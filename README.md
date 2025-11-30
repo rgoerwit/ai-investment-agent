@@ -619,8 +619,7 @@ This ensures the directory exists for scripts like `run_tickers.sh` while keepin
 
 ## 📬 Questions or Feedback?
 
-- **Issues:** [GitHub Issues](https://github.com/yourusername/repo/issues)
-- **Discussions:** [GitHub Discussions](https://github.com/yourusername/repo/discussions)
+- **Issues:** [GitHub Issues](https://github.com/rgoerwit/ai-investment-agent/issues)
 - **LinkedIn:** [Your Profile](https://www.linkedin.com/in/goerwitz)
 
 ---
