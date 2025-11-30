@@ -119,9 +119,6 @@ source .venv/bin/activate  # On macOS/Linux
 ### Run Your First Analysis
 
 ```bash
-# Make sure the right python env is active
-source .venv/bin/activate
-
 # Analyze a single ticker
 poetry run python -m src.main --ticker 0005.HK
 
@@ -134,6 +131,117 @@ poetry run bash run_tickers.sh
 # Run tests to verify installation
 poetry run pytest tests/ -v
 ```
+
+### Batch Analysis - Screening Hundreds of Tickers
+
+For serious portfolio construction, you'll want to screen many candidates at once. Here's how to generate and analyze a large watchlist.
+
+#### Step 1: Generate Your Ticker List with AI
+
+Use ChatGPT, Claude, or Gemini with this prompt to generate a candidate list:
+
+```
+Generate a plain-text list of 300-500 Yahoo Finance ticker symbols for international equities that meet these criteria:
+
+REQUIRED:
+- Listed on major exchanges in: Japan, Hong Kong, Taiwan, South Korea, Singapore, UK, Germany, Switzerland, France, Canada, Australia
+- Mid-cap to large-cap (market cap $500M - $50B USD)
+- Reasonable liquidity (average daily volume >$500k USD)
+- Growth potential: revenue growth >5% annually OR margin expansion trajectory
+- Value characteristics: P/E <25, P/B <3
+- NO PFIC reporting risks (avoid passive foreign investment companies like REITs, mutual funds)
+- NO restricted markets for US investors (no Chinese A-shares, no sanctioned countries)
+
+FORMAT:
+- Yahoo Finance format tickers (e.g., 7203.T for Toyota, 0700.HK for Tencent)
+- One ticker per line
+- No explanations, headers, or additional text
+- Plain text only
+
+Focus on: industrials, technology, consumer discretionary, healthcare
+Exclude: financials, REITs, utilities, telecoms
+
+Output the list and provide a download link so I can save it as sample_tickers.txt
+```
+
+**Alternative:** Ask the AI to output as a code block you can copy directly:
+
+```
+[Same prompt as above, but add:]
+
+Format the output as a code block so I can copy-paste it into a text file.
+```
+
+#### Step 2: Save the Ticker List
+
+Save the AI-generated list to `scratch/sample_tickers.txt`:
+
+```bash
+# Create the file (example tickers shown)
+cat > scratch/sample_tickers.txt << 'EOF'
+7203.T
+6758.T
+0700.HK
+0005.HK
+2330.TW
+005930.KS
+NOVN.SW
+ASML.AS
+SAP.DE
+SHOP.TO
+EOF
+
+# Or paste your AI-generated list into the file with a text editor
+```
+
+#### Step 3: Run Batch Analysis
+
+**⚠️ This will take a long time (likely overnight for 300+ tickers)**
+
+```bash
+# macOS users: Prevent sleep during long analysis
+caffeinate -i ./scripts/run_tickers.sh
+
+# Linux/WSL users: Run normally
+./scripts/run_tickers.sh
+
+# Or run in background with logging
+./scripts/run_tickers.sh > batch_analysis.log 2>&1 &
+```
+
+**Timing estimates:**
+- 50 tickers: ~2-4 hours (standard mode) or ~1-2 hours (quick mode)
+- 100 tickers: ~4-8 hours (standard mode) or ~2-4 hours (quick mode)
+- 300+ tickers: ~12-24 hours (standard mode) or ~6-12 hours (quick mode)
+
+**💡 Pro tip for macOS users:**
+The `caffeinate -i` command prevents your Mac from sleeping while the analysis runs. Without it, your laptop may sleep and pause the analysis.
+
+#### Step 4: Review Results
+
+Results are saved to `scratch/ticker_analysis_results.md`:
+
+```bash
+# View results
+cat scratch/ticker_analysis_results.md
+
+# Filter for BUY recommendations only
+grep -B 5 "FINAL DECISION: BUY" scratch/ticker_analysis_results.md
+
+# Count decisions
+echo "BUY: $(grep -c 'FINAL DECISION: BUY' scratch/ticker_analysis_results.md)"
+echo "HOLD: $(grep -c 'FINAL DECISION: HOLD' scratch/ticker_analysis_results.md)"
+echo "SELL: $(grep -c 'FINAL DECISION: SELL' scratch/ticker_analysis_results.md)"
+```
+
+#### What to Expect
+
+From a list of 300 candidates, you'll typically get:
+- **BUY recommendations:** 5-15 stocks (highly selective GARP filter)
+- **HOLD recommendations:** 20-40 stocks (interesting but flawed)
+- **SELL recommendations:** 250+ stocks (thesis violations, poor fundamentals)
+
+The system is **intentionally conservative** - it's designed to find the best 2-3% of candidates, not to give you 100 "buys."
 
 ### Example Output Structure
 
@@ -373,9 +481,6 @@ src/
 ### Comprehensive Test Suite
 
 ```bash
-# Make sure the right python environment is active
-source .venv/bin/activate
-
 # Run all tests
 poetry run pytest tests/ -v
 
