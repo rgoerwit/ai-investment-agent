@@ -221,8 +221,6 @@ caffeinate -i ./scripts/run_tickers.sh
 
 Note that quick mode, if you configure with gemini-2.5-flash (see .env) yields low-quality results.
 
-To assess costs, run:  ```bash examples/check_token_costs.py```
-
 **💡 Pro tip for macOS users:**
 The `caffeinate -i` command prevents your Mac from sleeping while the analysis runs. Without it, your laptop may sleep and pause the analysis.
 
@@ -426,6 +424,9 @@ Prompts enforce **algorithms via natural language** (e.g., "IF US Revenue > 35%:
 - **Standard Mode:** 5-10 minutes per ticker  
 - **API Cost:** $0 on Gemini free tier (15 RPM limit = ~100 stocks/day; I went to tier 2)
 - **Scalability:** Deploy to Azure Container Instances for 24/7 batch processing
+
+To assess costs, run:  ```bash examples/check_token_costs.py```. At tier 2 and using gemini-3-pro-preview as my DEEP_MODEL (see .env), unfortunately, my cost was > $.15/ticker.
+If this it too expensive, use the --quiet --brief flags, or switch to a cheaper model.
 
 One future enhancement would be to include building the pre-search for hundreds of tickers to look at right in, as an option, so the scan could be started without having to use the ```scripts/run_tickers.sh``` wrapper.  Another might be building in a real UI, lol.
 

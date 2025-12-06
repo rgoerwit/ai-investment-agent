@@ -49,9 +49,10 @@ def take_last(x, y):
 
 class AgentState(MessagesState):
     company_of_interest: str
+    company_name: str  # ADDED: Verified company name to prevent LLM hallucination
     trade_date: str
     sender: str
-    
+
     market_report: str
     sentiment_report: str
     news_report: str
@@ -118,15 +119,17 @@ def create_analyst_node(llm, agent_key: str, tools: List[Any], output_field: str
             context = get_context_from_config(config)
             current_date = context.trade_date if context else datetime.now().strftime("%Y-%m-%d")
             ticker = context.ticker if context else state.get("company_of_interest", "UNKNOWN")
-            
+            company_name = state.get("company_name", ticker)  # Get verified company name from state
+
             # --- CRITICAL FIX: Inject News Report into Fundamentals Analyst Context ---
             extra_context = ""
             if agent_key == "fundamentals_analyst":
                 news_report = state.get("news_report", "")
                 if news_report:
                     extra_context = f"\n\n### NEWS CONTEXT (Use for Qualitative Growth Scoring)\n{news_report}\n"
-            
-            full_system_instruction = f"{agent_prompt.system_message}\n\nDate: {current_date}\nAsset: {ticker}\n{get_analysis_context(ticker)}{extra_context}"
+
+            # CRITICAL FIX: Include verified company name to prevent hallucination
+            full_system_instruction = f"{agent_prompt.system_message}\n\nDate: {current_date}\nTicker: {ticker}\nCompany: {company_name}\n{get_analysis_context(ticker)}{extra_context}"
             invocation_messages = [SystemMessage(content=full_system_instruction)] + filtered_messages
             response = await runnable.ainvoke({"messages": invocation_messages})
             new_state = {"sender": agent_key, "messages": [response], "prompts_used": prompts_used}
@@ -168,7 +171,8 @@ def create_researcher_node(llm, memory: Optional[Any], agent_key: str) -> Callab
         
         # FIX: Contextualize memory retrieval to prevent cross-contamination
         ticker = state.get("company_of_interest", "UNKNOWN")
-        
+        company_name = state.get("company_name", ticker)  # Get verified company name
+
         # If we have memory, retrieve RELEVANT past insights for THIS ticker
         past_insights = ""
         if memory:
@@ -186,17 +190,17 @@ def create_researcher_node(llm, memory: Optional[Any], agent_key: str) -> Callab
                     # (e.g. don't return Canon data for HSBC just because they are both 'value stocks')
                     logger.info("memory_no_exact_match", ticker=ticker)
                     past_insights = ""
-                    
+
             except Exception as e:
                 logger.error("memory_retrieval_failed", ticker=ticker, error=str(e))
                 past_insights = ""
 
-        # FIX: Add Negative Constraint to System Prompt
+        # FIX: Add Negative Constraint with explicit company name to prevent hallucination
         negative_constraint = f"""
 CRITICAL INSTRUCTION:
-You are analyzing **{ticker}**. 
-If the provided context or memory contains information about a DIFFERENT company (e.g., from a previous analysis run), you MUST IGNORE IT. 
-Only use data explicitly related to {ticker}.
+You are analyzing **{ticker} ({company_name})**.
+If the provided context or memory contains information about a DIFFERENT company (e.g., from a previous analysis run), you MUST IGNORE IT.
+Only use data explicitly related to {ticker} ({company_name}).
 """
 
         prompt = f"""{agent_prompt.system_message}\n{negative_constraint}\n\nREPORTS:\n{reports}\n{past_insights}\n\nDEBATE HISTORY:\n{history}\n\nProvide your argument."""

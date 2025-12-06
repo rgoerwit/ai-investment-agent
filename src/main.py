@@ -438,11 +438,33 @@ async def run_analysis(ticker: str, quick_mode: bool) -> Optional[dict]:
         tracker.reset()
 
         logger.info(f"Starting analysis for {ticker} (quick_mode={quick_mode})")
-        
+
         # CRITICAL FIX: Enforce real-world date to prevent "Time Travel" hallucinations
         # This overrides potentially stale system prompts or environment defaults
         real_date = datetime.now().strftime("%Y-%m-%d")
-        
+
+        # CRITICAL FIX: Fetch and verify company name BEFORE graph execution
+        # This prevents LLM hallucination when tickers are similar (e.g., 0291.HK vs 0293.HK)
+        company_name = ticker  # Default fallback
+        try:
+            import yfinance as yf
+            ticker_obj = yf.Ticker(ticker)
+            info = ticker_obj.info
+            company_name = info.get('longName') or info.get('shortName') or ticker
+            logger.info(
+                "company_name_verified",
+                ticker=ticker,
+                company_name=company_name,
+                source="yfinance"
+            )
+        except Exception as e:
+            logger.warning(
+                "company_name_fetch_failed",
+                ticker=ticker,
+                error=str(e),
+                fallback=ticker
+            )
+
         graph = create_trading_graph(
             ticker=ticker,  # BUG FIX #1: Pass ticker for isolation
             cleanup_previous=True,  # BUG FIX #1: Cleanup to prevent contamination
@@ -453,8 +475,9 @@ async def run_analysis(ticker: str, quick_mode: bool) -> Optional[dict]:
         )
         
         initial_state = AgentState(
-            messages=[HumanMessage(content=f"Analyze {ticker} for investment decision. Current Date: {real_date}")],
+            messages=[HumanMessage(content=f"Analyze {ticker} ({company_name}) for investment decision. Current Date: {real_date}")],
             company_of_interest=ticker,
+            company_name=company_name,  # ADDED: Anchor verified company name in state
             trade_date=real_date,
             sender="user",
             market_report="",
