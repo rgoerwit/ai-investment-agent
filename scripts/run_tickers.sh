@@ -138,7 +138,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     echo "========================================"
     
     # Run analysis and capture output
-    if poetry run python -m src.main --quiet --ticker "$ticker" >> "$OUTPUT_FILE" 2>&1; then
+    if poetry run python -m src.main --quiet --brief --ticker "$ticker" >> "$OUTPUT_FILE" 2>&1; then
         print_success "Completed: $ticker"
     else
         print_error "Failed: $ticker (check $OUTPUT_FILE for details)"

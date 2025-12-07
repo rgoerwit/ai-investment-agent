@@ -20,7 +20,7 @@ from src.agents import (
     AgentState, create_analyst_node, create_researcher_node,
     create_research_manager_node, create_trader_node,
     create_risk_debater_node, create_portfolio_manager_node,
-    create_state_cleaner_node
+    create_state_cleaner_node, create_financial_health_validator_node
 )
 from src.llms import create_quick_thinking_llm, create_deep_thinking_llm
 from src.toolkit import toolkit
@@ -76,15 +76,15 @@ def route_tools(state: AgentState) -> str:
     """
     Route back to the agent that called the tool.
     Uses the 'sender' field from the state to determine which agent to return to.
-    
+
     Args:
         state: Current agent state with sender information
-        
+
     Returns:
         Name of the node to return to after tool execution
     """
     sender = state.get("sender", "")
-    
+
     # Map internal agent keys to Node Names
     agent_map = {
         "market_analyst": "Market Analyst",
@@ -92,16 +92,56 @@ def route_tools(state: AgentState) -> str:
         "news_analyst": "News Analyst",
         "fundamentals_analyst": "Fundamentals Analyst"
     }
-    
+
     node_name = agent_map.get(sender, "Market Analyst")
-    
+
     logger.debug(
         "tool_routing",
         sender=sender,
         routing_to=node_name
     )
-    
+
     return node_name
+
+
+def validator_router(state: AgentState, config: RunnableConfig) -> Literal["Portfolio Manager", "Bull Researcher"]:
+    """
+    Route based on pre-screening red-flag validation results.
+
+    If critical red flags detected (pre_screening_result == "REJECT"):
+    - Skip bull/bear debate (saves tokens, time)
+    - Route directly to Portfolio Manager for final SELL decision
+
+    If no critical red flags (pre_screening_result == "PASS"):
+    - Continue to normal flow: Bull Researcher → debate → Portfolio Manager
+
+    This routing implements the "fast-fail" pattern for extreme financial risks
+    that would result in automatic SELL regardless of debate outcome.
+
+    Args:
+        state: Current agent state with pre_screening_result populated
+        config: Runtime configuration (not currently used)
+
+    Returns:
+        "Portfolio Manager" if REJECT, "Bull Researcher" if PASS
+
+    Example red-flag scenarios that trigger REJECT:
+    - D/E ratio > 500% (leverage bomb)
+    - Positive income but negative FCF >2x income (earnings quality)
+    - Interest coverage <2.0x with D/E >100% (refinancing risk)
+    """
+    pre_screening_result = state.get('pre_screening_result', 'PASS')
+
+    if pre_screening_result == 'REJECT':
+        logger.info(
+            "validator_routing_to_pm",
+            ticker=state.get('company_of_interest', 'UNKNOWN'),
+            message="Red flags detected - skipping debate, routing to Portfolio Manager"
+        )
+        return "Portfolio Manager"
+
+    # Normal flow - proceed to debate
+    return "Bull Researcher"
 
 def create_trading_graph(
     max_debate_rounds: int = 2,
@@ -221,10 +261,13 @@ def create_trading_graph(
     social = create_analyst_node(social_llm, "sentiment_analyst", toolkit.get_sentiment_tools(), "sentiment_report")
     news = create_analyst_node(news_llm, "news_analyst", toolkit.get_news_tools(), "news_report")
     fund = create_analyst_node(fund_llm, "fundamentals_analyst", toolkit.get_fundamental_tools(), "fundamentals_report")
-    
+
     cleaner = create_state_cleaner_node()
     # Standard ToolNode initialized with all tools
     tool_node = ToolNode(toolkit.get_all_tools())
+
+    # Red-flag pre-screening validator (runs after fundamentals, before debate)
+    validator = create_financial_health_validator_node()
 
     # Research & Execution Nodes (now using ticker-specific or legacy memories)
     bull = create_researcher_node(bull_llm, bull_memory, "bull_researcher")
@@ -246,7 +289,10 @@ def create_trading_graph(
     workflow.add_node("Fundamentals Analyst", fund)
     workflow.add_node("tools", tool_node)
     workflow.add_node("Cleaner", cleaner)
-    
+
+    # Add red-flag validator (pre-screening layer)
+    workflow.add_node("Financial Validator", validator)
+
     # Add research and risk nodes
     workflow.add_node("Bull Researcher", bull)
     workflow.add_node("Bear Researcher", bear)
@@ -270,7 +316,7 @@ def create_trading_graph(
     
     workflow.add_conditional_edges("Social Analyst", should_continue_analyst, {"tools": "tools", "continue": "News Analyst"})
     workflow.add_conditional_edges("News Analyst", should_continue_analyst, {"tools": "tools", "continue": "Fundamentals Analyst"})
-    workflow.add_conditional_edges("Fundamentals Analyst", should_continue_analyst, {"tools": "tools", "continue": "Bull Researcher"})
+    workflow.add_conditional_edges("Fundamentals Analyst", should_continue_analyst, {"tools": "tools", "continue": "Financial Validator"})
 
     # Tool Return Logic
     workflow.add_conditional_edges("tools", route_tools, {
@@ -278,6 +324,14 @@ def create_trading_graph(
         "Social Analyst": "Social Analyst",
         "News Analyst": "News Analyst",
         "Fundamentals Analyst": "Fundamentals Analyst"
+    })
+
+    # Validator Routing (Red-Flag Detection)
+    # - If REJECT: Skip debate, go straight to Portfolio Manager
+    # - If PASS: Continue to normal debate flow
+    workflow.add_conditional_edges("Financial Validator", validator_router, {
+        "Portfolio Manager": "Portfolio Manager",
+        "Bull Researcher": "Bull Researcher"
     })
 
     # Debate Flow

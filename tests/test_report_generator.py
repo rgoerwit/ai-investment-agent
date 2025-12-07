@@ -897,3 +897,202 @@ Default SELL overridden to HOLD pending data completion.
         
         # Brief should be significantly shorter
         assert len(brief) < len(full)
+
+
+class TestRedFlagPreScreening:
+    """Test red-flag pre-screening section in reports."""
+
+    def test_report_with_reject_red_flags(self):
+        """Test report includes red flags when stock is rejected."""
+        reporter = QuietModeReporter("9999.HK", "Zombie Corp")
+        result_dict = {
+            'final_trade_decision': 'Action: SELL',
+            'red_flags': [
+                {
+                    'type': 'EXTREME_LEVERAGE',
+                    'severity': 'CRITICAL',
+                    'detail': 'D/E ratio 820% exceeds bankruptcy threshold of 500%',
+                    'action': 'AUTO_REJECT'
+                },
+                {
+                    'type': 'REFINANCING_RISK',
+                    'severity': 'CRITICAL',
+                    'detail': 'Interest coverage 1.1x below threshold of 2.0x with D/E 820%',
+                    'action': 'AUTO_REJECT'
+                }
+            ],
+            'pre_screening_result': 'REJECT'
+        }
+
+        report = reporter.generate_report(result_dict)
+
+        # Should have red flag section
+        assert "Red Flag Pre-Screening" in report
+        assert "CRITICAL RED FLAGS DETECTED" in report
+        assert "EXTREME_LEVERAGE" in report
+        assert "REFINANCING_RISK" in report
+        assert "D/E ratio 820%" in report
+        assert "Interest coverage 1.1x" in report
+        assert "Debate phase skipped" in report
+
+    def test_report_with_pass_warnings(self):
+        """Test report includes warnings when stock passes with non-critical flags."""
+        reporter = QuietModeReporter("TEST.US")
+        result_dict = {
+            'final_trade_decision': 'Action: BUY',
+            'red_flags': [
+                {
+                    'type': 'MODERATE_LEVERAGE',
+                    'severity': 'MEDIUM',
+                    'detail': 'D/E ratio 280% elevated but below critical threshold',
+                    'action': 'WARNING'
+                }
+            ],
+            'pre_screening_result': 'PASS'
+        }
+
+        report = reporter.generate_report(result_dict)
+
+        assert "Red Flag Pre-Screening" in report
+        assert "Warnings Detected" in report
+        assert "MODERATE_LEVERAGE" in report
+        assert "D/E ratio 280%" in report
+        # Should NOT mention debate skipped
+        assert "Debate phase skipped" not in report
+
+    def test_report_no_red_flags(self):
+        """Test report without red flags omits pre-screening section."""
+        reporter = QuietModeReporter("CLEAN.US", "Clean Company")
+        result_dict = {
+            'final_trade_decision': 'Action: BUY',
+            'red_flags': [],
+            'pre_screening_result': 'PASS'
+        }
+
+        report = reporter.generate_report(result_dict)
+
+        # Should NOT have red flag section
+        assert "Red Flag Pre-Screening" not in report
+        assert "CRITICAL RED FLAGS" not in report
+
+    def test_report_red_flags_in_brief_mode(self):
+        """Test red flags appear in brief mode."""
+        reporter = QuietModeReporter("FRAUD.CN")
+        result_dict = {
+            'final_trade_decision': 'Action: SELL\n\nRATIONALE: Critical red flags detected.',
+            'red_flags': [
+                {
+                    'type': 'EARNINGS_QUALITY',
+                    'severity': 'CRITICAL',
+                    'detail': 'Positive income $1,250M but negative FCF -$3,800M (3.0x ratio)',
+                    'action': 'AUTO_REJECT'
+                }
+            ],
+            'pre_screening_result': 'REJECT',
+            'market_report': 'Technical analysis here',
+            'fundamentals_report': 'Fundamental analysis here'
+        }
+
+        brief_report = reporter.generate_report(result_dict, brief_mode=True)
+        full_report = reporter.generate_report(result_dict, brief_mode=False)
+
+        # Both should have red flags section
+        assert "Red Flag Pre-Screening" in brief_report
+        assert "Red Flag Pre-Screening" in full_report
+        assert "EARNINGS_QUALITY" in brief_report
+        assert "EARNINGS_QUALITY" in full_report
+
+        # Brief should not have full sections
+        assert "Technical Analysis" not in brief_report
+        assert "Technical Analysis" in full_report
+
+    def test_report_multiple_red_flags_formatting(self):
+        """Test multiple red flags are properly formatted."""
+        reporter = QuietModeReporter("MULTI.US")
+        result_dict = {
+            'final_trade_decision': 'Action: SELL',
+            'red_flags': [
+                {
+                    'type': 'EXTREME_LEVERAGE',
+                    'severity': 'CRITICAL',
+                    'detail': 'D/E ratio 650% exceeds threshold',
+                    'action': 'AUTO_REJECT'
+                },
+                {
+                    'type': 'EARNINGS_QUALITY',
+                    'severity': 'CRITICAL',
+                    'detail': 'Negative FCF despite positive income',
+                    'action': 'AUTO_REJECT'
+                },
+                {
+                    'type': 'REFINANCING_RISK',
+                    'severity': 'CRITICAL',
+                    'detail': 'Interest coverage dangerously low',
+                    'action': 'AUTO_REJECT'
+                }
+            ],
+            'pre_screening_result': 'REJECT'
+        }
+
+        report = reporter.generate_report(result_dict)
+
+        # Should list all three flags
+        assert report.count('EXTREME_LEVERAGE') == 1
+        assert report.count('EARNINGS_QUALITY') == 1
+        assert report.count('REFINANCING_RISK') == 1
+
+        # All should be bullet points
+        assert report.count('- **EXTREME_LEVERAGE**') == 1
+        assert report.count('- **EARNINGS_QUALITY**') == 1
+        assert report.count('- **REFINANCING_RISK**') == 1
+
+    def test_report_red_flags_appear_before_exec_summary(self):
+        """Test red flags section appears before Executive Summary."""
+        reporter = QuietModeReporter("TEST.US")
+        result_dict = {
+            'final_trade_decision': 'Action: SELL\n\nExecutive summary content here.',
+            'red_flags': [
+                {
+                    'type': 'EXTREME_LEVERAGE',
+                    'severity': 'CRITICAL',
+                    'detail': 'Test detail',
+                    'action': 'AUTO_REJECT'
+                }
+            ],
+            'pre_screening_result': 'REJECT'
+        }
+
+        report = reporter.generate_report(result_dict)
+
+        red_flag_pos = report.find("Red Flag Pre-Screening")
+        exec_summary_pos = report.find("Executive Summary")
+
+        # Red flags should appear before executive summary
+        assert red_flag_pos > 0
+        assert exec_summary_pos > 0
+        assert red_flag_pos < exec_summary_pos
+
+    def test_report_missing_red_flag_fields(self):
+        """Test graceful handling of missing red flag fields."""
+        reporter = QuietModeReporter("TEST.US")
+        result_dict = {
+            'final_trade_decision': 'Action: SELL',
+            'red_flags': [
+                {
+                    'type': 'UNKNOWN',
+                    # severity missing
+                    # detail missing
+                    # action missing
+                }
+            ],
+            'pre_screening_result': 'REJECT'
+        }
+
+        # Should not crash
+        report = reporter.generate_report(result_dict)
+
+        assert "Red Flag Pre-Screening" in report
+        assert "UNKNOWN" in report
+        # Should use defaults
+        assert "UNKNOWN" in report  # type
+        # Missing fields should use fallbacks from code

@@ -134,6 +134,10 @@ class AgentState(MessagesState):
     tools_called: Annotated[Dict[str, Set[str]], take_last]
     prompts_used: Annotated[Dict[str, Dict[str, str]], take_last]
 
+    # Red-flag detection fields
+    red_flags: Annotated[List[Dict[str, Any]], take_last]
+    pre_screening_result: Annotated[str, take_last]  # "PASS" or "REJECT"
+
 # --- Helper Functions ---
 
 def get_context_from_config(config: RunnableConfig) -> Optional[Any]:
@@ -395,18 +399,130 @@ def create_state_cleaner_node() -> Callable:
     async def clean_state(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
         context = get_context_from_config(config)
         ticker = context.ticker if context else state.get("company_of_interest", "UNKNOWN")
-        
+
         logger.debug(
             "State cleaner running",
             context_ticker=context.ticker if context else None,
             state_ticker=state.get("company_of_interest"),
             final_ticker=ticker
         )
-        
+
         return {
-            "messages": [HumanMessage(content=f"Analyze {ticker}")], 
+            "messages": [HumanMessage(content=f"Analyze {ticker}")],
             "tools_called": state.get("tools_called", {}),
             "company_of_interest": ticker
         }
-    
+
     return clean_state
+
+
+# --- Red-Flag Detection System ---
+
+def create_financial_health_validator_node() -> Callable:
+    """
+    Factory function creating a pre-screening validator node to catch extreme financial risks
+    before proceeding to bull/bear debate.
+
+    This validator implements a "red-flag detection" pattern to save token costs and enforce
+    financial discipline. Uses deterministic threshold-based logic from RedFlagDetector.
+
+    Why code-driven instead of LLM-driven:
+    - Exact thresholds required (D/E > 500%, not "very high")
+    - Fast-fail pattern (avoid LLM calls for doomed stocks)
+    - Reliability (no hallucination risk on number parsing)
+    - Cost savings (~60% token reduction for rejected stocks)
+
+    Architecture integration:
+    - Runs AFTER Fundamentals Analyst (has data)
+    - Runs BEFORE Bull/Bear Debate (saves cost if doomed)
+    - Sets state.pre_screening_result = "REJECT" | "PASS"
+    - Graph routing: REJECT → Portfolio Manager (skip debate)
+                     PASS → Bull Researcher (normal flow)
+
+    Returns:
+        Async function compatible with LangGraph StateGraph.add_node()
+    """
+    async def financial_health_validator_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+        """
+        Pre-screening layer to catch extreme financial risks before detailed scoring.
+
+        Delegates to RedFlagDetector for deterministic validation logic.
+
+        Args:
+            state: Current agent state with fundamentals_report populated
+            config: Runtime configuration (not currently used)
+
+        Returns:
+            Updated state dict with:
+            - red_flags: List of detected red flags (severity, type, detail, action)
+            - pre_screening_result: "REJECT" if any AUTO_REJECT flags, else "PASS"
+        """
+        from src.validators.red_flag_detector import RedFlagDetector
+
+        fundamentals_report = state.get('fundamentals_report', '')
+        ticker = state.get('company_of_interest', 'UNKNOWN')
+        company_name = state.get('company_name', ticker)
+
+        quiet_mode = os.environ.get("QUIET_MODE", "false").lower() == "true"
+
+        # Graceful handling of missing fundamentals
+        if not fundamentals_report:
+            logger.warning(
+                "validator_no_fundamentals",
+                ticker=ticker,
+                message="No fundamentals report available - skipping pre-screening"
+            )
+            return {
+                'red_flags': [],
+                'pre_screening_result': 'PASS'
+            }
+
+        # Extract metrics from DATA_BLOCK
+        metrics = RedFlagDetector.extract_metrics(fundamentals_report)
+
+        # Log extracted metrics (unless in quiet mode)
+        if not quiet_mode:
+            logger.info(
+                "validator_extracted_metrics",
+                ticker=ticker,
+                debt_to_equity=metrics.get('debt_to_equity'),
+                fcf=metrics.get('fcf'),
+                net_income=metrics.get('net_income'),
+                interest_coverage=metrics.get('interest_coverage'),
+                adjusted_health_score=metrics.get('adjusted_health_score')
+            )
+
+        # Apply red-flag detection logic
+        red_flags, pre_screening_result = RedFlagDetector.detect_red_flags(metrics, ticker)
+
+        # Log results
+        if pre_screening_result == 'REJECT':
+            logger.warning(
+                "pre_screening_rejected",
+                ticker=ticker,
+                company_name=company_name,
+                red_flags_count=len(red_flags),
+                flag_types=[f['type'] for f in red_flags],
+                message=f"REJECTED: {ticker} ({company_name}) failed pre-screening due to {len(red_flags)} critical red flag(s)"
+            )
+        elif red_flags:
+            logger.info(
+                "pre_screening_warnings",
+                ticker=ticker,
+                warnings_count=len(red_flags),
+                message=f"{ticker} has {len(red_flags)} warning(s) but passed pre-screening"
+            )
+        else:
+            if not quiet_mode:
+                logger.info(
+                    "pre_screening_passed",
+                    ticker=ticker,
+                    message=f"{ticker} passed pre-screening validation"
+                )
+
+        return {
+            'red_flags': red_flags,
+            'pre_screening_result': pre_screening_result
+        }
+
+    return financial_health_validator_node

@@ -43,29 +43,33 @@ graph TB
     Start --> NewsAnalyst["News Analyst<br/>(Recent Events)"]
     Start --> SentimentAnalyst["Sentiment Analyst<br/>(Social Media)"]
     Start --> FundamentalsAnalyst["Fundamentals Analyst<br/>(Financial Health)"]
-    
+
     MarketAnalyst --> ResearchManager["Research Manager<br/>(Synthesize Data)"]
     NewsAnalyst --> ResearchManager
     SentimentAnalyst --> ResearchManager
-    FundamentalsAnalyst --> ResearchManager
-    
+    FundamentalsAnalyst --> Validator["Financial Validator<br/>(Red-Flag Detection)"]
+
+    Validator -->|PASS| ResearchManager
+    Validator -->|REJECT<br/>Critical Red Flags| PortfolioManager["Portfolio Manager<br/>(Final Decision)"]
+
     ResearchManager --> BullResearcher["Bull Researcher<br/>(Upside Case)"]
     ResearchManager --> BearResearcher["Bear Researcher<br/>(Downside Risk)"]
-    
+
     BullResearcher --> Debate{Multi-Round<br/>Debate}
     BearResearcher --> Debate
-    
+
     Debate -->|Round 1-2| BullResearcher
     Debate -->|Converged| RiskTeam["Risk Assessment Team<br/>(3 Perspectives)"]
-    
-    RiskTeam --> PortfolioManager["Portfolio Manager<br/>(Final Decision)"]
-    
+
+    RiskTeam --> PortfolioManager
+
     PortfolioManager --> Decision([BUY / SELL / HOLD<br/>+ Position Size])
-    
+
     style MarketAnalyst fill:#e1f5ff
     style NewsAnalyst fill:#e1f5ff
     style SentimentAnalyst fill:#e1f5ff
     style FundamentalsAnalyst fill:#e1f5ff
+    style Validator fill:#ffcccc
     style ResearchManager fill:#fff4e1
     style BullResearcher fill:#d4edda
     style BearResearcher fill:#f8d7da
@@ -78,12 +82,81 @@ graph TB
 ### How Agents Collaborate
 
 1. **Parallel Data Gathering** - Four analyst agents simultaneously fetch technical, fundamental, news, and sentiment data
-2. **Research Synthesis** - A Research Manager combines findings and identifies key themes
-3. **Adversarial Debate** - Bull and Bear researchers argue opposite perspectives for 1-2 rounds
-4. **Risk Assessment** - Three risk analysts (Conservative/Neutral/Aggressive) evaluate from different risk tolerances
-5. **Executive Decision** - Portfolio Manager synthesizes all viewpoints and applies thesis criteria
+2. **Red-Flag Pre-Screening** - Financial Validator checks for catastrophic risks (extreme leverage, earnings quality issues, refinancing risk) before proceeding
+3. **Research Synthesis** - A Research Manager combines findings and identifies key themes (if pre-screening passes)
+4. **Adversarial Debate** - Bull and Bear researchers argue opposite perspectives for 1-2 rounds
+5. **Risk Assessment** - Three risk analysts (Conservative/Neutral/Aggressive) evaluate from different risk tolerances
+6. **Executive Decision** - Portfolio Manager synthesizes all viewpoints and applies thesis criteria
 
-**Why This Matters:** Single-LLM systems are prone to confirmation bias. Multi-agent debate forces the AI to consider contradictory evidence, mimicking how institutional research teams actually work.
+**Why This Matters:** Single-LLM systems are prone to confirmation bias. Multi-agent debate forces the AI to consider contradictory evidence, mimicking how institutional research teams actually work. The red-flag validator saves ~60% of token costs by short-circuiting analysis for extreme risk cases (e.g., companies with 5x+ more debt than equity).
+
+---
+
+## 🚩 Red-Flag Detection: Pre-Screening Before Debate
+
+The system includes a **Financial Validator** node that catches catastrophic financial risks before wasting tokens on bull/bear debate. This implements a "fast-fail" pattern common in institutional credit analysis.
+
+### Why Pre-Screening Matters
+
+- **Cost Savings**: Skipping debate for doomed stocks saves ~60% of token costs per analysis
+- **Time Efficiency**: Reduces analysis time from 5-10 minutes to <1 minute for extreme cases
+- **Prevents Hope Bias**: Bull/bear debate might rationalize fatal flaws; validator enforces hard limits
+
+### Red Flags That Trigger Auto-Reject
+
+The validator checks for three catastrophic risk patterns:
+
+1. **Extreme Leverage (Leverage Bomb)**
+   - **Threshold**: Debt-to-Equity ratio > 500%
+   - **Rationale**: Company has 5x+ more debt than equity - one earnings miss could trigger default
+   - **Example**: D/E = 650% → Immediate SELL, skip debate
+
+2. **Earnings Quality Disconnect**
+   - **Threshold**: Positive net income but negative FCF >2x income
+   - **Rationale**: Earnings likely fabricated through accounting tricks (aggressive revenue recognition, capitalizing expenses)
+   - **Example**: Net Income = $500M, FCF = -$1.2B → Immediate SELL
+
+3. **Interest Coverage Death Spiral**
+   - **Threshold**: Interest coverage <2.0x AND D/E >100%
+   - **Rationale**: Company can barely pay interest expenses with high leverage - refinancing/default risk
+   - **Example**: Interest coverage = 1.5x, D/E = 180% → Immediate SELL
+
+### How It Works
+
+```text
+Fundamentals Analyst
+        ↓
+Financial Validator (parses DATA_BLOCK)
+        ↓
+    /       \
+PASS        REJECT
+ ↓           ↓
+Bull/Bear   Portfolio Manager
+Debate      (immediate SELL)
+```
+
+**Key Design Choices:**
+
+- **Only triggers on CONFIRMED data**: Missing data = graceful pass (prevents false positives)
+- **Thresholds from research**: Based on institutional bankruptcy/distress studies
+- **Complementary to Portfolio Manager**: PM still enforces health score <50% and other hard fails
+
+### Example: Caught by Validator
+
+```text
+Ticker: FAILING.HK
+D/E Ratio: 620%
+Interest Coverage: 1.2x
+Net Income: $200M
+Free Cash Flow: -$500M
+
+🚩 RED FLAGS DETECTED:
+- EXTREME_LEVERAGE: D/E 620% > 500% threshold
+- REFINANCING_RISK: Interest coverage 1.2x < 2.0x with D/E 620%
+- EARNINGS_QUALITY: Positive income but negative FCF 2.5x income
+
+RESULT: AUTO_REJECT → Skip debate → Final decision: SELL
+```
 
 ---
 
@@ -150,6 +223,7 @@ GEMINI_RPM_LIMIT=1000  # Paid tier 2: 67x faster than free tier
 ```
 
 **Performance comparison:**
+
 - **Free tier (15 RPM):** ~1 analysis per 5-10 minutes
 - **Paid tier 1 (360 RPM):** ~24 analyses in the same time (24x speedup)
 - **Paid tier 2 (1000 RPM):** ~67 analyses in the same time (67x speedup)

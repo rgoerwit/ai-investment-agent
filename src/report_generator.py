@@ -164,7 +164,33 @@ class QuietModeReporter:
             f"\n**Analysis Date:** {self.timestamp}\n",
             "---\n"
         ]
-        
+
+        # Red Flag Pre-Screening (if applicable)
+        red_flags = result.get('red_flags', [])
+        pre_screening_result = result.get('pre_screening_result', 'PASS')
+
+        if red_flags or pre_screening_result == 'REJECT':
+            report_parts.append("\n## 🚨 Red Flag Pre-Screening\n\n")
+
+            if pre_screening_result == 'REJECT':
+                report_parts.append("**Status**: CRITICAL RED FLAGS DETECTED - AUTO-REJECT\n\n")
+            else:
+                report_parts.append("**Status**: ⚠️ Warnings Detected - Proceed with Caution\n\n")
+
+            if red_flags:
+                for flag in red_flags:
+                    flag_type = flag.get('type', 'UNKNOWN')
+                    severity = flag.get('severity', 'UNKNOWN')
+                    detail = flag.get('detail', 'No details')
+
+                    report_parts.append(f"- **{flag_type}** ({severity}): {detail}\n")
+
+            if pre_screening_result == 'REJECT':
+                report_parts.append("\n*Debate phase skipped due to critical red flags. ")
+                report_parts.append("Stock routed directly to Portfolio Manager for final decision.*\n")
+
+            report_parts.append("\n---\n\n")
+
         # Executive Summary (always included)
         if final_decision_raw:
             report_parts.append("## Executive Summary\n")
