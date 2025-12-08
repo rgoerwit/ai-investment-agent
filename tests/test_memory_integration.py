@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch, AsyncMock
 from datetime import datetime
 
 from src.graph import create_trading_graph, TradingContext
+from src.memory import sanitize_ticker_for_collection
 
 
 class TestGraphMemoryIntegration:
@@ -161,7 +162,8 @@ class TestGraphMemoryContaminationPrevention:
         def track_create_memories(ticker):
             analysis_sequence.append(('create', ticker))
             # Return appropriate mocks based on ticker
-            safe_ticker = ticker.replace(".", "_")
+            # CRITICAL: Use same sanitization as production code
+            safe_ticker = sanitize_ticker_for_collection(ticker)
             return {
                 f"{safe_ticker}_bull_memory": MagicMock(available=True),
                 f"{safe_ticker}_bear_memory": MagicMock(available=True),
@@ -309,6 +311,146 @@ class TestGraphLogging:
                 break
         
         assert warning_logged, "Legacy memory usage should trigger warning"
+
+
+class TestGraphMemoryKeyConsistency:
+    """Test that graph.py uses same sanitization as memory.py for edge-case tickers."""
+
+    @patch('src.graph.create_memory_instances')
+    @patch('src.graph.cleanup_all_memories')
+    def test_edge_case_ticker_sanitization_matches(self, mock_cleanup, mock_create_memories):
+        """Test that graph.py correctly handles edge-case tickers with special chars, hyphens, etc."""
+        # Test cases that would fail with simple .replace() approach
+        edge_case_tickers = [
+            "BRK-B",          # Hyphenated ticker (Berkshire Hathaway)
+            "BF-B",           # Another hyphenated ticker
+            "0005.HK",        # Standard HK ticker
+            "A" * 50,         # Very long ticker (>40 chars, will be truncated)
+            ".WEIRDTICKER",   # Starts with dot (needs T_ prefix)
+        ]
+
+        mock_cleanup.return_value = {}
+
+        for ticker in edge_case_tickers:
+            # Create mock memories using the SAME sanitization function
+            safe_ticker = sanitize_ticker_for_collection(ticker)
+            mock_memories = {
+                f"{safe_ticker}_bull_memory": MagicMock(available=True),
+                f"{safe_ticker}_bear_memory": MagicMock(available=True),
+                f"{safe_ticker}_trader_memory": MagicMock(available=True),
+                f"{safe_ticker}_invest_judge_memory": MagicMock(available=True),
+                f"{safe_ticker}_risk_manager_memory": MagicMock(available=True),
+            }
+            mock_create_memories.return_value = mock_memories
+
+            # Should NOT raise ValueError about missing memories
+            try:
+                graph = create_trading_graph(
+                    ticker=ticker,
+                    cleanup_previous=False,
+                    enable_memory=True,
+                    max_debate_rounds=1
+                )
+                assert graph is not None, f"Graph creation failed for ticker: {ticker}"
+            except ValueError as e:
+                if "Failed to create memory instances" in str(e):
+                    pytest.fail(
+                        f"Memory key mismatch for ticker '{ticker}': {e}\n"
+                        f"This indicates graph.py sanitization doesn't match memory.py"
+                    )
+                else:
+                    raise
+
+    @patch('src.graph.create_memory_instances')
+    @patch('src.graph.cleanup_all_memories')
+    def test_hyphenated_ticker_specific(self, mock_cleanup, mock_create_memories):
+        """Specific test for hyphenated tickers like BRK-B."""
+        ticker = "BRK-B"
+        safe_ticker = sanitize_ticker_for_collection(ticker)
+
+        # Verify sanitization converts hyphen to underscore
+        assert safe_ticker == "BRK_B", f"Expected 'BRK_B', got '{safe_ticker}'"
+
+        mock_cleanup.return_value = {}
+        mock_memories = {
+            f"{safe_ticker}_bull_memory": MagicMock(available=True),
+            f"{safe_ticker}_bear_memory": MagicMock(available=True),
+            f"{safe_ticker}_trader_memory": MagicMock(available=True),
+            f"{safe_ticker}_invest_judge_memory": MagicMock(available=True),
+            f"{safe_ticker}_risk_manager_memory": MagicMock(available=True),
+        }
+        mock_create_memories.return_value = mock_memories
+
+        # Should successfully create graph
+        graph = create_trading_graph(
+            ticker=ticker,
+            cleanup_previous=False,
+            enable_memory=True,
+            max_debate_rounds=1
+        )
+
+        assert graph is not None
+        mock_create_memories.assert_called_once_with(ticker)
+
+    @patch('src.graph.create_memory_instances')
+    @patch('src.graph.cleanup_all_memories')
+    def test_very_long_ticker_truncation(self, mock_cleanup, mock_create_memories):
+        """Test that very long tickers (>40 chars) are handled consistently."""
+        long_ticker = "A" * 100
+        safe_ticker = sanitize_ticker_for_collection(long_ticker)
+
+        # Verify truncation to 40 chars (max for base ticker)
+        assert len(safe_ticker) == 40, f"Expected 40 chars, got {len(safe_ticker)}"
+
+        mock_cleanup.return_value = {}
+        mock_memories = {
+            f"{safe_ticker}_bull_memory": MagicMock(available=True),
+            f"{safe_ticker}_bear_memory": MagicMock(available=True),
+            f"{safe_ticker}_trader_memory": MagicMock(available=True),
+            f"{safe_ticker}_invest_judge_memory": MagicMock(available=True),
+            f"{safe_ticker}_risk_manager_memory": MagicMock(available=True),
+        }
+        mock_create_memories.return_value = mock_memories
+
+        # Should successfully create graph without key mismatch
+        graph = create_trading_graph(
+            ticker=long_ticker,
+            cleanup_previous=False,
+            enable_memory=True,
+            max_debate_rounds=1
+        )
+
+        assert graph is not None
+
+    @patch('src.graph.create_memory_instances')
+    @patch('src.graph.cleanup_all_memories')
+    def test_ticker_starting_with_special_char(self, mock_cleanup, mock_create_memories):
+        """Test tickers starting with non-alphanumeric (needs T_ prefix)."""
+        ticker = ".WEIRDTICKER"
+        safe_ticker = sanitize_ticker_for_collection(ticker)
+
+        # Verify T_ prefix is added
+        assert safe_ticker.startswith("T_"), f"Expected T_ prefix, got '{safe_ticker}'"
+
+        mock_cleanup.return_value = {}
+        mock_memories = {
+            f"{safe_ticker}_bull_memory": MagicMock(available=True),
+            f"{safe_ticker}_bear_memory": MagicMock(available=True),
+            f"{safe_ticker}_trader_memory": MagicMock(available=True),
+            f"{safe_ticker}_invest_judge_memory": MagicMock(available=True),
+            f"{safe_ticker}_risk_manager_memory": MagicMock(available=True),
+        }
+        mock_create_memories.return_value = mock_memories
+
+        # Should successfully create graph
+        graph = create_trading_graph(
+            ticker=ticker,
+            cleanup_previous=False,
+            enable_memory=True,
+            max_debate_rounds=1
+        )
+
+        assert graph is not None
 
 
 if __name__ == "__main__":
