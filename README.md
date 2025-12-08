@@ -28,7 +28,7 @@
 ✅ **Multi-Agent Debate Pattern** - Bull/Bear/Risk analysts argue, then a Portfolio Manager decides  
 ✅ **International Coverage** - Handles HK, Japan, Taiwan, Korea with proper FX/exchange logic  
 ✅ **Disciplined Risk Framework** - Hard-fail gatekeeping prevents emotional/hype-driven decisions  
-✅ **Zero Marginal Cost** - Runs on free-tier Gemini API (100+ analyses/day at $0)  
+✅ **Zero Marginal Cost** - Can runs (with lots of 429s and retries!) on free-tier Gemini API  
 ✅ **Full Transparency** - Every decision explained with supporting data and reasoning
 
 ---
@@ -520,7 +520,7 @@ Prompts enforce **algorithms via natural language** (e.g., "IF US Revenue > 35%:
 
 - **Quick Mode:** 2-4 minutes per ticker
 - **Standard Mode:** 5-10 minutes per ticker  
-- **API Cost:** $0 on Gemini free tier (15 RPM limit = ~100 stocks/day; I went to tier 2)
+- **API Cost:** $0 on Gemini free tier (15 RPM limit - slow for big jobs; I went to tier 2)
 - **Scalability:** Deploy to Azure Container Instances for 24/7 batch processing
 
 To assess costs, run:  ```bash examples/check_token_costs.py```. At tier 2 and using gemini-3-pro-preview as my DEEP_MODEL (see .env), unfortunately, my cost was > $.15/ticker.
@@ -581,7 +581,7 @@ src/
 ✅ **Individual Investors** - Diversify into ex-US markets with confidence  
 ✅ **AI Researchers** - Study multi-agent coordination in complex domains  
 ✅ **Educators** - Teach agentic AI, RAG, and LangGraph through practical finance  
-✅ **Startups** - Foundation for boutique research services ($49/month SaaS)
+✅ **Startups** - Foundation for boutique research services
 
 ### Limitations & Reality Check
 
