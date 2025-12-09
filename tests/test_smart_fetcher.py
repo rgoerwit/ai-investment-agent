@@ -9,10 +9,12 @@ Verifies that:
 """
 
 import asyncio
+import pytest
 from src.data.fetcher import SmartMarketDataFetcher
 from src.data.validator import FineGrainedValidator
 
 
+@pytest.mark.asyncio
 async def test_basic_fetch():
     """Test that basics are always present."""
     print("=" * 80)
@@ -69,6 +71,7 @@ async def test_basic_fetch():
     return data
 
 
+@pytest.mark.asyncio
 async def test_hsbc_currency_bug():
     """Test HSBC currency bug is fixed."""
     print("\n" + "=" * 80)
@@ -96,6 +99,7 @@ async def test_hsbc_currency_bug():
     print(f"  Gaps Filled: {quality.get('gaps_filled_this_fetch')}")
 
 
+@pytest.mark.asyncio
 async def test_fine_grained_validation():
     """Test fine-grained validation."""
     print("\n" + "=" * 80)
@@ -112,6 +116,7 @@ async def test_fine_grained_validation():
     print(validator.get_validation_summary(validation))
 
 
+@pytest.mark.asyncio
 async def test_gap_filling():
     """Test that gaps get filled from multiple sources."""
     print("\n" + "=" * 80)

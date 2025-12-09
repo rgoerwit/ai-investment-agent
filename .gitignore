@@ -1,5 +1,7 @@
 # Multi-Agent Investment Analysis System - .gitignore
 CLAUDE.md
+.claude
+.claude/*
 
 # Local things we ignore
 scratch/

@@ -3,11 +3,13 @@ Quick test to verify company name fix for 0293.HK
 """
 
 import asyncio
+import pytest
 import yfinance as yf
 from src.agents import AgentState, InvestDebateState, RiskDebateState
 from langchain_core.messages import HumanMessage
 
 
+@pytest.mark.asyncio
 async def test_company_name_extraction():
     """Test that we correctly extract company name for 0293.HK"""
 
@@ -66,6 +68,7 @@ async def test_company_name_extraction():
     return True
 
 
+@pytest.mark.asyncio
 async def test_similar_ticker():
     """Test that 0291.HK also works correctly"""
 
