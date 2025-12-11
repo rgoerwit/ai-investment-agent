@@ -15,8 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive documentation structure with docs/ directory
 - LICENSE file (MIT)
 - CONTRIBUTING.md with development guidelines
+- SECURITY.md with vulnerability disclosure policy
+- CODE_OF_CONDUCT.md for community standards
+- Issue templates for bug reports and feature requests (.github/ISSUE_TEMPLATE/)
+- Pull request template for consistent contributions
+- Repository topics for GitHub discoverability (agentic-ai, langgraph, equity-analysis, etc.)
 - Example script for single-ticker analysis with setup validation
 - Repository gap analysis documenting best practices alignment
+- GitHub Rulesets configuration with admin bypass actors
+- Automated GitHub repository configuration script (scratch/configure_github_settings.sh)
 
 ### Changed
 
