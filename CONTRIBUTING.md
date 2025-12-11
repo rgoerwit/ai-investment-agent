@@ -93,11 +93,11 @@ poetry run pytest tests/test_your_feature.py  # Single file
 
 Use descriptive branch names:
 
-- `feature/add-esg-analyst` - New features
-- `fix/portfolio-manager-output` - Bug fixes
-- `docs/api-reference` - Documentation updates
-- `refactor/memory-isolation` - Code refactoring
-- `test/rate-limiting` - Test additions
+- `feature-add-esg-analyst` or `feature/add-esg-analyst` - New features
+- `fix-portfolio-manager-output` or `fix/portfolio-manager-output` - Bug fixes
+- `docs-api-reference` or `docs/api-reference` - Documentation updates
+- `refactor-memory-isolation` or `refactor/memory-isolation` - Code refactoring
+- `test-rate-limiting` or `test/rate-limiting` - Test additions
 
 ### Commit Messages
 
