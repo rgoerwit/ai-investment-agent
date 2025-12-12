@@ -1,0 +1,11 @@
+# GitLeaks False Positives
+# This file lists fingerprints of false positive secret detections to be ignored
+#
+# Format: fingerprint from GitLeaks output (Commit SHA:File:RuleID:Line)
+# Get fingerprints from: gitleaks detect output or GitHub Security tab
+
+# False positive: Azure storage account name detected as Finnhub API key
+# These are example Terraform files, not real secrets
+6f52e2a271a434e42f9371246eede1404eb3632c:terraform/environments/prod/main.tf:finnhub-api-key:17
+6f52e2a271a434e42f9371246eede1404eb3632c:terraform/environments/stage/main.tf:finnhub-api-key:17
+6f52e2a271a434e42f9371246eede1404eb3632c:terraform/environments/dev/main.tf:finnhub-api-key:17

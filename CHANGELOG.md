@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed Docker build with `--no-root` flag for Poetry dependency installation
 - Fixed SARIF upload errors in security scanning workflow
 - Fixed missing file checks in CI/CD Docker image scanning
+- Fixed GitLeaks false positives in Terraform example files (Azure storage account names detected as Finnhub keys)
 
 ### Security
 
