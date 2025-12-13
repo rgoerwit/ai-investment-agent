@@ -17,8 +17,18 @@ Pattern matches: src/data/validator.py (also code-driven for same reasons)
 import re
 import structlog
 from typing import Dict, Optional, List, Tuple
+from enum import Enum
 
 logger = structlog.get_logger(__name__)
+
+
+class Sector(Enum):
+    """Sector classifications for sector-aware red flag detection."""
+    GENERAL = "General/Diversified"
+    BANKING = "Banking"
+    UTILITIES = "Utilities"
+    SHIPPING = "Shipping & Cyclical Commodities"
+    TECHNOLOGY = "Technology & Software"
 
 
 class RedFlagDetector:
@@ -30,6 +40,43 @@ class RedFlagDetector:
     2. Earnings Quality: Positive income but negative FCF >2x (fraud indicator)
     3. Refinancing Risk: Interest coverage <2.0x AND D/E >100% (default risk)
     """
+
+    @staticmethod
+    def detect_sector(fundamentals_report: str) -> Sector:
+        """
+        Detect sector from Fundamentals Analyst report.
+
+        Looks for SECTOR field in DATA_BLOCK. Falls back to GENERAL if not found.
+
+        Args:
+            fundamentals_report: Full fundamentals analyst report text
+
+        Returns:
+            Sector enum value
+        """
+        if not fundamentals_report:
+            return Sector.GENERAL
+
+        # Extract SECTOR from DATA_BLOCK
+        sector_match = re.search(r'SECTOR:\s*(.+?)(?:\n|$)', fundamentals_report)
+
+        if not sector_match:
+            logger.debug("no_sector_found_in_report", fallback="GENERAL")
+            return Sector.GENERAL
+
+        sector_text = sector_match.group(1).strip()
+
+        # Map to enum
+        if "Banking" in sector_text or "Bank" in sector_text:
+            return Sector.BANKING
+        elif "Utilities" in sector_text or "Utility" in sector_text:
+            return Sector.UTILITIES
+        elif "Shipping" in sector_text or "Commodities" in sector_text or "Cyclical" in sector_text:
+            return Sector.SHIPPING
+        elif "Technology" in sector_text or "Software" in sector_text:
+            return Sector.TECHNOLOGY
+        else:
+            return Sector.GENERAL
 
     @staticmethod
     def extract_metrics(fundamentals_report: str) -> Dict[str, Optional[float]]:
@@ -252,40 +299,66 @@ class RedFlagDetector:
     @staticmethod
     def detect_red_flags(
         metrics: Dict[str, Optional[float]],
-        ticker: str = "UNKNOWN"
+        ticker: str = "UNKNOWN",
+        sector: Sector = Sector.GENERAL
     ) -> Tuple[List[Dict], str]:
         """
-        Apply threshold-based red-flag detection logic.
+        Apply sector-aware threshold-based red-flag detection logic.
 
         Args:
             metrics: Extracted financial metrics
             ticker: Ticker symbol for logging
+            sector: Sector classification (affects D/E and coverage thresholds)
 
         Returns:
             Tuple of (red_flags_list, "PASS" or "REJECT")
 
-        Red-flag criteria:
-        1. D/E > 500%: Extreme leverage (bankruptcy risk)
+        Red-flag criteria (sector-adjusted):
+        1. D/E > SECTOR_THRESHOLD: Extreme leverage (bankruptcy risk)
         2. Positive income but negative FCF >2x income: Earnings quality (fraud)
-        3. Interest coverage <2.0x AND D/E >100%: Refinancing risk (default)
+        3. Interest coverage < SECTOR_THRESHOLD AND D/E > SECTOR_THRESHOLD: Refinancing risk
+
+        Sector-specific thresholds:
+        - GENERAL: D/E > 500%, Interest Coverage < 2.0x + D/E > 100%
+        - UTILITIES/SHIPPING: D/E > 800%, Interest Coverage < 1.5x + D/E > 200%
+        - BANKING: D/E check DISABLED (leverage is their business model)
+        - TECHNOLOGY: Standard thresholds (D/E > 500%)
         """
         red_flags = []
 
+        # Define sector-specific thresholds
+        if sector == Sector.BANKING:
+            # Banks: Leverage is their business model - skip D/E checks entirely
+            leverage_threshold = None
+            coverage_threshold = None
+            coverage_de_threshold = None
+        elif sector in (Sector.UTILITIES, Sector.SHIPPING):
+            # Capital-intensive sectors: Higher thresholds
+            leverage_threshold = 800  # D/E > 800% is extreme (vs 500% standard)
+            coverage_threshold = 1.5  # Interest coverage < 1.5x (vs 2.0x standard)
+            coverage_de_threshold = 200  # D/E > 200% when coverage weak (vs 100% standard)
+        else:
+            # General/Technology: Standard thresholds
+            leverage_threshold = 500
+            coverage_threshold = 2.0
+            coverage_de_threshold = 100
+
         # --- RED FLAG 1: Extreme Leverage (Leverage Bomb) ---
         debt_to_equity = metrics.get('debt_to_equity')
-        if debt_to_equity is not None and debt_to_equity > 500:
+        if leverage_threshold is not None and debt_to_equity is not None and debt_to_equity > leverage_threshold:
             red_flags.append({
                 'type': 'EXTREME_LEVERAGE',
                 'severity': 'CRITICAL',
-                'detail': f"D/E ratio {debt_to_equity:.1f}% is extreme (>500% threshold)",
+                'detail': f"D/E ratio {debt_to_equity:.1f}% is extreme (>{leverage_threshold}% threshold for {sector.value})",
                 'action': 'AUTO_REJECT',
-                'rationale': 'Company has 5x+ more debt than equity - bankruptcy risk'
+                'rationale': f'Leverage exceeds sector-appropriate threshold - bankruptcy risk (sector: {sector.value})'
             })
             logger.warning(
                 "red_flag_extreme_leverage",
                 ticker=ticker,
                 debt_to_equity=debt_to_equity,
-                threshold=500
+                threshold=leverage_threshold,
+                sector=sector.value
             )
 
         # --- RED FLAG 2: Earnings Quality Disconnect ---
@@ -311,24 +384,29 @@ class RedFlagDetector:
                 disconnect_multiple=abs(fcf / net_income) if net_income != 0 else None
             )
 
-        # --- RED FLAG 3: Interest Coverage Death Spiral ---
+        # --- RED FLAG 3: Interest Coverage Death Spiral (Sector-Aware) ---
         interest_coverage = metrics.get('interest_coverage')
 
-        if (interest_coverage is not None and interest_coverage < 2.0 and
-            debt_to_equity is not None and debt_to_equity > 100):
+        # Only apply if sector has defined thresholds (excludes banking)
+        if (coverage_threshold is not None and coverage_de_threshold is not None and
+            interest_coverage is not None and interest_coverage < coverage_threshold and
+            debt_to_equity is not None and debt_to_equity > coverage_de_threshold):
 
             red_flags.append({
                 'type': 'REFINANCING_RISK',
                 'severity': 'CRITICAL',
-                'detail': f"Interest coverage {interest_coverage:.2f}x with {debt_to_equity:.1f}% D/E ratio",
+                'detail': f"Interest coverage {interest_coverage:.2f}x with {debt_to_equity:.1f}% D/E ratio (thresholds: <{coverage_threshold}x coverage + >{coverage_de_threshold}% D/E for {sector.value})",
                 'action': 'AUTO_REJECT',
-                'rationale': 'Cannot comfortably service debt - refinancing/default risk'
+                'rationale': f'Cannot comfortably service debt - refinancing/default risk (sector: {sector.value})'
             })
             logger.warning(
                 "red_flag_refinancing_risk",
                 ticker=ticker,
                 interest_coverage=interest_coverage,
-                debt_to_equity=debt_to_equity
+                debt_to_equity=debt_to_equity,
+                coverage_threshold=coverage_threshold,
+                de_threshold=coverage_de_threshold,
+                sector=sector.value
             )
 
         # Determine result

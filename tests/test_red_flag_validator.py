@@ -670,3 +670,697 @@ PE_RATIO_FORWARD: 5.8
         # Should NOT trigger extreme leverage (280% < 500% threshold)
         flag_types = [flag['type'] for flag in result['red_flags']]
         assert 'EXTREME_LEVERAGE' not in flag_types
+
+
+class TestSectorAwareRedFlags:
+    """Test sector-specific threshold adjustments for capital-intensive sectors."""
+
+    @pytest.fixture
+    def validator_node(self):
+        """Create validator node fixture."""
+        return create_financial_health_validator_node()
+
+    @pytest.mark.asyncio
+    async def test_utilities_sector_higher_leverage_threshold(self, validator_node):
+        """
+        Test that utilities sector allows higher D/E ratio (800% vs 500%).
+
+        Real-world scenario: Electric utilities commonly operate with D/E ratios
+        of 200-300% due to capital-intensive infrastructure investments. This is
+        normal and sustainable given regulated cash flows.
+        """
+        state = {
+            'company_of_interest': 'UTIL.T',
+            'company_name': 'Tokyo Electric Power',
+            'fundamentals_report': """
+### --- START DATA_BLOCK ---
+SECTOR: Utilities
+SECTOR_ADJUSTMENTS: D/E threshold raised to 800% (vs 500% standard) for capital-intensive utilities
+ADJUSTED_HEALTH_SCORE: 55%
+PE_RATIO_TTM: 12.5
+### --- END DATA_BLOCK ---
+
+**Leverage**:
+- D/E: 250 (normal for utilities)
+- Interest Coverage: 2.8x
+- NetDebt/EBITDA: 4.5x
+""",
+            'messages': [],
+        }
+
+        result = await validator_node(state, {})
+
+        # Should PASS - 250% D/E is below the 800% utilities threshold
+        assert result['pre_screening_result'] == 'PASS'
+        assert len(result['red_flags']) == 0
+
+    @pytest.mark.asyncio
+    async def test_shipping_sector_allows_higher_leverage(self, validator_node):
+        """
+        Test that shipping/commodities sector allows higher D/E (800% threshold).
+
+        Real-world scenario: Pulp/paper companies like SUZ commonly have D/E ratios
+        of 200-300% due to capital-intensive mills and cyclical nature. This is
+        acceptable if they generate strong EBITDA during upturns.
+        """
+        state = {
+            'company_of_interest': 'SUZ',
+            'company_name': 'Suzano Pulp & Paper',
+            'fundamentals_report': """
+### --- START DATA_BLOCK ---
+SECTOR: Shipping & Cyclical Commodities
+SECTOR_ADJUSTMENTS: D/E threshold raised to 800% (vs 500% standard). Interest coverage threshold lowered to 1.5x (vs 2.0x standard) for capital-intensive sector.
+ADJUSTED_HEALTH_SCORE: 60%
+PE_RATIO_TTM: 10.2
+### --- END DATA_BLOCK ---
+
+**Leverage** - Capital-intensive sector norms:
+- D/E: 220 (typical for pulp/paper)
+- Interest Coverage: 1.8x (generates strong EBITDA, coverage acceptable for sector)
+- NetDebt/EBITDA: 3.2x
+
+**Cash Generation**:
+- EBITDA: $2.5B (strong operating performance)
+- Free Cash Flow: $800M (positive, cyclical downturns OK)
+""",
+            'messages': [],
+        }
+
+        result = await validator_node(state, {})
+
+        # Should PASS - 220% D/E < 800% threshold, 1.8x coverage > 1.5x threshold for shipping
+        assert result['pre_screening_result'] == 'PASS'
+        assert len(result['red_flags']) == 0
+
+    @pytest.mark.asyncio
+    async def test_shipping_sector_refinancing_risk_adjusted_thresholds(self, validator_node):
+        """
+        Test that shipping sector uses adjusted thresholds for refinancing risk.
+
+        Refinancing risk for shipping: coverage < 1.5x (vs 2.0x) + D/E > 200% (vs 100%)
+        """
+        state = {
+            'company_of_interest': 'SHIP.HK',
+            'company_name': 'Asian Shipping Corp',
+            'fundamentals_report': """
+### --- START DATA_BLOCK ---
+SECTOR: Shipping & Cyclical Commodities
+ADJUSTED_HEALTH_SCORE: 52%
+### --- END DATA_BLOCK ---
+
+**Leverage**:
+- D/E: 180 (below 200% sector threshold)
+- Interest Coverage: 1.6x (above 1.5x sector threshold)
+""",
+            'messages': [],
+        }
+
+        result = await validator_node(state, {})
+
+        # Should PASS - both metrics above sector-adjusted thresholds
+        # D/E 180% < 200% threshold, coverage 1.6x > 1.5x threshold
+        assert result['pre_screening_result'] == 'PASS'
+        assert len(result['red_flags']) == 0
+
+    @pytest.mark.asyncio
+    async def test_shipping_sector_fails_when_exceeds_sector_thresholds(self, validator_node):
+        """
+        Test that shipping sector still fails when metrics exceed SECTOR thresholds.
+        """
+        state = {
+            'company_of_interest': 'FAIL.HK',
+            'company_name': 'Failing Shipping Corp',
+            'fundamentals_report': """
+### --- START DATA_BLOCK ---
+SECTOR: Shipping & Cyclical Commodities
+ADJUSTED_HEALTH_SCORE: 30%
+### --- END DATA_BLOCK ---
+
+**Leverage**:
+- D/E: 850 (exceeds 800% sector threshold)
+- Interest Coverage: 1.2x (below 1.5x sector threshold)
+""",
+            'messages': [],
+        }
+
+        result = await validator_node(state, {})
+
+        # Should REJECT - D/E 850% > 800% sector threshold
+        assert result['pre_screening_result'] == 'REJECT'
+        flag_types = [flag['type'] for flag in result['red_flags']]
+        assert 'EXTREME_LEVERAGE' in flag_types
+
+    @pytest.mark.asyncio
+    async def test_banking_sector_skips_leverage_checks(self, validator_node):
+        """
+        Test that banking sector skips D/E checks entirely (leverage is their business).
+
+        Real-world scenario: Banks have D/E ratios of 1000%+ by design (deposits are
+        liabilities). D/E is meaningless - focus is on Tier 1 Capital, NPL ratios.
+        """
+        state = {
+            'company_of_interest': '0005.HK',
+            'company_name': 'HSBC Holdings',
+            'fundamentals_report': """
+### --- START DATA_BLOCK ---
+SECTOR: Banking
+SECTOR_ADJUSTMENTS: D/E ratio excluded (not applicable for banks) - Leverage score denominator adjusted to 1 pt. ROE threshold lowered to 12% (vs 15% standard). ROA threshold lowered to 1.0% (vs 7% standard).
+ADJUSTED_HEALTH_SCORE: 65%
+PE_RATIO_TTM: 9.8
+### --- END DATA_BLOCK ---
+
+**Leverage** - NOT APPLICABLE FOR BANKS:
+- D/E: 1200 (meaningless for banks - deposits are liabilities)
+- Tier 1 Capital Ratio: 14.5% (regulatory capital - strong)
+- NPL Ratio: 1.8% (asset quality - good)
+- Interest Coverage: N/A (not applicable for banks)
+
+**Profitability**:
+- ROE: 13.2% (above 12% bank threshold)
+- ROA: 0.95% (below 1.0% bank threshold but improving)
+""",
+            'messages': [],
+        }
+
+        result = await validator_node(state, {})
+
+        # Should PASS - banking sector skips all D/E and coverage checks
+        assert result['pre_screening_result'] == 'PASS'
+        assert len(result['red_flags']) == 0
+
+    @pytest.mark.asyncio
+    async def test_general_sector_uses_standard_thresholds(self, validator_node):
+        """
+        Test that General/Diversified sector uses standard thresholds (500% D/E).
+        """
+        state = {
+            'company_of_interest': 'GEN.HK',
+            'company_name': 'General Manufacturing',
+            'fundamentals_report': """
+### --- START DATA_BLOCK ---
+SECTOR: General/Diversified
+SECTOR_ADJUSTMENTS: None - standard thresholds applied
+ADJUSTED_HEALTH_SCORE: 55%
+### --- END DATA_BLOCK ---
+
+**Leverage**:
+- D/E: 520 (exceeds 500% standard threshold)
+- Interest Coverage: 1.9x
+""",
+            'messages': [],
+        }
+
+        result = await validator_node(state, {})
+
+        # Should REJECT - 520% D/E > 500% standard threshold
+        assert result['pre_screening_result'] == 'REJECT'
+        flag_types = [flag['type'] for flag in result['red_flags']]
+        assert 'EXTREME_LEVERAGE' in flag_types
+
+    @pytest.mark.asyncio
+    async def test_sector_detection_from_report(self, validator_node):
+        """
+        Test that sector is correctly detected from SECTOR field in DATA_BLOCK.
+        """
+        from src.validators.red_flag_detector import RedFlagDetector, Sector
+
+        # Test utilities detection
+        report_utilities = """
+### --- START DATA_BLOCK ---
+SECTOR: Utilities
+ADJUSTED_HEALTH_SCORE: 60%
+### --- END DATA_BLOCK ---
+"""
+        sector_utilities = RedFlagDetector.detect_sector(report_utilities)
+        assert sector_utilities == Sector.UTILITIES
+
+        # Test shipping detection
+        report_shipping = """
+### --- START DATA_BLOCK ---
+SECTOR: Shipping & Cyclical Commodities
+### --- END DATA_BLOCK ---
+"""
+        sector_shipping = RedFlagDetector.detect_sector(report_shipping)
+        assert sector_shipping == Sector.SHIPPING
+
+        # Test banking detection
+        report_banking = """
+### --- START DATA_BLOCK ---
+SECTOR: Banking
+### --- END DATA_BLOCK ---
+"""
+        sector_banking = RedFlagDetector.detect_sector(report_banking)
+        assert sector_banking == Sector.BANKING
+
+        # Test fallback to GENERAL
+        report_no_sector = """
+No SECTOR field here
+"""
+        sector_general = RedFlagDetector.detect_sector(report_no_sector)
+        assert sector_general == Sector.GENERAL
+
+
+class TestRealWorldSectorExamples:
+    """
+    Real-world ticker examples for each sector with pass/fail scenarios.
+
+    These tests use realistic financial profiles based on actual international equities
+    to ensure the sector-aware thresholds work correctly in production scenarios.
+    """
+
+    @pytest.fixture
+    def validator_node(self):
+        """Create validator node fixture."""
+        return create_financial_health_validator_node()
+
+    # --- UTILITIES SECTOR ---
+
+    @pytest.mark.asyncio
+    async def test_utilities_pass_tokyo_electric_power(self, validator_node):
+        """
+        PASS: Tokyo Electric Power (9501.T) - Typical Japanese utility.
+
+        Profile: D/E ~200%, coverage 3.2x, regulated monopoly with stable cash flows.
+        Should PASS utilities sector thresholds (D/E < 800%, coverage > 1.5x).
+        """
+        state = {
+            'company_of_interest': '9501.T',
+            'company_name': 'Tokyo Electric Power Company (TEPCO)',
+            'fundamentals_report': """
+### --- START DATA_BLOCK ---
+SECTOR: Utilities
+SECTOR_ADJUSTMENTS: D/E threshold raised to 800% (vs 500% standard) for capital-intensive utilities. Interest coverage threshold lowered to 1.5x (vs 2.0x standard).
+ADJUSTED_HEALTH_SCORE: 58%
+PE_RATIO_TTM: 11.2
+### --- END DATA_BLOCK ---
+
+**Leverage** (Utility-Adjusted):
+- D/E: 210 (typical for regulated utility)
+- NetDebt/EBITDA: 5.8x
+- Interest Coverage: 3.2x (stable regulated cash flows)
+
+**Cash Generation**:
+- EBITDA: ¥850B
+- Free Cash Flow: ¥180B
+- Operating Cash Flow: ¥320B
+""",
+            'messages': [],
+        }
+
+        result = await validator_node(state, {})
+
+        assert result['pre_screening_result'] == 'PASS'
+        assert len(result['red_flags']) == 0
+
+    @pytest.mark.asyncio
+    async def test_utilities_fail_distressed_spanish_utility(self, validator_node):
+        """
+        FAIL: Distressed European utility (hypothetical) - Extreme leverage post-acquisition.
+
+        Profile: D/E 920% (exceeds 800% utilities threshold), coverage 1.2x.
+        Should REJECT even with utilities sector adjustments.
+        """
+        state = {
+            'company_of_interest': 'UTIL.MC',
+            'company_name': 'Distressed Utility Corp (Spain)',
+            'fundamentals_report': """
+### --- START DATA_BLOCK ---
+SECTOR: Utilities
+SECTOR_ADJUSTMENTS: D/E threshold raised to 800% (vs 500% standard) for capital-intensive utilities
+ADJUSTED_HEALTH_SCORE: 32%
+PE_RATIO_TTM: 8.5
+### --- END DATA_BLOCK ---
+
+**Leverage** - CRITICAL CONCERN:
+- D/E: 920 (extreme even for utility - post-acquisition debt bomb)
+- NetDebt/EBITDA: 12.5x
+- Interest Coverage: 1.2x (stressed by rising rates)
+
+**Cash Generation**:
+- EBITDA: €1.2B (declining)
+- Free Cash Flow: -€200M (negative due to capex overruns)
+- Debt Maturities: €5B due in 18 months
+""",
+            'messages': [],
+        }
+
+        result = await validator_node(state, {})
+
+        assert result['pre_screening_result'] == 'REJECT'
+        flag_types = [flag['type'] for flag in result['red_flags']]
+        assert 'EXTREME_LEVERAGE' in flag_types  # 920% > 800% utilities threshold
+
+    # --- SHIPPING & CYCLICAL COMMODITIES SECTOR ---
+
+    @pytest.mark.asyncio
+    async def test_shipping_pass_suzano_pulp(self, validator_node):
+        """
+        PASS: Suzano (SUZ) - Brazilian pulp & paper leader.
+
+        Profile: D/E 220%, coverage 1.8x, strong EBITDA generation in cyclical industry.
+        Should PASS shipping/commodities thresholds (D/E < 800%, coverage > 1.5x).
+        This is the exact use case that motivated sector-aware thresholds.
+        """
+        state = {
+            'company_of_interest': 'SUZ',
+            'company_name': 'Suzano S.A. (Pulp & Paper)',
+            'fundamentals_report': """
+### --- START DATA_BLOCK ---
+SECTOR: Shipping & Cyclical Commodities
+SECTOR_ADJUSTMENTS: D/E threshold raised to 800% (vs 500% standard). Interest coverage threshold lowered to 1.5x (vs 2.0x standard) for capital-intensive sector.
+ADJUSTED_HEALTH_SCORE: 62%
+PE_RATIO_TTM: 9.8
+### --- END DATA_BLOCK ---
+
+**Leverage** - Capital-Intensive Sector Norms:
+- D/E: 220 (typical for pulp/paper - capex-heavy mills)
+- NetDebt/EBITDA: 3.1x
+- Interest Coverage: 1.8x (strong EBITDA covers debt comfortably)
+
+**Cash Generation**:
+- EBITDA: R$18.5B (strong operating performance)
+- Free Cash Flow: R$4.2B (positive even during pulp price downturn)
+- Operating Margin: 42% (best-in-class cost structure)
+
+**Sector Context**:
+- Pulp prices cyclical but company generates cash through cycle
+- Vertical integration (forestry + mills) supports margins
+""",
+            'messages': [],
+        }
+
+        result = await validator_node(state, {})
+
+        assert result['pre_screening_result'] == 'PASS'
+        assert len(result['red_flags']) == 0
+
+    @pytest.mark.asyncio
+    async def test_shipping_fail_overleveraged_dry_bulk(self, validator_node):
+        """
+        FAIL: Overleveraged dry bulk shipper (common pattern in shipping distress).
+
+        Profile: D/E 850% (exceeds 800% threshold), coverage 0.9x, commodity downturn.
+        Should REJECT - classic shipping bankruptcy pattern.
+        """
+        state = {
+            'company_of_interest': '2866.HK',
+            'company_name': 'Failing Dry Bulk Shipper',
+            'fundamentals_report': """
+### --- START DATA_BLOCK ---
+SECTOR: Shipping & Cyclical Commodities
+SECTOR_ADJUSTMENTS: D/E threshold raised to 800% for capital-intensive sector
+ADJUSTED_HEALTH_SCORE: 28%
+PE_RATIO_TTM: N/A (losses)
+### --- END DATA_BLOCK ---
+
+**Leverage** - CRITICAL DISTRESS:
+- D/E: 850 (extreme even for shipping - overleveraged at cycle peak)
+- NetDebt/EBITDA: 18.2x
+- Interest Coverage: 0.9x (cannot service debt)
+
+**Cash Generation**:
+- EBITDA: $45M (collapsed from $200M in 2021 peak)
+- Free Cash Flow: -$120M (negative)
+- Baltic Dry Index: Down 70% from peak (freight rate collapse)
+
+**Risk Factors**:
+- Ordered ships at cycle peak (2021) with high leverage
+- Commodity downturn crushed freight rates
+- Debt maturities approaching with no refinancing options
+""",
+            'messages': [],
+        }
+
+        result = await validator_node(state, {})
+
+        assert result['pre_screening_result'] == 'REJECT'
+        flag_types = [flag['type'] for flag in result['red_flags']]
+        assert 'EXTREME_LEVERAGE' in flag_types  # 850% > 800% threshold
+        assert 'REFINANCING_RISK' in flag_types  # Coverage 0.9x < 1.5x + D/E > 200%
+
+    # --- BANKING SECTOR ---
+
+    @pytest.mark.asyncio
+    async def test_banking_pass_hsbc_high_leverage(self, validator_node):
+        """
+        PASS: HSBC (0005.HK) - Global bank with typical bank capital structure.
+
+        Profile: D/E 1200% (normal for banks), strong Tier 1 capital, low NPLs.
+        Should PASS - banking sector skips D/E checks entirely.
+        """
+        state = {
+            'company_of_interest': '0005.HK',
+            'company_name': 'HSBC Holdings',
+            'fundamentals_report': """
+### --- START DATA_BLOCK ---
+SECTOR: Banking
+SECTOR_ADJUSTMENTS: D/E ratio excluded (not applicable for banks) - Leverage score denominator adjusted to 1 pt. ROE threshold lowered to 12% (vs 15% standard). ROA threshold lowered to 1.0% (vs 7% standard).
+ADJUSTED_HEALTH_SCORE: 68%
+PE_RATIO_TTM: 9.2
+### --- END DATA_BLOCK ---
+
+**Leverage** - NOT APPLICABLE FOR BANKS:
+- D/E: 1200 (deposits are liabilities - meaningless metric)
+- Tier 1 Capital Ratio: 14.8% (regulatory capital - well above 10% minimum)
+- Common Equity Tier 1: 13.5% (strong)
+- Leverage Ratio: 5.2% (above 3% regulatory minimum)
+
+**Asset Quality**:
+- NPL Ratio: 1.6% (non-performing loans - good quality)
+- Loan Loss Coverage: 180% (strong provisioning)
+
+**Profitability**:
+- ROE: 13.8% (above 12% bank threshold)
+- ROA: 0.62% (typical for large global bank)
+- Net Interest Margin: 1.68%
+""",
+            'messages': [],
+        }
+
+        result = await validator_node(state, {})
+
+        assert result['pre_screening_result'] == 'PASS'
+        assert len(result['red_flags']) == 0
+
+    @pytest.mark.asyncio
+    async def test_banking_pass_even_with_extreme_de(self, validator_node):
+        """
+        PASS: Regional Japanese bank with 2000% D/E (normal for banks).
+
+        Validates that banking sector truly skips D/E checks regardless of ratio.
+        """
+        state = {
+            'company_of_interest': '8411.T',
+            'company_name': 'Mizuho Financial Group',
+            'fundamentals_report': """
+### --- START DATA_BLOCK ---
+SECTOR: Banking
+SECTOR_ADJUSTMENTS: D/E ratio excluded (not applicable for banks)
+ADJUSTED_HEALTH_SCORE: 55%
+PE_RATIO_TTM: 7.8
+### --- END DATA_BLOCK ---
+
+**Leverage** - NOT APPLICABLE:
+- D/E: 2100 (21:1 leverage typical for Japanese megabank)
+- Tier 1 Capital Ratio: 11.2% (adequate)
+- Interest Coverage: N/A (not applicable for banks)
+
+**Asset Quality**:
+- NPL Ratio: 2.3% (acceptable for regional exposure)
+- Coverage Ratio: 145%
+
+**Profitability**:
+- ROE: 8.5% (below 12% threshold but improving)
+- ROA: 0.42%
+""",
+            'messages': [],
+        }
+
+        result = await validator_node(state, {})
+
+        # Should PASS - banking sector skips all leverage checks
+        assert result['pre_screening_result'] == 'PASS'
+        assert len(result['red_flags']) == 0
+
+    # --- TECHNOLOGY SECTOR ---
+
+    @pytest.mark.asyncio
+    async def test_technology_pass_samsung_electronics(self, validator_node):
+        """
+        PASS: Samsung Electronics (005930.KS) - Tech leader with conservative balance sheet.
+
+        Profile: D/E 45%, strong cash generation, minimal leverage.
+        Should PASS standard thresholds easily.
+        """
+        state = {
+            'company_of_interest': '005930.KS',
+            'company_name': 'Samsung Electronics',
+            'fundamentals_report': """
+### --- START DATA_BLOCK ---
+SECTOR: Technology & Software
+SECTOR_ADJUSTMENTS: None - standard thresholds applied
+ADJUSTED_HEALTH_SCORE: 78%
+PE_RATIO_TTM: 12.5
+### --- END DATA_BLOCK ---
+
+**Leverage** - Conservative:
+- D/E: 45 (minimal leverage for tech leader)
+- NetDebt/EBITDA: 0.2x (net cash position)
+- Interest Coverage: 28.5x (trivial debt burden)
+
+**Cash Generation**:
+- EBITDA: ₩85T
+- Free Cash Flow: ₩32T (strong)
+- Operating Cash Flow: ₩52T
+- Net Cash: ₩42T (fortress balance sheet)
+
+**Profitability**:
+- ROE: 14.2%
+- Operating Margin: 12.8% (memory cycle downturn)
+""",
+            'messages': [],
+        }
+
+        result = await validator_node(state, {})
+
+        assert result['pre_screening_result'] == 'PASS'
+        assert len(result['red_flags']) == 0
+
+    @pytest.mark.asyncio
+    async def test_technology_fail_overleveraged_lbo(self, validator_node):
+        """
+        FAIL: Overleveraged tech company post-LBO (private equity casualty).
+
+        Profile: D/E 580% (exceeds 500% standard threshold), coverage 1.6x.
+        Should REJECT - tech companies shouldn't operate with extreme leverage.
+        """
+        state = {
+            'company_of_interest': 'TECH.HK',
+            'company_name': 'Overleveraged Tech Corp',
+            'fundamentals_report': """
+### --- START DATA_BLOCK ---
+SECTOR: Technology & Software
+SECTOR_ADJUSTMENTS: None - standard thresholds applied
+ADJUSTED_HEALTH_SCORE: 38%
+PE_RATIO_TTM: 15.2
+### --- END DATA_BLOCK ---
+
+**Leverage** - EXTREME FOR TECH:
+- D/E: 580 (overleveraged post-LBO - PE firm loaded with debt)
+- NetDebt/EBITDA: 6.8x
+- Interest Coverage: 1.6x (tight for tech company)
+
+**Cash Generation**:
+- EBITDA: $120M
+- Free Cash Flow: $15M (minimal after debt service)
+- Revenue Growth: -5% (post-acquisition synergies failed)
+
+**Risk Factors**:
+- Private equity LBO in 2021 at peak valuations
+- Failed to achieve projected cost synergies
+- Customer attrition post-acquisition (25% lost)
+- Debt matures in 2026 with refinancing risk
+""",
+            'messages': [],
+        }
+
+        result = await validator_node(state, {})
+
+        assert result['pre_screening_result'] == 'REJECT'
+        flag_types = [flag['type'] for flag in result['red_flags']]
+        assert 'EXTREME_LEVERAGE' in flag_types  # 580% > 500% standard threshold
+
+    # --- GENERAL SECTOR ---
+
+    @pytest.mark.asyncio
+    async def test_general_pass_toyota_motor(self, validator_node):
+        """
+        PASS: Toyota Motor (7203.T) - Auto manufacturer with strong balance sheet.
+
+        Profile: D/E 180%, coverage 8.2x, best-in-class operational execution.
+        Should PASS standard thresholds comfortably.
+        """
+        state = {
+            'company_of_interest': '7203.T',
+            'company_name': 'Toyota Motor Corporation',
+            'fundamentals_report': """
+### --- START DATA_BLOCK ---
+SECTOR: General/Diversified
+SECTOR_ADJUSTMENTS: None - standard thresholds applied
+ADJUSTED_HEALTH_SCORE: 72%
+PE_RATIO_TTM: 9.8
+### --- END DATA_BLOCK ---
+
+**Leverage** - Manageable:
+- D/E: 180 (includes Toyota Financial Services - captive auto finance)
+- NetDebt/EBITDA: 2.1x
+- Interest Coverage: 8.2x (comfortable debt service)
+
+**Cash Generation**:
+- EBITDA: ¥4.8T
+- Free Cash Flow: ¥2.2T (strong)
+- Operating Cash Flow: ¥3.8T
+- Cash & Equivalents: ¥5.1T
+
+**Profitability**:
+- ROE: 16.8%
+- Operating Margin: 10.2% (industry-leading)
+""",
+            'messages': [],
+        }
+
+        result = await validator_node(state, {})
+
+        assert result['pre_screening_result'] == 'PASS'
+        assert len(result['red_flags']) == 0
+
+    @pytest.mark.asyncio
+    async def test_general_fail_chinese_property_developer(self, validator_node):
+        """
+        FAIL: Chinese property developer (Evergrande-style distress).
+
+        Profile: D/E 620%, coverage 0.8x, classic China property crisis pattern.
+        Should REJECT - multiple red flags (extreme leverage + refinancing risk).
+        """
+        state = {
+            'company_of_interest': '3333.HK',
+            'company_name': 'Distressed Property Developer',
+            'fundamentals_report': """
+### --- START DATA_BLOCK ---
+SECTOR: General/Diversified
+SECTOR_ADJUSTMENTS: None - standard thresholds applied
+ADJUSTED_HEALTH_SCORE: 18%
+PE_RATIO_TTM: 3.2 (distressed valuation)
+### --- END DATA_BLOCK ---
+
+**Leverage** - CRITICAL DISTRESS:
+- D/E: 620 (extreme - China property crisis)
+- NetDebt/EBITDA: 15.8x
+- Interest Coverage: 0.8x (cannot service debt)
+
+**Cash Generation**:
+- EBITDA: ¥12B (collapsing)
+- Free Cash Flow: -¥45B (massive outflow)
+- Net Income: ¥8B (positive but questionable quality)
+
+**Liquidity Crisis**:
+- Cash: ¥15B
+- Short-term debt: ¥180B (maturity wall)
+- Asset sales: Stalled (no buyers in distressed market)
+- Government intervention: Uncertain
+
+**Risk Factors**:
+- Three Red Lines policy breach (all three metrics failed)
+- Offshore bond default imminent
+- Property sales down 70% YoY
+- Credit rating: CCC+ (substantial risk)
+""",
+            'messages': [],
+        }
+
+        result = await validator_node(state, {})
+
+        assert result['pre_screening_result'] == 'REJECT'
+        flag_types = [flag['type'] for flag in result['red_flags']]
+        assert 'EXTREME_LEVERAGE' in flag_types  # 620% > 500% standard threshold
+        assert 'REFINANCING_RISK' in flag_types  # Coverage 0.8x < 2.0x + D/E > 100%

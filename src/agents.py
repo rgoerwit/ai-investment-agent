@@ -486,6 +486,9 @@ def create_financial_health_validator_node() -> Callable:
                 'pre_screening_result': 'PASS'
             }
 
+        # Extract sector classification from fundamentals report
+        sector = RedFlagDetector.detect_sector(fundamentals_report)
+
         # Extract metrics from DATA_BLOCK
         metrics = RedFlagDetector.extract_metrics(fundamentals_report)
 
@@ -494,6 +497,7 @@ def create_financial_health_validator_node() -> Callable:
             logger.info(
                 "validator_extracted_metrics",
                 ticker=ticker,
+                sector=sector.value,
                 debt_to_equity=metrics.get('debt_to_equity'),
                 fcf=metrics.get('fcf'),
                 net_income=metrics.get('net_income'),
@@ -501,8 +505,8 @@ def create_financial_health_validator_node() -> Callable:
                 adjusted_health_score=metrics.get('adjusted_health_score')
             )
 
-        # Apply red-flag detection logic
-        red_flags, pre_screening_result = RedFlagDetector.detect_red_flags(metrics, ticker)
+        # Apply sector-aware red-flag detection logic
+        red_flags, pre_screening_result = RedFlagDetector.detect_red_flags(metrics, ticker, sector)
 
         # Log results
         if pre_screening_result == 'REJECT':
