@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **External Consultant Node** - Optional cross-validation using OpenAI ChatGPT to detect biases and validate Gemini analysis
+  - Uses different LLM (OpenAI) to catch groupthink and confirmation bias that single-model systems miss
+  - Positioned post-debate, pre-risk-assessment for maximum context
+  - Fully backwards compatible - system works identically with consultant disabled
+  - Configurable via `ENABLE_CONSULTANT` and `OPENAI_API_KEY` environment variables
+  - Comprehensive test suite (29 new tests: 12 integration + 17 edge cases)
+  - See `docs/CONSULTANT_INTEGRATION.md` and `docs/CONSULTANT_CONSISTENCY_REVIEW.md` for details
 - GitLeaks and Trivy security scanning to CI/CD pipeline
 - Red-flag financial validator for pre-screening (extreme leverage, earnings quality, refinancing risk)
 - Currency normalization for liquidity calculations (FX rate conversion)
@@ -27,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Report Generator** - Now includes consultant review section when available (intelligent filtering excludes errors/N/A)
+- **Token Tracker** - Added OpenAI pricing (gpt-4o, gpt-4o-mini, gpt-4-turbo, gpt-4) with correct model ordering
 - Updated Dockerfile to multi-stage build pattern (40% smaller images)
 - Improved error handling in report generator with fallback hierarchy (Portfolio Manager → Research Manager → Trader)
 - Modernized GitHub Actions workflows (CodeQL v4, step-level conditionals)
@@ -34,6 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Consultant Node** - Fixed crash on `None` debate state with defensive null-checking
+- **Consultant Logging** - All consultant logging properly respects `--quiet` flag (structlog suppression)
+- **Portfolio Manager** - Fixed missing consultant review in decision context
 - Fixed silent output truncation when Portfolio Manager fails to produce final decision
 - Fixed Docker build with `--no-root` flag for Poetry dependency installation
 - Fixed SARIF upload errors in security scanning workflow

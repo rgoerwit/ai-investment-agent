@@ -314,6 +314,17 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         add_section('sentiment_report', 'Market Sentiment')
         add_section('news_report', 'News & Catalysts')
         add_section('investment_plan', 'Investment Recommendation')
+
+        # CRITICAL: Include consultant review if present (external cross-validation)
+        consultant_review = result.get('consultant_review', '')
+        if consultant_review and consultant_review.strip():
+            # Check if it's a real review (not an error message or "N/A")
+            normalized = self._normalize_string(consultant_review)
+            if normalized and "N/A (consultant disabled" not in normalized and not normalized.startswith('Consultant Review Error'):
+                report_parts.append("## 🔍 External Consultant Review (Cross-Validation)\n")
+                report_parts.append("*Independent review by OpenAI ChatGPT to validate Gemini analysis*\n\n")
+                report_parts.append(f"{self._clean_text(normalized)}\n\n")
+
         add_section('trader_investment_plan', 'Trading Strategy')
 
         # Risk Assessment (if present)

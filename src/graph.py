@@ -20,9 +20,10 @@ from src.agents import (
     AgentState, create_analyst_node, create_researcher_node,
     create_research_manager_node, create_trader_node,
     create_risk_debater_node, create_portfolio_manager_node,
-    create_state_cleaner_node, create_financial_health_validator_node
+    create_state_cleaner_node, create_financial_health_validator_node,
+    create_consultant_node
 )
-from src.llms import create_quick_thinking_llm, create_deep_thinking_llm
+from src.llms import create_quick_thinking_llm, create_deep_thinking_llm, get_consultant_llm
 from src.toolkit import toolkit
 from src.token_tracker import TokenTrackingCallback, get_tracker
 from src.memory import (
@@ -268,6 +269,9 @@ def create_trading_graph(
     neutral_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Neutral Analyst", tracker)])
     pm_llm = create_deep_thinking_llm(callbacks=[TokenTrackingCallback("Portfolio Manager", tracker)])
 
+    # Consultant LLM (OpenAI - optional, may be None if disabled/unavailable)
+    consultant_llm = get_consultant_llm(callbacks=[TokenTrackingCallback("Consultant", tracker)])
+
     # Nodes
     market = create_analyst_node(market_llm, "market_analyst", toolkit.get_technical_tools(), "market_report")
     social = create_analyst_node(social_llm, "sentiment_analyst", toolkit.get_sentiment_tools(), "sentiment_report")
@@ -293,6 +297,22 @@ def create_trading_graph(
     neutral = create_risk_debater_node(neutral_llm, "neutral_analyst")
     pm = create_portfolio_manager_node(pm_llm, risk_manager_memory)
 
+    # Consultant Node (optional - only if consultant_llm is available)
+    consultant = None
+    if consultant_llm is not None:
+        consultant = create_consultant_node(consultant_llm, "consultant")
+        logger.info(
+            "consultant_node_enabled",
+            ticker=ticker,
+            message="External consultant (OpenAI) will cross-validate Gemini analysis"
+        )
+    else:
+        logger.info(
+            "consultant_node_disabled",
+            ticker=ticker,
+            message="Consultant node skipped (OpenAI API key not configured or disabled)"
+        )
+
     workflow = StateGraph(AgentState)
     
     workflow.add_node("Market Analyst", market)
@@ -309,6 +329,11 @@ def create_trading_graph(
     workflow.add_node("Bull Researcher", bull)
     workflow.add_node("Bear Researcher", bear)
     workflow.add_node("Research Manager", res_mgr)
+
+    # Add consultant node (optional - only if OpenAI API key configured)
+    if consultant is not None:
+        workflow.add_node("Consultant", consultant)
+
     workflow.add_node("Trader", trader)
     workflow.add_node("Risky Analyst", risky)
     workflow.add_node("Safe Analyst", safe)
@@ -346,10 +371,11 @@ def create_trading_graph(
         "Bull Researcher": "Bull Researcher"
     })
 
-    # Debate Flow
+    # Debate Flow (Research Manager → Bull/Bear → Consultant → Trader)
     def debate_router(state: AgentState, config: RunnableConfig):
         """
         Route debate flow between Bull and Bear researchers.
+        After debate converges, routes to Consultant (if enabled) or Trader (if disabled).
         """
         # Retrieve configuration from context
         context = config.get("configurable", {}).get("context")
@@ -369,8 +395,15 @@ def create_trading_graph(
 
     workflow.add_conditional_edges("Bull Researcher", debate_router, ["Bear Researcher", "Research Manager"])
     workflow.add_conditional_edges("Bear Researcher", debate_router, ["Bull Researcher", "Research Manager"])
-    
-    workflow.add_edge("Research Manager", "Trader")
+
+    # Consultant routing: Research Manager → Consultant → Trader
+    # If consultant node not available, route directly to Trader
+    if consultant is not None:
+        workflow.add_edge("Research Manager", "Consultant")
+        workflow.add_edge("Consultant", "Trader")
+    else:
+        workflow.add_edge("Research Manager", "Trader")
+
     workflow.add_edge("Trader", "Risky Analyst")
     
     # Risk Flow
