@@ -4,6 +4,7 @@ CLAUDE.md
 .claude/*
 
 # Local things we ignore
+examples/~*
 scratch/
 scratch/*
 data_cache/
