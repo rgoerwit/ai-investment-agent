@@ -257,7 +257,20 @@ caffeinate -i ./scripts/run_tickers.sh
 - 50 tickers: ~2-4 hours (standard mode) or ~1-2 hours (quick mode)
 - 100 tickers: ~4-8 hours (standard mode) or ~2-4 hours (quick mode)
 
-**Note:** Quick mode automatically uses faster/cheaper models for all agents (Gemini Flash for Research Manager/Portfolio Manager, GPT-4o-mini for Consultant). This reduces cost and latency but may yield lower-quality analysis.
+⚠️ **IMPORTANT - Quick Mode Known Issues (Dec 2025):**
+
+As of December 2025, **--quick mode has known issues** with Gemini 2.x Flash models and langchain-google-genai 2.1.12:
+- **gemini-2.5-flash**: Data vacuum (Fundamentals Analyst fails to generate DATA_BLOCK)
+- **gemini-2.0-flash**: Hangs completely during LLM tool calls
+- **gemini-2.0-flash-thinking-exp**: Tool calling parsing errors
+
+**Current Workaround**: The system defaults to `gemini-3-pro-preview` for quick mode, which works reliably but is ~20x more expensive than Flash models ($2/$12 vs $0.10/$0.40 per 1M tokens). This means **--quick mode currently offers NO cost savings**, only reduced debate rounds (1 instead of 2).
+
+**Recommended**: Use normal mode (without --quick) until LangChain compatibility is resolved, OR upgrade `langchain-google-genai` to 4.0.0+ (may require code changes).
+
+**Root Cause**: API structure issues with `bind_tools()`, NOT context window limitations. See [`docs/GEMINI_FLASH_COMPATIBILITY.md`](docs/GEMINI_FLASH_COMPATIBILITY.md) for comprehensive analysis and solutions.
+
+**Important Note**: 10 out of 12 agents ALWAYS use the "quick model" (even in normal mode), meaning the current workaround makes the entire system expensive, not just when using --quick.
 
 **💡 Pro tip for macOS users:**
 The `caffeinate -i` command prevents your Mac from sleeping because it think it's inactive.  (It may sleep for other reasons even with caffeinate.)
