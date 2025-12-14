@@ -331,6 +331,12 @@ class TestConsultantQuickMode:
 
     def test_consultant_uses_quick_model_when_enabled(self):
         """Test that consultant uses CONSULTANT_QUICK_MODEL when quick_mode=True."""
+        # Skip if langchain-openai not installed (it's optional)
+        try:
+            import langchain_openai
+        except ImportError:
+            pytest.skip("langchain-openai not installed (optional dependency)")
+
         from src.llms import create_consultant_llm
         from unittest.mock import patch, MagicMock
 
@@ -351,6 +357,12 @@ class TestConsultantQuickMode:
 
     def test_consultant_uses_normal_model_when_quick_disabled(self):
         """Test that consultant uses CONSULTANT_MODEL when quick_mode=False."""
+        # Skip if langchain-openai not installed (it's optional)
+        try:
+            import langchain_openai
+        except ImportError:
+            pytest.skip("langchain-openai not installed (optional dependency)")
+
         from src.llms import create_consultant_llm
         from unittest.mock import patch, MagicMock
 
@@ -371,6 +383,12 @@ class TestConsultantQuickMode:
 
     def test_consultant_defaults_to_gpt4o_mini_in_quick_mode(self):
         """Test that consultant defaults to gpt-4o-mini when CONSULTANT_QUICK_MODEL not set."""
+        # Skip if langchain-openai not installed (it's optional)
+        try:
+            import langchain_openai
+        except ImportError:
+            pytest.skip("langchain-openai not installed (optional dependency)")
+
         from src.llms import create_consultant_llm
         from unittest.mock import patch, MagicMock
 
@@ -393,6 +411,12 @@ class TestConsultantQuickMode:
 
     def test_get_consultant_llm_respects_quick_mode(self):
         """Test that get_consultant_llm passes quick_mode to create_consultant_llm."""
+        # Skip if langchain-openai not installed (it's optional)
+        try:
+            import langchain_openai
+        except ImportError:
+            pytest.skip("langchain-openai not installed (optional dependency)")
+
         from src.llms import get_consultant_llm, _consultant_llm_instance
         from unittest.mock import patch, MagicMock
         import src.llms
