@@ -325,3 +325,95 @@ class TestNonRegression:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+class TestConsultantQuickMode:
+    """Test consultant LLM quick mode functionality."""
+
+    def test_consultant_uses_quick_model_when_enabled(self):
+        """Test that consultant uses CONSULTANT_QUICK_MODEL when quick_mode=True."""
+        from src.llms import create_consultant_llm
+        from unittest.mock import patch, MagicMock
+
+        with patch('langchain_openai.ChatOpenAI') as mock_chatgpt:
+            mock_chatgpt.return_value = MagicMock()
+            
+            with patch.dict(os.environ, {
+                "OPENAI_API_KEY": "test-key",
+                "CONSULTANT_QUICK_MODEL": "gpt-4o-mini",
+                "ENABLE_CONSULTANT": "true"
+            }):
+                llm = create_consultant_llm(quick_mode=True)
+                
+                assert llm is not None
+                mock_chatgpt.assert_called_once()
+                call_kwargs = mock_chatgpt.call_args[1]
+                assert call_kwargs["model"] == "gpt-4o-mini"
+
+    def test_consultant_uses_normal_model_when_quick_disabled(self):
+        """Test that consultant uses CONSULTANT_MODEL when quick_mode=False."""
+        from src.llms import create_consultant_llm
+        from unittest.mock import patch, MagicMock
+
+        with patch('langchain_openai.ChatOpenAI') as mock_chatgpt:
+            mock_chatgpt.return_value = MagicMock()
+            
+            with patch.dict(os.environ, {
+                "OPENAI_API_KEY": "test-key",
+                "CONSULTANT_MODEL": "gpt-4o",
+                "ENABLE_CONSULTANT": "true"
+            }):
+                llm = create_consultant_llm(quick_mode=False)
+                
+                assert llm is not None
+                mock_chatgpt.assert_called_once()
+                call_kwargs = mock_chatgpt.call_args[1]
+                assert call_kwargs["model"] == "gpt-4o"
+
+    def test_consultant_defaults_to_gpt4o_mini_in_quick_mode(self):
+        """Test that consultant defaults to gpt-4o-mini when CONSULTANT_QUICK_MODEL not set."""
+        from src.llms import create_consultant_llm
+        from unittest.mock import patch, MagicMock
+
+        with patch('langchain_openai.ChatOpenAI') as mock_chatgpt:
+            mock_chatgpt.return_value = MagicMock()
+            
+            with patch.dict(os.environ, {
+                "OPENAI_API_KEY": "test-key",
+                "ENABLE_CONSULTANT": "true"
+            }, clear=True):
+                # Remove CONSULTANT_QUICK_MODEL if it exists
+                os.environ.pop("CONSULTANT_QUICK_MODEL", None)
+                
+                llm = create_consultant_llm(quick_mode=True)
+                
+                assert llm is not None
+                mock_chatgpt.assert_called_once()
+                call_kwargs = mock_chatgpt.call_args[1]
+                assert call_kwargs["model"] == "gpt-4o-mini"  # Default for quick mode
+
+    def test_get_consultant_llm_respects_quick_mode(self):
+        """Test that get_consultant_llm passes quick_mode to create_consultant_llm."""
+        from src.llms import get_consultant_llm, _consultant_llm_instance
+        from unittest.mock import patch, MagicMock
+        import src.llms
+
+        # Reset the global instance
+        src.llms._consultant_llm_instance = None
+
+        with patch('langchain_openai.ChatOpenAI') as mock_chatgpt:
+            mock_chatgpt.return_value = MagicMock()
+            
+            with patch.dict(os.environ, {
+                "OPENAI_API_KEY": "test-key",
+                "CONSULTANT_QUICK_MODEL": "gpt-4o-mini-test",
+                "ENABLE_CONSULTANT": "true"
+            }):
+                llm = get_consultant_llm(quick_mode=True)
+                
+                assert llm is not None
+                mock_chatgpt.assert_called_once()
+                call_kwargs = mock_chatgpt.call_args[1]
+                assert call_kwargs["model"] == "gpt-4o-mini-test"
+
+        # Reset for other tests
+        src.llms._consultant_llm_instance = None

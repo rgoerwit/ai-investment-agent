@@ -145,13 +145,14 @@ def create_trading_graph(
     enable_memory: bool = True,
     recursion_limit: int = 100,
     ticker: Optional[str] = None,
-    cleanup_previous: bool = False
+    cleanup_previous: bool = False,
+    quick_mode: bool = False
 ):
     """
     Create the multi-agent trading analysis graph with ticker-specific memory isolation.
-    
+
     UPDATED: Now supports ticker-specific memories to prevent cross-contamination.
-    
+
     Args:
         ticker: Stock ticker symbol (e.g., "0005.HK", "AAPL"). If provided, creates
                 ticker-specific memories. If None, uses legacy global memories (NOT recommended).
@@ -161,18 +162,20 @@ def create_trading_graph(
         max_risk_discuss_rounds: Maximum rounds of risk discussion (default: 1)
         enable_memory: Whether to enable agent memory (default: True)
         recursion_limit: Maximum recursion depth for graph execution (default: 100)
-        
+        quick_mode: If True, use faster/cheaper models for consultant LLM (default: False)
+
     Returns:
         Compiled LangGraph StateGraph ready for execution
-        
+
     Example:
         # Recommended: Ticker-specific memory with cleanup
         graph = create_trading_graph(
             ticker="0005.HK",
             cleanup_previous=True,
-            max_debate_rounds=2
+            max_debate_rounds=2,
+            quick_mode=False
         )
-        
+
         # Legacy: Global memory (may cause contamination)
         graph = create_trading_graph(max_debate_rounds=2)
     """
@@ -262,15 +265,22 @@ def create_trading_graph(
     fund_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Fundamentals Analyst", tracker)])
     bull_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Bull Researcher", tracker)])
     bear_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Bear Researcher", tracker)])
-    res_mgr_llm = create_deep_thinking_llm(callbacks=[TokenTrackingCallback("Research Manager", tracker)])
+
+    # Research Manager and Portfolio Manager: Use deep thinking in normal mode, quick in quick mode
+    if quick_mode:
+        res_mgr_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Research Manager", tracker)])
+        pm_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Portfolio Manager", tracker)])
+    else:
+        res_mgr_llm = create_deep_thinking_llm(callbacks=[TokenTrackingCallback("Research Manager", tracker)])
+        pm_llm = create_deep_thinking_llm(callbacks=[TokenTrackingCallback("Portfolio Manager", tracker)])
+
     trader_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Trader", tracker)])
     risky_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Risky Analyst", tracker)])
     safe_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Safe Analyst", tracker)])
     neutral_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Neutral Analyst", tracker)])
-    pm_llm = create_deep_thinking_llm(callbacks=[TokenTrackingCallback("Portfolio Manager", tracker)])
 
     # Consultant LLM (OpenAI - optional, may be None if disabled/unavailable)
-    consultant_llm = get_consultant_llm(callbacks=[TokenTrackingCallback("Consultant", tracker)])
+    consultant_llm = get_consultant_llm(callbacks=[TokenTrackingCallback("Consultant", tracker)], quick_mode=quick_mode)
 
     # Nodes
     market = create_analyst_node(market_llm, "market_analyst", toolkit.get_technical_tools(), "market_report")

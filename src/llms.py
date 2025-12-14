@@ -137,6 +137,7 @@ def create_consultant_llm(
     model: Optional[str] = None,
     timeout: int = 120,
     max_retries: int = 3,
+    quick_mode: bool = False,
     callbacks: Optional[List[BaseCallbackHandler]] = None
 ) -> BaseChatModel:
     """
@@ -147,9 +148,10 @@ def create_consultant_llm(
 
     Args:
         temperature: Sampling temperature (default 0.3 for balanced creativity)
-        model: Model name (default from CONSULTANT_MODEL env var or gpt-4o)
+        model: Model name (overrides env vars if provided)
         timeout: Request timeout in seconds
         max_retries: Max retry attempts for failed requests
+        quick_mode: If True, use CONSULTANT_QUICK_MODEL env var (default False)
         callbacks: Optional callback handlers for token tracking
 
     Returns:
@@ -161,7 +163,8 @@ def create_consultant_llm(
 
     Notes:
         - Requires OPENAI_API_KEY environment variable
-        - Optional CONSULTANT_MODEL env var (defaults to gpt-4o)
+        - Normal mode: Uses CONSULTANT_MODEL env var (defaults to gpt-4o)
+        - Quick mode: Uses CONSULTANT_QUICK_MODEL env var (defaults to gpt-4o-mini)
         - Optional ENABLE_CONSULTANT env var (defaults to true)
         - gpt-4o is recommended as of Dec 2025 (GPT-4 Omni)
         - ChatGPT 5.2 not yet available via API as of Dec 2025
@@ -169,6 +172,7 @@ def create_consultant_llm(
     Example:
         >>> consultant_llm = create_consultant_llm()
         >>> result = consultant_llm.invoke("Review this analysis...")
+        >>> quick_llm = create_consultant_llm(quick_mode=True)
     """
     try:
         from langchain_openai import ChatOpenAI
@@ -197,7 +201,15 @@ def create_consultant_llm(
     # Get model name from env or use default
     # Note: As of Dec 2025, gpt-4o (GPT-4 Omni) is the latest production model
     # ChatGPT 5.2 is not yet available via API
-    model_name = model or os.environ.get("CONSULTANT_MODEL", "gpt-4o")
+    if model:
+        # Explicit model override
+        model_name = model
+    elif quick_mode:
+        # Quick mode: use faster/cheaper model (defaults to gpt-4o-mini)
+        model_name = os.environ.get("CONSULTANT_QUICK_MODEL", "gpt-4o-mini")
+    else:
+        # Normal mode: use full model (defaults to gpt-4o)
+        model_name = os.environ.get("CONSULTANT_MODEL", "gpt-4o")
 
     logger.info(
         f"Initializing Consultant LLM (OpenAI): {model_name} "
@@ -225,7 +237,10 @@ def create_consultant_llm(
 _consultant_llm_instance = None
 
 
-def get_consultant_llm(callbacks: Optional[List[BaseCallbackHandler]] = None) -> Optional[BaseChatModel]:
+def get_consultant_llm(
+    callbacks: Optional[List[BaseCallbackHandler]] = None,
+    quick_mode: bool = False
+) -> Optional[BaseChatModel]:
     """
     Get or create the consultant LLM instance.
 
@@ -234,9 +249,15 @@ def get_consultant_llm(callbacks: Optional[List[BaseCallbackHandler]] = None) ->
 
     Args:
         callbacks: Optional callback handlers for token tracking
+        quick_mode: If True, use CONSULTANT_QUICK_MODEL (gpt-4o-mini by default)
 
     Returns:
         ChatOpenAI instance or None if consultant disabled/unavailable
+
+    Note:
+        Caching is NOT affected by quick_mode - the instance is created once
+        with the mode that was first requested. This matches Gemini behavior
+        where models are configured at graph build time, not per-run.
     """
     global _consultant_llm_instance
 
@@ -257,7 +278,10 @@ def get_consultant_llm(callbacks: Optional[List[BaseCallbackHandler]] = None) ->
     # Lazy initialization
     if _consultant_llm_instance is None:
         try:
-            _consultant_llm_instance = create_consultant_llm(callbacks=callbacks)
+            _consultant_llm_instance = create_consultant_llm(
+                callbacks=callbacks,
+                quick_mode=quick_mode
+            )
         except Exception as e:
             logger.error(f"Failed to initialize consultant LLM: {str(e)}")
             return None

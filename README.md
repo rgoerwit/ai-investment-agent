@@ -257,7 +257,7 @@ caffeinate -i ./scripts/run_tickers.sh
 - 50 tickers: ~2-4 hours (standard mode) or ~1-2 hours (quick mode)
 - 100 tickers: ~4-8 hours (standard mode) or ~2-4 hours (quick mode)
 
-Note that quick mode, if you configure with gemini-2.5-flash (see .env), yields low-quality results.
+**Note:** Quick mode automatically uses faster/cheaper models for all agents (Gemini Flash for Research Manager/Portfolio Manager, GPT-4o-mini for Consultant). This reduces cost and latency but may yield lower-quality analysis.
 
 **💡 Pro tip for macOS users:**
 The `caffeinate -i` command prevents your Mac from sleeping because it think it's inactive.  (It may sleep for other reasons even with caffeinate.)
