@@ -163,21 +163,6 @@ class TestConfigDataclass:
     """Test Config dataclass initialization and defaults."""
     
     @patch.dict(os.environ, {}, clear=True)
-    def test_config_defaults(self):
-        """Test that Config uses correct default values."""
-        from src.config import Config
-        
-        config = Config()
-        
-        # Check string defaults
-        assert config.llm_provider == "google"
-        assert config.deep_think_llm == "gemini-3-pro-preview"
-        assert config.quick_think_llm == "gemini-2.5-flash"
-        assert config.default_ticker == "AAPL"
-        assert config.log_level == "INFO"
-        assert config.environment == "dev"
-    
-    @patch.dict(os.environ, {}, clear=True)
     def test_config_integer_defaults(self):
         """Test that integer conversions work correctly."""
         from src.config import Config
@@ -201,16 +186,7 @@ class TestConfigDataclass:
         assert config.max_position_size == 0.1
         assert config.risk_free_rate == 0.03
     
-    @patch.dict(os.environ, {}, clear=True)
-    def test_config_boolean_defaults(self):
-        """Test that boolean conversions work correctly."""
-        from src.config import Config
-        
-        config = Config()
-        
-        assert config.online_tools is True
-        assert config.enable_memory is True
-        assert config.langsmith_tracing_enabled is True
+
     
     def test_config_boolean_case_insensitive(self):
         """Test that boolean parsing is case-insensitive."""

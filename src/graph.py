@@ -266,13 +266,17 @@ def create_trading_graph(
     bull_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Bull Researcher", tracker)])
     bear_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Bear Researcher", tracker)])
 
-    # Research Manager and Portfolio Manager: Use deep thinking in normal mode, quick in quick mode
-    if quick_mode:
-        res_mgr_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Research Manager", tracker)])
-        pm_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Portfolio Manager", tracker)])
-    else:
-        res_mgr_llm = create_deep_thinking_llm(callbacks=[TokenTrackingCallback("Research Manager", tracker)])
-        pm_llm = create_deep_thinking_llm(callbacks=[TokenTrackingCallback("Portfolio Manager", tracker)])
+    # Research Manager and Portfolio Manager: Always use deep thinking model
+    # In quick mode, they'll use thinking_level="low" if QUICK_MODEL == DEEP_MODEL
+    # Otherwise, they use different models entirely (manual differentiation)
+    res_mgr_llm = create_deep_thinking_llm(
+        callbacks=[TokenTrackingCallback("Research Manager", tracker)],
+        quick_mode=quick_mode
+    )
+    pm_llm = create_deep_thinking_llm(
+        callbacks=[TokenTrackingCallback("Portfolio Manager", tracker)],
+        quick_mode=quick_mode
+    )
 
     trader_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Trader", tracker)])
     risky_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Risky Analyst", tracker)])

@@ -73,26 +73,50 @@ def create_gemini_model(
     timeout: int,
     max_retries: int,
     streaming: bool = False,
-    callbacks: Optional[List[BaseCallbackHandler]] = None
+    callbacks: Optional[List[BaseCallbackHandler]] = None,
+    thinking_level: Optional[str] = None
 ) -> BaseChatModel:
-    """Generic factory for Gemini models with optional callbacks."""
+    """
+    Generic factory for Gemini models with optional callbacks and thinking level.
 
-    # Note: transport='rest' is sometimes more stable than grpc for large contexts on some networks
-    llm = ChatGoogleGenerativeAI(
-        model=model_name,
-        temperature=temperature,
-        # Increased timeout is handled by the caller (config.api_timeout)
-        timeout=timeout,
-        # Retry logic handles 500, 503, 504 automatically by default in LangChain
-        max_retries=max_retries,
-        safety_settings=SAFETY_SETTINGS,
-        streaming=streaming,
-        rate_limiter=GLOBAL_RATE_LIMITER,
-        convert_system_message_to_human=False,
-        # EXPLICITLY set max_output_tokens to prevent truncation
-        max_output_tokens=32768,
-        callbacks=callbacks or []
-    )
+    Args:
+        model_name: Gemini model identifier
+        temperature: Sampling temperature
+        timeout: Request timeout in seconds
+        max_retries: Max retry attempts
+        streaming: Enable streaming responses
+        callbacks: Optional callback handlers
+        thinking_level: Optional thinking level ("low" or "high") for Gemini 3+ models
+
+    Returns:
+        Configured ChatGoogleGenerativeAI instance
+
+    Note:
+        thinking_level is only applied if the model supports it (Gemini 3+ models).
+        If provided for unsupported models, it will be silently ignored by the API.
+    """
+
+    # Build kwargs for ChatGoogleGenerativeAI
+    kwargs = {
+        "model": model_name,
+        "temperature": temperature,
+        "timeout": timeout,
+        "max_retries": max_retries,
+        "safety_settings": SAFETY_SETTINGS,
+        "streaming": streaming,
+        "rate_limiter": GLOBAL_RATE_LIMITER,
+        "convert_system_message_to_human": False,
+        "max_output_tokens": 32768,
+        "callbacks": callbacks or []
+    }
+
+    # Apply thinking_level if provided and model supports it
+    # Only Gemini 3+ models support thinking_level parameter
+    if thinking_level and model_name.startswith("gemini-3"):
+        kwargs["thinking_level"] = thinking_level
+        logger.info(f"Applying thinking_level={thinking_level} to {model_name}")
+
+    llm = ChatGoogleGenerativeAI(**kwargs)
     return llm
 
 def create_quick_thinking_llm(
@@ -102,30 +126,80 @@ def create_quick_thinking_llm(
     max_retries: int = None, # Allow override or use config default
     callbacks: Optional[List[BaseCallbackHandler]] = None
 ) -> BaseChatModel:
-    """Create a quick thinking LLM (Gemini 2.5 Flash)."""
+    """
+    Create a quick thinking LLM.
+
+    If QUICK_MODEL == DEEP_MODEL and the model supports thinking_level (Gemini 3+),
+    automatically applies thinking_level="low" for faster responses.
+
+    Returns:
+        Configured ChatGoogleGenerativeAI instance
+    """
     model_name = model or config.quick_think_llm
     # Use config defaults if not provided
     final_timeout = timeout if timeout is not None else config.api_timeout
     final_retries = max_retries if max_retries is not None else config.api_retry_attempts
 
+    # Determine if we should apply thinking_level
+    # Only apply if: (1) same model as deep, (2) model supports thinking_level
+    thinking_level = None
+    if config.quick_think_llm == config.deep_think_llm and model_name.startswith("gemini-3"):
+        thinking_level = "low"
+        logger.info(f"Quick LLM using same model as Deep LLM ({model_name}) - applying thinking_level=low")
+
     logger.info(f"Initializing Quick LLM: {model_name} (timeout={final_timeout}, retries={final_retries})")
-    return create_gemini_model(model_name, temperature, final_timeout, final_retries, callbacks=callbacks)
+    return create_gemini_model(
+        model_name, temperature, final_timeout, final_retries,
+        callbacks=callbacks, thinking_level=thinking_level
+    )
 
 def create_deep_thinking_llm(
     temperature: float = 0.1,
     model: Optional[str] = None,
     timeout: int = None, # Allow override or use config default
     max_retries: int = None, # Allow override or use config default
-    callbacks: Optional[List[BaseCallbackHandler]] = None
+    callbacks: Optional[List[BaseCallbackHandler]] = None,
+    quick_mode: bool = False
 ) -> BaseChatModel:
-    """Create a deep thinking LLM (Gemini 3 Pro)."""
+    """
+    Create a deep thinking LLM.
+
+    If QUICK_MODEL == DEEP_MODEL and the model supports thinking_level (Gemini 3+),
+    automatically applies thinking_level based on quick_mode:
+    - quick_mode=False → thinking_level="high" (deep reasoning)
+    - quick_mode=True → thinking_level="low" (faster, still same model)
+
+    Args:
+        temperature: Sampling temperature (default 0.1 for deterministic)
+        model: Model override (defaults to config.deep_think_llm)
+        timeout: Request timeout override
+        max_retries: Retry attempts override
+        callbacks: Optional callback handlers
+        quick_mode: If True, use low thinking level for speed
+
+    Returns:
+        Configured ChatGoogleGenerativeAI instance
+    """
     model_name = model or config.deep_think_llm
     # Use config defaults if not provided
     final_timeout = timeout if timeout is not None else config.api_timeout
     final_retries = max_retries if max_retries is not None else config.api_retry_attempts
 
+    # Determine if we should apply thinking_level
+    # Only apply if: (1) same model as quick, (2) model supports thinking_level
+    thinking_level = None
+    if config.quick_think_llm == config.deep_think_llm and model_name.startswith("gemini-3"):
+        thinking_level = "low" if quick_mode else "high"
+        logger.info(
+            f"Deep LLM using same model as Quick LLM ({model_name}) - "
+            f"applying thinking_level={thinking_level} (quick_mode={quick_mode})"
+        )
+
     logger.info(f"Initializing Deep LLM: {model_name} (timeout={final_timeout}, retries={final_retries})")
-    return create_gemini_model(model_name, temperature, final_timeout, final_retries, callbacks=callbacks)
+    return create_gemini_model(
+        model_name, temperature, final_timeout, final_retries,
+        callbacks=callbacks, thinking_level=thinking_level
+    )
 
 # Initialize default instances
 quick_thinking_llm = create_quick_thinking_llm()

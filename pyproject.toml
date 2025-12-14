@@ -16,7 +16,7 @@ langchain-core = ">=1.0.0,<2.0.0"
 # CRITICAL FIX: Required for Tavily and other tools
 langchain-community = ">=0.2.0,<1.0.0"
 # Primary LLM: Google Gemini
-langchain-google-genai = ">=2.0.0,<3.0.0"
+langchain-google-genai = "^4.0.0"
 # ADDED: Google GenAI SDK for direct access if needed
 google-genai = ">=1.0.0,<2.0.0"
 # OPTIONAL: OpenAI for consultant node (cross-validation)

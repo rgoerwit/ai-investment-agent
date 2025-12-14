@@ -59,7 +59,7 @@ class TestGeminiModelSelection:
     def test_quick_mode_uses_quick_models_for_all_agents(
         self, mock_quick_llm, mock_deep_llm, mock_consultant, mock_memories
     ):
-        """Test that quick mode (quick_mode=True) uses quick models for ALL agents including RM and PM."""
+        """Test that quick mode (quick_mode=True) passes quick_mode=True to deep thinking agents."""
         from src.graph import create_trading_graph
 
         # Setup mocks
@@ -79,14 +79,20 @@ class TestGeminiModelSelection:
 
         assert graph is not None
 
-        # Verify create_deep_thinking_llm was NOT called
-        assert mock_deep_llm.call_count == 0, \
-            f"Expected 0 deep LLM calls in quick mode, got {mock_deep_llm.call_count}"
+        # NEW BEHAVIOR: Deep thinking LLM is ALWAYS called for RM and PM
+        # In quick mode, it's called with quick_mode=True parameter
+        assert mock_deep_llm.call_count == 2, \
+            f"Expected 2 deep LLM calls (RM + PM) even in quick mode, got {mock_deep_llm.call_count}"
 
-        # Verify create_quick_thinking_llm was called for ALL agents
-        # Market, Social, News, Fundamentals, Bull, Bear, RM, PM, Trader, Risky, Safe, Neutral = 12
-        assert mock_quick_llm.call_count == 12, \
-            f"Expected 12 quick LLM calls (all agents), got {mock_quick_llm.call_count}"
+        # Verify both calls have quick_mode=True
+        for call in mock_deep_llm.call_args_list:
+            assert call.kwargs.get('quick_mode') == True, \
+                f"Expected quick_mode=True in deep LLM calls, got {call.kwargs}"
+
+        # Verify create_quick_thinking_llm was called for other agents
+        # Market, Social, News, Fundamentals, Bull, Bear, Trader, Risky, Safe, Neutral = 10
+        assert mock_quick_llm.call_count == 10, \
+            f"Expected 10 quick LLM calls (other agents), got {mock_quick_llm.call_count}"
 
     @patch('src.graph.create_memory_instances')
     @patch('src.graph.get_consultant_llm')

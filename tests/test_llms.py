@@ -156,7 +156,8 @@ class TestCreateQuickThinkingLLM:
             0.3,  # Default temperature
             300,  # From config
             10,   # From config
-            callbacks=None  # Default callbacks
+            callbacks=None,  # Default callbacks
+            thinking_level=None  # No thinking level for Flash models or different models
         )
     
     @patch('src.llms.create_gemini_model')
@@ -243,7 +244,8 @@ class TestCreateDeepThinkingLLM:
             0.1,  # Default temperature (lower for deep thinking)
             300,
             10,
-            callbacks=None  # Default callbacks
+            callbacks=None,  # Default callbacks
+            thinking_level=None  # No thinking level when models differ
         )
     
     @patch('src.llms.create_gemini_model')
@@ -283,7 +285,8 @@ class TestCreateDeepThinkingLLM:
             0.5,
             900,
             20,
-            callbacks=None  # Default callbacks
+            callbacks=None,  # Default callbacks
+            thinking_level=None  # No thinking level for non-Gemini-3 models
         )
 
 
