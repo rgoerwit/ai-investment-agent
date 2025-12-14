@@ -129,6 +129,7 @@ class AgentState(MessagesState):
     fundamentals_report: Annotated[str, take_last]
     investment_debate_state: Annotated[InvestDebateState, take_last]
     investment_plan: Annotated[str, take_last]
+    consultant_review: Annotated[str, take_last]  # ADDED: External consultant cross-validation
     trader_investment_plan: Annotated[str, take_last]
     risk_debate_state: Annotated[RiskDebateState, take_last]
     final_trade_decision: Annotated[str, take_last]
@@ -331,7 +332,12 @@ def create_trader_node(llm, memory: Optional[Any]) -> Callable:
         agent_prompt = get_prompt("trader")
         if not agent_prompt:
             return {"trader_investment_plan": "Error: Missing prompt"}
-        all_input = f"""MARKET ANALYST REPORT:\n{state.get('market_report', 'N/A')}\n\nFUNDAMENTALS ANALYST REPORT:\n{state.get('fundamentals_report', 'N/A')}\n\nRESEARCH MANAGER PLAN:\n{state.get('investment_plan', 'N/A')}"""
+
+        # Include consultant review if available (external cross-validation)
+        consultant = state.get('consultant_review', '')
+        consultant_section = f"""\n\nEXTERNAL CONSULTANT REVIEW (Cross-Validation):\n{consultant if consultant else 'N/A (consultant disabled or unavailable)'}"""
+
+        all_input = f"""MARKET ANALYST REPORT:\n{state.get('market_report', 'N/A')}\n\nFUNDAMENTALS ANALYST REPORT:\n{state.get('fundamentals_report', 'N/A')}\n\nRESEARCH MANAGER PLAN:\n{state.get('investment_plan', 'N/A')}{consultant_section}"""
         prompt = f"""{agent_prompt.system_message}\n\n{all_input}\n\nCreate Trading Plan."""
         try:
             response = await invoke_with_rate_limit_handling(
@@ -353,7 +359,12 @@ def create_risk_debater_node(llm, agent_key: str) -> Callable:
             risk_state['history'] += f"\n[SYSTEM]: Error - Missing prompt for {agent_key}"
             risk_state['count'] += 1
             return {"risk_debate_state": risk_state}
-        prompt = f"""{agent_prompt.system_message}\n\nTRADER PLAN: {state.get('trader_investment_plan')}\n\nProvide risk assessment."""
+
+        # Include consultant review if available (external cross-validation)
+        consultant = state.get('consultant_review', '')
+        consultant_section = f"""\n\nEXTERNAL CONSULTANT REVIEW (Cross-Validation):\n{consultant if consultant else 'N/A (consultant disabled or unavailable)'}"""
+
+        prompt = f"""{agent_prompt.system_message}\n\nTRADER PLAN: {state.get('trader_investment_plan')}{consultant_section}\n\nProvide risk assessment."""
         try:
             response = await invoke_with_rate_limit_handling(
                 llm,
@@ -379,10 +390,31 @@ def create_portfolio_manager_node(llm, memory: Optional[Any]) -> Callable:
         news = state.get('news_report', '')
         fundamentals = state.get('fundamentals_report', '')
         inv_plan = state.get('investment_plan', '')
+        consultant = state.get('consultant_review', '')
         trader = state.get('trader_investment_plan', '')
         risk = state.get('risk_debate_state', {}).get('history', '')
-        logger.info("pm_inputs", has_market=bool(market), has_sentiment=bool(sentiment), has_news=bool(news), has_fundamentals=bool(fundamentals), has_datablock="DATA_BLOCK" in fundamentals if fundamentals else False, fund_len=len(fundamentals) if fundamentals else 0)
-        all_context = f"""MARKET ANALYST REPORT:\n{market if market else 'N/A'}\n\nSENTIMENT ANALYST REPORT:\n{sentiment if sentiment else 'N/A'}\n\nNEWS ANALYST REPORT:\n{news if news else 'N/A'}\n\nFUNDAMENTALS ANALYST REPORT:\n{fundamentals if fundamentals else 'N/A'}\n\nRESEARCH MANAGER RECOMMENDATION:\n{inv_plan if inv_plan else 'N/A'}\n\nTRADER PROPOSAL:\n{trader if trader else 'N/A'}\n\nRISK TEAM DEBATE:\n{risk if risk else 'N/A'}"""
+
+        # Red-flag pre-screening results
+        pre_screening_result = state.get('pre_screening_result', 'N/A')
+        red_flags_detected = state.get('red_flags_detected', [])
+        quality_note = state.get('fundamentals_quality_note', '')
+
+        logger.info("pm_inputs", has_market=bool(market), has_sentiment=bool(sentiment), has_news=bool(news), has_fundamentals=bool(fundamentals), has_consultant=bool(consultant), has_datablock="DATA_BLOCK" in fundamentals if fundamentals else False, fund_len=len(fundamentals) if fundamentals else 0)
+
+        # Include consultant review in context (if available)
+        consultant_section = f"""\n\nEXTERNAL CONSULTANT REVIEW (Cross-Validation):\n{consultant if consultant else 'N/A (consultant disabled or unavailable)'}"""
+
+        # Include red-flag pre-screening results (critical safety gate)
+        red_flag_section = f"""\n\nRED-FLAG PRE-SCREENING:\nPre-Screening Result: {pre_screening_result}"""
+        if red_flags_detected:
+            red_flag_list = '\n'.join([f"  - {flag}" for flag in red_flags_detected])
+            red_flag_section += f"\nRed Flags Detected:\n{red_flag_list}"
+        else:
+            red_flag_section += f"\nRed Flags Detected: None"
+        if quality_note:
+            red_flag_section += f"\nNote: {quality_note}"
+
+        all_context = f"""MARKET ANALYST REPORT:\n{market if market else 'N/A'}\n\nSENTIMENT ANALYST REPORT:\n{sentiment if sentiment else 'N/A'}\n\nNEWS ANALYST REPORT:\n{news if news else 'N/A'}\n\nFUNDAMENTALS ANALYST REPORT:\n{fundamentals if fundamentals else 'N/A'}{red_flag_section}\n\nRESEARCH MANAGER RECOMMENDATION:\n{inv_plan if inv_plan else 'N/A'}{consultant_section}\n\nTRADER PROPOSAL:\n{trader if trader else 'N/A'}\n\nRISK TEAM DEBATE:\n{risk if risk else 'N/A'}"""
         prompt = f"""{agent_prompt.system_message}\n\n{all_context}\n\nMake Final Decision."""
         try:
             response = await invoke_with_rate_limit_handling(
@@ -395,6 +427,116 @@ def create_portfolio_manager_node(llm, memory: Optional[Any]) -> Callable:
             logger.error(f"PM error: {str(e)}")
             return {"final_trade_decision": f"Error: {str(e)}"}
     return pm_node
+
+def create_consultant_node(llm, agent_key: str = "consultant") -> Callable:
+    """
+    Factory function creating external consultant node for cross-validation.
+
+    Uses a different LLM (OpenAI) to review Gemini's analysis outputs and detect
+    biases, groupthink, and factual errors that internal agents may miss.
+
+    Args:
+        llm: LLM instance (typically OpenAI ChatGPT for cross-validation)
+        agent_key: Agent key for prompt lookup (default: "consultant")
+
+    Returns:
+        Async function compatible with LangGraph StateGraph.add_node()
+    """
+    async def consultant_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+        from src.prompts import get_prompt
+
+        agent_prompt = get_prompt(agent_key)
+        if not agent_prompt:
+            logger.error(f"Missing prompt for consultant: {agent_key}")
+            return {"consultant_review": "Error: Missing consultant prompt configuration"}
+
+        ticker = state.get("company_of_interest", "UNKNOWN")
+        company_name = state.get("company_name", ticker)
+
+        context = get_context_from_config(config)
+        current_date = context.trade_date if context else datetime.now().strftime("%Y-%m-%d")
+
+        # Assemble complete context (everything the Research Manager saw + the synthesis)
+        # Safely extract debate history (handle None/missing debate state)
+        debate_state = state.get('investment_debate_state')
+        debate_history = 'N/A'
+        if debate_state and isinstance(debate_state, dict):
+            debate_history = debate_state.get('history', 'N/A')
+        elif debate_state is None:
+            # DIAGNOSTIC: Log when debate state is unexpectedly None
+            # This shouldn't happen in normal execution (consultant runs after debate)
+            # If this occurs, it indicates a potential LangGraph state propagation issue
+            ticker = state.get('company_of_interest', 'UNKNOWN')
+            logger.error(
+                "consultant_received_none_debate_state",
+                ticker=ticker,
+                message="Consultant node received None debate state - this may indicate a graph execution bug or fast-fail path issue"
+            )
+            debate_history = '[SYSTEM DIAGNOSTIC: Debate state unexpectedly None. This may indicate the debate was skipped (fast-fail path) or a state propagation issue. Consultant cross-validation may be limited without debate context.]'
+
+        all_context = f"""
+=== ANALYST REPORTS (SOURCE DATA) ===
+
+MARKET ANALYST REPORT:
+{state.get('market_report', 'N/A')}
+
+SENTIMENT ANALYST REPORT:
+{state.get('sentiment_report', 'N/A')}
+
+NEWS ANALYST REPORT:
+{state.get('news_report', 'N/A')}
+
+FUNDAMENTALS ANALYST REPORT:
+{state.get('fundamentals_report', 'N/A')}
+
+=== BULL/BEAR DEBATE HISTORY ===
+
+{debate_history}
+
+=== RESEARCH MANAGER SYNTHESIS ===
+
+{state.get('investment_plan', 'N/A')}
+
+=== RED FLAGS (Pre-Screening Results) ===
+
+Red Flags Detected: {state.get('red_flags', [])}
+Pre-Screening Result: {state.get('pre_screening_result', 'UNKNOWN')}
+"""
+
+        prompt = f"""{agent_prompt.system_message}
+
+ANALYSIS DATE: {current_date}
+TICKER: {ticker}
+COMPANY: {company_name}
+
+{all_context}
+
+Provide your independent consultant review."""
+
+        try:
+            # Use rate limit handling wrapper for robustness
+            response = await invoke_with_rate_limit_handling(
+                llm,
+                [HumanMessage(content=prompt)],
+                context=agent_prompt.agent_name
+            )
+
+            logger.info(
+                "consultant_review_complete",
+                ticker=ticker,
+                review_length=len(response.content),
+                has_errors="ERROR" in response.content.upper() or "FAIL" in response.content.upper()
+            )
+
+            return {"consultant_review": response.content}
+
+        except Exception as e:
+            logger.error(f"Consultant node error for {ticker}: {str(e)}")
+            # Return error but don't block the graph
+            return {"consultant_review": f"Consultant Review Error: {str(e)}\n\nNote: Analysis will proceed without external validation."}
+
+    return consultant_node
+
 
 def create_state_cleaner_node() -> Callable:
     async def clean_state(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:

@@ -3,9 +3,11 @@ LLM configuration and initialization module.
 Updated for Google Gemini 3 with Safety Settings and Rate Limiting.
 Includes token tracking for cost monitoring.
 UPDATED: Configurable rate limits via GEMINI_RPM_LIMIT environment variable.
+UPDATED: Added OpenAI consultant LLM for cross-validation (Dec 2025).
 """
 
 import logging
+import os
 from typing import Optional, List
 from langchain_google_genai import ChatGoogleGenerativeAI, HarmBlockThreshold, HarmCategory
 from langchain_core.language_models import BaseChatModel
@@ -128,3 +130,160 @@ def create_deep_thinking_llm(
 # Initialize default instances
 quick_thinking_llm = create_quick_thinking_llm()
 deep_thinking_llm = create_deep_thinking_llm()
+
+
+def create_consultant_llm(
+    temperature: float = 0.3,
+    model: Optional[str] = None,
+    timeout: int = 120,
+    max_retries: int = 3,
+    quick_mode: bool = False,
+    callbacks: Optional[List[BaseCallbackHandler]] = None
+) -> BaseChatModel:
+    """
+    Create an OpenAI consultant LLM for cross-validation.
+
+    Uses OpenAI (ChatGPT) instead of Gemini to provide independent perspective
+    on Gemini's analysis outputs. This helps detect biases and groupthink.
+
+    Args:
+        temperature: Sampling temperature (default 0.3 for balanced creativity)
+        model: Model name (overrides env vars if provided)
+        timeout: Request timeout in seconds
+        max_retries: Max retry attempts for failed requests
+        quick_mode: If True, use CONSULTANT_QUICK_MODEL env var (default False)
+        callbacks: Optional callback handlers for token tracking
+
+    Returns:
+        Configured ChatOpenAI instance
+
+    Raises:
+        ValueError: If OPENAI_API_KEY not found in environment
+        ImportError: If langchain-openai package not installed
+
+    Notes:
+        - Requires OPENAI_API_KEY environment variable
+        - Normal mode: Uses CONSULTANT_MODEL env var (defaults to gpt-4o)
+        - Quick mode: Uses CONSULTANT_QUICK_MODEL env var (defaults to gpt-4o-mini)
+        - Optional ENABLE_CONSULTANT env var (defaults to true)
+        - gpt-4o is recommended as of Dec 2025 (GPT-4 Omni)
+        - ChatGPT 5.2 not yet available via API as of Dec 2025
+
+    Example:
+        >>> consultant_llm = create_consultant_llm()
+        >>> result = consultant_llm.invoke("Review this analysis...")
+        >>> quick_llm = create_consultant_llm(quick_mode=True)
+    """
+    try:
+        from langchain_openai import ChatOpenAI
+    except ImportError:
+        raise ImportError(
+            "langchain-openai package not found. Install with: "
+            "pip install langchain-openai>=0.3.0"
+        )
+
+    # Check if consultant is enabled
+    enable_consultant = os.environ.get("ENABLE_CONSULTANT", "true").lower()
+    if enable_consultant == "false":
+        raise ValueError(
+            "Consultant LLM is disabled. Set ENABLE_CONSULTANT=true to enable."
+        )
+
+    # Get OpenAI API key
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError(
+            "OPENAI_API_KEY not found in environment. "
+            "The consultant node requires an OpenAI API key for cross-validation. "
+            "Add OPENAI_API_KEY to your .env file or set ENABLE_CONSULTANT=false."
+        )
+
+    # Get model name from env or use default
+    # Note: As of Dec 2025, gpt-4o (GPT-4 Omni) is the latest production model
+    # ChatGPT 5.2 is not yet available via API
+    if model:
+        # Explicit model override
+        model_name = model
+    elif quick_mode:
+        # Quick mode: use faster/cheaper model (defaults to gpt-4o-mini)
+        model_name = os.environ.get("CONSULTANT_QUICK_MODEL", "gpt-4o-mini")
+    else:
+        # Normal mode: use full model (defaults to gpt-4o)
+        model_name = os.environ.get("CONSULTANT_MODEL", "gpt-4o")
+
+    logger.info(
+        f"Initializing Consultant LLM (OpenAI): {model_name} "
+        f"(timeout={timeout}s, retries={max_retries})"
+    )
+
+    # Create ChatOpenAI instance with similar config to Gemini models
+    llm = ChatOpenAI(
+        model=model_name,
+        temperature=temperature,
+        timeout=timeout,
+        max_retries=max_retries,
+        openai_api_key=api_key,
+        callbacks=callbacks or [],
+        # Match Gemini's max output for consistency
+        max_tokens=4096,  # OpenAI default, sufficient for consultant reports
+        # Enable streaming for better UX (optional)
+        streaming=False
+    )
+
+    return llm
+
+
+# Initialize consultant LLM (lazy initialization to handle missing API key gracefully)
+_consultant_llm_instance = None
+
+
+def get_consultant_llm(
+    callbacks: Optional[List[BaseCallbackHandler]] = None,
+    quick_mode: bool = False
+) -> Optional[BaseChatModel]:
+    """
+    Get or create the consultant LLM instance.
+
+    Uses lazy initialization to gracefully handle missing OPENAI_API_KEY.
+    If consultant is disabled or API key is missing, returns None.
+
+    Args:
+        callbacks: Optional callback handlers for token tracking
+        quick_mode: If True, use CONSULTANT_QUICK_MODEL (gpt-4o-mini by default)
+
+    Returns:
+        ChatOpenAI instance or None if consultant disabled/unavailable
+
+    Note:
+        Caching is NOT affected by quick_mode - the instance is created once
+        with the mode that was first requested. This matches Gemini behavior
+        where models are configured at graph build time, not per-run.
+    """
+    global _consultant_llm_instance
+
+    # Check if consultant is enabled
+    enable_consultant = os.environ.get("ENABLE_CONSULTANT", "true").lower()
+    if enable_consultant == "false":
+        logger.info("Consultant LLM disabled via ENABLE_CONSULTANT=false")
+        return None
+
+    # Check if API key exists
+    if not os.environ.get("OPENAI_API_KEY"):
+        logger.warning(
+            "OPENAI_API_KEY not found - consultant node will be skipped. "
+            "To enable consultant cross-validation, add OPENAI_API_KEY to .env"
+        )
+        return None
+
+    # Lazy initialization
+    if _consultant_llm_instance is None:
+        try:
+            _consultant_llm_instance = create_consultant_llm(
+                callbacks=callbacks,
+                quick_mode=quick_mode
+            )
+        except Exception as e:
+            logger.error(f"Failed to initialize consultant LLM: {str(e)}")
+            return None
+
+    return _consultant_llm_instance

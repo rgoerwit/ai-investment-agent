@@ -59,7 +59,10 @@ graph TB
     BearResearcher --> Debate
 
     Debate -->|Round 1-2| BullResearcher
-    Debate -->|Converged| RiskTeam["Risk Assessment Team<br/>(3 Perspectives)"]
+    Debate -->|Converged| Consultant["External Consultant<br/>(Cross-Validation)<br/>🔍 Optional"]
+
+    Consultant -->|OpenAI Review| RiskTeam["Risk Assessment Team<br/>(3 Perspectives)"]
+    Debate -.->|If Disabled| RiskTeam
 
     RiskTeam --> PortfolioManager
 
@@ -73,6 +76,7 @@ graph TB
     style ResearchManager fill:#fff4e1
     style BullResearcher fill:#d4edda
     style BearResearcher fill:#f8d7da
+    style Consultant fill:#e8daff
     style RiskTeam fill:#fff3cd
     style PortfolioManager fill:#d1ecf1
     style Debate fill:#ffeaa7
@@ -85,10 +89,11 @@ graph TB
 2. **Red-Flag Pre-Screening** - Financial Validator checks for catastrophic risks (extreme leverage, earnings quality issues, refinancing risk) before proceeding
 3. **Research Synthesis** - A Research Manager combines findings and identifies key themes (if pre-screening passes)
 4. **Adversarial Debate** - Bull and Bear researchers argue opposite perspectives for 1-2 rounds
-5. **Risk Assessment** - Three risk analysts (Conservative/Neutral/Aggressive) evaluate from different risk tolerances
-6. **Executive Decision** - Portfolio Manager synthesizes all viewpoints and applies thesis criteria
+5. **External Consultant** (Optional) - Independent cross-validation using OpenAI ChatGPT to detect biases and validate Gemini's analysis
+6. **Risk Assessment** - Three risk analysts (Conservative/Neutral/Aggressive) evaluate from different risk tolerances
+7. **Executive Decision** - Portfolio Manager synthesizes all viewpoints and applies thesis criteria
 
-**Why This Matters:** Single-LLM systems are prone to confirmation bias. Multi-agent debate forces the AI to consider contradictory evidence, mimicking how institutional research teams actually work. The Financial Validator node provides pre-screening to catch catastrophic financial risks (extreme leverage, earnings quality issues) before debate, saving time and token costs.
+**Why This Matters:** Single-LLM systems are prone to confirmation bias. Multi-agent debate forces the AI to consider contradictory evidence, mimicking how institutional research teams actually work. The Financial Validator node provides pre-screening to catch catastrophic financial risks before debate, saving time and token costs. The optional External Consultant uses a different AI model (OpenAI) to catch groupthink and validate conclusions that a single-model system might miss.
 
 ---
 
@@ -113,7 +118,11 @@ poetry install
 
 # Configure environment
 cp .env.example .env
-# Edit .env with your API keys
+# Edit .env with your API keys (GOOGLE_API_KEY is required)
+
+# Optional: Enable external consultant for cross-validation
+# Add OPENAI_API_KEY to .env for ChatGPT-based bias detection
+# See docs/CONSULTANT_INTEGRATION.md for details
 
 # Activate virtual environment (if needed for direct python calls)
 source .venv/bin/activate  # On macOS/Linux
@@ -248,7 +257,7 @@ caffeinate -i ./scripts/run_tickers.sh
 - 50 tickers: ~2-4 hours (standard mode) or ~1-2 hours (quick mode)
 - 100 tickers: ~4-8 hours (standard mode) or ~2-4 hours (quick mode)
 
-Note that quick mode, if you configure with gemini-2.5-flash (see .env), yields low-quality results.
+**Note:** Quick mode automatically uses faster/cheaper models for all agents (Gemini Flash for Research Manager/Portfolio Manager, GPT-4o-mini for Consultant). This reduces cost and latency but may yield lower-quality analysis.
 
 **💡 Pro tip for macOS users:**
 The `caffeinate -i` command prevents your Mac from sleeping because it think it's inactive.  (It may sleep for other reasons even with caffeinate.)

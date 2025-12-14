@@ -481,7 +481,8 @@ async def run_analysis(ticker: str, quick_mode: bool) -> Optional[dict]:
             max_debate_rounds=1 if quick_mode else 2,
             max_risk_discuss_rounds=1,
             enable_memory=config.enable_memory,
-            recursion_limit=100
+            recursion_limit=100,
+            quick_mode=quick_mode  # Pass quick_mode for consultant LLM selection
         )
         
         initial_state = AgentState(

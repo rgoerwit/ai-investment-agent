@@ -34,10 +34,30 @@ class TokenUsage:
 
         Updated for Dec 2025 pricing (sources: ai.google.dev/gemini-api/docs/pricing).
         """
-        # Gemini pricing (per 1M tokens) - PAID TIER RATES
-        # NOTE: These apply when billing is enabled on your GCP project
+        # LLM pricing (per 1M tokens)
         # IMPORTANT: Order matters! More specific models must come before general ones
         pricing = {
+            # OpenAI GPT-4 models (used by consultant node)
+            # Pricing as of Dec 2025: https://openai.com/api/pricing/
+            # Note: gpt-4o-mini must come BEFORE gpt-4o due to prefix matching
+            "gpt-4o-mini": {
+                "prompt": 0.15,     # $0.15 per 1M input tokens
+                "completion": 0.60  # $0.60 per 1M output tokens
+            },
+            "gpt-4o": {
+                "prompt": 2.50,     # $2.50 per 1M input tokens
+                "completion": 10.00 # $10.00 per 1M output tokens
+            },
+            "gpt-4-turbo": {
+                "prompt": 10.00,    # $10.00 per 1M input tokens
+                "completion": 30.00 # $30.00 per 1M output tokens
+            },
+            "gpt-4": {
+                "prompt": 30.00,    # $30.00 per 1M input tokens
+                "completion": 60.00 # $60.00 per 1M output tokens
+            },
+            # Gemini pricing - PAID TIER RATES
+            # NOTE: These apply when billing is enabled on your GCP project
             # Gemini 2.0 Flash variants (experimental - but PAID if billing enabled)
             "gemini-2.0-flash-thinking-exp": {
                 "prompt": 0.30,     # Paid tier: $0.30 per 1M input tokens
