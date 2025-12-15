@@ -266,11 +266,14 @@ def create_trading_graph(
     bull_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Bull Researcher", tracker)])
     bear_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Bear Researcher", tracker)])
 
-    # Research Manager and Portfolio Manager: Use deep thinking in normal mode, quick in quick mode
+    # Assign LLMs to thinking agents based on quick_mode.
     if quick_mode:
+        # In quick mode, EVERYONE uses the quick LLM.
+        logger.info("Quick mode ON: Using QUICK_MODEL for all agents, including thinking agents.")
         res_mgr_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Research Manager", tracker)])
         pm_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Portfolio Manager", tracker)])
     else:
+        # In normal (deep) mode, thinking agents use the deep LLM.
         res_mgr_llm = create_deep_thinking_llm(callbacks=[TokenTrackingCallback("Research Manager", tracker)])
         pm_llm = create_deep_thinking_llm(callbacks=[TokenTrackingCallback("Portfolio Manager", tracker)])
 

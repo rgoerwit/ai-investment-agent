@@ -28,7 +28,7 @@
 ✅ **Multi-Agent Debate Pattern** - Bull/Bear/Risk analysts argue, then a Portfolio Manager decides  
 ✅ **International Coverage** - Handles HK, Japan, Taiwan, Korea with proper FX/exchange logic  
 ✅ **Disciplined Risk Framework** - Hard-fail gatekeeping prevents emotional/hype-driven decisions  
-✅ **Zero Marginal Cost** - Can runs (with lots of 429s and retries!) on free-tier Gemini API  
+✅ **Zero Marginal Cost** - Can run (amidst 429s and retries) on free-tier Gemini API, albeit slowly  
 ✅ **Full Transparency** - Every decision explained with supporting data and reasoning
 
 ---
@@ -158,7 +158,9 @@ poetry run pytest tests/ -v
 
 The system automatically handles Gemini API rate limits based on your tier. **Free tier (15 RPM) works out of the box** with no configuration needed.
 
-If you upgrade to a **paid Gemini API tier**, you can unlock significantly faster analysis:
+If you upgrade to a **paid Gemini API tier**, make sure you're using an
+API key for the correct project (project settings determine your tier),
+and then up your RPM limits in .env:
 
 ```bash
 # In your .env file, add:
@@ -169,15 +171,17 @@ GEMINI_RPM_LIMIT=1000  # Paid tier 2: 67x faster than free tier
 
 **Performance comparison:**
 
-- **Free tier (15 RPM):** ~1 analysis per 5-10 minutes
-- **Paid tier 1 (360 RPM):** ~24 analyses in the same time (24x speedup...theoretically)
-- **Paid tier 2 (1000 RPM):** ~67 analyses in the same time (67x speedup)
+- **Free tier (15 RPM):** ~1 analysis per 5-10 minutes (sometimes stalling or dying)
+- **Paid tier 1 (360 RPM):** ~24 analyses in the same period (24x speedup...theoretically)
+- **Paid tier 2 (1000 RPM):** ~67 analyses in the same period (even faster)
 
-The system applies a 20% safety margin automatically to prevent hitting API limits. For batch analysis of tickers, paid tiers can reduce runtime substantially.
+The system applies a 20% safety margin automatically to prevent hitting API limits. For
+batch analysis of tickers, paid tiers can reduce runtime substantially.
 
 ### Batch Analysis - Screening Hundreds of Tickers
 
-For serious portfolio construction, you'll want to screen many candidates at once. Here's how to generate and analyze a large watchlist.
+For serious portfolio construction, you'll want to screen many candidates at once. Here's one way
+to generate and analyze a large watchlist.
 
 #### Step 1: Generate Your Ticker List with AI
 
@@ -254,26 +258,15 @@ caffeinate -i ./scripts/run_tickers.sh
 
 **Timing estimates:**
 
-- 50 tickers: ~2-4 hours (standard mode) or ~1-2 hours (quick mode)
-- 100 tickers: ~4-8 hours (standard mode) or ~2-4 hours (quick mode)
+- 50 tickers: ~2-4 hours (standard mode) or ~1-2 hours (quick mode - varies)
+- 100 tickers: ~4-8 hours (standard mode) or ~2-4 hours (quick mode - varies)
 
-⚠️ **IMPORTANT - Quick Mode Known Issues (Dec 2025):**
-
-As of December 2025, **--quick mode has known issues** with Gemini 2.x Flash models and langchain-google-genai 2.1.12:
-- **gemini-2.5-flash**: Data vacuum (Fundamentals Analyst fails to generate DATA_BLOCK)
-- **gemini-2.0-flash**: Hangs completely during LLM tool calls
-- **gemini-2.0-flash-thinking-exp**: Tool calling parsing errors
-
-**Current Workaround**: The system defaults to `gemini-3-pro-preview` for quick mode, which works reliably but is ~20x more expensive than Flash models ($2/$12 vs $0.10/$0.40 per 1M tokens). This means **--quick mode currently offers NO cost savings**, only reduced debate rounds (1 instead of 2).
-
-**Recommended**: Use normal mode (without --quick) until LangChain compatibility is resolved, OR upgrade `langchain-google-genai` to 4.0.0+ (may require code changes).
-
-**Root Cause**: API structure issues with `bind_tools()`, NOT context window limitations. See [`docs/GEMINI_FLASH_COMPATIBILITY.md`](docs/GEMINI_FLASH_COMPATIBILITY.md) for comprehensive analysis and solutions.
-
-**Important Note**: 10 out of 12 agents ALWAYS use the "quick model" (even in normal mode), meaning the current workaround makes the entire system expensive, not just when using --quick.
+**Note**: Small-cap/illiquid stocks may still show data gaps, but this *usually* reflects
+genuine data unavailability from financial APIs, not system failures.
 
 **💡 Pro tip for macOS users:**
-The `caffeinate -i` command prevents your Mac from sleeping because it think it's inactive.  (It may sleep for other reasons even with caffeinate.)
+The `caffeinate -i` command prevents your Mac from sleeping because it think it's inactive.
+(It may sleep for other reasons even with caffeinate.)
 
 #### Step 4: Review Results
 

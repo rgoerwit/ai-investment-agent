@@ -8,6 +8,7 @@ UPDATED: Added OpenAI consultant LLM for cross-validation (Dec 2025).
 
 import logging
 import os
+import re
 from typing import Optional, List
 from langchain_google_genai import ChatGoogleGenerativeAI, HarmBlockThreshold, HarmCategory
 from langchain_core.language_models import BaseChatModel
@@ -25,46 +26,44 @@ SAFETY_SETTINGS = {
     HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
 }
 
-# Configurable rate limiter based on Gemini API tier
-# Tier detection via GEMINI_RPM_LIMIT environment variable:
-#   - Free tier: 15 RPM (default)
-#   - Paid tier 1: 360 RPM (set GEMINI_RPM_LIMIT=360)
-#   - Paid tier 2: 1000 RPM (set GEMINI_RPM_LIMIT=1000)
-#
-# Rate limiter settings are calculated to be conservative:
-# - RPS = RPM / 60 (convert to requests per second)
-# - Reduce by 20% for safety margin to avoid hitting limits
-# - max_bucket_size allows brief bursts without throttling
+def _is_gemini_v3_or_greater(model_name: str) -> bool:
+    """
+    Checks if a Gemini model name is version 3.0 or greater.
+    This is used to determine if the 'thinking_level' parameter is supported.
+    """
+    if not model_name.startswith("gemini-"):
+        return False
+    
+    match = re.search(r"gemini-([0-9.]+)", model_name)
+    if not match:
+        return False
+    
+    version_str = match.group(1)
+    try:
+        major_version = int(version_str.split('.')[0])
+        return major_version >= 3
+    except (ValueError, IndexError):
+        return False
+
+# ... (rest of the file is the same until create_gemini_model)
 
 def _create_rate_limiter_from_rpm(rpm: int) -> InMemoryRateLimiter:
     """
     Create a rate limiter from RPM (requests per minute) setting.
-
-    Args:
-        rpm: Target requests per minute (e.g., 15 for free tier, 360 for paid)
-
-    Returns:
-        Configured InMemoryRateLimiter
     """
-    # Convert RPM to RPS with 20% safety margin
-    safety_factor = 0.8  # Use 80% of limit to avoid edge cases
+    safety_factor = 0.8
     rps = (rpm / 60.0) * safety_factor
-
-    # Bucket size: allow bursts up to 10% of RPM for parallel agent execution
     max_bucket = max(5, int(rpm * 0.1))
-
     logger.info(
         f"Rate limiter configured: {rpm} RPM → {rps:.2f} RPS "
         f"(80% of limit, bucket size: {max_bucket})"
     )
-
     return InMemoryRateLimiter(
         requests_per_second=rps,
         check_every_n_seconds=0.1,
         max_bucket_size=max_bucket
     )
 
-# Initialize global rate limiter from config
 GLOBAL_RATE_LIMITER = _create_rate_limiter_from_rpm(config.gemini_rpm_limit)
 
 def create_gemini_model(
@@ -73,65 +72,92 @@ def create_gemini_model(
     timeout: int,
     max_retries: int,
     streaming: bool = False,
-    callbacks: Optional[List[BaseCallbackHandler]] = None
+    callbacks: Optional[List[BaseCallbackHandler]] = None,
+    thinking_level: Optional[str] = None
 ) -> BaseChatModel:
-    """Generic factory for Gemini models with optional callbacks."""
+    """
+    Generic factory for Gemini models.
+    """
+    kwargs = {
+        "model": model_name,
+        "temperature": temperature,
+        "timeout": timeout,
+        "max_retries": max_retries,
+        "safety_settings": SAFETY_SETTINGS,
+        "streaming": streaming,
+        "rate_limiter": GLOBAL_RATE_LIMITER,
+        "convert_system_message_to_human": False,
+        "max_output_tokens": 32768,
+        "callbacks": callbacks or []
+    }
 
-    # Note: transport='rest' is sometimes more stable than grpc for large contexts on some networks
-    llm = ChatGoogleGenerativeAI(
-        model=model_name,
-        temperature=temperature,
-        # Increased timeout is handled by the caller (config.api_timeout)
-        timeout=timeout,
-        # Retry logic handles 500, 503, 504 automatically by default in LangChain
-        max_retries=max_retries,
-        safety_settings=SAFETY_SETTINGS,
-        streaming=streaming,
-        rate_limiter=GLOBAL_RATE_LIMITER,
-        convert_system_message_to_human=False,
-        # EXPLICITLY set max_output_tokens to prevent truncation
-        max_output_tokens=32768,
-        callbacks=callbacks or []
-    )
-    return llm
+    if thinking_level and _is_gemini_v3_or_greater(model_name):
+        kwargs["thinking_level"] = thinking_level
+        logger.info(f"Applying thinking_level={thinking_level} to {model_name}")
+
+    return ChatGoogleGenerativeAI(**kwargs)
 
 def create_quick_thinking_llm(
     temperature: float = 0.3,
     model: Optional[str] = None,
-    timeout: int = None, # Allow override or use config default
-    max_retries: int = None, # Allow override or use config default
+    timeout: int = None,
+    max_retries: int = None,
     callbacks: Optional[List[BaseCallbackHandler]] = None
 ) -> BaseChatModel:
-    """Create a quick thinking LLM (Gemini 2.5 Flash)."""
+    """
+    Create a quick thinking LLM.
+    If the QUICK_MODEL is Gemini 3+, this will set thinking_level="low".
+    """
     model_name = model or config.quick_think_llm
-    # Use config defaults if not provided
     final_timeout = timeout if timeout is not None else config.api_timeout
     final_retries = max_retries if max_retries is not None else config.api_retry_attempts
 
+    thinking_level = None
+    if _is_gemini_v3_or_greater(model_name):
+        thinking_level = "low"
+        logger.info(
+            f"Quick LLM ({model_name}) is Gemini 3+ - applying thinking_level=low"
+        )
+
     logger.info(f"Initializing Quick LLM: {model_name} (timeout={final_timeout}, retries={final_retries})")
-    return create_gemini_model(model_name, temperature, final_timeout, final_retries, callbacks=callbacks)
+    return create_gemini_model(
+        model_name, temperature, final_timeout, final_retries,
+        callbacks=callbacks, thinking_level=thinking_level
+    )
 
 def create_deep_thinking_llm(
     temperature: float = 0.1,
     model: Optional[str] = None,
-    timeout: int = None, # Allow override or use config default
-    max_retries: int = None, # Allow override or use config default
+    timeout: int = None,
+    max_retries: int = None,
     callbacks: Optional[List[BaseCallbackHandler]] = None
 ) -> BaseChatModel:
-    """Create a deep thinking LLM (Gemini 3 Pro)."""
+    """
+    Create a deep thinking LLM.
+    If the DEEP_MODEL is Gemini 3+, this will set thinking_level="high".
+    """
     model_name = model or config.deep_think_llm
-    # Use config defaults if not provided
     final_timeout = timeout if timeout is not None else config.api_timeout
     final_retries = max_retries if max_retries is not None else config.api_retry_attempts
 
+    thinking_level = None
+    if _is_gemini_v3_or_greater(model_name):
+        thinking_level = "high"
+        logger.info(
+            f"Deep LLM ({model_name}) is Gemini 3+ - applying thinking_level=high"
+        )
+
     logger.info(f"Initializing Deep LLM: {model_name} (timeout={final_timeout}, retries={final_retries})")
-    return create_gemini_model(model_name, temperature, final_timeout, final_retries, callbacks=callbacks)
+    return create_gemini_model(
+        model_name, temperature, final_timeout, final_retries,
+        callbacks=callbacks, thinking_level=thinking_level
+    )
 
 # Initialize default instances
 quick_thinking_llm = create_quick_thinking_llm()
 deep_thinking_llm = create_deep_thinking_llm()
 
-
+# ... (rest of the file is the same)
 def create_consultant_llm(
     temperature: float = 0.3,
     model: Optional[str] = None,
