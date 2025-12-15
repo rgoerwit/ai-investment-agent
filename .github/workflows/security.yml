@@ -32,6 +32,8 @@ jobs:
       contents: read
       # Required for private repos (optional for public)
       actions: read
+      # Required to comment on PRs
+      pull-requests: write
 
     strategy:
       fail-fast: false
