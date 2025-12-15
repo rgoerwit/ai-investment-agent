@@ -176,7 +176,8 @@ class Config:
     
     llm_provider: str = os.environ.get("LLM_PROVIDER", "google")
     deep_think_llm: str = os.environ.get("DEEP_MODEL", "gemini-3-pro-preview")
-    quick_think_llm: str = os.environ.get("QUICK_MODEL", "gemini-2.5-flash")
+    # ✅ FIXED (Dec 14, 2025): Flash models work with langchain-google-genai 4.0.0+
+    quick_think_llm: str = os.environ.get("QUICK_MODEL", "gemini-2.0-flash")
     
     max_debate_rounds: int = int(os.environ.get("MAX_DEBATE_ROUNDS", "2"))
     max_risk_discuss_rounds: int = int(os.environ.get("MAX_RISK_DISCUSS_ROUNDS", "1"))

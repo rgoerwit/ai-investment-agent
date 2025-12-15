@@ -16,7 +16,7 @@ langchain-core = ">=1.0.0,<2.0.0"
 # CRITICAL FIX: Required for Tavily and other tools
 langchain-community = ">=0.2.0,<1.0.0"
 # Primary LLM: Google Gemini
-langchain-google-genai = ">=2.0.0,<3.0.0"
+langchain-google-genai = "^4.0.0"
 # ADDED: Google GenAI SDK for direct access if needed
 google-genai = ">=1.0.0,<2.0.0"
 # OPTIONAL: OpenAI for consultant node (cross-validation)
@@ -41,7 +41,7 @@ stockstats = ">=0.6.2"
 pandas = ">=2.2.0,<3.0.0"
 
 # Vector database
-chromadb = ">=0.5.0,<1.0.0"
+chromadb = "^1.3.0"
 
 # HTTP and async
 aiohttp = ">=3.10.0,<4.0.0"
@@ -73,6 +73,7 @@ ruff = ">=0.8.0,<1.0.0"
 mypy = ">=1.13.0,<2.0.0"
 pre-commit = ">=4.0.0,<5.0.0"
 ipython = ">=8.30.0,<9.0.0"
+pytest-env = "^1.2.0"
 
 [tool.poetry.extras]
 observability = ["opentelemetry-api", "opentelemetry-sdk"]
@@ -85,7 +86,7 @@ build-backend = "poetry.core.masonry.api"
 [tool.black]
 line-length = 88
 target-version = ['py310', 'py311', 'py312']
-include = '\.pyi?$'
+include = '\.pyi?$' 
 
 [tool.ruff]
 line-length = 88
@@ -104,8 +105,42 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "8.0"
-addopts = "-ra -q -v"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 asyncio_mode = "auto"
+
+# Comprehensive options moved from pytest.ini
+addopts = """
+    --strict-markers
+    --strict-config
+    --verbose
+    --tb=short
+    --durations=10
+    --maxfail=5
+    -p no:cacheprovider
+"""
+
+# Register custom markers
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests requiring external services",
+    "unit: marks tests as unit tests",
+    "benchmark: marks tests as performance benchmarks",
+    "memory: marks tests that require memory/ChromaDB",
+    "llm: marks tests that require LLM connectivity",
+    "api: marks tests that require external API access",
+]
+
+# Filter out warnings from third-party libraries
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
+
+[tool.pytest_env]
+ENVIRONMENT = "test"
+LOG_LEVEL = "DEBUG"
+ENABLE_MEMORY = "false"
+ONLINE_TOOLS = "false"
+DEFAULT_TICKER = "TEST"

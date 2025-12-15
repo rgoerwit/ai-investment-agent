@@ -28,7 +28,7 @@
 ✅ **Multi-Agent Debate Pattern** - Bull/Bear/Risk analysts argue, then a Portfolio Manager decides  
 ✅ **International Coverage** - Handles HK, Japan, Taiwan, Korea with proper FX/exchange logic  
 ✅ **Disciplined Risk Framework** - Hard-fail gatekeeping prevents emotional/hype-driven decisions  
-✅ **Zero Marginal Cost** - Can runs (with lots of 429s and retries!) on free-tier Gemini API  
+✅ **Zero Marginal Cost** - Can run (amidst 429s and retries) on free-tier Gemini API, albeit slowly  
 ✅ **Full Transparency** - Every decision explained with supporting data and reasoning
 
 ---
@@ -158,7 +158,9 @@ poetry run pytest tests/ -v
 
 The system automatically handles Gemini API rate limits based on your tier. **Free tier (15 RPM) works out of the box** with no configuration needed.
 
-If you upgrade to a **paid Gemini API tier**, you can unlock significantly faster analysis:
+If you upgrade to a **paid Gemini API tier**, make sure you're using an
+API key for the correct project (project settings determine your tier),
+and then up your RPM limits in .env:
 
 ```bash
 # In your .env file, add:
@@ -169,15 +171,17 @@ GEMINI_RPM_LIMIT=1000  # Paid tier 2: 67x faster than free tier
 
 **Performance comparison:**
 
-- **Free tier (15 RPM):** ~1 analysis per 5-10 minutes
-- **Paid tier 1 (360 RPM):** ~24 analyses in the same time (24x speedup...theoretically)
-- **Paid tier 2 (1000 RPM):** ~67 analyses in the same time (67x speedup)
+- **Free tier (15 RPM):** ~1 analysis per 5-10 minutes (sometimes stalling or dying)
+- **Paid tier 1 (360 RPM):** ~24 analyses in the same period (24x speedup...theoretically)
+- **Paid tier 2 (1000 RPM):** ~67 analyses in the same period (even faster)
 
-The system applies a 20% safety margin automatically to prevent hitting API limits. For batch analysis of tickers, paid tiers can reduce runtime substantially.
+The system applies a 20% safety margin automatically to prevent hitting API limits. For
+batch analysis of tickers, paid tiers can reduce runtime substantially.
 
 ### Batch Analysis - Screening Hundreds of Tickers
 
-For serious portfolio construction, you'll want to screen many candidates at once. Here's how to generate and analyze a large watchlist.
+For serious portfolio construction, you'll want to screen many candidates at once. Here's one way
+to generate and analyze a large watchlist.
 
 #### Step 1: Generate Your Ticker List with AI
 
@@ -254,13 +258,15 @@ caffeinate -i ./scripts/run_tickers.sh
 
 **Timing estimates:**
 
-- 50 tickers: ~2-4 hours (standard mode) or ~1-2 hours (quick mode)
-- 100 tickers: ~4-8 hours (standard mode) or ~2-4 hours (quick mode)
+- 50 tickers: ~2-4 hours (standard mode) or ~1-2 hours (quick mode - varies)
+- 100 tickers: ~4-8 hours (standard mode) or ~2-4 hours (quick mode - varies)
 
-**Note:** Quick mode automatically uses faster/cheaper models for all agents (Gemini Flash for Research Manager/Portfolio Manager, GPT-4o-mini for Consultant). This reduces cost and latency but may yield lower-quality analysis.
+**Note**: Small-cap/illiquid stocks may still show data gaps, but this *usually* reflects
+genuine data unavailability from financial APIs, not system failures.
 
 **💡 Pro tip for macOS users:**
-The `caffeinate -i` command prevents your Mac from sleeping because it think it's inactive.  (It may sleep for other reasons even with caffeinate.)
+The `caffeinate -i` command prevents your Mac from sleeping because it think it's inactive.
+(It may sleep for other reasons even with caffeinate.)
 
 #### Step 4: Review Results
 

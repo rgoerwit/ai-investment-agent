@@ -620,7 +620,7 @@ async def main():
                 except:
                     pass
                 
-                reporter = QuietModeReporter(args.ticker, company_name)
+                reporter = QuietModeReporter(args.ticker, company_name, quick_mode=args.quick)
                 report = reporter.generate_report(result, brief_mode=args.brief)
                 print(report)
             else:
