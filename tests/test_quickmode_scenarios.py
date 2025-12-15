@@ -1,137 +1,114 @@
 """
-Tests for the quick_mode and thinking_level logic in src/llms.py.
-Ensures that the correct model and thinking level are selected based on:
-- The --quick flag (quick_mode)
-- Whether QUICK_MODEL and DEEP_MODEL are identical
-- The model version (Gemini 3+ vs. older models)
+Tests for the simplified thinking_level logic in src/llms.py.
+Verifies that thinking_level is set based only on the model version,
+not on any comparison between DEEP_MODEL and QUICK_MODEL.
 """
-
 import pytest
 from unittest.mock import patch, MagicMock
 
-# Subject Matter Under Test: The LLM creation functions
-from src.llms import create_deep_thinking_llm, create_quick_thinking_llm
+# The functions to test
+from src.llms import create_deep_thinking_llm, create_quick_thinking_llm, _is_gemini_v3_or_greater
 
-# Mock data for different model configurations
+# Mock data for model names
 GEMINI_3_PRO = "gemini-3-pro-preview"
+GEMINI_4_ULTRA = "gemini-4-ultra"
 GEMINI_2_FLASH = "gemini-2.0-flash"
 
 
 @pytest.fixture(autouse=True)
 def mock_create_gemini_model():
-    """
-    Auto-used fixture to mock the core `create_gemini_model` factory.
-    This allows us to inspect the arguments it's called with (e.g., thinking_level)
-    without actually creating a model instance.
-    """
+    """Mocks the core `create_gemini_model` factory to inspect its inputs."""
     with patch("src.llms.create_gemini_model") as mock:
-        # Return a mock object so the function doesn't return None
         mock.return_value = MagicMock()
         yield mock
 
 @pytest.fixture
 def mock_config():
-    """Mocks the config object in the llms module."""
+    """Mocks the config object in the llms module to control model names."""
     with patch("src.llms.config") as mock_conf:
-        # Set default values for timeout/retries to avoid dealing with MagicMocks
         mock_conf.api_timeout = 300
         mock_conf.api_retry_attempts = 10
         yield mock_conf
 
 
-def test_quick_mode_on_identical_gemini_3_models(mock_create_gemini_model, mock_config):
+@pytest.mark.parametrize("model_name, expected", [
+    ("gemini-3-pro", True),
+    ("gemini-3.5-pro", True),
+    ("gemini-4-ultra", True),
+    ("gemini-10-alpha", True),
+    ("gemini-2.0-flash", False),
+    ("gemini-1.5-pro", False),
+    ("not-a-gemini", False),
+    ("gemini-pro", False),
+])
+def test_is_gemini_v3_or_greater_helper(model_name, expected):
+    """Tests the version checking helper function directly for robustness."""
+    assert _is_gemini_v3_or_greater(model_name) == expected
+
+
+def test_quick_llm_sets_low_thinking_level_on_gemini_3_plus(mock_create_gemini_model, mock_config):
     """
-    SCENARIO: --quick is ON, and QUICK_MODEL == DEEP_MODEL (both are Gemini 3).
-    EXPECTATION: All agents should use the same model with thinking_level="low".
+    SCENARIO: The QUICK_MODEL is a Gemini 3+ model.
+    EXPECTATION: thinking_level should be "low".
     """
-    # Arrange: Set models to be identical and Gemini 3
+    # Arrange: Use a Gemini 3+ model for the quick LLM
     mock_config.quick_think_llm = GEMINI_3_PRO
-    mock_config.deep_think_llm = GEMINI_3_PRO
-
-    # Act: Create both a "deep" and "quick" LLM instance
-    # The quick_mode=True simulates the --quick flag being passed to the deep LLM
-    create_deep_thinking_llm(quick_mode=True)
-    create_quick_thinking_llm()
-
-    # Assert: Check the arguments passed to the underlying model factory
-    assert mock_create_gemini_model.call_count == 2
     
-    # Both calls should have specified thinking_level="low"
-    for call in mock_create_gemini_model.call_args_list:
-        assert call.args[0] == GEMINI_3_PRO  # Correctly check positional arg
-        assert call.kwargs.get("thinking_level") == "low"
-
-
-def test_quick_mode_off_identical_gemini_3_models(mock_create_gemini_model, mock_config):
-    """
-    SCENARIO: --quick is OFF, and QUICK_MODEL == DEEP_MODEL (both are Gemini 3).
-    EXPECTATION: 
-        - Deep agents use the model with thinking_level="high".
-        - Quick agents use the model with thinking_level="low".
-    """
-    # Arrange: Set models to be identical and Gemini 3
-    mock_config.quick_think_llm = GEMINI_3_PRO
-    mock_config.deep_think_llm = GEMINI_3_PRO
-
-    # Act: Create LLMs with quick_mode=False
-    create_deep_thinking_llm(quick_mode=False)
+    # Act
     create_quick_thinking_llm()
-
-    # Assert: Find the specific calls and check their arguments
-    assert mock_create_gemini_model.call_count == 2
-
-    # Find the call for the deep LLM (temperature=0.1) and check it
-    deep_call = next(c for c in mock_create_gemini_model.call_args_list if c.args[1] == 0.1)
-    assert deep_call.args[0] == GEMINI_3_PRO
-    assert deep_call.kwargs.get("thinking_level") == "high"
-
-    # Find the call for the quick LLM (temperature=0.3) and check it
-    quick_call = next(c for c in mock_create_gemini_model.call_args_list if c.args[1] == 0.3)
-    assert quick_call.args[0] == GEMINI_3_PRO
-    assert quick_call.kwargs.get("thinking_level") == "low"
-
-
-def test_quick_mode_off_different_models(mock_create_gemini_model, mock_config):
-    """
-    SCENARIO: --quick is OFF, and QUICK_MODEL != DEEP_MODEL.
-    EXPECTATION: Each agent uses its respective model, and no thinking_level is applied.
-    """
-    # Arrange: Set models to be different
-    mock_config.quick_think_llm = GEMINI_2_FLASH
-    mock_config.deep_think_llm = GEMINI_3_PRO
-
-    # Act: Create LLMs with quick_mode=False
-    create_deep_thinking_llm(quick_mode=False)
-    create_quick_thinking_llm()
-
-    # Assert:
-    assert mock_create_gemini_model.call_count == 2
     
-    # Check the deep call
-    deep_call = next(c for c in mock_create_gemini_model.call_args_list if c.args[0] == GEMINI_3_PRO)
-    assert deep_call.kwargs.get("thinking_level") is None
-
-    # Check the quick call
-    quick_call = next(c for c in mock_create_gemini_model.call_args_list if c.args[0] == GEMINI_2_FLASH)
-    assert quick_call.kwargs.get("thinking_level") is None
+    # Assert
+    mock_create_gemini_model.assert_called_once()
+    call_kwargs = mock_create_gemini_model.call_args.kwargs
+    assert call_kwargs.get("thinking_level") == "low"
 
 
-def test_no_thinking_level_for_gemini_2_models(mock_create_gemini_model, mock_config):
+def test_quick_llm_has_no_thinking_level_on_gemini_2(mock_create_gemini_model, mock_config):
     """
-    SCENARIO: Models are identical but are Gemini 2 (which doesn't support thinking_level).
-    EXPECTATION: No thinking_level should be passed, regardless of quick_mode.
+    SCENARIO: The QUICK_MODEL is a Gemini 2 model.
+    EXPECTATION: thinking_level should be None.
     """
-    # Arrange: Set models to be identical and Gemini 2
+    # Arrange: Use a Gemini 2 model for the quick LLM
     mock_config.quick_think_llm = GEMINI_2_FLASH
+    
+    # Act
+    create_quick_thinking_llm()
+    
+    # Assert
+    mock_create_gemini_model.assert_called_once()
+    call_kwargs = mock_create_gemini_model.call_args.kwargs
+    assert call_kwargs.get("thinking_level") is None
+
+
+def test_deep_llm_sets_high_thinking_level_on_gemini_4(mock_create_gemini_model, mock_config):
+    """
+    SCENARIO: The DEEP_MODEL is a Gemini 4 model.
+    EXPECTATION: thinking_level should be "high".
+    """
+    # Arrange: Use a Gemini 4 model for the deep LLM
+    mock_config.deep_think_llm = GEMINI_4_ULTRA
+    
+    # Act
+    create_deep_thinking_llm()
+    
+    # Assert
+    mock_create_gemini_model.assert_called_once()
+    call_kwargs = mock_create_gemini_model.call_args.kwargs
+    assert call_kwargs.get("thinking_level") == "high"
+
+
+def test_deep_llm_has_no_thinking_level_on_gemini_2(mock_create_gemini_model, mock_config):
+    """
+    SCENARIO: The DEEP_MODEL is a Gemini 2 model.
+    EXPECTATION: thinking_level should be None.
+    """
+    # Arrange: Use a Gemini 2 model for the deep LLM
     mock_config.deep_think_llm = GEMINI_2_FLASH
-
-    # Act: Create LLMs for both quick and deep modes
-    create_deep_thinking_llm(quick_mode=True)
-    create_deep_thinking_llm(quick_mode=False)
-    create_quick_thinking_llm()
-
-    # Assert: No call should have a thinking_level set
-    assert mock_create_gemini_model.call_count == 3
-    for call in mock_create_gemini_model.call_args_list:
-        assert call.args[0] == GEMINI_2_FLASH
-        assert call.kwargs.get("thinking_level") is None
+    
+    # Act
+    create_deep_thinking_llm()
+    
+    # Assert
+    mock_create_gemini_model.assert_called_once()
+    call_kwargs = mock_create_gemini_model.call_args.kwargs
+    assert call_kwargs.get("thinking_level") is None
