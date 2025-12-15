@@ -95,10 +95,11 @@ on:
           - plan-only
           - apply
 
+# Set minimal permissions for Azure deployment (principle of least privilege)
 permissions:
-  id-token: write
-  contents: read
-  pull-requests: write
+  id-token: write        # Required for Azure OIDC authentication (federated credentials)
+  contents: read         # Required to checkout code and read Terraform configs
+  pull-requests: write   # Required to comment deployment status on PRs
 
 env:
   REGISTRY_NAME: tradingsystem  # ⚠️  CHANGE THIS! Use your own Azure Container Registry name

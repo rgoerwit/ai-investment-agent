@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [ main, dev ]
 
+# Set minimal permissions for security (principle of least privilege)
+# This workflow only needs to read code - no write access required
+permissions:
+  contents: read  # Required to checkout code
+
 jobs:
   test:
     runs-on: ubuntu-latest

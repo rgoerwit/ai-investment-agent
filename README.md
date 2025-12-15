@@ -289,7 +289,7 @@ echo "SELL: $(grep -c 'FINAL DECISION: SELL' scratch/ticker_analysis_results.md)
 
 Versions of the codebase have varied in their strictness, but in general, from a list of 300 candidates, you'll typically get:
 
-- **BUY recommendations:** 5-15 stocks (selective GARP filter)
+- **BUY recommendations:** 5-15 stocks (depends on model used)
 - **HOLD recommendations:** 20-40 stocks (interesting but flawed)
 - **SELL recommendations:** 250+ stocks (thesis violations, poor fundamentals)
 
