@@ -12,32 +12,50 @@
 
 ---
 
-## Critical Finding: Most Agents ALWAYS Use "Quick" Model
+## Updated Architecture: Two-Tier Thinking System (Dec 2025)
 
-Looking at `src/graph.py:262-280`, the system architecture is:
+**IMPORTANT UPDATE**: The system now uses a two-tier architecture that separates data gathering from synthesis/reasoning.
+
+Looking at `src/graph.py:262-291`, the system architecture is now:
 
 ```python
-# ALWAYS use quick_think_llm (regardless of --quick flag):
+# TIER 1: ALWAYS use quick_think_llm (data gathering - simple extraction):
 - Market Analyst        (line 262)
 - Social Analyst        (line 263)
 - News Analyst          (line 264)
 - Fundamentals Analyst  (line 265)
-- Bull Researcher       (line 266)
-- Bear Researcher       (line 267)
-- Trader                (line 277)
-- Risk Analysts (3x)    (lines 278-280)
-# Total: 10 agents
+- Trader                (line 289)  # Simple execution task
+# Total: 5 agents - ALWAYS LOW thinking
 
-# Conditional (depends on --quick flag):
-- Research Manager      (line 271 or 274)
-- Portfolio Manager     (line 272 or 275)
-# Total: 2 agents
+# TIER 2: MODE-DEPENDENT (synthesis/reasoning - heavy cognitive load):
+# --quick mode: use quick_think_llm (thinking_level="low")
+# Normal mode: use deep_think_llm (thinking_level="high")
+- Bull Researcher       (lines 269-283)
+- Bear Researcher       (lines 269-283)
+- Research Manager      (lines 269-283)
+- Portfolio Manager     (lines 269-283)
+- Risk Analysts (3x)    (lines 269-283)
+# Total: 7 agents - MODE-DEPENDENT thinking
 
 # OpenAI (optional):
-- Consultant            (line 283)
+- Consultant            (line 295)
 ```
 
-**THIS MEANS**: With current workaround (`QUICK_MODEL=gemini-3-pro-preview`), **100% of Gemini agents use expensive Pro model in BOTH normal and --quick modes**.
+**KEY CHANGE**: Bull/Bear researchers and Risk Analysts now use **mode-dependent thinking**:
+- **Quick mode (`--quick`)**: All 7 synthesis agents use LOW thinking (faster, less deep reasoning)
+- **Normal mode (default)**: All 7 synthesis agents use HIGH thinking (slower, deeper reasoning for ~100k+ token contexts)
+
+**IMPACT ON COSTS**:
+- **Quick mode**: 5 agents always use QUICK_MODEL, 7 agents use QUICK_MODEL (all 12 use cheap model if available)
+- **Normal mode**: 5 agents use QUICK_MODEL, 7 agents use DEEP_MODEL (mixed usage pattern)
+
+With current workaround (`QUICK_MODEL=gemini-3-pro-preview`, `DEEP_MODEL=gemini-3-pro-preview`):
+- **Quick mode**: 100% of agents use expensive Pro model
+- **Normal mode**: 100% of agents use expensive Pro model
+
+**WHY THIS MATTERS**: If Flash models work with SDK 4.0.0+:
+- Quick mode could use Flash for ALL 12 agents (maximum cost savings)
+- Normal mode would use Flash for 5 agents, Pro for 7 agents (partial savings but better quality)
 
 ---
 

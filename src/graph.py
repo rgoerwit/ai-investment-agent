@@ -259,28 +259,36 @@ def create_trading_graph(
     # Create LLMs with token tracking callbacks
     tracker = get_tracker()
 
+    # Data gathering agents: Always use LOW thinking (small context, simple tasks)
     market_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Market Analyst", tracker)])
     social_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Social Analyst", tracker)])
     news_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("News Analyst", tracker)])
     fund_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Fundamentals Analyst", tracker)])
-    bull_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Bull Researcher", tracker)])
-    bear_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Bear Researcher", tracker)])
 
-    # Assign LLMs to thinking agents based on quick_mode.
+    # Synthesis agents: Mode-dependent thinking (large context, heavy reasoning load)
+    # Quick mode: LOW thinking (faster, less deep reasoning)
+    # Normal mode: HIGH thinking (slower, deeper reasoning)
     if quick_mode:
-        # In quick mode, EVERYONE uses the quick LLM.
-        logger.info("Quick mode ON: Using QUICK_MODEL for all agents, including thinking agents.")
+        logger.info("Quick mode ON: Using LOW thinking for synthesis agents (Bull, Bear, Research Manager, Portfolio Manager, Risk Analysts).")
+        bull_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Bull Researcher", tracker)])
+        bear_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Bear Researcher", tracker)])
         res_mgr_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Research Manager", tracker)])
         pm_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Portfolio Manager", tracker)])
+        risky_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Risky Analyst", tracker)])
+        safe_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Safe Analyst", tracker)])
+        neutral_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Neutral Analyst", tracker)])
     else:
-        # In normal (deep) mode, thinking agents use the deep LLM.
+        logger.info("Normal mode: Using HIGH (deep) thinking for synthesis agents (Bull, Bear, Research Manager, Portfolio Manager, Risk Analysts).")
+        bull_llm = create_deep_thinking_llm(callbacks=[TokenTrackingCallback("Bull Researcher", tracker)])
+        bear_llm = create_deep_thinking_llm(callbacks=[TokenTrackingCallback("Bear Researcher", tracker)])
         res_mgr_llm = create_deep_thinking_llm(callbacks=[TokenTrackingCallback("Research Manager", tracker)])
         pm_llm = create_deep_thinking_llm(callbacks=[TokenTrackingCallback("Portfolio Manager", tracker)])
+        risky_llm = create_deep_thinking_llm(callbacks=[TokenTrackingCallback("Risky Analyst", tracker)])
+        safe_llm = create_deep_thinking_llm(callbacks=[TokenTrackingCallback("Safe Analyst", tracker)])
+        neutral_llm = create_deep_thinking_llm(callbacks=[TokenTrackingCallback("Neutral Analyst", tracker)])
 
+    # Trader agent: Always use LOW thinking (simple execution task)
     trader_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Trader", tracker)])
-    risky_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Risky Analyst", tracker)])
-    safe_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Safe Analyst", tracker)])
-    neutral_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Neutral Analyst", tracker)])
 
     # Consultant LLM (OpenAI - optional, may be None if disabled/unavailable)
     consultant_llm = get_consultant_llm(callbacks=[TokenTrackingCallback("Consultant", tracker)], quick_mode=quick_mode)

@@ -104,13 +104,11 @@ def test_deep_llm_has_no_thinking_level_on_gemini_2(mock_create_gemini_model, mo
     """
     # Arrange: Use a Gemini 2 model for the deep LLM
     mock_config.deep_think_llm = GEMINI_2_FLASH
-
+    
     # Act
     create_deep_thinking_llm()
-
+    
     # Assert
     mock_create_gemini_model.assert_called_once()
     call_kwargs = mock_create_gemini_model.call_args.kwargs
     assert call_kwargs.get("thinking_level") is None
-
-

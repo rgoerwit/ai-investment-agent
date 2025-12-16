@@ -14,14 +14,14 @@ python = ">=3.10,<3.13"
 langchain = ">=1.0.0,<2.0.0"
 langchain-core = ">=1.0.0,<2.0.0"
 # CRITICAL FIX: Required for Tavily and other tools
-langchain-community = ">=0.2.0,<1.0.0"
+langchain-community = ">=0.4.0,<1.0.0"
 # Primary LLM: Google Gemini
 langchain-google-genai = "^4.0.0"
 # ADDED: Google GenAI SDK for direct access if needed
 google-genai = ">=1.0.0,<2.0.0"
 # OPTIONAL: OpenAI for consultant node (cross-validation)
 # The consultant node uses OpenAI to provide independent review of Gemini analysis
-langchain-openai = {version = ">=0.3.0,<1.0.0", optional = true}
+langchain-openai = ">=1.0.0,<2.0.0"
 langgraph = ">=1.0.0,<2.0.0"
 langgraph-checkpoint = ">=3.0.0,<4.0.0"
 

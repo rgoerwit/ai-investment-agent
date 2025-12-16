@@ -178,6 +178,69 @@ GEMINI_RPM_LIMIT=1000  # Paid tier 2: 67x faster than free tier
 The system applies a 20% safety margin automatically to prevent hitting API limits. For
 batch analysis of tickers, paid tiers can reduce runtime substantially.
 
+### AI Model Configuration and Thinking Levels (IMPORTANT - Dec 2025)
+
+The system uses a **two-tier thinking level architecture** optimized for both performance and reasoning depth. Understanding this is crucial for reliable operation, especially with Gemini models.
+
+#### Two-Tier Thinking System
+
+**Tier 1: Data Gathering Agents (Always LOW thinking)**
+- Market Analyst, Social Analyst, News Analyst, Fundamentals Analyst
+- Uses `QUICK_MODEL` (fast model for simple extraction tasks)
+- **Automatically sets `thinking_level="low"`** for Gemini 3+ models
+- Small context (~3-8k tokens), simple data extraction - doesn't need deep reasoning
+
+**Tier 2: Synthesis & Decision Agents (Mode-Dependent thinking)**
+- Bull/Bear Researchers, Research Manager, Portfolio Manager, Risk Analysts
+- Uses `DEEP_MODEL` (reasoning model for complex analysis)
+- **Quick mode (`--quick`):** `thinking_level="low"` (faster, less deep reasoning)
+- **Normal mode (default):** `thinking_level="high"` (slower, deeper reasoning)
+- Large context (~100k-180k tokens), heavy reasoning load - benefits from high thinking
+
+#### Critical Recommendation: Use Gemini 3+ for QUICK_MODEL
+
+**⚠️ IMPORTANT:** If you're using Gemini models, use **Gemini 3+** (e.g., `gemini-3-pro-preview`) for your `QUICK_MODEL`, not Gemini 2.x models.
+
+**Why?** The 4 data gathering agents (Market, Social, News, Fundamentals) call tools to fetch financial data. Gemini 2.x models have **tool-calling bugs** with some LangGraph versions that can cause failures during data collection. Gemini 3+ models work reliably.
+
+**What happens if you use Gemini 2.x for QUICK_MODEL:**
+- You'll see a WARNING log message at startup: `"QUICK_MODEL is gemini-2.0-flash (Gemini 2.x) - tool calling bugs may occur..."`
+- Data gathering agents may fail to fetch financial data correctly
+- The entire analysis pipeline depends on clean data from these agents
+
+**Recommended configuration** (in your environment or code):
+```bash
+# For best results with Gemini models:
+QUICK_MODEL=gemini-3-pro-preview    # For data gathering (thinking_level="low" auto-set)
+DEEP_MODEL=gemini-3-pro-preview     # For synthesis (thinking_level="high" in normal mode)
+
+# Or use different tiers if you have API access:
+QUICK_MODEL=gemini-3-flash-preview  # Faster, cheaper data gathering
+DEEP_MODEL=gemini-3-pro-preview     # More powerful synthesis
+```
+
+**Note:** The model configuration is currently **hardcoded in `src/llms.py`** (lines 164-165), not controlled by environment variables. The system uses:
+- Quick thinking: `gemini-2.0-flash-exp` (will trigger warning due to tool-calling bugs)
+- Deep thinking: `gemini-2.0-flash-thinking-exp`
+
+To change models, edit `src/llms.py` and update the `config.quick_think_llm` and `config.deep_think_llm` assignments, or modify your `.env` file if the config system reads from there.
+
+#### Performance Implications
+
+**Quick mode (`--quick`):**
+- 1 debate round vs 2 (50% fewer agent turns)
+- All synthesis agents use `thinking_level="low"` (faster responses)
+- Typical runtime: 2-4 minutes per ticker
+- **Trade-off:** Less thorough reasoning, may miss nuanced risks
+
+**Normal mode (default):**
+- 2 debate rounds (more adversarial back-and-forth)
+- All synthesis agents use `thinking_level="high"` (deeper reasoning)
+- Typical runtime: 5-10 minutes per ticker
+- **Benefit:** More thorough analysis, better risk detection, higher quality recommendations
+
+For batch analysis of 300+ tickers, quick mode can save hours of runtime but may produce less rigorous recommendations. Use normal mode for final investment decisions.
+
 ### Batch Analysis - Screening Hundreds of Tickers
 
 For serious portfolio construction, you'll want to screen many candidates at once. Here's one way
@@ -290,8 +353,8 @@ echo "SELL: $(grep -c 'FINAL DECISION: SELL' scratch/ticker_analysis_results.md)
 Versions of the codebase have varied in their strictness, but in general, from a list of 300 candidates, you'll typically get:
 
 - **BUY recommendations:** 5-15 stocks (depends on model used)
-- **HOLD recommendations:** 20-40 stocks (interesting but flawed)
-- **SELL recommendations:** 250+ stocks (thesis violations, poor fundamentals)
+- **HOLD recommendations:** 20-40 stocks (interesting but flawed or uncertain equities)
+- **SELL recommendations:** 255+ stocks (thesis violations, poor fundamentals)
 
 The system is **intentionally conservative** - it's designed to find the best candidates, not to give you 100 "buys."
 

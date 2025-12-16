@@ -118,6 +118,13 @@ def create_quick_thinking_llm(
         logger.info(
             f"Quick LLM ({model_name}) is Gemini 3+ - applying thinking_level=low"
         )
+    elif model_name.startswith("gemini-"):
+        # Gemini model but NOT 3+ (likely 2.x)
+        logger.warning(
+            f"QUICK_MODEL is {model_name} (Gemini 2.x) - tool calling bugs may occur with some LangGraph versions. "
+            f"Recommend using Gemini 3+ (e.g., gemini-3-pro-preview) for QUICK_MODEL. "
+            f"Gemini 3+ models automatically use thinking_level='low' for efficient data gathering."
+        )
 
     logger.info(f"Initializing Quick LLM: {model_name} (timeout={final_timeout}, retries={final_retries})")
     return create_gemini_model(

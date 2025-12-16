@@ -172,6 +172,54 @@ def filter_messages_for_gemini(messages: List[BaseMessage]) -> List[BaseMessage]
             filtered.append(msg)
     return filtered
 
+
+def extract_string_content(content: Any) -> str:
+    """
+    Safely extract string content from LLM response.content.
+
+    Gemini models (especially with langchain-google-genai) can return structured
+    data (dict/list) instead of plain strings when responses contain tool calls
+    or multi-part content. This function normalizes the content to a string.
+
+    Args:
+        content: The response.content value, which may be str, dict, list, or other
+
+    Returns:
+        String representation of the content
+    """
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, dict):
+        # Try common keys for text content in structured responses
+        if 'text' in content:
+            return str(content['text'])
+        if 'content' in content:
+            return extract_string_content(content['content'])  # Recursive for nested
+        if 'parts' in content:
+            # Gemini multi-part response format
+            parts = content['parts']
+            if isinstance(parts, list):
+                text_parts = [extract_string_content(p) for p in parts]
+                return '\n'.join(filter(None, text_parts))
+        # Fallback: convert dict to readable string
+        logger.warning("response_content_is_dict", keys=list(content.keys()))
+        return str(content)
+
+    if isinstance(content, list):
+        # Handle list of content parts
+        if len(content) == 0:
+            return ""
+        if len(content) == 1:
+            return extract_string_content(content[0])
+        # Multiple parts - join them
+        text_parts = [extract_string_content(item) for item in content]
+        return '\n'.join(filter(None, text_parts))
+
+    # Fallback for any other type
+    return str(content) if content is not None else ""
+
+
 # --- Agent Factory Functions ---
 
 def create_analyst_node(llm, agent_key: str, tools: List[Any], output_field: str) -> Callable:
@@ -226,10 +274,13 @@ def create_analyst_node(llm, agent_key: str, tools: List[Any], output_field: str
             if has_tool_calls:
                 return new_state
 
-            new_state[output_field] = response.content          
+            # CRITICAL FIX: Normalize response.content to string
+            # Gemini can return dict/list instead of string for structured responses
+            content_str = extract_string_content(response.content)
+            new_state[output_field] = content_str
 
             if agent_key == "fundamentals_analyst":
-                logger.info("fundamentals_output", has_datablock="DATA_BLOCK" in response.content, length=len(response.content))
+                logger.info("fundamentals_output", has_datablock="DATA_BLOCK" in content_str, length=len(content_str))
             return new_state
         except Exception as e:
             logger.error(f"Analyst node error {output_field}: {str(e)}")
@@ -293,7 +344,9 @@ Only use data explicitly related to {ticker} ({company_name}).
                 context=agent_name
             )
             debate_state = state.get('investment_debate_state', {}).copy()
-            argument = f"{agent_name}: {response.content}"
+            # CRITICAL FIX: Normalize response.content to string
+            content_str = extract_string_content(response.content)
+            argument = f"{agent_name}: {content_str}"
             debate_state['history'] = debate_state.get('history', '') + f"\n\n{argument}"
             debate_state['count'] = debate_state.get('count', 0) + 1
             if agent_name == 'Bull Analyst': 
@@ -321,7 +374,8 @@ def create_research_manager_node(llm, memory: Optional[Any]) -> Callable:
                 [HumanMessage(content=prompt)],
                 context=agent_prompt.agent_name
             )
-            return {"investment_plan": response.content}
+            # CRITICAL FIX: Normalize response.content to string
+            return {"investment_plan": extract_string_content(response.content)}
         except Exception as e:
             return {"investment_plan": f"Error: {str(e)}"}
     return research_manager_node
@@ -345,7 +399,8 @@ def create_trader_node(llm, memory: Optional[Any]) -> Callable:
                 [HumanMessage(content=prompt)],
                 context=agent_prompt.agent_name
             )
-            return {"trader_investment_plan": response.content}
+            # CRITICAL FIX: Normalize response.content to string
+            return {"trader_investment_plan": extract_string_content(response.content)}
         except Exception as e:
             return {"trader_investment_plan": f"Error: {str(e)}"}
     return trader_node
@@ -372,7 +427,9 @@ def create_risk_debater_node(llm, agent_key: str) -> Callable:
                 context=agent_prompt.agent_name
             )
             risk_state = state.get('risk_debate_state', {}).copy()
-            risk_state['history'] += f"\n{agent_prompt.agent_name}: {response.content}\n"
+            # CRITICAL FIX: Normalize response.content to string
+            content_str = extract_string_content(response.content)
+            risk_state['history'] += f"\n{agent_prompt.agent_name}: {content_str}\n"
             risk_state['count'] += 1
             return {"risk_debate_state": risk_state}
         except Exception as e:
@@ -422,7 +479,8 @@ def create_portfolio_manager_node(llm, memory: Optional[Any]) -> Callable:
                 [HumanMessage(content=prompt)],
                 context=agent_prompt.agent_name
             )
-            return {"final_trade_decision": response.content}
+            # CRITICAL FIX: Normalize response.content to string
+            return {"final_trade_decision": extract_string_content(response.content)}
         except Exception as e:
             logger.error(f"PM error: {str(e)}")
             return {"final_trade_decision": f"Error: {str(e)}"}
@@ -521,14 +579,17 @@ Provide your independent consultant review."""
                 context=agent_prompt.agent_name
             )
 
+            # CRITICAL FIX: Normalize response.content to string
+            content_str = extract_string_content(response.content)
+
             logger.info(
                 "consultant_review_complete",
                 ticker=ticker,
-                review_length=len(response.content),
-                has_errors="ERROR" in response.content.upper() or "FAIL" in response.content.upper()
+                review_length=len(content_str),
+                has_errors="ERROR" in content_str.upper() or "FAIL" in content_str.upper()
             )
 
-            return {"consultant_review": response.content}
+            return {"consultant_review": content_str}
 
         except Exception as e:
             logger.error(f"Consultant node error for {ticker}: {str(e)}")
@@ -603,13 +664,13 @@ def create_financial_health_validator_node() -> Callable:
         from src.validators.red_flag_detector import RedFlagDetector
 
         fundamentals_report = state.get('fundamentals_report', '')
-        
-        # --- FIX: DEFENSIVE HANDLING FOR LIST STATE ACCUMULATION ---
-        # LangGraph can sometimes pass the accumulated list of state updates
-        # instead of the reduced string. If we get a list, we take the last element
-        # which represents the most recent/final report.
-        if isinstance(fundamentals_report, list):
-            fundamentals_report = fundamentals_report[-1] if fundamentals_report else ""
+
+        # --- FIX: DEFENSIVE HANDLING FOR NON-STRING STATE VALUES ---
+        # LangGraph can sometimes pass accumulated list of state updates,
+        # or Gemini may return dict/structured content instead of string.
+        # Normalize to string using the helper function.
+        if not isinstance(fundamentals_report, str):
+            fundamentals_report = extract_string_content(fundamentals_report)
 
         ticker = state.get('company_of_interest', 'UNKNOWN')
         company_name = state.get('company_name', ticker)
