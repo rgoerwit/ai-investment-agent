@@ -10,7 +10,11 @@ import logging
 import os
 import re
 from typing import Optional, List
-from langchain_google_genai import ChatGoogleGenerativeAI, HarmBlockThreshold, HarmCategory
+from langchain_google_genai import (
+    ChatGoogleGenerativeAI,
+    HarmBlockThreshold,
+    HarmCategory,
+)
 from langchain_core.language_models import BaseChatModel
 from langchain_core.rate_limiters import InMemoryRateLimiter
 from langchain_core.callbacks import BaseCallbackHandler
@@ -33,11 +37,11 @@ def _is_gemini_v3_or_greater(model_name: str) -> bool:
     """
     if not model_name.startswith("gemini-"):
         return False
-    
+
     match = re.search(r"gemini-([0-9.]+)", model_name)
     if not match:
         return False
-    
+
     version_str = match.group(1)
     try:
         major_version = int(version_str.split('.')[0])
@@ -45,7 +49,21 @@ def _is_gemini_v3_or_greater(model_name: str) -> bool:
     except (ValueError, IndexError):
         return False
 
-# ... (rest of the file is the same until create_gemini_model)
+
+def is_gemini_v3_or_greater(model_name: str) -> bool:
+    """
+    Public wrapper to check if a Gemini model is version 3.0 or greater.
+
+    Used by agents to determine if retry with high thinking_level is beneficial.
+    Only Gemini 3+ models support the thinking_level parameter.
+
+    Args:
+        model_name: The model name string (e.g., "gemini-3-pro-preview")
+
+    Returns:
+        True if model is Gemini 3.0 or greater, False otherwise
+    """
+    return _is_gemini_v3_or_greater(model_name)
 
 def _create_rate_limiter_from_rpm(rpm: int) -> InMemoryRateLimiter:
     """
@@ -110,7 +128,9 @@ def create_quick_thinking_llm(
     """
     model_name = model or config.quick_think_llm
     final_timeout = timeout if timeout is not None else config.api_timeout
-    final_retries = max_retries if max_retries is not None else config.api_retry_attempts
+    final_retries = (
+        max_retries if max_retries is not None else config.api_retry_attempts
+    )
 
     thinking_level = None
     if _is_gemini_v3_or_greater(model_name):
@@ -121,12 +141,16 @@ def create_quick_thinking_llm(
     elif model_name.startswith("gemini-"):
         # Gemini model but NOT 3+ (likely 2.x)
         logger.warning(
-            f"QUICK_MODEL is {model_name} (Gemini 2.x) - tool calling bugs may occur with some LangGraph versions. "
-            f"Recommend using Gemini 3+ (e.g., gemini-3-pro-preview) for QUICK_MODEL. "
-            f"Gemini 3+ models automatically use thinking_level='low' for efficient data gathering."
+            f"QUICK_MODEL is {model_name} (Gemini 2.x) - tool calling bugs "
+            f"may occur with some LangGraph versions. Recommend using "
+            f"Gemini 3+ (e.g., gemini-3-pro-preview) for QUICK_MODEL. "
+            f"Gemini 3+ models use thinking_level='low' for data gathering."
         )
 
-    logger.info(f"Initializing Quick LLM: {model_name} (timeout={final_timeout}, retries={final_retries})")
+    logger.info(
+        f"Initializing Quick LLM: {model_name} "
+        f"(timeout={final_timeout}, retries={final_retries})"
+    )
     return create_gemini_model(
         model_name, temperature, final_timeout, final_retries,
         callbacks=callbacks, thinking_level=thinking_level
@@ -145,7 +169,9 @@ def create_deep_thinking_llm(
     """
     model_name = model or config.deep_think_llm
     final_timeout = timeout if timeout is not None else config.api_timeout
-    final_retries = max_retries if max_retries is not None else config.api_retry_attempts
+    final_retries = (
+        max_retries if max_retries is not None else config.api_retry_attempts
+    )
 
     thinking_level = None
     if _is_gemini_v3_or_greater(model_name):
@@ -154,7 +180,10 @@ def create_deep_thinking_llm(
             f"Deep LLM ({model_name}) is Gemini 3+ - applying thinking_level=high"
         )
 
-    logger.info(f"Initializing Deep LLM: {model_name} (timeout={final_timeout}, retries={final_retries})")
+    logger.info(
+        f"Initializing Deep LLM: {model_name} "
+        f"(timeout={final_timeout}, retries={final_retries})"
+    )
     return create_gemini_model(
         model_name, temperature, final_timeout, final_retries,
         callbacks=callbacks, thinking_level=thinking_level

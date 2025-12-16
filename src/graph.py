@@ -14,7 +14,6 @@ from langgraph.graph import StateGraph, END
 from langgraph.types import RunnableConfig
 # Modern ToolNode import for LangGraph 1.x
 from langgraph.prebuilt import ToolNode
-from langchain_core.messages import AIMessage, HumanMessage
 
 from src.agents import (
     AgentState, create_analyst_node, create_researcher_node,
@@ -23,7 +22,13 @@ from src.agents import (
     create_state_cleaner_node, create_financial_health_validator_node,
     create_consultant_node
 )
-from src.llms import create_quick_thinking_llm, create_deep_thinking_llm, get_consultant_llm
+from src.llms import (
+    create_quick_thinking_llm,
+    create_deep_thinking_llm,
+    get_consultant_llm,
+    is_gemini_v3_or_greater,
+)
+from src.config import config
 from src.toolkit import toolkit
 from src.token_tracker import TokenTrackingCallback, get_tracker
 from src.memory import (
@@ -38,7 +43,7 @@ class TradingContext:
     """
     Context object passed to graph nodes via configuration.
     Includes parameters that control graph execution flow.
-    
+
     UPDATED: Added ticker-specific memory management.
     """
     ticker: str
@@ -52,14 +57,16 @@ class TradingContext:
     # NEW: Whether to cleanup previous ticker memories
     cleanup_previous_memories: bool = True
 
-def should_continue_analyst(state: AgentState, config: RunnableConfig) -> Literal["tools", "continue"]:
+def should_continue_analyst(
+    state: AgentState, config: RunnableConfig
+) -> Literal["tools", "continue"]:
     """
     Determine if analyst should call tools or continue to next node.
-    
+
     Args:
         state: Current agent state
         config: Runtime configuration
-        
+
     Returns:
         "tools" if agent has pending tool calls, "continue" otherwise
     """
@@ -100,7 +107,9 @@ def route_tools(state: AgentState) -> str:
     return node_name
 
 
-def validator_router(state: AgentState, config: RunnableConfig) -> Literal["Portfolio Manager", "Bull Researcher"]:
+def validator_router(
+    state: AgentState, config: RunnableConfig
+) -> Literal["Portfolio Manager", "Bull Researcher"]:
     """
     Route based on pre-screening red-flag validation results.
 
@@ -154,15 +163,16 @@ def create_trading_graph(
     UPDATED: Now supports ticker-specific memories to prevent cross-contamination.
 
     Args:
-        ticker: Stock ticker symbol (e.g., "0005.HK", "AAPL"). If provided, creates
-                ticker-specific memories. If None, uses legacy global memories (NOT recommended).
-        cleanup_previous: If True, deletes all previous memories before creating new ones.
-                         Use this to ensure fresh analysis without contamination.
+        ticker: Stock ticker symbol (e.g., "0005.HK", "AAPL"). If provided,
+                creates ticker-specific memories. If None, uses legacy global
+                memories (NOT recommended).
+        cleanup_previous: If True, deletes all previous memories before
+                         creating new ones for fresh analysis.
         max_debate_rounds: Maximum rounds of bull/bear debate (default: 2)
         max_risk_discuss_rounds: Maximum rounds of risk discussion (default: 1)
         enable_memory: Whether to enable agent memory (default: True)
-        recursion_limit: Maximum recursion depth for graph execution (default: 100)
-        quick_mode: If True, use faster/cheaper models for consultant LLM (default: False)
+        recursion_limit: Max recursion depth for graph execution (default: 100)
+        quick_mode: If True, use faster/cheaper models (default: False)
 
     Returns:
         Compiled LangGraph StateGraph ready for execution
@@ -179,7 +189,7 @@ def create_trading_graph(
         # Legacy: Global memory (may cause contamination)
         graph = create_trading_graph(max_debate_rounds=2)
     """
-    
+
     # Determine which memories to use
     if ticker and enable_memory:
         # RECOMMENDED: Create ticker-specific memories
@@ -187,11 +197,11 @@ def create_trading_graph(
             logger.info(
                 "cleaning_previous_memories",
                 ticker=ticker,
-                message="Deleting previous memory collections for THIS ticker to prevent contamination"
+                message="Deleting previous memory collections for this ticker"
             )
             # UPDATED: Pass ticker to scoped cleanup
             cleanup_all_memories(days=0, ticker=ticker)
-        
+
         logger.info(
             "creating_ticker_memories",
             ticker=ticker,
@@ -209,13 +219,22 @@ def create_trading_graph(
         risk_manager_memory = memories.get(f"{safe_ticker}_risk_manager_memory")
 
         # Verify all memories were successfully created
-        if not all([bull_memory, bear_memory, invest_judge_memory, trader_memory, risk_manager_memory]):
+        all_memories = [
+            bull_memory, bear_memory, invest_judge_memory,
+            trader_memory, risk_manager_memory
+        ]
+        if not all(all_memories):
             missing = []
-            if not bull_memory: missing.append("bull_memory")
-            if not bear_memory: missing.append("bear_memory")
-            if not invest_judge_memory: missing.append("invest_judge_memory")
-            if not trader_memory: missing.append("trader_memory")
-            if not risk_manager_memory: missing.append("risk_manager_memory")
+            if not bull_memory:
+                missing.append("bull_memory")
+            if not bear_memory:
+                missing.append("bear_memory")
+            if not invest_judge_memory:
+                missing.append("invest_judge_memory")
+            if not trader_memory:
+                missing.append("trader_memory")
+            if not risk_manager_memory:
+                missing.append("risk_manager_memory")
             raise ValueError(
                 f"Failed to create memory instances for ticker {ticker}. "
                 f"Missing: {', '.join(missing)}. "
@@ -237,8 +256,7 @@ def create_trading_graph(
             "using_legacy_memories",
             ticker=ticker,
             enable_memory=enable_memory,
-            message="Using legacy global memories. This WILL cause cross-ticker contamination! "
-                    "Use ticker-specific memories by passing ticker parameter."
+            message="Using legacy memories - cross-ticker contamination risk!"
         )
         # Manually create legacy instances since they are no longer global
         bull_memory = FinancialSituationMemory("legacy_bull_memory")
@@ -246,7 +264,7 @@ def create_trading_graph(
         invest_judge_memory = FinancialSituationMemory("legacy_invest_judge_memory")
         trader_memory = FinancialSituationMemory("legacy_trader_memory")
         risk_manager_memory = FinancialSituationMemory("legacy_risk_manager_memory")
-    
+
     # Log graph creation
     logger.info(
         "creating_trading_graph",
@@ -260,44 +278,131 @@ def create_trading_graph(
     tracker = get_tracker()
 
     # Data gathering agents: Always use LOW thinking (small context, simple tasks)
-    market_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Market Analyst", tracker)])
-    social_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Social Analyst", tracker)])
-    news_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("News Analyst", tracker)])
-    fund_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Fundamentals Analyst", tracker)])
+    market_llm = create_quick_thinking_llm(
+        callbacks=[TokenTrackingCallback("Market Analyst", tracker)]
+    )
+    social_llm = create_quick_thinking_llm(
+        callbacks=[TokenTrackingCallback("Social Analyst", tracker)]
+    )
+    news_llm = create_quick_thinking_llm(
+        callbacks=[TokenTrackingCallback("News Analyst", tracker)]
+    )
+    fund_llm = create_quick_thinking_llm(
+        callbacks=[TokenTrackingCallback("Fundamentals Analyst", tracker)]
+    )
 
-    # Synthesis agents: Mode-dependent thinking (large context, heavy reasoning load)
-    # Quick mode: LOW thinking (faster, less deep reasoning)
-    # Normal mode: HIGH thinking (slower, deeper reasoning)
-    if quick_mode:
-        logger.info("Quick mode ON: Using LOW thinking for synthesis agents (Bull, Bear, Research Manager, Portfolio Manager, Risk Analysts).")
-        bull_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Bull Researcher", tracker)])
-        bear_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Bear Researcher", tracker)])
-        res_mgr_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Research Manager", tracker)])
-        pm_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Portfolio Manager", tracker)])
-        risky_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Risky Analyst", tracker)])
-        safe_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Safe Analyst", tracker)])
-        neutral_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Neutral Analyst", tracker)])
+    # --- RETRY LLM FOR DATA GATHERING AGENTS ---
+    # If not in quick_mode AND using Gemini 3+ for quick_think_llm, create a
+    # retry LLM with thinking_level=high. One retry attempt if output empty.
+    # Retry is disabled in quick_mode (user chose speed over reliability).
+    retry_llm = None
+    allow_retry = False
+    if not quick_mode and is_gemini_v3_or_greater(config.quick_think_llm):
+        retry_llm = create_deep_thinking_llm(
+            callbacks=[TokenTrackingCallback("Retry Agent (Deep)", tracker)]
+        )
+        allow_retry = True
+        logger.info(
+            "retry_llm_enabled",
+            ticker=ticker,
+            quick_model=config.quick_think_llm,
+            message="Agents will retry with thinking_level=high if insufficient"
+        )
+    elif quick_mode:
+        logger.info(
+            "retry_llm_disabled_quick_mode",
+            ticker=ticker,
+            message="Retry with deep thinking disabled in quick mode (speed preferred)"
+        )
     else:
-        logger.info("Normal mode: Using HIGH (deep) thinking for synthesis agents (Bull, Bear, Research Manager, Portfolio Manager, Risk Analysts).")
-        bull_llm = create_deep_thinking_llm(callbacks=[TokenTrackingCallback("Bull Researcher", tracker)])
-        bear_llm = create_deep_thinking_llm(callbacks=[TokenTrackingCallback("Bear Researcher", tracker)])
-        res_mgr_llm = create_deep_thinking_llm(callbacks=[TokenTrackingCallback("Research Manager", tracker)])
-        pm_llm = create_deep_thinking_llm(callbacks=[TokenTrackingCallback("Portfolio Manager", tracker)])
-        risky_llm = create_deep_thinking_llm(callbacks=[TokenTrackingCallback("Risky Analyst", tracker)])
-        safe_llm = create_deep_thinking_llm(callbacks=[TokenTrackingCallback("Safe Analyst", tracker)])
-        neutral_llm = create_deep_thinking_llm(callbacks=[TokenTrackingCallback("Neutral Analyst", tracker)])
+        logger.info(
+            "retry_llm_disabled_not_gemini3",
+            ticker=ticker,
+            quick_model=config.quick_think_llm,
+            message="Retry disabled (thinking_level only benefits Gemini 3+)"
+        )
+
+    # Synthesis agents: Mode-dependent thinking (large context, heavy reasoning)
+    # Quick mode: LOW thinking | Normal mode: HIGH thinking
+    if quick_mode:
+        logger.info("Quick mode: LOW thinking for synthesis agents")
+        bull_llm = create_quick_thinking_llm(
+            callbacks=[TokenTrackingCallback("Bull Researcher", tracker)]
+        )
+        bear_llm = create_quick_thinking_llm(
+            callbacks=[TokenTrackingCallback("Bear Researcher", tracker)]
+        )
+        res_mgr_llm = create_quick_thinking_llm(
+            callbacks=[TokenTrackingCallback("Research Manager", tracker)]
+        )
+        pm_llm = create_quick_thinking_llm(
+            callbacks=[TokenTrackingCallback("Portfolio Manager", tracker)]
+        )
+        risky_llm = create_quick_thinking_llm(
+            callbacks=[TokenTrackingCallback("Risky Analyst", tracker)]
+        )
+        safe_llm = create_quick_thinking_llm(
+            callbacks=[TokenTrackingCallback("Safe Analyst", tracker)]
+        )
+        neutral_llm = create_quick_thinking_llm(
+            callbacks=[TokenTrackingCallback("Neutral Analyst", tracker)]
+        )
+    else:
+        logger.info("Normal mode: HIGH thinking for synthesis agents")
+        bull_llm = create_deep_thinking_llm(
+            callbacks=[TokenTrackingCallback("Bull Researcher", tracker)]
+        )
+        bear_llm = create_deep_thinking_llm(
+            callbacks=[TokenTrackingCallback("Bear Researcher", tracker)]
+        )
+        res_mgr_llm = create_deep_thinking_llm(
+            callbacks=[TokenTrackingCallback("Research Manager", tracker)]
+        )
+        pm_llm = create_deep_thinking_llm(
+            callbacks=[TokenTrackingCallback("Portfolio Manager", tracker)]
+        )
+        risky_llm = create_deep_thinking_llm(
+            callbacks=[TokenTrackingCallback("Risky Analyst", tracker)]
+        )
+        safe_llm = create_deep_thinking_llm(
+            callbacks=[TokenTrackingCallback("Safe Analyst", tracker)]
+        )
+        neutral_llm = create_deep_thinking_llm(
+            callbacks=[TokenTrackingCallback("Neutral Analyst", tracker)]
+        )
 
     # Trader agent: Always use LOW thinking (simple execution task)
-    trader_llm = create_quick_thinking_llm(callbacks=[TokenTrackingCallback("Trader", tracker)])
+    trader_llm = create_quick_thinking_llm(
+        callbacks=[TokenTrackingCallback("Trader", tracker)]
+    )
 
     # Consultant LLM (OpenAI - optional, may be None if disabled/unavailable)
-    consultant_llm = get_consultant_llm(callbacks=[TokenTrackingCallback("Consultant", tracker)], quick_mode=quick_mode)
+    consultant_llm = get_consultant_llm(
+        callbacks=[TokenTrackingCallback("Consultant", tracker)],
+        quick_mode=quick_mode
+    )
 
-    # Nodes
-    market = create_analyst_node(market_llm, "market_analyst", toolkit.get_technical_tools(), "market_report")
-    social = create_analyst_node(social_llm, "sentiment_analyst", toolkit.get_sentiment_tools(), "sentiment_report")
-    news = create_analyst_node(news_llm, "news_analyst", toolkit.get_news_tools(), "news_report")
-    fund = create_analyst_node(fund_llm, "fundamentals_analyst", toolkit.get_fundamental_tools(), "fundamentals_report")
+    # Nodes (data gathering agents with optional retry capability)
+    market = create_analyst_node(
+        market_llm, "market_analyst",
+        toolkit.get_technical_tools(), "market_report",
+        retry_llm=retry_llm, allow_retry=allow_retry
+    )
+    social = create_analyst_node(
+        social_llm, "sentiment_analyst",
+        toolkit.get_sentiment_tools(), "sentiment_report",
+        retry_llm=retry_llm, allow_retry=allow_retry
+    )
+    news = create_analyst_node(
+        news_llm, "news_analyst",
+        toolkit.get_news_tools(), "news_report",
+        retry_llm=retry_llm, allow_retry=allow_retry
+    )
+    fund = create_analyst_node(
+        fund_llm, "fundamentals_analyst",
+        toolkit.get_fundamental_tools(), "fundamentals_report",
+        retry_llm=retry_llm, allow_retry=allow_retry
+    )
 
     cleaner = create_state_cleaner_node()
     # Standard ToolNode initialized with all tools
@@ -331,11 +436,11 @@ def create_trading_graph(
         logger.info(
             "consultant_node_disabled",
             ticker=ticker,
-            message="Consultant node skipped (OpenAI API key not configured or disabled)"
+            message="Consultant skipped (no OpenAI API key or disabled)"
         )
 
     workflow = StateGraph(AgentState)
-    
+
     workflow.add_node("Market Analyst", market)
     workflow.add_node("Social Analyst", social)
     workflow.add_node("News Analyst", news)
@@ -363,18 +468,30 @@ def create_trading_graph(
 
     # Flow
     workflow.set_entry_point("Market Analyst")
-    
+
     # 1. Market Flow
-    workflow.add_conditional_edges("Market Analyst", should_continue_analyst, {"tools": "tools", "continue": "Cleaner"})
-    
+    workflow.add_conditional_edges(
+        "Market Analyst", should_continue_analyst,
+        {"tools": "tools", "continue": "Cleaner"}
+    )
+
     # 2. Social Flow (via cleaner nodes to reset history)
     workflow.add_node("Clean1", cleaner)
     workflow.add_edge("Cleaner", "Clean1")
     workflow.add_edge("Clean1", "Social Analyst")
-    
-    workflow.add_conditional_edges("Social Analyst", should_continue_analyst, {"tools": "tools", "continue": "News Analyst"})
-    workflow.add_conditional_edges("News Analyst", should_continue_analyst, {"tools": "tools", "continue": "Fundamentals Analyst"})
-    workflow.add_conditional_edges("Fundamentals Analyst", should_continue_analyst, {"tools": "tools", "continue": "Financial Validator"})
+
+    workflow.add_conditional_edges(
+        "Social Analyst", should_continue_analyst,
+        {"tools": "tools", "continue": "News Analyst"}
+    )
+    workflow.add_conditional_edges(
+        "News Analyst", should_continue_analyst,
+        {"tools": "tools", "continue": "Fundamentals Analyst"}
+    )
+    workflow.add_conditional_edges(
+        "Fundamentals Analyst", should_continue_analyst,
+        {"tools": "tools", "continue": "Financial Validator"}
+    )
 
     # Tool Return Logic
     workflow.add_conditional_edges("tools", route_tools, {
@@ -396,26 +513,32 @@ def create_trading_graph(
     def debate_router(state: AgentState, config: RunnableConfig):
         """
         Route debate flow between Bull and Bear researchers.
-        After debate converges, routes to Consultant (if enabled) or Trader (if disabled).
+        After debate converges, routes to Consultant or Trader.
         """
         # Retrieve configuration from context
         context = config.get("configurable", {}).get("context")
         # Default to 2 rounds if context is missing or field is None
         max_rounds = getattr(context, "max_debate_rounds", 2) if context else 2
-        
+
         # Total turns = rounds * 2 (Bull + Bear per round)
         limit = max_rounds * 2
-        
+
         count = state.get("investment_debate_state", {}).get("count", 0)
-        
+
         if count >= limit:
             return "Research Manager"
-            
+
         # Alternating flow
         return "Bear Researcher" if count % 2 != 0 else "Bull Researcher"
 
-    workflow.add_conditional_edges("Bull Researcher", debate_router, ["Bear Researcher", "Research Manager"])
-    workflow.add_conditional_edges("Bear Researcher", debate_router, ["Bull Researcher", "Research Manager"])
+    workflow.add_conditional_edges(
+        "Bull Researcher", debate_router,
+        ["Bear Researcher", "Research Manager"]
+    )
+    workflow.add_conditional_edges(
+        "Bear Researcher", debate_router,
+        ["Bull Researcher", "Research Manager"]
+    )
 
     # Consultant routing: Research Manager → Consultant → Trader
     # If consultant node not available, route directly to Trader
@@ -426,7 +549,7 @@ def create_trading_graph(
         workflow.add_edge("Research Manager", "Trader")
 
     workflow.add_edge("Trader", "Risky Analyst")
-    
+
     # Risk Flow
     workflow.add_edge("Risky Analyst", "Safe Analyst")
     workflow.add_edge("Safe Analyst", "Neutral Analyst")
