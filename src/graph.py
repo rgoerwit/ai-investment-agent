@@ -17,6 +17,7 @@ import structlog
 from langgraph.graph import StateGraph, END
 from langgraph.types import RunnableConfig
 from langgraph.prebuilt import ToolNode
+from langchain_core.messages import AIMessage, ToolMessage
 
 from src.agents import (
     AgentState, create_analyst_node, create_researcher_node,
@@ -103,6 +104,69 @@ def route_tools(state: AgentState) -> str:
     )
 
     return node_name
+
+
+def create_agent_tool_node(tools: List, agent_key: str):
+    """
+    Create a tool execution node that only processes tool_calls from a specific agent.
+
+    CRITICAL FIX: In parallel execution, multiple agents add AIMessages to the shared
+    messages list. The standard ToolNode looks at the "latest AIMessage" which might
+    be from a different agent. This wrapper filters messages to find the AIMessage
+    that contains tool_calls for THIS agent's tools.
+
+    Args:
+        tools: List of tools this node can execute
+        agent_key: The sender key for the agent (e.g., "market_analyst")
+
+    Returns:
+        An async function that executes tools for the specific agent
+    """
+    tool_node = ToolNode(tools)
+    tool_names = {tool.name for tool in tools}
+
+    async def agent_tool_node(state: AgentState, config: RunnableConfig) -> Dict:
+        """Execute tools for a specific agent by filtering messages."""
+        messages = state.get("messages", [])
+
+        # Find the AIMessage from THIS agent (has tool_calls for our tools)
+        target_message = None
+        for msg in reversed(messages):
+            if isinstance(msg, AIMessage) and hasattr(msg, 'tool_calls') and msg.tool_calls:
+                # Check if any tool_call is for one of our tools
+                msg_tool_names = {tc.get('name', tc.get('function', {}).get('name', ''))
+                                 for tc in msg.tool_calls}
+                if msg_tool_names & tool_names:  # Intersection - has at least one of our tools
+                    target_message = msg
+                    break
+
+        if target_message is None:
+            logger.warning(
+                "agent_tool_node_no_matching_message",
+                agent_key=agent_key,
+                tool_names=list(tool_names),
+                message="No AIMessage found with tool_calls for this agent's tools"
+            )
+            return {"messages": []}
+
+        # Create a filtered state with only the target message
+        # This ensures ToolNode processes the correct tool_calls
+        filtered_messages = [target_message]
+
+        logger.debug(
+            "agent_tool_node_executing",
+            agent_key=agent_key,
+            tool_calls=[tc.get('name') for tc in target_message.tool_calls],
+            total_messages=len(messages)
+        )
+
+        # Execute the tools using the filtered messages
+        result = await tool_node.ainvoke({"messages": filtered_messages}, config)
+
+        # Return the tool messages
+        return result
+
+    return agent_tool_node
 
 
 def fan_out_to_analysts(
@@ -407,11 +471,21 @@ def create_trading_graph(
     )
     validator = create_financial_health_validator_node()
 
-    # Separate tool nodes for each analyst (avoids parallel routing conflicts)
-    market_tools = ToolNode(toolkit.get_market_tools())
-    sentiment_tools = ToolNode(toolkit.get_sentiment_tools())
-    news_tools = ToolNode(toolkit.get_news_tools())
-    junior_fund_tools = ToolNode(toolkit.get_junior_fundamental_tools())
+    # Agent-specific tool nodes for parallel execution
+    # CRITICAL: Uses create_agent_tool_node to filter messages by agent's tools
+    # This prevents parallel agents from executing each other's tool_calls
+    market_tools = create_agent_tool_node(
+        toolkit.get_market_tools(), "market_analyst"
+    )
+    sentiment_tools = create_agent_tool_node(
+        toolkit.get_sentiment_tools(), "sentiment_analyst"
+    )
+    news_tools = create_agent_tool_node(
+        toolkit.get_news_tools(), "news_analyst"
+    )
+    junior_fund_tools = create_agent_tool_node(
+        toolkit.get_junior_fundamental_tools(), "junior_fundamentals_analyst"
+    )
 
     # Research & Decision nodes
     bull = create_researcher_node(bull_llm, bull_memory, "bull_researcher")
