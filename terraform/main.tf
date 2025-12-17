@@ -183,20 +183,20 @@ resource "azurerm_storage_account" "main" {
 
 # File Share for persistent agent memory storage
 resource "azurerm_storage_share" "agent_memory" {
-  name                 = "agent-memory"
-  storage_account_name = azurerm_storage_account.main.name
-  quota                = var.storage_quota_gb
-  access_tier          = "Hot"
+  name               = "agent-memory"
+  storage_account_id = azurerm_storage_account.main.id
+  quota              = var.storage_quota_gb
+  access_tier        = "Hot"
 
   depends_on = [azurerm_storage_account.main]
 }
 
 # Additional file share for results output
 resource "azurerm_storage_share" "results" {
-  name                 = "results"
-  storage_account_name = azurerm_storage_account.main.name
-  quota                = 10 # 10GB for results
-  access_tier          = "Hot"
+  name               = "results"
+  storage_account_id = azurerm_storage_account.main.id
+  quota              = 10 # 10GB for results
+  access_tier        = "Hot"
 
   depends_on = [azurerm_storage_account.main]
 }
@@ -286,11 +286,11 @@ resource "azurerm_container_group" "main" {
       "DEFAULT_TICKER" = var.ticker_to_analyze
       "LOG_LEVEL"      = var.log_level
 
-      # Note: Model selection is hardcoded in src/llms.py
-      # These env vars are provided for documentation but currently ignored
+      # Model selection - configured via environment variables
+      # See src/config.py for defaults if not set
       "LLM_PROVIDER" = "google"
-      "QUICK_MODEL"  = "gemini-2.0-flash-exp"
-      "DEEP_MODEL"   = "gemini-2.0-flash-thinking-exp"
+      "QUICK_MODEL"  = var.quick_model
+      "DEEP_MODEL"   = var.deep_model
 
       # LangSmith configuration
       "LANGSMITH_TRACING" = "true"

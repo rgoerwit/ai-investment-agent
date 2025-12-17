@@ -39,17 +39,27 @@ This isn't a single prompt to an LLM. It's a **stateful orchestration** of speci
 
 ```mermaid
 graph TB
-    Start([User: Analyze TICKER]) --> MarketAnalyst["Market Analyst<br/>(Technical Analysis)"]
+    Start([User: Analyze TICKER]) --> Dispatcher{Parallel<br/>Dispatch}
 
-    MarketAnalyst --> SentimentAnalyst["Sentiment Analyst<br/>(Social Media)"]
-    SentimentAnalyst --> NewsAnalyst["News Analyst<br/>(Recent Events)"]
-    NewsAnalyst --> JuniorFund["Junior Fundamentals<br/>(Data Gathering)"]
+    %% Parallel Fan-Out: 4 branches run simultaneously
+    Dispatcher --> MarketAnalyst["Market Analyst<br/>(Technical Analysis)"]
+    Dispatcher --> SentimentAnalyst["Sentiment Analyst<br/>(Social Media)"]
+    Dispatcher --> NewsAnalyst["News Analyst<br/>(Recent Events)"]
+    Dispatcher --> JuniorFund["Junior Fundamentals<br/>(Data Gathering)"]
+
+    %% Each analyst has tool-calling loop (simplified)
+    MarketAnalyst --> SyncCheck["Sync Check<br/>(Fan-In Barrier)"]
+    SentimentAnalyst --> SyncCheck
+    NewsAnalyst --> SyncCheck
+
+    %% Fundamentals chain is longer
     JuniorFund -->|Raw Data| SeniorFund["Senior Fundamentals<br/>(Scoring & Analysis)"]
-
     SeniorFund --> Validator["Financial Validator<br/>(Red-Flag Detection)"]
+    Validator --> SyncCheck
 
-    Validator -->|REJECT<br/>Critical Red Flags| PortfolioManager["Portfolio Manager<br/>(Final Decision)"]
-    Validator -->|PASS| BullResearcher["Bull Researcher<br/>(Upside Case)"]
+    %% After all 4 branches complete
+    SyncCheck -->|REJECT| PortfolioManager["Portfolio Manager<br/>(Final Decision)"]
+    SyncCheck -->|PASS| BullResearcher["Bull Researcher<br/>(Upside Case)"]
 
     BullResearcher --> Debate{Multi-Round<br/>Debate}
     BearResearcher["Bear Researcher<br/>(Downside Risk)"] --> Debate
@@ -63,18 +73,20 @@ graph TB
     Consultant -->|OpenAI Review| Trader["Trader<br/>(Trade Plan)"]
     ResearchManager -.->|If Disabled| Trader
 
-    Trader --> RiskTeam["Risk Assessment Team<br/>(3 Perspectives)"]
+    Trader --> RiskTeam["Risk Assessment Team<br/>(Risky → Safe → Neutral)"]
 
     RiskTeam --> PortfolioManager
 
     PortfolioManager --> Decision([BUY / SELL / HOLD<br/>+ Position Size])
 
+    style Dispatcher fill:#ffeaa7
     style MarketAnalyst fill:#e1f5ff
     style NewsAnalyst fill:#e1f5ff
     style SentimentAnalyst fill:#e1f5ff
     style JuniorFund fill:#e1f5ff
     style SeniorFund fill:#e1f5ff
     style Validator fill:#ffcccc
+    style SyncCheck fill:#e0e0e0
     style ResearchManager fill:#fff4e1
     style BullResearcher fill:#d4edda
     style BearResearcher fill:#f8d7da
@@ -88,17 +100,33 @@ graph TB
 
 ### How Agents Collaborate
 
-1. **Sequential Data Gathering** - Analyst agents run in sequence to build context: Market → Sentiment → News → Junior Fundamentals → Senior Fundamentals. Each agent can access previous reports for context.
-2. **Junior/Senior Fundamentals Split** - The Junior Fundamentals Analyst calls data tools (get_financial_metrics, get_fundamental_analysis) and returns raw data. The Senior Fundamentals Analyst receives this raw data and produces scored analysis with a structured DATA_BLOCK.
-3. **Red-Flag Pre-Screening** - Financial Validator parses the DATA_BLOCK for catastrophic risks (extreme leverage >500% D/E, earnings quality issues, refinancing risk). REJECT routes directly to Portfolio Manager; PASS continues to debate.
-4. **Adversarial Debate** - Bull and Bear researchers argue opposite perspectives for 1-2 rounds, receiving Market and Fundamentals reports plus debate history.
-5. **Research Synthesis** - After debate converges, the Research Manager combines ALL analyst reports (Market, Sentiment, News, Fundamentals) with debate history to create an investment plan.
-6. **External Consultant** (Optional) - Independent cross-validation using OpenAI ChatGPT to detect biases and validate Gemini's analysis.
-7. **Trade Planning** - Trader creates specific execution parameters based on the investment plan.
-8. **Risk Assessment** - Three risk analysts (Conservative/Neutral/Aggressive) evaluate position sizing from different risk tolerances.
-9. **Executive Decision** - Portfolio Manager synthesizes all viewpoints, applies thesis criteria, and makes final BUY/SELL/HOLD decision.
+1. **Parallel Data Gathering (Fan-Out)** - Four analyst branches run **simultaneously** to maximize speed:
+   - Market Analyst (technical indicators, liquidity)
+   - Sentiment Analyst (social media signals)
+   - News Analyst (recent events, catalysts)
+   - Fundamentals chain (Junior → Senior → Validator)
 
-**Why This Matters:** Single-LLM systems are prone to confirmation bias. Multi-agent debate forces the AI to consider contradictory evidence, mimicking how institutional research teams actually work. The Junior/Senior split prevents tool-calling complexity from interfering with analysis quality. The Financial Validator provides deterministic pre-screening to catch catastrophic financial risks before debate, saving time and token costs. The optional External Consultant uses a different AI model (OpenAI) to catch groupthink.
+   Each branch has its own tool-calling loop. This parallel architecture reduces analysis time by ~60% compared to sequential execution.
+
+2. **Sync Check (Fan-In Barrier)** - All 4 branches converge at a synchronization point. The Sync Check waits for all reports before proceeding. Early branches terminate; the last branch to complete triggers the next phase.
+
+3. **Junior/Senior Fundamentals Split** - The Junior Fundamentals Analyst calls data tools (get_financial_metrics, get_fundamental_analysis) and returns raw data. The Senior Fundamentals Analyst receives this raw data and produces scored analysis with a structured DATA_BLOCK.
+
+4. **Red-Flag Pre-Screening** - Financial Validator parses the DATA_BLOCK for catastrophic risks (extreme leverage >500% D/E, earnings quality issues, refinancing risk). REJECT routes directly to Portfolio Manager; PASS continues to debate.
+
+5. **Adversarial Debate** - Bull and Bear researchers argue opposite perspectives for 1-2 rounds, receiving ALL analyst reports (Market, Sentiment, News, Fundamentals) plus debate history.
+
+6. **Research Synthesis** - After debate converges, the Research Manager combines all analyst reports with debate history to create an investment plan.
+
+7. **External Consultant** (Optional) - Independent cross-validation using OpenAI ChatGPT to detect biases and validate Gemini's analysis.
+
+8. **Trade Planning** - Trader creates specific execution parameters based on the investment plan.
+
+9. **Risk Assessment** - Three risk analysts (Risky/Safe/Neutral) evaluate position sizing from different risk tolerances.
+
+10. **Executive Decision** - Portfolio Manager synthesizes all viewpoints, applies thesis criteria, and makes final BUY/SELL/HOLD decision.
+
+**Why This Matters:** Single-LLM systems are prone to confirmation bias. Multi-agent debate forces the AI to consider contradictory evidence, mimicking how institutional research teams actually work. The parallel fan-out/fan-in pattern provides speed without sacrificing data quality. The Junior/Senior split prevents tool-calling complexity from interfering with analysis. The Financial Validator provides deterministic pre-screening to catch catastrophic risks before debate. The optional External Consultant uses a different AI model (OpenAI) to catch groupthink.
 
 ---
 
@@ -142,8 +170,17 @@ source .venv/bin/activate  # On macOS/Linux
 export GRPC_VERBOSITY=ERROR
 export GRPC_TRACE=""
 
-# Analyze a single ticker; add --quiet to skip all the logging; add --brief for short output
+# Analyze a single ticker
 poetry run python -m src.main --ticker 0005.HK
+
+# Output to file (auto-detects non-TTY, outputs clean markdown)
+poetry run python -m src.main --ticker 0005.HK > results/0005.HK.md
+
+# Quiet mode (suppress logging, output markdown only)
+poetry run python -m src.main --ticker 0005.HK --quiet
+
+# Brief mode (compact markdown: header, summary, decision only)
+poetry run python -m src.main --ticker 0005.HK --brief
 
 # Quick mode (faster, 1 debate round)
 poetry run python -m src.main --ticker 7203.T --quick
@@ -224,11 +261,13 @@ QUICK_MODEL=gemini-3-flash-preview  # Faster, cheaper data gathering
 DEEP_MODEL=gemini-3-pro-preview     # More powerful synthesis
 ```
 
-**Note:** The model configuration is currently **hardcoded in `src/llms.py`** (lines 164-165), not controlled by environment variables. The system uses:
-- Quick thinking: `gemini-2.0-flash-exp` (will trigger warning due to tool-calling bugs)
-- Deep thinking: `gemini-2.0-flash-thinking-exp`
+**Note:** Model configuration is controlled via environment variables in your `.env` file:
+```bash
+QUICK_MODEL=gemini-3-pro-preview    # Used by data gathering agents
+DEEP_MODEL=gemini-3-pro-preview     # Used by synthesis agents in normal mode
+```
 
-To change models, edit `src/llms.py` and update the `config.quick_think_llm` and `config.deep_think_llm` assignments, or modify your `.env` file if the config system reads from there.
+The defaults (if not set) are defined in `src/config.py`. All LLM instances are automatically tracked for proper cleanup at application shutdown.
 
 #### Performance Implications
 

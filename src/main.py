@@ -613,7 +613,11 @@ async def main():
         result = await run_analysis(args.ticker, args.quick)
         
         if result:
-            if args.brief or args.quiet:
+            # Auto-detect non-TTY stdout (e.g., output redirected to file)
+            # Use markdown output instead of Rich formatting to avoid box-drawing characters
+            use_markdown = args.brief or args.quiet or not sys.stdout.isatty()
+
+            if use_markdown:
                 company_name = None
                 try:
                     import yfinance as yf
@@ -622,7 +626,7 @@ async def main():
                     company_name = info.get('longName') or info.get('shortName')
                 except:
                     pass
-                
+
                 reporter = QuietModeReporter(args.ticker, company_name, quick_mode=args.quick)
                 report = reporter.generate_report(result, brief_mode=args.brief)
                 print(report)

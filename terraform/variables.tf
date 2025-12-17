@@ -169,6 +169,20 @@ variable "log_level" {
   }
 }
 
+# ===== MODEL CONFIGURATION =====
+
+variable "quick_model" {
+  description = "Gemini model for data gathering agents (thinking_level=low)"
+  type        = string
+  default     = "gemini-3-pro-preview"
+}
+
+variable "deep_model" {
+  description = "Gemini model for synthesis agents (thinking_level=high in normal mode)"
+  type        = string
+  default     = "gemini-3-pro-preview"
+}
+
 # ===== STORAGE CONFIGURATION =====
 
 variable "storage_quota_gb" {
