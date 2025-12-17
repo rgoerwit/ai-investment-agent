@@ -124,21 +124,22 @@ def sync_check_router(
     state: AgentState, config: RunnableConfig
 ) -> Literal["Research Manager", "Portfolio Manager", "__end__"]:
     """
-    Synchronization barrier that waits for all 4 analyst streams.
+    Synchronization barrier for parallel analyst streams (fan-in pattern).
 
-    Each parallel branch routes here when complete. The router checks
-    if ALL required reports are present:
-    - market_report
-    - sentiment_report
-    - news_report
-    - pre_screening_result (from Validator)
+    All 4 parallel branches converge here. Each branch calls sync_check
+    when it completes. The router checks if ALL required reports are present:
+    - market_report (from Market Analyst)
+    - sentiment_report (from Sentiment Analyst)
+    - news_report (from News Analyst)
+    - pre_screening_result (from Validator in Fundamentals chain)
 
-    When all are present:
-    - REJECT → Portfolio Manager (fast-fail, skip debate)
-    - PASS → Research Manager (continue to debate)
+    Routing behavior:
+    - If NOT all reports present: Return __end__ to terminate THIS branch
+      (other branches continue running and will hit sync_check later)
+    - If all present AND pre_screening=REJECT: Route to Portfolio Manager (fast-fail)
+    - If all present AND pre_screening=PASS: Route to Bull Researcher (start debate)
 
-    When not all present:
-    - Return END to terminate this branch (other branches continue)
+    The LAST branch to complete will see all reports and proceed to the next phase.
     """
     market_done = bool(state.get("market_report"))
     sentiment_done = bool(state.get("sentiment_report"))
@@ -488,23 +489,24 @@ def create_trading_graph(
         ["Market Analyst", "Sentiment Analyst", "News Analyst", "Junior Fundamentals Analyst"]
     )
 
-    # Market, Sentiment, News: tools loop → END (set reports and exit)
+    # Market, Sentiment, News: tools loop → Sync Check
+    # All branches converge at Sync Check for proper synchronization
     # Each analyst has its own tool node to avoid parallel routing conflicts
     workflow.add_conditional_edges(
         "Market Analyst", should_continue_analyst,
-        {"tools": "market_tools", "continue": END}
+        {"tools": "market_tools", "continue": "Sync Check"}
     )
     workflow.add_edge("market_tools", "Market Analyst")
 
     workflow.add_conditional_edges(
         "Sentiment Analyst", should_continue_analyst,
-        {"tools": "sentiment_tools", "continue": END}
+        {"tools": "sentiment_tools", "continue": "Sync Check"}
     )
     workflow.add_edge("sentiment_tools", "Sentiment Analyst")
 
     workflow.add_conditional_edges(
         "News Analyst", should_continue_analyst,
-        {"tools": "news_tools", "continue": END}
+        {"tools": "news_tools", "continue": "Sync Check"}
     )
     workflow.add_edge("news_tools", "News Analyst")
 

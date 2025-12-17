@@ -343,6 +343,8 @@ def create_analyst_node(
             extra_context = ""
 
             # Junior Fundamentals Analyst: Gets news context for qualitative info
+            # NOTE: In parallel mode, news_report may not be available yet
+            # Junior primarily uses tools - news context is supplementary
             if agent_key == "junior_fundamentals_analyst":
                 news_report = state.get("news_report", "")
                 if news_report:
@@ -350,8 +352,11 @@ def create_analyst_node(
                         f"\n\n### NEWS CONTEXT (for ADR/analyst search queries)"
                         f"\n{news_report}\n"
                     )
+                # Don't log warning - Junior's job is tool calling, news is optional
 
-            # Senior Fundamentals Analyst: Gets raw data from Junior + news
+            # Senior Fundamentals Analyst: Gets raw data from Junior
+            # NOTE: In parallel mode, news_report may not be available yet (race condition)
+            # This is acceptable - Bull/Bear researchers will have all reports after sync
             if agent_key == "fundamentals_analyst":
                 raw_data = state.get("raw_fundamentals_data", "")
                 news_report = state.get("news_report", "")
@@ -360,10 +365,23 @@ def create_analyst_node(
                         f"\n\n### RAW FINANCIAL DATA FROM JUNIOR ANALYST"
                         f"\n{raw_data}\n"
                     )
+                else:
+                    logger.warning(
+                        "senior_fundamentals_no_raw_data",
+                        ticker=ticker,
+                        message="Junior Analyst data not available - this should not happen"
+                    )
                 if news_report:
                     extra_context += (
                         f"\n\n### NEWS CONTEXT (for Qualitative Growth Scoring)"
                         f"\n{news_report}\n"
+                    )
+                else:
+                    # Expected in parallel mode - News Analyst may still be running
+                    logger.info(
+                        "senior_fundamentals_no_news",
+                        ticker=ticker,
+                        message="News report not yet available (parallel execution) - proceeding without news context"
                     )
 
             # CRITICAL FIX: Include verified company name to prevent hallucination
@@ -488,7 +506,18 @@ def create_researcher_node(llm, memory: Optional[Any], agent_key: str) -> Callab
             debate_state['count'] = debate_state.get('count', 0) + 1
             return {"investment_debate_state": debate_state}
         agent_name = agent_prompt.agent_name
-        reports = f"MARKET: {state.get('market_report')}\nFUNDAMENTALS: {state.get('fundamentals_report')}"
+        # Include all 4 analyst reports for comprehensive debate context
+        reports = f"""MARKET ANALYST REPORT:
+{state.get('market_report', 'N/A')}
+
+SENTIMENT ANALYST REPORT:
+{state.get('sentiment_report', 'N/A')}
+
+NEWS ANALYST REPORT:
+{state.get('news_report', 'N/A')}
+
+FUNDAMENTALS ANALYST REPORT:
+{state.get('fundamentals_report', 'N/A')}"""
         history = state.get('investment_debate_state', {}).get('history', '')
 
         # FIX: Contextualize memory retrieval to prevent cross-contamination
@@ -581,7 +610,21 @@ def create_trader_node(llm, memory: Optional[Any]) -> Callable:
         consultant = state.get('consultant_review', '')
         consultant_section = f"""\n\nEXTERNAL CONSULTANT REVIEW (Cross-Validation):\n{consultant if consultant else 'N/A (consultant disabled or unavailable)'}"""
 
-        all_input = f"""MARKET ANALYST REPORT:\n{state.get('market_report', 'N/A')}\n\nFUNDAMENTALS ANALYST REPORT:\n{state.get('fundamentals_report', 'N/A')}\n\nRESEARCH MANAGER PLAN:\n{state.get('investment_plan', 'N/A')}{consultant_section}"""
+        # Include all 4 analyst reports for comprehensive trading context
+        all_input = f"""MARKET ANALYST REPORT:
+{state.get('market_report', 'N/A')}
+
+SENTIMENT ANALYST REPORT:
+{state.get('sentiment_report', 'N/A')}
+
+NEWS ANALYST REPORT:
+{state.get('news_report', 'N/A')}
+
+FUNDAMENTALS ANALYST REPORT:
+{state.get('fundamentals_report', 'N/A')}
+
+RESEARCH MANAGER PLAN:
+{state.get('investment_plan', 'N/A')}{consultant_section}"""
         prompt = f"""{agent_prompt.system_message}\n\n{all_input}\n\nCreate Trading Plan."""
         try:
             response = await invoke_with_rate_limit_handling(
