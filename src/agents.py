@@ -122,12 +122,13 @@ class AgentState(MessagesState):
     company_of_interest: str
     company_name: str  # ADDED: Verified company name to prevent LLM hallucination
     trade_date: str
-    sender: str
+    sender: Annotated[str, take_last]  # Support parallel writes
 
     market_report: Annotated[str, take_last]
     sentiment_report: Annotated[str, take_last]
     news_report: Annotated[str, take_last]
-    fundamentals_report: Annotated[str, take_last]
+    raw_fundamentals_data: Annotated[str, take_last]  # Junior Analyst output
+    fundamentals_report: Annotated[str, take_last]  # Senior Analyst analysis
     investment_debate_state: Annotated[InvestDebateState, take_last]
     investment_plan: Annotated[str, take_last]
     consultant_review: Annotated[str, take_last]  # External consultant validation
@@ -261,8 +262,19 @@ def _is_output_insufficient(content: str, agent_key: str) -> bool:
     if not content or len(content) < 50:
         return True
 
+    if agent_key == "junior_fundamentals_analyst":
+        # Junior analyst should return raw tool data
+        # Check for markers that indicate tools were called
+        has_tool_output = (
+            "get_financial_metrics" in content.lower()
+            or "financial" in content.lower()
+            or "roe" in content.lower()
+            or "=== RAW" in content
+        )
+        return not has_tool_output or len(content) < 200
+
     if agent_key == "fundamentals_analyst":
-        # Fundamentals report MUST contain DATA_BLOCK for downstream processing
+        # Senior fundamentals report MUST contain DATA_BLOCK
         return "DATA_BLOCK" not in content
 
     if agent_key == "news_analyst":
@@ -327,12 +339,32 @@ def create_analyst_node(
             )
             company_name = state.get("company_name", ticker)  # Get verified company name from state
 
-            # --- CRITICAL FIX: Inject News Report into Fundamentals Analyst Context ---
+            # --- Context injection for specific agents ---
             extra_context = ""
-            if agent_key == "fundamentals_analyst":
+
+            # Junior Fundamentals Analyst: Gets news context for qualitative info
+            if agent_key == "junior_fundamentals_analyst":
                 news_report = state.get("news_report", "")
                 if news_report:
-                    extra_context = f"\n\n### NEWS CONTEXT (Use for Qualitative Growth Scoring)\n{news_report}\n"
+                    extra_context = (
+                        f"\n\n### NEWS CONTEXT (for ADR/analyst search queries)"
+                        f"\n{news_report}\n"
+                    )
+
+            # Senior Fundamentals Analyst: Gets raw data from Junior + news
+            if agent_key == "fundamentals_analyst":
+                raw_data = state.get("raw_fundamentals_data", "")
+                news_report = state.get("news_report", "")
+                if raw_data:
+                    extra_context = (
+                        f"\n\n### RAW FINANCIAL DATA FROM JUNIOR ANALYST"
+                        f"\n{raw_data}\n"
+                    )
+                if news_report:
+                    extra_context += (
+                        f"\n\n### NEWS CONTEXT (for Qualitative Growth Scoring)"
+                        f"\n{news_report}\n"
+                    )
 
             # CRITICAL FIX: Include verified company name to prevent hallucination
             full_system_instruction = f"{agent_prompt.system_message}\n\nDate: {current_date}\nTicker: {ticker}\nCompany: {company_name}\n{get_analysis_context(ticker)}{extra_context}"

@@ -392,14 +392,32 @@ class Toolkit:
     def get_core_tools(self): return [get_yfinance_data, get_technical_indicators]
     
     def get_technical_tools(self): return [
-        get_yfinance_data, 
-        get_technical_indicators, 
+        get_yfinance_data,
+        get_technical_indicators,
         calculate_liquidity_metrics
     ]
+
+    # Alias for market analyst (uses technical tools)
+    def get_market_tools(self):
+        return self.get_technical_tools()
     
-    def get_fundamental_tools(self): return [get_financial_metrics, get_news, get_fundamental_analysis] 
-    def get_sentiment_tools(self): return [get_social_media_sentiment, get_multilingual_sentiment_search]
-    def get_news_tools(self): return [get_news, get_macroeconomic_news]
+    def get_junior_fundamental_tools(self):
+        """Tools for Junior Fundamentals Analyst (data gathering)."""
+        return [get_financial_metrics, get_fundamental_analysis]
+
+    def get_senior_fundamental_tools(self):
+        """Senior Fundamentals Analyst has NO tools - receives data from Junior."""
+        return []
+
+    # Legacy alias - use get_junior_fundamental_tools instead
+    def get_fundamental_tools(self):
+        return self.get_junior_fundamental_tools()
+
+    def get_sentiment_tools(self):
+        return [get_social_media_sentiment, get_multilingual_sentiment_search]
+
+    def get_news_tools(self):
+        return [get_news, get_macroeconomic_news]
     def get_all_tools(self): return [
         get_yfinance_data, 
         get_technical_indicators, 

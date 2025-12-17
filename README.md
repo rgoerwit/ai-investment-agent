@@ -40,29 +40,30 @@ This isn't a single prompt to an LLM. It's a **stateful orchestration** of speci
 ```mermaid
 graph TB
     Start([User: Analyze TICKER]) --> MarketAnalyst["Market Analyst<br/>(Technical Analysis)"]
-    Start --> NewsAnalyst["News Analyst<br/>(Recent Events)"]
-    Start --> SentimentAnalyst["Sentiment Analyst<br/>(Social Media)"]
-    Start --> FundamentalsAnalyst["Fundamentals Analyst<br/>(Financial Health)"]
 
-    MarketAnalyst --> ResearchManager["Research Manager<br/>(Synthesize Data)"]
-    NewsAnalyst --> ResearchManager
-    SentimentAnalyst --> ResearchManager
-    FundamentalsAnalyst --> Validator["Financial Validator<br/>(Red-Flag Detection)"]
+    MarketAnalyst --> SentimentAnalyst["Sentiment Analyst<br/>(Social Media)"]
+    SentimentAnalyst --> NewsAnalyst["News Analyst<br/>(Recent Events)"]
+    NewsAnalyst --> JuniorFund["Junior Fundamentals<br/>(Data Gathering)"]
+    JuniorFund -->|Raw Data| SeniorFund["Senior Fundamentals<br/>(Scoring & Analysis)"]
 
-    Validator -->|PASS| ResearchManager
+    SeniorFund --> Validator["Financial Validator<br/>(Red-Flag Detection)"]
+
     Validator -->|REJECT<br/>Critical Red Flags| PortfolioManager["Portfolio Manager<br/>(Final Decision)"]
-
-    ResearchManager --> BullResearcher["Bull Researcher<br/>(Upside Case)"]
-    ResearchManager --> BearResearcher["Bear Researcher<br/>(Downside Risk)"]
+    Validator -->|PASS| BullResearcher["Bull Researcher<br/>(Upside Case)"]
 
     BullResearcher --> Debate{Multi-Round<br/>Debate}
-    BearResearcher --> Debate
+    BearResearcher["Bear Researcher<br/>(Downside Risk)"] --> Debate
 
     Debate -->|Round 1-2| BullResearcher
-    Debate -->|Converged| Consultant["External Consultant<br/>(Cross-Validation)<br/>🔍 Optional"]
+    Debate -->|Round 1-2| BearResearcher
+    Debate -->|Converged| ResearchManager["Research Manager<br/>(Synthesize All Data)"]
 
-    Consultant -->|OpenAI Review| RiskTeam["Risk Assessment Team<br/>(3 Perspectives)"]
-    Debate -.->|If Disabled| RiskTeam
+    ResearchManager --> Consultant["External Consultant<br/>(Cross-Validation)<br/>🔍 Optional"]
+
+    Consultant -->|OpenAI Review| Trader["Trader<br/>(Trade Plan)"]
+    ResearchManager -.->|If Disabled| Trader
+
+    Trader --> RiskTeam["Risk Assessment Team<br/>(3 Perspectives)"]
 
     RiskTeam --> PortfolioManager
 
@@ -71,12 +72,14 @@ graph TB
     style MarketAnalyst fill:#e1f5ff
     style NewsAnalyst fill:#e1f5ff
     style SentimentAnalyst fill:#e1f5ff
-    style FundamentalsAnalyst fill:#e1f5ff
+    style JuniorFund fill:#e1f5ff
+    style SeniorFund fill:#e1f5ff
     style Validator fill:#ffcccc
     style ResearchManager fill:#fff4e1
     style BullResearcher fill:#d4edda
     style BearResearcher fill:#f8d7da
     style Consultant fill:#e8daff
+    style Trader fill:#ffe4e1
     style RiskTeam fill:#fff3cd
     style PortfolioManager fill:#d1ecf1
     style Debate fill:#ffeaa7
@@ -85,15 +88,17 @@ graph TB
 
 ### How Agents Collaborate
 
-1. **Parallel Data Gathering** - Four analyst agents simultaneously fetch technical, fundamental, news, and sentiment data
-2. **Red-Flag Pre-Screening** - Financial Validator checks for catastrophic risks (extreme leverage, earnings quality issues, refinancing risk) before proceeding
-3. **Research Synthesis** - A Research Manager combines findings and identifies key themes (if pre-screening passes)
-4. **Adversarial Debate** - Bull and Bear researchers argue opposite perspectives for 1-2 rounds
-5. **External Consultant** (Optional) - Independent cross-validation using OpenAI ChatGPT to detect biases and validate Gemini's analysis
-6. **Risk Assessment** - Three risk analysts (Conservative/Neutral/Aggressive) evaluate from different risk tolerances
-7. **Executive Decision** - Portfolio Manager synthesizes all viewpoints and applies thesis criteria
+1. **Sequential Data Gathering** - Analyst agents run in sequence to build context: Market → Sentiment → News → Junior Fundamentals → Senior Fundamentals. Each agent can access previous reports for context.
+2. **Junior/Senior Fundamentals Split** - The Junior Fundamentals Analyst calls data tools (get_financial_metrics, get_fundamental_analysis) and returns raw data. The Senior Fundamentals Analyst receives this raw data and produces scored analysis with a structured DATA_BLOCK.
+3. **Red-Flag Pre-Screening** - Financial Validator parses the DATA_BLOCK for catastrophic risks (extreme leverage >500% D/E, earnings quality issues, refinancing risk). REJECT routes directly to Portfolio Manager; PASS continues to debate.
+4. **Adversarial Debate** - Bull and Bear researchers argue opposite perspectives for 1-2 rounds, receiving Market and Fundamentals reports plus debate history.
+5. **Research Synthesis** - After debate converges, the Research Manager combines ALL analyst reports (Market, Sentiment, News, Fundamentals) with debate history to create an investment plan.
+6. **External Consultant** (Optional) - Independent cross-validation using OpenAI ChatGPT to detect biases and validate Gemini's analysis.
+7. **Trade Planning** - Trader creates specific execution parameters based on the investment plan.
+8. **Risk Assessment** - Three risk analysts (Conservative/Neutral/Aggressive) evaluate position sizing from different risk tolerances.
+9. **Executive Decision** - Portfolio Manager synthesizes all viewpoints, applies thesis criteria, and makes final BUY/SELL/HOLD decision.
 
-**Why This Matters:** Single-LLM systems are prone to confirmation bias. Multi-agent debate forces the AI to consider contradictory evidence, mimicking how institutional research teams actually work. The Financial Validator node provides pre-screening to catch catastrophic financial risks before debate, saving time and token costs. The optional External Consultant uses a different AI model (OpenAI) to catch groupthink and validate conclusions that a single-model system might miss.
+**Why This Matters:** Single-LLM systems are prone to confirmation bias. Multi-agent debate forces the AI to consider contradictory evidence, mimicking how institutional research teams actually work. The Junior/Senior split prevents tool-calling complexity from interfering with analysis quality. The Financial Validator provides deterministic pre-screening to catch catastrophic financial risks before debate, saving time and token costs. The optional External Consultant uses a different AI model (OpenAI) to catch groupthink.
 
 ---
 
