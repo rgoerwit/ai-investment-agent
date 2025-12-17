@@ -40,29 +40,30 @@ This isn't a single prompt to an LLM. It's a **stateful orchestration** of speci
 ```mermaid
 graph TB
     Start([User: Analyze TICKER]) --> MarketAnalyst["Market Analyst<br/>(Technical Analysis)"]
-    Start --> NewsAnalyst["News Analyst<br/>(Recent Events)"]
-    Start --> SentimentAnalyst["Sentiment Analyst<br/>(Social Media)"]
-    Start --> FundamentalsAnalyst["Fundamentals Analyst<br/>(Financial Health)"]
 
-    MarketAnalyst --> ResearchManager["Research Manager<br/>(Synthesize Data)"]
-    NewsAnalyst --> ResearchManager
-    SentimentAnalyst --> ResearchManager
-    FundamentalsAnalyst --> Validator["Financial Validator<br/>(Red-Flag Detection)"]
+    MarketAnalyst --> SentimentAnalyst["Sentiment Analyst<br/>(Social Media)"]
+    SentimentAnalyst --> NewsAnalyst["News Analyst<br/>(Recent Events)"]
+    NewsAnalyst --> JuniorFund["Junior Fundamentals<br/>(Data Gathering)"]
+    JuniorFund -->|Raw Data| SeniorFund["Senior Fundamentals<br/>(Scoring & Analysis)"]
 
-    Validator -->|PASS| ResearchManager
+    SeniorFund --> Validator["Financial Validator<br/>(Red-Flag Detection)"]
+
     Validator -->|REJECT<br/>Critical Red Flags| PortfolioManager["Portfolio Manager<br/>(Final Decision)"]
-
-    ResearchManager --> BullResearcher["Bull Researcher<br/>(Upside Case)"]
-    ResearchManager --> BearResearcher["Bear Researcher<br/>(Downside Risk)"]
+    Validator -->|PASS| BullResearcher["Bull Researcher<br/>(Upside Case)"]
 
     BullResearcher --> Debate{Multi-Round<br/>Debate}
-    BearResearcher --> Debate
+    BearResearcher["Bear Researcher<br/>(Downside Risk)"] --> Debate
 
     Debate -->|Round 1-2| BullResearcher
-    Debate -->|Converged| Consultant["External Consultant<br/>(Cross-Validation)<br/>🔍 Optional"]
+    Debate -->|Round 1-2| BearResearcher
+    Debate -->|Converged| ResearchManager["Research Manager<br/>(Synthesize All Data)"]
 
-    Consultant -->|OpenAI Review| RiskTeam["Risk Assessment Team<br/>(3 Perspectives)"]
-    Debate -.->|If Disabled| RiskTeam
+    ResearchManager --> Consultant["External Consultant<br/>(Cross-Validation)<br/>🔍 Optional"]
+
+    Consultant -->|OpenAI Review| Trader["Trader<br/>(Trade Plan)"]
+    ResearchManager -.->|If Disabled| Trader
+
+    Trader --> RiskTeam["Risk Assessment Team<br/>(3 Perspectives)"]
 
     RiskTeam --> PortfolioManager
 
@@ -71,12 +72,14 @@ graph TB
     style MarketAnalyst fill:#e1f5ff
     style NewsAnalyst fill:#e1f5ff
     style SentimentAnalyst fill:#e1f5ff
-    style FundamentalsAnalyst fill:#e1f5ff
+    style JuniorFund fill:#e1f5ff
+    style SeniorFund fill:#e1f5ff
     style Validator fill:#ffcccc
     style ResearchManager fill:#fff4e1
     style BullResearcher fill:#d4edda
     style BearResearcher fill:#f8d7da
     style Consultant fill:#e8daff
+    style Trader fill:#ffe4e1
     style RiskTeam fill:#fff3cd
     style PortfolioManager fill:#d1ecf1
     style Debate fill:#ffeaa7
@@ -85,15 +88,17 @@ graph TB
 
 ### How Agents Collaborate
 
-1. **Parallel Data Gathering** - Four analyst agents simultaneously fetch technical, fundamental, news, and sentiment data
-2. **Red-Flag Pre-Screening** - Financial Validator checks for catastrophic risks (extreme leverage, earnings quality issues, refinancing risk) before proceeding
-3. **Research Synthesis** - A Research Manager combines findings and identifies key themes (if pre-screening passes)
-4. **Adversarial Debate** - Bull and Bear researchers argue opposite perspectives for 1-2 rounds
-5. **External Consultant** (Optional) - Independent cross-validation using OpenAI ChatGPT to detect biases and validate Gemini's analysis
-6. **Risk Assessment** - Three risk analysts (Conservative/Neutral/Aggressive) evaluate from different risk tolerances
-7. **Executive Decision** - Portfolio Manager synthesizes all viewpoints and applies thesis criteria
+1. **Sequential Data Gathering** - Analyst agents run in sequence to build context: Market → Sentiment → News → Junior Fundamentals → Senior Fundamentals. Each agent can access previous reports for context.
+2. **Junior/Senior Fundamentals Split** - The Junior Fundamentals Analyst calls data tools (get_financial_metrics, get_fundamental_analysis) and returns raw data. The Senior Fundamentals Analyst receives this raw data and produces scored analysis with a structured DATA_BLOCK.
+3. **Red-Flag Pre-Screening** - Financial Validator parses the DATA_BLOCK for catastrophic risks (extreme leverage >500% D/E, earnings quality issues, refinancing risk). REJECT routes directly to Portfolio Manager; PASS continues to debate.
+4. **Adversarial Debate** - Bull and Bear researchers argue opposite perspectives for 1-2 rounds, receiving Market and Fundamentals reports plus debate history.
+5. **Research Synthesis** - After debate converges, the Research Manager combines ALL analyst reports (Market, Sentiment, News, Fundamentals) with debate history to create an investment plan.
+6. **External Consultant** (Optional) - Independent cross-validation using OpenAI ChatGPT to detect biases and validate Gemini's analysis.
+7. **Trade Planning** - Trader creates specific execution parameters based on the investment plan.
+8. **Risk Assessment** - Three risk analysts (Conservative/Neutral/Aggressive) evaluate position sizing from different risk tolerances.
+9. **Executive Decision** - Portfolio Manager synthesizes all viewpoints, applies thesis criteria, and makes final BUY/SELL/HOLD decision.
 
-**Why This Matters:** Single-LLM systems are prone to confirmation bias. Multi-agent debate forces the AI to consider contradictory evidence, mimicking how institutional research teams actually work. The Financial Validator node provides pre-screening to catch catastrophic financial risks before debate, saving time and token costs. The optional External Consultant uses a different AI model (OpenAI) to catch groupthink and validate conclusions that a single-model system might miss.
+**Why This Matters:** Single-LLM systems are prone to confirmation bias. Multi-agent debate forces the AI to consider contradictory evidence, mimicking how institutional research teams actually work. The Junior/Senior split prevents tool-calling complexity from interfering with analysis quality. The Financial Validator provides deterministic pre-screening to catch catastrophic financial risks before debate, saving time and token costs. The optional External Consultant uses a different AI model (OpenAI) to catch groupthink.
 
 ---
 
@@ -177,6 +182,69 @@ GEMINI_RPM_LIMIT=1000  # Paid tier 2: 67x faster than free tier
 
 The system applies a 20% safety margin automatically to prevent hitting API limits. For
 batch analysis of tickers, paid tiers can reduce runtime substantially.
+
+### AI Model Configuration and Thinking Levels (IMPORTANT - Dec 2025)
+
+The system uses a **two-tier thinking level architecture** optimized for both performance and reasoning depth. Understanding this is crucial for reliable operation, especially with Gemini models.
+
+#### Two-Tier Thinking System
+
+**Tier 1: Data Gathering Agents (Always LOW thinking)**
+- Market Analyst, Social Analyst, News Analyst, Fundamentals Analyst
+- Uses `QUICK_MODEL` (fast model for simple extraction tasks)
+- **Automatically sets `thinking_level="low"`** for Gemini 3+ models
+- Small context (~3-8k tokens), simple data extraction - doesn't need deep reasoning
+
+**Tier 2: Synthesis & Decision Agents (Mode-Dependent thinking)**
+- Bull/Bear Researchers, Research Manager, Portfolio Manager, Risk Analysts
+- Uses `DEEP_MODEL` (reasoning model for complex analysis)
+- **Quick mode (`--quick`):** `thinking_level="low"` (faster, less deep reasoning)
+- **Normal mode (default):** `thinking_level="high"` (slower, deeper reasoning)
+- Large context (~100k-180k tokens), heavy reasoning load - benefits from high thinking
+
+#### Critical Recommendation: Use Gemini 3+ for QUICK_MODEL
+
+**⚠️ IMPORTANT:** If you're using Gemini models, use **Gemini 3+** (e.g., `gemini-3-pro-preview`) for your `QUICK_MODEL`, not Gemini 2.x models.
+
+**Why?** The 4 data gathering agents (Market, Social, News, Fundamentals) call tools to fetch financial data. Gemini 2.x models have **tool-calling bugs** with some LangGraph versions that can cause failures during data collection. Gemini 3+ models work reliably.
+
+**What happens if you use Gemini 2.x for QUICK_MODEL:**
+- You'll see a WARNING log message at startup: `"QUICK_MODEL is gemini-2.0-flash (Gemini 2.x) - tool calling bugs may occur..."`
+- Data gathering agents may fail to fetch financial data correctly
+- The entire analysis pipeline depends on clean data from these agents
+
+**Recommended configuration** (in your environment or code):
+```bash
+# For best results with Gemini models:
+QUICK_MODEL=gemini-3-pro-preview    # For data gathering (thinking_level="low" auto-set)
+DEEP_MODEL=gemini-3-pro-preview     # For synthesis (thinking_level="high" in normal mode)
+
+# Or use different tiers if you have API access:
+QUICK_MODEL=gemini-3-flash-preview  # Faster, cheaper data gathering
+DEEP_MODEL=gemini-3-pro-preview     # More powerful synthesis
+```
+
+**Note:** The model configuration is currently **hardcoded in `src/llms.py`** (lines 164-165), not controlled by environment variables. The system uses:
+- Quick thinking: `gemini-2.0-flash-exp` (will trigger warning due to tool-calling bugs)
+- Deep thinking: `gemini-2.0-flash-thinking-exp`
+
+To change models, edit `src/llms.py` and update the `config.quick_think_llm` and `config.deep_think_llm` assignments, or modify your `.env` file if the config system reads from there.
+
+#### Performance Implications
+
+**Quick mode (`--quick`):**
+- 1 debate round vs 2 (50% fewer agent turns)
+- All synthesis agents use `thinking_level="low"` (faster responses)
+- Typical runtime: 2-4 minutes per ticker
+- **Trade-off:** Less thorough reasoning, may miss nuanced risks
+
+**Normal mode (default):**
+- 2 debate rounds (more adversarial back-and-forth)
+- All synthesis agents use `thinking_level="high"` (deeper reasoning)
+- Typical runtime: 5-10 minutes per ticker
+- **Benefit:** More thorough analysis, better risk detection, higher quality recommendations
+
+For batch analysis of 300+ tickers, quick mode can save hours of runtime but may produce less rigorous recommendations. Use normal mode for final investment decisions.
 
 ### Batch Analysis - Screening Hundreds of Tickers
 
@@ -290,8 +358,8 @@ echo "SELL: $(grep -c 'FINAL DECISION: SELL' scratch/ticker_analysis_results.md)
 Versions of the codebase have varied in their strictness, but in general, from a list of 300 candidates, you'll typically get:
 
 - **BUY recommendations:** 5-15 stocks (depends on model used)
-- **HOLD recommendations:** 20-40 stocks (interesting but flawed)
-- **SELL recommendations:** 250+ stocks (thesis violations, poor fundamentals)
+- **HOLD recommendations:** 20-40 stocks (interesting but flawed or uncertain equities)
+- **SELL recommendations:** 255+ stocks (thesis violations, poor fundamentals)
 
 The system is **intentionally conservative** - it's designed to find the best candidates, not to give you 100 "buys."
 

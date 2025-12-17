@@ -7,9 +7,9 @@ We provide security updates for the following versions:
 | Version | Supported          | Notes |
 | ------- | ------------------ | ----- |
 | main (latest) | :white_check_mark: | Active development - recommended |
-| < 1.0 (dev) | :white_check_mark: | Pre-release - use with caution |
 
-**Note:** This project is in active development. We recommend using the latest commit from `main` and monitoring releases.
+**Note:** This project is in active development. Use the latest commit from `main`
+and monitoring releases.
 
 ---
 
@@ -84,7 +84,7 @@ LANGSMITH_API_KEY=lsv2_pt_...     # LangChain tracing/debugging
 ✅ **DO:**
 - Keep `.env` file local (already in `.gitignore`)
 - Use environment variables in production/CI
-- Rotate API keys every 90 days
+- Rotate API keys periodically
 - Use API keys with minimum required permissions
 - Monitor API usage dashboards for unauthorized activity
 - Revoke keys immediately if compromised
@@ -123,7 +123,7 @@ This application stores data **entirely on your local machine**:
 #### Privacy Recommendations:
 
 - **Sensitive portfolios:** Do not share analysis results containing proprietary holdings
-- **Confidential research:** Keep `results/` directory private (not in git)
+- **Confidential research:** Keep `results/` and `scratch/` directory private (not in git)
 - **Ticker privacy:** Be aware API providers log requested ticker symbols
 - **Audit trail:** Review `.gitignore` to ensure no sensitive data is committed
 
@@ -153,7 +153,7 @@ This software is for **research and educational purposes ONLY**.
 - **Hallucination:** LLMs can fabricate financial metrics, news events, or reasoning
 - **Recency Bias:** Training data cutoffs mean LLMs lack knowledge of very recent events
 - **Confirmation Bias:** Multi-agent debate helps but doesn't eliminate bias
-- **Context Confusion:** Ticker-specific memory isolation prevents but doesn't eliminate cross-contamination
+- **Context Confusion:** Ticker-specific memory isolation does not eliminate cross-contamination
 - **Prompt Injection:** Malicious news articles or company filings could influence analysis
 
 #### Your Responsibilities:
@@ -175,7 +175,7 @@ This software is for **research and educational purposes ONLY**.
   - Isolated in virtual environment (`poetry` sandboxing)
   - No public internet access to ChromaDB port
   - We monitor for updates and apply patches
-- **Status:** Accepted risk (benefits outweigh for local-only use)
+- **Status:** Benefits outweigh for local-only use, but BE CAREFUL!
 
 **Other Dependencies:**
 - **LangChain/LangGraph:** Actively maintained, security patches applied

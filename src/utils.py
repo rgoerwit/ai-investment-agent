@@ -10,7 +10,7 @@ from typing import Callable, Any
 from src.config import Config
 from src.llms import quick_thinking_llm
 from src.memory import FinancialSituationMemory
-from src.agents import AgentState
+from src.agents import AgentState, extract_string_content
 
 logger = structlog.get_logger(__name__)
 
@@ -43,8 +43,9 @@ class SignalProcessor:
                 ("human", full_signal),
             ]
             result = await self.llm.ainvoke(messages)
-            content = result.content.strip().upper()
-            
+            # CRITICAL FIX: Normalize response.content to string (Gemini may return dict)
+            content = extract_string_content(result.content).strip().upper()
+
             if content in ["BUY", "SELL", "HOLD"]:
                 logger.info("signal_extracted_via_llm", signal=content)
                 return content
@@ -112,7 +113,8 @@ class Reflector:
         
         try:
             result = await self.llm.ainvoke(prompt)
-            lesson = result.content.strip()
+            # CRITICAL FIX: Normalize response.content to string (Gemini may return dict)
+            lesson = extract_string_content(result.content).strip()
 
             # The situation (context) and the lesson (result) are stored.
             await memory.add_situations([(situation, lesson)])

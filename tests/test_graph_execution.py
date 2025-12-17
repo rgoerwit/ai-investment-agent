@@ -66,22 +66,20 @@ class TestDebateRouter:
     @patch('src.graph.create_trader_node')
     @patch('src.graph.create_risk_debater_node')
     @patch('src.graph.create_portfolio_manager_node')
-    @patch('src.graph.create_state_cleaner_node')
     @patch('src.graph.toolkit')
-    def test_debate_router_alternation(self, mock_toolkit, mock_cleaner, mock_pm, 
-                                      mock_risk, mock_trader, mock_res_mgr, 
+    def test_debate_router_alternation(self, mock_toolkit, mock_pm,
+                                      mock_risk, mock_trader, mock_res_mgr,
                                       mock_researcher, mock_analyst):
         """Test debate router alternates correctly."""
         from src.graph import create_trading_graph
-        
-        # Mock all node creation
+
+        # Mock all node creation (cleaner nodes removed in parallel refactor)
         mock_analyst.return_value = lambda s, c: {}
         mock_researcher.return_value = lambda s, c: {}
         mock_res_mgr.return_value = lambda s, c: {}
         mock_trader.return_value = lambda s, c: {}
         mock_risk.return_value = lambda s, c: {}
         mock_pm.return_value = lambda s, c: {}
-        mock_cleaner.return_value = lambda s, c: {}
         mock_toolkit.get_all_tools.return_value = []
         
         graph = create_trading_graph(max_debate_rounds=2)

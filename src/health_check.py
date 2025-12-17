@@ -160,8 +160,17 @@ async def check_llm_connectivity() -> bool:
             llm.ainvoke("Respond with just the word 'OK'."),
             timeout=15.0
         )
-        
-        content = response.content.strip()
+
+        # Handle potential dict/list response from Gemini
+        raw_content = response.content
+        if isinstance(raw_content, dict):
+            content = str(raw_content.get('text', raw_content))
+        elif isinstance(raw_content, list):
+            content = str(raw_content[0]) if raw_content else ""
+        else:
+            content = str(raw_content) if raw_content else ""
+        content = content.strip()
+
         if "OK" in content or "ok" in content.lower():
             logger.info("Gemini LLM connectivity: OK (✓)")
             return True

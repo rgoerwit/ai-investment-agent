@@ -36,8 +36,13 @@ class AlphaVantageFetcher:
         return self
 
     async def __aexit__(self, *args):
-        if self._session:
+        await self.close()
+
+    async def close(self):
+        """Close the aiohttp session. Safe to call multiple times."""
+        if self._session and not self._session.closed:
             await self._session.close()
+            self._session = None
 
     def is_available(self) -> bool:
         """Check if configured and quota remaining."""

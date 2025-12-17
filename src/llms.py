@@ -10,7 +10,11 @@ import logging
 import os
 import re
 from typing import Optional, List
-from langchain_google_genai import ChatGoogleGenerativeAI, HarmBlockThreshold, HarmCategory
+from langchain_google_genai import (
+    ChatGoogleGenerativeAI,
+    HarmBlockThreshold,
+    HarmCategory,
+)
 from langchain_core.language_models import BaseChatModel
 from langchain_core.rate_limiters import InMemoryRateLimiter
 from langchain_core.callbacks import BaseCallbackHandler
@@ -33,11 +37,11 @@ def _is_gemini_v3_or_greater(model_name: str) -> bool:
     """
     if not model_name.startswith("gemini-"):
         return False
-    
+
     match = re.search(r"gemini-([0-9.]+)", model_name)
     if not match:
         return False
-    
+
     version_str = match.group(1)
     try:
         major_version = int(version_str.split('.')[0])
@@ -45,7 +49,21 @@ def _is_gemini_v3_or_greater(model_name: str) -> bool:
     except (ValueError, IndexError):
         return False
 
-# ... (rest of the file is the same until create_gemini_model)
+
+def is_gemini_v3_or_greater(model_name: str) -> bool:
+    """
+    Public wrapper to check if a Gemini model is version 3.0 or greater.
+
+    Used by agents to determine if retry with high thinking_level is beneficial.
+    Only Gemini 3+ models support the thinking_level parameter.
+
+    Args:
+        model_name: The model name string (e.g., "gemini-3-pro-preview")
+
+    Returns:
+        True if model is Gemini 3.0 or greater, False otherwise
+    """
+    return _is_gemini_v3_or_greater(model_name)
 
 def _create_rate_limiter_from_rpm(rpm: int) -> InMemoryRateLimiter:
     """
@@ -66,6 +84,21 @@ def _create_rate_limiter_from_rpm(rpm: int) -> InMemoryRateLimiter:
 
 GLOBAL_RATE_LIMITER = _create_rate_limiter_from_rpm(config.gemini_rpm_limit)
 
+# Track LLM instances for cleanup
+_llm_instances: dict = {}
+_llm_instance_counter: int = 0
+
+
+def get_all_llm_instances() -> dict:
+    """
+    Get all tracked LLM instances for cleanup.
+
+    Returns:
+        Dict mapping instance names to LLM objects
+    """
+    return _llm_instances.copy()
+
+
 def create_gemini_model(
     model_name: str,
     temperature: float,
@@ -77,7 +110,10 @@ def create_gemini_model(
 ) -> BaseChatModel:
     """
     Generic factory for Gemini models.
+    All created instances are tracked for proper cleanup at shutdown.
     """
+    global _llm_instance_counter
+
     kwargs = {
         "model": model_name,
         "temperature": temperature,
@@ -95,7 +131,14 @@ def create_gemini_model(
         kwargs["thinking_level"] = thinking_level
         logger.info(f"Applying thinking_level={thinking_level} to {model_name}")
 
-    return ChatGoogleGenerativeAI(**kwargs)
+    llm = ChatGoogleGenerativeAI(**kwargs)
+
+    # Track instance for cleanup
+    _llm_instance_counter += 1
+    instance_name = f"gemini_{model_name}_{_llm_instance_counter}"
+    _llm_instances[instance_name] = llm
+
+    return llm
 
 def create_quick_thinking_llm(
     temperature: float = 0.3,
@@ -110,7 +153,9 @@ def create_quick_thinking_llm(
     """
     model_name = model or config.quick_think_llm
     final_timeout = timeout if timeout is not None else config.api_timeout
-    final_retries = max_retries if max_retries is not None else config.api_retry_attempts
+    final_retries = (
+        max_retries if max_retries is not None else config.api_retry_attempts
+    )
 
     thinking_level = None
     if _is_gemini_v3_or_greater(model_name):
@@ -118,8 +163,19 @@ def create_quick_thinking_llm(
         logger.info(
             f"Quick LLM ({model_name}) is Gemini 3+ - applying thinking_level=low"
         )
+    elif model_name.startswith("gemini-"):
+        # Gemini model but NOT 3+ (likely 2.x)
+        logger.warning(
+            f"QUICK_MODEL is {model_name} (Gemini 2.x) - tool calling bugs "
+            f"may occur with some LangGraph versions. Recommend using "
+            f"Gemini 3+ (e.g., gemini-3-pro-preview) for QUICK_MODEL. "
+            f"Gemini 3+ models use thinking_level='low' for data gathering."
+        )
 
-    logger.info(f"Initializing Quick LLM: {model_name} (timeout={final_timeout}, retries={final_retries})")
+    logger.info(
+        f"Initializing Quick LLM: {model_name} "
+        f"(timeout={final_timeout}, retries={final_retries})"
+    )
     return create_gemini_model(
         model_name, temperature, final_timeout, final_retries,
         callbacks=callbacks, thinking_level=thinking_level
@@ -138,7 +194,9 @@ def create_deep_thinking_llm(
     """
     model_name = model or config.deep_think_llm
     final_timeout = timeout if timeout is not None else config.api_timeout
-    final_retries = max_retries if max_retries is not None else config.api_retry_attempts
+    final_retries = (
+        max_retries if max_retries is not None else config.api_retry_attempts
+    )
 
     thinking_level = None
     if _is_gemini_v3_or_greater(model_name):
@@ -147,13 +205,16 @@ def create_deep_thinking_llm(
             f"Deep LLM ({model_name}) is Gemini 3+ - applying thinking_level=high"
         )
 
-    logger.info(f"Initializing Deep LLM: {model_name} (timeout={final_timeout}, retries={final_retries})")
+    logger.info(
+        f"Initializing Deep LLM: {model_name} "
+        f"(timeout={final_timeout}, retries={final_retries})"
+    )
     return create_gemini_model(
         model_name, temperature, final_timeout, final_retries,
         callbacks=callbacks, thinking_level=thinking_level
     )
 
-# Initialize default instances
+# Initialize default instances (automatically tracked by create_gemini_model)
 quick_thinking_llm = create_quick_thinking_llm()
 deep_thinking_llm = create_deep_thinking_llm()
 

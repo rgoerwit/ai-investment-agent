@@ -1,10 +1,11 @@
 """
-Multi-Agent Trading System - Agent Definitions
+Multi-Agent Trading System - Agent Definitions.
+
 FIXED: All data passing issues - agents now receive complete reports.
 ADDED: Debug logging to track data flow.
-FIXED: Memory retrieval now contextualized per ticker to prevent cross-contamination.
-UPDATED (Pass 3 Fixes): Added Negative Constraint to prompts and strict metadata filtering.
-UPDATED: Added explicit 429/ResourceExhausted handling for Gemini free tier.
+FIXED: Memory contextualized per ticker to prevent cross-contamination.
+UPDATED: Added Negative Constraint to prompts and metadata filtering.
+UPDATED: Added 429/ResourceExhausted handling for Gemini free tier.
 FIXED: Corrected memory query parameter name to 'metadata_filter'.
 """
 
@@ -17,7 +18,7 @@ from datetime import datetime
 from langgraph.graph import MessagesState
 from langgraph.types import RunnableConfig
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage, BaseMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 
 import structlog
 
@@ -114,22 +115,23 @@ class RiskDebateState(TypedDict):
     count: int
 
 def take_last(x, y):
-    """Reducer function: takes the most recent value. Used with Annotated state fields."""
+    """Reducer: takes the most recent value. Used with Annotated fields."""
     return y
 
 class AgentState(MessagesState):
     company_of_interest: str
     company_name: str  # ADDED: Verified company name to prevent LLM hallucination
     trade_date: str
-    sender: str
+    sender: Annotated[str, take_last]  # Support parallel writes
 
     market_report: Annotated[str, take_last]
     sentiment_report: Annotated[str, take_last]
     news_report: Annotated[str, take_last]
-    fundamentals_report: Annotated[str, take_last]
+    raw_fundamentals_data: Annotated[str, take_last]  # Junior Analyst output
+    fundamentals_report: Annotated[str, take_last]  # Senior Analyst analysis
     investment_debate_state: Annotated[InvestDebateState, take_last]
     investment_plan: Annotated[str, take_last]
-    consultant_review: Annotated[str, take_last]  # ADDED: External consultant cross-validation
+    consultant_review: Annotated[str, take_last]  # External consultant validation
     trader_investment_plan: Annotated[str, take_last]
     risk_debate_state: Annotated[RiskDebateState, take_last]
     final_trade_decision: Annotated[str, take_last]
@@ -151,11 +153,24 @@ def get_context_from_config(config: RunnableConfig) -> Optional[Any]:
         return None
 
 def get_analysis_context(ticker: str) -> str:
-    """Generate contextual analysis guidance based on asset type (ETF vs individual stock)."""
-    etf_indicators = ['VTI', 'SPY', 'QQQ', 'IWM', 'VOO', 'VEA', 'VWO', 'BND', 'AGG', 'EFA', 'EEM', 'TLT', 'GLD', 'DIA']
-    if any(ind in ticker.upper() for ind in etf_indicators) or 'ETF' in ticker.upper():
-        return "This is an ETF (Exchange-Traded Fund). Focus on holdings, expense ratio, and liquidity."
-    return "This is an individual stock. Focus on fundamentals, valuation, and competitive advantage."
+    """Generate contextual guidance based on asset type (ETF vs stock)."""
+    etf_indicators = [
+        'VTI', 'SPY', 'QQQ', 'IWM', 'VOO', 'VEA', 'VWO',
+        'BND', 'AGG', 'EFA', 'EEM', 'TLT', 'GLD', 'DIA'
+    ]
+    is_etf = (
+        any(ind in ticker.upper() for ind in etf_indicators)
+        or 'ETF' in ticker.upper()
+    )
+    if is_etf:
+        return (
+            "This is an ETF (Exchange-Traded Fund). "
+            "Focus on holdings, expense ratio, and liquidity."
+        )
+    return (
+        "This is an individual stock. "
+        "Focus on fundamentals, valuation, and competitive advantage."
+    )
 
 def filter_messages_for_gemini(messages: List[BaseMessage]) -> List[BaseMessage]:
     if not messages:
@@ -164,7 +179,12 @@ def filter_messages_for_gemini(messages: List[BaseMessage]) -> List[BaseMessage]
     for msg in messages:
         if isinstance(msg, SystemMessage):
             continue
-        if filtered and isinstance(msg, HumanMessage) and isinstance(filtered[-1], HumanMessage):
+        is_consecutive_human = (
+            filtered
+            and isinstance(msg, HumanMessage)
+            and isinstance(filtered[-1], HumanMessage)
+        )
+        if is_consecutive_human:
             last_msg = filtered.pop()
             new_content = f"{last_msg.content}\n\n{msg.content}"
             filtered.append(HumanMessage(content=new_content))
@@ -172,11 +192,120 @@ def filter_messages_for_gemini(messages: List[BaseMessage]) -> List[BaseMessage]
             filtered.append(msg)
     return filtered
 
+
+def extract_string_content(content: Any) -> str:
+    """
+    Safely extract string content from LLM response.content.
+
+    Gemini models (especially with langchain-google-genai) can return structured
+    data (dict/list) instead of plain strings when responses contain tool calls
+    or multi-part content. This function normalizes the content to a string.
+
+    Args:
+        content: The response.content value, which may be str, dict, list, or other
+
+    Returns:
+        String representation of the content
+    """
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, dict):
+        # Try common keys for text content in structured responses
+        if 'text' in content:
+            return str(content['text'])
+        if 'content' in content:
+            return extract_string_content(content['content'])  # Recursive for nested
+        if 'parts' in content:
+            # Gemini multi-part response format
+            parts = content['parts']
+            if isinstance(parts, list):
+                text_parts = [extract_string_content(p) for p in parts]
+                return '\n'.join(filter(None, text_parts))
+        # Fallback: convert dict to readable string
+        logger.warning("response_content_is_dict", keys=list(content.keys()))
+        return str(content)
+
+    if isinstance(content, list):
+        # Handle list of content parts
+        if len(content) == 0:
+            return ""
+        if len(content) == 1:
+            return extract_string_content(content[0])
+        # Multiple parts - join them
+        text_parts = [extract_string_content(item) for item in content]
+        return '\n'.join(filter(None, text_parts))
+
+    # Fallback for any other type
+    return str(content) if content is not None else ""
+
+
 # --- Agent Factory Functions ---
 
-def create_analyst_node(llm, agent_key: str, tools: List[Any], output_field: str) -> Callable:
+
+def _is_output_insufficient(content: str, agent_key: str) -> bool:
+    """
+    Check if agent output is empty or truncated/insufficient.
+
+    Used to determine if a retry with higher thinking_level is needed.
+
+    Args:
+        content: The extracted string content from the agent response
+        agent_key: The agent identifier (e.g., "fundamentals_analyst")
+
+    Returns:
+        True if output is insufficient and retry may help:
+        - Content is empty or very short (< 50 chars)
+        - For fundamentals_analyst: Missing DATA_BLOCK marker
+        - For news_analyst: Content too short (< 200 chars)
+    """
+    if not content or len(content) < 50:
+        return True
+
+    if agent_key == "junior_fundamentals_analyst":
+        # Junior analyst should return raw tool data
+        # Check for markers that indicate tools were called
+        has_tool_output = (
+            "get_financial_metrics" in content.lower()
+            or "financial" in content.lower()
+            or "roe" in content.lower()
+            or "=== RAW" in content
+        )
+        return not has_tool_output or len(content) < 200
+
+    if agent_key == "fundamentals_analyst":
+        # Senior fundamentals report MUST contain DATA_BLOCK
+        return "DATA_BLOCK" not in content
+
+    if agent_key == "news_analyst":
+        # News report should have reasonable content
+        return len(content) < 200
+
+    # For other agents (market, sentiment), just check for non-trivial content
+    return False
+
+
+def create_analyst_node(
+    llm,
+    agent_key: str,
+    tools: List[Any],
+    output_field: str,
+    retry_llm: Optional[Any] = None,
+    allow_retry: bool = False
+) -> Callable:
     """
     Factory function creating data analyst agent nodes.
+
+    Args:
+        llm: Primary LLM (quick_think_llm with thinking_level=low)
+        agent_key: Agent identifier for prompt lookup
+        tools: Tools to bind to the LLM for function calling
+        output_field: State field to store output (e.g., 'fundamentals_report')
+        retry_llm: Optional fallback LLM (deep_think_llm, thinking_level=high)
+        allow_retry: If True, retry ONCE with retry_llm if output insufficient
+
+    Note:
+        Retry only happens ONCE to prevent infinite loops.
     """
     async def analyst_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
         from src.prompts import get_prompt
@@ -186,22 +315,74 @@ def create_analyst_node(llm, agent_key: str, tools: List[Any], output_field: str
             return {output_field: f"Error: Could not load prompt for {agent_key}."}
         messages_template = [MessagesPlaceholder(variable_name="messages")]
         prompt_template = ChatPromptTemplate.from_messages(messages_template)
-        runnable = prompt_template | llm.bind_tools(tools) if tools else prompt_template | llm
+        if tools:
+            runnable = prompt_template | llm.bind_tools(tools)
+        else:
+            runnable = prompt_template | llm
         try:
             prompts_used = state.get("prompts_used", {})
-            prompts_used[output_field] = {"agent_name": agent_prompt.agent_name, "version": agent_prompt.version}
-            filtered_messages = filter_messages_for_gemini(state.get("messages", []))
+            prompts_used[output_field] = {
+                "agent_name": agent_prompt.agent_name,
+                "version": agent_prompt.version
+            }
+            filtered_messages = filter_messages_for_gemini(
+                state.get("messages", [])
+            )
             context = get_context_from_config(config)
-            current_date = context.trade_date if context else datetime.now().strftime("%Y-%m-%d")
-            ticker = context.ticker if context else state.get("company_of_interest", "UNKNOWN")
+            current_date = (
+                context.trade_date if context
+                else datetime.now().strftime("%Y-%m-%d")
+            )
+            ticker = (
+                context.ticker if context
+                else state.get("company_of_interest", "UNKNOWN")
+            )
             company_name = state.get("company_name", ticker)  # Get verified company name from state
 
-            # --- CRITICAL FIX: Inject News Report into Fundamentals Analyst Context ---
+            # --- Context injection for specific agents ---
             extra_context = ""
-            if agent_key == "fundamentals_analyst":
+
+            # Junior Fundamentals Analyst: Gets news context for qualitative info
+            # NOTE: In parallel mode, news_report may not be available yet
+            # Junior primarily uses tools - news context is supplementary
+            if agent_key == "junior_fundamentals_analyst":
                 news_report = state.get("news_report", "")
                 if news_report:
-                    extra_context = f"\n\n### NEWS CONTEXT (Use for Qualitative Growth Scoring)\n{news_report}\n"
+                    extra_context = (
+                        f"\n\n### NEWS CONTEXT (for ADR/analyst search queries)"
+                        f"\n{news_report}\n"
+                    )
+                # Don't log warning - Junior's job is tool calling, news is optional
+
+            # Senior Fundamentals Analyst: Gets raw data from Junior
+            # NOTE: In parallel mode, news_report may not be available yet (race condition)
+            # This is acceptable - Bull/Bear researchers will have all reports after sync
+            if agent_key == "fundamentals_analyst":
+                raw_data = state.get("raw_fundamentals_data", "")
+                news_report = state.get("news_report", "")
+                if raw_data:
+                    extra_context = (
+                        f"\n\n### RAW FINANCIAL DATA FROM JUNIOR ANALYST"
+                        f"\n{raw_data}\n"
+                    )
+                else:
+                    logger.warning(
+                        "senior_fundamentals_no_raw_data",
+                        ticker=ticker,
+                        message="Junior Analyst data not available - this should not happen"
+                    )
+                if news_report:
+                    extra_context += (
+                        f"\n\n### NEWS CONTEXT (for Qualitative Growth Scoring)"
+                        f"\n{news_report}\n"
+                    )
+                else:
+                    # Expected in parallel mode - News Analyst may still be running
+                    logger.info(
+                        "senior_fundamentals_no_news",
+                        ticker=ticker,
+                        message="News report not yet available (parallel execution) - proceeding without news context"
+                    )
 
             # CRITICAL FIX: Include verified company name to prevent hallucination
             full_system_instruction = f"{agent_prompt.system_message}\n\nDate: {current_date}\nTicker: {ticker}\nCompany: {company_name}\n{get_analysis_context(ticker)}{extra_context}"
@@ -214,7 +395,7 @@ def create_analyst_node(llm, agent_key: str, tools: List[Any], output_field: str
                 context=agent_prompt.agent_name
             )
             new_state = {"sender": agent_key, "messages": [response], "prompts_used": prompts_used}
-            
+
             # Check for tool calls
             has_tool_calls = False
             try:
@@ -226,10 +407,88 @@ def create_analyst_node(llm, agent_key: str, tools: List[Any], output_field: str
             if has_tool_calls:
                 return new_state
 
-            new_state[output_field] = response.content          
+            # CRITICAL FIX: Normalize response.content to string
+            # Gemini can return dict/list instead of string for structured responses
+            content_str = extract_string_content(response.content)
+
+            # --- RETRY LOGIC FOR GEMINI 3+ WITH THINKING_LEVEL ---
+            # If output is insufficient (empty/truncated) and retry is allowed,
+            # retry ONCE with the deep thinking LLM (thinking_level=high).
+            # This handles cases where Gemini 3+ with thinking_level=low returns empty.
+            # NO LOOPING: Only one retry attempt is made.
+            if (
+                allow_retry and
+                retry_llm is not None and
+                _is_output_insufficient(content_str, agent_key)
+            ):
+                logger.warning(
+                    "analyst_retry_with_deep_thinking",
+                    agent_key=agent_key,
+                    ticker=ticker,
+                    original_length=len(content_str),
+                    has_datablock="DATA_BLOCK" in content_str if content_str else False,
+                    message="Insufficient output from quick LLM (thinking_level=low), retrying ONCE with deep thinking"
+                )
+
+                # Rebuild runnable with retry_llm (deep thinking)
+                retry_runnable = prompt_template | retry_llm.bind_tools(tools) if tools else prompt_template | retry_llm
+
+                try:
+                    retry_response = await invoke_with_rate_limit_handling(
+                        retry_runnable,
+                        {"messages": invocation_messages},
+                        context=f"{agent_prompt.agent_name} (RETRY-HIGH)"
+                    )
+
+                    # Extract content from retry response
+                    retry_content_str = extract_string_content(retry_response.content)
+
+                    # Check if retry produced tool calls (continue tool loop)
+                    retry_has_tool_calls = False
+                    try:
+                        if hasattr(retry_response, 'tool_calls') and retry_response.tool_calls:
+                            retry_has_tool_calls = isinstance(retry_response.tool_calls, list) and len(retry_response.tool_calls) > 0
+                    except (AttributeError, TypeError):
+                        pass
+
+                    if retry_has_tool_calls:
+                        # Retry produced tool calls - update state and continue tool loop
+                        new_state["messages"] = [retry_response]
+                        logger.info(
+                            "analyst_retry_produced_tool_calls",
+                            agent_key=agent_key,
+                            ticker=ticker,
+                            message="Retry with deep thinking produced tool calls, continuing tool loop"
+                        )
+                        return new_state
+
+                    # Use retry content (even if still insufficient - no further retries)
+                    logger.info(
+                        "analyst_retry_complete",
+                        agent_key=agent_key,
+                        ticker=ticker,
+                        original_length=len(content_str),
+                        retry_length=len(retry_content_str),
+                        retry_has_datablock="DATA_BLOCK" in retry_content_str if retry_content_str else False,
+                        retry_improved=len(retry_content_str) > len(content_str)
+                    )
+                    content_str = retry_content_str
+
+                except Exception as retry_error:
+                    # Retry failed - log and proceed with original (insufficient) output
+                    logger.error(
+                        "analyst_retry_failed",
+                        agent_key=agent_key,
+                        ticker=ticker,
+                        error=str(retry_error),
+                        message="Retry with deep thinking failed, using original output"
+                    )
+                    # Keep original content_str
+
+            new_state[output_field] = content_str
 
             if agent_key == "fundamentals_analyst":
-                logger.info("fundamentals_output", has_datablock="DATA_BLOCK" in response.content, length=len(response.content))
+                logger.info("fundamentals_output", has_datablock="DATA_BLOCK" in content_str, length=len(content_str))
             return new_state
         except Exception as e:
             logger.error(f"Analyst node error {output_field}: {str(e)}")
@@ -247,9 +506,20 @@ def create_researcher_node(llm, memory: Optional[Any], agent_key: str) -> Callab
             debate_state['count'] = debate_state.get('count', 0) + 1
             return {"investment_debate_state": debate_state}
         agent_name = agent_prompt.agent_name
-        reports = f"MARKET: {state.get('market_report')}\nFUNDAMENTALS: {state.get('fundamentals_report')}"
+        # Include all 4 analyst reports for comprehensive debate context
+        reports = f"""MARKET ANALYST REPORT:
+{state.get('market_report', 'N/A')}
+
+SENTIMENT ANALYST REPORT:
+{state.get('sentiment_report', 'N/A')}
+
+NEWS ANALYST REPORT:
+{state.get('news_report', 'N/A')}
+
+FUNDAMENTALS ANALYST REPORT:
+{state.get('fundamentals_report', 'N/A')}"""
         history = state.get('investment_debate_state', {}).get('history', '')
-        
+
         # FIX: Contextualize memory retrieval to prevent cross-contamination
         ticker = state.get("company_of_interest", "UNKNOWN")
         company_name = state.get("company_name", ticker)  # Get verified company name
@@ -293,12 +563,14 @@ Only use data explicitly related to {ticker} ({company_name}).
                 context=agent_name
             )
             debate_state = state.get('investment_debate_state', {}).copy()
-            argument = f"{agent_name}: {response.content}"
+            # CRITICAL FIX: Normalize response.content to string
+            content_str = extract_string_content(response.content)
+            argument = f"{agent_name}: {content_str}"
             debate_state['history'] = debate_state.get('history', '') + f"\n\n{argument}"
             debate_state['count'] = debate_state.get('count', 0) + 1
-            if agent_name == 'Bull Analyst': 
+            if agent_name == 'Bull Analyst':
                 debate_state['bull_history'] = debate_state.get('bull_history', '') + f"\n{argument}"
-            else: 
+            else:
                 debate_state['bear_history'] = debate_state.get('bear_history', '') + f"\n{argument}"
             return {"investment_debate_state": debate_state}
         except Exception as e:
@@ -321,7 +593,8 @@ def create_research_manager_node(llm, memory: Optional[Any]) -> Callable:
                 [HumanMessage(content=prompt)],
                 context=agent_prompt.agent_name
             )
-            return {"investment_plan": response.content}
+            # CRITICAL FIX: Normalize response.content to string
+            return {"investment_plan": extract_string_content(response.content)}
         except Exception as e:
             return {"investment_plan": f"Error: {str(e)}"}
     return research_manager_node
@@ -337,7 +610,21 @@ def create_trader_node(llm, memory: Optional[Any]) -> Callable:
         consultant = state.get('consultant_review', '')
         consultant_section = f"""\n\nEXTERNAL CONSULTANT REVIEW (Cross-Validation):\n{consultant if consultant else 'N/A (consultant disabled or unavailable)'}"""
 
-        all_input = f"""MARKET ANALYST REPORT:\n{state.get('market_report', 'N/A')}\n\nFUNDAMENTALS ANALYST REPORT:\n{state.get('fundamentals_report', 'N/A')}\n\nRESEARCH MANAGER PLAN:\n{state.get('investment_plan', 'N/A')}{consultant_section}"""
+        # Include all 4 analyst reports for comprehensive trading context
+        all_input = f"""MARKET ANALYST REPORT:
+{state.get('market_report', 'N/A')}
+
+SENTIMENT ANALYST REPORT:
+{state.get('sentiment_report', 'N/A')}
+
+NEWS ANALYST REPORT:
+{state.get('news_report', 'N/A')}
+
+FUNDAMENTALS ANALYST REPORT:
+{state.get('fundamentals_report', 'N/A')}
+
+RESEARCH MANAGER PLAN:
+{state.get('investment_plan', 'N/A')}{consultant_section}"""
         prompt = f"""{agent_prompt.system_message}\n\n{all_input}\n\nCreate Trading Plan."""
         try:
             response = await invoke_with_rate_limit_handling(
@@ -345,7 +632,8 @@ def create_trader_node(llm, memory: Optional[Any]) -> Callable:
                 [HumanMessage(content=prompt)],
                 context=agent_prompt.agent_name
             )
-            return {"trader_investment_plan": response.content}
+            # CRITICAL FIX: Normalize response.content to string
+            return {"trader_investment_plan": extract_string_content(response.content)}
         except Exception as e:
             return {"trader_investment_plan": f"Error: {str(e)}"}
     return trader_node
@@ -372,10 +660,12 @@ def create_risk_debater_node(llm, agent_key: str) -> Callable:
                 context=agent_prompt.agent_name
             )
             risk_state = state.get('risk_debate_state', {}).copy()
-            risk_state['history'] += f"\n{agent_prompt.agent_name}: {response.content}\n"
+            # CRITICAL FIX: Normalize response.content to string
+            content_str = extract_string_content(response.content)
+            risk_state['history'] += f"\n{agent_prompt.agent_name}: {content_str}\n"
             risk_state['count'] += 1
             return {"risk_debate_state": risk_state}
-        except Exception as e:
+        except Exception:
             return {"risk_debate_state": state.get('risk_debate_state', {})}
     return risk_node
 
@@ -410,7 +700,7 @@ def create_portfolio_manager_node(llm, memory: Optional[Any]) -> Callable:
             red_flag_list = '\n'.join([f"  - {flag}" for flag in red_flags_detected])
             red_flag_section += f"\nRed Flags Detected:\n{red_flag_list}"
         else:
-            red_flag_section += f"\nRed Flags Detected: None"
+            red_flag_section += "\nRed Flags Detected: None"
         if quality_note:
             red_flag_section += f"\nNote: {quality_note}"
 
@@ -422,7 +712,8 @@ def create_portfolio_manager_node(llm, memory: Optional[Any]) -> Callable:
                 [HumanMessage(content=prompt)],
                 context=agent_prompt.agent_name
             )
-            return {"final_trade_decision": response.content}
+            # CRITICAL FIX: Normalize response.content to string
+            return {"final_trade_decision": extract_string_content(response.content)}
         except Exception as e:
             logger.error(f"PM error: {str(e)}")
             return {"final_trade_decision": f"Error: {str(e)}"}
@@ -521,14 +812,17 @@ Provide your independent consultant review."""
                 context=agent_prompt.agent_name
             )
 
+            # CRITICAL FIX: Normalize response.content to string
+            content_str = extract_string_content(response.content)
+
             logger.info(
                 "consultant_review_complete",
                 ticker=ticker,
-                review_length=len(response.content),
-                has_errors="ERROR" in response.content.upper() or "FAIL" in response.content.upper()
+                review_length=len(content_str),
+                has_errors="ERROR" in content_str.upper() or "FAIL" in content_str.upper()
             )
 
-            return {"consultant_review": response.content}
+            return {"consultant_review": content_str}
 
         except Exception as e:
             logger.error(f"Consultant node error for {ticker}: {str(e)}")
@@ -603,13 +897,13 @@ def create_financial_health_validator_node() -> Callable:
         from src.validators.red_flag_detector import RedFlagDetector
 
         fundamentals_report = state.get('fundamentals_report', '')
-        
-        # --- FIX: DEFENSIVE HANDLING FOR LIST STATE ACCUMULATION ---
-        # LangGraph can sometimes pass the accumulated list of state updates
-        # instead of the reduced string. If we get a list, we take the last element
-        # which represents the most recent/final report.
-        if isinstance(fundamentals_report, list):
-            fundamentals_report = fundamentals_report[-1] if fundamentals_report else ""
+
+        # --- FIX: DEFENSIVE HANDLING FOR NON-STRING STATE VALUES ---
+        # LangGraph can sometimes pass accumulated list of state updates,
+        # or Gemini may return dict/structured content instead of string.
+        # Normalize to string using the helper function.
+        if not isinstance(fundamentals_report, str):
+            fundamentals_report = extract_string_content(fundamentals_report)
 
         ticker = state.get('company_of_interest', 'UNKNOWN')
         company_name = state.get('company_name', ticker)

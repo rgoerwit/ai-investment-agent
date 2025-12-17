@@ -566,6 +566,9 @@ async def main():
     try:
         args = parse_arguments()
 
+        # Import cleanup module (will be used in finally block)
+        from src.cleanup import cleanup_async_resources
+
         if args.quiet or args.brief:
             # Suppress token tracker logging BEFORE any imports that might initialize it
             # CRITICAL: Must set quiet mode before importing get_tracker() or any module that uses it
@@ -656,6 +659,14 @@ async def main():
         else:
             console.print(f"\n[bold red]Unexpected error:[/bold red] {str(e)}\n")
         sys.exit(1)
+    finally:
+        # Clean up async resources (aiohttp sessions, etc.)
+        # This prevents "coroutine was never awaited" warnings
+        try:
+            from src.cleanup import cleanup_async_resources
+            await cleanup_async_resources()
+        except Exception:
+            pass  # Cleanup errors shouldn't prevent exit
 
 
 if __name__ == "__main__":
