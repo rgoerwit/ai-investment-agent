@@ -84,6 +84,21 @@ def _create_rate_limiter_from_rpm(rpm: int) -> InMemoryRateLimiter:
 
 GLOBAL_RATE_LIMITER = _create_rate_limiter_from_rpm(config.gemini_rpm_limit)
 
+# Track LLM instances for cleanup
+_llm_instances: dict = {}
+_llm_instance_counter: int = 0
+
+
+def get_all_llm_instances() -> dict:
+    """
+    Get all tracked LLM instances for cleanup.
+
+    Returns:
+        Dict mapping instance names to LLM objects
+    """
+    return _llm_instances.copy()
+
+
 def create_gemini_model(
     model_name: str,
     temperature: float,
@@ -95,7 +110,10 @@ def create_gemini_model(
 ) -> BaseChatModel:
     """
     Generic factory for Gemini models.
+    All created instances are tracked for proper cleanup at shutdown.
     """
+    global _llm_instance_counter
+
     kwargs = {
         "model": model_name,
         "temperature": temperature,
@@ -113,7 +131,14 @@ def create_gemini_model(
         kwargs["thinking_level"] = thinking_level
         logger.info(f"Applying thinking_level={thinking_level} to {model_name}")
 
-    return ChatGoogleGenerativeAI(**kwargs)
+    llm = ChatGoogleGenerativeAI(**kwargs)
+
+    # Track instance for cleanup
+    _llm_instance_counter += 1
+    instance_name = f"gemini_{model_name}_{_llm_instance_counter}"
+    _llm_instances[instance_name] = llm
+
+    return llm
 
 def create_quick_thinking_llm(
     temperature: float = 0.3,
@@ -189,7 +214,7 @@ def create_deep_thinking_llm(
         callbacks=callbacks, thinking_level=thinking_level
     )
 
-# Initialize default instances
+# Initialize default instances (automatically tracked by create_gemini_model)
 quick_thinking_llm = create_quick_thinking_llm()
 deep_thinking_llm = create_deep_thinking_llm()
 
