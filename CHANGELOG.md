@@ -5,10 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.1.0] - 2025-12-18
 
 ### Added
 
+- **Junior Analyst and Foreign Language Analyst Parallel Chain** - Redesigned the fundamental analysis stage into a parallelized research architecture
+  - **Junior Analyst**: Handles standardized financial metrics, yfinance/yahooquery data fetching, and core profitability scoring.
+  - **Foreign Language Analyst**: Dedicated agent for analyzing local-language (non-English) financial news, filings, and regional sentiment.
+  - **Senior Fundamentals Analyst (Synthesis)**: Acts as a gatekeeper that waits for both Junior and Foreign analyst outputs before synthesizing the final data block and growth score.
+  - **Information Arbitrage**: Enables the system to identify discrepancies between global English-language consensus and local-language operational realities.
 - **External Consultant Node** - Optional cross-validation using OpenAI ChatGPT to detect biases and validate Gemini analysis
   - Uses different LLM (OpenAI) to catch groupthink and confirmation bias that single-model systems miss
   - Positioned post-debate, pre-risk-assessment for maximum context

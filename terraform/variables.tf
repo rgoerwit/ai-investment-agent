@@ -102,7 +102,7 @@ variable "location" {
 # ===== APPLICATION CONTAINER CONFIGURATION =====
 
 variable "docker_image" {
-  description = "The Docker image to deploy (e.g., 'myregistry/trading-system:v1.0.0')"
+  description = "The Docker image to deploy (e.g., 'myregistry/trading-system:v3.1.0')"
   type        = string
 
   validation {
