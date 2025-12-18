@@ -93,6 +93,7 @@ def route_tools(state: AgentState) -> str:
         "sentiment_analyst": "Sentiment Analyst",
         "news_analyst": "News Analyst",
         "junior_fundamentals_analyst": "Junior Fundamentals Analyst",
+        "foreign_language_analyst": "Foreign Language Analyst",
     }
 
     node_name = agent_map.get(sender, "Market Analyst")
@@ -173,15 +174,56 @@ def fan_out_to_analysts(
     state: AgentState, config: RunnableConfig
 ) -> List[str]:
     """
-    Fan-out router that triggers all 4 analyst streams in parallel.
+    Fan-out router that triggers all 5 analyst streams in parallel.
     Returns a list of destinations for parallel execution.
+
+    Architecture:
+    - Market, Sentiment, News → Sync Check (direct)
+    - Junior Fundamentals, Foreign Language → Fundamentals Sync → Senior → Validator → Sync Check
     """
     return [
         "Market Analyst",
         "Sentiment Analyst",
         "News Analyst",
-        "Junior Fundamentals Analyst"
+        "Junior Fundamentals Analyst",
+        "Foreign Language Analyst"
     ]
+
+
+def fundamentals_sync_router(
+    state: AgentState, config: RunnableConfig
+) -> Literal["Fundamentals Analyst", "__end__"]:
+    """
+    Synchronization barrier for Junior Fundamentals and Foreign Language analysts.
+
+    Both analysts run in parallel gathering financial data. This barrier waits for
+    both to complete before allowing the Senior Fundamentals Analyst to process
+    their combined output.
+
+    Routing behavior:
+    - If BOTH Junior (raw_fundamentals_data) and Foreign (foreign_language_report) complete:
+      Route to Senior Fundamentals Analyst
+    - If not all complete: Return __end__ to terminate THIS branch
+      (the other branch will eventually complete and trigger the router)
+    """
+    junior_done = bool(state.get("raw_fundamentals_data"))
+    foreign_done = bool(state.get("foreign_language_report"))
+
+    logger.info(
+        "fundamentals_sync_status",
+        junior_done=junior_done,
+        foreign_done=foreign_done
+    )
+
+    if junior_done and foreign_done:
+        logger.info(
+            "fundamentals_sync_complete",
+            message="Both Junior and Foreign Language analysts complete - proceeding to Senior Fundamentals"
+        )
+        return "Fundamentals Analyst"
+
+    # Not all fundamentals streams complete - terminate this branch
+    return "__end__"
 
 
 def sync_check_router(
@@ -458,7 +500,17 @@ def create_trading_graph(
         retry_llm=retry_llm, allow_retry=allow_retry
     )
 
-    # Fundamentals chain (sequential)
+    # Foreign Language Analyst (parallel with Junior Fundamentals)
+    foreign_llm = create_quick_thinking_llm(
+        callbacks=[TokenTrackingCallback("Foreign Language Analyst", tracker)]
+    )
+    foreign_analyst = create_analyst_node(
+        foreign_llm, "foreign_language_analyst",
+        toolkit.get_foreign_language_tools(), "foreign_language_report",
+        retry_llm=retry_llm, allow_retry=allow_retry
+    )
+
+    # Fundamentals chain (Junior + Foreign → Senior → Validator)
     junior_fund = create_analyst_node(
         junior_fund_llm, "junior_fundamentals_analyst",
         toolkit.get_junior_fundamental_tools(), "raw_fundamentals_data",
@@ -485,6 +537,9 @@ def create_trading_graph(
     )
     junior_fund_tools = create_agent_tool_node(
         toolkit.get_junior_fundamental_tools(), "junior_fundamentals_analyst"
+    )
+    foreign_tools = create_agent_tool_node(
+        toolkit.get_foreign_language_tools(), "foreign_language_analyst"
     )
 
     # Research & Decision nodes
@@ -524,11 +579,19 @@ def create_trading_graph(
 
     workflow.add_node("Sync Check", sync_check_node)
 
+    # Fundamentals Sync Check node (waits for Junior + Foreign Language analysts)
+    async def fundamentals_sync_node(state: AgentState, config: RunnableConfig):
+        """Synchronization barrier for fundamentals data streams - routing logic in conditional edges."""
+        return {}
+
+    workflow.add_node("Fundamentals Sync Check", fundamentals_sync_node)
+
     # Add analyst nodes
     workflow.add_node("Market Analyst", market)
     workflow.add_node("Sentiment Analyst", sentiment)
     workflow.add_node("News Analyst", news)
     workflow.add_node("Junior Fundamentals Analyst", junior_fund)
+    workflow.add_node("Foreign Language Analyst", foreign_analyst)
     workflow.add_node("Fundamentals Analyst", senior_fund)
     workflow.add_node("Financial Validator", validator)
     # Separate tool nodes for parallel execution (avoids sender race condition)
@@ -536,6 +599,7 @@ def create_trading_graph(
     workflow.add_node("sentiment_tools", sentiment_tools)
     workflow.add_node("news_tools", news_tools)
     workflow.add_node("junior_fund_tools", junior_fund_tools)
+    workflow.add_node("foreign_tools", foreign_tools)
 
     # Add research and risk nodes
     workflow.add_node("Bull Researcher", bull)
@@ -556,11 +620,11 @@ def create_trading_graph(
     # Entry point
     workflow.set_entry_point("Dispatcher")
 
-    # Fan-out from Dispatcher to all 4 parallel analyst streams
+    # Fan-out from Dispatcher to all 5 parallel analyst streams
     workflow.add_conditional_edges(
         "Dispatcher",
         fan_out_to_analysts,
-        ["Market Analyst", "Sentiment Analyst", "News Analyst", "Junior Fundamentals Analyst"]
+        ["Market Analyst", "Sentiment Analyst", "News Analyst", "Junior Fundamentals Analyst", "Foreign Language Analyst"]
     )
 
     # Market, Sentiment, News: tools loop → Sync Check
@@ -584,12 +648,28 @@ def create_trading_graph(
     )
     workflow.add_edge("news_tools", "News Analyst")
 
-    # Junior Fundamentals flow: tools loop → Senior Fundamentals
+    # Junior Fundamentals flow: tools loop → Fundamentals Sync Check
     workflow.add_conditional_edges(
         "Junior Fundamentals Analyst", should_continue_analyst,
-        {"tools": "junior_fund_tools", "continue": "Fundamentals Analyst"}
+        {"tools": "junior_fund_tools", "continue": "Fundamentals Sync Check"}
     )
     workflow.add_edge("junior_fund_tools", "Junior Fundamentals Analyst")
+
+    # Foreign Language Analyst flow: tools loop → Fundamentals Sync Check
+    workflow.add_conditional_edges(
+        "Foreign Language Analyst", should_continue_analyst,
+        {"tools": "foreign_tools", "continue": "Fundamentals Sync Check"}
+    )
+    workflow.add_edge("foreign_tools", "Foreign Language Analyst")
+
+    # Fundamentals Sync Check: wait for Junior + Foreign, then route to Senior
+    workflow.add_conditional_edges(
+        "Fundamentals Sync Check", fundamentals_sync_router,
+        {
+            "__end__": END,
+            "Fundamentals Analyst": "Fundamentals Analyst"
+        }
+    )
 
     # Senior Fundamentals → Validator → Sync Check
     workflow.add_edge("Fundamentals Analyst", "Financial Validator")
@@ -633,7 +713,8 @@ def create_trading_graph(
         "trading_graph_created",
         ticker=ticker,
         architecture="parallel",
-        parallel_streams=["Market", "Sentiment", "News", "Fundamentals"]
+        parallel_streams=["Market", "Sentiment", "News", "Junior Fundamentals", "Foreign Language"],
+        fundamentals_sync="Junior + Foreign → Senior → Validator"
     )
 
     return workflow.compile()

@@ -41,23 +41,26 @@ This isn't a single prompt to an LLM. It's a **stateful orchestration** of speci
 graph TB
     Start([User: Analyze TICKER]) --> Dispatcher{Parallel<br/>Dispatch}
 
-    %% Parallel Fan-Out: 4 branches run simultaneously
+    %% Parallel Fan-Out: 5 branches run simultaneously
     Dispatcher --> MarketAnalyst["Market Analyst<br/>(Technical Analysis)"]
     Dispatcher --> SentimentAnalyst["Sentiment Analyst<br/>(Social Media)"]
     Dispatcher --> NewsAnalyst["News Analyst<br/>(Recent Events)"]
-    Dispatcher --> JuniorFund["Junior Fundamentals<br/>(Data Gathering)"]
+    Dispatcher --> JuniorFund["Junior Fundamentals<br/>(API Data)"]
+    Dispatcher --> ForeignLang["Foreign Language<br/>(Native Sources)"]
 
-    %% Each analyst has tool-calling loop (simplified)
+    %% Market/Sentiment/News go directly to main Sync Check
     MarketAnalyst --> SyncCheck["Sync Check<br/>(Fan-In Barrier)"]
     SentimentAnalyst --> SyncCheck
     NewsAnalyst --> SyncCheck
 
-    %% Fundamentals chain is longer
-    JuniorFund -->|Raw Data| SeniorFund["Senior Fundamentals<br/>(Scoring & Analysis)"]
+    %% Fundamentals sub-graph: Junior + Foreign sync first
+    JuniorFund --> FundSync["Fundamentals<br/>Sync"]
+    ForeignLang --> FundSync
+    FundSync --> SeniorFund["Senior Fundamentals<br/>(Scoring & Analysis)"]
     SeniorFund --> Validator["Financial Validator<br/>(Red-Flag Detection)"]
     Validator --> SyncCheck
 
-    %% After all 4 branches complete
+    %% After all branches complete
     SyncCheck -->|REJECT| PortfolioManager["Portfolio Manager<br/>(Final Decision)"]
     SyncCheck -->|PASS| BullResearcher["Bull Researcher<br/>(Upside Case)"]
 
@@ -68,7 +71,7 @@ graph TB
     Debate -->|Round 1-2| BearResearcher
     Debate -->|Converged| ResearchManager["Research Manager<br/>(Synthesize All Data)"]
 
-    ResearchManager --> Consultant["External Consultant<br/>(Cross-Validation)<br/>🔍 Optional"]
+    ResearchManager --> Consultant["External Consultant<br/>(Cross-Validation)<br/>Optional"]
 
     Consultant -->|OpenAI Review| Trader["Trader<br/>(Trade Plan)"]
     ResearchManager -.->|If Disabled| Trader
@@ -84,6 +87,8 @@ graph TB
     style NewsAnalyst fill:#e1f5ff
     style SentimentAnalyst fill:#e1f5ff
     style JuniorFund fill:#e1f5ff
+    style ForeignLang fill:#e1ffe1
+    style FundSync fill:#e0e0e0
     style SeniorFund fill:#e1f5ff
     style Validator fill:#ffcccc
     style SyncCheck fill:#e0e0e0
@@ -100,17 +105,18 @@ graph TB
 
 ### How Agents Collaborate
 
-1. **Parallel Data Gathering (Fan-Out)** - Four analyst branches run **simultaneously** to maximize speed:
+1. **Parallel Data Gathering (Fan-Out)** - Five analyst branches run **simultaneously** to maximize speed:
    - Market Analyst (technical indicators, liquidity)
    - Sentiment Analyst (social media signals)
    - News Analyst (recent events, catalysts)
-   - Fundamentals chain (Junior → Senior → Validator)
+   - Junior Fundamentals (API-based financial data)
+   - Foreign Language Analyst (native-language sources, premium English fallback)
 
    Each branch has its own tool-calling loop. This parallel architecture reduces analysis time by ~60% compared to sequential execution.
 
-2. **Sync Check (Fan-In Barrier)** - All 4 branches converge at a synchronization point. The Sync Check waits for all reports before proceeding. Early branches terminate; the last branch to complete triggers the next phase.
+2. **Sync Check (Fan-In Barrier)** - All branches converge at synchronization points. The Fundamentals Sync waits for Junior + Foreign Language analysts before Senior processes their combined data. The main Sync Check waits for all reports before proceeding to debate.
 
-3. **Junior/Senior Fundamentals Split** - The Junior Fundamentals Analyst calls data tools (get_financial_metrics, get_fundamental_analysis) and returns raw data. The Senior Fundamentals Analyst receives this raw data and produces scored analysis with a structured DATA_BLOCK.
+3. **Junior/Senior/Foreign Fundamentals Split** - The Junior Fundamentals Analyst calls data tools (get_financial_metrics, get_fundamental_analysis) and returns raw API data. The Foreign Language Analyst searches native-language sources (IR pages, exchange filings) and premium English sources (Bloomberg, Morningstar) for supplemental data. The Senior Fundamentals Analyst receives both data streams and produces scored analysis with a structured DATA_BLOCK, using Foreign data to fill gaps in Junior's output.
 
 4. **Red-Flag Pre-Screening** - Financial Validator parses the DATA_BLOCK for catastrophic risks (extreme leverage >500% D/E, earnings quality issues, refinancing risk). REJECT routes directly to Portfolio Manager; PASS continues to debate.
 
@@ -126,7 +132,7 @@ graph TB
 
 10. **Executive Decision** - Portfolio Manager synthesizes all viewpoints, applies thesis criteria, and makes final BUY/SELL/HOLD decision.
 
-**Why This Matters:** Single-LLM systems are prone to confirmation bias. Multi-agent debate forces the AI to consider contradictory evidence, mimicking how institutional research teams actually work. The parallel fan-out/fan-in pattern provides speed without sacrificing data quality. The Junior/Senior split prevents tool-calling complexity from interfering with analysis. The Financial Validator provides deterministic pre-screening to catch catastrophic risks before debate. The optional External Consultant uses a different AI model (OpenAI) to catch groupthink.
+**Why This Matters:** Single-LLM systems are prone to confirmation bias. Multi-agent debate forces the AI to consider contradictory evidence, mimicking how institutional research teams actually work. The parallel fan-out/fan-in pattern provides speed without sacrificing data quality. The Junior/Senior/Foreign split uses multiple data pathways (APIs + native-language web sources) to reduce data gaps common with international stocks. The Financial Validator provides deterministic pre-screening to catch catastrophic risks before debate. The optional External Consultant uses a different AI model (OpenAI) to catch groupthink.
 
 ---
 

@@ -128,6 +128,7 @@ class AgentState(MessagesState):
     sentiment_report: Annotated[str, take_last]
     news_report: Annotated[str, take_last]
     raw_fundamentals_data: Annotated[str, take_last]  # Junior Analyst output
+    foreign_language_report: Annotated[str, take_last]  # Foreign Language Analyst output
     fundamentals_report: Annotated[str, take_last]  # Senior Analyst analysis
     investment_debate_state: Annotated[InvestDebateState, take_last]
     investment_plan: Annotated[str, take_last]
@@ -354,15 +355,16 @@ def create_analyst_node(
                     )
                 # Don't log warning - Junior's job is tool calling, news is optional
 
-            # Senior Fundamentals Analyst: Gets raw data from Junior
-            # NOTE: In parallel mode, news_report may not be available yet (race condition)
-            # This is acceptable - Bull/Bear researchers will have all reports after sync
+            # Senior Fundamentals Analyst: Gets raw data from Junior AND Foreign Language Analyst
+            # NOTE: Both Junior and Foreign Language analysts complete before Senior via Fundamentals Sync
             if agent_key == "fundamentals_analyst":
                 raw_data = state.get("raw_fundamentals_data", "")
+                foreign_data = state.get("foreign_language_report", "")
                 news_report = state.get("news_report", "")
+
                 if raw_data:
                     extra_context = (
-                        f"\n\n### RAW FINANCIAL DATA FROM JUNIOR ANALYST"
+                        f"\n\n### RAW FINANCIAL DATA FROM JUNIOR ANALYST (Primary Source)"
                         f"\n{raw_data}\n"
                     )
                 else:
@@ -371,6 +373,27 @@ def create_analyst_node(
                         ticker=ticker,
                         message="Junior Analyst data not available - this should not happen"
                     )
+
+                # Foreign Language Analyst data supplements Junior's data
+                if foreign_data:
+                    extra_context += (
+                        f"\n\n### FOREIGN/ALTERNATIVE SOURCE DATA (Cross-Reference)"
+                        f"\nNote: Use this data to FILL GAPS in Junior Analyst data. "
+                        f"Prioritize Junior's data when both sources have the same metric.\n"
+                        f"{foreign_data}\n"
+                    )
+                    logger.info(
+                        "senior_fundamentals_has_foreign_data",
+                        ticker=ticker,
+                        foreign_data_length=len(foreign_data)
+                    )
+                else:
+                    logger.info(
+                        "senior_fundamentals_no_foreign_data",
+                        ticker=ticker,
+                        message="Foreign Language Analyst data not available - proceeding with Junior data only"
+                    )
+
                 if news_report:
                     extra_context += (
                         f"\n\n### NEWS CONTEXT (for Qualitative Growth Scoring)"

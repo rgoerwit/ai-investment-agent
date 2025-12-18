@@ -385,10 +385,67 @@ async def get_fundamental_analysis(ticker: Annotated[str, "Stock ticker symbol"]
     except Exception as e:
         return f"Error searching for fundamentals: {e}"
 
+@tool
+async def search_foreign_sources(
+    ticker: Annotated[str, "Stock ticker symbol"],
+    search_query: Annotated[str, "Search query (can include native language terms)"]
+) -> str:
+    """
+    Search for financial data from foreign-language and premium English sources.
+
+    Use this tool to find official filings, IR pages, and premium source data
+    that may not be available through standard English-language APIs.
+
+    Tips:
+    - Include native language terms for non-US tickers
+    - Include site: operator for targeting specific sources
+    - Include year/date for recent data
+    """
+    if not tavily_tool:
+        return "Foreign source search unavailable (Tavily not configured)"
+
+    try:
+        normalized_symbol = normalize_ticker(ticker)
+        ticker_obj = yf.Ticker(normalized_symbol)
+        company_name = await extract_company_name_async(ticker_obj)
+
+        # Build comprehensive query with company context
+        full_query = f"{search_query} {company_name} {ticker}"
+
+        logger.info(
+            "foreign_source_search",
+            ticker=ticker,
+            query=full_query[:100]  # Truncate for logging
+        )
+
+        results = await tavily_tool.ainvoke({"query": full_query})
+
+        if not results:
+            return f"No results found for foreign source search: {search_query}"
+
+        # Format results for agent consumption
+        results_str = str(results)
+
+        # Add context header
+        output = f"""### Foreign Source Search Results
+Query: {search_query}
+Ticker: {ticker} ({company_name})
+
+{results_str}
+
+Note: Verify dates and currencies in the source data."""
+
+        return output
+
+    except Exception as e:
+        logger.error(f"Foreign source search error: {e}")
+        return f"Error searching foreign sources: {e}"
+
+
 class Toolkit:
     def __init__(self):
         self.market_data_fetcher = market_data_fetcher
-    
+
     def get_core_tools(self): return [get_yfinance_data, get_technical_indicators]
     
     def get_technical_tools(self): return [
@@ -418,16 +475,22 @@ class Toolkit:
 
     def get_news_tools(self):
         return [get_news, get_macroeconomic_news]
+
+    def get_foreign_language_tools(self):
+        """Tools for Foreign Language Analyst (supplemental data from native sources)."""
+        return [search_foreign_sources]
+
     def get_all_tools(self): return [
-        get_yfinance_data, 
-        get_technical_indicators, 
-        get_financial_metrics, 
-        get_news, 
-        get_social_media_sentiment, 
-        get_multilingual_sentiment_search, 
-        calculate_liquidity_metrics, 
-        get_macroeconomic_news, 
-        get_fundamental_analysis
+        get_yfinance_data,
+        get_technical_indicators,
+        get_financial_metrics,
+        get_news,
+        get_social_media_sentiment,
+        get_multilingual_sentiment_search,
+        calculate_liquidity_metrics,
+        get_macroeconomic_news,
+        get_fundamental_analysis,
+        search_foreign_sources
     ]
 
 toolkit = Toolkit()

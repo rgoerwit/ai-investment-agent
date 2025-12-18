@@ -285,6 +285,7 @@ def display_results(result: dict, ticker: str):
         ("market_report", "Market Analysis"),
         ("sentiment_report", "Sentiment Analysis"),
         ("news_report", "News Analysis"),
+        ("foreign_language_report", "Foreign Language Analysis"),
         ("fundamentals_report", "Fundamentals Analysis"),
         ("investment_plan", "Investment Plan"),
         ("trader_investment_plan", "Trading Proposal")
@@ -494,6 +495,8 @@ async def run_analysis(ticker: str, quick_mode: bool) -> Optional[dict]:
             market_report="",
             sentiment_report="",
             news_report="",
+            raw_fundamentals_data="",
+            foreign_language_report="",
             fundamentals_report="",
             investment_debate_state=InvestDebateState(
                 bull_history="",
