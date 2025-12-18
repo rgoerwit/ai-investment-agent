@@ -2,7 +2,7 @@
 
 > **An open-source agentic AI system that democratizes sophisticated equity research for international markets**
 
-**If you're concerned about US political instability, rising federal debt, dollar depreciation, or an AI-driven market bubble**, this system offers a way to diversify by evaluating GARP (Growth at a Reasonable Price) opportunities in ex-US markets. It uses the same multi-perspective analysis patterns employed by institutional research teams, but is powered by free- or cheap-tier AI and financial data APIs and can be run from a basic MacBook or other laptop.
+**If you're concerned about US political instability, rising federal debt, dollar depreciation, or an AI-driven market bubble**, this system offers a way to diversify by evaluating transitional value-to-GARP (Value → Growth at a Reasonable Price) opportunities in ex-US markets. It uses the same multi-perspective analysis patterns employed by institutional research teams, but is powered by free- or cheap-tier AI and financial data APIs and can be run from a basic MacBook or other laptop.
 
 **What you need:** Python 3.12+, a Google Gemini API key (free tier), and basic command-line familiarity. Optional: Additional API keys for enhanced data (FMP, Tavily, EODHD). Everything runs locally on your machine—no cloud subscription required.
 
@@ -14,7 +14,7 @@
 
 ## 🎯 What Makes This Different
 
-**Most "AI trading bots" are simple scripts.** This is a **thesis-driven fundamental analysis engine** with institutional-grade architecture.
+**Most "AI trading bots" are simple scripts.** This is a **thesis-driven fundamental analysis engine** with institutional-grade architecture.  (I spent hours and hours working my *ss off to get this right.)
 
 ### The Problem This Solves
 
@@ -41,23 +41,26 @@ This isn't a single prompt to an LLM. It's a **stateful orchestration** of speci
 graph TB
     Start([User: Analyze TICKER]) --> Dispatcher{Parallel<br/>Dispatch}
 
-    %% Parallel Fan-Out: 4 branches run simultaneously
+    %% Parallel Fan-Out: 5 branches run simultaneously
     Dispatcher --> MarketAnalyst["Market Analyst<br/>(Technical Analysis)"]
     Dispatcher --> SentimentAnalyst["Sentiment Analyst<br/>(Social Media)"]
     Dispatcher --> NewsAnalyst["News Analyst<br/>(Recent Events)"]
-    Dispatcher --> JuniorFund["Junior Fundamentals<br/>(Data Gathering)"]
+    Dispatcher --> JuniorFund["Junior Fundamentals<br/>(API Data)"]
+    Dispatcher --> ForeignLang["Foreign Language<br/>(Native Sources)"]
 
-    %% Each analyst has tool-calling loop (simplified)
+    %% Market/Sentiment/News go directly to main Sync Check
     MarketAnalyst --> SyncCheck["Sync Check<br/>(Fan-In Barrier)"]
     SentimentAnalyst --> SyncCheck
     NewsAnalyst --> SyncCheck
 
-    %% Fundamentals chain is longer
-    JuniorFund -->|Raw Data| SeniorFund["Senior Fundamentals<br/>(Scoring & Analysis)"]
+    %% Fundamentals sub-graph: Junior + Foreign sync first
+    JuniorFund --> FundSync["Fundamentals<br/>Sync"]
+    ForeignLang --> FundSync
+    FundSync --> SeniorFund["Senior Fundamentals<br/>(Scoring & Analysis)"]
     SeniorFund --> Validator["Financial Validator<br/>(Red-Flag Detection)"]
     Validator --> SyncCheck
 
-    %% After all 4 branches complete
+    %% After all branches complete
     SyncCheck -->|REJECT| PortfolioManager["Portfolio Manager<br/>(Final Decision)"]
     SyncCheck -->|PASS| BullResearcher["Bull Researcher<br/>(Upside Case)"]
 
@@ -68,7 +71,7 @@ graph TB
     Debate -->|Round 1-2| BearResearcher
     Debate -->|Converged| ResearchManager["Research Manager<br/>(Synthesize All Data)"]
 
-    ResearchManager --> Consultant["External Consultant<br/>(Cross-Validation)<br/>🔍 Optional"]
+    ResearchManager --> Consultant["External Consultant<br/>(Cross-Validation)<br/>Optional"]
 
     Consultant -->|OpenAI Review| Trader["Trader<br/>(Trade Plan)"]
     ResearchManager -.->|If Disabled| Trader
@@ -84,6 +87,8 @@ graph TB
     style NewsAnalyst fill:#e1f5ff
     style SentimentAnalyst fill:#e1f5ff
     style JuniorFund fill:#e1f5ff
+    style ForeignLang fill:#e1ffe1
+    style FundSync fill:#e0e0e0
     style SeniorFund fill:#e1f5ff
     style Validator fill:#ffcccc
     style SyncCheck fill:#e0e0e0
@@ -100,17 +105,18 @@ graph TB
 
 ### How Agents Collaborate
 
-1. **Parallel Data Gathering (Fan-Out)** - Four analyst branches run **simultaneously** to maximize speed:
+1. **Parallel Data Gathering (Fan-Out)** - Five analyst branches run **simultaneously** to maximize speed:
    - Market Analyst (technical indicators, liquidity)
    - Sentiment Analyst (social media signals)
    - News Analyst (recent events, catalysts)
-   - Fundamentals chain (Junior → Senior → Validator)
+   - Junior Fundamentals (API-based financial data)
+   - Foreign Language Analyst (native-language sources, premium English fallback)
 
    Each branch has its own tool-calling loop. This parallel architecture reduces analysis time by ~60% compared to sequential execution.
 
-2. **Sync Check (Fan-In Barrier)** - All 4 branches converge at a synchronization point. The Sync Check waits for all reports before proceeding. Early branches terminate; the last branch to complete triggers the next phase.
+2. **Sync Check (Fan-In Barrier)** - All branches converge at synchronization points. The Fundamentals Sync waits for Junior + Foreign Language analysts before Senior processes their combined data. The main Sync Check waits for all reports before proceeding to debate.
 
-3. **Junior/Senior Fundamentals Split** - The Junior Fundamentals Analyst calls data tools (get_financial_metrics, get_fundamental_analysis) and returns raw data. The Senior Fundamentals Analyst receives this raw data and produces scored analysis with a structured DATA_BLOCK.
+3. **Junior/Senior/Foreign Fundamentals Split** - The Junior Fundamentals Analyst calls data tools (get_financial_metrics, get_fundamental_analysis) and returns raw API data. The Foreign Language Analyst searches native-language sources (IR pages, exchange filings) and premium English sources (Bloomberg, Morningstar) for supplemental data. The Senior Fundamentals Analyst receives both data streams and produces scored analysis with a structured DATA_BLOCK, using Foreign data to fill gaps in Junior's output.
 
 4. **Red-Flag Pre-Screening** - Financial Validator parses the DATA_BLOCK for catastrophic risks (extreme leverage >500% D/E, earnings quality issues, refinancing risk). REJECT routes directly to Portfolio Manager; PASS continues to debate.
 
@@ -126,7 +132,7 @@ graph TB
 
 10. **Executive Decision** - Portfolio Manager synthesizes all viewpoints, applies thesis criteria, and makes final BUY/SELL/HOLD decision.
 
-**Why This Matters:** Single-LLM systems are prone to confirmation bias. Multi-agent debate forces the AI to consider contradictory evidence, mimicking how institutional research teams actually work. The parallel fan-out/fan-in pattern provides speed without sacrificing data quality. The Junior/Senior split prevents tool-calling complexity from interfering with analysis. The Financial Validator provides deterministic pre-screening to catch catastrophic risks before debate. The optional External Consultant uses a different AI model (OpenAI) to catch groupthink.
+**Why This Matters:** Single-LLM (and worse yet, single-prompt) systems are prone to confirmation bias. Multi-model + multi-agent debate forces the system as a whole to consider contradictory evidence, mimicking how institutional research teams actually work. The parallel fan-out/fan-in pattern provides speed without sacrificing data quality. The Junior/Senior/Foreign split uses multiple data pathways (APIs + native-language web sources) to reduce data gaps common when analyzing international stocks. The Financial Validator provides deterministic pre-screening to catch catastrophic risks before debate. The optional External Consultant uses a different AI model (OpenAI) to catch groupthink.
 
 ---
 
@@ -136,8 +142,8 @@ graph TB
 
 - Python 3.12+
 - Poetry (dependency management)
-- Google Gemini API key (free tier: 15 RPM)
-- Optional: Tavily API, FMP API, StockTwits access
+- Google Gemini API key (free tier: 15 RPM, slow and glitchy, but workable)
+- Optional: Tavily API, FMP API, StockTwits, EODHD access
 
 ### Installation
 
@@ -179,15 +185,15 @@ poetry run python -m src.main --ticker 0005.HK > results/0005.HK.md
 # Quiet mode (suppress logging, output markdown only)
 poetry run python -m src.main --ticker 0005.HK --quiet
 
-# Brief mode (compact markdown: header, summary, decision only)
+# Brief output mode (compact markdown: header, summary, decision only)
 poetry run python -m src.main --ticker 0005.HK --brief
 
-# Quick mode (faster, 1 debate round)
+# Quick mode (faster, 1 debate round); not brief output!
 poetry run python -m src.main --ticker 7203.T --quick
 
 # Run with real-time logging visible (unbuffered Python output)
 # Redirect to file and monitor with: tail -f scratch/ticker_analysis_info.txt
-poetry run python -u -m src.main --ticker 0005.HK >scratch/ticker_analysis_info.txt 2>&1 &
+poetry run python -u -m src.main --ticker 0005.HK >scratch/ticker_analysis_0005-HK.txt 2>&1 &
 
 # Batch analysis
 poetry run bash run_tickers.sh
@@ -198,7 +204,8 @@ poetry run pytest tests/ -v
 
 ### Configuring API Rate Limits (NEW)
 
-The system automatically handles Gemini API rate limits based on your tier. **Free tier (15 RPM) works out of the box** with no configuration needed.
+The system automatically handles Gemini API rate limits based on your tier.
+**Free tier (15 RPM) works out of the box** with no configuration needed.
 
 If you upgrade to a **paid Gemini API tier**, make sure you're using an
 API key for the correct project (project settings determine your tier),
@@ -206,51 +213,59 @@ and then up your RPM limits in .env:
 
 ```bash
 # In your .env file, add:
-GEMINI_RPM_LIMIT=360   # Paid tier 1: 24x faster than free tier
+GEMINI_RPM_LIMIT=360   # Paid tier 1: faster than free tier
 # or
-GEMINI_RPM_LIMIT=1000  # Paid tier 2: 67x faster than free tier
+GEMINI_RPM_LIMIT=1000  # Paid tier 2: should be much, much faster than free tier
 ```
 
 **Performance comparison:**
 
-- **Free tier (15 RPM):** ~1 analysis per 5-10 minutes (sometimes stalling or dying)
-- **Paid tier 1 (360 RPM):** ~24 analyses in the same period (24x speedup...theoretically)
-- **Paid tier 2 (1000 RPM):** ~67 analyses in the same period (even faster)
+- **Free tier (15 RPM):** ~1 analysis per 10-20 minutes (sometimes stalling or dying)
+- **Paid tier 1 (360 RPM):** ~3-5 analyses in the same period
+- **Paid tier 2 (1000 RPM):** ? analyses in the same period (I haven't tried this)
 
 The system applies a 20% safety margin automatically to prevent hitting API limits. For
-batch analysis of tickers, paid tiers can reduce runtime substantially.
+batch analysis of tickers, paid tiers can reduce runtime substantially.  The system is
+complex and expensive, though, when you're running even at tier 1 ($50-100 for a normal
+batch of 300 tickers).
 
 ### AI Model Configuration and Thinking Levels (IMPORTANT - Dec 2025)
 
-The system uses a **two-tier thinking level architecture** optimized for both performance and reasoning depth. Understanding this is crucial for reliable operation, especially with Gemini models.
+The system uses a **two-tier thinking level architecture** optimized for both performance and reasoning depth. Understanding this is crucial for reliable operation, especially with
+Gemini models.
 
 #### Two-Tier Thinking System
 
-**Tier 1: Data Gathering Agents (Always LOW thinking)**
-- Market Analyst, Social Analyst, News Analyst, Fundamentals Analyst
-- Uses `QUICK_MODEL` (fast model for simple extraction tasks)
+### Tier 1: Data Gathering Agents (Always LOW thinking)
+
+- Market, Social, News, Fundamentals, Foreign Language, and Junior Analysts
+- All use `QUICK_MODEL` (set this to a fast model for simple extraction tasks)
 - **Automatically sets `thinking_level="low"`** for Gemini 3+ models
 - Small context (~3-8k tokens), simple data extraction - doesn't need deep reasoning
 
-**Tier 2: Synthesis & Decision Agents (Mode-Dependent thinking)**
+### Tier 2: Synthesis & Decision Agents (Mode-Dependent thinking)
+
 - Bull/Bear Researchers, Research Manager, Portfolio Manager, Risk Analysts
 - Uses `DEEP_MODEL` (reasoning model for complex analysis)
 - **Quick mode (`--quick`):** `thinking_level="low"` (faster, less deep reasoning)
 - **Normal mode (default):** `thinking_level="high"` (slower, deeper reasoning)
 - Large context (~100k-180k tokens), heavy reasoning load - benefits from high thinking
 
-#### Critical Recommendation: Use Gemini 3+ for QUICK_MODEL
+#### Critical Recommendation: Use Gemini 3+ (flash) for QUICK_MODEL
 
-**⚠️ IMPORTANT:** If you're using Gemini models, use **Gemini 3+** (e.g., `gemini-3-pro-preview`) for your `QUICK_MODEL`, not Gemini 2.x models.
+**⚠️ IMPORTANT:** If you're using Gemini models, use **Gemini 3+** (e.g., `gemini-3-pro-preview`)
+for your `QUICK_MODEL`, not Gemini 2.x models.
 
-**Why?** The 4 data gathering agents (Market, Social, News, Fundamentals) call tools to fetch financial data. Gemini 2.x models have **tool-calling bugs** with some LangGraph versions that can cause failures during data collection. Gemini 3+ models work reliably.
+**Why?** The 4 data gathering agents call tools to fetch financial data. Gemini 2.x models have **tool-calling bugs** with some LangGraph versions that can cause failures during data collection. Gemini 3+ models work reliably.
 
-**What happens if you use Gemini 2.x for QUICK_MODEL:**
-- You'll see a WARNING log message at startup: `"QUICK_MODEL is gemini-2.0-flash (Gemini 2.x) - tool calling bugs may occur..."`
+### What happens if you use Gemini 2.x for QUICK_MODEL
+
+- You'll see a WARNING log message at startup
 - Data gathering agents may fail to fetch financial data correctly
-- The entire analysis pipeline depends on clean data from these agents
+- The entire analysis pipeline depends on clean data from these agents, so results will degrade
 
-**Recommended configuration** (in your environment or code):
+### Recommended configuration** (in your environment or code)
+
 ```bash
 # For best results with Gemini models:
 QUICK_MODEL=gemini-3-pro-preview    # For data gathering (thinking_level="low" auto-set)
@@ -261,9 +276,10 @@ QUICK_MODEL=gemini-3-flash-preview  # Faster, cheaper data gathering
 DEEP_MODEL=gemini-3-pro-preview     # More powerful synthesis
 ```
 
-**Note:** Model configuration is controlled via environment variables in your `.env` file:
+**Note:** Model configuration is controlled via environment variables in your `.env` file
+
 ```bash
-QUICK_MODEL=gemini-3-pro-preview    # Used by data gathering agents
+QUICK_MODEL=gemini-3-flash-preview  # Used by data gathering agents
 DEEP_MODEL=gemini-3-pro-preview     # Used by synthesis agents in normal mode
 ```
 
@@ -271,16 +287,18 @@ The defaults (if not set) are defined in `src/config.py`. All LLM instances are 
 
 #### Performance Implications
 
-**Quick mode (`--quick`):**
+### Quick mode (`--quick`):
+
 - 1 debate round vs 2 (50% fewer agent turns)
 - All synthesis agents use `thinking_level="low"` (faster responses)
 - Typical runtime: 2-4 minutes per ticker
 - **Trade-off:** Less thorough reasoning, may miss nuanced risks
 
-**Normal mode (default):**
+### Normal mode (default):
+
 - 2 debate rounds (more adversarial back-and-forth)
 - All synthesis agents use `thinking_level="high"` (deeper reasoning)
-- Typical runtime: 5-10 minutes per ticker
+- Typical runtime: Depending on API limits, 3-20 minutes per ticker
 - **Benefit:** More thorough analysis, better risk detection, higher quality recommendations
 
 For batch analysis of 300+ tickers, quick mode can save hours of runtime but may produce less rigorous recommendations. Use normal mode for final investment decisions.
@@ -315,7 +333,7 @@ FORMAT:
 Focus on: industrials, technology, consumer discretionary, healthcare
 Exclude: financials, REITs, utilities, telecoms
 
-Output the list and provide a download link so I can save it as sample_tickers.txt
+Output the list and provide a download link so I can save it as sample_tickers.txt.  Make sure there is one ticker to a line, with no comments.
 ```
 
 **Alternative:** Ask the AI to output as a code block you can copy directly:
@@ -350,7 +368,7 @@ EOF
 
 #### Step 3: Run Batch Analysis
 
-Note: **⚠️ This will take a long time (likely overnight for 300+ tickers)**
+Note: **⚠️ This will take a long time (likely a day or more for 300+ tickers)**
 
 ```bash
 # macOS users: Prevent sleep during long analysis
@@ -384,44 +402,53 @@ Results are saved to `scratch/ticker_analysis_results.md`:
 cat scratch/ticker_analysis_results.md
 
 # Filter for BUY recommendations only
-grep -B 5 "FINAL DECISION: BUY" scratch/ticker_analysis_results.md
+egrep '^###.*FINAL DECISION.*BUY *$' scratch/ticker_analysis_results.md
 
 # Count decisions
-echo "BUY: $(grep -c 'FINAL DECISION: BUY' scratch/ticker_analysis_results.md)"
-echo "HOLD: $(grep -c 'FINAL DECISION: HOLD' scratch/ticker_analysis_results.md)"
-echo "SELL: $(grep -c 'FINAL DECISION: SELL' scratch/ticker_analysis_results.md)"
+echo "BUY: $(egrep -c '^###.*FINAL DECISION.*BUY *$' scratch/ticker_analysis_results.md)"
+echo "HOLD: $(egrep -c '^###.*FINAL DECISION.*HOLD *$' scratch/ticker_analysis_results.md)"
+echo "SELL: $(egrep -c '^###.*FINAL DECISION.*SELL *$' scratch/ticker_analysis_results.md)"
 ```
 
 #### What to Expect
 
 Versions of the codebase have varied in their strictness, but in general, from a list of 300 candidates, you'll typically get:
 
-- **BUY recommendations:** 5-15 stocks (depends on model used)
-- **HOLD recommendations:** 20-40 stocks (interesting but flawed or uncertain equities)
-- **SELL recommendations:** 255+ stocks (thesis violations, poor fundamentals)
+- **BUY recommendations:** 25-50 stocks (depends on model used)
+- **HOLD recommendations:** 5-50 stocks (interesting but flawed or uncertain equities)
+- **SELL recommendations:** 200+ stocks (thesis violations, poor fundamentals)
 
 The system is **intentionally conservative** - it's designed to find the best candidates, not to give you 100 "buys."
 
 ### Example Output Structure
 
-```text
-# 0005.HK (HSBC HOLDINGS): SELL
-
+```markdown
+# 2412.TW (Chunghwa Telecom Co., Ltd.): SELL
+**Analysis Date:** 2025-12-17 23:57:57
+---
 ## Executive Summary
-FINAL DECISION: SELL
-Position Size: 0%
-Conviction: High
+### FINAL DECISION: SELL
 
-### THESIS COMPLIANCE
-- Financial Health: 62.5% [PASS]
-- Growth Transition: 0% [FAIL]
-- Liquidity: $223M daily [PASS]
-- Analyst Coverage: 9 [PASS]
+### THESIS COMPLIANCE SUMMARY
 
-### DECISION RATIONALE
-1. Hard thesis violation on growth (0% vs 50% required)
-2. High qualitative risk (geopolitical exposure, cyclical)
-3. Consensus across all risk analysts: 0% allocation
+**Hard Fail Checks:**
+- **Financial Health**: 67% (Adjusted) - [PASS]
+- **Growth Transition**: 67% (Adjusted) - [PASS]
+- **Liquidity**: PASS - [PASS]
+- **Analyst Coverage**: 6 - [PASS]
+- **US Revenue**: Not disclosed - [N/A]
+- **P/E Ratio**: 26.37 (PEG: 5.49) - [FAIL]
+
+**Hard Fail Result**: **FAIL on: [P/E Ratio > 25]**
+
+**Qualitative Risk Tally** (Calculated for context, though Hard Fail triggers SELL):
+- **ADR (MODERATE_CONCERN)**: [+0.33]
+- **ADR (EMERGING_INTEREST bonus)**: [+0]
+- **ADR (UNCERTAIN)**: [+0]
+- **Qualitative Risks**: Valuation Disconnect [+1.0], Geopolitical Strategy Risk [+1.0]
+- **US Revenue 25-35%**: [+0]
+- **Marginal Valuation**: [+0] (N/A, P/E > 25 is beyond marginal)
+- **TOTAL RISK COUNT**: 2.33
 ...
 ```
 
@@ -478,7 +505,7 @@ The system enforces a **value-to-growth transition** strategy focused on:
 ### Soft Factors (Risk Scoring)
 
 - 📊 Valuation (P/E ≤ 18, PEG ≤ 1.2, P/B ≤ 1.4)
-- 🌍 US Revenue exposure (prefer 25-35% for diversification)
+- 🌍 US Revenue exposure (prefer less exposure here)
 - 🏢 ADR availability (sponsored means equity is well "discovered")
 - ⚠️ Qualitative risks (geopolitical, industry headwinds, management issues)
 
@@ -530,7 +557,7 @@ memories = create_memory_instances("0005.HK")
 
 ### Prompt Engineering Excellence
 
-Each agent uses **versioned, structured prompts** with strict output formats:
+Each agent uses **versioned, structured prompts** in a separate `prompts/` subdirectory, with strict output formats:
 
 ```json
 {
@@ -563,7 +590,7 @@ Prompts enforce **algorithms via natural language** (e.g., "IF US Revenue > 35%:
 
 **Weaknesses Identified:**
 
-- ⚠️ Enforces "undiscovered" thesis for mega-caps (HSBC, Samsung are well-known)
+- ⚠️ Enforces "undiscovered" thesis for mega-caps (HSBC, Samsung are well-known, for example)
 - ⚠️ Yet, favors mega-caps in a weird way because you can find data on them!
 - ⚠️ Can't fully match real fund managers, who have just amazing data at their fingertips
 - ⚠️ Sentiment analysis limited by free StockTwits API (misses institutional sentiment)
@@ -571,12 +598,12 @@ Prompts enforce **algorithms via natural language** (e.g., "IF US Revenue > 35%:
 
 ### Speed & Cost
 
-- **Quick Mode:** 2-4 minutes per ticker
-- **Standard Mode:** 5-10 minutes per ticker  
-- **API Cost:** $0 on Gemini free tier (15 RPM limit - slow for big jobs; I went to tier 2)
+- **Quick Mode:** faster, but fewer debate rounds, fewer fallbacks
+- **Standard Mode:** more expensive (if you are using paid API keys), slower, but better results
+- **API Cost:** $0 on Gemini free tier (15 RPM limit - slow for big jobs; I went to tier 1)
 - **Scalability:** Deploy to Azure Container Instances for 24/7 batch processing
 
-To assess costs, run:  ```bash examples/check_token_costs.py```. At tier 2 and using gemini-3-pro-preview as my DEEP_MODEL (see .env), unfortunately, my cost was > $.15/ticker.
+To assess costs, run:  ```bash examples/check_token_costs.py```. At tier 1 and using gemini-3-pro-preview as my DEEP_MODEL (see .env), unfortunately, my cost was > $.15/ticker.
 If this it too expensive, use the --quiet --brief flags, or switch to a cheaper model.
 
 One future enhancement would be to include building the pre-search for hundreds of tickers to look at right in, as an option, so the scan could be started without having to use the ```scripts/run_tickers.sh``` wrapper.  Another might be building in a real UI, lol.
@@ -607,6 +634,7 @@ src/
 ├── data/
 │   ├── fetcher.py     # Smart multi-source data pipeline
 │   └── validator.py   # Financial data sanity checks
+│   └── other...       # Other fetcher-tool auxiliary files
 └── main.py            # CLI entry point with clean state management
 ```
 
@@ -624,10 +652,10 @@ src/
 
 **Institutional research is a luxury good.** A single Bloomberg Terminal costs $24,000/year. A hedge fund analyst team costs $500k-$2M annually. This system provides:
 
-- 📈 **Institutional-quality analysis** for $0 marginal cost
-- 🌏 **Global market access** without multilingual analysts
-- 🤖 **Systematic discipline** replacing emotional trading
-- 🔬 **Reproducible research** with versioned prompts and auditable decisions
+- **Institutional-quality analysis** for $0 marginal cost
+- **Global market access** without multilingual analysts
+- **Systematic discipline** replacing emotional trading
+- **Reproducible research** with versioned prompts and auditable decisions
 
 ### Real-World Use Cases
 
