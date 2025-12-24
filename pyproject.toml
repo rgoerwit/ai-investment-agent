@@ -137,6 +137,9 @@ markers = [
 filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::PendingDeprecationWarning",
+    # langchain_tavily field shadowing warnings (third-party, cannot fix)
+    "ignore:Field name \"output_schema\" in \"TavilyResearch\":UserWarning",
+    "ignore:Field name \"stream\" in \"TavilyResearch\":UserWarning",
 ]
 
 [tool.pytest_env]

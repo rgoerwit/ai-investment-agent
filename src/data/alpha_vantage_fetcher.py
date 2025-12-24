@@ -10,12 +10,14 @@ import os
 import aiohttp
 import asyncio
 import structlog
+import pandas as pd
 from typing import Optional, Dict, Any
+from src.data.interfaces import FinancialFetcher
 
 logger = structlog.get_logger(__name__)
 
 
-class AlphaVantageFetcher:
+class AlphaVantageFetcher(FinancialFetcher):
     """
     Async client for Alpha Vantage with automatic rate limit handling.
 
@@ -56,6 +58,14 @@ class AlphaVantageFetcher:
             logger.debug("alpha_vantage_unavailable", reason="rate_limit_exhausted")
 
         return has_key and not_exhausted
+
+    async def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
+        """
+        Fetch historical price data.
+        Currently not implemented for Alpha Vantage to save API calls for fundamentals.
+        Returns empty DataFrame.
+        """
+        return pd.DataFrame()
 
     async def get_financial_metrics(self, symbol: str) -> Optional[Dict[str, Any]]:
         """

@@ -16,11 +16,13 @@ Error Codes Handled (per EODHD Docs):
 import os
 import aiohttp
 import logging
+import pandas as pd
 from typing import Optional, Dict, Any
+from src.data.interfaces import FinancialFetcher
 
 logger = logging.getLogger(__name__)
 
-class EODHDFetcher:
+class EODHDFetcher(FinancialFetcher):
     """
     Async client for EOD Historical Data.
     Maintains state to stop requests if API limits are hit.
@@ -69,6 +71,13 @@ class EODHDFetcher:
             return f"{ticker}.US"
             
         return ticker
+
+    async def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
+        """
+        Fetch OHLC data.
+        Currently not implemented for EODHD to save API calls.
+        """
+        return pd.DataFrame()
 
     async def get_financial_metrics(self, symbol: str) -> Dict[str, Optional[float]]:
         """

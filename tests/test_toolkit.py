@@ -12,6 +12,7 @@ Each test uses proper async mocking and validates both success and error paths.
 """
 
 import pytest
+import json
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 from datetime import datetime
@@ -49,7 +50,7 @@ class TestGetFinancialMetrics:
     """Tests for the primary fundamental data tool."""
 
     async def test_complete_data_formatting(self, mock_fetcher):
-        """Ensure the tool formats a complete dataset correctly for the LLM."""
+        """Ensure the tool returns complete data as JSON for the LLM to process."""
         mock_data = {
             'currentPrice': 150.00,
             'currency': 'USD',
@@ -76,17 +77,17 @@ class TestGetFinancialMetrics:
 
         result = await toolkit.get_financial_metrics.ainvoke("AAPL")
 
-        # Verify key sections exist
-        assert "FINANCIAL METRICS FOR AAPL" in result
-        assert "Price: 150.00 USD" in result
-        assert "- ROE: 25.00%" in result
-        assert "- P/E (TTM): 20.50" in result
-        assert "- Analyst Opinions: 12" in result
-        assert "### PROFITABILITY" in result
-        assert "### VALUATION" in result
+        # Tool now returns raw JSON for agent to process
+        parsed = json.loads(result)
+        assert parsed['currentPrice'] == 150.0
+        assert parsed['currency'] == 'USD'
+        assert parsed['returnOnEquity'] == 0.25
+        assert parsed['trailingPE'] == 20.5
+        assert parsed['numberOfAnalystOpinions'] == 12
+        assert parsed['_data_source'] == 'yfinance'
 
     async def test_partial_data_handling(self, mock_fetcher):
-        """Ensure the tool handles missing (None) values gracefully with N/A."""
+        """Ensure the tool handles missing (None) values gracefully as null in JSON."""
         # Only minimal data provided
         mock_data = {
             'currentPrice': 100.0,
@@ -98,26 +99,30 @@ class TestGetFinancialMetrics:
 
         result = await toolkit.get_financial_metrics.ainvoke("UNKNOWN")
 
-        assert "Price: 100.00 USD" in result
-        assert "- ROE: N/A" in result
-        assert "- P/E (TTM): N/A" in result
-        assert "- Free Cash Flow: N/A" in result
-        # Should not crash on missing analyst opinions
-        assert "- Analyst Opinions: Data Unavailable" in result
+        # Tool returns raw JSON - agent is responsible for interpreting null values
+        parsed = json.loads(result)
+        assert parsed['currentPrice'] == 100.0
+        assert parsed['currency'] == 'USD'
+        assert parsed['_data_source'] == 'partial'
+        # Missing keys should not be present (or be None if included)
+        assert parsed.get('returnOnEquity') is None
+        assert parsed.get('trailingPE') is None
 
     async def test_fetcher_error_propagation(self, mock_fetcher):
-        """Ensure errors from the fetcher are reported to the agent."""
+        """Ensure errors from the fetcher are reported to the agent as JSON."""
         mock_fetcher.get_financial_metrics = AsyncMock(return_value={"error": "API Rate Limit"})
-        
+
         result = await toolkit.get_financial_metrics.ainvoke("AAPL")
-        
-        assert "Data Unavailable" in result
-        assert "API Rate Limit" in result
+
+        # Tool returns error in JSON format
+        parsed = json.loads(result)
+        assert "error" in parsed
+        assert "API Rate Limit" in parsed["error"]
 
     async def test_growth_zero_vs_none(self, mock_fetcher):
         """
-        CRITICAL: Ensure 0.0% growth is distinct from None (N/A).
-        Zero growth (stagnation) must show as "0.00%", not "N/A".
+        CRITICAL: Ensure 0.0 growth is distinct from None in JSON.
+        Zero growth (stagnation) must be 0.0, not null.
         """
         mock_data = {
             'currentPrice': 100.0,
@@ -128,18 +133,17 @@ class TestGetFinancialMetrics:
             '_data_source': 'yfinance',
         }
         mock_fetcher.get_financial_metrics = AsyncMock(return_value=mock_data)
-        
+
         result = await toolkit.get_financial_metrics.ainvoke("FLAT")
-        
-        # 0.0 should show as "0.00%", NOT "N/A"
-        assert "Revenue Growth (YoY): 0.00%" in result
-        # Negative should show correctly
-        assert "Earnings Growth: -5.00%" in result
-        # None should show as N/A
-        assert "Gross Margin: N/A" in result
+
+        # Tool returns raw JSON - 0.0 must be preserved as 0.0, not null
+        parsed = json.loads(result)
+        assert parsed['revenueGrowth'] == 0.0  # Zero, NOT None
+        assert parsed['earningsGrowth'] == -0.05  # Negative value
+        assert parsed['grossMargins'] is None  # null in JSON
 
     async def test_large_numbers_formatting(self, mock_fetcher):
-        """Test that large cash/debt values are formatted with proper separators."""
+        """Test that large cash/debt values are preserved as numbers in JSON."""
         mock_data = {
             'currentPrice': 250.00,
             'currency': 'USD',
@@ -150,14 +154,15 @@ class TestGetFinancialMetrics:
             '_data_source': 'yfinance'
         }
         mock_fetcher.get_financial_metrics = AsyncMock(return_value=mock_data)
-        
+
         result = await toolkit.get_financial_metrics.ainvoke("AAPL")
-        
-        # Check for proper formatting (depends on your format function)
-        # Most implementations use millions/billions notation
-        assert "Cash:" in result
-        assert "Debt:" in result
-        # Values should be readable (not raw: 50000000000)
+
+        # Tool returns raw JSON - large numbers preserved as integers
+        parsed = json.loads(result)
+        assert parsed['totalCash'] == 50000000000
+        assert parsed['totalDebt'] == 120000000000
+        assert parsed['operatingCashflow'] == 15000000000
+        assert parsed['freeCashflow'] == 12000000000
 
     async def test_currency_non_usd(self, mock_fetcher):
         """Test handling of non-USD currencies (GBP, EUR, JPY, KRW, etc)."""
@@ -168,11 +173,14 @@ class TestGetFinancialMetrics:
             '_data_source': 'yfinance'
         }
         mock_fetcher.get_financial_metrics = AsyncMock(return_value=mock_data)
-        
+
         result = await toolkit.get_financial_metrics.ainvoke("7203.T")
-        
-        assert "Price: 25000.00 JPY" in result
-        assert "7203.T" in result
+
+        # Tool returns raw JSON - currency included in data
+        parsed = json.loads(result)
+        assert parsed['currentPrice'] == 25000.0
+        assert parsed['currency'] == 'JPY'
+        assert parsed['returnOnEquity'] == 0.12
 
 
 @pytest.mark.asyncio
@@ -684,9 +692,12 @@ class TestIntegration:
             
             # Execute all tools
             ticker = "005930.KS"
-            
+
             metrics_result = await toolkit.get_financial_metrics.ainvoke(ticker)
-            assert "50000.00 KRW" in metrics_result
+            # Tool returns raw JSON
+            parsed = json.loads(metrics_result)
+            assert parsed['currentPrice'] == 50000.0
+            assert parsed['currency'] == 'KRW'
             
             news_result = await toolkit.get_news.ainvoke({"ticker": ticker})
             assert "Samsung" in news_result

@@ -115,11 +115,8 @@ class TestFMPMissingKey:
         fetcher = FMPFetcher(api_key=None)
         result = await fetcher.get_financial_metrics("AAPL")
 
-        # Should return dict with all None values and _source field
-        assert result is not None
-        assert result['_source'] == 'fmp'
-        assert result['pe'] is None
-        assert result['pb'] is None
+        # Should return None when no API key is present
+        assert result is None
 
     @pytest.mark.asyncio
     @patch.dict(os.environ, {}, clear=True)

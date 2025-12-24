@@ -243,13 +243,16 @@ class TestGetFinancialMetrics:
             'priceToEarningsGrowthRatio': 1.5,
             'currentRatio': 1.2,
             'debtToEquityRatio': 1.8,
-            'netProfitMargin': 0.25
+            'netProfitMargin': 0.25,
+            'freeCashFlowPerShare': 5.5,
+            'operatingCashFlowPerShare': 6.5
         }]
         
         # Mock key-metrics endpoint
         metrics_data = [{
             'returnOnEquity': 0.45,
-            'returnOnAssets': 0.18
+            'returnOnAssets': 0.18,
+            'marketCap': 1000000
         }]
         
         # Mock growth endpoint
@@ -272,17 +275,20 @@ class TestGetFinancialMetrics:
         
         result = await fetcher.get_financial_metrics('AAPL')
         
-        # Verify all fields are populated
-        assert result['pe'] == 25.5
-        assert result['pb'] == 10.2
-        assert result['peg'] == 1.5
-        assert result['roe'] == 0.45
-        assert result['roa'] == 0.18
-        assert result['current_ratio'] == 1.2
-        assert result['debt_to_equity'] == 1.8
-        assert result['profit_margin'] == 0.25
-        assert result['revenue_growth'] == 0.15
-        assert result['eps_growth'] == 0.20
+        # Verify all fields are populated with correct keys
+        assert result['trailingPE'] == 25.5
+        assert result['priceToBook'] == 10.2
+        assert result['pegRatio'] == 1.5
+        assert result['returnOnEquity'] == 0.45
+        assert result['returnOnAssets'] == 0.18
+        assert result['currentRatio'] == 1.2
+        assert result['debtToEquity'] == 1.8
+        assert result['profitMargins'] == 0.25
+        assert result['revenueGrowth'] == 0.15
+        assert result['earningsGrowth'] == 0.20
+        assert result['freeCashflow'] == 5.5
+        assert result['operatingCashflow'] == 6.5
+        assert result['marketCap'] == 1000000
         assert result['_source'] == 'fmp'
     
     @pytest.mark.asyncio
@@ -300,10 +306,10 @@ class TestGetFinancialMetrics:
         
         result = await fetcher.get_financial_metrics('AAPL')
         
-        # PE should be set, others should be None
-        assert result['pe'] == 15.0
-        assert result['roe'] is None
-        assert result['revenue_growth'] is None
+        # PE should be set, others should be missing
+        assert result['trailingPE'] == 15.0
+        assert 'returnOnEquity' not in result
+        assert 'revenueGrowth' not in result
     
     @pytest.mark.asyncio
     async def test_get_financial_metrics_no_data(self):
@@ -313,11 +319,8 @@ class TestGetFinancialMetrics:
         
         result = await fetcher.get_financial_metrics('INVALID')
         
-        # All values should be None except _source
-        assert result['pe'] is None
-        assert result['pb'] is None
-        assert result['roe'] is None
-        assert result['_source'] == 'fmp'
+        # Should return None when no data is found
+        assert result is None
     
     @pytest.mark.asyncio
     async def test_get_financial_metrics_empty_arrays(self):
@@ -327,9 +330,8 @@ class TestGetFinancialMetrics:
         
         result = await fetcher.get_financial_metrics('AAPL')
         
-        # Should handle empty arrays gracefully
-        assert result['pe'] is None
-        assert result['_source'] == 'fmp'
+        # Should handle empty arrays gracefully and return None
+        assert result is None
     
     @pytest.mark.asyncio
     async def test_get_financial_metrics_missing_fields(self):
@@ -346,8 +348,8 @@ class TestGetFinancialMetrics:
         
         result = await fetcher.get_financial_metrics('AAPL')
         
-        assert result['pe'] == 20.0
-        assert result['pb'] is None  # Missing from response
+        assert result['trailingPE'] == 20.0
+        assert result.get('priceToBook') is None  # Missing from response
 
 
 class TestGlobalFetcher:
@@ -379,7 +381,7 @@ class TestConvenienceFunction:
         # Create proper mock - is_available() is NOT async
         mock_fetcher = MagicMock()
         mock_fetcher.is_available = MagicMock(return_value=True)  # Regular mock, not async
-        mock_fetcher.get_financial_metrics = AsyncMock(return_value={'pe': 15.0, '_source': 'fmp'})
+        mock_fetcher.get_financial_metrics = AsyncMock(return_value={'trailingPE': 15.0, '_source': 'fmp'})
         mock_fetcher.__aenter__ = AsyncMock(return_value=mock_fetcher)
         mock_fetcher.__aexit__ = AsyncMock(return_value=None)
         
@@ -387,7 +389,7 @@ class TestConvenienceFunction:
         
         result = await fetch_fmp_metrics('AAPL')
         
-        assert result['pe'] == 15.0
+        assert result['trailingPE'] == 15.0
         mock_fetcher.get_financial_metrics.assert_called_once_with('AAPL')
     
     @pytest.mark.asyncio
@@ -445,6 +447,5 @@ class TestErrorScenarios:
         
         result = await fetcher.get_financial_metrics('AAPL')
         
-        # Should handle gracefully and return all None
-        assert result['pe'] is None
-        assert result['_source'] == 'fmp'
+        # Should handle gracefully and return None (no valid data found)
+        assert result is None

@@ -408,11 +408,8 @@ def create_trading_graph(
     junior_fund_llm = create_quick_thinking_llm(
         callbacks=[TokenTrackingCallback("Junior Fundamentals Analyst", tracker)]
     )
-    senior_fund_llm = create_quick_thinking_llm(
-        callbacks=[TokenTrackingCallback("Fundamentals Analyst", tracker)]
-    )
 
-    # Retry LLM for data gathering agents
+    # Retry LLM for data gathering agents (Junior Fundamentals, NOT Senior)
     retry_llm = None
     allow_retry = False
     if not quick_mode and is_gemini_v3_or_greater(config.quick_think_llm):
@@ -425,8 +422,12 @@ def create_trading_graph(
         logger.info("retry_llm_disabled_quick_mode", ticker=ticker)
 
     # Synthesis agents: Mode-dependent thinking
+    # Senior Fundamentals Analyst is a synthesis agent (parses JSON, calculates scores, produces DATA_BLOCK)
     if quick_mode:
         logger.info("Quick mode: LOW thinking for synthesis agents")
+        senior_fund_llm = create_quick_thinking_llm(
+            callbacks=[TokenTrackingCallback("Fundamentals Analyst", tracker)]
+        )
         bull_llm = create_quick_thinking_llm(
             callbacks=[TokenTrackingCallback("Bull Researcher", tracker)]
         )
@@ -450,6 +451,9 @@ def create_trading_graph(
         )
     else:
         logger.info("Normal mode: HIGH thinking for synthesis agents")
+        senior_fund_llm = create_deep_thinking_llm(
+            callbacks=[TokenTrackingCallback("Fundamentals Analyst", tracker)]
+        )
         bull_llm = create_deep_thinking_llm(
             callbacks=[TokenTrackingCallback("Bull Researcher", tracker)]
         )
@@ -511,15 +515,16 @@ def create_trading_graph(
     )
 
     # Fundamentals chain (Junior + Foreign → Senior → Validator)
+    # Junior uses retry logic (data gathering agent with quick thinking)
     junior_fund = create_analyst_node(
         junior_fund_llm, "junior_fundamentals_analyst",
         toolkit.get_junior_fundamental_tools(), "raw_fundamentals_data",
         retry_llm=retry_llm, allow_retry=allow_retry
     )
+    # Senior is a synthesis agent (mode-dependent thinking, no retry needed)
     senior_fund = create_analyst_node(
         senior_fund_llm, "fundamentals_analyst",
-        toolkit.get_senior_fundamental_tools(), "fundamentals_report",
-        retry_llm=retry_llm, allow_retry=allow_retry
+        toolkit.get_senior_fundamental_tools(), "fundamentals_report"
     )
     validator = create_financial_health_validator_node()
 
