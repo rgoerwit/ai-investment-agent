@@ -24,12 +24,14 @@ Usage:
 import os
 import aiohttp
 import logging
+import pandas as pd
 from typing import Optional, Dict, Any
+from src.data.interfaces import FinancialFetcher
 
 logger = logging.getLogger(__name__)
 
 
-class FMPFetcher:
+class FMPFetcher(FinancialFetcher):
     """
     Minimal FMP API client for financial metrics.
     
@@ -128,85 +130,65 @@ class FMPFetcher:
             # Unexpected errors - log at debug level
             logger.debug(f"FMP request failed for {endpoint}: {e}")
             return None
+
+    async def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
+        """
+        Returns OHLC DataFrame with standard columns.
+        Currently not implemented for FMP to save API calls.
+        """
+        return pd.DataFrame()
     
-    async def get_financial_metrics(self, symbol: str) -> Dict[str, Optional[float]]:
+    async def get_financial_metrics(self, symbol: str) -> Optional[Dict[str, Any]]:
         """
         Get comprehensive financial metrics for a symbol.
         
         Fetches data from multiple FMP endpoints and combines them into a single dict.
-        
-        Args:
-            symbol: Stock ticker symbol (e.g., 'AAPL', '005930.KS')
-            
-        Returns:
-            Dict with keys:
-                - pe, pb, peg: Valuation ratios
-                - roe, roa: Profitability metrics
-                - current_ratio, debt_to_equity: Health metrics
-                - revenue_growth, eps_growth: Growth metrics
-                - profit_margin: Margin metric
-                - free_cash_flow, operating_cash_flow: Cash flow metrics
-                - source: Always 'FMP'
-                
-            All values are None if data not available.
-            
-        Raises:
-            ValueError: If API key is invalid
+        Returns standardized keys: trailingPE, priceToBook, returnOnEquity, etc.
         """
-        result = {
-            'pe': None,
-            'pb': None,
-            'peg': None,
-            'roe': None,
-            'roa': None,
-            'current_ratio': None,
-            'debt_to_equity': None,
-            'revenue_growth': None,
-            'eps_growth': None,
-            'profit_margin': None,
-            'free_cash_flow': None,
-            'operating_cash_flow': None,
-            '_source': 'fmp'
-        }
+        result = {}
         
         # Fetch ratios endpoint (has P/E, P/B, PEG, current ratio, D/E, margins)
         ratios = await self._get("ratios", {"symbol": symbol, "limit": 1})
         if ratios and isinstance(ratios, list) and len(ratios) > 0:
             r = ratios[0]
-            # Use correct field names from actual FMP API response
-            result['pe'] = r.get('priceToEarningsRatio')
-            result['pb'] = r.get('priceToBookRatio')
-            result['peg'] = r.get('priceToEarningsGrowthRatio')
-            result['current_ratio'] = r.get('currentRatio')
-            result['debt_to_equity'] = r.get('debtToEquityRatio')
-            result['profit_margin'] = r.get('netProfitMargin')
-            result['free_cash_flow'] = r.get('freeCashFlowPerShare') # Ratio endpoint often has per share
-            result['operating_cash_flow'] = r.get('operatingCashFlowPerShare')
+            # Map to standard interface keys
+            result['trailingPE'] = r.get('priceToEarningsRatio')
+            result['priceToBook'] = r.get('priceToBookRatio')
+            result['pegRatio'] = r.get('priceToEarningsGrowthRatio')
+            result['currentRatio'] = r.get('currentRatio')
+            result['debtToEquity'] = r.get('debtToEquityRatio')
+            result['profitMargins'] = r.get('netProfitMargin')
+            result['freeCashflow'] = r.get('freeCashFlowPerShare') # Ratio endpoint often has per share
+            result['operatingCashflow'] = r.get('operatingCashFlowPerShare')
         
         # Fetch key-metrics endpoint (has ROE, ROA, Cash Flows)
         metrics = await self._get("key-metrics", {"symbol": symbol, "limit": 1})
         if metrics and isinstance(metrics, list) and len(metrics) > 0:
             m = metrics[0]
-            result['roe'] = m.get('returnOnEquity')
-            result['roa'] = m.get('returnOnAssets')
+            result['returnOnEquity'] = m.get('returnOnEquity')
+            result['returnOnAssets'] = m.get('returnOnAssets')
             # Prefer absolute values if available
             if m.get('freeCashFlowPerShare'):
-                 result['free_cash_flow'] = m.get('freeCashFlowPerShare')
+                 result['freeCashflow'] = m.get('freeCashFlowPerShare')
             if m.get('operatingCashFlowPerShare'):
-                 result['operating_cash_flow'] = m.get('operatingCashFlowPerShare')
+                 result['operatingCashflow'] = m.get('operatingCashFlowPerShare')
+            if m.get('marketCap'):
+                result['marketCap'] = m.get('marketCap')
 
         
         # Fetch income statement growth endpoint (has revenue/EPS growth)
         growth = await self._get("income-statement-growth", {"symbol": symbol, "limit": 1})
         if growth and isinstance(growth, list) and len(growth) > 0:
             g = growth[0]
-            result['revenue_growth'] = g.get('growthRevenue')
-            result['eps_growth'] = g.get('growthEPS')
+            result['revenueGrowth'] = g.get('growthRevenue')
+            result['earningsGrowth'] = g.get('growthEPS')
         
         # Log if we got no data at all
-        if all(v is None for k, v in result.items() if k != '_source'):
+        if not result:
             logger.debug(f"FMP returned no data for {symbol}")
-        
+            return None
+            
+        result['_source'] = 'fmp'
         return result
 
 

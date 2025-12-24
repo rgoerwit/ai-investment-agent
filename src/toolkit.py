@@ -119,73 +119,64 @@ def _format_val(value: Any, fmt: str = "{:.2f}", default: str = "N/A") -> str:
 
 # --- DATA TOOLS ---
 
+import json
+import math
+
+
+def _sanitize_for_json(data: dict) -> dict:
+    """
+    Sanitize data for JSON encoding.
+    Converts infinity/NaN to None, handles negative prices, and converts string numbers.
+    Recursively handles nested dicts and lists.
+    """
+    sanitized = {}
+    for key, value in data.items():
+        if isinstance(value, dict):
+            # Recursively sanitize nested dicts
+            sanitized[key] = _sanitize_for_json(value)
+        elif isinstance(value, list):
+            # Sanitize list elements
+            sanitized[key] = [
+                _sanitize_for_json(v) if isinstance(v, dict) else v
+                for v in value
+            ]
+        elif isinstance(value, float):
+            # Handle infinity and NaN - convert to None for valid JSON
+            if math.isinf(value) or math.isnan(value):
+                sanitized[key] = None
+            # Handle negative prices (data corruption)
+            elif key == 'currentPrice' and value < 0:
+                sanitized[key] = None
+            else:
+                sanitized[key] = value
+        elif isinstance(value, str) and key != '_data_source' and key != 'currency' and key != 'symbol':
+            # Try to convert string numbers to float
+            try:
+                sanitized[key] = float(value)
+            except (ValueError, TypeError):
+                sanitized[key] = value
+        else:
+            sanitized[key] = value
+    return sanitized
+
+
 @tool
 async def get_financial_metrics(ticker: Annotated[str, "Stock ticker symbol"]) -> str:
-    """Get key financial ratios and metrics."""
+    """Get key financial ratios and metrics as a JSON string."""
     try:
         normalized_symbol = normalize_ticker(ticker)
         data = await market_data_fetcher.get_financial_metrics(normalized_symbol)
-        
+
         if 'error' in data:
-            return f"Data Unavailable: {data.get('error')}"
-            
-        current_price = _safe_float(data.get('currentPrice', data.get('regularMarketPrice', 0)))
-        # Sanity check for negative price (data corruption)
-        if current_price is not None and current_price < 0:
-            logger.warning(f"Negative price detected for {ticker}: {current_price}")
-            current_price = None
-            
-        currency = data.get('currency', 'N/A')
-        analyst_count = data.get('numberOfAnalystOpinions')
-        
-        # Helper for percentage formatting
-        def fmt_pct(val): return _format_val(val, "{:.2%}")
-        
-        # Helper for standard float formatting
-        def fmt_flt(val): return _format_val(val, "{:.2f}")
-        
-        # Helper for large numbers
-        def fmt_lrg(val): return _format_val(val, "{:,.0f}")
+            return json.dumps({"error": data.get('error')})
 
-        price_str = f"{current_price:.2f}" if current_price is not None else "N/A"
+        # Sanitize data for valid JSON output (handle inf/nan/negative prices)
+        sanitized_data = _sanitize_for_json(data)
 
-        report_lines = [
-            f"FINANCIAL METRICS FOR {normalized_symbol}",
-            f"Price: {price_str} {currency}",
-            f"Data Source: {data.get('_data_source', 'unknown')}",
-            "",
-            "### PROFITABILITY",
-            f"- ROE: {fmt_pct(data.get('returnOnEquity'))}",
-            f"- ROA: {fmt_pct(data.get('returnOnAssets'))}",
-            f"- Op Margin: {fmt_pct(data.get('operatingMargins'))}",
-            "",
-            "### LEVERAGE & HEALTH",
-            f"- Debt/Equity: {fmt_flt(data.get('debtToEquity'))}",
-            f"- Current Ratio: {fmt_flt(data.get('currentRatio'))}",
-            f"- Total Cash: {fmt_lrg(data.get('totalCash'))}",
-            f"- Total Debt: {fmt_lrg(data.get('totalDebt'))}",
-            "",
-            "### CASH FLOW",
-            f"- Operating Cash Flow: {fmt_lrg(data.get('operatingCashflow'))}",
-            f"- Free Cash Flow: {fmt_lrg(data.get('freeCashflow'))}",
-            "",
-            "### GROWTH",
-            f"- Revenue Growth (YoY): {fmt_pct(data.get('revenueGrowth'))}",
-            f"- Earnings Growth: {fmt_pct(data.get('earningsGrowth'))}",
-            f"- Gross Margin: {fmt_pct(data.get('grossMargins'))}",
-            "",
-            "### VALUATION",
-            f"- P/E (TTM): {fmt_flt(data.get('trailingPE'))}",
-            f"- Forward P/E: {fmt_flt(data.get('forwardPE'))}",
-            f"- P/B Ratio: {fmt_flt(data.get('priceToBook'))}",
-            f"- PEG Ratio: {fmt_flt(data.get('pegRatio'))}",
-            "",
-            "### ANALYST COVERAGE",
-            f"- Analyst Opinions: {analyst_count}" if analyst_count is not None else "- Analyst Opinions: Data Unavailable",
-        ]
-        return "\n".join(report_lines)
+        # Return sanitized data as JSON string for the agent to process
+        return json.dumps(sanitized_data, indent=2)
     except Exception as e:
-        return f"Error: {str(e)}"
+        return json.dumps({"error": str(e)})
 
 @tool
 async def get_news(

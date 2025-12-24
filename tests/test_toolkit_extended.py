@@ -175,13 +175,16 @@ class TestFinancialMetricsEdgeCases:
             '_data_source': 'yfinance'
         }
         mock_fetcher.get_financial_metrics = AsyncMock(return_value=mock_data)
-        
+
         result = await toolkit.get_financial_metrics.ainvoke("BADMATH")
-        
-        # Should handle infinity gracefully by converting to N/A (safe formatting)
+
+        # Should sanitize infinity to null in JSON output
         assert isinstance(result, str)
         assert "inf" not in result.lower()
-        assert "- P/E (TTM): N/A" in result
+        parsed = json.loads(result)
+        assert parsed['trailingPE'] is None  # Converted from inf
+        assert parsed['priceToBook'] is None  # Converted from -inf
+        assert parsed['currentPrice'] == 100.0  # Valid value preserved
     
     async def test_metrics_nan_values(self, mock_fetcher):
         """Test handling of NaN in metrics."""
@@ -194,15 +197,16 @@ class TestFinancialMetricsEdgeCases:
             '_data_source': 'yfinance'
         }
         mock_fetcher.get_financial_metrics = AsyncMock(return_value=mock_data)
-        
-        # UPDATED: Use a ticker name without "nan" to avoid false positive substring matches
+
         result = await toolkit.get_financial_metrics.ainvoke("NULL_TEST")
-        
-        # Should detect NaN and convert to N/A
+
+        # Should sanitize NaN to null in JSON output
         assert isinstance(result, str)
-        # Check specifically for value pattern, not just substring
-        assert ": nan" not in result.lower() 
-        assert "- ROE: N/A" in result
+        assert ": nan" not in result.lower()
+        parsed = json.loads(result)
+        assert parsed['returnOnEquity'] is None  # Converted from NaN
+        assert parsed['debtToEquity'] is None  # Converted from NaN
+        assert parsed['currentPrice'] == 100.0  # Valid value preserved
     
     async def test_metrics_negative_price(self, mock_fetcher):
         """Test handling of corrupted negative price data."""
@@ -212,13 +216,15 @@ class TestFinancialMetricsEdgeCases:
             '_data_source': 'corrupt'
         }
         mock_fetcher.get_financial_metrics = AsyncMock(return_value=mock_data)
-        
+
         result = await toolkit.get_financial_metrics.ainvoke("CORRUPT")
-        
-        # Should detect negative price and show N/A
+
+        # Should sanitize negative price to null in JSON output
         assert isinstance(result, str)
         assert "-150" not in result
-        assert "Price: N/A" in result
+        parsed = json.loads(result)
+        assert parsed['currentPrice'] is None  # Converted from negative
+        assert parsed['currency'] == 'USD'  # Other fields preserved
     
     async def test_metrics_missing_currency(self, mock_fetcher):
         """Test handling of missing currency field."""
@@ -229,11 +235,15 @@ class TestFinancialMetricsEdgeCases:
             '_data_source': 'yfinance'
         }
         mock_fetcher.get_financial_metrics = AsyncMock(return_value=mock_data)
-        
+
         result = await toolkit.get_financial_metrics.ainvoke("NOCUR")
-        
+
+        # JSON output preserves the raw data - currency will be absent
         assert isinstance(result, str)
-        assert "N/A" in result
+        parsed = json.loads(result)
+        assert parsed['currentPrice'] == 100.0
+        assert parsed['returnOnEquity'] == 0.25
+        assert 'currency' not in parsed  # Missing field is simply absent
     
     async def test_metrics_unknown_currency(self, mock_fetcher):
         """Test handling of unrecognized currency code."""
@@ -259,13 +269,16 @@ class TestFinancialMetricsEdgeCases:
             '_data_source': 'buggy_api'
         }
         mock_fetcher.get_financial_metrics = AsyncMock(return_value=mock_data)
-        
+
         result = await toolkit.get_financial_metrics.ainvoke("STRNUM")
-        
-        # Should convert strings to numbers successfully
+
+        # Sanitization should convert strings to numbers
         assert isinstance(result, str)
-        assert "150" in result
-        assert "20.50" in result
+        parsed = json.loads(result)
+        assert parsed['currentPrice'] == 150.0  # Converted from string
+        assert parsed['returnOnEquity'] == 0.25  # Converted from string
+        assert parsed['trailingPE'] == 20.5  # Converted from string
+        assert parsed['currency'] == 'USD'  # String fields preserved as strings
 
 
 # ==================== TECHNICAL INDICATORS EDGE CASES ====================
@@ -425,11 +438,12 @@ class TestCrossToolFailures:
         sentiment_result = await toolkit.get_social_media_sentiment.ainvoke("AAPL")
         
         assert all(isinstance(r, str) for r in [metrics_result, news_result, sentiment_result])
-        
+
         # Assert that news_result handled the error gracefully as "No news found"
         assert "No news found" in news_result
-        assert "Error" in metrics_result or "Data Unavailable" in metrics_result
-        assert "Error" in sentiment_result
+        # JSON output uses lowercase "error" key
+        assert "error" in metrics_result.lower()
+        assert "error" in sentiment_result.lower()
     
     async def test_partial_data_synthesis(self, mock_fetcher):
         """Test system handles some fields present, others missing."""

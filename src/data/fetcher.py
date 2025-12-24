@@ -23,6 +23,7 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass
 from collections import namedtuple
 
+from src.data.interfaces import FinancialFetcher
 from src.ticker_utils import generate_strict_search_query
 
 logger = structlog.get_logger(__name__)
@@ -226,7 +227,7 @@ class FinancialPatternExtractor:
         return extracted
 
 
-class SmartMarketDataFetcher:
+class SmartMarketDataFetcher(FinancialFetcher):
     """Intelligent multi-source fetcher with unified parallel approach."""
     
     REQUIRED_BASICS = ['symbol', 'currentPrice', 'currency']
@@ -238,6 +239,13 @@ class SmartMarketDataFetcher:
         'numberOfAnalystOpinions', 'pegRatio', 'forwardPE'
     ]
     
+    def is_available(self) -> bool:
+        """
+        SmartMarketDataFetcher is always available as it aggregates from multiple sources.
+        yfinance (the primary source) requires no API key.
+        """
+        return True
+
     def __init__(self):
         self.fx_cache = {}
         self.fx_cache_expiry_time = {}
@@ -495,23 +503,12 @@ class SmartMarketDataFetcher:
         
         try:
             fmp_data = await self.fmp_fetcher.get_financial_metrics(symbol)
-            if not fmp_data or all(v is None for k, v in fmp_data.items() if k != '_source'):
-                return None
             
-            mapped = {}
-            key_mapping = {
-                'pe': 'trailingPE', 'pb': 'priceToBook', 'peg': 'pegRatio',
-                'roe': 'returnOnEquity', 'marketCap': 'marketCap',
-                'revenue_growth': 'revenueGrowth', 'debt_to_equity': 'debtToEquity'
-            }
-            
-            for fmp_key, yf_key in key_mapping.items():
-                if fmp_data.get(fmp_key):
-                    mapped[yf_key] = fmp_data[fmp_key]
-            
-            if mapped:
+            # Check if we got valid data (keys other than _source)
+            if fmp_data and any(v is not None for k, v in fmp_data.items() if k != '_source'):
                 self.stats['sources']['fmp'] += 1
-                return mapped
+                return fmp_data
+                
         except Exception:
             return None
         
@@ -946,7 +943,7 @@ class SmartMarketDataFetcher:
             logger.error("unexpected_fetch_error", ticker=ticker, error=str(e))
             return {"error": str(e), "symbol": ticker}
 
-    async def get_historical_prices(self, ticker: str, period: str = "1y") -> pd.DataFrame:
+    async def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
         """Fetch historical price data."""
         try:
             stock = yf.Ticker(ticker)
@@ -955,6 +952,10 @@ class SmartMarketDataFetcher:
         except Exception as e:
             logger.error("history_fetch_failed", ticker=ticker, error=str(e))
             return pd.DataFrame()
+    
+    # Alias for backward compatibility and interface compliance
+    async def get_historical_prices(self, ticker: str, period: str = "1y") -> pd.DataFrame:
+        return await self.get_price_history(ticker, period)
     
     def get_stats(self) -> Dict[str, Any]:
         """Get comprehensive statistics on fetcher performance."""

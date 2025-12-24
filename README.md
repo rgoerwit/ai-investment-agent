@@ -562,11 +562,11 @@ Each agent uses **versioned, structured prompts** in a separate `prompts/` subdi
 ```json
 {
   "agent_key": "fundamentals_analyst",
-  "version": "6.1",
+  "version": "7.1",
   "system_message": "### CRITICAL: DATA VALIDATION\n\nBEFORE reporting ANY metric as N/A:\n1. Verify tool returned null/error\n2. Document which tool and response\n3. Only then mark N/A...",
   "metadata": {
-    "thesis_version": "6.0",
-    "changes": "Added strict validation to prevent data vacuum abuse"
+    "thesis_version": "7.0",
+    "changes": "Updated to receive raw JSON from Junior Analyst"
   }
 }
 ```
