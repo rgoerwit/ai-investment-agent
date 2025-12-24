@@ -47,6 +47,23 @@ except ImportError:
         except ImportError:
             logger.warning("Tavily tools not available. Install langchain-tavily or langchain-community.")
 
+
+def _truncate_tavily_result(result, max_chars: int = None) -> str:
+    """
+    Truncate Tavily search result to prevent token bloat.
+
+    Uses TAVILY_MAX_CHARS from config (default 7000 chars ~1750 tokens).
+    """
+    from src.config import config
+    if max_chars is None:
+        max_chars = config.tavily_max_chars
+
+    result_str = str(result)
+    if len(result_str) > max_chars:
+        return result_str[:max_chars] + "\n[...truncated for efficiency]"
+    return result_str
+
+
 async def fetch_with_timeout(coroutine, timeout_seconds=10, error_msg="Timeout"):
     try:
         return await asyncio.wait_for(coroutine, timeout=timeout_seconds)
@@ -216,24 +233,20 @@ async def get_news(
         try:
             general_result = await tavily_tool.ainvoke({"query": general_query})
             if general_result:
-                # Sanitize and truncate output to prevent context overflow
-                sanitized = html.escape(str(general_result))
-                if len(sanitized) > 15000:
-                    sanitized = sanitized[:15000] + "... [truncated]"
+                # Sanitize and truncate using global limit
+                sanitized = html.escape(_truncate_tavily_result(general_result))
                 results.append(f"=== GENERAL NEWS ===\n{sanitized}\n")
         except Exception as e:
             logger.warning(f"General news search failed: {e}")
-        
+
         # 2. Local Search - Use Clean Name
         if local_hint and not search_query:
             local_query = f'"{company_name}" {local_hint} (earnings OR guidance OR strategy)'
             try:
                 local_result = await tavily_tool.ainvoke({"query": local_query})
                 if local_result:
-                    # Sanitize and truncate
-                    sanitized_local = html.escape(str(local_result))
-                    if len(sanitized_local) > 15000:
-                        sanitized_local = sanitized_local[:15000] + "... [truncated]"
+                    # Sanitize and truncate using global limit
+                    sanitized_local = html.escape(_truncate_tavily_result(local_result))
                     results.append(f"=== LOCAL/REGIONAL NEWS SOURCES ===\n{sanitized_local}\n")
             except Exception as e:
                 logger.warning(f"Local news search failed: {e}")
@@ -303,7 +316,8 @@ async def get_social_media_sentiment(ticker: str) -> str:
 async def get_macroeconomic_news(trade_date: str) -> str:
     """Get macroeconomic news context for a specific date."""
     if not tavily_tool: return "Tool unavailable"
-    return str(await tavily_tool.ainvoke({"query": f"macroeconomic news {trade_date}"}))
+    result = await tavily_tool.ainvoke({"query": f"macroeconomic news {trade_date}"})
+    return _truncate_tavily_result(result)
 
 @tool
 async def get_fundamental_analysis(ticker: Annotated[str, "Stock ticker symbol"]) -> str:
@@ -328,11 +342,11 @@ async def get_fundamental_analysis(ticker: Annotated[str, "Stock ticker symbol"]
         ticker_query = f"{ticker} stock analyst coverage count consensus rating American Depositary Receipt exchange listing ADR status"
         ticker_results = await tavily_tool.ainvoke({"query": ticker_query})
         ticker_results_str = str(ticker_results)
-        
+
         # Check result quality
         # If results are empty or very short (< 200 chars), the ticker search essentially failed.
         ticker_search_failed = not ticker_results or len(ticker_results_str) < 200
-        
+
         # CASE A: TOTAL FAILURE -> Full Fallback
         if ticker_search_failed:
             if company_name and company_name != ticker:
@@ -341,16 +355,16 @@ async def get_fundamental_analysis(ticker: Annotated[str, "Stock ticker symbol"]
                 name_results = await tavily_tool.ainvoke({"query": name_query})
                 return (
                     f"Fundamental Search Results for {company_name} ({ticker}) [Source: Fallback Name Search]:\n"
-                    f"{name_results}\n\n"
+                    f"{_truncate_tavily_result(name_results)}\n\n"
                     f"(Note: Primary ticker search yielded insufficient data, switched to company name search)"
                 )
-            return f"Fundamental Search Results for {ticker} (Limited Data):\n{ticker_results}"
+            return f"Fundamental Search Results for {ticker} (Limited Data):\n{_truncate_tavily_result(ticker_results)}"
 
         # CASE B: SUCCESS BUT POTENTIAL ADR MISS -> Surgical Append
         # Check if the ticker results actually mention ADR/Depositary keywords
         adr_keywords = ["ADR", "American Depositary", "Depositary Receipt", "OTC", "Pink Sheets", "sponsored"]
         found_adr_info = any(kw.lower() in ticker_results_str.lower() for kw in adr_keywords)
-        
+
         # If we have a good company name, the ticker search succeeded, BUT it missed ADR info...
         if not found_adr_info and company_name and company_name != ticker:
             # Run a targeted "Surgical" search just for the ADR
@@ -358,20 +372,20 @@ async def get_fundamental_analysis(ticker: Annotated[str, "Stock ticker symbol"]
             adr_query = f'"{company_name}" American Depositary Receipt ADR ticker status'
             adr_results = await tavily_tool.ainvoke({"query": adr_query})
             adr_results_str = str(adr_results)
-            
+
             # Only append if the surgical search actually found something relevant to avoid noise
             if any(kw.lower() in adr_results_str.lower() for kw in adr_keywords):
                 combined_results = (
                     f"Fundamental Search Results for {ticker} [Primary Source]:\n"
-                    f"{ticker_results}\n\n"
+                    f"{_truncate_tavily_result(ticker_results)}\n\n"
                     f"=== SUPPLEMENTAL ADR SEARCH ===\n"
                     f"(Primary ticker search missed ADR info, found via name search for '{company_name}')\n"
-                    f"{adr_results}"
+                    f"{_truncate_tavily_result(adr_results)}"
                 )
                 return combined_results
 
         # Case C: Success and ADR info found (or no name available to double check)
-        return f"Fundamental Search Results for {ticker}:\n{ticker_results}"
+        return f"Fundamental Search Results for {ticker}:\n{_truncate_tavily_result(ticker_results)}"
 
     except Exception as e:
         return f"Error searching for fundamentals: {e}"
@@ -414,8 +428,8 @@ async def search_foreign_sources(
         if not results:
             return f"No results found for foreign source search: {search_query}"
 
-        # Format results for agent consumption
-        results_str = str(results)
+        # Format results for agent consumption (with truncation)
+        results_str = _truncate_tavily_result(results)
 
         # Add context header
         output = f"""### Foreign Source Search Results
