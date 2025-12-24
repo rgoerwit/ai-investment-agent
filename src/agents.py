@@ -91,6 +91,73 @@ async def invoke_with_rate_limit_handling(
             # Not a rate limit error, or final attempt - re-raise
             raise
 
+
+# --- News Report Summarization ---
+
+def extract_news_highlights(news_report: str, max_chars: int = 1500) -> str:
+    """
+    Extract key highlights from a news report for Senior Fundamentals.
+
+    Keeps only the information needed for thesis compliance scoring:
+    - US Revenue status
+    - Geographic breakdown (summarized)
+    - Top growth catalysts
+
+    This reduces token usage by ~70% while preserving decision-relevant data.
+    """
+    if not news_report or len(news_report) < 300:
+        return news_report
+
+    highlights = []
+    lines = news_report.split('\n')
+
+    # Extract US Revenue section (critical for thesis)
+    in_geo_section = False
+    geo_lines = []
+    for line in lines:
+        if 'GEOGRAPHIC REVENUE' in line.upper() or 'US REVENUE' in line.upper():
+            in_geo_section = True
+        elif in_geo_section:
+            if line.startswith('---') or line.startswith('###'):
+                in_geo_section = False
+            elif line.strip():
+                geo_lines.append(line)
+                if len(geo_lines) >= 6:  # Limit geographic section
+                    break
+
+    if geo_lines:
+        highlights.append("**US/Geographic Revenue:**")
+        highlights.extend(geo_lines[:6])
+
+    # Extract growth catalysts (key bullet points only)
+    in_catalyst_section = False
+    catalyst_header_added = False
+    catalyst_count = 0
+    for line in lines:
+        if 'CATALYST' in line.upper() or 'GROWTH CATALYST' in line.upper():
+            in_catalyst_section = True
+            if not catalyst_header_added:
+                highlights.append("\n**Growth Catalysts:**")
+                catalyst_header_added = True
+        elif in_catalyst_section:
+            if line.startswith('---') or (line.startswith('###') and 'CATALYST' not in line.upper()):
+                in_catalyst_section = False
+            elif line.strip().startswith(('1.', '2.', '3.', '-', '*', '•')):
+                # Only take the first line of each catalyst
+                highlights.append(line.strip()[:150])
+                catalyst_count += 1
+                if catalyst_count >= 3:  # Limit to top 3 catalysts
+                    break
+
+    result = '\n'.join(highlights)
+
+    # Final safety truncation
+    if len(result) > max_chars:
+        result = result[:max_chars] + "\n[...truncated for efficiency]"
+
+    return result if result.strip() else news_report[:max_chars]
+
+
 # --- State Definitions ---
 class InvestDebateState(TypedDict):
     """State tracking bull/bear investment debate progression."""
@@ -395,9 +462,11 @@ def create_analyst_node(
                     )
 
                 if news_report:
+                    # Summarize news to reduce token usage (~70% reduction)
+                    news_highlights = extract_news_highlights(news_report)
                     extra_context += (
-                        f"\n\n### NEWS CONTEXT (for Qualitative Growth Scoring)"
-                        f"\n{news_report}\n"
+                        f"\n\n### NEWS HIGHLIGHTS (for Qualitative Growth Scoring)"
+                        f"\n{news_highlights}\n"
                     )
                 else:
                     # Expected in parallel mode - News Analyst may still be running

@@ -203,6 +203,10 @@ class Config:
     # Default: 15 RPM (free tier) - Set GEMINI_RPM_LIMIT in .env to override
     gemini_rpm_limit: int = int(os.environ.get("GEMINI_RPM_LIMIT", "15"))
 
+    # Tavily search result truncation (prevents token bloat from web searches)
+    # Default: 7000 chars (~1750 tokens) per search result
+    tavily_max_chars: int = int(os.environ.get("TAVILY_MAX_CHARS", "7000"))
+
     chroma_persist_directory: str = os.environ.get("CHROMA_PERSIST_DIR", "./chroma_db")
     environment: str = os.environ.get("ENVIRONMENT", "dev")
     
