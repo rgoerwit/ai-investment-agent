@@ -48,7 +48,7 @@ except ImportError:
             logger.warning("Tavily tools not available. Install langchain-tavily or langchain-community.")
 
 
-def _truncate_tavily_result(result, max_chars: int = None) -> str:
+def _truncate_tavily_result(result: Any, max_chars: Optional[int] = None) -> str:
     """
     Truncate Tavily search result to prevent token bloat.
 

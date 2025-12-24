@@ -115,8 +115,12 @@ def extract_news_highlights(news_report: str, max_chars: int = 1500) -> str:
     in_geo_section = False
     geo_lines = []
     for line in lines:
-        if 'GEOGRAPHIC REVENUE' in line.upper() or 'US REVENUE' in line.upper():
+        line_upper = line.upper()
+        if 'GEOGRAPHIC REVENUE' in line_upper or 'US REVENUE' in line_upper:
             in_geo_section = True
+            # Also capture this line if it contains actual data (not just a header)
+            if ':' in line and not line.strip().startswith('###'):
+                geo_lines.append(line)
         elif in_geo_section:
             if line.startswith('---') or line.startswith('###'):
                 in_geo_section = False
