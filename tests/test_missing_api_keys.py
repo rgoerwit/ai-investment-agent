@@ -20,22 +20,20 @@ from src.data.fetcher import SmartMarketDataFetcher
 class TestAlphaVantageMissingKey:
     """Test Alpha Vantage behavior without API key."""
 
-    @patch.dict(os.environ, {}, clear=True)
     def test_is_available_returns_false_without_key(self):
         """Verify is_available() returns False when API key is missing."""
+        # Create fetcher and force api_key to None (bypasses config default)
         fetcher = AlphaVantageFetcher(api_key=None)
+        fetcher.api_key = None
         assert fetcher.is_available() is False
 
-    @patch.dict(os.environ, {}, clear=True)
     def test_is_available_returns_false_with_empty_key(self):
-        """Verify is_available() returns False when API key is empty string.
-
-        Note: Empty string triggers fallback to os.getenv(), so environment must be cleared.
-        """
+        """Verify is_available() returns False when API key is empty string."""
         fetcher = AlphaVantageFetcher(api_key="")
+        # Force empty string (bypasses config default)
+        fetcher.api_key = ""
         assert fetcher.is_available() is False
 
-    @patch.dict(os.environ, {}, clear=True)
     def test_is_available_behavior_without_key(self):
         """Verify correct behavior when API key is missing.
 
@@ -44,6 +42,8 @@ class TestAlphaVantageMissingKey:
         and manual testing confirms DEBUG level is used (respects --quiet).
         """
         fetcher = AlphaVantageFetcher(api_key=None)
+        # Force api_key to None (bypasses config default)
+        fetcher.api_key = None
 
         # Core behavior: should return False
         assert fetcher.is_available() is False
@@ -51,11 +51,12 @@ class TestAlphaVantageMissingKey:
         # The call to is_available() exercises the logging code path
         # (line 48-49 in alpha_vantage_fetcher.py logs at DEBUG level)
 
-    @patch.dict(os.environ, {}, clear=True)
     def test_is_available_not_logged_at_info_level(self, caplog):
         """Verify missing key does NOT spam INFO/WARNING logs."""
         with caplog.at_level(logging.INFO):
             fetcher = AlphaVantageFetcher(api_key=None)
+            # Force api_key to None (bypasses config default)
+            fetcher.api_key = None
             fetcher.is_available()
 
             # Should NOT log at INFO or WARNING level
@@ -66,10 +67,11 @@ class TestAlphaVantageMissingKey:
             )
 
     @pytest.mark.asyncio
-    @patch.dict(os.environ, {}, clear=True)
     async def test_get_financial_metrics_returns_none_without_key(self):
         """Verify get_financial_metrics returns None gracefully without key."""
         fetcher = AlphaVantageFetcher(api_key=None)
+        # Force api_key to None (bypasses config default)
+        fetcher.api_key = None
         result = await fetcher.get_financial_metrics("AAPL")
         assert result is None
 
@@ -77,24 +79,27 @@ class TestAlphaVantageMissingKey:
 class TestEODHDMissingKey:
     """Test EODHD behavior without API key."""
 
-    @patch.dict(os.environ, {}, clear=True)
     def test_is_available_returns_false_without_key(self):
         """Verify is_available() returns False when API key is missing."""
         fetcher = EODHDFetcher(api_key=None)
+        # Force api_key to None (bypasses config default)
+        fetcher.api_key = None
         assert fetcher.is_available() is False
 
     @pytest.mark.asyncio
-    @patch.dict(os.environ, {}, clear=True)
     async def test_get_financial_metrics_returns_none_without_key(self):
         """Verify get_financial_metrics returns None gracefully without key."""
         fetcher = EODHDFetcher(api_key=None)
+        # Force api_key to None (bypasses config default)
+        fetcher.api_key = None
         result = await fetcher.get_financial_metrics("AAPL")
         assert result is None
 
-    @patch.dict(os.environ, {}, clear=True)
     def test_no_exception_on_initialization_without_key(self):
         """Verify fetcher can be initialized without key (no crash)."""
         fetcher = EODHDFetcher(api_key=None)
+        # Force api_key to None (bypasses config default)
+        fetcher.api_key = None
         assert fetcher.api_key is None
         assert fetcher._is_exhausted is False
 
@@ -102,27 +107,30 @@ class TestEODHDMissingKey:
 class TestFMPMissingKey:
     """Test FMP behavior without API key."""
 
-    @patch.dict(os.environ, {}, clear=True)
     def test_is_available_returns_false_without_key(self):
         """Verify is_available() returns False when API key is missing."""
         fetcher = FMPFetcher(api_key=None)
+        # Force api_key to None (bypasses config default)
+        fetcher.api_key = None
         assert fetcher.is_available() is False
 
     @pytest.mark.asyncio
-    @patch.dict(os.environ, {}, clear=True)
     async def test_get_financial_metrics_returns_none_without_key(self):
         """Verify get_financial_metrics returns None gracefully without key."""
         fetcher = FMPFetcher(api_key=None)
+        # Force api_key to None (bypasses config default)
+        fetcher.api_key = None
         result = await fetcher.get_financial_metrics("AAPL")
 
         # Should return None when no API key is present
         assert result is None
 
     @pytest.mark.asyncio
-    @patch.dict(os.environ, {}, clear=True)
     async def test_internal_get_returns_none_without_key(self):
         """Verify internal _get() returns None when API key missing."""
         fetcher = FMPFetcher(api_key=None)
+        # Force api_key to None (bypasses config default)
+        fetcher.api_key = None
         result = await fetcher._get("ratios", {"symbol": "AAPL"})
         assert result is None
 
@@ -239,13 +247,17 @@ class TestSingletonBehaviorWithoutKeys:
         assert fetcher is not None
         # Singleton may have key from environment - just verify no crash
 
-    @patch.dict(os.environ, {}, clear=True)
     def test_direct_instantiation_without_key(self):
         """Verify direct instantiation works without environment variables."""
         # This bypasses singletons and tests the classes directly
         av = AlphaVantageFetcher(api_key=None)
         eodhd = EODHDFetcher(api_key=None)
         fmp = FMPFetcher(api_key=None)
+
+        # Force api_key to None (bypasses config default)
+        av.api_key = None
+        eodhd.api_key = None
+        fmp.api_key = None
 
         assert av.is_available() is False
         assert eodhd.is_available() is False

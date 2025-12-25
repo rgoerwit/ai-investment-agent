@@ -137,18 +137,20 @@ class TestMemoryIsolation:
             mock_client_class.return_value = mock_client
             
             # Create memories for both tickers
-            with patch.dict(os.environ, {'GOOGLE_API_KEY': 'test-key'}):
+            # Note: Mock config getter instead of os.environ (Pydantic Settings)
+            with patch('src.memory.config') as mock_config:
+                mock_config.get_google_api_key.return_value = 'test-key'
                 with patch('src.memory.GoogleGenerativeAIEmbeddings') as mock_embeddings_class:
                     mock_embeddings = MagicMock()
                     mock_embeddings.embed_query.return_value = [0.1] * 768
                     mock_embeddings_class.return_value = mock_embeddings
-                    
+
                     hsbc_memory = FinancialSituationMemory("0005_HK_bull_memory")
                     canon_memory = FinancialSituationMemory("7915_T_bull_memory")
-            
-            # Verify they use different collections
-            assert hsbc_memory.situation_collection != canon_memory.situation_collection
-            assert hsbc_memory.name != canon_memory.name
+
+                    # Verify they use different collections (must be inside context)
+                    assert hsbc_memory.situation_collection != canon_memory.situation_collection
+                    assert hsbc_memory.name != canon_memory.name
     
     @pytest.mark.asyncio
     async def test_memory_cleanup_removes_all(self):
@@ -208,51 +210,53 @@ class TestMemoryContaminationPrevention:
             mock_client.delete_collection = delete_collection
             mock_client.list_collections.return_value = list(collections_store.values())
             mock_client_class.return_value = mock_client
-            
-            with patch.dict(os.environ, {'GOOGLE_API_KEY': 'test-key'}):
+
+            # Mock config getter instead of patching os.environ (Pydantic Settings pattern)
+            with patch('src.memory.config') as mock_config:
+                mock_config.get_google_api_key.return_value = 'test-key'
                 with patch('src.memory.GoogleGenerativeAIEmbeddings') as mock_embeddings_class:
                     mock_embeddings = MagicMock()
                     mock_embeddings.embed_query.return_value = [0.1] * 768
                     mock_embeddings.aembed_query = AsyncMock(return_value=[0.1] * 768)
                     mock_embeddings_class.return_value = mock_embeddings
-                    
+
                     # Step 1: Analyze HSBC
                     hsbc_memories_1 = create_memory_instances("0005.HK")
                     hsbc_bull_1 = hsbc_memories_1["0005_HK_bull_memory"]
-                    
+
                     # Add HSBC-specific memory
                     await hsbc_bull_1.add_situations(
                         ["HSBC shows strong banking fundamentals"],
                         [{"ticker": "0005.HK", "topic": "banking"}]
                     )
-                    
+
                     # Step 2: Cleanup and analyze Canon
                     cleanup_all_memories(days=0)
                     collections_store.clear()  # Simulate cleanup
-                    
+
                     canon_memories = create_memory_instances("7915.T")
                     canon_bull = canon_memories["7915_T_bull_memory"]
-                    
+
                     # Add Canon-specific memory
                     await canon_bull.add_situations(
                         ["Canon's camera division faces declining demand"],
                         [{"ticker": "7915.T", "topic": "cameras"}]
                     )
-                    
+
                     # Step 3: Cleanup and re-analyze HSBC
                     cleanup_all_memories(days=0)
                     collections_store.clear()  # Simulate cleanup
-                    
+
                     hsbc_memories_2 = create_memory_instances("0005.HK")
                     hsbc_bull_2 = hsbc_memories_2["0005_HK_bull_memory"]
-                    
+
                     # Verify HSBC memory is fresh (no Canon contamination)
                     # Query for camera-related content
                     results = await hsbc_bull_2.query_similar_situations(
                         "camera division analysis",
                         n_results=5
                     )
-                    
+
                     # Should find no results (Canon data was cleaned up)
                     assert len(results) == 0 or all(
                         "canon" not in r['document'].lower()
@@ -339,26 +343,30 @@ class TestMemoryStats:
             mock_client.get_or_create_collection.return_value = mock_collection
             mock_client_class.return_value = mock_client
             
-            with patch.dict(os.environ, {'GOOGLE_API_KEY': 'test-key'}):
+            # Note: Mock config getter instead of os.environ (Pydantic Settings)
+            with patch('src.memory.config') as mock_config:
+                mock_config.get_google_api_key.return_value = 'test-key'
                 with patch('src.memory.GoogleGenerativeAIEmbeddings') as mock_embeddings_class:
                     mock_embeddings = MagicMock()
                     mock_embeddings.embed_query.return_value = [0.1] * 768
                     mock_embeddings_class.return_value = mock_embeddings
-                    
+
                     memory = FinancialSituationMemory("test_collection")
                     stats = memory.get_stats()
-                    
+
                     assert stats["available"] == True
                     assert stats["name"] == "test_collection"
                     assert stats["count"] == 42
     
     def test_memory_get_stats_when_unavailable(self):
         """Test that unavailable memories report correct stats."""
-        # Create memory without API key (will be unavailable)
-        with patch.dict(os.environ, {}, clear=True):
+        # Mock config to simulate missing API key
+        with patch('src.memory.config') as mock_config:
+            mock_config.get_google_api_key.return_value = ''
+
             memory = FinancialSituationMemory("test_unavailable")
             stats = memory.get_stats()
-            
+
             assert stats["available"] == False
             assert stats["name"] == "test_unavailable"
             assert stats["count"] == 0

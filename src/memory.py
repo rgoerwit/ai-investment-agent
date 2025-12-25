@@ -94,12 +94,8 @@ class FinancialSituationMemory:
         
         # Initialize ChromaDB
         try:
-            # CRITICAL: Disable telemetry to prevent ClientStartEvent errors
-            # Required for ChromaDB v0.5.x (may not be needed in v0.6.x+)
-            # Set multiple environment variables for maximum compatibility
-            os.environ["ANONYMIZED_TELEMETRY"] = "False"
-            os.environ["CHROMA_TELEMETRY_ENABLED"] = "False"
-            
+            # NOTE: Telemetry env vars (ANONYMIZED_TELEMETRY, CHROMA_TELEMETRY_ENABLED)
+            # are now set by config.py's setup_environment validator.
             import chromadb
             from chromadb.config import Settings
             

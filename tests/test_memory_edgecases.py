@@ -13,7 +13,8 @@ class TestEmbeddingEdgeCases:
     
     async def test_embedding_dimension_mismatch(self):
         """Test handling of mismatched embedding dimensions."""
-        with patch('os.environ.get', return_value='test-api-key'):
+        with patch('src.memory.config') as mock_config:
+            mock_config.get_google_api_key.return_value = 'test-api-key'
             with patch('src.memory.GoogleGenerativeAIEmbeddings') as mock_emb:
                 with patch('chromadb.PersistentClient') as mock_client:
                     # Setup mock instance
@@ -40,7 +41,8 @@ class TestEmbeddingEdgeCases:
     
     async def test_embedding_nan_values(self):
         """Test handling of NaN in embedding vectors."""
-        with patch('os.environ.get', return_value='test-api-key'):
+        with patch('src.memory.config') as mock_config:
+            mock_config.get_google_api_key.return_value = 'test-api-key'
             with patch('src.memory.GoogleGenerativeAIEmbeddings') as mock_emb:
                 with patch('chromadb.PersistentClient') as mock_client:
                     mock_emb_instance = MagicMock()
@@ -67,7 +69,8 @@ class TestEmbeddingEdgeCases:
     
     async def test_embedding_infinity_values(self):
         """Test handling of infinity in embeddings."""
-        with patch('os.environ.get', return_value='test-api-key'):
+        with patch('src.memory.config') as mock_config:
+            mock_config.get_google_api_key.return_value = 'test-api-key'
             with patch('src.memory.GoogleGenerativeAIEmbeddings') as mock_emb:
                 with patch('chromadb.PersistentClient') as mock_client:
                     mock_emb_instance = MagicMock()
@@ -96,7 +99,8 @@ class TestEmbeddingEdgeCases:
     
     async def test_embedding_all_zeros(self):
         """Test handling of zero-vector embeddings."""
-        with patch('os.environ.get', return_value='test-api-key'):
+        with patch('src.memory.config') as mock_config:
+            mock_config.get_google_api_key.return_value = 'test-api-key'
             with patch('src.memory.GoogleGenerativeAIEmbeddings') as mock_emb:
                 with patch('chromadb.PersistentClient') as mock_client:
                     mock_emb_instance = MagicMock()
@@ -120,7 +124,8 @@ class TestEmbeddingEdgeCases:
     
     async def test_embedding_api_rate_limit(self):
         """Test handling of embedding API rate limit."""
-        with patch('os.environ.get', return_value='test-api-key'):
+        with patch('src.memory.config') as mock_config:
+            mock_config.get_google_api_key.return_value = 'test-api-key'
             with patch('src.memory.GoogleGenerativeAIEmbeddings') as mock_emb:
                 with patch('chromadb.PersistentClient') as mock_client:
                     mock_emb_instance = MagicMock()
@@ -149,7 +154,8 @@ class TestMemoryPersistenceEdgeCases:
     
     async def test_corrupted_metadata(self):
         """Test handling of corrupted metadata in stored memories."""
-        with patch('os.environ.get', return_value='test-api-key'):
+        with patch('src.memory.config') as mock_config:
+            mock_config.get_google_api_key.return_value = 'test-api-key'
             with patch('src.memory.GoogleGenerativeAIEmbeddings') as mock_emb:
                 with patch('chromadb.PersistentClient') as mock_client:
                     mock_emb_instance = MagicMock()
@@ -172,7 +178,8 @@ class TestMemoryPersistenceEdgeCases:
     
     async def test_duplicate_ids(self):
         """Test handling of duplicate memory IDs."""
-        with patch('os.environ.get', return_value='test-api-key'):
+        with patch('src.memory.config') as mock_config:
+            mock_config.get_google_api_key.return_value = 'test-api-key'
             with patch('src.memory.GoogleGenerativeAIEmbeddings') as mock_emb:
                 with patch('chromadb.PersistentClient') as mock_client:
                     mock_emb_instance = MagicMock()
@@ -192,7 +199,8 @@ class TestMemoryPersistenceEdgeCases:
     
     async def test_very_large_document(self):
         """Test handling of extremely large document text."""
-        with patch('os.environ.get', return_value='test-api-key'):
+        with patch('src.memory.config') as mock_config:
+            mock_config.get_google_api_key.return_value = 'test-api-key'
             with patch('src.memory.GoogleGenerativeAIEmbeddings') as mock_emb:
                 with patch('chromadb.PersistentClient') as mock_client:
                     mock_emb_instance = MagicMock()
@@ -214,7 +222,8 @@ class TestMemoryPersistenceEdgeCases:
     
     async def test_empty_situations_list(self):
         """Test handling of empty situations list."""
-        with patch('os.environ.get', return_value='test-api-key'):
+        with patch('src.memory.config') as mock_config:
+            mock_config.get_google_api_key.return_value = 'test-api-key'
             with patch('src.memory.GoogleGenerativeAIEmbeddings') as mock_emb:
                 with patch('chromadb.PersistentClient') as mock_client:
                     mock_emb_instance = MagicMock()
@@ -234,8 +243,9 @@ class TestMemoryIsolationEdgeCases:
     
     async def test_ticker_with_special_chars(self):
         """Test ticker sanitization with special characters."""
-        with patch('os.environ.get', return_value='test-api-key'):
-             with patch('src.memory.GoogleGenerativeAIEmbeddings') as mock_emb:
+        with patch('src.memory.config') as mock_config:
+            mock_config.get_google_api_key.return_value = 'test-api-key'
+            with patch('src.memory.GoogleGenerativeAIEmbeddings') as mock_emb:
                 with patch('chromadb.PersistentClient') as mock_client:
                     mock_emb_instance = MagicMock()
                     mock_emb_instance.embed_query.return_value = [0.1] * 768
@@ -255,19 +265,20 @@ class TestMemoryIsolationEdgeCases:
     
     async def test_very_long_ticker(self):
         """Test handling of excessively long ticker symbols."""
-        with patch('os.environ.get', return_value='test-api-key'):
-             with patch('src.memory.GoogleGenerativeAIEmbeddings') as mock_emb:
+        with patch('src.memory.config') as mock_config:
+            mock_config.get_google_api_key.return_value = 'test-api-key'
+            with patch('src.memory.GoogleGenerativeAIEmbeddings') as mock_emb:
                 with patch('chromadb.PersistentClient') as mock_client:
                     mock_emb_instance = MagicMock()
                     mock_emb_instance.embed_query.return_value = [0.1] * 768
                     mock_emb.return_value = mock_emb_instance
-                    
+
                     mock_collection = MagicMock()
                     mock_client.return_value.get_or_create_collection.return_value = mock_collection
 
                     long_ticker = "A" * 200
                     memories = create_memory_instances(long_ticker)
-                    
+
                     # New logic limits base ticker to 40 chars to make room for suffixes
                     # Total length should be well within Chroma's 63 char limit
                     collection_names = [m.name for m in memories.values()]
@@ -275,21 +286,22 @@ class TestMemoryIsolationEdgeCases:
     
     async def test_ticker_with_unicode(self):
         """Test ticker with unicode characters."""
-        # Mock needed here too because create_memory_instances initializes classes
-        with patch('os.environ.get', return_value='test-api-key'):
-             with patch('src.memory.GoogleGenerativeAIEmbeddings') as mock_emb:
+        # Mock config instead of os.environ (Pydantic Settings pattern)
+        with patch('src.memory.config') as mock_config:
+            mock_config.get_google_api_key.return_value = 'test-api-key'
+            with patch('src.memory.GoogleGenerativeAIEmbeddings') as mock_emb:
                 with patch('chromadb.PersistentClient') as mock_client:
                     mock_emb_instance = MagicMock()
                     mock_emb_instance.embed_query.return_value = [0.1] * 768
                     mock_emb.return_value = mock_emb_instance
-                    
+
                     mock_collection = MagicMock()
                     mock_client.return_value.get_or_create_collection.return_value = mock_collection
 
                     unicode_ticker = "测试.HK"
                     memories = create_memory_instances(unicode_ticker)
                     assert isinstance(memories, dict)
-                    
+
                     # Check names are safe (no unicode)
                     names = [m.name for m in memories.values()]
                     assert all(n.isascii() for n in names)
@@ -315,7 +327,8 @@ class TestMemoryIsolationEdgeCases:
     
     async def test_query_with_empty_string(self):
         """Test querying with empty string."""
-        with patch('os.environ.get', return_value='test-api-key'):
+        with patch('src.memory.config') as mock_config:
+            mock_config.get_google_api_key.return_value = 'test-api-key'
             with patch('src.memory.GoogleGenerativeAIEmbeddings') as mock_emb:
                 with patch('chromadb.PersistentClient') as mock_client:
                     mock_emb_instance = MagicMock()
@@ -337,7 +350,8 @@ class TestMemoryIsolationEdgeCases:
     
     async def test_query_with_very_long_text(self):
         """Test querying with extremely long query text."""
-        with patch('os.environ.get', return_value='test-api-key'):
+        with patch('src.memory.config') as mock_config:
+            mock_config.get_google_api_key.return_value = 'test-api-key'
             with patch('src.memory.GoogleGenerativeAIEmbeddings') as mock_emb:
                 with patch('chromadb.PersistentClient') as mock_client:
                     mock_emb_instance = MagicMock()
@@ -356,7 +370,8 @@ class TestMemoryIsolationEdgeCases:
     
     async def test_query_with_invalid_filter(self):
         """Test querying with malformed metadata filter."""
-        with patch('os.environ.get', return_value='test-api-key'):
+        with patch('src.memory.config') as mock_config:
+            mock_config.get_google_api_key.return_value = 'test-api-key'
             with patch('src.memory.GoogleGenerativeAIEmbeddings') as mock_emb:
                 with patch('chromadb.PersistentClient') as mock_client:
                     mock_emb_instance = MagicMock()

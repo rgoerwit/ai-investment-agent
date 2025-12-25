@@ -25,6 +25,7 @@ from collections import namedtuple
 
 from src.data.interfaces import FinancialFetcher
 from src.ticker_utils import generate_strict_search_query
+from src.config import config
 
 logger = structlog.get_logger(__name__)
 
@@ -255,7 +256,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         self.av_fetcher = get_av_fetcher() if ALPHA_VANTAGE_AVAILABLE else None
         self.pattern_extractor = FinancialPatternExtractor()
 
-        api_key = os.environ.get("TAVILY_API_KEY")
+        api_key = config.get_tavily_api_key()
         self.tavily_client = TavilyClient(api_key=api_key) if TAVILY_LIB_AVAILABLE and api_key else None
 
         self.stats = {

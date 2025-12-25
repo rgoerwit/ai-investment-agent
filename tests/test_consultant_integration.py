@@ -19,17 +19,32 @@ class TestConsultantNodeCreation:
 
     def test_consultant_llm_disabled_env_var(self):
         """Test that consultant is disabled when ENABLE_CONSULTANT=false."""
-        with patch.dict(os.environ, {"ENABLE_CONSULTANT": "false"}):
+        import src.llms
+        # Reset singleton to force re-evaluation
+        src.llms._consultant_llm_instance = None
+
+        with patch('src.llms.config') as mock_config:
+            mock_config.enable_consultant = False
             llm = get_consultant_llm()
             assert llm is None
 
+        # Reset for other tests
+        src.llms._consultant_llm_instance = None
+
     def test_consultant_llm_missing_api_key(self):
         """Test that consultant returns None when OPENAI_API_KEY missing."""
-        with patch.dict(os.environ, {"ENABLE_CONSULTANT": "true"}, clear=True):
-            # Remove OPENAI_API_KEY if it exists
-            os.environ.pop("OPENAI_API_KEY", None)
+        import src.llms
+        # Reset singleton to force re-evaluation
+        src.llms._consultant_llm_instance = None
+
+        with patch('src.llms.config') as mock_config:
+            mock_config.enable_consultant = True
+            mock_config.get_openai_api_key.return_value = ""
             llm = get_consultant_llm()
             assert llm is None
+
+        # Reset for other tests
+        src.llms._consultant_llm_instance = None
 
     def test_consultant_llm_creation_success(self):
         """Test successful consultant LLM creation with valid config."""
@@ -43,11 +58,10 @@ class TestConsultantNodeCreation:
             mock_llm = Mock()
             mock_chatgpt.return_value = mock_llm
 
-            with patch.dict(os.environ, {
-                "ENABLE_CONSULTANT": "true",
-                "OPENAI_API_KEY": "test-key",
-                "CONSULTANT_MODEL": "gpt-4o"
-            }):
+            with patch('src.llms.config') as mock_config:
+                mock_config.enable_consultant = True
+                mock_config.consultant_model = "gpt-4o"
+                mock_config.get_openai_api_key.return_value = "test-key"
                 llm = create_consultant_llm()
 
                 assert llm is not None
@@ -342,14 +356,13 @@ class TestConsultantQuickMode:
 
         with patch('langchain_openai.ChatOpenAI') as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
-            
-            with patch.dict(os.environ, {
-                "OPENAI_API_KEY": "test-key",
-                "CONSULTANT_QUICK_MODEL": "gpt-4o-mini",
-                "ENABLE_CONSULTANT": "true"
-            }):
+
+            with patch('src.llms.config') as mock_config:
+                mock_config.enable_consultant = True
+                mock_config.consultant_quick_model = "gpt-4o-mini"
+                mock_config.get_openai_api_key.return_value = "test-key"
                 llm = create_consultant_llm(quick_mode=True)
-                
+
                 assert llm is not None
                 mock_chatgpt.assert_called_once()
                 call_kwargs = mock_chatgpt.call_args[1]
@@ -368,14 +381,13 @@ class TestConsultantQuickMode:
 
         with patch('langchain_openai.ChatOpenAI') as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
-            
-            with patch.dict(os.environ, {
-                "OPENAI_API_KEY": "test-key",
-                "CONSULTANT_MODEL": "gpt-4o",
-                "ENABLE_CONSULTANT": "true"
-            }):
+
+            with patch('src.llms.config') as mock_config:
+                mock_config.enable_consultant = True
+                mock_config.consultant_model = "gpt-4o"
+                mock_config.get_openai_api_key.return_value = "test-key"
                 llm = create_consultant_llm(quick_mode=False)
-                
+
                 assert llm is not None
                 mock_chatgpt.assert_called_once()
                 call_kwargs = mock_chatgpt.call_args[1]
@@ -394,16 +406,13 @@ class TestConsultantQuickMode:
 
         with patch('langchain_openai.ChatOpenAI') as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
-            
-            with patch.dict(os.environ, {
-                "OPENAI_API_KEY": "test-key",
-                "ENABLE_CONSULTANT": "true"
-            }, clear=True):
-                # Remove CONSULTANT_QUICK_MODEL if it exists
-                os.environ.pop("CONSULTANT_QUICK_MODEL", None)
-                
+
+            with patch('src.llms.config') as mock_config:
+                mock_config.enable_consultant = True
+                mock_config.consultant_quick_model = "gpt-4o-mini"  # Default value
+                mock_config.get_openai_api_key.return_value = "test-key"
                 llm = create_consultant_llm(quick_mode=True)
-                
+
                 assert llm is not None
                 mock_chatgpt.assert_called_once()
                 call_kwargs = mock_chatgpt.call_args[1]
@@ -426,14 +435,13 @@ class TestConsultantQuickMode:
 
         with patch('langchain_openai.ChatOpenAI') as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
-            
-            with patch.dict(os.environ, {
-                "OPENAI_API_KEY": "test-key",
-                "CONSULTANT_QUICK_MODEL": "gpt-4o-mini-test",
-                "ENABLE_CONSULTANT": "true"
-            }):
+
+            with patch('src.llms.config') as mock_config:
+                mock_config.enable_consultant = True
+                mock_config.consultant_quick_model = "gpt-4o-mini-test"
+                mock_config.get_openai_api_key.return_value = "test-key"
                 llm = get_consultant_llm(quick_mode=True)
-                
+
                 assert llm is not None
                 mock_chatgpt.assert_called_once()
                 call_kwargs = mock_chatgpt.call_args[1]

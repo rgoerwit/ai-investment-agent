@@ -108,13 +108,16 @@ class TestPromptRegistryInit:
         registry = PromptRegistry(prompts_dir="/nonexistent/path")
         assert len(registry.prompts) > 0  # Still has defaults
     
-    def test_init_uses_env_var(self, monkeypatch):
-        """Test PROMPTS_DIR environment variable."""
+    def test_init_uses_config_prompts_dir(self):
+        """Test prompts_dir from config Settings."""
+        from unittest.mock import patch
+
         with TemporaryDirectory() as tmpdir:
-            monkeypatch.setenv("PROMPTS_DIR", tmpdir)
-            registry = PromptRegistry()
-            
-            assert str(registry.prompts_dir) == tmpdir
+            with patch('src.prompts.config') as mock_config:
+                mock_config.prompts_dir = Path(tmpdir)
+                registry = PromptRegistry()
+
+                assert str(registry.prompts_dir) == tmpdir
 
 
 class TestLoadDefaultPrompts:

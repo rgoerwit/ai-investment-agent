@@ -27,6 +27,7 @@ import logging
 import pandas as pd
 from typing import Optional, Dict, Any
 from src.data.interfaces import FinancialFetcher
+from src.config import config
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +43,11 @@ class FMPFetcher(FinancialFetcher):
     def __init__(self, api_key: Optional[str] = None):
         """
         Initialize FMP fetcher.
-        
+
         Args:
-            api_key: FMP API key (or None to read from FMP_API_KEY env var)
+            api_key: FMP API key (or None to read from config)
         """
-        self.api_key = api_key or os.getenv('FMP_API_KEY')
+        self.api_key = api_key or config.get_fmp_api_key()
         self.base_url = "https://financialmodelingprep.com/stable"
         self._session = None
         self._key_validated = False

@@ -8,7 +8,7 @@ settings, particularly for rate limits where mismatches cause severe performance
 import pytest
 import os
 from pathlib import Path
-from unittest.mock import patch, mock_open
+from unittest.mock import patch, mock_open, MagicMock
 
 
 class TestEnvOverrideWarning:
@@ -143,6 +143,14 @@ FINNHUB_API_KEY=test_finnhub
 TAVILY_API_KEY=test_tavily
 GEMINI_RPM_LIMIT=15
 """
+        # Mock config getters (validate_environment_variables now uses config singleton)
+        mock_config = MagicMock()
+        mock_config.get_google_api_key.return_value = 'test_key_123'
+        mock_config.get_finnhub_api_key.return_value = 'test_finnhub'
+        mock_config.get_tavily_api_key.return_value = 'test_tavily'
+        mock_config.get_eodhd_api_key.return_value = ''
+        mock_config.langsmith_project = 'test-project'
+
         with patch('builtins.open', mock_open(read_data=env_content)):
             with patch.object(Path, 'exists', return_value=True):
                 with patch.dict(os.environ, {
@@ -151,8 +159,10 @@ GEMINI_RPM_LIMIT=15
                     'TAVILY_API_KEY': 'test_tavily',
                     'GEMINI_RPM_LIMIT': '360'  # Shell override
                 }):
-                    with caplog.at_level(logging.WARNING, logger='src.config'):
-                        validate_environment_variables()
+                    with patch('src.config.config', mock_config):
+                        with patch('src.config.configure_langsmith_tracing'):
+                            with caplog.at_level(logging.WARNING, logger='src.config'):
+                                validate_environment_variables()
 
         # Verify the specific warning is logged
         all_messages = ' '.join([record.message for record in caplog.records if record.levelname == 'WARNING'])

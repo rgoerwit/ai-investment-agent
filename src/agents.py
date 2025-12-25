@@ -10,7 +10,6 @@ FIXED: Corrected memory query parameter name to 'metadata_filter'.
 """
 
 import asyncio
-import os
 from typing import Annotated, List, Dict, Any, Optional, Set, Callable
 from typing_extensions import TypedDict
 from datetime import datetime
@@ -21,6 +20,8 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 
 import structlog
+
+from src.config import config as settings_config
 
 logger = structlog.get_logger(__name__)
 
@@ -50,7 +51,7 @@ async def invoke_with_rate_limit_handling(
     Raises:
         Exception: Re-raises if not a rate limit error or after max attempts
     """
-    quiet_mode = os.environ.get("QUIET_MODE", "false").lower() == "true"
+    quiet_mode = settings_config.quiet_mode
 
     for attempt in range(max_attempts):
         try:
@@ -1004,7 +1005,7 @@ def create_financial_health_validator_node() -> Callable:
         ticker = state.get('company_of_interest', 'UNKNOWN')
         company_name = state.get('company_name', ticker)
 
-        quiet_mode = os.environ.get("QUIET_MODE", "false").lower() == "true"
+        quiet_mode = settings_config.quiet_mode
 
         # Graceful handling of missing fundamentals
         if not fundamentals_report:

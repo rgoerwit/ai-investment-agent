@@ -111,6 +111,11 @@ def create_gemini_model(
     """
     Generic factory for Gemini models.
     All created instances are tracked for proper cleanup at shutdown.
+
+    Note: API key is explicitly passed from config to avoid dependency on
+    os.environ being populated by load_dotenv() (Pydantic Settings handles
+    .env loading for our config, but third-party libs like LangChain still
+    expect explicit api_key or os.environ values).
     """
     global _llm_instance_counter
 
@@ -124,7 +129,8 @@ def create_gemini_model(
         "rate_limiter": GLOBAL_RATE_LIMITER,
         "convert_system_message_to_human": False,
         "max_output_tokens": 32768,
-        "callbacks": callbacks or []
+        "callbacks": callbacks or [],
+        "api_key": config.get_google_api_key(),  # Explicit API key from config
     }
 
     if thinking_level and _is_gemini_v3_or_greater(model_name):
@@ -269,15 +275,14 @@ def create_consultant_llm(
             "pip install langchain-openai>=0.3.0"
         )
 
-    # Check if consultant is enabled
-    enable_consultant = os.environ.get("ENABLE_CONSULTANT", "true").lower()
-    if enable_consultant == "false":
+    # Check if consultant is enabled (via config, not os.environ)
+    if not config.enable_consultant:
         raise ValueError(
             "Consultant LLM is disabled. Set ENABLE_CONSULTANT=true to enable."
         )
 
-    # Get OpenAI API key
-    api_key = os.environ.get("OPENAI_API_KEY")
+    # Get OpenAI API key via config (SecretStr protected)
+    api_key = config.get_openai_api_key()
     if not api_key:
         raise ValueError(
             "OPENAI_API_KEY not found in environment. "
@@ -285,7 +290,7 @@ def create_consultant_llm(
             "Add OPENAI_API_KEY to your .env file or set ENABLE_CONSULTANT=false."
         )
 
-    # Get model name from env or use default
+    # Get model name from config (not os.environ)
     # Note: As of Dec 2025, gpt-4o (GPT-4 Omni) is the latest production model
     # ChatGPT 5.2 is not yet available via API
     if model:
@@ -293,10 +298,10 @@ def create_consultant_llm(
         model_name = model
     elif quick_mode:
         # Quick mode: use faster/cheaper model (defaults to gpt-4o-mini)
-        model_name = os.environ.get("CONSULTANT_QUICK_MODEL", "gpt-4o-mini")
+        model_name = config.consultant_quick_model
     else:
         # Normal mode: use full model (defaults to gpt-4o)
-        model_name = os.environ.get("CONSULTANT_MODEL", "gpt-4o")
+        model_name = config.consultant_model
 
     logger.info(
         f"Initializing Consultant LLM (OpenAI): {model_name} "
@@ -348,14 +353,13 @@ def get_consultant_llm(
     """
     global _consultant_llm_instance
 
-    # Check if consultant is enabled
-    enable_consultant = os.environ.get("ENABLE_CONSULTANT", "true").lower()
-    if enable_consultant == "false":
+    # Check if consultant is enabled (via config, not os.environ)
+    if not config.enable_consultant:
         logger.info("Consultant LLM disabled via ENABLE_CONSULTANT=false")
         return None
 
-    # Check if API key exists
-    if not os.environ.get("OPENAI_API_KEY"):
+    # Check if API key exists (via config with SecretStr protection)
+    if not config.get_openai_api_key():
         logger.warning(
             "OPENAI_API_KEY not found - consultant node will be skipped. "
             "To enable consultant cross-validation, add OPENAI_API_KEY to .env"

@@ -13,6 +13,7 @@ import structlog
 import pandas as pd
 from typing import Optional, Dict, Any
 from src.data.interfaces import FinancialFetcher
+from src.config import config
 
 logger = structlog.get_logger(__name__)
 
@@ -28,7 +29,7 @@ class AlphaVantageFetcher(FinancialFetcher):
     """
 
     def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or os.getenv('ALPHAVANTAGE_API_KEY')
+        self.api_key = api_key or config.get_alpha_vantage_api_key()
         self.base_url = "https://www.alphavantage.co/query"
         self._session = None
         self._is_exhausted = False  # Circuit breaker

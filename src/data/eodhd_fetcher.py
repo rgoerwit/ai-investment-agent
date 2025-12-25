@@ -19,6 +19,7 @@ import logging
 import pandas as pd
 from typing import Optional, Dict, Any
 from src.data.interfaces import FinancialFetcher
+from src.config import config
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +28,9 @@ class EODHDFetcher(FinancialFetcher):
     Async client for EOD Historical Data.
     Maintains state to stop requests if API limits are hit.
     """
-    
+
     def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or os.getenv('EODHD_API_KEY')
+        self.api_key = api_key or config.get_eodhd_api_key()
         self.base_url = "https://eodhd.com/api"
         self._session = None
         self._is_exhausted = False  # Circuit breaker for rate limits

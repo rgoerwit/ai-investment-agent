@@ -200,9 +200,7 @@ class TestQuietMode:
 
     @pytest.mark.asyncio
     async def test_quiet_mode_suppresses_logging(self):
-        """Test that QUIET_MODE=true suppresses rate limit warnings."""
-        os.environ["QUIET_MODE"] = "true"
-
+        """Test that quiet_mode=True suppresses rate limit warnings."""
         runnable = AsyncMock()
         runnable.ainvoke = AsyncMock(side_effect=[
             Exception("429 Too Many Requests"),
@@ -210,26 +208,22 @@ class TestQuietMode:
         ])
 
         with patch('asyncio.sleep', new_callable=AsyncMock):
-            with patch('src.agents.logger') as mock_logger:
-                result = await invoke_with_rate_limit_handling(
-                    runnable,
-                    {"input": "test"},
-                    max_attempts=2,
-                    context="Test Agent"
-                )
+            with patch('src.agents.settings_config') as mock_config:
+                mock_config.quiet_mode = True
+                with patch('src.agents.logger') as mock_logger:
+                    result = await invoke_with_rate_limit_handling(
+                        runnable,
+                        {"input": "test"},
+                        max_attempts=2,
+                        context="Test Agent"
+                    )
 
-                # Should not log in quiet mode
-                mock_logger.warning.assert_not_called()
-
-        # Clean up
-        del os.environ["QUIET_MODE"]
+                    # Should not log in quiet mode
+                    mock_logger.warning.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_normal_mode_logs_rate_limits(self):
         """Test that rate limits are logged when not in quiet mode."""
-        # Ensure QUIET_MODE is not set
-        os.environ.pop("QUIET_MODE", None)
-
         runnable = AsyncMock()
         runnable.ainvoke = AsyncMock(side_effect=[
             Exception("429 Too Many Requests"),
@@ -237,19 +231,21 @@ class TestQuietMode:
         ])
 
         with patch('asyncio.sleep', new_callable=AsyncMock):
-            with patch('src.agents.logger') as mock_logger:
-                result = await invoke_with_rate_limit_handling(
-                    runnable,
-                    {"input": "test"},
-                    max_attempts=2,
-                    context="Test Agent"
-                )
+            with patch('src.agents.settings_config') as mock_config:
+                mock_config.quiet_mode = False
+                with patch('src.agents.logger') as mock_logger:
+                    result = await invoke_with_rate_limit_handling(
+                        runnable,
+                        {"input": "test"},
+                        max_attempts=2,
+                        context="Test Agent"
+                    )
 
-                # Should log in normal mode
-                mock_logger.warning.assert_called_once()
-                call_args = mock_logger.warning.call_args[1]
-                assert call_args['context'] == "Test Agent"
-                assert call_args['wait_seconds'] == 60
+                    # Should log in normal mode
+                    mock_logger.warning.assert_called_once()
+                    call_args = mock_logger.warning.call_args[1]
+                    assert call_args['context'] == "Test Agent"
+                    assert call_args['wait_seconds'] == 60
 
 
 class TestContextLogging:
@@ -258,7 +254,6 @@ class TestContextLogging:
     @pytest.mark.asyncio
     async def test_context_included_in_logs(self):
         """Test that agent context is included in log messages."""
-        os.environ.pop("QUIET_MODE", None)
 
         runnable = AsyncMock()
         runnable.ainvoke = AsyncMock(side_effect=[

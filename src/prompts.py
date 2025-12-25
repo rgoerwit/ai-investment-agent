@@ -12,6 +12,8 @@ import json
 import os
 import structlog
 
+from src.config import config
+
 logger = structlog.get_logger(__name__)
 
 
@@ -35,9 +37,10 @@ class AgentPrompt:
 
 class PromptRegistry:
     """Central registry for all agent prompts with version tracking."""
-    
+
     def __init__(self, prompts_dir: Optional[str] = None):
-        self.prompts_dir = Path(prompts_dir or os.environ.get("PROMPTS_DIR", "./prompts"))
+        # Use explicit path if provided, otherwise fall back to config
+        self.prompts_dir = Path(prompts_dir) if prompts_dir else config.prompts_dir
         self.prompts: Dict[str, AgentPrompt] = {}
         self._load_default_prompts()
         self._load_custom_prompts()

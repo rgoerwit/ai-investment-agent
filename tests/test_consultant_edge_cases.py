@@ -173,11 +173,10 @@ class TestConfigurationEdgeCases:
             mock_llm = Mock()
             mock_chatgpt.return_value = mock_llm
 
-            with patch.dict(os.environ, {
-                "ENABLE_CONSULTANT": "true",
-                "OPENAI_API_KEY": "test-key",
-                "CONSULTANT_MODEL": "invalid-model-name-12345"
-            }):
+            with patch('src.llms.config') as mock_config:
+                mock_config.enable_consultant = True
+                mock_config.consultant_model = "invalid-model-name-12345"
+                mock_config.get_openai_api_key.return_value = "test-key"
                 llm = create_consultant_llm()
 
                 # Should still create LLM (OpenAI will validate model name)
@@ -188,26 +187,37 @@ class TestConfigurationEdgeCases:
     def test_consultant_with_empty_api_key(self):
         """Test consultant with empty string API key (not missing)."""
         from src.llms import get_consultant_llm
+        import src.llms
 
-        with patch.dict(os.environ, {
-            "ENABLE_CONSULTANT": "true",
-            "OPENAI_API_KEY": ""  # Empty string, not missing
-        }, clear=True):
+        # Reset singleton to force re-evaluation
+        src.llms._consultant_llm_instance = None
+
+        with patch('src.llms.config') as mock_config:
+            mock_config.enable_consultant = True
+            mock_config.get_openai_api_key.return_value = ""
             llm = get_consultant_llm()
 
             # Should return None (empty key treated same as missing)
             assert llm is None
 
-    def test_consultant_enable_flag_case_insensitive(self):
-        """Test that ENABLE_CONSULTANT handles various casings."""
+        # Reset for other tests
+        src.llms._consultant_llm_instance = None
+
+    def test_consultant_enable_flag_disabled(self):
+        """Test that consultant is disabled when enable_consultant=False."""
         from src.llms import get_consultant_llm
+        import src.llms
 
-        test_cases = ["FALSE", "False", "false", "fAlSe"]
+        # Reset singleton to force re-evaluation
+        src.llms._consultant_llm_instance = None
 
-        for case in test_cases:
-            with patch.dict(os.environ, {"ENABLE_CONSULTANT": case}):
-                llm = get_consultant_llm()
-                assert llm is None, f"Should be disabled for ENABLE_CONSULTANT={case}"
+        with patch('src.llms.config') as mock_config:
+            mock_config.enable_consultant = False
+            llm = get_consultant_llm()
+            assert llm is None, "Should be disabled when enable_consultant=False"
+
+        # Reset for other tests
+        src.llms._consultant_llm_instance = None
 
 
 class TestErrorPropagation:

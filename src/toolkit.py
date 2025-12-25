@@ -28,24 +28,31 @@ logger = structlog.get_logger(__name__)
 stocktwits_api = StockTwitsAPI()
 
 # --- Modernized Tavily Import Pattern ---
+# Note: API key is explicitly passed from config to avoid dependency on
+# os.environ being populated by load_dotenv() (Pydantic Settings handles
+# .env loading for our config, but third-party libs expect explicit api_key).
 TAVILY_AVAILABLE = False
 tavily_tool = None
-try:
-    from langchain_tavily import TavilySearch
-    tavily_tool = TavilySearch(max_results=5)
-    TAVILY_AVAILABLE = True
-except ImportError:
+_tavily_api_key = config.get_tavily_api_key()
+if _tavily_api_key:
     try:
-        from langchain_community.tools import TavilySearchResults
-        tavily_tool = TavilySearchResults(max_results=5)
+        from langchain_tavily import TavilySearch
+        tavily_tool = TavilySearch(max_results=5, tavily_api_key=_tavily_api_key)
         TAVILY_AVAILABLE = True
     except ImportError:
         try:
-            from langchain_community.tools.tavily_search import TavilySearchResults
-            tavily_tool = TavilySearchResults(max_results=5)
+            from langchain_community.tools import TavilySearchResults
+            tavily_tool = TavilySearchResults(max_results=5, tavily_api_key=_tavily_api_key)
             TAVILY_AVAILABLE = True
         except ImportError:
-            logger.warning("Tavily tools not available. Install langchain-tavily or langchain-community.")
+            try:
+                from langchain_community.tools.tavily_search import TavilySearchResults
+                tavily_tool = TavilySearchResults(max_results=5, tavily_api_key=_tavily_api_key)
+                TAVILY_AVAILABLE = True
+            except ImportError:
+                logger.warning("Tavily tools not available. Install langchain-tavily or langchain-community.")
+else:
+    logger.warning("TAVILY_API_KEY not set. Tavily tools disabled.")
 
 
 def _truncate_tavily_result(result: Any, max_chars: Optional[int] = None) -> str:
