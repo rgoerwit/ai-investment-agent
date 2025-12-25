@@ -451,7 +451,11 @@ def create_trading_graph(
         )
     else:
         logger.info("Normal mode: HIGH thinking for synthesis agents")
-        senior_fund_llm = create_deep_thinking_llm(
+        # Senior Fundamentals uses QUICK thinking even in normal mode:
+        # - It does structured scoring (rule-based), not creative synthesis
+        # - Large input context (48k tokens) + HIGH thinking causes 504 timeouts
+        # - Prompt v7.2 EFFICIENCY DIRECTIVE further reduces verbosity
+        senior_fund_llm = create_quick_thinking_llm(
             callbacks=[TokenTrackingCallback("Fundamentals Analyst", tracker)]
         )
         bull_llm = create_deep_thinking_llm(

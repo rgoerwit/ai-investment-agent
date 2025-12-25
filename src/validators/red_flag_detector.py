@@ -222,11 +222,12 @@ class RedFlagDetector:
             FCF in dollars (e.g., 1_500_000_000), or None if not found
         """
         patterns = [
-            r'\*\*Free Cash Flow\*\*:\s*([+-]?)\$?\s*([0-9,.]+)\s*([BMK])?',
-            r'(?:^|\n)\s*Free Cash Flow:\s*([+-]?)\$?\s*([0-9,.]+)\s*([BMK])?',
-            r'(?:^|\n)\s*FCF:\s*([+-]?)\$?\s*([0-9,.]+)\s*([BMK])?',
-            r'(?:Free Cash Flow|FCF):\s*([+-]?)\$?\s*([0-9,.]+)\s*([BMK])?',
-            r'Positive FCF:\s*\$?\s*([0-9,.]+)\s*([BMK])?',  # No negative for "Positive"
+            # Support multiple currencies: $, ¥, €, £ or none
+            r'\*\*Free Cash Flow\*\*:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?',
+            r'(?:^|\n)\s*Free Cash Flow:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?',
+            r'(?:^|\n)\s*FCF:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?',
+            r'(?:Free Cash Flow|FCF):\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?',
+            r'Positive FCF:\s*[$¥€£]?\s*([0-9,.]+)\s*([BMK])?',  # No negative for "Positive"
         ]
         for pattern in patterns:
             match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
@@ -271,9 +272,10 @@ class RedFlagDetector:
             Net income in dollars (e.g., 500_000_000), or None if not found
         """
         patterns = [
-            r'\*\*Net Income\*\*:\s*([+-]?)\$?\s*([0-9,.]+)\s*([BMK])?',
-            r'(?:^|\n)\s*Net Income:\s*([+-]?)\$?\s*([0-9,.]+)\s*([BMK])?',
-            r'Net Income:\s*([+-]?)\$?\s*([0-9,.]+)\s*([BMK])?',
+            # Support multiple currencies: $, ¥, €, £ or none
+            r'\*\*Net Income\*\*:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?',
+            r'(?:^|\n)\s*Net Income:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?',
+            r'Net Income:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?',
         ]
         for pattern in patterns:
             match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
