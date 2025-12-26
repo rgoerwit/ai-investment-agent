@@ -3,28 +3,30 @@ Multi-Agent Trading System Graph
 REFACTORED: Parallel analyst execution with synchronization barrier.
 
 Architecture:
-1. Dispatcher fans out to 4 parallel analyst streams
-2. Market, Sentiment, News analysts run independently
-3. Junior Fund → Senior Fund → Validator runs as sequential chain
-4. Sync Check waits for all 4 streams, then routes to Research Manager or Portfolio Manager
-5. Bull/Bear debate → Consultant → Trader → Risk Team → Portfolio Manager
+1. Dispatcher fans out to 6 parallel analyst streams
+2. Market, Sentiment, News analysts run independently → Sync Check
+3. Junior Fundamentals, Foreign Language, Legal Counsel run in parallel → Fundamentals Sync Check
+4. Fundamentals Sync waits for all 3, then Senior Fund → Validator → Sync Check
+5. Sync Check waits for all streams, then routes to Research Manager (PASS) or Portfolio Manager (REJECT)
+6. Bull/Bear debate → Consultant → Trader → Risk Team → Portfolio Manager
 """
 
-from typing import Literal, Dict, Optional, List
+from typing import Literal, Any
 from dataclasses import dataclass
 import structlog
 
 from langgraph.graph import StateGraph, END
 from langgraph.types import RunnableConfig
 from langgraph.prebuilt import ToolNode
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage
 
 from src.agents import (
     AgentState, create_analyst_node, create_researcher_node,
     create_research_manager_node, create_trader_node,
     create_risk_debater_node, create_portfolio_manager_node,
     create_financial_health_validator_node,
-    create_consultant_node
+    create_consultant_node,
+    create_legal_counsel_node
 )
 from src.llms import (
     create_quick_thinking_llm,
@@ -52,7 +54,7 @@ class TradingContext:
     enable_memory: bool = True
     max_debate_rounds: int = 2
     max_risk_rounds: int = 1
-    ticker_memories: Optional[Dict[str, any]] = None
+    ticker_memories: dict[str, Any] | None = None
     cleanup_previous_memories: bool = True
 
 
@@ -94,6 +96,7 @@ def route_tools(state: AgentState) -> str:
         "news_analyst": "News Analyst",
         "junior_fundamentals_analyst": "Junior Fundamentals Analyst",
         "foreign_language_analyst": "Foreign Language Analyst",
+        "legal_counsel": "Legal Counsel",
     }
 
     node_name = agent_map.get(sender, "Market Analyst")
@@ -107,7 +110,7 @@ def route_tools(state: AgentState) -> str:
     return node_name
 
 
-def create_agent_tool_node(tools: List, agent_key: str):
+def create_agent_tool_node(tools: list, agent_key: str):
     """
     Create a tool execution node that only processes tool_calls from a specific agent.
 
@@ -126,7 +129,7 @@ def create_agent_tool_node(tools: List, agent_key: str):
     tool_node = ToolNode(tools)
     tool_names = {tool.name for tool in tools}
 
-    async def agent_tool_node(state: AgentState, config: RunnableConfig) -> Dict:
+    async def agent_tool_node(state: AgentState, config: RunnableConfig) -> dict:
         """Execute tools for a specific agent by filtering messages."""
         messages = state.get("messages", [])
 
@@ -172,21 +175,22 @@ def create_agent_tool_node(tools: List, agent_key: str):
 
 def fan_out_to_analysts(
     state: AgentState, config: RunnableConfig
-) -> List[str]:
+) -> list[str]:
     """
-    Fan-out router that triggers all 5 analyst streams in parallel.
+    Fan-out router that triggers all 6 analyst streams in parallel.
     Returns a list of destinations for parallel execution.
 
     Architecture:
     - Market, Sentiment, News → Sync Check (direct)
-    - Junior Fundamentals, Foreign Language → Fundamentals Sync → Senior → Validator → Sync Check
+    - Junior Fundamentals, Foreign Language, Legal Counsel → Fundamentals Sync → Senior → Validator → Sync Check
     """
     return [
         "Market Analyst",
         "Sentiment Analyst",
         "News Analyst",
         "Junior Fundamentals Analyst",
-        "Foreign Language Analyst"
+        "Foreign Language Analyst",
+        "Legal Counsel"
     ]
 
 
@@ -194,31 +198,33 @@ def fundamentals_sync_router(
     state: AgentState, config: RunnableConfig
 ) -> Literal["Fundamentals Analyst", "__end__"]:
     """
-    Synchronization barrier for Junior Fundamentals and Foreign Language analysts.
+    Synchronization barrier for Junior Fundamentals, Foreign Language, and Legal Counsel.
 
-    Both analysts run in parallel gathering financial data. This barrier waits for
-    both to complete before allowing the Senior Fundamentals Analyst to process
+    All three analysts run in parallel gathering financial/legal data. This barrier waits
+    for all to complete before allowing the Senior Fundamentals Analyst to process
     their combined output.
 
     Routing behavior:
-    - If BOTH Junior (raw_fundamentals_data) and Foreign (foreign_language_report) complete:
+    - If ALL THREE complete (raw_fundamentals_data, foreign_language_report, legal_report):
       Route to Senior Fundamentals Analyst
     - If not all complete: Return __end__ to terminate THIS branch
-      (the other branch will eventually complete and trigger the router)
+      (the other branches will eventually complete and trigger the router)
     """
     junior_done = bool(state.get("raw_fundamentals_data"))
     foreign_done = bool(state.get("foreign_language_report"))
+    legal_done = bool(state.get("legal_report"))
 
     logger.info(
         "fundamentals_sync_status",
         junior_done=junior_done,
-        foreign_done=foreign_done
+        foreign_done=foreign_done,
+        legal_done=legal_done
     )
 
-    if junior_done and foreign_done:
+    if junior_done and foreign_done and legal_done:
         logger.info(
             "fundamentals_sync_complete",
-            message="Both Junior and Foreign Language analysts complete - proceeding to Senior Fundamentals"
+            message="Junior, Foreign Language, and Legal Counsel complete - proceeding to Senior Fundamentals"
         )
         return "Fundamentals Analyst"
 
@@ -312,7 +318,7 @@ def create_trading_graph(
     max_risk_discuss_rounds: int = 1,
     enable_memory: bool = True,
     recursion_limit: int = 100,
-    ticker: Optional[str] = None,
+    ticker: str | None = None,
     cleanup_previous: bool = False,
     quick_mode: bool = False
 ):
@@ -451,7 +457,11 @@ def create_trading_graph(
         )
     else:
         logger.info("Normal mode: HIGH thinking for synthesis agents")
-        senior_fund_llm = create_deep_thinking_llm(
+        # Senior Fundamentals uses QUICK thinking even in normal mode:
+        # - It does structured scoring (rule-based), not creative synthesis
+        # - Large input context (48k tokens) + HIGH thinking causes 504 timeouts
+        # - Prompt v7.2 EFFICIENCY DIRECTIVE further reduces verbosity
+        senior_fund_llm = create_quick_thinking_llm(
             callbacks=[TokenTrackingCallback("Fundamentals Analyst", tracker)]
         )
         bull_llm = create_deep_thinking_llm(
@@ -504,7 +514,7 @@ def create_trading_graph(
         retry_llm=retry_llm, allow_retry=allow_retry
     )
 
-    # Foreign Language Analyst (parallel with Junior Fundamentals)
+    # Foreign Language Analyst (parallel with Junior Fundamentals and Legal Counsel)
     foreign_llm = create_quick_thinking_llm(
         callbacks=[TokenTrackingCallback("Foreign Language Analyst", tracker)]
     )
@@ -512,6 +522,14 @@ def create_trading_graph(
         foreign_llm, "foreign_language_analyst",
         toolkit.get_foreign_language_tools(), "foreign_language_report",
         retry_llm=retry_llm, allow_retry=allow_retry
+    )
+
+    # Legal Counsel (parallel with Junior Fundamentals and Foreign Language)
+    legal_llm = create_quick_thinking_llm(
+        callbacks=[TokenTrackingCallback("Legal Counsel", tracker)]
+    )
+    legal_counsel = create_legal_counsel_node(
+        legal_llm, toolkit.get_legal_tools()
     )
 
     # Fundamentals chain (Junior + Foreign → Senior → Validator)
@@ -545,6 +563,9 @@ def create_trading_graph(
     )
     foreign_tools = create_agent_tool_node(
         toolkit.get_foreign_language_tools(), "foreign_language_analyst"
+    )
+    legal_tools = create_agent_tool_node(
+        toolkit.get_legal_tools(), "legal_counsel"
     )
 
     # Research & Decision nodes
@@ -597,6 +618,7 @@ def create_trading_graph(
     workflow.add_node("News Analyst", news)
     workflow.add_node("Junior Fundamentals Analyst", junior_fund)
     workflow.add_node("Foreign Language Analyst", foreign_analyst)
+    workflow.add_node("Legal Counsel", legal_counsel)
     workflow.add_node("Fundamentals Analyst", senior_fund)
     workflow.add_node("Financial Validator", validator)
     # Separate tool nodes for parallel execution (avoids sender race condition)
@@ -605,6 +627,7 @@ def create_trading_graph(
     workflow.add_node("news_tools", news_tools)
     workflow.add_node("junior_fund_tools", junior_fund_tools)
     workflow.add_node("foreign_tools", foreign_tools)
+    workflow.add_node("legal_tools", legal_tools)
 
     # Add research and risk nodes
     workflow.add_node("Bull Researcher", bull)
@@ -625,11 +648,11 @@ def create_trading_graph(
     # Entry point
     workflow.set_entry_point("Dispatcher")
 
-    # Fan-out from Dispatcher to all 5 parallel analyst streams
+    # Fan-out from Dispatcher to all 6 parallel analyst streams
     workflow.add_conditional_edges(
         "Dispatcher",
         fan_out_to_analysts,
-        ["Market Analyst", "Sentiment Analyst", "News Analyst", "Junior Fundamentals Analyst", "Foreign Language Analyst"]
+        ["Market Analyst", "Sentiment Analyst", "News Analyst", "Junior Fundamentals Analyst", "Foreign Language Analyst", "Legal Counsel"]
     )
 
     # Market, Sentiment, News: tools loop → Sync Check
@@ -667,7 +690,14 @@ def create_trading_graph(
     )
     workflow.add_edge("foreign_tools", "Foreign Language Analyst")
 
-    # Fundamentals Sync Check: wait for Junior + Foreign, then route to Senior
+    # Legal Counsel flow: tools loop → Fundamentals Sync Check
+    workflow.add_conditional_edges(
+        "Legal Counsel", should_continue_analyst,
+        {"tools": "legal_tools", "continue": "Fundamentals Sync Check"}
+    )
+    workflow.add_edge("legal_tools", "Legal Counsel")
+
+    # Fundamentals Sync Check: wait for Junior + Foreign + Legal, then route to Senior
     workflow.add_conditional_edges(
         "Fundamentals Sync Check", fundamentals_sync_router,
         {
@@ -718,8 +748,8 @@ def create_trading_graph(
         "trading_graph_created",
         ticker=ticker,
         architecture="parallel",
-        parallel_streams=["Market", "Sentiment", "News", "Junior Fundamentals", "Foreign Language"],
-        fundamentals_sync="Junior + Foreign → Senior → Validator"
+        parallel_streams=["Market", "Sentiment", "News", "Junior Fundamentals", "Foreign Language", "Legal Counsel"],
+        fundamentals_sync="Junior + Foreign + Legal → Senior → Validator"
     )
 
     return workflow.compile()

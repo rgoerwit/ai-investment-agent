@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
+from typing import Any
 import pandas as pd
 
 class FinancialFetcher(ABC):
@@ -19,7 +19,7 @@ class FinancialFetcher(ABC):
         pass
 
     @abstractmethod
-    async def get_financial_metrics(self, ticker: str) -> Optional[Dict[str, Any]]:
+    async def get_financial_metrics(self, ticker: str) -> dict[str, Any] | None:
         """
         Returns a dictionary of standardized financial metrics.
         Must return keys: 'currentPrice', 'marketCap', 'trailingPE', etc.

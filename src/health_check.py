@@ -13,7 +13,7 @@ import asyncio
 import logging
 from pathlib import Path
 import json
-from typing import Dict, Any, List, Tuple
+from typing import Any
 
 # Add the repository root to Python path
 repo_root = Path(__file__).parent.parent
@@ -50,7 +50,7 @@ def get_package_version(module_name: str, package_name: str = None) -> str:
         return "unknown"
 
 
-def check_python_version() -> Tuple[bool, List[str]]:
+def check_python_version() -> tuple[bool, list[str]]:
     """Check if Python version meets requirements."""
     issues = []
     major, minor = sys.version_info[:2]
@@ -65,36 +65,36 @@ def check_python_version() -> Tuple[bool, List[str]]:
 
 
 def check_environment_variables() -> bool:
-    """Check if required environment variables are set for Gemini."""
-    env_file = repo_root / ".env"
-    if env_file.exists():
-        logger.info(f"Loading environment from {env_file}")
-        try:
-            from dotenv import load_dotenv
-            load_dotenv(env_file)
-        except ImportError:
-            logger.warning("python-dotenv not available, skipping .env file loading")
-    
-    # UPDATED: Check for Google API Key instead of OpenAI
-    required_vars = [
-        "GOOGLE_API_KEY", 
-        "FINNHUB_API_KEY", 
-        "TAVILY_API_KEY", 
+    """Check if required environment variables are set for Gemini.
+
+    Uses config getters to check for API keys, which properly handle
+    SecretStr protection and prevent accidental key exposure in logs.
+
+    Note: Pydantic Settings handles .env loading automatically via env_file
+    in SettingsConfigDict, so no manual load_dotenv() is needed.
+    """
+    from src.config import config
+
+    # Check required API keys using secure getters
+    # (getters return empty string if not set, never expose the actual key)
+    required_checks = [
+        ("GOOGLE_API_KEY", config.get_google_api_key),
+        ("FINNHUB_API_KEY", config.get_finnhub_api_key),
+        ("TAVILY_API_KEY", config.get_tavily_api_key),
     ]
     missing_vars = []
-    
-    for var in required_vars:
-        value = os.environ.get(var, "")
-        if not value or value.strip() == "":
-            missing_vars.append(var)
+
+    for var_name, getter in required_checks:
+        if getter():
+            logger.info(f"{var_name}: Present (✓)")
         else:
-            logger.info(f"{var}: Present (✓)")
-    
+            missing_vars.append(var_name)
+
     if missing_vars:
         logger.error(f"Missing environment variables: {missing_vars}")
         logger.info("Please copy .env.example to .env and add your API keys")
         return False
-    
+
     logger.info("All required environment variables are set")
     return True
 

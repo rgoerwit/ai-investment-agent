@@ -168,6 +168,44 @@ Free Cash Flow: -$850M
         metrics = RedFlagDetector.extract_metrics(report)
         assert metrics['fcf'] == -850_000_000
 
+    def test_extract_multi_currency_fcf_and_net_income(self):
+        """Test extraction of FCF and Net Income in non-USD currencies (¥, €, £)."""
+        # Japanese Yen (common for Japan stocks like 8591.T ORIX)
+        report_jpy = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 58%
+### --- END DATA_BLOCK ---
+Free Cash Flow: -¥978.6B
+Net Income: ¥439.7B
+"""
+        metrics_jpy = RedFlagDetector.extract_metrics(report_jpy)
+        assert metrics_jpy['fcf'] == -978_600_000_000
+        assert metrics_jpy['net_income'] == 439_700_000_000
+
+        # Euro (common for European stocks)
+        report_eur = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 65%
+### --- END DATA_BLOCK ---
+Free Cash Flow: €2.5B
+Net Income: €1.2B
+"""
+        metrics_eur = RedFlagDetector.extract_metrics(report_eur)
+        assert metrics_eur['fcf'] == 2_500_000_000
+        assert metrics_eur['net_income'] == 1_200_000_000
+
+        # British Pound (common for UK stocks)
+        report_gbp = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 70%
+### --- END DATA_BLOCK ---
+FCF: £500M
+Net Income: -£100M
+"""
+        metrics_gbp = RedFlagDetector.extract_metrics(report_gbp)
+        assert metrics_gbp['fcf'] == 500_000_000
+        assert metrics_gbp['net_income'] == -100_000_000
+
 
 class TestRedFlagValidatorNode:
     """Test the financial health validator node logic."""

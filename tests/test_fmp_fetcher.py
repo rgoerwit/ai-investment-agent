@@ -28,19 +28,23 @@ class TestFMPFetcherInit:
         assert fetcher._session is None
         assert fetcher._key_validated is False
     
-    @patch.dict(os.environ, {'FMP_API_KEY': 'env-key'})
     def test_init_from_environment(self):
-        """Test initialization from environment variable."""
-        fetcher = FMPFetcher()
-        
-        assert fetcher.api_key == "env-key"
-    
-    @patch.dict(os.environ, {}, clear=True)
+        """Test initialization from environment variable via config."""
+        # Pydantic Settings loads from .env at import time, so we mock the config getter
+        with patch('src.data.fmp_fetcher.config') as mock_config:
+            mock_config.get_fmp_api_key.return_value = "env-key"
+            fetcher = FMPFetcher()
+
+            assert fetcher.api_key == "env-key"
+
     def test_init_no_api_key(self):
         """Test initialization without API key."""
-        fetcher = FMPFetcher()
-        
-        assert fetcher.api_key is None
+        # Mock config to return None (simulates no FMP_API_KEY in environment)
+        with patch('src.data.fmp_fetcher.config') as mock_config:
+            mock_config.get_fmp_api_key.return_value = None
+            fetcher = FMPFetcher()
+
+            assert fetcher.api_key is None
     
     def test_is_available_with_key(self):
         """Test that is_available returns True when key is present."""
@@ -48,11 +52,13 @@ class TestFMPFetcherInit:
         
         assert fetcher.is_available() is True
     
-    @patch.dict(os.environ, {}, clear=True)  # Clear FMP_API_KEY from env
     def test_is_available_without_key(self):
         """Test that is_available returns False when key is missing."""
+        # Explicit None bypasses config lookup
         fetcher = FMPFetcher(api_key=None)
-        
+        # Force api_key to None (bypasses config default behavior)
+        fetcher.api_key = None
+
         assert fetcher.is_available() is False
 
 
@@ -109,15 +115,16 @@ class TestFMPGet:
         assert fetcher._key_validated is True
     
     @pytest.mark.asyncio
-    @patch.dict(os.environ, {}, clear=True)
     async def test_get_without_api_key(self):
         """Test that _get returns None when API key is not available."""
-        # Clear environment so fetcher has no API key
+        # Create fetcher with explicit None
         fetcher = FMPFetcher(api_key=None)
-        
+        # Force api_key to None (bypasses config default behavior)
+        fetcher.api_key = None
+
         # Early return when no API key - never hits the network
         result = await fetcher._get('ratios', {'symbol': 'AAPL'})
-        
+
         assert result is None
     
     @pytest.mark.asyncio

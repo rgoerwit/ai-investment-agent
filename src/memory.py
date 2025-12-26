@@ -16,7 +16,7 @@ import asyncio
 import os
 import re
 from datetime import datetime
-from typing import List, Dict, Tuple, Optional, Any
+from typing import Any
 import structlog
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -94,12 +94,8 @@ class FinancialSituationMemory:
         
         # Initialize ChromaDB
         try:
-            # CRITICAL: Disable telemetry to prevent ClientStartEvent errors
-            # Required for ChromaDB v0.5.x (may not be needed in v0.6.x+)
-            # Set multiple environment variables for maximum compatibility
-            os.environ["ANONYMIZED_TELEMETRY"] = "False"
-            os.environ["CHROMA_TELEMETRY_ENABLED"] = "False"
-            
+            # NOTE: Telemetry env vars (ANONYMIZED_TELEMETRY, CHROMA_TELEMETRY_ENABLED)
+            # are now set by config.py's setup_environment validator.
             import chromadb
             from chromadb.config import Settings
             
@@ -148,7 +144,7 @@ class FinancialSituationMemory:
         wait=wait_exponential(multiplier=1, min=2, max=10),
         retry=retry_if_exception_type(Exception)
     )
-    async def _get_embedding(self, text: str) -> List[float]:
+    async def _get_embedding(self, text: str) -> list[float]:
         """
         Get embedding vector for text with retry logic.
         
@@ -184,9 +180,9 @@ class FinancialSituationMemory:
         return embedding
     
     async def add_situations(
-        self, 
-        situations: List[str], 
-        metadata: Optional[List[Dict[str, Any]]] = None
+        self,
+        situations: list[str],
+        metadata: list[dict[str, Any]] | None = None
     ) -> bool:
         """
         Add financial situations/debates to memory.
@@ -255,8 +251,8 @@ class FinancialSituationMemory:
         self,
         query_text: str,
         n_results: int = 5,
-        metadata_filter: Optional[Dict[str, Any]] = None
-    ) -> List[Dict[str, Any]]:
+        metadata_filter: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
         """
         Query for similar past situations.
         
@@ -360,7 +356,7 @@ class FinancialSituationMemory:
         
         return memory_text
     
-    def clear_old_memories(self, days_to_keep: int = 90, ticker: Optional[str] = None) -> Dict[str, int]:
+    def clear_old_memories(self, days_to_keep: int = 90, ticker: str | None = None) -> dict[str, int]:
         """
         Remove memories older than specified days.
         
@@ -467,7 +463,7 @@ class FinancialSituationMemory:
         
         return results
     
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """
         Get statistics about this memory collection.
         
@@ -553,7 +549,7 @@ def sanitize_ticker_for_collection(ticker: str) -> str:
     return sanitized
 
 
-def create_memory_instances(ticker: str) -> Dict[str, FinancialSituationMemory]:
+def create_memory_instances(ticker: str) -> dict[str, FinancialSituationMemory]:
     """
     Create ticker-specific memory instances to prevent cross-contamination.
     
@@ -603,7 +599,7 @@ def create_memory_instances(ticker: str) -> Dict[str, FinancialSituationMemory]:
     return instances
 
 
-def cleanup_all_memories(days: int = 0, ticker: Optional[str] = None) -> Dict[str, int]:
+def cleanup_all_memories(days: int = 0, ticker: str | None = None) -> dict[str, int]:
     """
     Clean up memories from collections.
     
@@ -711,7 +707,7 @@ def cleanup_all_memories(days: int = 0, ticker: Optional[str] = None) -> Dict[st
     return results
 
 
-def get_all_memory_stats() -> Dict[str, Dict[str, Any]]:
+def get_all_memory_stats() -> dict[str, dict[str, Any]]:
     """
     Get statistics for all memory collections.
     

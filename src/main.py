@@ -5,22 +5,15 @@ Updated for Gemini 3 (Nov 2025).
 """
 
 import argparse
-
 import os
-
-# Chroma telemetry is just a pain; need to catch this early
-os.environ["ANONYMIZED_TELEMETRY"] = "False"
-os.environ["CHROMA_TELEMETRY_ENABLED"] = "False"
-
-# Suppress gRPC fork warnings; if gRPC skips fork handlers, so be it
-os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "1" # handle forks gracefully
-os.environ["GRPC_POLL_STRATEGY"] = "poll"
-
 import sys
+
+# Import config FIRST to set telemetry/system env vars before any library imports
+from src.config import config, validate_environment_variables
+
 import asyncio
 import logging
 import structlog
-from typing import Optional
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -28,8 +21,6 @@ from rich import box
 from datetime import datetime
 from pathlib import Path
 import json
-
-from src.config import config, validate_environment_variables
 from src.report_generator import QuietModeReporter
 # IMPORTANT: Don't import get_tracker here - it instantiates the singleton immediately
 # Import it lazily in functions that need it, after quiet mode is set
@@ -436,7 +427,7 @@ def save_results_to_file(result: dict, ticker: str) -> Path:
     return filepath
 
 
-async def run_analysis(ticker: str, quick_mode: bool) -> Optional[dict]:
+async def run_analysis(ticker: str, quick_mode: bool) -> dict | None:
     """Run the multi-agent analysis workflow."""
     try:
         from src.graph import create_trading_graph, TradingContext
@@ -584,8 +575,8 @@ async def main():
             tracker = TokenTracker()
             tracker._quiet_mode = True
 
-            # Set environment variable for rate limit handler to check
-            os.environ["QUIET_MODE"] = "true"
+            # Set config flag for rate limit handler to check
+            config.quiet_mode = True
 
         if args.quick_model:
             config.quick_think_llm = args.quick_model

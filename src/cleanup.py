@@ -16,12 +16,12 @@ Usage:
 """
 
 import structlog
-from typing import List, Callable, Awaitable
+from collections.abc import Awaitable, Callable
 
 logger = structlog.get_logger(__name__)
 
 # Registry of cleanup functions
-_cleanup_functions: List[Callable[[], Awaitable[None]]] = []
+_cleanup_functions: list[Callable[[], Awaitable[None]]] = []
 
 
 def register_cleanup(cleanup_fn: Callable[[], Awaitable[None]]) -> None:

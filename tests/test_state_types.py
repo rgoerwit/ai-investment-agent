@@ -11,7 +11,7 @@ Critical for:
 """
 
 import pytest
-from typing import Dict, Any
+from typing import Any
 from unittest.mock import MagicMock, AsyncMock
 
 
@@ -64,9 +64,9 @@ class TestAgentStateTypeDefinitions:
         complex_fields = [
             'investment_debate_state',  # InvestDebateState
             'risk_debate_state',  # RiskDebateState
-            'tools_called',  # Dict
-            'prompts_used',  # Dict
-            'red_flags',  # List[Dict]
+            'tools_called',  # dict
+            'prompts_used',  # dict
+            'red_flags',  # list[dict]
             'pre_screening_result'  # str but critical
         ]
 

@@ -1,6 +1,6 @@
 import aiohttp
 import structlog
-from typing import Dict, Any, List
+from typing import Any
 
 logger = structlog.get_logger(__name__)
 
@@ -11,7 +11,7 @@ class StockTwitsAPI:
     """
     BASE_URL = "https://api.stocktwits.com/api/2"
     
-    async def get_sentiment(self, ticker: str) -> Dict[str, Any]:
+    async def get_sentiment(self, ticker: str) -> dict[str, Any]:
         """
         Fetch the last 30 messages for a ticker and calculate sentiment.
         
@@ -51,7 +51,7 @@ class StockTwitsAPI:
                 logger.error("stocktwits_fetch_failed", ticker=ticker, error=str(e))
                 return {"error": str(e)}
 
-    def _process_messages(self, messages: List[Dict], ticker: str) -> Dict[str, Any]:
+    def _process_messages(self, messages: list[dict], ticker: str) -> dict[str, Any]:
         """Analyze messages for Bullish/Bearish tags."""
         total = len(messages)
         bullish = 0

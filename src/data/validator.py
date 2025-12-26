@@ -12,7 +12,7 @@ Provides actionable feedback on what's missing and what's suspicious.
 """
 
 import structlog
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Any
 from dataclasses import dataclass, field
 
 logger = structlog.get_logger(__name__)
@@ -23,10 +23,10 @@ class ValidationResult:
     """Detailed validation result."""
     category: str
     passed: bool
-    issues: List[str] = field(default_factory=list)
-    warnings: List[str] = field(default_factory=list)
-    validated_fields: List[str] = field(default_factory=list)
-    missing_fields: List[str] = field(default_factory=list)
+    issues: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    validated_fields: list[str] = field(default_factory=list)
+    missing_fields: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -38,7 +38,7 @@ class OverallValidation:
     financial_health_ok: bool = False
     growth_ok: bool = False
     
-    results: List[ValidationResult] = field(default_factory=list)
+    results: list[ValidationResult] = field(default_factory=list)
     
     @property
     def total_issues(self) -> int:
@@ -71,7 +71,7 @@ class FineGrainedValidator:
     def __init__(self):
         logger.info("fine_grained_validator_initialized")
     
-    def _safe_float(self, value: Any) -> Optional[float]:
+    def _safe_float(self, value: Any) -> float | None:
         """Safely convert value to float, returning None if invalid."""
         try:
             if value is None:
@@ -80,7 +80,7 @@ class FineGrainedValidator:
         except (ValueError, TypeError):
             return None
 
-    def _validate_basics(self, data: Dict, symbol: str) -> ValidationResult:
+    def _validate_basics(self, data: dict, symbol: str) -> ValidationResult:
         """
         Validate basic required fields.
         
@@ -137,7 +137,7 @@ class FineGrainedValidator:
         result.passed = len(result.issues) == 0
         return result
     
-    def _validate_valuation(self, data: Dict, symbol: str) -> ValidationResult:
+    def _validate_valuation(self, data: dict, symbol: str) -> ValidationResult:
         """
         Validate valuation metrics: PE, PB, PEG, Market Cap.
         
@@ -190,7 +190,7 @@ class FineGrainedValidator:
         else:
             result.validated_fields.append('marketCap')
         
-        # Consistency: PE * EPS should ≈ Price
+        # Consistency: PE * EPS should \u2248 Price
         price = self._safe_float(data.get('currentPrice') or data.get('regularMarketPrice'))
         eps = self._safe_float(data.get('trailingEps'))
         
@@ -198,14 +198,14 @@ class FineGrainedValidator:
             implied_price = pe * eps
             if abs(price - implied_price) / price > 0.1:  # 10% tolerance
                 result.warnings.append(
-                    f"PE/EPS inconsistency: P/E×EPS={implied_price:.2f} "
+                    f"PE/EPS inconsistency: P/E\u00d7EPS={implied_price:.2f} "
                     f"but price={price:.2f}"
                 )
         
         result.passed = len(result.issues) == 0
         return result
     
-    def _validate_profitability(self, data: Dict, symbol: str) -> ValidationResult:
+    def _validate_profitability(self, data: dict, symbol: str) -> ValidationResult:
         """
         Validate profitability metrics: Margins, ROE, ROA.
         
@@ -269,7 +269,7 @@ class FineGrainedValidator:
         result.passed = len(result.issues) == 0
         return result
     
-    def _validate_financial_health(self, data: Dict, symbol: str) -> ValidationResult:
+    def _validate_financial_health(self, data: dict, symbol: str) -> ValidationResult:
         """
         Validate financial health: D/E, Current Ratio, Cash Flow.
         
@@ -352,7 +352,7 @@ class FineGrainedValidator:
         result.passed = len(result.issues) == 0
         return result
     
-    def _validate_growth(self, data: Dict, symbol: str) -> ValidationResult:
+    def _validate_growth(self, data: dict, symbol: str) -> ValidationResult:
         """
         Validate growth metrics: Revenue Growth, Earnings Growth.
         
@@ -389,7 +389,7 @@ class FineGrainedValidator:
         result.passed = len(result.issues) == 0
         return result
     
-    def _is_financial_company(self, data: Dict) -> bool:
+    def _is_financial_company(self, data: dict) -> bool:
         """Check if company is in financial sector (banks have different metrics)."""
         industry = str(data.get('industry', '')).lower()
         sector = str(data.get('sector', '')).lower()
@@ -398,7 +398,7 @@ class FineGrainedValidator:
         
         return any(kw in industry or kw in sector for kw in financial_keywords)
     
-    def validate_comprehensive(self, data: Dict, symbol: str) -> OverallValidation:
+    def validate_comprehensive(self, data: dict, symbol: str) -> OverallValidation:
         """
         Comprehensive validation across all categories.
         

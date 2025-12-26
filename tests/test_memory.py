@@ -30,55 +30,67 @@ class TestFinancialSituationMemoryInitialization:
     """Test memory initialization under various conditions."""
     
     def test_init_without_api_key(self):
-        """Memory should gracefully handle missing API key."""
-        with patch.dict(os.environ, {}, clear=True):
+        """Memory should gracefully handle missing API key.
+
+        Note: We mock config.get_google_api_key() to return empty string,
+        which simulates the case where GOOGLE_API_KEY is not set.
+        This is cleaner than patching os.environ and reloading modules.
+        """
+        with patch('src.memory.config') as mock_config:
+            mock_config.get_google_api_key.return_value = ''
+
             memory = FinancialSituationMemory("test_memory")
-            
+
             assert memory.name == "test_memory"
             assert memory.available == False
             assert memory.embeddings is None
             assert memory.situation_collection is None
-    
+
     def test_init_with_embedding_failure(self):
         """Memory should handle embedding initialization failures."""
-        with patch.dict(os.environ, {'GOOGLE_API_KEY': 'test-key'}):
+        with patch('src.memory.config') as mock_config:
+            mock_config.get_google_api_key.return_value = 'test-key'
             with patch('src.memory.GoogleGenerativeAIEmbeddings', side_effect=Exception("API error")):
                 memory = FinancialSituationMemory("test_memory")
-                
+
                 assert memory.available == False
                 assert memory.embeddings is None
-    
+
     def test_init_with_chromadb_failure(self):
         """Memory should handle ChromaDB connection failures."""
-        with patch.dict(os.environ, {'GOOGLE_API_KEY': 'test-key'}):
+        with patch('src.memory.config') as mock_config:
+            mock_config.get_google_api_key.return_value = 'test-key'
             with patch('src.memory.GoogleGenerativeAIEmbeddings') as mock_embeddings_class:
                 mock_embeddings = MagicMock()
                 mock_embeddings.embed_query.return_value = [0.1] * 768
                 mock_embeddings_class.return_value = mock_embeddings
-                
+
                 with patch('chromadb.PersistentClient', side_effect=Exception("Connection failed")):
                     memory = FinancialSituationMemory("test_memory")
-                    
+
                     assert memory.available == False
                     assert memory.situation_collection is None
     
     def test_successful_init(self):
         """Memory should initialize successfully with valid configuration."""
-        with patch.dict(os.environ, {'GOOGLE_API_KEY': 'test-key'}):
+        # Mock config getter directly (os.environ patching no longer works due to SecretStr)
+        with patch('src.memory.config') as mock_config:
+            mock_config.get_google_api_key.return_value = 'test-key'
+
             with patch('src.memory.GoogleGenerativeAIEmbeddings') as mock_embeddings_class:
                 mock_embeddings = MagicMock()
                 mock_embeddings.embed_query.return_value = [0.1] * 768
                 mock_embeddings_class.return_value = mock_embeddings
-                
+
                 with patch('chromadb.PersistentClient') as mock_client_class:
                     mock_client = MagicMock()
                     mock_collection = MagicMock()
                     mock_collection.count.return_value = 0
                     mock_client.get_or_create_collection.return_value = mock_collection
                     mock_client_class.return_value = mock_client
-                    
+
                     memory = FinancialSituationMemory("test_memory")
-                    
+
                     assert memory.name == "test_memory"
                     assert memory.available == True
                     assert memory.embeddings is not None
@@ -211,15 +223,15 @@ class TestGetRelevantMemory:
 class TestMemoryCleanup:
     """
     Test memory cleanup functionality.
-    Note: cleanup_all_memories returns a Dict[str, int], NOT an int.
+    Note: cleanup_all_memories returns a dict[str, int], NOT an int.
     """
     
     def test_cleanup_unavailable(self):
-        """clear_old_memories (instance method) should return Dict when unavailable (it re-initializes client)."""
+        """clear_old_memories (instance method) should return dict when unavailable (it re-initializes client)."""
         memory = FinancialSituationMemory("test_memory")
         memory.available = False
         
-        # Instance method now returns Dict[str, int]
+        # Instance method now returns dict[str, int]
         # Even if available=False, it creates a new client to perform cleanup
         results = memory.clear_old_memories(days_to_keep=30)
         assert isinstance(results, dict)
@@ -279,15 +291,17 @@ class TestMemoryStats:
     
     def test_stats_unavailable(self):
         """get_stats should return unavailable status."""
-        # Ensure API key is missing to force unavailable state
-        with patch.dict(os.environ, {}, clear=True):
+        # Mock config to simulate missing API key
+        with patch('src.memory.config') as mock_config:
+            mock_config.get_google_api_key.return_value = ''
+
             memory = FinancialSituationMemory("test_memory")
-            
+
             # Double check initialization state
             assert memory.available == False
-            
+
             stats = memory.get_stats()
-            
+
             assert stats['available'] == False
             assert stats['name'] == "test_memory"
             assert stats['count'] == 0

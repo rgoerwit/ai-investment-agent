@@ -12,7 +12,7 @@ Tests cover:
 import pytest
 import asyncio
 from unittest.mock import patch, AsyncMock, MagicMock
-from typing import Dict, Any
+from typing import Any
 
 from src.fx_normalization import (
     get_fx_rate_yfinance,

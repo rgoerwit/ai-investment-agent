@@ -168,14 +168,15 @@ class TestAgentStateField:
 class TestFundamentalsSyncRouter:
     """Tests for the fundamentals_sync_router function."""
 
-    def test_router_waits_for_both_analysts(self):
-        """Test router returns __end__ if not both analysts complete."""
+    def test_router_waits_for_all_analysts(self):
+        """Test router returns __end__ if not all three analysts complete."""
         from src.graph import fundamentals_sync_router
 
         # Only Junior done
         state_junior_only = {
             "raw_fundamentals_data": "some data",
-            "foreign_language_report": ""
+            "foreign_language_report": "",
+            "legal_report": ""
         }
         result = fundamentals_sync_router(state_junior_only, {})
         assert result == "__end__"
@@ -183,20 +184,40 @@ class TestFundamentalsSyncRouter:
         # Only Foreign done
         state_foreign_only = {
             "raw_fundamentals_data": "",
-            "foreign_language_report": "some foreign data"
+            "foreign_language_report": "some foreign data",
+            "legal_report": ""
         }
         result = fundamentals_sync_router(state_foreign_only, {})
         assert result == "__end__"
 
-    def test_router_proceeds_when_both_complete(self):
-        """Test router proceeds to Fundamentals Analyst when both complete."""
+        # Only Legal done
+        state_legal_only = {
+            "raw_fundamentals_data": "",
+            "foreign_language_report": "",
+            "legal_report": "some legal data"
+        }
+        result = fundamentals_sync_router(state_legal_only, {})
+        assert result == "__end__"
+
+        # Junior + Foreign done (missing Legal)
+        state_junior_foreign = {
+            "raw_fundamentals_data": "junior data",
+            "foreign_language_report": "foreign data",
+            "legal_report": ""
+        }
+        result = fundamentals_sync_router(state_junior_foreign, {})
+        assert result == "__end__"
+
+    def test_router_proceeds_when_all_three_complete(self):
+        """Test router proceeds to Fundamentals Analyst when all three complete."""
         from src.graph import fundamentals_sync_router
 
-        state_both_done = {
+        state_all_done = {
             "raw_fundamentals_data": "junior data",
-            "foreign_language_report": "foreign data"
+            "foreign_language_report": "foreign data",
+            "legal_report": "legal data"
         }
-        result = fundamentals_sync_router(state_both_done, {})
+        result = fundamentals_sync_router(state_all_done, {})
         assert result == "Fundamentals Analyst"
 
     def test_router_handles_none_values(self):
@@ -205,7 +226,8 @@ class TestFundamentalsSyncRouter:
 
         state_with_none = {
             "raw_fundamentals_data": None,
-            "foreign_language_report": None
+            "foreign_language_report": None,
+            "legal_report": None
         }
         result = fundamentals_sync_router(state_with_none, {})
         assert result == "__end__"
@@ -221,7 +243,7 @@ class TestGraphStructure:
         destinations = fan_out_to_analysts({}, {})
 
         assert "Foreign Language Analyst" in destinations
-        assert len(destinations) == 5  # Market, Sentiment, News, Junior, Foreign
+        assert len(destinations) == 6  # Market, Sentiment, News, Junior, Foreign, Legal
 
     def test_route_tools_includes_foreign_analyst(self):
         """Test that route_tools handles foreign_language_analyst sender."""

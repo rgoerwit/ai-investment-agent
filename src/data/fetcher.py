@@ -18,13 +18,14 @@ import asyncio
 import structlog
 import os
 import re
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Any
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 from collections import namedtuple
 
 from src.data.interfaces import FinancialFetcher
 from src.ticker_utils import generate_strict_search_query
+from src.config import config
 
 logger = structlog.get_logger(__name__)
 
@@ -97,11 +98,11 @@ MergeResult = namedtuple('MergeResult', ['data', 'gaps_filled'])
 class DataQuality:
     """Track data quality and sources."""
     basics_ok: bool = False
-    basics_missing: List[str] = None
+    basics_missing: list[str] = None
     coverage_pct: float = 0.0
-    sources_used: List[str] = None
+    sources_used: list[str] = None
     gaps_filled: int = 0
-    suspicious_fields: List[str] = None
+    suspicious_fields: list[str] = None
     
     def __post_init__(self):
         if self.basics_missing is None: self.basics_missing = []
@@ -186,7 +187,7 @@ class FinancialPatternExtractor:
         except ValueError:
             return 0.0
 
-    def extract_from_text(self, content: str, skip_fields: set = None) -> Dict[str, Any]:
+    def extract_from_text(self, content: str, skip_fields: set = None) -> dict[str, Any]:
         skip_fields = skip_fields or set()
         extracted = {}
         
@@ -255,7 +256,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         self.av_fetcher = get_av_fetcher() if ALPHA_VANTAGE_AVAILABLE else None
         self.pattern_extractor = FinancialPatternExtractor()
 
-        api_key = os.environ.get("TAVILY_API_KEY")
+        api_key = config.get_tavily_api_key()
         self.tavily_client = TavilyClient(api_key=api_key) if TAVILY_LIB_AVAILABLE and api_key else None
 
         self.stats = {
@@ -297,7 +298,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         
         return 1.0
 
-    def _extract_from_financial_statements(self, ticker: yf.Ticker, symbol: str) -> Dict[str, Any]:
+    def _extract_from_financial_statements(self, ticker: yf.Ticker, symbol: str) -> dict[str, Any]:
         """Extract metrics from yfinance financial statements."""
         extracted = {}
         
@@ -414,7 +415,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         
         return extracted
 
-    async def _fetch_yfinance_enhanced(self, symbol: str) -> Optional[Dict]:
+    async def _fetch_yfinance_enhanced(self, symbol: str) -> dict | None:
         """Fetch yfinance data including statement calculation."""
         try:
             ticker = yf.Ticker(symbol)
@@ -469,7 +470,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
             logger.error("yfinance_enhanced_failed", symbol=symbol, error=str(e))
             return None
 
-    def _fetch_yahooquery_fallback(self, symbol: str) -> Optional[Dict]:
+    def _fetch_yahooquery_fallback(self, symbol: str) -> dict | None:
         """Fallback: yahooquery."""
         if not YAHOOQUERY_AVAILABLE:
             return None
@@ -496,7 +497,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         except Exception:
             return None
 
-    async def _fetch_fmp_fallback(self, symbol: str) -> Optional[Dict]:
+    async def _fetch_fmp_fallback(self, symbol: str) -> dict | None:
         """Fallback: FMP."""
         if not FMP_AVAILABLE or not self.fmp_fetcher or not self.fmp_fetcher.is_available():
             return None
@@ -514,7 +515,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         
         return None
 
-    async def _fetch_eodhd_fallback(self, symbol: str) -> Optional[Dict]:
+    async def _fetch_eodhd_fallback(self, symbol: str) -> dict | None:
         """
         Fallback: EOD Historical Data.
         High quality source for fundamentals.
@@ -542,7 +543,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
             logger.warning("eodhd_fetch_error", symbol=symbol, error=str(e))
             return None
 
-    async def _fetch_av_fallback(self, symbol: str) -> Optional[Dict]:
+    async def _fetch_av_fallback(self, symbol: str) -> dict | None:
         """
         Fallback: Alpha Vantage.
         High-quality fundamentals with circuit breaker for rate limit handling.
@@ -570,7 +571,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
             logger.warning("alpha_vantage_fetch_error", symbol=symbol, error=str(e))
             return None
 
-    async def _fetch_all_sources_parallel(self, symbol: str) -> Dict[str, Optional[Dict]]:
+    async def _fetch_all_sources_parallel(self, symbol: str) -> dict[str, dict | None]:
         """PHASE 1: Launch all data sources in parallel."""
         logger.info("launching_parallel_sources", symbol=symbol)
 
@@ -601,7 +602,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         
         return results
 
-    def _smart_merge_with_quality(self, source_results: Dict[str, Optional[Dict]], symbol: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    def _smart_merge_with_quality(self, source_results: dict[str, dict | None], symbol: str) -> tuple[dict[str, Any], dict[str, Any]]:
         """
         PHASE 3: Intelligent merge with quality scoring.
         Updated to include EODHD and Alpha Vantage in the priority logic and field-specific override checks.
@@ -678,13 +679,13 @@ class SmartMarketDataFetcher(FinancialFetcher):
         
         return merged, metadata
 
-    def _calculate_coverage(self, data: Dict) -> float:
+    def _calculate_coverage(self, data: dict) -> float:
         """Calculate percentage of IMPORTANT_FIELDS present."""
         if not data: return 0.0
         present = sum(1 for field in self.IMPORTANT_FIELDS if data.get(field) is not None)
         return present / len(self.IMPORTANT_FIELDS) if self.IMPORTANT_FIELDS else 0.0
 
-    def _identify_critical_gaps(self, data: Dict) -> List[str]:
+    def _identify_critical_gaps(self, data: dict) -> list[str]:
         """Identify which critical fields are missing."""
         critical = [
             'trailingPE', 'forwardPE', 'priceToBook', 'pegRatio',
@@ -695,7 +696,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         ]
         return [f for f in critical if f not in data or data[f] is None]
 
-    async def _fetch_tavily_gaps(self, symbol: str, missing_fields: List[str]) -> Dict[str, Any]:
+    async def _fetch_tavily_gaps(self, symbol: str, missing_fields: list[str]) -> dict[str, Any]:
         """PHASE 5: Tavily gap-filling."""
         DANGEROUS_FIELDS = ['trailingPE', 'forwardPE', 'pegRatio', 'currentPrice', 'marketCap']
         safe_missing_fields = [f for f in missing_fields if f not in DANGEROUS_FIELDS]
@@ -750,7 +751,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         all_text = "\n\n".join(search_results.values())
         return self.pattern_extractor.extract_from_text(all_text, skip_fields=set())
 
-    def _merge_gap_fill_data(self, merged: Dict[str, Any], gap_fill_data: Dict[str, Any], merge_metadata: Dict[str, Any]) -> Dict[str, Any]:
+    def _merge_gap_fill_data(self, merged: dict[str, Any], gap_fill_data: dict[str, Any], merge_metadata: dict[str, Any]) -> dict[str, Any]:
         """Merge Tavily data."""
         tavily_quality = SOURCE_QUALITY['tavily_extraction']
         added = 0
@@ -772,7 +773,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         merge_metadata['gaps_filled'] += added
         return merged
 
-    def _calculate_derived_metrics(self, data: Dict, symbol: str) -> Dict:
+    def _calculate_derived_metrics(self, data: dict, symbol: str) -> dict:
         """Calculate metrics."""
         calculated = {}
         try:
@@ -800,7 +801,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         except: pass
         return calculated
 
-    def _merge_data(self, primary: Dict, *fallbacks: Dict) -> MergeResult:
+    def _merge_data(self, primary: dict, *fallbacks: dict) -> MergeResult:
         """Merge simple dictionaries."""
         merged = primary.copy() if primary else {}
         gaps = 0
@@ -813,7 +814,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
                     if not k.startswith('_'): gaps += 1
         return MergeResult(merged, gaps)
 
-    def _fix_currency_mismatch(self, info: Dict, symbol: str) -> Dict:
+    def _fix_currency_mismatch(self, info: dict, symbol: str) -> dict:
         """Fix currency mismatch."""
         trading_curr = info.get('currency', 'USD').upper()
         financial_curr = info.get('financialCurrency', trading_curr).upper()
@@ -829,13 +830,13 @@ class SmartMarketDataFetcher(FinancialFetcher):
                 info['priceToBook'] = price / info['bookValue']
         return info
 
-    def _fix_debt_equity_scaling(self, info: Dict, symbol: str) -> Dict:
+    def _fix_debt_equity_scaling(self, info: dict, symbol: str) -> dict:
         de = info.get('debtToEquity')
         if de is not None and de > DEBT_EQUITY_PERCENTAGE_THRESHOLD:
             info['debtToEquity'] = de / 100.0
         return info
 
-    def _normalize_data_integrity(self, info: Dict, symbol: str) -> Dict:
+    def _normalize_data_integrity(self, info: dict, symbol: str) -> dict:
         info = self._fix_currency_mismatch(info, symbol)
         info = self._fix_debt_equity_scaling(info, symbol)
         
@@ -848,7 +849,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
                 info['_trailingPE_source'] = 'normalized_forward_proxy'
         return info
 
-    def _validate_basics(self, data: Dict, symbol: str) -> DataQuality:
+    def _validate_basics(self, data: dict, symbol: str) -> DataQuality:
         quality = DataQuality()
         quality.sources_used = [k for k, v in self.stats['sources'].items() if v > 0]
         
@@ -868,7 +869,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         
         return quality
 
-    async def get_financial_metrics(self, ticker: str, timeout: int = 30) -> Dict[str, Any]:
+    async def get_financial_metrics(self, ticker: str, timeout: int = 30) -> dict[str, Any]:
         """
         UNIFIED APPROACH: Main entry point with parallel sources and mandatory gap-filling.
         Includes EODHD fallback.
@@ -957,7 +958,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
     async def get_historical_prices(self, ticker: str, period: str = "1y") -> pd.DataFrame:
         return await self.get_price_history(ticker, period)
     
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """Get comprehensive statistics on fetcher performance."""
         return self.stats.copy()
     
@@ -972,5 +973,5 @@ fetcher = SmartMarketDataFetcher()
 
 
 # Backward compatibility
-async def fetch_ticker_data(ticker: str) -> Dict[str, Any]:
+async def fetch_ticker_data(ticker: str) -> dict[str, Any]:
     return await fetcher.get_financial_metrics(ticker)

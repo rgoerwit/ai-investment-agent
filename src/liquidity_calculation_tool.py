@@ -1,4 +1,4 @@
-from typing import Annotated, Optional
+from typing import Annotated
 import pandas as pd
 import structlog
 from langchain_core.tools import tool
@@ -81,7 +81,7 @@ EXCHANGE_CURRENCY_MAP = {
 }
 
 @tool
-async def calculate_liquidity_metrics(ticker: Annotated[Optional[str], "Stock ticker symbol"] = None) -> str:
+async def calculate_liquidity_metrics(ticker: Annotated[str | None, "Stock ticker symbol"] = None) -> str:
     """
     Calculate liquidity metrics using the robust MarketDataFetcher.
     Checks 3-month average volume and turnover.

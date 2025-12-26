@@ -12,7 +12,7 @@ were being processed by the wrong tool nodes, causing data quality regression.
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from typing import Dict, Any, List
+from typing import Any
 
 from langchain_core.messages import AIMessage, ToolMessage, HumanMessage
 from langchain_core.tools import tool
@@ -58,7 +58,7 @@ FUNDAMENTALS_TOOLS = [get_financial_metrics]
 
 # --- Helper: Simplified tool node for testing ---
 
-def create_test_tool_node(tools: List, agent_key: str):
+def create_test_tool_node(tools: list, agent_key: str):
     """
     Create a test-friendly version of create_agent_tool_node.
     This version executes tools directly without requiring LangGraph runtime.
@@ -66,7 +66,7 @@ def create_test_tool_node(tools: List, agent_key: str):
     tool_names = {tool.name for tool in tools}
     tools_by_name = {tool.name: tool for tool in tools}
 
-    async def agent_tool_node(state: Dict, config: Dict = None) -> Dict:
+    async def agent_tool_node(state: dict, config: dict = None) -> dict:
         """Execute tools for a specific agent by filtering messages."""
         messages = state.get("messages", [])
 
