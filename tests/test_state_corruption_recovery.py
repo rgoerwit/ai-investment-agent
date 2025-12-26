@@ -691,7 +691,7 @@ class TestEndToEndInformationFlow:
             # From red-flag pre-screening
             "red_flags": {
                 "Pre-Screening Result: PASS": "Gate check",
-                "No extreme leverage detected": "Safety check"
+                "Red Flags Detected: None": "Safety check"
             }
         }
 
@@ -793,8 +793,7 @@ class TestEndToEndInformationFlow:
 
             # Red-flag pre-screening results
             "pre_screening_result": "PASS",
-            "red_flags_detected": [],
-            "fundamentals_quality_note": "Pre-Screening Result: PASS - No extreme leverage detected"
+            "red_flags": []
         }
 
         # Mock LLM and track what context is passed to portfolio manager
