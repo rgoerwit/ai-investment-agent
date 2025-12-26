@@ -809,23 +809,28 @@ def create_portfolio_manager_node(llm, memory: Any | None) -> Callable:
 
         # Red-flag pre-screening results
         pre_screening_result = state.get('pre_screening_result', 'N/A')
-        red_flags_detected = state.get('red_flags_detected', [])
-        quality_note = state.get('fundamentals_quality_note', '')
-
-        logger.info("pm_inputs", has_market=bool(market), has_sentiment=bool(sentiment), has_news=bool(news), has_fundamentals=bool(fundamentals), has_consultant=bool(consultant), has_datablock="DATA_BLOCK" in fundamentals if fundamentals else False, fund_len=len(fundamentals) if fundamentals else 0)
+        red_flags = state.get('red_flags', [])
+        
+        logger.info("pm_inputs", 
+                    has_market=bool(market), 
+                    has_sentiment=bool(sentiment), 
+                    has_news=bool(news), 
+                    has_fundamentals=bool(fundamentals), 
+                    has_consultant=bool(consultant), 
+                    has_datablock="DATA_BLOCK" in fundamentals if fundamentals else False, 
+                    fund_len=len(fundamentals) if fundamentals else 0,
+                    red_flags_count=len(red_flags))
 
         # Include consultant review in context (if available)
         consultant_section = f"""\n\nEXTERNAL CONSULTANT REVIEW (Cross-Validation):\n{consultant if consultant else 'N/A (consultant disabled or unavailable)'}"""
 
         # Include red-flag pre-screening results (critical safety gate)
         red_flag_section = f"""\n\nRED-FLAG PRE-SCREENING:\nPre-Screening Result: {pre_screening_result}"""
-        if red_flags_detected:
-            red_flag_list = '\n'.join([f"  - {flag}" for flag in red_flags_detected])
-            red_flag_section += f"\nRed Flags Detected:\n{red_flag_list}"
+        if red_flags:
+            red_flag_list = '\n'.join([f"  - {flag.get('type', 'Unknown')}: {flag.get('detail', 'No detail')}" for flag in red_flags])
+            red_flag_section += f"\nRed Flags/Warnings Detected:\n{red_flag_list}"
         else:
             red_flag_section += "\nRed Flags Detected: None"
-        if quality_note:
-            red_flag_section += f"\nNote: {quality_note}"
 
         all_context = f"""MARKET ANALYST REPORT:\n{market if market else 'N/A'}\n\nSENTIMENT ANALYST REPORT:\n{sentiment if sentiment else 'N/A'}\n\nNEWS ANALYST REPORT:\n{news if news else 'N/A'}\n\nFUNDAMENTALS ANALYST REPORT:\n{fundamentals if fundamentals else 'N/A'}{red_flag_section}\n\nRESEARCH MANAGER RECOMMENDATION:\n{inv_plan if inv_plan else 'N/A'}{consultant_section}\n\nTRADER PROPOSAL:\n{trader if trader else 'N/A'}\n\nRISK TEAM DEBATE:\n{risk if risk else 'N/A'}"""
         prompt = f"""{agent_prompt.system_message}\n\n{all_context}\n\nMake Final Decision."""
