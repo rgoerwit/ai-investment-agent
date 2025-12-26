@@ -61,6 +61,49 @@ graph TB
     FundSync --> SeniorFund["Senior Fundamentals<br/>(Scoring & Analysis)"]
     SeniorFund --> Validator["Financial Validator<br/>(Red-Flag Detection)"]
     Validator --> SyncCheck
+
+    %% After all branches complete
+    SyncCheck -->|REJECT| PortfolioManager["Portfolio Manager<br/>(Final Decision)"]
+    SyncCheck -->|PASS| BullResearcher["Bull Researcher<br/>(Upside Case)"]
+
+    BullResearcher --> Debate{Multi-Round<br/>Debate}
+    BearResearcher["Bear Researcher<br/>(Downside Risk)"] --> Debate
+
+    Debate -->|Round 1-2| BullResearcher
+    Debate -->|Round 1-2| BearResearcher
+    Debate -->|Converged| ResearchManager["Research Manager<br/>(Synthesize All Data)"]
+
+    ResearchManager --> Consultant["External Consultant<br/>(Cross-Validation)<br/>Optional"]
+
+    Consultant -->|OpenAI Review| Trader["Trader<br/>(Trade Plan)"]
+    ResearchManager -.->|If Disabled| Trader
+
+    Trader --> RiskTeam["Risk Assessment Team<br/>(Risky → Safe → Neutral)"]
+
+    RiskTeam --> PortfolioManager
+
+    PortfolioManager --> Decision([BUY / SELL / HOLD<br/>+ Position Size])
+
+    style Dispatcher fill:#ffeaa7
+    style MarketAnalyst fill:#e1f5ff
+    style NewsAnalyst fill:#e1f5ff
+    style SentimentAnalyst fill:#e1f5ff
+    style JuniorFund fill:#e1f5ff
+    style ForeignLang fill:#e1ffe1
+    style LegalCounsel fill:#e1ffe1
+    style FundSync fill:#e0e0e0
+    style SeniorFund fill:#e1f5ff
+    style Validator fill:#ffcccc
+    style SyncCheck fill:#e0e0e0
+    style ResearchManager fill:#fff4e1
+    style BullResearcher fill:#d4edda
+    style BearResearcher fill:#f8d7da
+    style Consultant fill:#e8daff
+    style Trader fill:#ffe4e1
+    style RiskTeam fill:#fff3cd
+    style PortfolioManager fill:#d1ecf1
+    style Debate fill:#ffeaa7
+    style Decision fill:#55efc4
 ```
 
 ### How Agents Collaborate
