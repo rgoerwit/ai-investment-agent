@@ -4,7 +4,7 @@ Provides comprehensive logging of LLM token consumption across all agents.
 """
 
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Any
 from dataclasses import dataclass, field
 from datetime import datetime
 import structlog
@@ -112,7 +112,7 @@ class AgentTokenStats:
     total_completion_tokens: int = 0
     total_tokens: int = 0
     total_cost_usd: float = 0.0
-    calls: List[TokenUsage] = field(default_factory=list)
+    calls: list[TokenUsage] = field(default_factory=list)
 
     def add_usage(self, usage: TokenUsage):
         """Add a token usage record to this agent's stats."""
@@ -130,7 +130,7 @@ class TokenTracker:
     Thread-safe singleton for tracking LLM token consumption.
     """
 
-    _instance: Optional['TokenTracker'] = None
+    _instance: 'TokenTracker | None' = None
     _quiet_mode: bool = False
 
     def __new__(cls):
@@ -144,8 +144,8 @@ class TokenTracker:
             return
 
         self._initialized = True
-        self.agent_stats: Dict[str, AgentTokenStats] = {}
-        self.all_usages: List[TokenUsage] = []
+        self.agent_stats: dict[str, AgentTokenStats] = {}
+        self.all_usages: list[TokenUsage] = []
         self.session_start = datetime.now().isoformat()
 
         # Only log if quiet mode is not enabled (check both class and instance level)
@@ -192,11 +192,11 @@ class TokenTracker:
                 estimated_cost_usd=f"${usage.estimated_cost_usd:.6f}"
             )
 
-    def get_agent_stats(self, agent_name: str) -> Optional[AgentTokenStats]:
+    def get_agent_stats(self, agent_name: str) -> AgentTokenStats | None:
         """Get statistics for a specific agent."""
         return self.agent_stats.get(agent_name)
 
-    def get_total_stats(self) -> Dict[str, Any]:
+    def get_total_stats(self) -> dict[str, Any]:
         """Get aggregate statistics across all agents."""
         total_prompt = sum(stats.total_prompt_tokens for stats in self.agent_stats.values())
         total_completion = sum(stats.total_completion_tokens for stats in self.agent_stats.values())
@@ -279,7 +279,7 @@ class TokenTrackingCallback(BaseCallbackHandler):
     Attach this to LLM instances to automatically log token consumption.
     """
 
-    def __init__(self, agent_name: str, tracker: Optional[TokenTracker] = None):
+    def __init__(self, agent_name: str, tracker: TokenTracker | None = None):
         """
         Initialize callback with agent name.
 
@@ -338,7 +338,7 @@ class TokenTrackingCallback(BaseCallbackHandler):
 
 
 # Global singleton instance (lazy initialization to respect quiet mode)
-_global_tracker: Optional[TokenTracker] = None
+_global_tracker: TokenTracker | None = None
 
 
 def get_tracker() -> TokenTracker:

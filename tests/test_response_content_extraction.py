@@ -9,7 +9,7 @@ for response.content. These tests verify:
 """
 
 import pytest
-from typing import Any, Dict, List
+from typing import Any
 
 from src.agents import extract_string_content
 from src.validators.red_flag_detector import RedFlagDetector, Sector

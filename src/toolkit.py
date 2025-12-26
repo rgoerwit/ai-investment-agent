@@ -8,7 +8,7 @@ import os
 import asyncio
 import math
 import html
-from typing import Any, Annotated, List, Dict, Optional
+from typing import Any, Annotated
 import pandas as pd
 import structlog
 import yfinance as yf
@@ -55,7 +55,7 @@ else:
     logger.warning("TAVILY_API_KEY not set. Tavily tools disabled.")
 
 
-def _truncate_tavily_result(result: Any, max_chars: Optional[int] = None) -> str:
+def _truncate_tavily_result(result: Any, max_chars: int | None = None) -> str:
     """
     Truncate Tavily search result to prevent token bloat.
 
@@ -108,7 +108,7 @@ async def extract_company_name_async(ticker_obj) -> str:
     except Exception:
         return ticker_str
 
-def extract_from_dataframe(df: pd.DataFrame, field_name: str, row_index: int = 0) -> Optional[float]:
+def extract_from_dataframe(df: pd.DataFrame, field_name: str, row_index: int = 0) -> float | None:
     if df is None or df.empty: return None
     try:
         if field_name in df.index:
@@ -119,7 +119,7 @@ def extract_from_dataframe(df: pd.DataFrame, field_name: str, row_index: int = 0
 
 # --- DATA UTILS ---
 
-def _safe_float(value: Any) -> Optional[float]:
+def _safe_float(value: Any) -> float | None:
     """Safely convert value to float, handling None, strings, NaN, and Inf."""
     try:
         if value is None: 
@@ -454,6 +454,167 @@ Note: Verify dates and currencies in the source data."""
         return f"Error searching foreign sources: {e}"
 
 
+# --- Legal/Tax Disclosure Tool ---
+
+# Static withholding tax rates by country (treaty rates for US investors)
+# Last updated: 2025-01-01 | Source: IRS Publication 515, bilateral tax treaties
+# Note: These are standard treaty rates; actual rates may vary based on investor status
+WITHHOLDING_TAX_RATES = {
+    'japan': '15%',           # US-Japan Treaty Art. 10 (reduced from 20%)
+    'hong kong': '0%',        # No withholding tax on dividends
+    'singapore': '0%',        # US-Singapore Treaty
+    'united kingdom': '0%',   # US-UK Treaty (0% for qualified dividends)
+    'uk': '0%',               # Alias
+    'germany': '15%',         # US-Germany Treaty (reduced from 26.375%)
+    'france': '15%',          # US-France Treaty (reduced from 30%)
+    'australia': '15%',       # US-Australia Treaty
+    'canada': '15%',          # US-Canada Treaty
+    'taiwan': '21%',          # No treaty, statutory rate
+    'south korea': '15%',     # US-Korea Treaty
+    'korea': '15%',           # Alias
+    'china': '10%',           # US-China Treaty
+    'india': '25%',           # US-India Treaty
+    'brazil': '15%',          # US-Brazil Treaty (interest; no dividend treaty)
+    'switzerland': '15%',     # US-Switzerland Treaty
+    'netherlands': '15%',     # US-Netherlands Treaty
+    'ireland': '15%',         # US-Ireland Treaty
+    'sweden': '15%',          # US-Sweden Treaty
+    'norway': '15%',          # US-Norway Treaty
+    'denmark': '15%',         # US-Denmark Treaty
+    'finland': '15%',         # US-Finland Treaty
+    'israel': '25%',          # US-Israel Treaty
+    'mexico': '10%',          # US-Mexico Treaty
+    'cayman islands': '0%',   # No local tax
+    'british virgin islands': '0%',  # No local tax
+    'bermuda': '0%',          # No local tax
+}
+
+
+@tool
+async def search_legal_tax_disclosures(
+    ticker: Annotated[str, "Stock ticker symbol (e.g., 8591.T, 0005.HK)"],
+    company_name: Annotated[str, "Full company name"],
+    sector: Annotated[str, "Company sector from financial data"],
+    country: Annotated[str, "Country of domicile"]
+) -> str:
+    """
+    Search for US investor legal/tax disclosures: PFIC status and VIE structures.
+
+    Runs ONE combined search query to minimize API calls and rate limit risk.
+    Only performs substantive search for high-risk profiles:
+    - PFIC: Financial Services, Insurance, Banks, Leasing, REITs, Asset Management
+    - VIE: China-connected tickers (.HK, .SS, .SZ) or Cayman/BVI domicile
+
+    Returns JSON with search results and withholding tax rate.
+    """
+    import json
+
+    if not tavily_tool:
+        return json.dumps({
+            "error": "Legal/tax search unavailable (Tavily not configured)",
+            "searches_performed": []
+        })
+
+    # Determine risk profile
+    PFIC_RISK_SECTORS = {
+        'Financial Services', 'Insurance', 'Banks', 'Capital Markets',
+        'Diversified Financial Services', 'Real Estate', 'Thrifts & Mortgage Finance',
+        'Asset Management', 'Investment Banking & Brokerage'
+    }
+    PFIC_RISK_KEYWORDS = ['Leasing', 'REIT', 'Investment Trust', 'Asset Management',
+                          'Holding', 'Private Equity', 'Venture Capital']
+
+    CHINA_SUFFIXES = ('.HK', '.SS', '.SZ')
+    CHINA_DOMICILES = ['china', 'hong kong', 'cayman islands', 'british virgin islands', 'bermuda']
+
+    is_pfic_risk = (
+        sector in PFIC_RISK_SECTORS or
+        any(kw.lower() in sector.lower() for kw in PFIC_RISK_KEYWORDS)
+    )
+
+    is_china_connected = (
+        any(ticker.upper().endswith(suffix) for suffix in CHINA_SUFFIXES) or
+        country.lower() in CHINA_DOMICILES
+    )
+
+    # Get withholding rate from lookup table
+    country_lower = country.lower().strip()
+    withholding_rate = WITHHOLDING_TAX_RATES.get(country_lower, 'UNKNOWN')
+
+    # If no risk factors, return early with minimal data
+    if not is_pfic_risk and not is_china_connected:
+        logger.info(
+            "legal_search_skipped",
+            ticker=ticker,
+            sector=sector,
+            country=country,
+            reason="Low-risk profile"
+        )
+        return json.dumps({
+            "searches_performed": [],
+            "pfic_relevant": False,
+            "vie_relevant": False,
+            "withholding_rate": withholding_rate,
+            "country": country,
+            "sector": sector,
+            "note": "Low-risk profile - no legal/tax search required"
+        })
+
+    # Build ONE combined search query (rate limit efficient)
+    search_terms = []
+    if is_pfic_risk:
+        search_terms.append('PFIC "passive foreign investment company" 20-F "US investors" tax')
+    if is_china_connected:
+        search_terms.append('VIE "variable interest entity" "contractual arrangements" structure')
+
+    query = f'"{company_name}" ({ticker}) {" ".join(search_terms)}'
+
+    logger.info(
+        "legal_tax_search",
+        ticker=ticker,
+        company=company_name,
+        pfic_risk=is_pfic_risk,
+        vie_risk=is_china_connected,
+        query_length=len(query)
+    )
+
+    try:
+        results = await tavily_tool.ainvoke({"query": query})
+        results_str = _truncate_tavily_result(results, max_chars=2500)
+
+        searches = []
+        if is_pfic_risk:
+            searches.append("PFIC")
+        if is_china_connected:
+            searches.append("VIE")
+
+        return json.dumps({
+            "searches_performed": searches,
+            "pfic_relevant": is_pfic_risk,
+            "vie_relevant": is_china_connected,
+            "withholding_rate": withholding_rate,
+            "country": country,
+            "sector": sector,
+            "results": results_str
+        })
+
+    except Exception as e:
+        logger.error(
+            "legal_tax_search_error",
+            ticker=ticker,
+            error=str(e)
+        )
+        return json.dumps({
+            "error": str(e),
+            "searches_performed": [],
+            "pfic_relevant": is_pfic_risk,
+            "vie_relevant": is_china_connected,
+            "withholding_rate": withholding_rate,
+            "country": country,
+            "sector": sector
+        })
+
+
 class Toolkit:
     def __init__(self):
         self.market_data_fetcher = market_data_fetcher
@@ -492,6 +653,10 @@ class Toolkit:
         """Tools for Foreign Language Analyst (supplemental data from native sources)."""
         return [search_foreign_sources]
 
+    def get_legal_tools(self):
+        """Tools for Legal Counsel (PFIC/VIE detection for US investors)."""
+        return [search_legal_tax_disclosures]
+
     def get_all_tools(self): return [
         get_yfinance_data,
         get_technical_indicators,
@@ -502,7 +667,8 @@ class Toolkit:
         calculate_liquidity_metrics,
         get_macroeconomic_news,
         get_fundamental_analysis,
-        search_foreign_sources
+        search_foreign_sources,
+        search_legal_tax_disclosures
     ]
 
 toolkit = Toolkit()

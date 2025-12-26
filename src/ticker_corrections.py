@@ -12,7 +12,6 @@ Common issues:
 """
 
 import structlog
-from typing import Optional, Tuple, Dict
 
 logger = structlog.get_logger(__name__)
 
@@ -104,7 +103,7 @@ class TickerCorrector:
     """Handles ticker symbol corrections and validations."""
     
     @classmethod
-    def apply_correction(cls, ticker: str) -> Tuple[str, bool, Optional[str]]:
+    def apply_correction(cls, ticker: str) -> tuple[str, bool, str | None]:
         """
         Apply known corrections to a ticker symbol.
         
@@ -144,7 +143,7 @@ class TickerCorrector:
         return ticker, False, None
     
     @classmethod
-    def is_known_valid(cls, ticker: str) -> Tuple[bool, Optional[Dict[str, str]]]:
+    def is_known_valid(cls, ticker: str) -> tuple[bool, dict[str, str] | None]:
         """
         Check if ticker is in the known valid list.
         
@@ -162,7 +161,7 @@ class TickerCorrector:
         return False, None
     
     @classmethod
-    def suggest_correction(cls, failed_ticker: str) -> Optional[str]:
+    def suggest_correction(cls, failed_ticker: str) -> str | None:
         """
         Suggest a correction for a failed ticker lookup.
         
@@ -237,7 +236,7 @@ def is_valid_ticker(ticker: str) -> bool:
     return valid
 
 
-def get_ticker_metadata(ticker: str) -> Optional[Dict[str, str]]:
+def get_ticker_metadata(ticker: str) -> dict[str, str] | None:
     """Get metadata for a known ticker."""
     _, metadata = TickerCorrector.is_known_valid(ticker)
     return metadata

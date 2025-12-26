@@ -6,7 +6,7 @@ Includes ALL agent definitions to prevent NoneType errors.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Any
+from typing import Any
 from pathlib import Path
 import json
 import os
@@ -28,7 +28,7 @@ class AgentPrompt:
     system_message: str
     category: str = "general"
     requires_tools: bool = False
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     
     def __post_init__(self):
         if self.metadata is None:
@@ -38,10 +38,10 @@ class AgentPrompt:
 class PromptRegistry:
     """Central registry for all agent prompts with version tracking."""
 
-    def __init__(self, prompts_dir: Optional[str] = None):
+    def __init__(self, prompts_dir: str | None = None):
         # Use explicit path if provided, otherwise fall back to config
         self.prompts_dir = Path(prompts_dir) if prompts_dir else config.prompts_dir
-        self.prompts: Dict[str, AgentPrompt] = {}
+        self.prompts: dict[str, AgentPrompt] = {}
         self._load_default_prompts()
         self._load_custom_prompts()
     
@@ -2188,7 +2188,7 @@ You are NOT permanent staff. You have:
             except Exception as e:
                 logger.error("Failed to load custom prompt", file=json_file.name, error=str(e))
     
-    def get(self, agent_key: str) -> Optional[AgentPrompt]:
+    def get(self, agent_key: str) -> AgentPrompt | None:
         """Get prompt by agent key, checking env var override first."""
         env_var = f"PROMPT_{agent_key.upper()}"
         if env_var in os.environ:
@@ -2206,7 +2206,7 @@ You are NOT permanent staff. You have:
         
         return self.prompts.get(agent_key)
     
-    def get_all(self) -> Dict[str, AgentPrompt]:
+    def get_all(self) -> dict[str, AgentPrompt]:
         """Get all registered prompts."""
         return self.prompts.copy()
     
@@ -2214,7 +2214,7 @@ You are NOT permanent staff. You have:
         """List all registered prompt keys."""
         return list(self.prompts.keys())
     
-    def export_to_json(self, output_dir: Optional[str] = None):
+    def export_to_json(self, output_dir: str | None = None):
         """Export all prompts to JSON files."""
         export_dir = Path(output_dir or self.prompts_dir)
         export_dir.mkdir(parents=True, exist_ok=True)
@@ -2250,16 +2250,16 @@ def get_registry() -> PromptRegistry:
     return _registry
 
 
-def get_prompt(agent_key: str) -> Optional[AgentPrompt]:
+def get_prompt(agent_key: str) -> AgentPrompt | None:
     """Convenience function to get a prompt by key."""
     return get_registry().get(agent_key)
 
 
-def get_all_prompts() -> Dict[str, AgentPrompt]:
+def get_all_prompts() -> dict[str, AgentPrompt]:
     """Convenience function to get all prompts."""
     return get_registry().get_all()
 
 
-def export_prompts(output_dir: Optional[str] = None):
+def export_prompts(output_dir: str | None = None):
     """Convenience function to export prompts."""
     get_registry().export_to_json(output_dir)

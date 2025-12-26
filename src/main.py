@@ -14,7 +14,6 @@ from src.config import config, validate_environment_variables
 import asyncio
 import logging
 import structlog
-from typing import Optional
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -428,7 +427,7 @@ def save_results_to_file(result: dict, ticker: str) -> Path:
     return filepath
 
 
-async def run_analysis(ticker: str, quick_mode: bool) -> Optional[dict]:
+async def run_analysis(ticker: str, quick_mode: bool) -> dict | None:
     """Run the multi-agent analysis workflow."""
     try:
         from src.graph import create_trading_graph, TradingContext

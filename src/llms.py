@@ -9,7 +9,6 @@ UPDATED: Added OpenAI consultant LLM for cross-validation (Dec 2025).
 import logging
 import os
 import re
-from typing import Optional, List
 from langchain_google_genai import (
     ChatGoogleGenerativeAI,
     HarmBlockThreshold,
@@ -105,8 +104,8 @@ def create_gemini_model(
     timeout: int,
     max_retries: int,
     streaming: bool = False,
-    callbacks: Optional[List[BaseCallbackHandler]] = None,
-    thinking_level: Optional[str] = None
+    callbacks: list[BaseCallbackHandler] | None = None,
+    thinking_level: str | None = None
 ) -> BaseChatModel:
     """
     Generic factory for Gemini models.
@@ -148,10 +147,10 @@ def create_gemini_model(
 
 def create_quick_thinking_llm(
     temperature: float = 0.3,
-    model: Optional[str] = None,
+    model: str | None = None,
     timeout: int = None,
     max_retries: int = None,
-    callbacks: Optional[List[BaseCallbackHandler]] = None
+    callbacks: list[BaseCallbackHandler] | None = None
 ) -> BaseChatModel:
     """
     Create a quick thinking LLM.
@@ -189,10 +188,10 @@ def create_quick_thinking_llm(
 
 def create_deep_thinking_llm(
     temperature: float = 0.1,
-    model: Optional[str] = None,
+    model: str | None = None,
     timeout: int = None,
     max_retries: int = None,
-    callbacks: Optional[List[BaseCallbackHandler]] = None
+    callbacks: list[BaseCallbackHandler] | None = None
 ) -> BaseChatModel:
     """
     Create a deep thinking LLM.
@@ -227,11 +226,11 @@ deep_thinking_llm = create_deep_thinking_llm()
 # ... (rest of the file is the same)
 def create_consultant_llm(
     temperature: float = 0.3,
-    model: Optional[str] = None,
+    model: str | None = None,
     timeout: int = 120,
     max_retries: int = 3,
     quick_mode: bool = False,
-    callbacks: Optional[List[BaseCallbackHandler]] = None
+    callbacks: list[BaseCallbackHandler] | None = None
 ) -> BaseChatModel:
     """
     Create an OpenAI consultant LLM for cross-validation.
@@ -330,9 +329,9 @@ _consultant_llm_instance = None
 
 
 def get_consultant_llm(
-    callbacks: Optional[List[BaseCallbackHandler]] = None,
+    callbacks: list[BaseCallbackHandler] | None = None,
     quick_mode: bool = False
-) -> Optional[BaseChatModel]:
+) -> BaseChatModel | None:
     """
     Get or create the consultant LLM instance.
 

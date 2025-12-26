@@ -12,7 +12,6 @@ UPDATED: Dec 2025 - Aligned with modern yfinance patterns
 
 import asyncio
 import structlog
-from typing import Dict, Optional, Tuple
 from datetime import datetime, timedelta
 
 logger = structlog.get_logger(__name__)
@@ -21,7 +20,7 @@ logger = structlog.get_logger(__name__)
 # TIER 1: Dynamic FX Rates (yfinance - always up-to-date)
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def get_fx_rate_yfinance(from_currency: str, to_currency: str = "USD") -> Optional[float]:
+async def get_fx_rate_yfinance(from_currency: str, to_currency: str = "USD") -> float | None:
     """
     Get live FX rate from yfinance using standard forex pairs.
 
@@ -107,7 +106,7 @@ FALLBACK_RATES_TO_USD = {
     "USD": 1.0,
 }
 
-def get_fx_rate_fallback(from_currency: str, to_currency: str = "USD") -> Optional[float]:
+def get_fx_rate_fallback(from_currency: str, to_currency: str = "USD") -> float | None:
     """
     Get FX rate from hardcoded fallback table.
 
@@ -139,7 +138,7 @@ async def get_fx_rate(
     from_currency: str,
     to_currency: str = "USD",
     allow_fallback: bool = True
-) -> Tuple[Optional[float], str]:
+) -> tuple[float | None, str]:
     """
     Get FX rate with smart fallback chain.
 
@@ -195,10 +194,10 @@ async def get_fx_rate(
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def normalize_to_usd(
-    value: Optional[float],
+    value: float | None,
     currency: str,
     metric_name: str = "value"
-) -> Tuple[Optional[float], Dict[str, any]]:
+) -> tuple[float | None, dict[str, any]]:
     """
     Normalize a single value to USD with metadata tracking.
 
@@ -276,9 +275,9 @@ async def normalize_to_usd(
 
 
 async def normalize_financial_dict(
-    data: Dict[str, any],
+    data: dict[str, any],
     currency_field: str = "currency"
-) -> Dict[str, any]:
+) -> dict[str, any]:
     """
     Normalize all currency-dependent fields in a financial data dict.
 

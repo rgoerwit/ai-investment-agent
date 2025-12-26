@@ -17,7 +17,7 @@ import os
 import aiohttp
 import logging
 import pandas as pd
-from typing import Optional, Dict, Any
+from typing import Any
 from src.data.interfaces import FinancialFetcher
 from src.config import config
 
@@ -29,7 +29,7 @@ class EODHDFetcher(FinancialFetcher):
     Maintains state to stop requests if API limits are hit.
     """
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: str | None = None):
         self.api_key = api_key or config.get_eodhd_api_key()
         self.base_url = "https://eodhd.com/api"
         self._session = None
@@ -80,7 +80,7 @@ class EODHDFetcher(FinancialFetcher):
         """
         return pd.DataFrame()
 
-    async def get_financial_metrics(self, symbol: str) -> Dict[str, Optional[float]]:
+    async def get_financial_metrics(self, symbol: str) -> dict[str, float | None] | None:
         """
         Fetch fundamentals from EODHD.
         Returns processed dictionary or None if failed.
@@ -129,7 +129,7 @@ class EODHDFetcher(FinancialFetcher):
             logger.debug(f"EODHD request failed: {e}")
             return None
 
-    def _parse_fundamentals(self, data: Dict) -> Dict[str, Optional[float]]:
+    def _parse_fundamentals(self, data: dict) -> dict[str, float | None]:
         """Map EODHD JSON structure to internal schema."""
         output = {
             '_source': 'eodhd',
@@ -213,7 +213,7 @@ class EODHDFetcher(FinancialFetcher):
 
         return output
 
-    def _safe_float(self, value: Any) -> Optional[float]:
+    def _safe_float(self, value: Any) -> float | None:
         """Safely convert to float."""
         try:
             if value is None or value == 'NA' or value == 'NaN':
@@ -221,6 +221,7 @@ class EODHDFetcher(FinancialFetcher):
             return float(value)
         except (ValueError, TypeError):
             return None
+
 
 # Singleton Pattern
 _eodhd_fetcher = None

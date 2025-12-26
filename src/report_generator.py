@@ -9,7 +9,7 @@ UPDATED: Added comprehensive error handling and fallback logic for missing Portf
 
 import sys
 import logging
-from typing import Dict, Optional, Any
+from typing import Any
 from datetime import datetime
 import re
 
@@ -19,7 +19,7 @@ import re
 class QuietModeReporter:
     """Generates clean markdown reports with minimal output."""
 
-    def __init__(self, ticker: str, company_name: Optional[str] = None, quick_mode: bool = False):
+    def __init__(self, ticker: str, company_name: str | None = None, quick_mode: bool = False):
         self.ticker = ticker.upper()
         self.company_name = company_name
         self.timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -141,7 +141,7 @@ class QuietModeReporter:
 
         return ""
 
-    def _get_final_decision_text(self, result: Dict) -> str:
+    def _get_final_decision_text(self, result: dict) -> str:
         """
         Extract final decision text from result dictionary with comprehensive fallback logic.
 
@@ -212,7 +212,7 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
 """
         return error_msg
 
-    def generate_report(self, result: Dict, brief_mode: bool = False) -> str:
+    def generate_report(self, result: dict, brief_mode: bool = False) -> str:
         """
         Generate markdown report from analysis results.
 

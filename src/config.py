@@ -14,7 +14,7 @@ Migration Notes (Dec 2025):
 
 from pathlib import Path
 import os
-from typing import Optional, Any
+from typing import Any
 import logging
 import sys
 
@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 
 # --- Helper Functions (preserved for backwards compatibility with tests) ---
 
-def _get_env_var(var: str, required: bool = True, default: Optional[str] = None) -> str:
+def _get_env_var(var: str, required: bool = True, default: str | None = None) -> str:
     """Get environment variable with validation.
 
     Preserved for backwards compatibility with existing tests.

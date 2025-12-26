@@ -5,18 +5,24 @@ This module implements deterministic threshold-based validation to catch extreme
 financial risks before they enter the bull/bear debate phase. Uses regex parsing
 of the Fundamentals Analyst's DATA_BLOCK output.
 
+Two categories of flags:
+1. CRITICAL (AUTO_REJECT): Financial viability issues - extreme leverage, earnings fraud, refinancing risk
+2. WARNING (RISK_PENALTY): Tax/legal issues - PFIC probable, VIE structure (not company viability)
+
 Why code-driven instead of LLM-driven:
 - Exact thresholds required (D/E > 500%, not "very high")
 - Fast-fail pattern (avoid LLM calls for doomed stocks)
 - Reliability (no hallucination risk on number parsing)
 - Cost savings (~60% token reduction for rejected stocks)
+- Deterministic JSON parsing for legal_report
 
 Pattern matches: src/data/validator.py (also code-driven for same reasons)
 """
 
 import re
+import json
 import structlog
-from typing import Dict, Optional, List, Tuple
+from typing import Any
 from enum import Enum
 
 logger = structlog.get_logger(__name__)
@@ -33,12 +39,16 @@ class Sector(Enum):
 
 class RedFlagDetector:
     """
-    Deterministic pre-screening for catastrophic financial risks.
+    Deterministic pre-screening for catastrophic financial and legal risks.
 
-    Detects three critical red flags from institutional bankruptcy/distress research:
+    CRITICAL RED FLAGS (AUTO_REJECT - financial viability):
     1. Extreme Leverage: D/E > 500% (bankruptcy risk)
     2. Earnings Quality: Positive income but negative FCF >2x (fraud indicator)
     3. Refinancing Risk: Interest coverage <2.0x AND D/E >100% (default risk)
+
+    WARNING FLAGS (RISK_PENALTY - tax/legal, not viability):
+    4. PFIC Probable: Company likely classified as PFIC (US tax reporting burden)
+    5. VIE Structure: China stock uses contractual VIE structure (ownership risk)
     """
 
     @staticmethod
@@ -79,7 +89,7 @@ class RedFlagDetector:
             return Sector.GENERAL
 
     @staticmethod
-    def extract_metrics(fundamentals_report: str) -> Dict[str, Optional[float]]:
+    def extract_metrics(fundamentals_report: str) -> dict[str, float | None]:
         """
         Extract financial metrics from Fundamentals Analyst DATA_BLOCK.
 
@@ -106,7 +116,7 @@ class RedFlagDetector:
             PE_RATIO_TTM: 12.34
             ### --- END DATA_BLOCK ---
         """
-        metrics: Dict[str, Optional[float]] = {
+        metrics: dict[str, float | None] = {
             'debt_to_equity': None,
             'net_income': None,
             'fcf': None,
@@ -148,7 +158,7 @@ class RedFlagDetector:
         return metrics
 
     @staticmethod
-    def _extract_debt_to_equity(report: str) -> Optional[float]:
+    def _extract_debt_to_equity(report: str) -> float | None:
         """
         Extract D/E ratio, converting from ratio to percentage if needed.
 
@@ -179,7 +189,7 @@ class RedFlagDetector:
         return None
 
     @staticmethod
-    def _extract_interest_coverage(report: str) -> Optional[float]:
+    def _extract_interest_coverage(report: str) -> float | None:
         """
         Extract interest coverage ratio.
 
@@ -205,7 +215,7 @@ class RedFlagDetector:
         return None
 
     @staticmethod
-    def _extract_free_cash_flow(report: str) -> Optional[float]:
+    def _extract_free_cash_flow(report: str) -> float | None:
         """
         Extract FCF with support for negative values and B/M/K multipliers.
 
@@ -256,7 +266,7 @@ class RedFlagDetector:
         return None
 
     @staticmethod
-    def _extract_net_income(report: str) -> Optional[float]:
+    def _extract_net_income(report: str) -> float | None:
         """
         Extract net income with support for negative values and B/M/K multipliers.
 
@@ -300,10 +310,10 @@ class RedFlagDetector:
 
     @staticmethod
     def detect_red_flags(
-        metrics: Dict[str, Optional[float]],
+        metrics: dict[str, float | None],
         ticker: str = "UNKNOWN",
         sector: Sector = Sector.GENERAL
-    ) -> Tuple[List[Dict], str]:
+    ) -> tuple[list[dict], str]:
         """
         Apply sector-aware threshold-based red-flag detection logic.
 
@@ -416,3 +426,169 @@ class RedFlagDetector:
         result = 'REJECT' if has_auto_reject else 'PASS'
 
         return red_flags, result
+
+    @staticmethod
+    def extract_legal_risks(legal_report: str) -> dict[str, Any]:
+        """
+        Extract legal/tax risk data from Legal Counsel's JSON output.
+
+        Args:
+            legal_report: Legal Counsel output (JSON string or raw text)
+
+        Returns:
+            Dict with extracted legal risks:
+            - pfic_status: CLEAN/UNCERTAIN/PROBABLE/N/A
+            - pfic_evidence: Quote from search results
+            - vie_structure: YES/NO/N/A
+            - vie_evidence: Description if VIE detected
+            - country: Country of domicile
+            - sector: Sector name
+        """
+        risks: dict[str, Any] = {
+            'pfic_status': None,
+            'pfic_evidence': None,
+            'vie_structure': None,
+            'vie_evidence': None,
+            'country': None,
+            'sector': None,
+        }
+
+        if not legal_report:
+            return risks
+
+        # Try to parse as JSON first (preferred)
+        try:
+            # Handle potential markdown code blocks
+            json_str = legal_report.strip()
+            if json_str.startswith('```'):
+                # Extract JSON from markdown code block
+                lines = json_str.split('\n')
+                json_lines = []
+                in_block = False
+                for line in lines:
+                    if line.startswith('```') and not in_block:
+                        in_block = True
+                        continue
+                    elif line.startswith('```') and in_block:
+                        break
+                    elif in_block:
+                        json_lines.append(line)
+                json_str = '\n'.join(json_lines)
+
+            data = json.loads(json_str)
+            risks['pfic_status'] = data.get('pfic_status')
+            risks['pfic_evidence'] = data.get('pfic_evidence')
+            risks['vie_structure'] = data.get('vie_structure')
+            risks['vie_evidence'] = data.get('vie_evidence')
+            risks['country'] = data.get('country')
+            risks['sector'] = data.get('sector')
+
+            logger.debug(
+                "legal_risks_parsed_json",
+                pfic_status=risks['pfic_status'],
+                vie_structure=risks['vie_structure']
+            )
+            return risks
+
+        except json.JSONDecodeError:
+            # Fall back to regex parsing
+            logger.debug("legal_report_not_json_falling_back_to_regex")
+
+        # Regex fallback for non-JSON output
+        pfic_match = re.search(
+            r'"?pfic_status"?\s*:\s*"?(CLEAN|UNCERTAIN|PROBABLE|N/A)"?',
+            legal_report, re.IGNORECASE
+        )
+        if pfic_match:
+            risks['pfic_status'] = pfic_match.group(1).upper()
+
+        vie_match = re.search(
+            r'"?vie_structure"?\s*:\s*"?(YES|NO|N/A)"?',
+            legal_report, re.IGNORECASE
+        )
+        if vie_match:
+            risks['vie_structure'] = vie_match.group(1).upper()
+
+        return risks
+
+    @staticmethod
+    def detect_legal_flags(
+        legal_risks: dict[str, Any],
+        ticker: str = "UNKNOWN"
+    ) -> list[dict]:
+        """
+        Detect legal/tax warning flags from Legal Counsel output.
+
+        Unlike financial red flags (which trigger AUTO_REJECT), legal flags
+        add risk penalties but do NOT reject the stock. PFIC is a tax burden,
+        not a viability issue.
+
+        Args:
+            legal_risks: Extracted legal risk data from extract_legal_risks()
+            ticker: Ticker symbol for logging
+
+        Returns:
+            List of warning flag dicts with risk_penalty values
+        """
+        warnings = []
+
+        pfic_status = legal_risks.get('pfic_status')
+        vie_structure = legal_risks.get('vie_structure')
+        pfic_evidence = legal_risks.get('pfic_evidence') or 'No evidence provided'
+
+        # --- WARNING 1: PFIC Probable ---
+        if pfic_status == 'PROBABLE':
+            warnings.append({
+                'type': 'PFIC_PROBABLE',
+                'severity': 'WARNING',
+                'detail': f"Company likely classified as PFIC. Evidence: {pfic_evidence[:100]}...",
+                'action': 'RISK_PENALTY',
+                'risk_penalty': 1.0,  # Add 1.0 to risk tally
+                'rationale': 'PFIC classification requires onerous US tax reporting (Form 8621). '
+                            'Mark-to-market or QEF election required. Not a viability issue, '
+                            'but increases compliance burden for US investors.'
+            })
+            logger.warning(
+                "legal_flag_pfic_probable",
+                ticker=ticker,
+                evidence=pfic_evidence[:50]
+            )
+
+        # --- WARNING 2: PFIC Uncertain (lesser penalty) ---
+        elif pfic_status == 'UNCERTAIN':
+            warnings.append({
+                'type': 'PFIC_UNCERTAIN',
+                'severity': 'WARNING',
+                'detail': f"PFIC status unclear. Evidence: {pfic_evidence[:100]}...",
+                'action': 'RISK_PENALTY',
+                'risk_penalty': 0.5,  # Add 0.5 to risk tally
+                'rationale': 'PFIC status cannot be confirmed. Company may use hedge language '
+                            'or is in a high-risk sector without clear disclosure. '
+                            'Recommend consulting tax advisor before investing.'
+            })
+            logger.info(
+                "legal_flag_pfic_uncertain",
+                ticker=ticker,
+                evidence=pfic_evidence[:50]
+            )
+
+        # --- WARNING 3: VIE Structure ---
+        if vie_structure == 'YES':
+            vie_evidence = legal_risks.get('vie_evidence') or 'VIE structure detected'
+            warnings.append({
+                'type': 'VIE_STRUCTURE',
+                'severity': 'WARNING',
+                'detail': f"Company uses VIE contractual structure for China operations. {vie_evidence[:80]}",
+                'action': 'RISK_PENALTY',
+                'risk_penalty': 0.5,  # Add 0.5 to risk tally
+                'rationale': 'VIE structure means investors own contracts, not equity. '
+                            'China regulatory risk if VIE agreements are invalidated. '
+                            'Common for China tech/education stocks but adds legal uncertainty.'
+            })
+            logger.warning(
+                "legal_flag_vie_structure",
+                ticker=ticker,
+                evidence=vie_evidence[:50]
+            )
+
+        return warnings

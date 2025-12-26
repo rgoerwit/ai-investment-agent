@@ -10,11 +10,14 @@ FIXED: Corrected memory query parameter name to 'metadata_filter'.
 """
 
 import asyncio
-from typing import Annotated, List, Dict, Any, Optional, Set, Callable
+import json
+import re
+from typing import Annotated, Any, Callable
 from typing_extensions import TypedDict
 from datetime import datetime
 
 from langgraph.graph import MessagesState
+from langgraph.prebuilt import create_react_agent
 from langgraph.types import RunnableConfig
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
@@ -29,7 +32,7 @@ logger = structlog.get_logger(__name__)
 
 async def invoke_with_rate_limit_handling(
     runnable,
-    input_data: Dict[str, Any],
+    input_data: dict[str, Any],
     max_attempts: int = 3,
     context: str = "LLM"
 ) -> Any:
@@ -201,6 +204,7 @@ class AgentState(MessagesState):
     news_report: Annotated[str, take_last]
     raw_fundamentals_data: Annotated[str, take_last]  # Junior Analyst output
     foreign_language_report: Annotated[str, take_last]  # Foreign Language Analyst output
+    legal_report: Annotated[str, take_last]  # Legal Counsel output (PFIC/VIE JSON)
     fundamentals_report: Annotated[str, take_last]  # Senior Analyst analysis
     investment_debate_state: Annotated[InvestDebateState, take_last]
     investment_plan: Annotated[str, take_last]
@@ -208,16 +212,16 @@ class AgentState(MessagesState):
     trader_investment_plan: Annotated[str, take_last]
     risk_debate_state: Annotated[RiskDebateState, take_last]
     final_trade_decision: Annotated[str, take_last]
-    tools_called: Annotated[Dict[str, Set[str]], take_last]
-    prompts_used: Annotated[Dict[str, Dict[str, str]], take_last]
+    tools_called: Annotated[dict[str, set[str]], take_last]
+    prompts_used: Annotated[dict[str, dict[str, str]], take_last]
 
     # Red-flag detection fields
-    red_flags: Annotated[List[Dict[str, Any]], take_last]
+    red_flags: Annotated[list[dict[str, Any]], take_last]
     pre_screening_result: Annotated[str, take_last]  # "PASS" or "REJECT"
 
 # --- Helper Functions ---
 
-def get_context_from_config(config: RunnableConfig) -> Optional[Any]:
+def get_context_from_config(config: RunnableConfig) -> Any | None:
     """Extract TradingContext from RunnableConfig.configurable dict."""
     try:
         configurable = config.get("configurable", {})
@@ -245,7 +249,7 @@ def get_analysis_context(ticker: str) -> str:
         "Focus on fundamentals, valuation, and competitive advantage."
     )
 
-def filter_messages_for_gemini(messages: List[BaseMessage]) -> List[BaseMessage]:
+def filter_messages_for_gemini(messages: list[BaseMessage]) -> list[BaseMessage]:
     if not messages:
         return []
     filtered = []
@@ -361,9 +365,9 @@ def _is_output_insufficient(content: str, agent_key: str) -> bool:
 def create_analyst_node(
     llm,
     agent_key: str,
-    tools: List[Any],
+    tools: list[Any],
     output_field: str,
-    retry_llm: Optional[Any] = None,
+    retry_llm: Any | None = None,
     allow_retry: bool = False
 ) -> Callable:
     """
@@ -380,7 +384,7 @@ def create_analyst_node(
     Note:
         Retry only happens ONCE to prevent infinite loops.
     """
-    async def analyst_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    async def analyst_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         from src.prompts import get_prompt
         agent_prompt = get_prompt(agent_key)
         if not agent_prompt:
@@ -479,6 +483,28 @@ def create_analyst_node(
                         "senior_fundamentals_no_news",
                         ticker=ticker,
                         message="News report not yet available (parallel execution) - proceeding without news context"
+                    )
+
+                # Legal Counsel data for PFIC/VIE reconciliation
+                legal_report = state.get("legal_report", "")
+                if legal_report:
+                    extra_context += (
+                        f"\n\n### LEGAL/TAX RISK ASSESSMENT (From Legal Counsel)"
+                        f"\nUse this to inform your PFIC_RISK assessment in DATA_BLOCK. "
+                        f"If Legal Counsel found PFIC disclosure (pfic_status: PROBABLE), set PFIC_RISK: MEDIUM or HIGH. "
+                        f"If no disclosure found in high-risk sector (pfic_status: UNCERTAIN), set PFIC_RISK: MEDIUM.\n"
+                        f"{legal_report}\n"
+                    )
+                    logger.info(
+                        "senior_fundamentals_has_legal_data",
+                        ticker=ticker,
+                        legal_data_length=len(legal_report)
+                    )
+                else:
+                    logger.info(
+                        "senior_fundamentals_no_legal_data",
+                        ticker=ticker,
+                        message="Legal Counsel data not yet available - proceeding without legal context"
                     )
 
             # CRITICAL FIX: Include verified company name to prevent hallucination
@@ -592,8 +618,8 @@ def create_analyst_node(
             return {"messages": [AIMessage(content=f"Error: {str(e)}")], output_field: f"Error: {str(e)}"}
     return analyst_node
 
-def create_researcher_node(llm, memory: Optional[Any], agent_key: str) -> Callable:
-    async def researcher_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+def create_researcher_node(llm, memory: Any | None, agent_key: str) -> Callable:
+    async def researcher_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         from src.prompts import get_prompt
         agent_prompt = get_prompt(agent_key)
         if not agent_prompt:
@@ -675,8 +701,8 @@ Only use data explicitly related to {ticker} ({company_name}).
             return {"investment_debate_state": state.get('investment_debate_state', {})}
     return researcher_node
 
-def create_research_manager_node(llm, memory: Optional[Any]) -> Callable:
-    async def research_manager_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+def create_research_manager_node(llm, memory: Any | None) -> Callable:
+    async def research_manager_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         from src.prompts import get_prompt
         agent_prompt = get_prompt("research_manager")
         if not agent_prompt:
@@ -696,8 +722,8 @@ def create_research_manager_node(llm, memory: Optional[Any]) -> Callable:
             return {"investment_plan": f"Error: {str(e)}"}
     return research_manager_node
 
-def create_trader_node(llm, memory: Optional[Any]) -> Callable:
-    async def trader_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+def create_trader_node(llm, memory: Any | None) -> Callable:
+    async def trader_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         from src.prompts import get_prompt
         agent_prompt = get_prompt("trader")
         if not agent_prompt:
@@ -736,7 +762,7 @@ RESEARCH MANAGER PLAN:
     return trader_node
 
 def create_risk_debater_node(llm, agent_key: str) -> Callable:
-    async def risk_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    async def risk_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         from src.prompts import get_prompt
         agent_prompt = get_prompt(agent_key)
         if not agent_prompt:
@@ -766,8 +792,8 @@ def create_risk_debater_node(llm, agent_key: str) -> Callable:
             return {"risk_debate_state": state.get('risk_debate_state', {})}
     return risk_node
 
-def create_portfolio_manager_node(llm, memory: Optional[Any]) -> Callable:
-    async def pm_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+def create_portfolio_manager_node(llm, memory: Any | None) -> Callable:
+    async def pm_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         from src.prompts import get_prompt
         agent_prompt = get_prompt("portfolio_manager")
         if not agent_prompt:
@@ -830,7 +856,7 @@ def create_consultant_node(llm, agent_key: str = "consultant") -> Callable:
     Returns:
         Async function compatible with LangGraph StateGraph.add_node()
     """
-    async def consultant_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    async def consultant_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         from src.prompts import get_prompt
 
         agent_prompt = get_prompt(agent_key)
@@ -929,8 +955,176 @@ Provide your independent consultant review."""
     return consultant_node
 
 
+def create_legal_counsel_node(llm, tools: list) -> Callable:
+    """
+    Factory function creating Legal Counsel node for PFIC/VIE detection.
+
+    Lightweight agent that runs parallel to Foreign Language Analyst.
+    Outputs structured JSON for deterministic parsing by Red Flag Detector.
+
+    Args:
+        llm: LLM instance (should be QUICK_MODEL with thinking_level=low)
+        tools: List containing search_legal_tax_disclosures tool
+
+    Returns:
+        Async function compatible with LangGraph StateGraph.add_node()
+    """
+    async def legal_counsel_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+        from src.prompts import get_prompt
+
+        agent_prompt = get_prompt("legal_counsel")
+        if not agent_prompt:
+            logger.error("Missing prompt for legal_counsel")
+            return {"legal_report": json.dumps({"error": "Missing legal_counsel prompt"})}
+
+        ticker = state.get("company_of_interest", "UNKNOWN")
+        company_name = state.get("company_name", ticker)
+
+        context = get_context_from_config(config)
+        current_date = context.trade_date if context else datetime.now().strftime("%Y-%m-%d")
+
+        # Extract sector and country from Junior's raw data (if available)
+        raw_data = state.get("raw_fundamentals_data", "")
+        sector, country = _extract_sector_country(raw_data)
+
+        # Build minimal input for Legal Counsel
+        input_data = {
+            "ticker": ticker,
+            "company_name": company_name,
+            "sector": sector,
+            "country": country
+        }
+
+        human_msg = f"""Analyze legal/tax risks for:
+Ticker: {ticker}
+Company: {company_name}
+Sector: {sector}
+Country: {country}
+Date: {current_date}
+
+Call the search_legal_tax_disclosures tool with these parameters, then provide your JSON assessment."""
+
+        try:
+            # Create agent with tools
+            agent = create_react_agent(llm, tools)
+            result = await agent.ainvoke({
+                "messages": [
+                    SystemMessage(content=agent_prompt.system_message),
+                    HumanMessage(content=human_msg)
+                ]
+            })
+
+            # Extract final response
+            response = result["messages"][-1].content
+            response_str = extract_string_content(response)
+
+            # Validate JSON output
+            try:
+                # Try to parse as JSON directly
+                parsed = json.loads(response_str)
+                logger.info(
+                    "legal_counsel_complete",
+                    ticker=ticker,
+                    pfic_status=parsed.get("pfic_status"),
+                    vie_structure=parsed.get("vie_structure")
+                )
+                return {"legal_report": response_str, "sender": "legal_counsel"}
+
+            except json.JSONDecodeError:
+                # Try to extract JSON from response (may be wrapped in text)
+                json_match = re.search(r'\{[^{}]*"pfic_status"[^{}]*\}', response_str, re.DOTALL)
+                if json_match:
+                    extracted = json_match.group()
+                    try:
+                        json.loads(extracted)  # Validate
+                        logger.info(
+                            "legal_counsel_extracted_json",
+                            ticker=ticker
+                        )
+                        return {"legal_report": extracted, "sender": "legal_counsel"}
+                    except:
+                        pass
+
+                # Return raw response wrapped in error JSON
+                logger.warning(
+                    "legal_counsel_invalid_json",
+                    ticker=ticker,
+                    response_preview=response_str[:200]
+                )
+                return {
+                    "legal_report": json.dumps({
+                        "error": "Invalid JSON response",
+                        "raw_response": response_str[:500],
+                        "pfic_status": "UNCERTAIN",
+                        "vie_structure": "N/A"
+                    }),
+                    "sender": "legal_counsel"
+                }
+
+        except Exception as e:
+            logger.error(
+                "legal_counsel_error",
+                ticker=ticker,
+                error=str(e)
+            )
+            return {
+                "legal_report": json.dumps({
+                    "error": str(e),
+                    "pfic_status": "UNCERTAIN",
+                    "vie_structure": "N/A"
+                }),
+                "sender": "legal_counsel"
+            }
+
+    return legal_counsel_node
+
+
+def _extract_sector_country(raw_data: str) -> tuple:
+    """
+    Extract sector and country from Junior Analyst's raw JSON output.
+
+    Args:
+        raw_data: Raw fundamentals data string from Junior Analyst
+
+    Returns:
+        Tuple of (sector, country) strings
+    """
+    sector, country = "Unknown", "Unknown"
+
+    if not raw_data:
+        return sector, country
+
+    try:
+        # Try to find JSON block in raw data
+        # Look for common patterns from get_financial_metrics output
+        json_patterns = [
+            r'"sector"\s*:\s*"([^"]+)"',
+            r'"industry"\s*:\s*"([^"]+)"',
+            r'"country"\s*:\s*"([^"]+)"',
+        ]
+
+        sector_match = re.search(r'"sector"\s*:\s*"([^"]+)"', raw_data, re.IGNORECASE)
+        if sector_match:
+            sector = sector_match.group(1)
+
+        country_match = re.search(r'"country"\s*:\s*"([^"]+)"', raw_data, re.IGNORECASE)
+        if country_match:
+            country = country_match.group(1)
+
+        # Fallback: try to find industry if sector not found
+        if sector == "Unknown":
+            industry_match = re.search(r'"industry"\s*:\s*"([^"]+)"', raw_data, re.IGNORECASE)
+            if industry_match:
+                sector = industry_match.group(1)
+
+    except Exception as e:
+        logger.debug(f"Error extracting sector/country: {e}")
+
+    return sector, country
+
+
 def create_state_cleaner_node() -> Callable:
-    async def clean_state(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    async def clean_state(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         context = get_context_from_config(config)
         ticker = context.ticker if context else state.get("company_of_interest", "UNKNOWN")
 
@@ -976,7 +1170,7 @@ def create_financial_health_validator_node() -> Callable:
     Returns:
         Async function compatible with LangGraph StateGraph.add_node()
     """
-    async def financial_health_validator_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    async def financial_health_validator_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         """
         Pre-screening layer to catch extreme financial risks before detailed scoring.
 
@@ -1040,6 +1234,27 @@ def create_financial_health_validator_node() -> Callable:
 
         # Apply sector-aware red-flag detection logic
         red_flags, pre_screening_result = RedFlagDetector.detect_red_flags(metrics, ticker, sector)
+
+        # --- Legal/Tax Flag Detection ---
+        # Extract and process legal_report for PFIC/VIE warnings
+        # These are WARNING flags (risk penalty) not AUTO_REJECT flags
+        legal_report = state.get('legal_report', '')
+        if legal_report:
+            if not isinstance(legal_report, str):
+                legal_report = extract_string_content(legal_report)
+
+            legal_risks = RedFlagDetector.extract_legal_risks(legal_report)
+            legal_warnings = RedFlagDetector.detect_legal_flags(legal_risks, ticker)
+
+            if legal_warnings:
+                red_flags.extend(legal_warnings)
+                if not quiet_mode:
+                    logger.info(
+                        "legal_warnings_detected",
+                        ticker=ticker,
+                        warning_types=[w['type'] for w in legal_warnings],
+                        total_risk_penalty=sum(w.get('risk_penalty', 0) for w in legal_warnings)
+                    )
 
         # Log results
         if pre_screening_result == 'REJECT':

@@ -41,82 +41,43 @@ This isn't a single prompt to an LLM. It's a **stateful orchestration** of speci
 graph TB
     Start([User: Analyze TICKER]) --> Dispatcher{Parallel<br/>Dispatch}
 
-    %% Parallel Fan-Out: 5 branches run simultaneously
+    %% Parallel Fan-Out: 6 branches run simultaneously
     Dispatcher --> MarketAnalyst["Market Analyst<br/>(Technical Analysis)"]
     Dispatcher --> SentimentAnalyst["Sentiment Analyst<br/>(Social Media)"]
     Dispatcher --> NewsAnalyst["News Analyst<br/>(Recent Events)"]
     Dispatcher --> JuniorFund["Junior Fundamentals<br/>(API Data)"]
     Dispatcher --> ForeignLang["Foreign Language<br/>(Native Sources)"]
+    Dispatcher --> LegalCounsel["Legal Counsel<br/>(Tax & Regulatory)"]
 
     %% Market/Sentiment/News go directly to main Sync Check
     MarketAnalyst --> SyncCheck["Sync Check<br/>(Fan-In Barrier)"]
     SentimentAnalyst --> SyncCheck
     NewsAnalyst --> SyncCheck
 
-    %% Fundamentals sub-graph: Junior + Foreign sync first
+    %% Fundamentals sub-graph: Junior + Foreign + Legal sync first
     JuniorFund --> FundSync["Fundamentals<br/>Sync"]
     ForeignLang --> FundSync
+    LegalCounsel --> FundSync
     FundSync --> SeniorFund["Senior Fundamentals<br/>(Scoring & Analysis)"]
     SeniorFund --> Validator["Financial Validator<br/>(Red-Flag Detection)"]
     Validator --> SyncCheck
-
-    %% After all branches complete
-    SyncCheck -->|REJECT| PortfolioManager["Portfolio Manager<br/>(Final Decision)"]
-    SyncCheck -->|PASS| BullResearcher["Bull Researcher<br/>(Upside Case)"]
-
-    BullResearcher --> Debate{Multi-Round<br/>Debate}
-    BearResearcher["Bear Researcher<br/>(Downside Risk)"] --> Debate
-
-    Debate -->|Round 1-2| BullResearcher
-    Debate -->|Round 1-2| BearResearcher
-    Debate -->|Converged| ResearchManager["Research Manager<br/>(Synthesize All Data)"]
-
-    ResearchManager --> Consultant["External Consultant<br/>(Cross-Validation)<br/>Optional"]
-
-    Consultant -->|OpenAI Review| Trader["Trader<br/>(Trade Plan)"]
-    ResearchManager -.->|If Disabled| Trader
-
-    Trader --> RiskTeam["Risk Assessment Team<br/>(Risky → Safe → Neutral)"]
-
-    RiskTeam --> PortfolioManager
-
-    PortfolioManager --> Decision([BUY / SELL / HOLD<br/>+ Position Size])
-
-    style Dispatcher fill:#ffeaa7
-    style MarketAnalyst fill:#e1f5ff
-    style NewsAnalyst fill:#e1f5ff
-    style SentimentAnalyst fill:#e1f5ff
-    style JuniorFund fill:#e1f5ff
-    style ForeignLang fill:#e1ffe1
-    style FundSync fill:#e0e0e0
-    style SeniorFund fill:#e1f5ff
-    style Validator fill:#ffcccc
-    style SyncCheck fill:#e0e0e0
-    style ResearchManager fill:#fff4e1
-    style BullResearcher fill:#d4edda
-    style BearResearcher fill:#f8d7da
-    style Consultant fill:#e8daff
-    style Trader fill:#ffe4e1
-    style RiskTeam fill:#fff3cd
-    style PortfolioManager fill:#d1ecf1
-    style Debate fill:#ffeaa7
-    style Decision fill:#55efc4
 ```
 
 ### How Agents Collaborate
 
-1. **Parallel Data Gathering (Fan-Out)** - Five analyst branches run **simultaneously** to maximize speed:
+1. **Parallel Data Gathering (Fan-Out)** - Six analyst branches run **simultaneously** to maximize speed:
    - Market Analyst (technical indicators, liquidity)
    - Sentiment Analyst (social media signals)
    - News Analyst (recent events, catalysts)
    - Junior Fundamentals (API-based financial data)
    - Foreign Language Analyst (native-language sources, premium English fallback)
+   - **Legal Counsel** (tax risks like PFIC, regulatory structures like VIE, withholding rates)
 
    Each branch has its own tool-calling loop. This parallel architecture reduces analysis time by ~60% compared to sequential execution.
 
-2. **Sync Check (Fan-In Barrier)** - All branches converge at synchronization points. The Fundamentals Sync waits for Junior + Foreign Language analysts before Senior processes their combined data. The main Sync Check waits for all reports before proceeding to debate.
+2. **Sync Check (Fan-In Barrier)** - All branches converge at synchronization points. The Fundamentals Sync waits for **Junior + Foreign Language + Legal Counsel** analysts before Senior processes their combined data. The main Sync Check waits for all reports before proceeding to debate.
 
-3. **Junior/Senior/Foreign Fundamentals Split** - The Junior Fundamentals Analyst calls data tools (get_financial_metrics, get_fundamental_analysis) and returns raw API data. The Foreign Language Analyst searches native-language sources (IR pages, exchange filings) and premium English sources (Bloomberg, Morningstar) for supplemental data. The Senior Fundamentals Analyst receives both data streams and produces scored analysis with a structured DATA_BLOCK, using Foreign data to fill gaps in Junior's output.
+3. **Junior/Senior/Foreign/Legal Fundamentals Split** - The Junior Fundamentals Analyst calls data tools (get_financial_metrics, get_fundamental_analysis) and returns raw API data. The Foreign Language Analyst searches native-language sources (IR pages, exchange filings). The **Legal Counsel** identifies specific jurisdictional risks (e.g., PFIC status for US taxpayers, VIE structure risks in China). The Senior Fundamentals Analyst receives all three data streams and produces scored analysis with a structured DATA_BLOCK.
 
 4. **Red-Flag Pre-Screening** - Financial Validator parses the DATA_BLOCK for catastrophic risks (extreme leverage >500% D/E, earnings quality issues, refinancing risk). REJECT routes directly to Portfolio Manager; PASS continues to debate.
 

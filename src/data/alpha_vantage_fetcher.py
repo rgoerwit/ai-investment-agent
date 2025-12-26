@@ -11,7 +11,7 @@ import aiohttp
 import asyncio
 import structlog
 import pandas as pd
-from typing import Optional, Dict, Any
+from typing import Any
 from src.data.interfaces import FinancialFetcher
 from src.config import config
 
@@ -28,7 +28,7 @@ class AlphaVantageFetcher(FinancialFetcher):
     - Field mapping to internal schema
     """
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: str | None = None):
         self.api_key = api_key or config.get_alpha_vantage_api_key()
         self.base_url = "https://www.alphavantage.co/query"
         self._session = None
@@ -68,7 +68,7 @@ class AlphaVantageFetcher(FinancialFetcher):
         """
         return pd.DataFrame()
 
-    async def get_financial_metrics(self, symbol: str) -> Optional[Dict[str, Any]]:
+    async def get_financial_metrics(self, symbol: str) -> dict[str, Any] | None:
         """
         Fetch company overview (fundamentals).
 
@@ -155,7 +155,7 @@ class AlphaVantageFetcher(FinancialFetcher):
                         error=str(e))
             return None
 
-    def _parse_overview(self, data: Dict) -> Dict[str, Any]:
+    def _parse_overview(self, data: dict) -> dict[str, Any]:
         """
         Map Alpha Vantage OVERVIEW fields to internal schema.
 
@@ -210,7 +210,7 @@ class AlphaVantageFetcher(FinancialFetcher):
 
         return tagged_output if tagged_output else None
 
-    def _safe_float(self, value: Any) -> Optional[float]:
+    def _safe_float(self, value: Any) -> float | None:
         """Convert to float, handling None/'None'/'-' gracefully."""
         try:
             if value is None or value == 'None' or value == '-' or value == 'N/A':
@@ -219,7 +219,7 @@ class AlphaVantageFetcher(FinancialFetcher):
         except (ValueError, TypeError):
             return None
 
-    def _safe_percentage(self, value: Any) -> Optional[float]:
+    def _safe_percentage(self, value: Any) -> float | None:
         """
         Convert percentage string to decimal float.
         Example: '0.15' -> 0.15 (already decimal)
@@ -242,7 +242,7 @@ class AlphaVantageFetcher(FinancialFetcher):
         except (ValueError, TypeError):
             return None
 
-    def _safe_int(self, value: Any) -> Optional[int]:
+    def _safe_int(self, value: Any) -> int | None:
         """Convert to int, handling None/'None'/'-' gracefully."""
         try:
             if value is None or value == 'None' or value == '-' or value == 'N/A':
@@ -250,6 +250,7 @@ class AlphaVantageFetcher(FinancialFetcher):
             return int(float(value))
         except (ValueError, TypeError):
             return None
+
 
 
 # Singleton instance

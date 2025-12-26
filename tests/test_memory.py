@@ -223,15 +223,15 @@ class TestGetRelevantMemory:
 class TestMemoryCleanup:
     """
     Test memory cleanup functionality.
-    Note: cleanup_all_memories returns a Dict[str, int], NOT an int.
+    Note: cleanup_all_memories returns a dict[str, int], NOT an int.
     """
     
     def test_cleanup_unavailable(self):
-        """clear_old_memories (instance method) should return Dict when unavailable (it re-initializes client)."""
+        """clear_old_memories (instance method) should return dict when unavailable (it re-initializes client)."""
         memory = FinancialSituationMemory("test_memory")
         memory.available = False
         
-        # Instance method now returns Dict[str, int]
+        # Instance method now returns dict[str, int]
         # Even if available=False, it creates a new client to perform cleanup
         results = memory.clear_old_memories(days_to_keep=30)
         assert isinstance(results, dict)

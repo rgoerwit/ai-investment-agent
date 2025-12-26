@@ -25,7 +25,7 @@ import os
 import aiohttp
 import logging
 import pandas as pd
-from typing import Optional, Dict, Any
+from typing import Any
 from src.data.interfaces import FinancialFetcher
 from src.config import config
 
@@ -40,7 +40,7 @@ class FMPFetcher(FinancialFetcher):
         yfinance -> yahooquery -> FMP -> partial data
     """
     
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: str | None = None):
         """
         Initialize FMP fetcher.
 
@@ -71,7 +71,7 @@ class FMPFetcher(FinancialFetcher):
         """Check if FMP is configured (API key present)."""
         return self.api_key is not None
     
-    async def _get(self, endpoint: str, params: Dict) -> Optional[Any]:
+    async def _get(self, endpoint: str, params: dict) -> Any | None:
         """
         Make API request with error handling.
         
@@ -139,7 +139,7 @@ class FMPFetcher(FinancialFetcher):
         """
         return pd.DataFrame()
     
-    async def get_financial_metrics(self, symbol: str) -> Optional[Dict[str, Any]]:
+    async def get_financial_metrics(self, symbol: str) -> dict[str, Any] | None:
         """
         Get comprehensive financial metrics for a symbol.
         
@@ -194,7 +194,7 @@ class FMPFetcher(FinancialFetcher):
 
 
 # Global singleton instance
-_fmp_fetcher: Optional[FMPFetcher] = None
+_fmp_fetcher: FMPFetcher | None = None
 
 
 def get_fmp_fetcher() -> FMPFetcher:
@@ -210,7 +210,7 @@ def get_fmp_fetcher() -> FMPFetcher:
     return _fmp_fetcher
 
 
-async def fetch_fmp_metrics(symbol: str) -> Optional[Dict[str, Optional[float]]]:
+async def fetch_fmp_metrics(symbol: str) -> dict[str, float | None] | None:
     """
     Convenience function to fetch FMP metrics.
     

@@ -13,7 +13,7 @@ import asyncio
 import logging
 from pathlib import Path
 import json
-from typing import Dict, Any, List, Tuple
+from typing import Any
 
 # Add the repository root to Python path
 repo_root = Path(__file__).parent.parent
@@ -50,7 +50,7 @@ def get_package_version(module_name: str, package_name: str = None) -> str:
         return "unknown"
 
 
-def check_python_version() -> Tuple[bool, List[str]]:
+def check_python_version() -> tuple[bool, list[str]]:
     """Check if Python version meets requirements."""
     issues = []
     major, minor = sys.version_info[:2]

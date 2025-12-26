@@ -10,7 +10,7 @@ Provides "vague sentiment" signal for ex-US equities through:
 NO paid APIs required beyond existing Tavily.
 """
 
-from typing import Annotated, Dict, List, Optional
+from typing import Annotated
 import structlog
 from langchain_core.tools import tool
 
@@ -87,7 +87,7 @@ REGION_PLATFORMS = {
 }
 
 
-def get_company_translations(ticker: str, company_name: str) -> Dict[str, str]:
+def get_company_translations(ticker: str, company_name: str) -> dict[str, str]:
     """
     Get local language translations of company name.
     Returns dict with 'native' and 'romanized' keys.

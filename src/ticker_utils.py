@@ -5,7 +5,6 @@ and strict search query generation.
 """
 
 import re
-from typing import Tuple, Optional, Dict
 import structlog
 
 logger = structlog.get_logger(__name__)
@@ -169,7 +168,7 @@ class TickerFormatter:
     }
     
     @classmethod
-    def normalize_ticker(cls, ticker: str, target_format: str = "yfinance") -> Tuple[str, Dict[str, str]]:
+    def normalize_ticker(cls, ticker: str, target_format: str = "yfinance") -> tuple[str, dict[str, str]]:
         """
         Normalize ticker to target format and extract metadata.
         """
@@ -286,8 +285,8 @@ class TickerFormatter:
         return ticker, metadata
     
     @classmethod
-    def _convert_from_ibkr(cls, symbol: str, exchange: str, target_format: str, 
-                           original_ticker: str) -> Tuple[str, Dict[str, str]]:
+    def _convert_from_ibkr(cls, symbol: str, exchange: str, target_format: str,
+                           original_ticker: str) -> tuple[str, dict[str, str]]:
         """Convert from IBKR format to target format."""
         for suffix_key, info in cls.EXCHANGE_SUFFIXES.items():
             if info[3] == exchange:
@@ -326,7 +325,7 @@ class TickerFormatter:
         return normalized, metadata
     
     @classmethod
-    def _map_reuters_to_exchange(cls, reuters_code: str, country_code: str) -> Optional[Tuple[str, str, str, str]]:
+    def _map_reuters_to_exchange(cls, reuters_code: str, country_code: str) -> tuple[str, str, str, str] | None:
         """Map Reuters exchange codes to exchange info (yfinance_suffix, name, country, ibkr_code)."""
         reuters_mapping = {
             "N": {
@@ -366,7 +365,7 @@ class TickerFormatter:
         return normalized
     
     @classmethod
-    def get_exchange_info(cls, ticker: str) -> Dict[str, str]:
+    def get_exchange_info(cls, ticker: str) -> dict[str, str]:
         """Get exchange information for a ticker."""
         _, metadata = cls.normalize_ticker(ticker)
         return metadata
@@ -395,7 +394,7 @@ def to_ibkr(ticker: str) -> str:
     return TickerFormatter.to_ibkr(ticker)
 
 
-def get_ticker_info(ticker: str) -> Dict[str, str]:
+def get_ticker_info(ticker: str) -> dict[str, str]:
     """Get complete ticker information."""
     _, metadata = TickerFormatter.normalize_ticker(ticker)
     return metadata
