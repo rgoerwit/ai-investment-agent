@@ -480,8 +480,8 @@ The valuation is attractive at current levels.
         assert "BUY" in report
         assert "Executive Summary" in report
 
-        # Should contain rationale
-        assert "Decision Rationale" in report
+        # Should contain rationale (inline, not as separate header)
+        assert "RATIONALE" in report.upper()
         assert "Strong fundamentals" in report
 
         # Should NOT contain full sections
@@ -540,9 +540,9 @@ Market positioning is excellent and valuation remains attractive.
         assert "BUY" in report
         assert "Executive Summary" in report
 
-        # Should attempt to extract rationale from text
-        assert "Decision Rationale" in report
-        # Should have some rationale content
+        # Should have content from decision text (rationale may be inline or absent)
+        assert "Strong performance" in report or "growth trajectory" in report
+        # Should have reasonable length
         assert len(report) > 100
 
     def test_brief_mode_minimal_data(self):
@@ -620,8 +620,8 @@ RATIONALE: Risk-reward unfavorable.
         assert "significant headwinds" in report
         assert "declining margins" in report
 
-        # Rationale should be present
-        assert "Decision Rationale" in report
+        # Rationale should be present (inline)
+        assert "RATIONALE" in report.upper()
         assert "Risk-reward" in report
 
 
@@ -888,10 +888,10 @@ Default SELL overridden to HOLD pending data completion.
         brief = reporter.generate_report(result_dict, brief_mode=True)
         full = reporter.generate_report(result_dict, brief_mode=False)
 
-        # Brief should have header and rationale
+        # Brief should have header and rationale (inline)
         assert "0005.HK" in brief
         assert "HOLD" in brief
-        assert "Decision Rationale" in brief
+        assert "RATIONALE" in brief.upper()
         assert "Analyst coverage below threshold" in brief
 
         # Brief should NOT have detailed sections

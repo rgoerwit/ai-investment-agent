@@ -222,11 +222,17 @@ GEMINI_RPM_LIMIT=360   # Paid tier 1: faster than free tier
 GEMINI_RPM_LIMIT=1000  # Paid tier 2: should be much, much faster than free tier
 ```
 
-**Performance comparison:**
+**Performance comparison (Google Tier 1, paid Tavily, ChatGPT API):**
+
+| Configuration | Time | Cost | Tokens |
+|---------------|------|------|--------|
+| Pro + Normal mode (DEEP_MODEL=gemini-3-pro-preview) | ~5 min | ~$0.46 | ~244k |
+| Flash + Normal mode (DEEP_MODEL=gemini-3-flash-preview) | ~3:15 | ~$0.13 | ~214k |
+| Pro + Quick mode (--quick flag) | ~1:40 | ~$0.09 | ~200k |
 
 - **Free tier (15 RPM):** ~1 analysis per 10-20 minutes (sometimes stalling or dying)
-- **Paid tier 1 (360 RPM):** ~3-5 analyses in the same period
-- **Paid tier 2 (1000 RPM):** ? analyses in the same period (I haven't tried this)
+- **Paid tier 1 (360 RPM):** ~3-5 analyses in the same period (tested benchmarks above)
+- **Paid tier 2 (1000 RPM):** ? analyses in the same period (not tested)
 
 The system applies a 20% safety margin automatically to prevent hitting API limits. For
 batch analysis of tickers, paid tiers can reduce runtime substantially.  The system is
@@ -295,14 +301,14 @@ The defaults (if not set) are defined in `src/config.py`. All LLM instances are 
 
 - 1 debate round vs 2 (50% fewer agent turns)
 - All synthesis agents use `thinking_level="low"` (faster responses)
-- Typical runtime: 2-4 minutes per ticker
+- **Tested runtime:** ~1:40 per ticker (Pro model), ~$0.09 cost
 - **Trade-off:** Less thorough reasoning, may miss nuanced risks
 
 ### Normal mode (default):
 
 - 2 debate rounds (more adversarial back-and-forth)
 - All synthesis agents use `thinking_level="high"` (deeper reasoning)
-- Typical runtime: Depending on API limits, 3-20 minutes per ticker
+- **Tested runtime:** ~5 min (Pro) or ~3:15 (Flash), cost $0.46 / $0.13
 - **Benefit:** More thorough analysis, better risk detection, higher quality recommendations
 
 For batch analysis of 300+ tickers, quick mode can save hours of runtime but may produce less rigorous recommendations. Use normal mode for final investment decisions.
@@ -385,10 +391,13 @@ caffeinate -i ./scripts/run_tickers.sh
 ./scripts/run_tickers.sh > batch_analysis.log 2>&1 &
 ```
 
-**Timing estimates:**
+**Timing estimates (Google Tier 1):**
 
-- 50 tickers: ~2-4 hours (standard mode) or ~1-2 hours (quick mode - varies)
-- 100 tickers: ~4-8 hours (standard mode) or ~2-4 hours (quick mode - varies)
+| Tickers | Quick (~1:40/ea) | Flash Normal (~3:15/ea) | Pro Normal (~5 min/ea) |
+|---------|------------------|-------------------------|------------------------|
+| 50 | ~1.4 hrs, ~$5 | ~2.7 hrs, ~$7 | ~4.2 hrs, ~$23 |
+| 100 | ~2.8 hrs, ~$9 | ~5.4 hrs, ~$13 | ~8.3 hrs, ~$46 |
+| 300 | ~8 hrs, ~$27 | ~16 hrs, ~$39 | ~25 hrs, ~$138 |
 
 **Note**: Small-cap/illiquid stocks may still show data gaps, but this *usually* reflects
 genuine data unavailability from financial APIs, not system failures.
@@ -602,13 +611,24 @@ Prompts enforce **algorithms via natural language** (e.g., "IF US Revenue > 35%:
 
 ### Speed & Cost
 
-- **Quick Mode:** faster, but fewer debate rounds, fewer fallbacks
-- **Standard Mode:** more expensive (if you are using paid API keys), slower, but better results
-- **API Cost:** $0 on Gemini free tier (15 RPM limit - slow for big jobs; I went to tier 1)
+**Tested with Google Tier 1, paid Tavily, ChatGPT API (Dec 2025):**
+
+| Configuration | Time | Cost per Ticker |
+|---------------|------|-----------------|
+| `DEEP_MODEL=gemini-3-pro-preview` (normal) | ~5 min | ~$0.46 |
+| `DEEP_MODEL=gemini-3-flash-preview` (normal) | ~3:15 | ~$0.13 |
+| `--quick` flag (any DEEP_MODEL) | ~1:40 | ~$0.09 |
+
+- **Quick Mode:** ~$0.09/ticker, 1:40 runtime, 1 debate round
+- **Normal + Flash:** ~$0.13/ticker, 3:15 runtime, 2 debate rounds (best value)
+- **Normal + Pro:** ~$0.46/ticker, 5 min runtime, 2 debate rounds (most thorough)
+- **API Cost:** $0 on Gemini free tier (15 RPM limit - slow for big jobs)
 - **Scalability:** Deploy to Azure Container Instances for 24/7 batch processing
 
-To assess costs, run:  ```bash examples/check_token_costs.py```. At tier 1 and using gemini-3-pro-preview as my DEEP_MODEL (see .env), unfortunately, my cost was > $.15/ticker.
-If this it too expensive, use the --quiet --brief flags, or switch to a cheaper model.
+To assess costs, run: `python examples/check_token_costs.py`. For batch analysis of 300 tickers:
+- Quick mode: ~$27, ~8 hours
+- Flash normal: ~$39, ~16 hours
+- Pro normal: ~$138, ~25 hours
 
 One future enhancement would be to include building the pre-search for hundreds of tickers to look at right in, as an option, so the scan could be started without having to use the ```scripts/run_tickers.sh``` wrapper.  Another might be building in a real UI, lol.
 
