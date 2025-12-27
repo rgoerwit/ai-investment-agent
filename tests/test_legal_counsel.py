@@ -1,12 +1,12 @@
 """
 Tests for Legal Counsel Agent and Legal Flag Detection
 
-This module tests the Legal Counsel agent that detects PFIC and VIE risks
-for US investors in ex-US equities.
+This module tests the Legal Counsel agent that detects PFIC, VIE, CMIC,
+and other regulatory risks for US investors in ex-US equities.
 
 Test categories:
-1. Legal risk extraction from JSON output
-2. Legal flag detection (PFIC/VIE warnings)
+1. Legal risk extraction from JSON output (PFIC, VIE, CMIC, other)
+2. Legal flag detection (PFIC/VIE/CMIC warnings)
 3. Integration with red flag detector
 
 Run with: pytest tests/test_legal_counsel.py -v
@@ -142,6 +142,100 @@ class TestLegalRiskExtraction:
         assert risks["pfic_status"] is None
         assert risks["vie_structure"] is None
 
+    def test_extract_cmic_flagged(self):
+        """Test CMIC FLAGGED extraction."""
+        legal_report = json.dumps(
+            {
+                "pfic_status": "N/A",
+                "vie_structure": "N/A",
+                "cmic_status": "FLAGGED",
+                "cmic_evidence": "Company appears on OFAC NS-CMIC list",
+                "country": "China",
+                "sector": "Defense",
+            }
+        )
+
+        risks = RedFlagDetector.extract_legal_risks(legal_report)
+
+        assert risks["cmic_status"] == "FLAGGED"
+        assert "NS-CMIC" in risks["cmic_evidence"]
+
+    def test_extract_cmic_uncertain(self):
+        """Test CMIC UNCERTAIN extraction."""
+        legal_report = json.dumps(
+            {
+                "pfic_status": "N/A",
+                "vie_structure": "N/A",
+                "cmic_status": "UNCERTAIN",
+                "cmic_evidence": "State-owned enterprise in sensitive sector",
+                "country": "China",
+                "sector": "Semiconductors",
+            }
+        )
+
+        risks = RedFlagDetector.extract_legal_risks(legal_report)
+
+        assert risks["cmic_status"] == "UNCERTAIN"
+
+    def test_extract_cmic_clear(self):
+        """Test CMIC CLEAR extraction for non-defense Chinese company."""
+        legal_report = json.dumps(
+            {
+                "pfic_status": "N/A",
+                "vie_structure": "YES",
+                "cmic_status": "CLEAR",
+                "cmic_evidence": None,
+                "country": "China",
+                "sector": "Consumer",
+            }
+        )
+
+        risks = RedFlagDetector.extract_legal_risks(legal_report)
+
+        assert risks["cmic_status"] == "CLEAR"
+
+    def test_extract_other_regulatory_risks(self):
+        """Test extraction of other_regulatory_risks array."""
+        legal_report = json.dumps(
+            {
+                "pfic_status": "N/A",
+                "vie_structure": "YES",
+                "cmic_status": "CLEAR",
+                "other_regulatory_risks": [
+                    {
+                        "risk_type": "HFCAA",
+                        "description": "Pending PCAOB audit compliance",
+                        "severity": "HIGH",
+                    },
+                    {
+                        "risk_type": "SDN",
+                        "description": "Minor Russia exposure in supply chain",
+                        "severity": "LOW",
+                    },
+                ],
+                "country": "China",
+                "sector": "Technology",
+            }
+        )
+
+        risks = RedFlagDetector.extract_legal_risks(legal_report)
+
+        assert len(risks["other_regulatory_risks"]) == 2
+        assert risks["other_regulatory_risks"][0]["risk_type"] == "HFCAA"
+        assert risks["other_regulatory_risks"][0]["severity"] == "HIGH"
+
+    def test_extract_cmic_regex_fallback(self):
+        """Test CMIC extraction via regex fallback."""
+        legal_report = """
+        Based on my analysis:
+        cmic_status: FLAGGED
+        The company appears on defense blacklist.
+        """
+
+        risks = RedFlagDetector.extract_legal_risks(legal_report)
+
+        assert risks["cmic_status"] == "FLAGGED"
+
 
 class TestLegalFlagDetection:
     """Test detection of legal/tax warning flags."""
@@ -256,6 +350,136 @@ class TestLegalFlagDetection:
         for warning in warnings:
             assert warning["action"] == "RISK_PENALTY"
             assert warning["action"] != "AUTO_REJECT"
+
+    def test_cmic_flagged_warning(self):
+        """Test CMIC_FLAGGED warning flag detection with high penalty."""
+        legal_risks = {
+            "pfic_status": "N/A",
+            "vie_structure": "N/A",
+            "cmic_status": "FLAGGED",
+            "cmic_evidence": "Company on NS-CMIC list",
+            "other_regulatory_risks": [],
+        }
+
+        warnings = RedFlagDetector.detect_legal_flags(legal_risks, "0001.SS")
+
+        assert len(warnings) == 1
+        assert warnings[0]["type"] == "CMIC_FLAGGED"
+        assert warnings[0]["severity"] == "HIGH"
+        assert warnings[0]["action"] == "RISK_PENALTY"
+        assert warnings[0]["risk_penalty"] == 2.0  # Highest legal penalty
+
+    def test_cmic_uncertain_warning(self):
+        """Test CMIC_UNCERTAIN warning flag detection."""
+        legal_risks = {
+            "pfic_status": "N/A",
+            "vie_structure": "N/A",
+            "cmic_status": "UNCERTAIN",
+            "cmic_evidence": "State-owned enterprise in sensitive sector",
+            "other_regulatory_risks": [],
+        }
+
+        warnings = RedFlagDetector.detect_legal_flags(legal_risks, "600000.SS")
+
+        assert len(warnings) == 1
+        assert warnings[0]["type"] == "CMIC_UNCERTAIN"
+        assert warnings[0]["risk_penalty"] == 1.0
+
+    def test_cmic_clear_no_warning(self):
+        """Test CMIC CLEAR status generates no CMIC warning."""
+        legal_risks = {
+            "pfic_status": "N/A",
+            "vie_structure": "N/A",
+            "cmic_status": "CLEAR",
+            "cmic_evidence": None,
+            "other_regulatory_risks": [],
+        }
+
+        warnings = RedFlagDetector.detect_legal_flags(legal_risks, "BABA")
+
+        # No CMIC warning for CLEAR status
+        cmic_warnings = [w for w in warnings if "CMIC" in w["type"]]
+        assert len(cmic_warnings) == 0
+
+    def test_other_regulatory_risks_high_severity(self):
+        """Test other_regulatory_risks with HIGH severity."""
+        legal_risks = {
+            "pfic_status": "N/A",
+            "vie_structure": "N/A",
+            "cmic_status": "N/A",
+            "other_regulatory_risks": [
+                {
+                    "risk_type": "HFCAA",
+                    "description": "Failing PCAOB audit requirements",
+                    "severity": "HIGH",
+                }
+            ],
+        }
+
+        warnings = RedFlagDetector.detect_legal_flags(legal_risks, "LK")
+
+        assert len(warnings) == 1
+        assert warnings[0]["type"] == "REGULATORY_HFCAA"
+        assert warnings[0]["risk_penalty"] == 1.5  # HIGH = 1.5
+
+    def test_other_regulatory_risks_multiple(self):
+        """Test multiple other_regulatory_risks with different severities."""
+        legal_risks = {
+            "pfic_status": "N/A",
+            "vie_structure": "N/A",
+            "cmic_status": "N/A",
+            "other_regulatory_risks": [
+                {"risk_type": "HFCAA", "description": "Audit risk", "severity": "HIGH"},
+                {
+                    "risk_type": "SDN",
+                    "description": "Minor exposure",
+                    "severity": "LOW",
+                },
+                {
+                    "risk_type": "ENTITY_LIST",
+                    "description": "Export controls",
+                    "severity": "MEDIUM",
+                },
+            ],
+        }
+
+        warnings = RedFlagDetector.detect_legal_flags(legal_risks, "TEST")
+
+        assert len(warnings) == 3
+        total_penalty = sum(w["risk_penalty"] for w in warnings)
+        assert total_penalty == 3.0  # 1.5 + 0.5 + 1.0
+
+    def test_combined_cmic_and_other_risks(self):
+        """Test CMIC + other regulatory risks combined."""
+        legal_risks = {
+            "pfic_status": "PROBABLE",
+            "pfic_evidence": "PFIC warning",
+            "vie_structure": "YES",
+            "vie_evidence": "VIE structure",
+            "cmic_status": "UNCERTAIN",
+            "cmic_evidence": "Possible defense ties",
+            "other_regulatory_risks": [
+                {
+                    "risk_type": "HFCAA",
+                    "description": "Audit risk",
+                    "severity": "MEDIUM",
+                }
+            ],
+        }
+
+        warnings = RedFlagDetector.detect_legal_flags(legal_risks, "TEST.HK")
+
+        # Should have: PFIC_PROBABLE, VIE, CMIC_UNCERTAIN, REGULATORY_HFCAA
+        assert len(warnings) == 4
+        types = [w["type"] for w in warnings]
+        assert "PFIC_PROBABLE" in types
+        assert "VIE_STRUCTURE" in types
+        assert "CMIC_UNCERTAIN" in types
+        assert "REGULATORY_HFCAA" in types
+
+        # Total penalty: 1.0 + 0.5 + 1.0 + 1.0 = 3.5
+        total_penalty = sum(w["risk_penalty"] for w in warnings)
+        assert total_penalty == 3.5
 
 
 class TestLegalFlagIntegration:

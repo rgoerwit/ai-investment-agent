@@ -474,6 +474,9 @@ class RedFlagDetector:
             - pfic_evidence: Quote from search results
             - vie_structure: YES/NO/N/A
             - vie_evidence: Description if VIE detected
+            - cmic_status: FLAGGED/UNCERTAIN/CLEAR/N/A
+            - cmic_evidence: Description if CMIC risk detected
+            - other_regulatory_risks: List of {risk_type, description, severity}
             - country: Country of domicile
             - sector: Sector name
         """
@@ -482,6 +485,9 @@ class RedFlagDetector:
             "pfic_evidence": None,
             "vie_structure": None,
             "vie_evidence": None,
+            "cmic_status": None,
+            "cmic_evidence": None,
+            "other_regulatory_risks": [],
             "country": None,
             "sector": None,
         }
@@ -513,6 +519,9 @@ class RedFlagDetector:
             risks["pfic_evidence"] = data.get("pfic_evidence")
             risks["vie_structure"] = data.get("vie_structure")
             risks["vie_evidence"] = data.get("vie_evidence")
+            risks["cmic_status"] = data.get("cmic_status")
+            risks["cmic_evidence"] = data.get("cmic_evidence")
+            risks["other_regulatory_risks"] = data.get("other_regulatory_risks") or []
             risks["country"] = data.get("country")
             risks["sector"] = data.get("sector")
 
@@ -520,6 +529,7 @@ class RedFlagDetector:
                 "legal_risks_parsed_json",
                 pfic_status=risks["pfic_status"],
                 vie_structure=risks["vie_structure"],
+                cmic_status=risks["cmic_status"],
             )
             return risks
 
@@ -542,6 +552,14 @@ class RedFlagDetector:
         if vie_match:
             risks["vie_structure"] = vie_match.group(1).upper()
 
+        cmic_match = re.search(
+            r'"?cmic_status"?\s*:\s*"?(FLAGGED|UNCERTAIN|CLEAR|N/A)"?',
+            legal_report,
+            re.IGNORECASE,
+        )
+        if cmic_match:
+            risks["cmic_status"] = cmic_match.group(1).upper()
+
         return risks
 
     @staticmethod
@@ -553,7 +571,17 @@ class RedFlagDetector:
 
         Unlike financial red flags (which trigger AUTO_REJECT), legal flags
         add risk penalties but do NOT reject the stock. PFIC is a tax burden,
-        not a viability issue.
+        not a viability issue. CMIC is currently a high penalty (2.0) but not
+        auto-reject since restrictions may change - modify severity/action
+        in the code if stricter enforcement is needed.
+
+        Flags detected:
+        - PFIC_PROBABLE: 1.0 penalty (tax burden)
+        - PFIC_UNCERTAIN: 0.5 penalty
+        - VIE_STRUCTURE: 0.5 penalty (ownership risk)
+        - CMIC_FLAGGED: 2.0 penalty (near-prohibition, configurable)
+        - CMIC_UNCERTAIN: 1.0 penalty
+        - REGULATORY_*: 0.5-1.5 penalty based on severity (open-ended)
 
         Args:
             legal_risks: Extracted legal risk data from extract_legal_risks()
@@ -621,6 +649,78 @@ class RedFlagDetector:
             )
             logger.warning(
                 "legal_flag_vie_structure", ticker=ticker, evidence=vie_evidence[:50]
+            )
+
+        # --- WARNING 4: CMIC Flagged (configurable severity) ---
+        # CMIC = Chinese Military-Industrial Complex (NS-CMIC list)
+        # Default: HIGH risk penalty but NOT auto-reject (restrictions may change)
+        # To escalate: change severity to "CRITICAL" and action to "AUTO_REJECT"
+        cmic_status = legal_risks.get("cmic_status")
+        if cmic_status == "FLAGGED":
+            cmic_evidence = legal_risks.get("cmic_evidence") or "NS-CMIC list match"
+            warnings.append(
+                {
+                    "type": "CMIC_FLAGGED",
+                    "severity": "HIGH",  # Change to "CRITICAL" for auto-reject
+                    "detail": f"Company appears on NS-CMIC list. {cmic_evidence[:80]}",
+                    "action": "RISK_PENALTY",  # Change to "AUTO_REJECT" if needed
+                    "risk_penalty": 2.0,  # High penalty - near-prohibition
+                    "rationale": "US Executive Orders prohibit US persons from investing in "
+                    "NS-CMIC listed companies. Verify current OFAC status before investing. "
+                    "Restrictions may be modified by future executive orders.",
+                }
+            )
+            logger.warning(
+                "legal_flag_cmic_flagged", ticker=ticker, evidence=cmic_evidence[:50]
+            )
+
+        elif cmic_status == "UNCERTAIN":
+            cmic_evidence = (
+                legal_risks.get("cmic_evidence") or "Possible CMIC connection"
+            )
+            warnings.append(
+                {
+                    "type": "CMIC_UNCERTAIN",
+                    "severity": "WARNING",
+                    "detail": f"Possible CMIC connection. {cmic_evidence[:80]}",
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 1.0,
+                    "rationale": "Company may have ties to Chinese military-industrial complex. "
+                    "Recommend verifying against current OFAC NS-CMIC list before investing.",
+                }
+            )
+            logger.info(
+                "legal_flag_cmic_uncertain", ticker=ticker, evidence=cmic_evidence[:50]
+            )
+
+        # --- WARNING 5+: Other Regulatory Risks (open-ended) ---
+        other_risks = legal_risks.get("other_regulatory_risks") or []
+        severity_penalties = {"HIGH": 1.5, "MEDIUM": 1.0, "LOW": 0.5}
+
+        for risk in other_risks:
+            if not isinstance(risk, dict):
+                continue
+            risk_type = risk.get("risk_type", "OTHER")
+            description = risk.get("description", "Regulatory risk detected")
+            severity = risk.get("severity", "MEDIUM").upper()
+            penalty = severity_penalties.get(severity, 1.0)
+
+            warnings.append(
+                {
+                    "type": f"REGULATORY_{risk_type}",
+                    "severity": "WARNING" if severity != "HIGH" else "HIGH",
+                    "detail": f"{risk_type}: {description[:100]}",
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": penalty,
+                    "rationale": f"Regulatory risk identified by Legal Counsel. "
+                    f"Type: {risk_type}, Severity: {severity}. Review before investing.",
+                }
+            )
+            logger.info(
+                "legal_flag_other_regulatory",
+                ticker=ticker,
+                risk_type=risk_type,
+                severity=severity,
             )
 
         return warnings
