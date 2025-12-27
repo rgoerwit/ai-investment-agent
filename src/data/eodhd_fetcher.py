@@ -13,15 +13,17 @@ Error Codes Handled (per EODHD Docs):
 - 429: Too Many Requests (Daily limit reached)
 """
 
-import os
-import aiohttp
 import logging
-import pandas as pd
 from typing import Any
-from src.data.interfaces import FinancialFetcher
+
+import aiohttp
+import pandas as pd
+
 from src.config import config
+from src.data.interfaces import FinancialFetcher
 
 logger = logging.getLogger(__name__)
+
 
 class EODHDFetcher(FinancialFetcher):
     """
@@ -34,11 +36,11 @@ class EODHDFetcher(FinancialFetcher):
         self.base_url = "https://eodhd.com/api"
         self._session = None
         self._is_exhausted = False  # Circuit breaker for rate limits
-        
+
     async def __aenter__(self):
         self._session = aiohttp.ClientSession()
         return self
-    
+
     async def __aexit__(self, *args):
         await self.close()
 
@@ -55,22 +57,22 @@ class EODHDFetcher(FinancialFetcher):
     def _normalize_ticker(self, ticker: str) -> str:
         """
         Convert yfinance ticker to EODHD format.
-        
+
         Mappings:
         - US: "AAPL" -> "AAPL.US"
         - London: "BP.L" -> "BP.LSE" (Sometimes .L works, but .LSE is canonical)
         - Others: Generally match (0005.HK -> 0005.HK)
         """
         ticker = ticker.upper()
-        
+
         # Specific overrides for common divergences
-        if ticker.endswith('.L'):
-            return ticker.replace('.L', '.LSE')
-        
+        if ticker.endswith(".L"):
+            return ticker.replace(".L", ".LSE")
+
         # If no suffix, assume US
-        if '.' not in ticker:
+        if "." not in ticker:
             return f"{ticker}.US"
-            
+
         return ticker
 
     async def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
@@ -80,7 +82,9 @@ class EODHDFetcher(FinancialFetcher):
         """
         return pd.DataFrame()
 
-    async def get_financial_metrics(self, symbol: str) -> dict[str, float | None] | None:
+    async def get_financial_metrics(
+        self, symbol: str
+    ) -> dict[str, float | None] | None:
         """
         Fetch fundamentals from EODHD.
         Returns processed dictionary or None if failed.
@@ -97,7 +101,6 @@ class EODHDFetcher(FinancialFetcher):
 
         try:
             async with self._session.get(url, params=params, timeout=10) as response:
-
                 # --- Error Handling & Circuit Breaking ---
                 if response.status == 200:
                     try:
@@ -106,25 +109,31 @@ class EODHDFetcher(FinancialFetcher):
                         logger.debug(f"EODHD malformed JSON for {eod_symbol}: {e}")
                         return None
                     return self._parse_fundamentals(data)
-                
+
                 elif response.status == 429:
-                    logger.error(f"EODHD API Limit Exceeded (429). Disabling EODHD for this session.")
+                    logger.error(
+                        "EODHD API Limit Exceeded (429). Disabling EODHD for this session."
+                    )
                     self._is_exhausted = True
                     return None
-                
+
                 elif response.status == 402:
-                    logger.warning(f"EODHD Payment Required (402). Access restricted for {eod_symbol}.")
+                    logger.warning(
+                        f"EODHD Payment Required (402). Access restricted for {eod_symbol}."
+                    )
                     # Don't disable globally, might just be this specific exchange
                     return None
-                    
+
                 elif response.status == 404:
                     logger.debug(f"EODHD data not found for {eod_symbol}")
                     return None
-                    
+
                 else:
-                    logger.warning(f"EODHD API error {response.status} for {eod_symbol}")
+                    logger.warning(
+                        f"EODHD API error {response.status} for {eod_symbol}"
+                    )
                     return None
-                    
+
         except Exception as e:
             logger.debug(f"EODHD request failed: {e}")
             return None
@@ -132,81 +141,93 @@ class EODHDFetcher(FinancialFetcher):
     def _parse_fundamentals(self, data: dict) -> dict[str, float | None]:
         """Map EODHD JSON structure to internal schema."""
         output = {
-            '_source': 'eodhd',
+            "_source": "eodhd",
             # Core Valuation
-            'marketCap': None, 
-            'trailingPE': None, 
-            'forwardPE': None,
-            'priceToBook': None, 
-            'pegRatio': None,
-            
+            "marketCap": None,
+            "trailingPE": None,
+            "forwardPE": None,
+            "priceToBook": None,
+            "pegRatio": None,
             # Profitability
-            'returnOnEquity': None, 
-            'returnOnAssets': None,
-            'profitMargins': None, 
-            'operatingMargins': None,
-            'grossMargins': None,
-
+            "returnOnEquity": None,
+            "returnOnAssets": None,
+            "profitMargins": None,
+            "operatingMargins": None,
+            "grossMargins": None,
             # Growth & Health
-            'revenueGrowth': None, 
-            'earningsGrowth': None,
-            'debtToEquity': None, 
-            'currentRatio': None, 
-            
+            "revenueGrowth": None,
+            "earningsGrowth": None,
+            "debtToEquity": None,
+            "currentRatio": None,
             # Cash Flow
-            'freeCashflow': None, 
-            'operatingCashflow': None,
-            
+            "freeCashflow": None,
+            "operatingCashflow": None,
             # Basics
-            'currency': None, 
-            'currentPrice': None
+            "currency": None,
+            "currentPrice": None,
         }
 
         try:
-            general = data.get('General', {})
-            highlights = data.get('Highlights', {})
-            valuation = data.get('Valuation', {})
-            technicals = data.get('Technicals', {})
-            financials = data.get('Financials', {})
+            general = data.get("General", {})
+            highlights = data.get("Highlights", {})
+            valuation = data.get("Valuation", {})
+            technicals = data.get("Technicals", {})
+            financials = data.get("Financials", {})
 
             # --- Basics ---
-            output['currency'] = general.get('CurrencyCode')
+            output["currency"] = general.get("CurrencyCode")
             # EODHD Technicals often has the 50d MA or close
-            output['currentPrice'] = self._safe_float(technicals.get('50DayMA'))
+            output["currentPrice"] = self._safe_float(technicals.get("50DayMA"))
 
             # --- Valuation ---
-            output['marketCap'] = self._safe_float(highlights.get('MarketCapitalization'))
-            output['trailingPE'] = self._safe_float(highlights.get('PERatio'))
-            output['forwardPE'] = self._safe_float(valuation.get('ForwardPE'))
-            output['priceToBook'] = self._safe_float(valuation.get('PriceBookMRQ'))
-            output['pegRatio'] = self._safe_float(highlights.get('PEGRatio'))
+            output["marketCap"] = self._safe_float(
+                highlights.get("MarketCapitalization")
+            )
+            output["trailingPE"] = self._safe_float(highlights.get("PERatio"))
+            output["forwardPE"] = self._safe_float(valuation.get("ForwardPE"))
+            output["priceToBook"] = self._safe_float(valuation.get("PriceBookMRQ"))
+            output["pegRatio"] = self._safe_float(highlights.get("PEGRatio"))
 
             # --- Profitability ---
-            output['returnOnEquity'] = self._safe_float(highlights.get('ReturnOnEquityTTM'))
-            output['returnOnAssets'] = self._safe_float(highlights.get('ReturnOnAssetsTTM'))
-            output['profitMargins'] = self._safe_float(highlights.get('ProfitMargin'))
-            output['operatingMargins'] = self._safe_float(highlights.get('OperatingMarginTTM'))
-            output['grossMargins'] = self._safe_float(highlights.get('GrossProfitMarginTTM'))
+            output["returnOnEquity"] = self._safe_float(
+                highlights.get("ReturnOnEquityTTM")
+            )
+            output["returnOnAssets"] = self._safe_float(
+                highlights.get("ReturnOnAssetsTTM")
+            )
+            output["profitMargins"] = self._safe_float(highlights.get("ProfitMargin"))
+            output["operatingMargins"] = self._safe_float(
+                highlights.get("OperatingMarginTTM")
+            )
+            output["grossMargins"] = self._safe_float(
+                highlights.get("GrossProfitMarginTTM")
+            )
 
             # --- Growth ---
-            output['revenueGrowth'] = self._safe_float(highlights.get('RevenueTTMYoy'))
-            output['earningsGrowth'] = self._safe_float(highlights.get('EarningsShareTTMYoy'))
+            output["revenueGrowth"] = self._safe_float(highlights.get("RevenueTTMYoy"))
+            output["earningsGrowth"] = self._safe_float(
+                highlights.get("EarningsShareTTMYoy")
+            )
 
             # --- Health ---
             # EODHD Debt/Equity is usually absolute, ensure we don't get %.
-            output['debtToEquity'] = self._safe_float(highlights.get('DebtToEquity'))
-            output['currentRatio'] = self._safe_float(highlights.get('CurrentRatio'))
+            output["debtToEquity"] = self._safe_float(highlights.get("DebtToEquity"))
+            output["currentRatio"] = self._safe_float(highlights.get("CurrentRatio"))
 
             # --- Cash Flow ---
             # Parse from Cash_Flow statement to get absolute numbers
-            cash_flow_statement = financials.get('Cash_Flow', {}).get('yearly', {})
+            cash_flow_statement = financials.get("Cash_Flow", {}).get("yearly", {})
             if cash_flow_statement:
                 # Keys are dates, sort to get most recent
                 dates = sorted(cash_flow_statement.keys())
                 if dates:
                     last_report = cash_flow_statement[dates[-1]]
-                    output['freeCashflow'] = self._safe_float(last_report.get('freeCashFlow'))
-                    output['operatingCashflow'] = self._safe_float(last_report.get('totalCashFromOperatingActivities'))
+                    output["freeCashflow"] = self._safe_float(
+                        last_report.get("freeCashFlow")
+                    )
+                    output["operatingCashflow"] = self._safe_float(
+                        last_report.get("totalCashFromOperatingActivities")
+                    )
 
         except Exception as e:
             logger.warning(f"Error parsing EODHD data structure: {e}")
@@ -216,7 +237,7 @@ class EODHDFetcher(FinancialFetcher):
     def _safe_float(self, value: Any) -> float | None:
         """Safely convert to float."""
         try:
-            if value is None or value == 'NA' or value == 'NaN':
+            if value is None or value == "NA" or value == "NaN":
                 return None
             return float(value)
         except (ValueError, TypeError):
@@ -225,6 +246,7 @@ class EODHDFetcher(FinancialFetcher):
 
 # Singleton Pattern
 _eodhd_fetcher = None
+
 
 def get_eodhd_fetcher() -> EODHDFetcher:
     global _eodhd_fetcher

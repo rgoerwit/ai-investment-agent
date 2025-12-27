@@ -19,17 +19,19 @@ Why code-driven instead of LLM-driven:
 Pattern matches: src/data/validator.py (also code-driven for same reasons)
 """
 
-import re
 import json
-import structlog
-from typing import Any
+import re
 from enum import Enum
+from typing import Any
+
+import structlog
 
 logger = structlog.get_logger(__name__)
 
 
 class Sector(Enum):
     """Sector classifications for sector-aware red flag detection."""
+
     GENERAL = "General/Diversified"
     BANKING = "Banking"
     UTILITIES = "Utilities"
@@ -68,7 +70,7 @@ class RedFlagDetector:
             return Sector.GENERAL
 
         # Extract SECTOR from DATA_BLOCK
-        sector_match = re.search(r'SECTOR:\s*(.+?)(?:\n|$)', fundamentals_report)
+        sector_match = re.search(r"SECTOR:\s*(.+?)(?:\n|$)", fundamentals_report)
 
         if not sector_match:
             logger.debug("no_sector_found_in_report", fallback="GENERAL")
@@ -81,7 +83,11 @@ class RedFlagDetector:
             return Sector.BANKING
         elif "Utilities" in sector_text or "Utility" in sector_text:
             return Sector.UTILITIES
-        elif "Shipping" in sector_text or "Commodities" in sector_text or "Cyclical" in sector_text:
+        elif (
+            "Shipping" in sector_text
+            or "Commodities" in sector_text
+            or "Cyclical" in sector_text
+        ):
             return Sector.SHIPPING
         elif "Technology" in sector_text or "Software" in sector_text:
             return Sector.TECHNOLOGY
@@ -117,19 +123,21 @@ class RedFlagDetector:
             ### --- END DATA_BLOCK ---
         """
         metrics: dict[str, float | None] = {
-            'debt_to_equity': None,
-            'net_income': None,
-            'fcf': None,
-            'interest_coverage': None,
-            'pe_ratio': None,
-            'adjusted_health_score': None,
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": None,
+            "adjusted_health_score": None,
         }
 
         if not fundamentals_report:
             return metrics
 
         # Extract the LAST DATA_BLOCK (agent self-correction pattern)
-        data_block_pattern = r'### --- START DATA_BLOCK ---(.+?)### --- END DATA_BLOCK ---'
+        data_block_pattern = (
+            r"### --- START DATA_BLOCK ---(.+?)### --- END DATA_BLOCK ---"
+        )
         blocks = list(re.finditer(data_block_pattern, fundamentals_report, re.DOTALL))
 
         if not blocks:
@@ -140,20 +148,26 @@ class RedFlagDetector:
         data_block = blocks[-1].group(1)
 
         # Extract ADJUSTED_HEALTH_SCORE (percentage)
-        health_match = re.search(r'ADJUSTED_HEALTH_SCORE:\s*(\d+(?:\.\d+)?)%', data_block)
+        health_match = re.search(
+            r"ADJUSTED_HEALTH_SCORE:\s*(\d+(?:\.\d+)?)%", data_block
+        )
         if health_match:
-            metrics['adjusted_health_score'] = float(health_match.group(1))
+            metrics["adjusted_health_score"] = float(health_match.group(1))
 
         # Extract PE_RATIO_TTM
-        pe_match = re.search(r'PE_RATIO_TTM:\s*([0-9.]+)', data_block)
+        pe_match = re.search(r"PE_RATIO_TTM:\s*([0-9.]+)", data_block)
         if pe_match:
-            metrics['pe_ratio'] = float(pe_match.group(1))
+            metrics["pe_ratio"] = float(pe_match.group(1))
 
         # Now extract from detailed sections (below DATA_BLOCK)
-        metrics['debt_to_equity'] = RedFlagDetector._extract_debt_to_equity(fundamentals_report)
-        metrics['interest_coverage'] = RedFlagDetector._extract_interest_coverage(fundamentals_report)
-        metrics['fcf'] = RedFlagDetector._extract_free_cash_flow(fundamentals_report)
-        metrics['net_income'] = RedFlagDetector._extract_net_income(fundamentals_report)
+        metrics["debt_to_equity"] = RedFlagDetector._extract_debt_to_equity(
+            fundamentals_report
+        )
+        metrics["interest_coverage"] = RedFlagDetector._extract_interest_coverage(
+            fundamentals_report
+        )
+        metrics["fcf"] = RedFlagDetector._extract_free_cash_flow(fundamentals_report)
+        metrics["net_income"] = RedFlagDetector._extract_net_income(fundamentals_report)
 
         return metrics
 
@@ -174,11 +188,11 @@ class RedFlagDetector:
             D/E ratio as percentage (e.g., 250.0), or None if not found
         """
         patterns = [
-            r'(?:^|\n)\s*-?\s*D/E:\s*([0-9.]+)',
-            r'(?:^|\n)\s*-?\s*Debt/Equity:\s*([0-9.]+)',
-            r'(?:^|\n)\s*-?\s*Debt-to-Equity:\s*([0-9.]+)',
-            r'D/E:\s*([0-9.]+)',
-            r'Debt/Equity:\s*([0-9.]+)',
+            r"(?:^|\n)\s*-?\s*D/E:\s*([0-9.]+)",
+            r"(?:^|\n)\s*-?\s*Debt/Equity:\s*([0-9.]+)",
+            r"(?:^|\n)\s*-?\s*Debt-to-Equity:\s*([0-9.]+)",
+            r"D/E:\s*([0-9.]+)",
+            r"Debt/Equity:\s*([0-9.]+)",
         ]
         for pattern in patterns:
             match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
@@ -204,9 +218,9 @@ class RedFlagDetector:
             Interest coverage ratio (e.g., 3.5), or None if not found
         """
         patterns = [
-            r'\*\*Interest Coverage\*\*:\s*([0-9.]+)x?',
-            r'Interest Coverage:\s*([0-9.]+)x?',
-            r'Interest Coverage Ratio:\s*([0-9.]+)x?',
+            r"\*\*Interest Coverage\*\*:\s*([0-9.]+)x?",
+            r"Interest Coverage:\s*([0-9.]+)x?",
+            r"Interest Coverage Ratio:\s*([0-9.]+)x?",
         ]
         for pattern in patterns:
             match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
@@ -233,11 +247,11 @@ class RedFlagDetector:
         """
         patterns = [
             # Support multiple currencies: $, ¥, €, £ or none
-            r'\*\*Free Cash Flow\*\*:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?',
-            r'(?:^|\n)\s*Free Cash Flow:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?',
-            r'(?:^|\n)\s*FCF:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?',
-            r'(?:Free Cash Flow|FCF):\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?',
-            r'Positive FCF:\s*[$¥€£]?\s*([0-9,.]+)\s*([BMK])?',  # No negative for "Positive"
+            r"\*\*Free Cash Flow\*\*:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
+            r"(?:^|\n)\s*Free Cash Flow:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
+            r"(?:^|\n)\s*FCF:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
+            r"(?:Free Cash Flow|FCF):\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
+            r"Positive FCF:\s*[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",  # No negative for "Positive"
         ]
         for pattern in patterns:
             match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
@@ -245,22 +259,22 @@ class RedFlagDetector:
                 groups = match.groups()
                 # Handle two different pattern structures
                 if len(groups) == 2:  # "Positive FCF" pattern
-                    value = float(groups[0].replace(',', ''))
+                    value = float(groups[0].replace(",", ""))
                     multiplier = groups[1] if len(groups) > 1 else None
                 else:  # All other patterns with sign capture
                     sign = groups[0]  # '+' or '-' or ''
-                    value = float(groups[1].replace(',', ''))
-                    if sign == '-':
+                    value = float(groups[1].replace(",", ""))
+                    if sign == "-":
                         value = -value
                     multiplier = groups[2] if len(groups) > 2 else None
 
                 # Handle B/M/K multipliers
                 if multiplier:
-                    if multiplier.upper() == 'B':
+                    if multiplier.upper() == "B":
                         value *= 1_000_000_000
-                    elif multiplier.upper() == 'M':
+                    elif multiplier.upper() == "M":
                         value *= 1_000_000
-                    elif multiplier.upper() == 'K':
+                    elif multiplier.upper() == "K":
                         value *= 1_000
                 return value
         return None
@@ -283,27 +297,27 @@ class RedFlagDetector:
         """
         patterns = [
             # Support multiple currencies: $, ¥, €, £ or none
-            r'\*\*Net Income\*\*:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?',
-            r'(?:^|\n)\s*Net Income:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?',
-            r'Net Income:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?',
+            r"\*\*Net Income\*\*:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
+            r"(?:^|\n)\s*Net Income:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
+            r"Net Income:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
         ]
         for pattern in patterns:
             match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
             if match:
                 groups = match.groups()
                 sign = groups[0]  # '+' or '-' or ''
-                value = float(groups[1].replace(',', ''))
-                if sign == '-':
+                value = float(groups[1].replace(",", ""))
+                if sign == "-":
                     value = -value
                 multiplier = groups[2] if len(groups) > 2 else None
 
                 # Handle B/M/K multipliers
                 if multiplier:
-                    if multiplier.upper() == 'B':
+                    if multiplier.upper() == "B":
                         value *= 1_000_000_000
-                    elif multiplier.upper() == 'M':
+                    elif multiplier.upper() == "M":
                         value *= 1_000_000
-                    elif multiplier.upper() == 'K':
+                    elif multiplier.upper() == "K":
                         value *= 1_000
                 return value
         return None
@@ -312,7 +326,7 @@ class RedFlagDetector:
     def detect_red_flags(
         metrics: dict[str, float | None],
         ticker: str = "UNKNOWN",
-        sector: Sector = Sector.GENERAL
+        sector: Sector = Sector.GENERAL,
     ) -> tuple[list[dict], str]:
         """
         Apply sector-aware threshold-based red-flag detection logic.
@@ -348,7 +362,9 @@ class RedFlagDetector:
             # Capital-intensive sectors: Higher thresholds
             leverage_threshold = 800  # D/E > 800% is extreme (vs 500% standard)
             coverage_threshold = 1.5  # Interest coverage < 1.5x (vs 2.0x standard)
-            coverage_de_threshold = 200  # D/E > 200% when coverage weak (vs 100% standard)
+            coverage_de_threshold = (
+                200  # D/E > 200% when coverage weak (vs 100% standard)
+            )
         else:
             # General/Technology: Standard thresholds
             leverage_threshold = 500
@@ -356,61 +372,78 @@ class RedFlagDetector:
             coverage_de_threshold = 100
 
         # --- RED FLAG 1: Extreme Leverage (Leverage Bomb) ---
-        debt_to_equity = metrics.get('debt_to_equity')
-        if leverage_threshold is not None and debt_to_equity is not None and debt_to_equity > leverage_threshold:
-            red_flags.append({
-                'type': 'EXTREME_LEVERAGE',
-                'severity': 'CRITICAL',
-                'detail': f"D/E ratio {debt_to_equity:.1f}% is extreme (>{leverage_threshold}% threshold for {sector.value})",
-                'action': 'AUTO_REJECT',
-                'rationale': f'Leverage exceeds sector-appropriate threshold - bankruptcy risk (sector: {sector.value})'
-            })
+        debt_to_equity = metrics.get("debt_to_equity")
+        if (
+            leverage_threshold is not None
+            and debt_to_equity is not None
+            and debt_to_equity > leverage_threshold
+        ):
+            red_flags.append(
+                {
+                    "type": "EXTREME_LEVERAGE",
+                    "severity": "CRITICAL",
+                    "detail": f"D/E ratio {debt_to_equity:.1f}% is extreme (>{leverage_threshold}% threshold for {sector.value})",
+                    "action": "AUTO_REJECT",
+                    "rationale": f"Leverage exceeds sector-appropriate threshold - bankruptcy risk (sector: {sector.value})",
+                }
+            )
             logger.warning(
                 "red_flag_extreme_leverage",
                 ticker=ticker,
                 debt_to_equity=debt_to_equity,
                 threshold=leverage_threshold,
-                sector=sector.value
+                sector=sector.value,
             )
 
         # --- RED FLAG 2: Earnings Quality Disconnect ---
-        net_income = metrics.get('net_income')
-        fcf = metrics.get('fcf')
+        net_income = metrics.get("net_income")
+        fcf = metrics.get("fcf")
 
-        if (net_income is not None and net_income > 0 and
-            fcf is not None and fcf < 0 and
-            abs(fcf) > (2 * net_income)):
-
-            red_flags.append({
-                'type': 'EARNINGS_QUALITY',
-                'severity': 'CRITICAL',
-                'detail': f"Positive net income (${net_income:,.0f}) but negative FCF (${fcf:,.0f}) >2x income",
-                'action': 'AUTO_REJECT',
-                'rationale': 'Earnings likely fabricated through accounting tricks - FCF disconnect'
-            })
+        if (
+            net_income is not None
+            and net_income > 0
+            and fcf is not None
+            and fcf < 0
+            and abs(fcf) > (2 * net_income)
+        ):
+            red_flags.append(
+                {
+                    "type": "EARNINGS_QUALITY",
+                    "severity": "CRITICAL",
+                    "detail": f"Positive net income (${net_income:,.0f}) but negative FCF (${fcf:,.0f}) >2x income",
+                    "action": "AUTO_REJECT",
+                    "rationale": "Earnings likely fabricated through accounting tricks - FCF disconnect",
+                }
+            )
             logger.warning(
                 "red_flag_earnings_quality",
                 ticker=ticker,
                 net_income=net_income,
                 fcf=fcf,
-                disconnect_multiple=abs(fcf / net_income) if net_income != 0 else None
+                disconnect_multiple=abs(fcf / net_income) if net_income != 0 else None,
             )
 
         # --- RED FLAG 3: Interest Coverage Death Spiral (Sector-Aware) ---
-        interest_coverage = metrics.get('interest_coverage')
+        interest_coverage = metrics.get("interest_coverage")
 
         # Only apply if sector has defined thresholds (excludes banking)
-        if (coverage_threshold is not None and coverage_de_threshold is not None and
-            interest_coverage is not None and interest_coverage < coverage_threshold and
-            debt_to_equity is not None and debt_to_equity > coverage_de_threshold):
-
-            red_flags.append({
-                'type': 'REFINANCING_RISK',
-                'severity': 'CRITICAL',
-                'detail': f"Interest coverage {interest_coverage:.2f}x with {debt_to_equity:.1f}% D/E ratio (thresholds: <{coverage_threshold}x coverage + >{coverage_de_threshold}% D/E for {sector.value})",
-                'action': 'AUTO_REJECT',
-                'rationale': f'Cannot comfortably service debt - refinancing/default risk (sector: {sector.value})'
-            })
+        if (
+            coverage_threshold is not None
+            and coverage_de_threshold is not None
+            and interest_coverage is not None
+            and interest_coverage < coverage_threshold
+            and debt_to_equity is not None
+            and debt_to_equity > coverage_de_threshold
+        ):
+            red_flags.append(
+                {
+                    "type": "REFINANCING_RISK",
+                    "severity": "CRITICAL",
+                    "detail": f"Interest coverage {interest_coverage:.2f}x with {debt_to_equity:.1f}% D/E ratio (thresholds: <{coverage_threshold}x coverage + >{coverage_de_threshold}% D/E for {sector.value})",
+                    "action": "AUTO_REJECT",
+                    "rationale": f"Cannot comfortably service debt - refinancing/default risk (sector: {sector.value})",
+                }
+            )
             logger.warning(
                 "red_flag_refinancing_risk",
                 ticker=ticker,
@@ -418,12 +451,12 @@ class RedFlagDetector:
                 debt_to_equity=debt_to_equity,
                 coverage_threshold=coverage_threshold,
                 de_threshold=coverage_de_threshold,
-                sector=sector.value
+                sector=sector.value,
             )
 
         # Determine result
-        has_auto_reject = any(flag['action'] == 'AUTO_REJECT' for flag in red_flags)
-        result = 'REJECT' if has_auto_reject else 'PASS'
+        has_auto_reject = any(flag["action"] == "AUTO_REJECT" for flag in red_flags)
+        result = "REJECT" if has_auto_reject else "PASS"
 
         return red_flags, result
 
@@ -445,12 +478,12 @@ class RedFlagDetector:
             - sector: Sector name
         """
         risks: dict[str, Any] = {
-            'pfic_status': None,
-            'pfic_evidence': None,
-            'vie_structure': None,
-            'vie_evidence': None,
-            'country': None,
-            'sector': None,
+            "pfic_status": None,
+            "pfic_evidence": None,
+            "vie_structure": None,
+            "vie_evidence": None,
+            "country": None,
+            "sector": None,
         }
 
         if not legal_report:
@@ -460,33 +493,33 @@ class RedFlagDetector:
         try:
             # Handle potential markdown code blocks
             json_str = legal_report.strip()
-            if json_str.startswith('```'):
+            if json_str.startswith("```"):
                 # Extract JSON from markdown code block
-                lines = json_str.split('\n')
+                lines = json_str.split("\n")
                 json_lines = []
                 in_block = False
                 for line in lines:
-                    if line.startswith('```') and not in_block:
+                    if line.startswith("```") and not in_block:
                         in_block = True
                         continue
-                    elif line.startswith('```') and in_block:
+                    elif line.startswith("```") and in_block:
                         break
                     elif in_block:
                         json_lines.append(line)
-                json_str = '\n'.join(json_lines)
+                json_str = "\n".join(json_lines)
 
             data = json.loads(json_str)
-            risks['pfic_status'] = data.get('pfic_status')
-            risks['pfic_evidence'] = data.get('pfic_evidence')
-            risks['vie_structure'] = data.get('vie_structure')
-            risks['vie_evidence'] = data.get('vie_evidence')
-            risks['country'] = data.get('country')
-            risks['sector'] = data.get('sector')
+            risks["pfic_status"] = data.get("pfic_status")
+            risks["pfic_evidence"] = data.get("pfic_evidence")
+            risks["vie_structure"] = data.get("vie_structure")
+            risks["vie_evidence"] = data.get("vie_evidence")
+            risks["country"] = data.get("country")
+            risks["sector"] = data.get("sector")
 
             logger.debug(
                 "legal_risks_parsed_json",
-                pfic_status=risks['pfic_status'],
-                vie_structure=risks['vie_structure']
+                pfic_status=risks["pfic_status"],
+                vie_structure=risks["vie_structure"],
             )
             return risks
 
@@ -497,24 +530,23 @@ class RedFlagDetector:
         # Regex fallback for non-JSON output
         pfic_match = re.search(
             r'"?pfic_status"?\s*:\s*"?(CLEAN|UNCERTAIN|PROBABLE|N/A)"?',
-            legal_report, re.IGNORECASE
+            legal_report,
+            re.IGNORECASE,
         )
         if pfic_match:
-            risks['pfic_status'] = pfic_match.group(1).upper()
+            risks["pfic_status"] = pfic_match.group(1).upper()
 
         vie_match = re.search(
-            r'"?vie_structure"?\s*:\s*"?(YES|NO|N/A)"?',
-            legal_report, re.IGNORECASE
+            r'"?vie_structure"?\s*:\s*"?(YES|NO|N/A)"?', legal_report, re.IGNORECASE
         )
         if vie_match:
-            risks['vie_structure'] = vie_match.group(1).upper()
+            risks["vie_structure"] = vie_match.group(1).upper()
 
         return risks
 
     @staticmethod
     def detect_legal_flags(
-        legal_risks: dict[str, Any],
-        ticker: str = "UNKNOWN"
+        legal_risks: dict[str, Any], ticker: str = "UNKNOWN"
     ) -> list[dict]:
         """
         Detect legal/tax warning flags from Legal Counsel output.
@@ -532,63 +564,63 @@ class RedFlagDetector:
         """
         warnings = []
 
-        pfic_status = legal_risks.get('pfic_status')
-        vie_structure = legal_risks.get('vie_structure')
-        pfic_evidence = legal_risks.get('pfic_evidence') or 'No evidence provided'
+        pfic_status = legal_risks.get("pfic_status")
+        vie_structure = legal_risks.get("vie_structure")
+        pfic_evidence = legal_risks.get("pfic_evidence") or "No evidence provided"
 
         # --- WARNING 1: PFIC Probable ---
-        if pfic_status == 'PROBABLE':
-            warnings.append({
-                'type': 'PFIC_PROBABLE',
-                'severity': 'WARNING',
-                'detail': f"Company likely classified as PFIC. Evidence: {pfic_evidence[:100]}...",
-                'action': 'RISK_PENALTY',
-                'risk_penalty': 1.0,  # Add 1.0 to risk tally
-                'rationale': 'PFIC classification requires onerous US tax reporting (Form 8621). '
-                            'Mark-to-market or QEF election required. Not a viability issue, '
-                            'but increases compliance burden for US investors.'
-            })
+        if pfic_status == "PROBABLE":
+            warnings.append(
+                {
+                    "type": "PFIC_PROBABLE",
+                    "severity": "WARNING",
+                    "detail": f"Company likely classified as PFIC. Evidence: {pfic_evidence[:100]}...",
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 1.0,  # Add 1.0 to risk tally
+                    "rationale": "PFIC classification requires onerous US tax reporting (Form 8621). "
+                    "Mark-to-market or QEF election required. Not a viability issue, "
+                    "but increases compliance burden for US investors.",
+                }
+            )
             logger.warning(
-                "legal_flag_pfic_probable",
-                ticker=ticker,
-                evidence=pfic_evidence[:50]
+                "legal_flag_pfic_probable", ticker=ticker, evidence=pfic_evidence[:50]
             )
 
         # --- WARNING 2: PFIC Uncertain (lesser penalty) ---
-        elif pfic_status == 'UNCERTAIN':
-            warnings.append({
-                'type': 'PFIC_UNCERTAIN',
-                'severity': 'WARNING',
-                'detail': f"PFIC status unclear. Evidence: {pfic_evidence[:100]}...",
-                'action': 'RISK_PENALTY',
-                'risk_penalty': 0.5,  # Add 0.5 to risk tally
-                'rationale': 'PFIC status cannot be confirmed. Company may use hedge language '
-                            'or is in a high-risk sector without clear disclosure. '
-                            'Recommend consulting tax advisor before investing.'
-            })
+        elif pfic_status == "UNCERTAIN":
+            warnings.append(
+                {
+                    "type": "PFIC_UNCERTAIN",
+                    "severity": "WARNING",
+                    "detail": f"PFIC status unclear. Evidence: {pfic_evidence[:100]}...",
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 0.5,  # Add 0.5 to risk tally
+                    "rationale": "PFIC status cannot be confirmed. Company may use hedge language "
+                    "or is in a high-risk sector without clear disclosure. "
+                    "Recommend consulting tax advisor before investing.",
+                }
+            )
             logger.info(
-                "legal_flag_pfic_uncertain",
-                ticker=ticker,
-                evidence=pfic_evidence[:50]
+                "legal_flag_pfic_uncertain", ticker=ticker, evidence=pfic_evidence[:50]
             )
 
         # --- WARNING 3: VIE Structure ---
-        if vie_structure == 'YES':
-            vie_evidence = legal_risks.get('vie_evidence') or 'VIE structure detected'
-            warnings.append({
-                'type': 'VIE_STRUCTURE',
-                'severity': 'WARNING',
-                'detail': f"Company uses VIE contractual structure for China operations. {vie_evidence[:80]}",
-                'action': 'RISK_PENALTY',
-                'risk_penalty': 0.5,  # Add 0.5 to risk tally
-                'rationale': 'VIE structure means investors own contracts, not equity. '
-                            'China regulatory risk if VIE agreements are invalidated. '
-                            'Common for China tech/education stocks but adds legal uncertainty.'
-            })
+        if vie_structure == "YES":
+            vie_evidence = legal_risks.get("vie_evidence") or "VIE structure detected"
+            warnings.append(
+                {
+                    "type": "VIE_STRUCTURE",
+                    "severity": "WARNING",
+                    "detail": f"Company uses VIE contractual structure for China operations. {vie_evidence[:80]}",
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 0.5,  # Add 0.5 to risk tally
+                    "rationale": "VIE structure means investors own contracts, not equity. "
+                    "China regulatory risk if VIE agreements are invalidated. "
+                    "Common for China tech/education stocks but adds legal uncertainty.",
+                }
+            )
             logger.warning(
-                "legal_flag_vie_structure",
-                ticker=ticker,
-                evidence=vie_evidence[:50]
+                "legal_flag_vie_structure", ticker=ticker, evidence=vie_evidence[:50]
             )
 
         return warnings

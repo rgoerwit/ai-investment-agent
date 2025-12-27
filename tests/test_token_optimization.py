@@ -5,9 +5,7 @@ Tests for token optimization features:
 - TAVILY_MAX_CHARS configuration
 """
 
-import pytest
 import os
-from unittest.mock import patch
 
 
 class TestExtractNewsHighlights:
@@ -39,7 +37,8 @@ class TestExtractNewsHighlights:
         """Should extract US Revenue/Geographic Revenue section."""
         from src.agents import extract_news_highlights
 
-        report = """### GEOGRAPHIC REVENUE VERIFICATION
+        report = (
+            """### GEOGRAPHIC REVENUE VERIFICATION
 
 **US Revenue**: 25%
 - Source: Annual Report 2024
@@ -47,7 +46,9 @@ class TestExtractNewsHighlights:
 
 ### OTHER SECTION
 This should not be included.
-""" + "x" * 300  # Pad to exceed 300 chars
+"""
+            + "x" * 300
+        )  # Pad to exceed 300 chars
 
         result = extract_news_highlights(report)
         assert "**US/Geographic Revenue:**" in result
@@ -57,7 +58,8 @@ This should not be included.
         """Should extract growth catalysts section."""
         from src.agents import extract_news_highlights
 
-        report = """### SOME SECTION
+        report = (
+            """### SOME SECTION
 Intro text.
 
 ### GROWTH CATALYSTS IDENTIFIED
@@ -68,7 +70,9 @@ Intro text.
 
 ### ANOTHER SECTION
 More text here.
-""" + "x" * 300  # Pad to exceed 300 chars
+"""
+            + "x" * 300
+        )  # Pad to exceed 300 chars
 
         result = extract_news_highlights(report)
         assert "**Growth Catalysts:**" in result
@@ -78,28 +82,37 @@ More text here.
         """Should limit to top 3 catalysts."""
         from src.agents import extract_news_highlights
 
-        report = """### GROWTH CATALYSTS
+        report = (
+            """### GROWTH CATALYSTS
 
 1. First catalyst
 2. Second catalyst
 3. Third catalyst
 4. Fourth catalyst should be excluded
 5. Fifth catalyst should be excluded
-""" + "x" * 300
+"""
+            + "x" * 300
+        )
 
         result = extract_news_highlights(report)
         # Count numbered items
-        numbered_items = [line for line in result.split('\n')
-                        if line.strip().startswith(('1.', '2.', '3.', '4.', '5.'))]
+        numbered_items = [
+            line
+            for line in result.split("\n")
+            if line.strip().startswith(("1.", "2.", "3.", "4.", "5."))
+        ]
         assert len(numbered_items) <= 3
 
     def test_respects_max_chars(self):
         """Should respect max_chars parameter."""
         from src.agents import extract_news_highlights
 
-        report = """### GEOGRAPHIC REVENUE VERIFICATION
+        report = (
+            """### GEOGRAPHIC REVENUE VERIFICATION
 **US Revenue**: 25%
-""" + "x" * 2000  # Make it long
+"""
+            + "x" * 2000
+        )  # Make it long
 
         result = extract_news_highlights(report, max_chars=500)
         assert len(result) <= 550  # Allow for truncation message
@@ -108,12 +121,15 @@ More text here.
         """Should not duplicate catalyst header."""
         from src.agents import extract_news_highlights
 
-        report = """### GROWTH CATALYSTS
+        report = (
+            """### GROWTH CATALYSTS
 1. First catalyst
 
 ### GROWTH CATALYSTS IDENTIFIED
 2. Second catalyst
-""" + "x" * 300
+"""
+            + "x" * 300
+        )
 
         result = extract_news_highlights(report)
         # Count occurrences of the header
@@ -151,8 +167,8 @@ class TestTruncateTavilyResult:
 
     def test_uses_config_default(self):
         """Should use TAVILY_MAX_CHARS from config when max_chars not specified."""
-        from src.toolkit import _truncate_tavily_result
         from src.config import config
+        from src.toolkit import _truncate_tavily_result
 
         long_result = "x" * 20000
         result = _truncate_tavily_result(long_result)
@@ -189,7 +205,9 @@ class TestTavilyMaxCharsConfig:
         try:
             # Re-import to get fresh config
             import importlib
+
             import src.config
+
             importlib.reload(src.config)
 
             assert src.config.config.tavily_max_chars == 7000
@@ -207,7 +225,9 @@ class TestTavilyMaxCharsConfig:
 
             # Re-import to get fresh config
             import importlib
+
             import src.config
+
             importlib.reload(src.config)
 
             assert src.config.config.tavily_max_chars == 5000
@@ -227,7 +247,9 @@ class TestTavilyMaxCharsConfig:
 
             # Re-import to get fresh config
             import importlib
+
             import src.config
+
             importlib.reload(src.config)
 
             from src.toolkit import _truncate_tavily_result
@@ -246,7 +268,9 @@ class TestTavilyMaxCharsConfig:
 
             # Reload config to restore defaults
             import importlib
+
             import src.config
+
             importlib.reload(src.config)
 
 
@@ -259,13 +283,16 @@ class TestNewsHighlightsIntegration:
         # but we verify the function is used correctly
         from src.agents import extract_news_highlights
 
-        full_report = """### GEOGRAPHIC REVENUE VERIFICATION
+        full_report = (
+            """### GEOGRAPHIC REVENUE VERIFICATION
 **US Revenue**: 30%
 - Source: 10-K Filing
 
 ### NEWS SOURCES REVIEW
 Long section of news sources that should be removed.
-""" + "x" * 1000
+"""
+            + "x" * 1000
+        )
 
         highlights = extract_news_highlights(full_report)
 

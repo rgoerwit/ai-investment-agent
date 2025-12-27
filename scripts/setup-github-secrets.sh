@@ -101,31 +101,31 @@ check_prerequisites() {
         echo "Install from: https://cli.github.com/"
         exit 1
     fi
-    
+
     if ! gh auth status &> /dev/null; then
         print_error "Not authenticated with GitHub CLI"
         echo ""
         echo "Run: gh auth login"
         exit 1
     fi
-    
+
     print_success "GitHub CLI is ready"
 }
 
 # Load environment file
 load_env_file() {
     local env_file="$1"
-    
+
     if [[ ! -f "$env_file" ]]; then
         print_error "Environment file not found: $env_file"
         exit 1
     fi
-    
+
     # Source the file
     set -a
     source "$env_file"
     set +a
-    
+
     print_success "Loaded $env_file"
 }
 
@@ -136,12 +136,12 @@ set_secret() {
     local secret_value="$3"
     local force="$4"
     local dry_run="$5"
-    
+
     if [[ "$dry_run" == "true" ]]; then
         print_info "[DRY RUN] Would set: $secret_name"
         return 0
     fi
-    
+
     # Check if secret already exists
     if gh secret list --repo "$repo" 2>/dev/null | grep -q "^$secret_name"; then
         if [[ "$force" == "true" ]]; then
@@ -153,7 +153,7 @@ set_secret() {
     else
         print_info "Setting new secret: $secret_name"
     fi
-    
+
     # Set the secret
     if echo "$secret_value" | gh secret set "$secret_name" --repo "$repo"; then
         print_success "Set: $secret_name"
@@ -169,7 +169,7 @@ main() {
     local env_file=".env"
     local force="false"
     local dry_run="false"
-    
+
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -198,14 +198,14 @@ main() {
                 ;;
         esac
     done
-    
+
     # Validate required arguments
     if [[ -z "$repo" ]]; then
         print_error "Repository is required"
         echo ""
         show_usage
     fi
-    
+
     echo ""
     echo "════════════════════════════════════════════════════════════"
     echo "  GitHub Secrets Setup"
@@ -217,20 +217,20 @@ main() {
         print_warning "DRY RUN MODE - no changes will be made"
     fi
     echo ""
-    
+
     # Run checks
     check_prerequisites
     cd "$REPO_ROOT" || exit 1
     load_env_file "$env_file"
-    
+
     echo ""
     print_info "Setting GitHub secrets..."
     echo ""
-    
+
     # Set API secrets
     local secrets_set=0
     local secrets_failed=0
-    
+
     # Required secret
     if [[ -n "${GOOGLE_API_KEY:-}" ]]; then
         if set_secret "$repo" "GOOGLE_API_KEY" "$GOOGLE_API_KEY" "$force" "$dry_run"; then
@@ -241,7 +241,7 @@ main() {
     else
         print_warning "GOOGLE_API_KEY not found in $env_file"
     fi
-    
+
     # Optional secrets
     for secret_name in "TAVILY_API_KEY" "FMP_API_KEY" "LANGSMITH_API_KEY"; do
         secret_value="${!secret_name:-}"
@@ -253,7 +253,7 @@ main() {
             fi
         fi
     done
-    
+
     # Summary
     echo ""
     echo "════════════════════════════════════════════════════════════"

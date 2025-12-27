@@ -123,20 +123,20 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     if [[ -z "$line" ]] || [[ "$line" =~ ^[[:space:]]*# ]]; then
         continue
     fi
-    
+
     # Trim whitespace
     ticker=$(echo "$line" | xargs)
-    
+
     if [[ -z "$ticker" ]]; then
         continue
     fi
-    
+
     processed=$((processed + 1))
-    
+
     echo "========================================"
     print_info "[$processed/$ticker_count] Analyzing: $ticker"
     echo "========================================"
-    
+
     # Run analysis and capture output
     if poetry run python -m src.main --quiet --ticker "$ticker" >> "$OUTPUT_FILE" 2>&1; then
         print_success "Completed: $ticker"
@@ -144,15 +144,15 @@ while IFS= read -r line || [[ -n "$line" ]]; do
         print_error "Failed: $ticker (check $OUTPUT_FILE for details)"
         failed=$((failed + 1))
     fi
-    
+
     # Add separator to output file
     echo "" >> "$OUTPUT_FILE"
     echo "---" >> "$OUTPUT_FILE"
     echo "" >> "$OUTPUT_FILE"
-    
+
     # Small delay to allow connections to close cleanly
     sleep 2
-    
+
 done < "$INPUT_FILE"
 
 echo ""

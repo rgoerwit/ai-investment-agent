@@ -5,10 +5,10 @@ Ensures that GEMINI_RPM_LIMIT environment variable correctly configures
 the rate limiter for different API tiers (free, paid tier 1, tier 2).
 """
 
-import pytest
-import os
 import importlib
-from unittest.mock import patch, MagicMock
+import os
+
+import pytest
 
 
 class TestRateLimitConfiguration:
@@ -23,7 +23,9 @@ class TestRateLimitConfiguration:
 
         # Skip if config has non-default value (user may be on paid tier)
         if src.config.config.gemini_rpm_limit != 15:
-            pytest.skip(f"GEMINI_RPM_LIMIT is set to {src.config.config.gemini_rpm_limit}, skipping default test")
+            pytest.skip(
+                f"GEMINI_RPM_LIMIT is set to {src.config.config.gemini_rpm_limit}, skipping default test"
+            )
 
         assert src.config.config.gemini_rpm_limit == 15
 
@@ -32,6 +34,7 @@ class TestRateLimitConfiguration:
         os.environ["GEMINI_RPM_LIMIT"] = "360"
 
         import src.config
+
         importlib.reload(src.config)
 
         assert src.config.config.gemini_rpm_limit == 360
@@ -44,6 +47,7 @@ class TestRateLimitConfiguration:
         os.environ["GEMINI_RPM_LIMIT"] = "1000"
 
         import src.config
+
         importlib.reload(src.config)
 
         assert src.config.config.gemini_rpm_limit == 1000
@@ -56,6 +60,7 @@ class TestRateLimitConfiguration:
         os.environ["GEMINI_RPM_LIMIT"] = "500"
 
         import src.config
+
         importlib.reload(src.config)
 
         assert src.config.config.gemini_rpm_limit == 500
@@ -166,6 +171,7 @@ class TestGlobalRateLimiterInitialization:
         # Reimport to pick up new config
         import src.config
         import src.llms
+
         importlib.reload(src.config)
         importlib.reload(src.llms)
 
@@ -256,6 +262,7 @@ class TestEdgeCases:
 
         with pytest.raises(ValueError):
             import src.config
+
             importlib.reload(src.config)
 
         # Clean up

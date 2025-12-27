@@ -10,9 +10,9 @@ Critical for:
 - Preventing runtime "expected string or bytes-like object, got 'list'" errors
 """
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
-from typing import Any
-from unittest.mock import MagicMock, AsyncMock
 
 
 class TestAgentStateTypeDefinitions:
@@ -20,21 +20,21 @@ class TestAgentStateTypeDefinitions:
 
     def test_agent_state_has_take_last_for_string_fields(self):
         """Verify all string report fields use take_last reducer to prevent list accumulation."""
+
         from src.agents import AgentState
-        import typing
 
         # Get annotations
         annotations = AgentState.__annotations__
 
         # String fields that MUST use take_last (not list accumulation)
         string_fields_requiring_take_last = [
-            'market_report',
-            'sentiment_report',
-            'news_report',
-            'fundamentals_report',
-            'investment_plan',
-            'trader_investment_plan',
-            'final_trade_decision'
+            "market_report",
+            "sentiment_report",
+            "news_report",
+            "fundamentals_report",
+            "investment_plan",
+            "trader_investment_plan",
+            "final_trade_decision",
         ]
 
         for field in string_fields_requiring_take_last:
@@ -44,15 +44,19 @@ class TestAgentStateTypeDefinitions:
             annotation = annotations[field]
 
             # For Annotated types, check metadata includes take_last
-            if hasattr(annotation, '__metadata__'):
+            if hasattr(annotation, "__metadata__"):
                 # This is an Annotated type - verify take_last is in metadata
                 from src.agents import take_last
-                assert take_last in annotation.__metadata__, \
-                    f"{field} must use Annotated[str, take_last] to prevent list accumulation"
+
+                assert (
+                    take_last in annotation.__metadata__
+                ), f"{field} must use Annotated[str, take_last] to prevent list accumulation"
             else:
                 # If it's just 'str', it will use default list accumulation (BAD)
-                pytest.fail(f"{field} is defined as plain 'str' instead of 'Annotated[str, take_last]'. "
-                           f"This will cause state to accumulate as a list, breaking regex parsers.")
+                pytest.fail(
+                    f"{field} is defined as plain 'str' instead of 'Annotated[str, take_last]'. "
+                    f"This will cause state to accumulate as a list, breaking regex parsers."
+                )
 
     def test_agent_state_complex_fields_have_reducers(self):
         """Verify complex dict/list fields use explicit reducers."""
@@ -62,12 +66,12 @@ class TestAgentStateTypeDefinitions:
 
         # Complex fields that need explicit reducers
         complex_fields = [
-            'investment_debate_state',  # InvestDebateState
-            'risk_debate_state',  # RiskDebateState
-            'tools_called',  # dict
-            'prompts_used',  # dict
-            'red_flags',  # list[dict]
-            'pre_screening_result'  # str but critical
+            "investment_debate_state",  # InvestDebateState
+            "risk_debate_state",  # RiskDebateState
+            "tools_called",  # dict
+            "prompts_used",  # dict
+            "red_flags",  # list[dict]
+            "pre_screening_result",  # str but critical
         ]
 
         for field in complex_fields:
@@ -75,8 +79,9 @@ class TestAgentStateTypeDefinitions:
             annotation = annotations[field]
 
             # All complex fields should be Annotated
-            assert hasattr(annotation, '__metadata__'), \
-                f"{field} should use Annotated[Type, reducer] for explicit state management"
+            assert hasattr(
+                annotation, "__metadata__"
+            ), f"{field} should use Annotated[Type, reducer] for explicit state management"
 
 
 class TestStatePropagationTypes:
@@ -85,15 +90,15 @@ class TestStatePropagationTypes:
     @pytest.mark.asyncio
     async def test_fundamentals_report_is_string_not_list(self):
         """REGRESSION TEST: fundamentals_report must be string for RedFlagDetector regex parsing."""
-        from src.agents import create_analyst_node
         from types import SimpleNamespace
         from unittest.mock import patch
+
+        from src.agents import create_analyst_node
 
         # Mock LLM - use SimpleNamespace for response like existing tests
         mock_llm = MagicMock()
         mock_response = SimpleNamespace(
-            content="Mock fundamentals report with DATA_BLOCK",
-            tool_calls=None
+            content="Mock fundamentals report with DATA_BLOCK", tool_calls=None
         )
 
         # Mock both bind_tools path and direct path (matches test_agents.py pattern)
@@ -101,33 +106,40 @@ class TestStatePropagationTypes:
         mock_llm.ainvoke = AsyncMock(return_value=mock_response)
 
         # CRITICAL: Mock the invoke_with_rate_limit_handling to bypass the chain
-        with patch('src.agents.invoke_with_rate_limit_handling', new=AsyncMock(return_value=mock_response)):
+        with patch(
+            "src.agents.invoke_with_rate_limit_handling",
+            new=AsyncMock(return_value=mock_response),
+        ):
             # Create fundamentals analyst node
             fundamentals_node = create_analyst_node(
-                mock_llm,
-                "fundamentals_analyst",
-                [],
-                "fundamentals_report"
+                mock_llm, "fundamentals_analyst", [], "fundamentals_report"
             )
 
             # Initial state
             state = {
                 "messages": [],
                 "company_of_interest": "TEST.US",
-                "trade_date": "2025-12-07"
+                "trade_date": "2025-12-07",
             }
-            config = {"configurable": {"context": MagicMock(ticker="TEST.US", trade_date="2025-12-07")}}
+            config = {
+                "configurable": {
+                    "context": MagicMock(ticker="TEST.US", trade_date="2025-12-07")
+                }
+            }
 
             # Run fundamentals analyst
             result_state = await fundamentals_node(state, config)
 
             # CRITICAL: fundamentals_report must be a STRING, not a list
-            fundamentals_report = result_state.get('fundamentals_report')
+            fundamentals_report = result_state.get("fundamentals_report")
 
-            assert fundamentals_report is not None, "fundamentals_report should be populated"
-            assert isinstance(fundamentals_report, str), \
-                f"fundamentals_report must be str, got {type(fundamentals_report)}. " \
+            assert (
+                fundamentals_report is not None
+            ), "fundamentals_report should be populated"
+            assert isinstance(fundamentals_report, str), (
+                f"fundamentals_report must be str, got {type(fundamentals_report)}. "
                 f"If it's a list, AgentState needs 'Annotated[str, take_last]' annotation."
+            )
 
             # Test that RedFlagDetector can parse it (would fail with list)
             from src.validators.red_flag_detector import RedFlagDetector
@@ -139,16 +151,17 @@ class TestStatePropagationTypes:
     @pytest.mark.asyncio
     async def test_all_report_fields_are_strings_after_execution(self):
         """Test that all report fields maintain string type through execution."""
-        from src.agents import create_analyst_node
         from types import SimpleNamespace
         from unittest.mock import patch
+
+        from src.agents import create_analyst_node
 
         # Test each analyst type
         test_cases = [
             ("market_analyst", "market_report"),
             ("sentiment_analyst", "sentiment_report"),
             ("news_analyst", "news_report"),
-            ("fundamentals_analyst", "fundamentals_report")
+            ("fundamentals_analyst", "fundamentals_report"),
         ]
 
         for agent_name, output_field in test_cases:
@@ -156,31 +169,43 @@ class TestStatePropagationTypes:
             mock_llm = MagicMock()
             mock_response = SimpleNamespace(
                 content=f"Test {output_field} content",  # String content
-                tool_calls=None
+                tool_calls=None,
             )
 
             # Mock both bind_tools path and direct path (matches test_agents.py pattern)
-            mock_llm.bind_tools.return_value.ainvoke = AsyncMock(return_value=mock_response)
+            mock_llm.bind_tools.return_value.ainvoke = AsyncMock(
+                return_value=mock_response
+            )
             mock_llm.ainvoke = AsyncMock(return_value=mock_response)
 
             # CRITICAL: Mock the invoke_with_rate_limit_handling to bypass the chain
-            with patch('src.agents.invoke_with_rate_limit_handling', new=AsyncMock(return_value=mock_response)):
+            with patch(
+                "src.agents.invoke_with_rate_limit_handling",
+                new=AsyncMock(return_value=mock_response),
+            ):
                 node = create_analyst_node(mock_llm, agent_name, [], output_field)
 
                 state = {
                     "messages": [],
                     "company_of_interest": "TEST.US",
-                    "trade_date": "2025-12-07"
+                    "trade_date": "2025-12-07",
                 }
-                config = {"configurable": {"context": MagicMock(ticker="TEST.US", trade_date="2025-12-07")}}
+                config = {
+                    "configurable": {
+                        "context": MagicMock(ticker="TEST.US", trade_date="2025-12-07")
+                    }
+                }
 
                 result = await node(state, config)
 
                 # Check output field type
                 output_value = result.get(output_field)
-                assert output_value is not None, f"{output_field} should be populated by {agent_name}"
-                assert isinstance(output_value, str), \
-                    f"{output_field} from {agent_name} must be str, got {type(output_value)}"
+                assert (
+                    output_value is not None
+                ), f"{output_field} should be populated by {agent_name}"
+                assert isinstance(
+                    output_value, str
+                ), f"{output_field} from {agent_name} must be str, got {type(output_value)}"
 
 
 class TestStateFieldTypesInPractice:
@@ -213,7 +238,6 @@ class TestStateFieldTypesInPractice:
 
     def test_state_dict_types_match_expectations(self):
         """Test that state dict values have expected types."""
-        from src.agents import AgentState
 
         # Simulate a state dict that might come from LangGraph
         state_dict = {
@@ -224,7 +248,7 @@ class TestStateFieldTypesInPractice:
             "market_report": "Market analysis here",  # Should be string
             "fundamentals_report": "Fundamentals analysis here",  # Should be string
             "red_flags": [],  # Should be list
-            "pre_screening_result": "PASS"  # Should be string
+            "pre_screening_result": "PASS",  # Should be string
         }
 
         # Verify types
@@ -286,20 +310,17 @@ class TestDataProviderTypes:
         import pandas as pd
 
         # Simulate financial data that might come from yfinance/yahooquery
-        data = {
-            'price': [100.0, 101.5, 99.8],
-            'volume': [1000000, 1200000, 950000]
-        }
+        data = {"price": [100.0, 101.5, 99.8], "volume": [1000000, 1200000, 950000]}
 
         df = pd.DataFrame(data)
 
         # These operations should work with correct types
-        assert df['price'].dtype in [float, 'float64']
-        assert df['volume'].dtype in [int, 'int64', float, 'float64']
+        assert df["price"].dtype in [float, "float64"]
+        assert df["volume"].dtype in [int, "int64", float, "float64"]
 
         # String columns should be object dtype
-        df['ticker'] = 'TEST.US'
-        assert df['ticker'].dtype == object
+        df["ticker"] = "TEST.US"
+        assert df["ticker"].dtype == object
 
 
 class TestTypeAnnotationConsistency:
@@ -307,24 +328,26 @@ class TestTypeAnnotationConsistency:
 
     def test_agent_state_fields_match_usage(self):
         """Verify AgentState annotations match actual usage in code."""
+
         from src.agents import AgentState
-        import inspect
 
         # Get all fields from AgentState
         annotations = AgentState.__annotations__
 
         # Verify critical fields exist
         required_fields = [
-            'company_of_interest',
-            'trade_date',
-            'market_report',
-            'fundamentals_report',
-            'red_flags',
-            'pre_screening_result'
+            "company_of_interest",
+            "trade_date",
+            "market_report",
+            "fundamentals_report",
+            "red_flags",
+            "pre_screening_result",
         ]
 
         for field in required_fields:
-            assert field in annotations, f"Required field {field} missing from AgentState"
+            assert (
+                field in annotations
+            ), f"Required field {field} missing from AgentState"
 
     def test_no_plain_string_annotations_for_reports(self):
         """Ensure no report fields use plain 'str' without Annotated."""
@@ -333,20 +356,20 @@ class TestTypeAnnotationConsistency:
         annotations = AgentState.__annotations__
 
         report_fields = [
-            'market_report',
-            'sentiment_report',
-            'news_report',
-            'fundamentals_report',
-            'investment_plan',
-            'trader_investment_plan',
-            'final_trade_decision'
+            "market_report",
+            "sentiment_report",
+            "news_report",
+            "fundamentals_report",
+            "investment_plan",
+            "trader_investment_plan",
+            "final_trade_decision",
         ]
 
         for field in report_fields:
             annotation = annotations[field]
 
             # Check if it's just 'str' (which would be wrong)
-            if annotation == str:
+            if annotation is str:
                 pytest.fail(
                     f"{field} uses plain 'str' annotation. "
                     f"Should use 'Annotated[str, take_last]' to prevent list accumulation."

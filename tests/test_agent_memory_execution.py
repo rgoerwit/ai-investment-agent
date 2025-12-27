@@ -9,20 +9,23 @@ This addresses the CRITICAL requirement: memory isolation in practice, not just 
 Run with: pytest tests/test_agent_memory_execution.py -v
 """
 
-import pytest
-from unittest.mock import MagicMock, patch, AsyncMock
-from langchain_core.messages import AIMessage
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from src.agents import create_researcher_node, AgentState
-from src.memory import FinancialSituationMemory, sanitize_ticker_for_collection, create_memory_instances
+import pytest
+
+from src.memory import (
+    FinancialSituationMemory,
+    create_memory_instances,
+    sanitize_ticker_for_collection,
+)
 
 
 class TestResearcherMemoryIsolation:
     """Test that researcher nodes use isolated ticker-specific memories."""
 
     @pytest.mark.asyncio
-    @patch('src.memory.GoogleGenerativeAIEmbeddings')
-    @patch('chromadb.PersistentClient')
+    @patch("src.memory.GoogleGenerativeAIEmbeddings")
+    @patch("chromadb.PersistentClient")
     async def test_bull_researcher_memory_created_with_correct_ticker(
         self, mock_chroma_client, mock_embeddings
     ):
@@ -40,7 +43,9 @@ class TestResearcherMemoryIsolation:
         mock_embeddings.return_value = mock_emb_instance
 
         # Setup mock ChromaDB
-        mock_chroma_client.return_value.get_or_create_collection.return_value = MagicMock()
+        mock_chroma_client.return_value.get_or_create_collection.return_value = (
+            MagicMock()
+        )
 
         # Create ticker-specific memory
         safe_ticker = sanitize_ticker_for_collection(ticker)
@@ -54,8 +59,8 @@ class TestResearcherMemoryIsolation:
         assert bull_memory.available
 
     @pytest.mark.asyncio
-    @patch('src.memory.GoogleGenerativeAIEmbeddings')
-    @patch('chromadb.PersistentClient')
+    @patch("src.memory.GoogleGenerativeAIEmbeddings")
+    @patch("chromadb.PersistentClient")
     async def test_sequential_ticker_analyses_dont_contaminate(
         self, mock_chroma_client, mock_embeddings
     ):
@@ -84,32 +89,40 @@ class TestResearcherMemoryIsolation:
             collection.name = name
 
             if "0005_HK" in name:
+
                 def hsbc_add(documents, metadatas, ids, embeddings=None):
-                    hsbc_data.append({
-                        'documents': documents,
-                        'metadatas': metadatas,
-                        'ids': ids
-                    })
+                    hsbc_data.append(
+                        {"documents": documents, "metadatas": metadatas, "ids": ids}
+                    )
+
                 collection.add = MagicMock(side_effect=hsbc_add)
                 collection.query.return_value = {
-                    'ids': [[]], 'documents': [[]], 'metadatas': [[]], 'distances': [[]]
+                    "ids": [[]],
+                    "documents": [[]],
+                    "metadatas": [[]],
+                    "distances": [[]],
                 }
 
             elif "7203_T" in name:
+
                 def toyota_add(documents, metadatas, ids, embeddings=None):
-                    toyota_data.append({
-                        'documents': documents,
-                        'metadatas': metadatas,
-                        'ids': ids
-                    })
+                    toyota_data.append(
+                        {"documents": documents, "metadatas": metadatas, "ids": ids}
+                    )
+
                 collection.add = MagicMock(side_effect=toyota_add)
                 collection.query.return_value = {
-                    'ids': [[]], 'documents': [[]], 'metadatas': [[]], 'distances': [[]]
+                    "ids": [[]],
+                    "documents": [[]],
+                    "metadatas": [[]],
+                    "distances": [[]],
                 }
 
             return collection
 
-        mock_chroma_client.return_value.get_or_create_collection.side_effect = create_mock_collection
+        mock_chroma_client.return_value.get_or_create_collection.side_effect = (
+            create_mock_collection
+        )
 
         # Create memories for HSBC
         hsbc_memories = create_memory_instances("0005.HK")
@@ -117,8 +130,7 @@ class TestResearcherMemoryIsolation:
         # Simulate storing HSBC analysis
         hsbc_bull_memory = hsbc_memories["0005_HK_bull_memory"]
         await hsbc_bull_memory.add_situations(
-            ["HSBC shows strong banking fundamentals"],
-            [{"ticker": "0005.HK"}]
+            ["HSBC shows strong banking fundamentals"], [{"ticker": "0005.HK"}]
         )
 
         # Create memories for Toyota
@@ -127,35 +139,38 @@ class TestResearcherMemoryIsolation:
         # Simulate storing Toyota analysis
         toyota_bull_memory = toyota_memories["7203_T_bull_memory"]
         await toyota_bull_memory.add_situations(
-            ["Toyota manufacturing efficiency improving"],
-            [{"ticker": "7203.T"}]
+            ["Toyota manufacturing efficiency improving"], [{"ticker": "7203.T"}]
         )
 
         # Verify isolation: HSBC data should not mention Toyota
         if hsbc_data:
-            hsbc_docs = [item['documents'] for item in hsbc_data]
+            hsbc_docs = [item["documents"] for item in hsbc_data]
             hsbc_text = str(hsbc_docs).lower()
-            assert 'toyota' not in hsbc_text, "HSBC memory should not contain Toyota data"
+            assert (
+                "toyota" not in hsbc_text
+            ), "HSBC memory should not contain Toyota data"
 
         # Verify isolation: Toyota data should not mention HSBC
         if toyota_data:
-            toyota_docs = [item['documents'] for item in toyota_data]
+            toyota_docs = [item["documents"] for item in toyota_data]
             toyota_text = str(toyota_docs).lower()
-            assert 'hsbc' not in toyota_text, "Toyota memory should not contain HSBC data"
+            assert (
+                "hsbc" not in toyota_text
+            ), "Toyota memory should not contain HSBC data"
 
         # Verify correct metadata was stored
         if hsbc_data:
             assert all(
-                meta['ticker'] == '0005.HK'
+                meta["ticker"] == "0005.HK"
                 for item in hsbc_data
-                for meta in item['metadatas']
+                for meta in item["metadatas"]
             ), "HSBC memory should only have ticker='0005.HK' metadata"
 
         if toyota_data:
             assert all(
-                meta['ticker'] == '7203.T'
+                meta["ticker"] == "7203.T"
                 for item in toyota_data
-                for meta in item['metadatas']
+                for meta in item["metadatas"]
             ), "Toyota memory should only have ticker='7203.T' metadata"
 
 
@@ -163,8 +178,8 @@ class TestResearcherMetadataFiltering:
     """Test that researcher nodes enforce metadata filtering correctly."""
 
     @pytest.mark.asyncio
-    @patch('src.memory.GoogleGenerativeAIEmbeddings')
-    @patch('chromadb.PersistentClient')
+    @patch("src.memory.GoogleGenerativeAIEmbeddings")
+    @patch("chromadb.PersistentClient")
     async def test_researcher_metadata_filter_prevents_wrong_ticker_retrieval(
         self, mock_chroma_client, mock_embeddings
     ):
@@ -191,31 +206,30 @@ class TestResearcherMetadataFiltering:
 
         def track_query(query_embeddings, n_results, where=None, **kwargs):
             """Track query calls to verify metadata filter is used."""
-            query_calls.append({
-                'where': where,
-                'n_results': n_results
-            })
+            query_calls.append({"where": where, "n_results": n_results})
 
             # Simulate ChromaDB respecting metadata filter
-            if where and where.get('ticker') == ticker:
+            if where and where.get("ticker") == ticker:
                 # Return correct ticker data
                 return {
-                    'ids': [['mem1']],
-                    'documents': [['HSBC analysis']],
-                    'metadatas': [[{'ticker': ticker}]],
-                    'distances': [[0.5]]
+                    "ids": [["mem1"]],
+                    "documents": [["HSBC analysis"]],
+                    "metadatas": [[{"ticker": ticker}]],
+                    "distances": [[0.5]],
                 }
             else:
                 # Return empty if filter doesn't match
                 return {
-                    'ids': [[]],
-                    'documents': [[]],
-                    'metadatas': [[]],
-                    'distances': [[]]
+                    "ids": [[]],
+                    "documents": [[]],
+                    "metadatas": [[]],
+                    "distances": [[]],
                 }
 
         mock_collection.query = MagicMock(side_effect=track_query)
-        mock_chroma_client.return_value.get_or_create_collection.return_value = mock_collection
+        mock_chroma_client.return_value.get_or_create_collection.return_value = (
+            mock_collection
+        )
 
         # Create memory and query
         safe_ticker = sanitize_ticker_for_collection(ticker)
@@ -223,28 +237,29 @@ class TestResearcherMetadataFiltering:
 
         # Query with metadata filter (as researcher nodes should)
         results = await memory.query_similar_situations(
-            "What are the fundamentals?",
-            metadata_filter={"ticker": ticker}
+            "What are the fundamentals?", metadata_filter={"ticker": ticker}
         )
 
         # Verify query was called with correct metadata filter
         assert len(query_calls) > 0, "Memory query should have been called"
         last_query = query_calls[-1]
-        assert last_query['where'] is not None, "Query should include metadata filter"
-        assert last_query['where']['ticker'] == ticker, f"Filter should be for ticker {ticker}"
+        assert last_query["where"] is not None, "Query should include metadata filter"
+        assert (
+            last_query["where"]["ticker"] == ticker
+        ), f"Filter should be for ticker {ticker}"
 
         # Verify results only contain correct ticker data
         for result in results:
-            if 'metadata' in result:
-                assert result['metadata']['ticker'] == ticker
+            if "metadata" in result:
+                assert result["metadata"]["ticker"] == ticker
 
 
 class TestCrossTickerContamination:
     """Real-world contamination scenarios that the memory isolation prevents."""
 
     @pytest.mark.asyncio
-    @patch('src.memory.GoogleGenerativeAIEmbeddings')
-    @patch('chromadb.PersistentClient')
+    @patch("src.memory.GoogleGenerativeAIEmbeddings")
+    @patch("chromadb.PersistentClient")
     async def test_semiconductor_shortage_doesnt_leak_to_bank_stock(
         self, mock_chroma_client, mock_embeddings
     ):
@@ -269,36 +284,44 @@ class TestCrossTickerContamination:
             stored_data[name] = []
 
             def track_add(documents, metadatas, ids, embeddings=None):
-                stored_data[name].append({
-                    'documents': documents,
-                    'metadatas': metadatas
-                })
+                stored_data[name].append(
+                    {"documents": documents, "metadatas": metadatas}
+                )
 
             collection.add = MagicMock(side_effect=track_add)
 
             def track_query(query_embeddings, n_results, where=None, **kwargs):
                 # Only return data matching metadata filter
-                ticker_filter = where.get('ticker') if where else None
+                ticker_filter = where.get("ticker") if where else None
                 matching_data = [
-                    item for item in stored_data[name]
-                    if any(meta.get('ticker') == ticker_filter for meta in item['metadatas'])
+                    item
+                    for item in stored_data[name]
+                    if any(
+                        meta.get("ticker") == ticker_filter
+                        for meta in item["metadatas"]
+                    )
                 ]
 
                 if matching_data:
                     return {
-                        'ids': [['id1']],
-                        'documents': [[matching_data[0]['documents'][0]]],
-                        'metadatas': [[matching_data[0]['metadatas'][0]]],
-                        'distances': [[0.5]]
+                        "ids": [["id1"]],
+                        "documents": [[matching_data[0]["documents"][0]]],
+                        "metadatas": [[matching_data[0]["metadatas"][0]]],
+                        "distances": [[0.5]],
                     }
                 return {
-                    'ids': [[]], 'documents': [[]], 'metadatas': [[]], 'distances': [[]]
+                    "ids": [[]],
+                    "documents": [[]],
+                    "metadatas": [[]],
+                    "distances": [[]],
                 }
 
             collection.query = MagicMock(side_effect=track_query)
             return collection
 
-        mock_chroma_client.return_value.get_or_create_collection.side_effect = create_tracked_collection
+        mock_chroma_client.return_value.get_or_create_collection.side_effect = (
+            create_tracked_collection
+        )
 
         # Step 1: Analyze Toyota - store semiconductor shortage concern
         toyota_memories = create_memory_instances("7203.T")
@@ -306,7 +329,7 @@ class TestCrossTickerContamination:
 
         await toyota_bull.add_situations(
             ["Toyota faces semiconductor shortage impacting production"],
-            [{"ticker": "7203.T"}]
+            [{"ticker": "7203.T"}],
         )
 
         # Step 2: Analyze HSBC - should NOT retrieve Toyota's semiconductor issues
@@ -315,24 +338,25 @@ class TestCrossTickerContamination:
 
         # Query HSBC memory (should be empty or only contain HSBC data)
         hsbc_results = await hsbc_bull.query_similar_situations(
-            "What are the key risks?",
-            metadata_filter={"ticker": "0005.HK"}
+            "What are the key risks?", metadata_filter={"ticker": "0005.HK"}
         )
 
         # Verify HSBC query didn't return Toyota semiconductor data
         for result in hsbc_results:
-            result_text = result.get('content', '').lower()
-            assert 'semiconductor' not in result_text, \
-                "HSBC analysis should not retrieve Toyota semiconductor issues"
-            assert 'toyota' not in result_text, \
-                "HSBC analysis should not contain Toyota data"
+            result_text = result.get("content", "").lower()
+            assert (
+                "semiconductor" not in result_text
+            ), "HSBC analysis should not retrieve Toyota semiconductor issues"
+            assert (
+                "toyota" not in result_text
+            ), "HSBC analysis should not contain Toyota data"
 
 
 class TestMemoryCollectionNaming:
     """Test that memory collection names follow correct convention."""
 
-    @patch('src.memory.GoogleGenerativeAIEmbeddings')
-    @patch('chromadb.PersistentClient')
+    @patch("src.memory.GoogleGenerativeAIEmbeddings")
+    @patch("chromadb.PersistentClient")
     def test_edge_case_tickers_create_valid_collection_names(
         self, mock_chroma_client, mock_embeddings
     ):
@@ -358,12 +382,14 @@ class TestMemoryCollectionNaming:
             collection.name = name
             return collection
 
-        mock_chroma_client.return_value.get_or_create_collection.side_effect = track_get_or_create
+        mock_chroma_client.return_value.get_or_create_collection.side_effect = (
+            track_get_or_create
+        )
 
         edge_case_tickers = [
-            ("0005.HK", "0005_HK"),      # Dot replacement
-            ("BRK-B", "BRK_B"),          # Hyphen replacement
-            ("A" * 50, "A" * 40),        # Truncation to 40 chars
+            ("0005.HK", "0005_HK"),  # Dot replacement
+            ("BRK-B", "BRK_B"),  # Hyphen replacement
+            ("A" * 50, "A" * 40),  # Truncation to 40 chars
         ]
 
         for ticker, expected_safe in edge_case_tickers:
@@ -372,14 +398,16 @@ class TestMemoryCollectionNaming:
 
             # Verify all memory keys use expected sanitized ticker
             for key in memories.keys():
-                assert key.startswith(expected_safe), \
-                    f"Memory key '{key}' should start with '{expected_safe}' for ticker '{ticker}'"
+                assert key.startswith(
+                    expected_safe
+                ), f"Memory key '{key}' should start with '{expected_safe}' for ticker '{ticker}'"
 
             # Verify collection names are valid (no special chars)
             for collection_name in created_collections:
                 # ChromaDB collection names must be alphanumeric + underscore
-                assert all(c.isalnum() or c == '_' for c in collection_name), \
-                    f"Collection name '{collection_name}' contains invalid characters"
+                assert all(
+                    c.isalnum() or c == "_" for c in collection_name
+                ), f"Collection name '{collection_name}' contains invalid characters"
 
             created_collections.clear()
 

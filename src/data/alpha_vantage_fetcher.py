@@ -6,14 +6,15 @@ Free Tier Limits: 25 requests/day, 5 requests/minute.
 Strategy: Use until exhausted, then silent fail (Circuit Breaker).
 """
 
-import os
-import aiohttp
 import asyncio
-import structlog
-import pandas as pd
 from typing import Any
-from src.data.interfaces import FinancialFetcher
+
+import aiohttp
+import pandas as pd
+import structlog
+
 from src.config import config
+from src.data.interfaces import FinancialFetcher
 
 logger = structlog.get_logger(__name__)
 
@@ -85,51 +86,52 @@ class AlphaVantageFetcher(FinancialFetcher):
             self._session = aiohttp.ClientSession()
 
         # Alpha Vantage uses standard ticker format (0005.HK, AAPL, etc.)
-        params = {
-            "function": "OVERVIEW",
-            "symbol": symbol,
-            "apikey": self.api_key
-        }
+        params = {"function": "OVERVIEW", "symbol": symbol, "apikey": self.api_key}
 
         try:
             logger.debug("alpha_vantage_request", symbol=symbol)
 
             async with self._session.get(
-                self.base_url,
-                params=params,
-                timeout=aiohttp.ClientTimeout(total=10)
+                self.base_url, params=params, timeout=aiohttp.ClientTimeout(total=10)
             ) as response:
                 if response.status != 200:
                     # HTTP errors are debug level - not user-facing issues
-                    logger.debug("alpha_vantage_http_error",
-                                symbol=symbol,
-                                status=response.status)
+                    logger.debug(
+                        "alpha_vantage_http_error",
+                        symbol=symbol,
+                        status=response.status,
+                    )
                     return None
 
                 try:
                     data = await response.json()
                 except (ValueError, aiohttp.ContentTypeError) as e:
-                    logger.debug("alpha_vantage_malformed_json",
-                                symbol=symbol,
-                                error=str(e))
+                    logger.debug(
+                        "alpha_vantage_malformed_json", symbol=symbol, error=str(e)
+                    )
                     return None
 
                 # Check for API rate limit message
                 if "Note" in data:
-                    if "higher API call volume" in data["Note"] or "call frequency" in data["Note"]:
+                    if (
+                        "higher API call volume" in data["Note"]
+                        or "call frequency" in data["Note"]
+                    ):
                         # Rate limit hit - INFO level (visible but not alarming)
-                        logger.info("alpha_vantage_rate_limit_hit",
-                                   symbol=symbol,
-                                   message="Daily quota exhausted (25 requests/day free tier)")
+                        logger.info(
+                            "alpha_vantage_rate_limit_hit",
+                            symbol=symbol,
+                            message="Daily quota exhausted (25 requests/day free tier)",
+                        )
                         self._is_exhausted = True
                         return None
 
                 # Check for "Information" field (often used for errors)
                 if "Information" in data:
                     # API info messages are debug level
-                    logger.debug("alpha_vantage_info",
-                                symbol=symbol,
-                                message=data["Information"])
+                    logger.debug(
+                        "alpha_vantage_info", symbol=symbol, message=data["Information"]
+                    )
                     return None
 
                 # Check for valid response (must have Symbol field)
@@ -138,9 +140,9 @@ class AlphaVantageFetcher(FinancialFetcher):
                     return None
 
                 # Success - debug level (only visible when debugging data sources)
-                logger.debug("alpha_vantage_success",
-                            symbol=symbol,
-                            fields_count=len(data))
+                logger.debug(
+                    "alpha_vantage_success", symbol=symbol, fields_count=len(data)
+                )
 
                 return self._parse_overview(data)
 
@@ -150,9 +152,7 @@ class AlphaVantageFetcher(FinancialFetcher):
             return None
         except Exception as e:
             # Unexpected errors - debug level
-            logger.debug("alpha_vantage_request_failed",
-                        symbol=symbol,
-                        error=str(e))
+            logger.debug("alpha_vantage_request_failed", symbol=symbol, error=str(e))
             return None
 
     def _parse_overview(self, data: dict) -> dict[str, Any]:
@@ -163,57 +163,54 @@ class AlphaVantageFetcher(FinancialFetcher):
         https://www.alphavantage.co/documentation/#company-overview
         """
         output = {
-            '_source': 'alpha_vantage',
-
+            "_source": "alpha_vantage",
             # Basic info
-            'symbol': data.get('Symbol'),
-            'currency': data.get('Currency'),
-
+            "symbol": data.get("Symbol"),
+            "currency": data.get("Currency"),
             # Valuation metrics
-            'marketCap': self._safe_float(data.get('MarketCapitalization')),
-            'trailingPE': self._safe_float(data.get('PERatio')),
-            'forwardPE': self._safe_float(data.get('ForwardPE')),
-            'priceToBook': self._safe_float(data.get('PriceToBookRatio')),
-            'pegRatio': self._safe_float(data.get('PEGRatio')),
-
+            "marketCap": self._safe_float(data.get("MarketCapitalization")),
+            "trailingPE": self._safe_float(data.get("PERatio")),
+            "forwardPE": self._safe_float(data.get("ForwardPE")),
+            "priceToBook": self._safe_float(data.get("PriceToBookRatio")),
+            "pegRatio": self._safe_float(data.get("PEGRatio")),
             # Profitability
-            'returnOnEquity': self._safe_percentage(data.get('ReturnOnEquityTTM')),
-            'returnOnAssets': self._safe_percentage(data.get('ReturnOnAssetsTTM')),
-            'profitMargins': self._safe_percentage(data.get('ProfitMargin')),
-            'operatingMargins': self._safe_percentage(data.get('OperatingMarginTTM')),
-
+            "returnOnEquity": self._safe_percentage(data.get("ReturnOnEquityTTM")),
+            "returnOnAssets": self._safe_percentage(data.get("ReturnOnAssetsTTM")),
+            "profitMargins": self._safe_percentage(data.get("ProfitMargin")),
+            "operatingMargins": self._safe_percentage(data.get("OperatingMarginTTM")),
             # Growth
-            'revenueGrowth': self._safe_percentage(data.get('QuarterlyRevenueGrowthYOY')),
-            'earningsGrowth': self._safe_percentage(data.get('QuarterlyEarningsGrowthYOY')),
-
+            "revenueGrowth": self._safe_percentage(
+                data.get("QuarterlyRevenueGrowthYOY")
+            ),
+            "earningsGrowth": self._safe_percentage(
+                data.get("QuarterlyEarningsGrowthYOY")
+            ),
             # Financial strength
-            'debtToEquity': self._safe_float(data.get('DebtToEquity')),
-            'currentRatio': self._safe_float(data.get('CurrentRatio')),
-            'beta': self._safe_float(data.get('Beta')),
-
+            "debtToEquity": self._safe_float(data.get("DebtToEquity")),
+            "currentRatio": self._safe_float(data.get("CurrentRatio")),
+            "beta": self._safe_float(data.get("Beta")),
             # Analyst data
             # Note: Alpha Vantage OVERVIEW endpoint doesn't provide analyst count directly
             # Only provides AnalystTargetPrice (a price value, not a count)
             # numberOfAnalystOpinions will be filled by other sources (yfinance, etc.)
-
             # Metadata
-            'sector': data.get('Sector'),
-            'industry': data.get('Industry'),
+            "sector": data.get("Sector"),
+            "industry": data.get("Industry"),
         }
 
         # Tag each field with source for quality tracking
         tagged_output = {}
         for key, value in output.items():
-            if value is not None and key != '_source':
+            if value is not None and key != "_source":
                 tagged_output[key] = value
-                tagged_output[f'_source_{key}'] = 'alpha_vantage'
+                tagged_output[f"_source_{key}"] = "alpha_vantage"
 
         return tagged_output if tagged_output else None
 
     def _safe_float(self, value: Any) -> float | None:
         """Convert to float, handling None/'None'/'-' gracefully."""
         try:
-            if value is None or value == 'None' or value == '-' or value == 'N/A':
+            if value is None or value == "None" or value == "-" or value == "N/A":
                 return None
             return float(value)
         except (ValueError, TypeError):
@@ -226,14 +223,14 @@ class AlphaVantageFetcher(FinancialFetcher):
                  '15%' -> 0.15 (convert from percentage)
         """
         try:
-            if value is None or value == 'None' or value == '-' or value == 'N/A':
+            if value is None or value == "None" or value == "-" or value == "N/A":
                 return None
 
             value_str = str(value)
 
             # Remove percentage sign if present
-            if '%' in value_str:
-                value_str = value_str.replace('%', '')
+            if "%" in value_str:
+                value_str = value_str.replace("%", "")
                 return float(value_str) / 100.0
 
             # Already decimal (Alpha Vantage returns decimals, not percentages)
@@ -245,12 +242,11 @@ class AlphaVantageFetcher(FinancialFetcher):
     def _safe_int(self, value: Any) -> int | None:
         """Convert to int, handling None/'None'/'-' gracefully."""
         try:
-            if value is None or value == 'None' or value == '-' or value == 'N/A':
+            if value is None or value == "None" or value == "-" or value == "N/A":
                 return None
             return int(float(value))
         except (ValueError, TypeError):
             return None
-
 
 
 # Singleton instance

@@ -11,36 +11,42 @@ Architecture:
 6. Bull/Bear debate → Consultant → Trader → Risk Team → Portfolio Manager
 """
 
-from typing import Literal, Any
 from dataclasses import dataclass
-import structlog
+from typing import Any, Literal
 
-from langgraph.graph import StateGraph, END
-from langgraph.types import RunnableConfig
-from langgraph.prebuilt import ToolNode
+import structlog
 from langchain_core.messages import AIMessage
+from langgraph.graph import END, StateGraph
+from langgraph.prebuilt import ToolNode
+from langgraph.types import RunnableConfig
 
 from src.agents import (
-    AgentState, create_analyst_node, create_researcher_node,
-    create_research_manager_node, create_trader_node,
-    create_risk_debater_node, create_portfolio_manager_node,
-    create_financial_health_validator_node,
+    AgentState,
+    create_analyst_node,
     create_consultant_node,
-    create_legal_counsel_node
+    create_financial_health_validator_node,
+    create_legal_counsel_node,
+    create_portfolio_manager_node,
+    create_research_manager_node,
+    create_researcher_node,
+    create_risk_debater_node,
+    create_trader_node,
 )
+from src.config import config
 from src.llms import (
-    create_quick_thinking_llm,
     create_deep_thinking_llm,
+    create_quick_thinking_llm,
     get_consultant_llm,
     is_gemini_v3_or_greater,
 )
-from src.config import config
-from src.toolkit import toolkit
-from src.token_tracker import TokenTrackingCallback, get_tracker
 from src.memory import (
-    create_memory_instances, cleanup_all_memories, FinancialSituationMemory,
-    sanitize_ticker_for_collection
+    FinancialSituationMemory,
+    cleanup_all_memories,
+    create_memory_instances,
+    sanitize_ticker_for_collection,
 )
+from src.token_tracker import TokenTrackingCallback, get_tracker
+from src.toolkit import toolkit
 
 logger = structlog.get_logger(__name__)
 
@@ -48,6 +54,7 @@ logger = structlog.get_logger(__name__)
 @dataclass
 class TradingContext:
     """Context object passed to graph nodes via configuration."""
+
     ticker: str
     trade_date: str
     quick_mode: bool = False
@@ -60,6 +67,7 @@ class TradingContext:
 
 # --- Routing Functions ---
 
+
 def should_continue_analyst(
     state: AgentState, config: RunnableConfig
 ) -> Literal["tools", "continue"]:
@@ -69,15 +77,14 @@ def should_continue_analyst(
     """
     messages = state.get("messages", [])
     sender = state.get("sender", "unknown")
-    has_tool_calls = messages and hasattr(messages[-1], 'tool_calls') and messages[-1].tool_calls
+    has_tool_calls = (
+        messages and hasattr(messages[-1], "tool_calls") and messages[-1].tool_calls
+    )
 
     result = "tools" if has_tool_calls else "continue"
 
     logger.info(
-        "analyst_routing",
-        sender=sender,
-        has_tool_calls=has_tool_calls,
-        result=result
+        "analyst_routing", sender=sender, has_tool_calls=has_tool_calls, result=result
     )
 
     return result
@@ -101,11 +108,7 @@ def route_tools(state: AgentState) -> str:
 
     node_name = agent_map.get(sender, "Market Analyst")
 
-    logger.debug(
-        "tool_routing",
-        sender=sender,
-        routing_to=node_name
-    )
+    logger.debug("tool_routing", sender=sender, routing_to=node_name)
 
     return node_name
 
@@ -136,11 +139,19 @@ def create_agent_tool_node(tools: list, agent_key: str):
         # Find the AIMessage from THIS agent (has tool_calls for our tools)
         target_message = None
         for msg in reversed(messages):
-            if isinstance(msg, AIMessage) and hasattr(msg, 'tool_calls') and msg.tool_calls:
+            if (
+                isinstance(msg, AIMessage)
+                and hasattr(msg, "tool_calls")
+                and msg.tool_calls
+            ):
                 # Check if any tool_call is for one of our tools
-                msg_tool_names = {tc.get('name', tc.get('function', {}).get('name', ''))
-                                 for tc in msg.tool_calls}
-                if msg_tool_names & tool_names:  # Intersection - has at least one of our tools
+                msg_tool_names = {
+                    tc.get("name", tc.get("function", {}).get("name", ""))
+                    for tc in msg.tool_calls
+                }
+                if (
+                    msg_tool_names & tool_names
+                ):  # Intersection - has at least one of our tools
                     target_message = msg
                     break
 
@@ -149,7 +160,7 @@ def create_agent_tool_node(tools: list, agent_key: str):
                 "agent_tool_node_no_matching_message",
                 agent_key=agent_key,
                 tool_names=list(tool_names),
-                message="No AIMessage found with tool_calls for this agent's tools"
+                message="No AIMessage found with tool_calls for this agent's tools",
             )
             return {"messages": []}
 
@@ -160,8 +171,8 @@ def create_agent_tool_node(tools: list, agent_key: str):
         logger.debug(
             "agent_tool_node_executing",
             agent_key=agent_key,
-            tool_calls=[tc.get('name') for tc in target_message.tool_calls],
-            total_messages=len(messages)
+            tool_calls=[tc.get("name") for tc in target_message.tool_calls],
+            total_messages=len(messages),
         )
 
         # Execute the tools using the filtered messages
@@ -173,9 +184,7 @@ def create_agent_tool_node(tools: list, agent_key: str):
     return agent_tool_node
 
 
-def fan_out_to_analysts(
-    state: AgentState, config: RunnableConfig
-) -> list[str]:
+def fan_out_to_analysts(state: AgentState, config: RunnableConfig) -> list[str]:
     """
     Fan-out router that triggers all 6 analyst streams in parallel.
     Returns a list of destinations for parallel execution.
@@ -190,7 +199,7 @@ def fan_out_to_analysts(
         "News Analyst",
         "Junior Fundamentals Analyst",
         "Foreign Language Analyst",
-        "Legal Counsel"
+        "Legal Counsel",
     ]
 
 
@@ -218,13 +227,13 @@ def fundamentals_sync_router(
         "fundamentals_sync_status",
         junior_done=junior_done,
         foreign_done=foreign_done,
-        legal_done=legal_done
+        legal_done=legal_done,
     )
 
     if junior_done and foreign_done and legal_done:
         logger.info(
             "fundamentals_sync_complete",
-            message="Junior, Foreign Language, and Legal Counsel complete - proceeding to Senior Fundamentals"
+            message="Junior, Foreign Language, and Legal Counsel complete - proceeding to Senior Fundamentals",
         )
         return "Fundamentals Analyst"
 
@@ -270,7 +279,7 @@ def sync_check_router(
         news_done=news_done,
         validator_done=validator_done,
         pre_screening=pre_screening,
-        all_done=all_done
+        all_done=all_done,
     )
 
     if not all_done:
@@ -282,13 +291,13 @@ def sync_check_router(
     if pre_screening == "REJECT":
         logger.info(
             "sync_routing_to_pm",
-            message="Red flags detected - skipping debate, routing to Portfolio Manager"
+            message="Red flags detected - skipping debate, routing to Portfolio Manager",
         )
         return "Portfolio Manager"
 
     logger.info(
         "sync_routing_to_research_manager",
-        message="All analysts complete - proceeding to Research Manager"
+        message="All analysts complete - proceeding to Research Manager",
     )
     return "Research Manager"
 
@@ -313,6 +322,7 @@ def debate_router(state: AgentState, config: RunnableConfig):
 
 # --- Graph Creation ---
 
+
 def create_trading_graph(
     max_debate_rounds: int = 2,
     max_risk_discuss_rounds: int = 1,
@@ -320,7 +330,7 @@ def create_trading_graph(
     recursion_limit: int = 100,
     ticker: str | None = None,
     cleanup_previous: bool = False,
-    quick_mode: bool = False
+    quick_mode: bool = False,
 ):
     """
     Create the multi-agent trading analysis graph with parallel analyst execution.
@@ -362,16 +372,24 @@ def create_trading_graph(
         risk_manager_memory = memories.get(f"{safe_ticker}_risk_manager_memory")
 
         all_memories = [
-            bull_memory, bear_memory, invest_judge_memory,
-            trader_memory, risk_manager_memory
+            bull_memory,
+            bear_memory,
+            invest_judge_memory,
+            trader_memory,
+            risk_manager_memory,
         ]
         if not all(all_memories):
             missing = []
-            if not bull_memory: missing.append("bull_memory")
-            if not bear_memory: missing.append("bear_memory")
-            if not invest_judge_memory: missing.append("invest_judge_memory")
-            if not trader_memory: missing.append("trader_memory")
-            if not risk_manager_memory: missing.append("risk_manager_memory")
+            if not bull_memory:
+                missing.append("bull_memory")
+            if not bear_memory:
+                missing.append("bear_memory")
+            if not invest_judge_memory:
+                missing.append("invest_judge_memory")
+            if not trader_memory:
+                missing.append("trader_memory")
+            if not risk_manager_memory:
+                missing.append("risk_manager_memory")
             raise ValueError(
                 f"Failed to create memory instances for {ticker}. Missing: {', '.join(missing)}"
             )
@@ -380,7 +398,7 @@ def create_trading_graph(
             "ticker_memories_ready",
             ticker=ticker,
             bull_available=bull_memory.available,
-            bear_available=bear_memory.available
+            bear_available=bear_memory.available,
         )
     else:
         logger.warning("using_legacy_memories", ticker=ticker)
@@ -395,7 +413,7 @@ def create_trading_graph(
         ticker=ticker,
         max_debate_rounds=max_debate_rounds,
         enable_memory=enable_memory,
-        architecture="parallel"
+        architecture="parallel",
     )
 
     # --- LLM Setup ---
@@ -491,27 +509,35 @@ def create_trading_graph(
     )
 
     consultant_llm = get_consultant_llm(
-        callbacks=[TokenTrackingCallback("Consultant", tracker)],
-        quick_mode=quick_mode
+        callbacks=[TokenTrackingCallback("Consultant", tracker)], quick_mode=quick_mode
     )
 
     # --- Node Creation ---
 
     # Data gathering analysts (parallel)
     market = create_analyst_node(
-        market_llm, "market_analyst",
-        toolkit.get_technical_tools(), "market_report",
-        retry_llm=retry_llm, allow_retry=allow_retry
+        market_llm,
+        "market_analyst",
+        toolkit.get_technical_tools(),
+        "market_report",
+        retry_llm=retry_llm,
+        allow_retry=allow_retry,
     )
     sentiment = create_analyst_node(
-        social_llm, "sentiment_analyst",
-        toolkit.get_sentiment_tools(), "sentiment_report",
-        retry_llm=retry_llm, allow_retry=allow_retry
+        social_llm,
+        "sentiment_analyst",
+        toolkit.get_sentiment_tools(),
+        "sentiment_report",
+        retry_llm=retry_llm,
+        allow_retry=allow_retry,
     )
     news = create_analyst_node(
-        news_llm, "news_analyst",
-        toolkit.get_news_tools(), "news_report",
-        retry_llm=retry_llm, allow_retry=allow_retry
+        news_llm,
+        "news_analyst",
+        toolkit.get_news_tools(),
+        "news_report",
+        retry_llm=retry_llm,
+        allow_retry=allow_retry,
     )
 
     # Foreign Language Analyst (parallel with Junior Fundamentals and Legal Counsel)
@@ -519,54 +545,54 @@ def create_trading_graph(
         callbacks=[TokenTrackingCallback("Foreign Language Analyst", tracker)]
     )
     foreign_analyst = create_analyst_node(
-        foreign_llm, "foreign_language_analyst",
-        toolkit.get_foreign_language_tools(), "foreign_language_report",
-        retry_llm=retry_llm, allow_retry=allow_retry
+        foreign_llm,
+        "foreign_language_analyst",
+        toolkit.get_foreign_language_tools(),
+        "foreign_language_report",
+        retry_llm=retry_llm,
+        allow_retry=allow_retry,
     )
 
     # Legal Counsel (parallel with Junior Fundamentals and Foreign Language)
     legal_llm = create_quick_thinking_llm(
         callbacks=[TokenTrackingCallback("Legal Counsel", tracker)]
     )
-    legal_counsel = create_legal_counsel_node(
-        legal_llm, toolkit.get_legal_tools()
-    )
+    legal_counsel = create_legal_counsel_node(legal_llm, toolkit.get_legal_tools())
 
     # Fundamentals chain (Junior + Foreign → Senior → Validator)
     # Junior uses retry logic (data gathering agent with quick thinking)
     junior_fund = create_analyst_node(
-        junior_fund_llm, "junior_fundamentals_analyst",
-        toolkit.get_junior_fundamental_tools(), "raw_fundamentals_data",
-        retry_llm=retry_llm, allow_retry=allow_retry
+        junior_fund_llm,
+        "junior_fundamentals_analyst",
+        toolkit.get_junior_fundamental_tools(),
+        "raw_fundamentals_data",
+        retry_llm=retry_llm,
+        allow_retry=allow_retry,
     )
     # Senior is a synthesis agent (mode-dependent thinking, no retry needed)
     senior_fund = create_analyst_node(
-        senior_fund_llm, "fundamentals_analyst",
-        toolkit.get_senior_fundamental_tools(), "fundamentals_report"
+        senior_fund_llm,
+        "fundamentals_analyst",
+        toolkit.get_senior_fundamental_tools(),
+        "fundamentals_report",
     )
     validator = create_financial_health_validator_node()
 
     # Agent-specific tool nodes for parallel execution
     # CRITICAL: Uses create_agent_tool_node to filter messages by agent's tools
     # This prevents parallel agents from executing each other's tool_calls
-    market_tools = create_agent_tool_node(
-        toolkit.get_market_tools(), "market_analyst"
-    )
+    market_tools = create_agent_tool_node(toolkit.get_market_tools(), "market_analyst")
     sentiment_tools = create_agent_tool_node(
         toolkit.get_sentiment_tools(), "sentiment_analyst"
     )
-    news_tools = create_agent_tool_node(
-        toolkit.get_news_tools(), "news_analyst"
-    )
+    news_tools = create_agent_tool_node(toolkit.get_news_tools(), "news_analyst")
     junior_fund_tools = create_agent_tool_node(
         toolkit.get_junior_fundamental_tools(), "junior_fundamentals_analyst"
     )
     foreign_tools = create_agent_tool_node(
         toolkit.get_foreign_language_tools(), "foreign_language_analyst"
     )
-    legal_tools = create_agent_tool_node(
-        toolkit.get_legal_tools(), "legal_counsel"
-    )
+    legal_tools = create_agent_tool_node(toolkit.get_legal_tools(), "legal_counsel")
 
     # Research & Decision nodes
     bull = create_researcher_node(bull_llm, bull_memory, "bull_researcher")
@@ -652,58 +678,69 @@ def create_trading_graph(
     workflow.add_conditional_edges(
         "Dispatcher",
         fan_out_to_analysts,
-        ["Market Analyst", "Sentiment Analyst", "News Analyst", "Junior Fundamentals Analyst", "Foreign Language Analyst", "Legal Counsel"]
+        [
+            "Market Analyst",
+            "Sentiment Analyst",
+            "News Analyst",
+            "Junior Fundamentals Analyst",
+            "Foreign Language Analyst",
+            "Legal Counsel",
+        ],
     )
 
     # Market, Sentiment, News: tools loop → Sync Check
     # All branches converge at Sync Check for proper synchronization
     # Each analyst has its own tool node to avoid parallel routing conflicts
     workflow.add_conditional_edges(
-        "Market Analyst", should_continue_analyst,
-        {"tools": "market_tools", "continue": "Sync Check"}
+        "Market Analyst",
+        should_continue_analyst,
+        {"tools": "market_tools", "continue": "Sync Check"},
     )
     workflow.add_edge("market_tools", "Market Analyst")
 
     workflow.add_conditional_edges(
-        "Sentiment Analyst", should_continue_analyst,
-        {"tools": "sentiment_tools", "continue": "Sync Check"}
+        "Sentiment Analyst",
+        should_continue_analyst,
+        {"tools": "sentiment_tools", "continue": "Sync Check"},
     )
     workflow.add_edge("sentiment_tools", "Sentiment Analyst")
 
     workflow.add_conditional_edges(
-        "News Analyst", should_continue_analyst,
-        {"tools": "news_tools", "continue": "Sync Check"}
+        "News Analyst",
+        should_continue_analyst,
+        {"tools": "news_tools", "continue": "Sync Check"},
     )
     workflow.add_edge("news_tools", "News Analyst")
 
     # Junior Fundamentals flow: tools loop → Fundamentals Sync Check
     workflow.add_conditional_edges(
-        "Junior Fundamentals Analyst", should_continue_analyst,
-        {"tools": "junior_fund_tools", "continue": "Fundamentals Sync Check"}
+        "Junior Fundamentals Analyst",
+        should_continue_analyst,
+        {"tools": "junior_fund_tools", "continue": "Fundamentals Sync Check"},
     )
     workflow.add_edge("junior_fund_tools", "Junior Fundamentals Analyst")
 
     # Foreign Language Analyst flow: tools loop → Fundamentals Sync Check
     workflow.add_conditional_edges(
-        "Foreign Language Analyst", should_continue_analyst,
-        {"tools": "foreign_tools", "continue": "Fundamentals Sync Check"}
+        "Foreign Language Analyst",
+        should_continue_analyst,
+        {"tools": "foreign_tools", "continue": "Fundamentals Sync Check"},
     )
     workflow.add_edge("foreign_tools", "Foreign Language Analyst")
 
     # Legal Counsel flow: tools loop → Fundamentals Sync Check
     workflow.add_conditional_edges(
-        "Legal Counsel", should_continue_analyst,
-        {"tools": "legal_tools", "continue": "Fundamentals Sync Check"}
+        "Legal Counsel",
+        should_continue_analyst,
+        {"tools": "legal_tools", "continue": "Fundamentals Sync Check"},
     )
     workflow.add_edge("legal_tools", "Legal Counsel")
 
     # Fundamentals Sync Check: wait for Junior + Foreign + Legal, then route to Senior
     workflow.add_conditional_edges(
-        "Fundamentals Sync Check", fundamentals_sync_router,
-        {
-            "__end__": END,
-            "Fundamentals Analyst": "Fundamentals Analyst"
-        }
+        "Fundamentals Sync Check",
+        fundamentals_sync_router,
+        {"__end__": END, "Fundamentals Analyst": "Fundamentals Analyst"},
     )
 
     # Senior Fundamentals → Validator → Sync Check
@@ -712,22 +749,21 @@ def create_trading_graph(
 
     # Sync Check: wait for all streams, then route
     workflow.add_conditional_edges(
-        "Sync Check", sync_check_router,
+        "Sync Check",
+        sync_check_router,
         {
             "__end__": END,
             "Portfolio Manager": "Portfolio Manager",
-            "Research Manager": "Bull Researcher"  # Start debate with Bull
-        }
+            "Research Manager": "Bull Researcher",  # Start debate with Bull
+        },
     )
 
     # Bull/Bear Debate Flow
     workflow.add_conditional_edges(
-        "Bull Researcher", debate_router,
-        ["Bear Researcher", "Research Manager"]
+        "Bull Researcher", debate_router, ["Bear Researcher", "Research Manager"]
     )
     workflow.add_conditional_edges(
-        "Bear Researcher", debate_router,
-        ["Bull Researcher", "Research Manager"]
+        "Bear Researcher", debate_router, ["Bull Researcher", "Research Manager"]
     )
 
     # Research Manager → Consultant → Trader (or direct to Trader)
@@ -748,8 +784,15 @@ def create_trading_graph(
         "trading_graph_created",
         ticker=ticker,
         architecture="parallel",
-        parallel_streams=["Market", "Sentiment", "News", "Junior Fundamentals", "Foreign Language", "Legal Counsel"],
-        fundamentals_sync="Junior + Foreign + Legal → Senior → Validator"
+        parallel_streams=[
+            "Market",
+            "Sentiment",
+            "News",
+            "Junior Fundamentals",
+            "Foreign Language",
+            "Legal Counsel",
+        ],
+        fundamentals_sync="Junior + Foreign + Legal → Senior → Validator",
     )
 
     return workflow.compile()

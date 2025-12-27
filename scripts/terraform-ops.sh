@@ -117,15 +117,15 @@ EOF
 
 check_prerequisites() {
     local missing=()
-    
+
     if ! command -v terraform &> /dev/null; then
         missing+=("terraform")
     fi
-    
+
     if ! command -v az &> /dev/null; then
         missing+=("azure-cli")
     fi
-    
+
     if [[ ${#missing[@]} -gt 0 ]]; then
         print_error "Missing required tools: ${missing[*]}"
         echo ""
@@ -134,7 +134,7 @@ check_prerequisites() {
         echo "  azure-cli: https://docs.microsoft.com/en-us/cli/azure/install-azure-cli"
         exit 1
     fi
-    
+
     # Check Azure login
     if ! az account show &> /dev/null; then
         print_error "Not logged into Azure"
@@ -146,7 +146,7 @@ check_prerequisites() {
 
 validate_environment() {
     local env="$1"
-    
+
     case "$env" in
         dev|staging|prod) ;;
         *)
@@ -155,7 +155,7 @@ validate_environment() {
             exit 1
             ;;
     esac
-    
+
     # Check if Terraform directory exists
     local tf_dir="$REPO_ROOT/terraform/environments/$env"
     if [[ ! -d "$tf_dir" ]]; then
@@ -168,7 +168,7 @@ validate_environment() {
 
 load_environment_vars() {
     local env_file="$REPO_ROOT/.env"
-    
+
     if [[ -f "$env_file" ]]; then
         print_info "Loading environment variables from .env..."
         set -a
@@ -177,7 +177,7 @@ load_environment_vars() {
     else
         print_warning ".env file not found - using runtime environment only"
     fi
-    
+
     # Export Terraform variables
     export TF_VAR_google_api_key="${GOOGLE_API_KEY:-}"
     export TF_VAR_tavily_api_key="${TAVILY_API_KEY:-}"
@@ -188,14 +188,14 @@ load_environment_vars() {
 cmd_validate() {
     local env="$1"
     local tf_dir="$REPO_ROOT/terraform/environments/$env"
-    
+
     print_info "Validating Terraform configuration for $env..."
-    
+
     cd "$tf_dir" || exit 1
-    
+
     # Initialize (without backend for validation)
     terraform init -backend=false
-    
+
     # Validate
     if terraform validate; then
         print_success "Terraform configuration is valid"
@@ -208,14 +208,14 @@ cmd_validate() {
 cmd_plan() {
     local env="$1"
     local tf_dir="$REPO_ROOT/terraform/environments/$env"
-    
+
     print_info "Generating Terraform plan for $env..."
-    
+
     cd "$tf_dir" || exit 1
-    
+
     # Initialize with backend
     terraform init
-    
+
     # Plan
     terraform plan -detailed-exitcode || {
         exit_code=$?
@@ -233,19 +233,19 @@ cmd_apply() {
     local env="$1"
     local dry_run="$2"
     local tf_dir="$REPO_ROOT/terraform/environments/$env"
-    
+
     echo ""
     print_warning "About to apply Terraform changes for: $env"
     print_warning "This will CREATE or MODIFY Azure resources"
     print_warning "Estimated cost: ~$35-50/month per environment"
     echo ""
-    
+
     if [[ "$dry_run" == "true" ]]; then
         print_info "DRY RUN MODE - showing plan only"
         cmd_plan "$env"
         return 0
     fi
-    
+
     # Confirmation
     read -p "Type the environment name '$env' to confirm: " -r
     echo
@@ -253,12 +253,12 @@ cmd_apply() {
         print_error "Confirmation failed - aborting"
         exit 1
     fi
-    
+
     cd "$tf_dir" || exit 1
-    
+
     # Initialize
     terraform init
-    
+
     # Apply (will prompt for confirmation)
     print_info "Applying Terraform changes..."
     if terraform apply; then
@@ -275,7 +275,7 @@ cmd_destroy() {
     local env="$1"
     local dry_run="$2"
     local tf_dir="$REPO_ROOT/terraform/environments/$env"
-    
+
     echo ""
     print_danger
     echo ""
@@ -283,7 +283,7 @@ cmd_destroy() {
     print_error "Environment: $env"
     print_error "This operation CANNOT be undone!"
     echo ""
-    
+
     if [[ "$dry_run" == "true" ]]; then
         print_info "DRY RUN MODE - showing what would be destroyed"
         cd "$tf_dir" || exit 1
@@ -291,7 +291,7 @@ cmd_destroy() {
         terraform plan -destroy
         return 0
     fi
-    
+
     # Multiple confirmations for destroy
     read -p "Are you ABSOLUTELY SURE you want to destroy $env? (yes/no): " -r
     echo
@@ -299,24 +299,24 @@ cmd_destroy() {
         print_info "Destroy cancelled"
         exit 0
     fi
-    
+
     read -p "Type the environment name '$env' to confirm destruction: " -r
     echo
     if [[ "$REPLY" != "$env" ]]; then
         print_error "Confirmation failed - aborting"
         exit 1
     fi
-    
+
     echo ""
     print_warning "Last chance to cancel (Ctrl+C now!)..."
     sleep 5
     echo ""
-    
+
     cd "$tf_dir" || exit 1
-    
+
     # Initialize
     terraform init
-    
+
     # Destroy (will prompt for final confirmation)
     print_error "Destroying infrastructure..."
     if terraform destroy; then
@@ -330,10 +330,10 @@ cmd_destroy() {
 cmd_output() {
     local env="$1"
     local tf_dir="$REPO_ROOT/terraform/environments/$env"
-    
+
     print_info "Terraform outputs for $env:"
     echo ""
-    
+
     cd "$tf_dir" || exit 1
     terraform init
     terraform output
@@ -343,15 +343,15 @@ main() {
     local command=""
     local environment=""
     local dry_run="false"
-    
+
     # Parse arguments
     if [[ $# -eq 0 ]]; then
         show_usage
     fi
-    
+
     command="$1"
     shift
-    
+
     while [[ $# -gt 0 ]]; do
         case $1 in
             --env)
@@ -371,14 +371,14 @@ main() {
                 ;;
         esac
     done
-    
+
     # Validate environment is provided
     if [[ -z "$environment" ]]; then
         print_error "Environment is required (use --env)"
         echo ""
         show_usage
     fi
-    
+
     # Header
     echo ""
     echo "════════════════════════════════════════════════════════════"
@@ -391,12 +391,12 @@ main() {
         print_warning "Mode: DRY RUN"
     fi
     echo ""
-    
+
     # Checks
     check_prerequisites
     validate_environment "$environment"
     load_environment_vars
-    
+
     # Execute command
     case "$command" in
         validate)
@@ -424,7 +424,7 @@ main() {
             exit 1
             ;;
     esac
-    
+
     echo ""
 }
 

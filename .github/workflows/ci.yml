@@ -14,27 +14,27 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-    
+
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.12'
-    
+
     - name: Install Poetry
       uses: snok/install-poetry@v1
       with:
         virtualenvs-create: true
         virtualenvs-in-project: true
         installer-parallel: true
-    
+
     - name: Install dependencies
       run: |
         poetry install --no-interaction
-    
+
     - name: Run tests
       run: |
         poetry run pytest tests/ -v --tb=short -m "not integration"
@@ -42,16 +42,16 @@ jobs:
         # Provide dummy keys for tests that need them
         GOOGLE_API_KEY: "test-key-for-ci"
         TAVILY_API_KEY: "test-key-for-ci"
-    
+
     - name: Validate prompt JSON files
       run: |
         poetry run python -c "
         import json
         from pathlib import Path
-        
+
         prompt_dir = Path('prompts')
         errors = []
-        
+
         for prompt_file in prompt_dir.glob('*.json'):
             try:
                 with open(prompt_file) as f:
@@ -63,7 +63,7 @@ jobs:
                         errors.append(f'{prompt_file.name}: missing system_message')
             except json.JSONDecodeError as e:
                 errors.append(f'{prompt_file.name}: invalid JSON - {e}')
-        
+
         if errors:
             print('❌ Prompt validation errors:')
             for error in errors:
@@ -72,11 +72,11 @@ jobs:
         else:
             print('✅ All prompt files are valid JSON')
         "
-    
+
     - name: Check for accidentally committed secrets
       run: |
         echo "🔍 Scanning for accidentally committed secrets..."
-        
+
         # Patterns that should never be in the repo
         FORBIDDEN_PATTERNS=(
           "sk-[A-Za-z0-9]{48}"                    # OpenAI API keys
@@ -91,7 +91,7 @@ jobs:
           "password[\"']\s*[:=]\s*[\"'][^\"']{8,}"  # Hardcoded passwords
           "api[_-]?key[\"']\s*[:=]\s*[\"'][^\"']{16,}"  # Hardcoded API keys
         )
-        
+
         # File extensions to check
         FILE_PATTERNS=(
           "*.py"
@@ -102,14 +102,14 @@ jobs:
           "*.sh"
           "*.md"
         )
-        
+
         found_secrets=0
-        
+
         for pattern in "${FORBIDDEN_PATTERNS[@]}"; do
           for file_ext in "${FILE_PATTERNS[@]}"; do
             # Search for pattern in files, excluding .git directory
             matches=$(find . -name "$file_ext" -not -path "./.git/*" -not -path "./.venv/*" -not -path "./node_modules/*" -type f -exec grep -l -E "$pattern" {} \; 2>/dev/null || true)
-            
+
             if [ -n "$matches" ]; then
               echo "❌ SECURITY ALERT: Potential secret found matching pattern: $pattern"
               echo "   Files:"
@@ -118,7 +118,7 @@ jobs:
             fi
           done
         done
-        
+
         # Also check for common secret filenames that should be gitignored
         FORBIDDEN_FILES=(
           ".env"
@@ -131,11 +131,11 @@ jobs:
           "*.key"
           "*.pem"
         )
-        
+
         for file_pattern in "${FORBIDDEN_FILES[@]}"; do
           # Check if these files exist and are NOT in .gitignore
           files=$(find . -name "$file_pattern" -not -path "./.git/*" -not -path "./.venv/*" -type f 2>/dev/null || true)
-          
+
           if [ -n "$files" ]; then
             # Check if they're properly gitignored
             for file in $files; do
@@ -148,7 +148,7 @@ jobs:
             done
           fi
         done
-        
+
         if [ $found_secrets -gt 0 ]; then
           echo ""
           echo "❌ Found $found_secrets potential secret(s) in repository!"

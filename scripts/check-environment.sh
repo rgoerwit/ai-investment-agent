@@ -43,7 +43,7 @@ cd "$REPO_ROOT" || exit 1
 print_info "Checking for .env file..."
 if [[ ! -f ".env" ]]; then
     print_error "No .env file found"
-    
+
     if [[ -f ".env.example" ]]; then
         echo ""
         print_info "Found .env.example - creating .env..."

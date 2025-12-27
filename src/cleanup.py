@@ -15,8 +15,9 @@ Usage:
             await cleanup_async_resources()
 """
 
-import structlog
 from collections.abc import Awaitable, Callable
+
+import structlog
 
 logger = structlog.get_logger(__name__)
 
@@ -61,6 +62,7 @@ async def _cleanup_data_fetchers() -> None:
     # Import here to avoid circular imports
     try:
         from src.data.alpha_vantage_fetcher import get_av_fetcher
+
         fetcher = get_av_fetcher()
         await fetcher.close()
         logger.debug("cleanup_closed", resource="alpha_vantage_session")
@@ -69,6 +71,7 @@ async def _cleanup_data_fetchers() -> None:
 
     try:
         from src.data.fmp_fetcher import get_fmp_fetcher
+
         fetcher = get_fmp_fetcher()
         await fetcher.close()
         logger.debug("cleanup_closed", resource="fmp_session")
@@ -77,6 +80,7 @@ async def _cleanup_data_fetchers() -> None:
 
     try:
         from src.data.eodhd_fetcher import get_eodhd_fetcher
+
         fetcher = get_eodhd_fetcher()
         await fetcher.close()
         logger.debug("cleanup_closed", resource="eodhd_session")
@@ -93,15 +97,18 @@ async def _cleanup_genai_clients() -> None:
     """
     try:
         from src.llms import get_all_llm_instances
+
         llm_instances = get_all_llm_instances()
 
         for name, llm in llm_instances.items():
             try:
-                if hasattr(llm, 'async_client') and llm.async_client is not None:
+                if hasattr(llm, "async_client") and llm.async_client is not None:
                     client = llm.async_client
-                    if hasattr(client, 'aclose'):
+                    if hasattr(client, "aclose"):
                         await client.aclose()
-                        logger.debug("cleanup_closed", resource=f"genai_async_client_{name}")
+                        logger.debug(
+                            "cleanup_closed", resource=f"genai_async_client_{name}"
+                        )
             except Exception as e:
                 logger.debug("cleanup_error", resource=f"genai_{name}", error=str(e))
 

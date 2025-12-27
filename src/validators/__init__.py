@@ -7,4 +7,4 @@ Complements LLM-driven agents with exact threshold-based logic.
 
 from src.validators.red_flag_detector import RedFlagDetector
 
-__all__ = ['RedFlagDetector']
+__all__ = ["RedFlagDetector"]

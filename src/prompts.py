@@ -5,11 +5,12 @@ Version 7.0 - Adaptive Scoring and Data Vacuum Logic.
 Includes ALL agent definitions to prevent NoneType errors.
 """
 
-from dataclasses import dataclass, field
-from typing import Any
-from pathlib import Path
 import json
 import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
 import structlog
 
 from src.config import config
@@ -22,6 +23,7 @@ class AgentPrompt:
     """
     Structured prompt with metadata for version tracking.
     """
+
     agent_key: str
     agent_name: str
     version: str
@@ -29,7 +31,7 @@ class AgentPrompt:
     category: str = "general"
     requires_tools: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
-    
+
     def __post_init__(self):
         if self.metadata is None:
             self.metadata = {}
@@ -44,10 +46,10 @@ class PromptRegistry:
         self.prompts: dict[str, AgentPrompt] = {}
         self._load_default_prompts()
         self._load_custom_prompts()
-    
+
     def _load_default_prompts(self):
         """Load specialized prompts aligned with JSON prompt files."""
-        
+
         # ==========================================
         # 1. ANALYSIS TEAM
         # ==========================================
@@ -154,8 +156,8 @@ State the company from verified state: "Analyzing [TICKER] - [COMPANY NAME]"
                 "last_updated": "2025-11-22",
                 "thesis_version": "4.5",
                 "critical_output": "liquidity_metrics",
-                "changes": "Added mandatory STEP 2 for technical indicators"
-            }
+                "changes": "Added mandatory STEP 2 for technical indicators",
+            },
         )
 
         self.prompts["sentiment_analyst"] = AgentPrompt(
@@ -182,7 +184,7 @@ You have access to social media and news monitoring tools (StockTwits API and Ta
 
 1. **FIRST**: Call `get_social_media_sentiment(ticker)`.
    This tool now checks **StockTwits** (real-time trader stream) first, then falls back to Tavily.
-   - **CRITICAL INTERPRETATION**: 
+   - **CRITICAL INTERPRETATION**:
      - **High StockTwits Volume (>50 msgs)**: The stock is **DISCOVERED** by retail traders.
      This is a NEGATIVE for the "undiscovered" thesis.
      - **Zero/Low StockTwits Volume**: This is a **POSITIVE** signal for the "undiscovered" thesis.
@@ -350,8 +352,8 @@ Analyzing [TICKER] - [COMPANY NAME]
                 "last_updated": "2025-11-22",
                 "thesis_version": "5.1",
                 "critical_output": "undiscovered_status",
-                "changes": "Integrated StockTwits as primary signal. Raised threshold to >50."
-            }
+                "changes": "Integrated StockTwits as primary signal. Raised threshold to >50.",
+            },
         )
 
         self.prompts["news_analyst"] = AgentPrompt(
@@ -618,13 +620,13 @@ Analyzing [TICKER] - [COMPANY NAME]
 
 **Most Important Event**: [Full details from news]
 
-**Other Notable Events**: 
+**Other Notable Events**:
 - [Event 1] - [Date] - [Source]
 - [Event 2] - [Date] - [Source]
 
 ### UPCOMING CATALYSTS (Next 6 Months)
 
-**Near-Term** (0-3 months): 
+**Near-Term** (0-3 months):
 - [Event] - [Date] - [Expected impact]
 
 **Medium-Term** (3-6 months):
@@ -657,7 +659,12 @@ Analyzing [TICKER] - [COMPANY NAME]
 
 Date: [Current date]
 Asset: [Ticker]""",
-            metadata={"last_updated": "2025-11-26", "thesis_version": "4.6", "critical_outputs": ["us_revenue", "catalysts", "local_insights"], "changes": "FULL PROMPT RESTORED: Includes Tool Protocol, Data Handling, Ex-US Context, Exclusive Domain, and Detailed Output Structure."}
+            metadata={
+                "last_updated": "2025-11-26",
+                "thesis_version": "4.6",
+                "critical_outputs": ["us_revenue", "catalysts", "local_insights"],
+                "changes": "FULL PROMPT RESTORED: Includes Tool Protocol, Data Handling, Ex-US Context, Exclusive Domain, and Detailed Output Structure.",
+            },
         )
 
         self.prompts["fundamentals_analyst"] = AgentPrompt(
@@ -854,19 +861,19 @@ Sponsorship Determination:
 
 - **NO ADR** -> PASS
   Portfolio Manager: +0 to risk tally
-  
+
 - **UNSPONSORED OTC (no sponsored ADR exists)** -> EMERGING_INTEREST
   Portfolio Manager: -0.5 to risk tally (BONUS)
-  
+
 - **UNSPONSORED OTC (sponsored ADR also exists)** -> MODERATE_CONCERN
   Portfolio Manager: +0.33 to risk tally
-  
+
 - **SPONSORED OTC** -> MODERATE_CONCERN
   Portfolio Manager: +0.33 to risk tally
-  
+
 - **SPONSORED NYSE/NASDAQ** -> MODERATE_CONCERN (UPDATED)
   Portfolio Manager: +0.33 to risk tally (Downgraded from Hard Fail to Risk Penalty)
-  
+
 - **UNCERTAIN** -> UNCERTAIN
   Portfolio Manager: +0 to risk tally (neutral)
 
@@ -1156,7 +1163,12 @@ PFIC_RISK: [LOW / MEDIUM / HIGH]
 **IBKR Accessibility**: [Status and notes]
 
 **PFIC Risk**: [Assessment]""",
-            metadata={"last_updated": "2025-12-17", "thesis_version": "7.1", "critical_output": "DATA_BLOCK", "changes": "v7.1: Updated to receive raw JSON from Junior Analyst. Added DATA RECONCILIATION RULES for merging Junior and Foreign data. Added JSON KEY MAPPING for parsing tool output."}
+            metadata={
+                "last_updated": "2025-12-17",
+                "thesis_version": "7.1",
+                "critical_output": "DATA_BLOCK",
+                "changes": "v7.1: Updated to receive raw JSON from Junior Analyst. Added DATA RECONCILIATION RULES for merging Junior and Foreign data. Added JSON KEY MAPPING for parsing tool output.",
+            },
         )
 
         self.prompts["junior_fundamentals_analyst"] = AgentPrompt(
@@ -1218,7 +1230,12 @@ Return ALL tool results in a structured format:
 5. **DOCUMENT FAILURES** - If a tool fails or returns empty, note: "Tool X returned: [error/empty]"
 
 The Senior Analyst depends on receiving complete raw data to perform accurate analysis.""",
-            metadata={"last_updated": "2025-12-16", "thesis_version": "6.0", "critical_output": "raw_data", "changes": "v1.1: Fixed - removed reference to non-existent get_comprehensive_fundamental_data tool. Clarified only 2 tools available: get_financial_metrics and get_fundamental_analysis."}
+            metadata={
+                "last_updated": "2025-12-16",
+                "thesis_version": "6.0",
+                "critical_output": "raw_data",
+                "changes": "v1.1: Fixed - removed reference to non-existent get_comprehensive_fundamental_data tool. Clarified only 2 tools available: get_financial_metrics and get_fundamental_analysis.",
+            },
         )
 
         self.prompts["foreign_language_analyst"] = AgentPrompt(
@@ -1307,7 +1324,12 @@ From results, extract:
 3. **Document dates**: Old data (>1 year) should be flagged.
 4. **No hacking/bypassing paywalls**: Only use freely accessible pages.
 5. **Admit failure clearly**: If no useful data found, say so - do not fabricate.""",
-            metadata={"last_updated": "2025-12-17", "thesis_version": "7.0", "critical_output": "foreign_language_report", "changes": "v1.0: Initial version for supplemental foreign-source data gathering"}
+            metadata={
+                "last_updated": "2025-12-17",
+                "thesis_version": "7.0",
+                "critical_output": "foreign_language_report",
+                "changes": "v1.0: Initial version for supplemental foreign-source data gathering",
+            },
         )
 
         # ==========================================
@@ -1396,7 +1418,7 @@ Example: "With a P/E of 14 (well below the 18 threshold) and ROE of 18%, this co
 
 **CONVICTION**: [High/Medium/Low]
 
-**RECOMMENDATION**: 
+**RECOMMENDATION**:
 - BUY if thesis compliance ≥80% and strong catalysts
 - HOLD if 60-79% thesis compliance or weaker catalysts
 - **Cannot recommend BUY if**: P/E>25, ADR exists, analyst coverage≥10, financial health<7, or growth<3
@@ -1406,7 +1428,7 @@ Example: "With a P/E of 14 (well below the 18 threshold) and ROE of 18%, this co
 Keep concise (300-800 words).
 
 Remember: You're advocating, not just summarizing. Make the bull case COMPELLING while respecting thesis boundaries. Acknowledge when thesis criteria are stretched or violated.""",
-            metadata={"last_updated": "2025-11-17", "thesis_version": "2.3"}
+            metadata={"last_updated": "2025-11-17", "thesis_version": "2.3"},
         )
 
         self.prompts["bear_researcher"] = AgentPrompt(
@@ -1495,7 +1517,7 @@ Example: "This stock violates the thesis on valuation: P/E is 22 (vs. threshold 
 Keep concise (300-800 words).
 
 Remember: You're the skeptic, not the pessimist. Present valid concerns COMPELLINGLY. Cite specific numbers from the Fundamentals Analyst report to support your case.""",
-            metadata={"last_updated": "2025-11-17", "thesis_version": "2.4"}
+            metadata={"last_updated": "2025-11-17", "thesis_version": "2.4"},
         )
 
         self.prompts["research_manager"] = AgentPrompt(
@@ -1641,13 +1663,17 @@ Your primary role is to check for **QUALITATIVE RISKS** and **THESIS-BREAKING DI
 3. **US Revenue "Not Disclosed" is NEUTRAL**: Do not mark as warning or risk. Only evaluate if actually reported.
 4. **Unsponsored ADRs are acceptable**: They may signal emerging interest without violating undiscovered thesis.
 5. **NYSE/NASDAQ Sponsored ADRs**: These are **Risk Factors**, not auto-fails.""",
-            metadata={"last_updated": "2025-11-28", "thesis_version": "4.5", "changes": "Updated to use Adjusted Scores (percentages) for Health and Growth thresholds and implemented Data Vacuum Logic."}
+            metadata={
+                "last_updated": "2025-11-28",
+                "thesis_version": "4.5",
+                "changes": "Updated to use Adjusted Scores (percentages) for Health and Growth thresholds and implemented Data Vacuum Logic.",
+            },
         )
 
         # ==========================================
         # 3. EXECUTION TEAM (ZERO-BASED)
         # ==========================================
-        
+
         self.prompts["trader"] = AgentPrompt(
             agent_key="trader",
             agent_name="Trader",
@@ -1727,14 +1753,14 @@ Propose specific execution details for this single position:
             metadata={
                 "last_updated": "2025-11-21",
                 "thesis_version": "3.0",
-                "changes": "Removed portfolio allocation assumptions. All recommendations are for standalone positions without knowledge of existing holdings."
-            }
+                "changes": "Removed portfolio allocation assumptions. All recommendations are for standalone positions without knowledge of existing holdings.",
+            },
         )
-        
+
         # ==========================================
         # 4. RISK TEAM (ZERO-BASED)
         # ==========================================
-        
+
         self.prompts["risky_analyst"] = AgentPrompt(
             agent_key="risky_analyst",
             agent_name="Risky Analyst",
@@ -1770,10 +1796,10 @@ You believe in:
             metadata={
                 "last_updated": "2025-11-21",
                 "risk_stance": "aggressive",
-                "changes": "Removed portfolio allocation assumptions. All recommendations are for standalone positions."
-            }
+                "changes": "Removed portfolio allocation assumptions. All recommendations are for standalone positions.",
+            },
         )
-        
+
         self.prompts["safe_analyst"] = AgentPrompt(
             agent_key="safe_analyst",
             agent_name="Safe Analyst",
@@ -1808,10 +1834,10 @@ You believe in:
             metadata={
                 "last_updated": "2025-11-21",
                 "risk_stance": "conservative",
-                "changes": "Removed portfolio allocation assumptions. All recommendations are for standalone positions."
-            }
+                "changes": "Removed portfolio allocation assumptions. All recommendations are for standalone positions.",
+            },
         )
-        
+
         self.prompts["neutral_analyst"] = AgentPrompt(
             agent_key="neutral_analyst",
             agent_name="Neutral Analyst",
@@ -1846,14 +1872,14 @@ You believe in:
             metadata={
                 "last_updated": "2025-11-21",
                 "risk_stance": "balanced",
-                "changes": "Removed portfolio allocation assumptions. All recommendations are for standalone positions."
-            }
+                "changes": "Removed portfolio allocation assumptions. All recommendations are for standalone positions.",
+            },
         )
-        
+
         # ==========================================
         # 5. MANAGER (ZERO-BASED)
         # ==========================================
-        
+
         self.prompts["portfolio_manager"] = AgentPrompt(
             agent_key="portfolio_manager",
             agent_name="Portfolio Manager",
@@ -1995,8 +2021,8 @@ State decision clearly.
             metadata={
                 "last_updated": "2025-11-28",
                 "thesis_version": "7.0",
-                "changes": "Implemented 'Data Vacuum' logic to distinguish missing data from failed data. Added 1.5% cap for high-vacuum stocks."
-            }
+                "changes": "Implemented 'Data Vacuum' logic to distinguish missing data from failed data. Added 1.5% cap for high-vacuum stocks.",
+            },
         )
 
         # ==========================================
@@ -2160,34 +2186,44 @@ You are NOT permanent staff. You have:
 5. **Your review goes to Portfolio Manager and Risk Team** - make every word count
 6. **Focus on MATERIAL issues**: Don't flag minor formatting or style preferences
 7. **Challenge with evidence, not opinions**: "Bear case ignored D/E of 520%" (good) vs. "I don't like this stock" (bad)""",
-            metadata={"last_updated": "2025-12-13", "thesis_version": "1.0", "changes": "Initial consultant prompt - designed to challenge Gemini outputs using OpenAI for cross-validation and bias detection"}
+            metadata={
+                "last_updated": "2025-12-13",
+                "thesis_version": "1.0",
+                "changes": "Initial consultant prompt - designed to challenge Gemini outputs using OpenAI for cross-validation and bias detection",
+            },
         )
 
         logger.info("Prompts loaded successfully", count=len(self.prompts))
-    
+
     def _load_custom_prompts(self):
         """Load custom prompts from JSON files, overriding defaults."""
         if not self.prompts_dir.exists():
-            logger.debug("No custom prompts directory found", path=str(self.prompts_dir))
+            logger.debug(
+                "No custom prompts directory found", path=str(self.prompts_dir)
+            )
             return
-        
+
         for json_file in self.prompts_dir.glob("*.json"):
             try:
-                with open(json_file, 'r') as f:
+                with open(json_file) as f:
                     data = json.load(f)
-                
+
                 agent_key = data.get("agent_key")
                 if not agent_key:
                     logger.warning("JSON file missing agent_key", file=json_file.name)
                     continue
-                
+
                 prompt = AgentPrompt(**data)
                 self.prompts[agent_key] = prompt
-                logger.info("Custom prompt loaded", agent_key=agent_key, version=prompt.version)
-                
+                logger.info(
+                    "Custom prompt loaded", agent_key=agent_key, version=prompt.version
+                )
+
             except Exception as e:
-                logger.error("Failed to load custom prompt", file=json_file.name, error=str(e))
-    
+                logger.error(
+                    "Failed to load custom prompt", file=json_file.name, error=str(e)
+                )
+
     def get(self, agent_key: str) -> AgentPrompt | None:
         """Get prompt by agent key, checking env var override first."""
         env_var = f"PROMPT_{agent_key.upper()}"
@@ -2201,27 +2237,27 @@ You are NOT permanent staff. You have:
                     system_message=os.environ[env_var],
                     category=base_prompt.category,
                     requires_tools=base_prompt.requires_tools,
-                    metadata={"source": "environment"}
+                    metadata={"source": "environment"},
                 )
-        
+
         return self.prompts.get(agent_key)
-    
+
     def get_all(self) -> dict[str, AgentPrompt]:
         """Get all registered prompts."""
         return self.prompts.copy()
-    
+
     def list_keys(self) -> list:
         """List all registered prompt keys."""
         return list(self.prompts.keys())
-    
+
     def export_to_json(self, output_dir: str | None = None):
         """Export all prompts to JSON files."""
         export_dir = Path(output_dir or self.prompts_dir)
         export_dir.mkdir(parents=True, exist_ok=True)
-        
+
         for agent_key, prompt in self.prompts.items():
             output_file = export_dir / f"{agent_key}.json"
-            
+
             prompt_dict = {
                 "agent_key": prompt.agent_key,
                 "agent_name": prompt.agent_name,
@@ -2229,12 +2265,12 @@ You are NOT permanent staff. You have:
                 "system_message": prompt.system_message,
                 "category": prompt.category,
                 "requires_tools": prompt.requires_tools,
-                "metadata": prompt.metadata
+                "metadata": prompt.metadata,
             }
-            
-            with open(output_file, 'w') as f:
+
+            with open(output_file, "w") as f:
                 json.dump(prompt_dict, f, indent=2)
-            
+
             logger.info("Prompt exported", agent_key=agent_key, file=str(output_file))
 
 

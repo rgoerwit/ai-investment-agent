@@ -5,12 +5,13 @@ Tests various failure modes, data format edge cases, and system robustness
 to ensure the consultant doesn't break existing functionality under stress.
 """
 
+from unittest.mock import Mock, patch
+
 import pytest
-import os
-from unittest.mock import Mock, patch, AsyncMock
-from src.agents import create_consultant_node, AgentState
-from src.report_generator import QuietModeReporter
 from langgraph.types import RunnableConfig
+
+from src.agents import create_consultant_node
+from src.report_generator import QuietModeReporter
 
 
 class TestDataFormatEdgeCases:
@@ -26,8 +27,8 @@ class TestDataFormatEdgeCases:
         async def mock_invoke(*args, **kwargs):
             return mock_response
 
-        with patch('src.agents.invoke_with_rate_limit_handling', new=mock_invoke):
-            with patch('src.prompts.get_prompt') as mock_get_prompt:
+        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
                 mock_prompt.agent_name = "External Consultant"
@@ -46,10 +47,12 @@ class TestDataFormatEdgeCases:
                     "investment_debate_state": {},
                     "investment_plan": "",
                     "red_flags": [],
-                    "pre_screening_result": "PASS"
+                    "pre_screening_result": "PASS",
                 }
 
-                config = RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")})
+                config = RunnableConfig(
+                    configurable={"context": Mock(trade_date="2025-12-13")}
+                )
 
                 result = await consultant_node(state, config)
 
@@ -70,9 +73,9 @@ class TestDataFormatEdgeCases:
             invoke_calls.append(args)
             return mock_response
 
-        with patch('src.agents.invoke_with_rate_limit_handling', new=mock_invoke):
-            with patch('src.prompts.get_prompt') as mock_get_prompt:
-                with patch('src.agents.logger') as mock_logger:
+        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                with patch("src.agents.logger") as mock_logger:
                     mock_prompt = Mock()
                     mock_prompt.system_message = "You are a consultant."
                     mock_prompt.agent_name = "External Consultant"
@@ -91,10 +94,12 @@ class TestDataFormatEdgeCases:
                         "investment_debate_state": None,  # None instead of dict
                         "investment_plan": "BUY",
                         "red_flags": [],
-                        "pre_screening_result": "PASS"
+                        "pre_screening_result": "PASS",
                     }
 
-                    config = RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")})
+                    config = RunnableConfig(
+                        configurable={"context": Mock(trade_date="2025-12-13")}
+                    )
 
                     result = await consultant_node(state, config)
 
@@ -125,8 +130,8 @@ class TestDataFormatEdgeCases:
         async def mock_invoke(*args, **kwargs):
             return mock_response
 
-        with patch('src.agents.invoke_with_rate_limit_handling', new=mock_invoke):
-            with patch('src.prompts.get_prompt') as mock_get_prompt:
+        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
                 mock_prompt.agent_name = "External Consultant"
@@ -145,10 +150,12 @@ class TestDataFormatEdgeCases:
                     "investment_debate_state": {"history": "Debate"},
                     "investment_plan": "BUY",
                     "red_flags": [],
-                    "pre_screening_result": "PASS"
+                    "pre_screening_result": "PASS",
                 }
 
-                config = RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")})
+                config = RunnableConfig(
+                    configurable={"context": Mock(trade_date="2025-12-13")}
+                )
 
                 result = await consultant_node(state, config)
 
@@ -169,11 +176,11 @@ class TestConfigurationEdgeCases:
 
         from src.llms import create_consultant_llm
 
-        with patch('langchain_openai.ChatOpenAI') as mock_chatgpt:
+        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
             mock_llm = Mock()
             mock_chatgpt.return_value = mock_llm
 
-            with patch('src.llms.config') as mock_config:
+            with patch("src.llms.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.consultant_model = "invalid-model-name-12345"
                 mock_config.get_openai_api_key.return_value = "test-key"
@@ -186,13 +193,13 @@ class TestConfigurationEdgeCases:
 
     def test_consultant_with_empty_api_key(self):
         """Test consultant with empty string API key (not missing)."""
-        from src.llms import get_consultant_llm
         import src.llms
+        from src.llms import get_consultant_llm
 
         # Reset singleton to force re-evaluation
         src.llms._consultant_llm_instance = None
 
-        with patch('src.llms.config') as mock_config:
+        with patch("src.llms.config") as mock_config:
             mock_config.enable_consultant = True
             mock_config.get_openai_api_key.return_value = ""
             llm = get_consultant_llm()
@@ -205,13 +212,13 @@ class TestConfigurationEdgeCases:
 
     def test_consultant_enable_flag_disabled(self):
         """Test that consultant is disabled when enable_consultant=False."""
-        from src.llms import get_consultant_llm
         import src.llms
+        from src.llms import get_consultant_llm
 
         # Reset singleton to force re-evaluation
         src.llms._consultant_llm_instance = None
 
-        with patch('src.llms.config') as mock_config:
+        with patch("src.llms.config") as mock_config:
             mock_config.enable_consultant = False
             llm = get_consultant_llm()
             assert llm is None, "Should be disabled when enable_consultant=False"
@@ -231,8 +238,10 @@ class TestErrorPropagation:
         async def mock_invoke_timeout(*args, **kwargs):
             raise TimeoutError("OpenAI API request timed out after 120s")
 
-        with patch('src.agents.invoke_with_rate_limit_handling', new=mock_invoke_timeout):
-            with patch('src.prompts.get_prompt') as mock_get_prompt:
+        with patch(
+            "src.agents.invoke_with_rate_limit_handling", new=mock_invoke_timeout
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
                 mock_prompt.agent_name = "External Consultant"
@@ -248,10 +257,12 @@ class TestErrorPropagation:
                     "news_report": "Report",
                     "fundamentals_report": "Report",
                     "investment_debate_state": {"history": "Debate"},
-                    "investment_plan": "BUY"
+                    "investment_plan": "BUY",
                 }
 
-                config = RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")})
+                config = RunnableConfig(
+                    configurable={"context": Mock(trade_date="2025-12-13")}
+                )
 
                 result = await consultant_node(state, config)
 
@@ -267,8 +278,10 @@ class TestErrorPropagation:
         async def mock_invoke_rate_limit(*args, **kwargs):
             raise Exception("Rate limit exceeded. Please retry after 60s.")
 
-        with patch('src.agents.invoke_with_rate_limit_handling', new=mock_invoke_rate_limit):
-            with patch('src.prompts.get_prompt') as mock_get_prompt:
+        with patch(
+            "src.agents.invoke_with_rate_limit_handling", new=mock_invoke_rate_limit
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
                 mock_prompt.agent_name = "External Consultant"
@@ -284,10 +297,12 @@ class TestErrorPropagation:
                     "news_report": "Report",
                     "fundamentals_report": "Report",
                     "investment_debate_state": {"history": "Debate"},
-                    "investment_plan": "BUY"
+                    "investment_plan": "BUY",
                 }
 
-                config = RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")})
+                config = RunnableConfig(
+                    configurable={"context": Mock(trade_date="2025-12-13")}
+                )
 
                 result = await consultant_node(state, config)
 
@@ -312,7 +327,7 @@ class TestReportGeneration:
             "investment_plan": "BUY recommendation",
             "consultant_review": "CONSULTANT REVIEW: APPROVED\n\nAnalysis is sound.",
             "trader_investment_plan": "Trading plan",
-            "final_trade_decision": "FINAL DECISION: BUY\n\nRationale: Good fundamentals."
+            "final_trade_decision": "FINAL DECISION: BUY\n\nRationale: Good fundamentals.",
         }
 
         report = reporter.generate_report(result, brief_mode=False)
@@ -330,7 +345,7 @@ class TestReportGeneration:
             "fundamentals_report": "Fundamentals",
             "investment_plan": "BUY recommendation",
             "consultant_review": "Consultant Review Error: OpenAI API timeout",
-            "final_trade_decision": "FINAL DECISION: BUY"
+            "final_trade_decision": "FINAL DECISION: BUY",
         }
 
         report = reporter.generate_report(result, brief_mode=False)
@@ -348,7 +363,7 @@ class TestReportGeneration:
             "fundamentals_report": "Fundamentals",
             "investment_plan": "BUY recommendation",
             "consultant_review": "N/A (consultant disabled or unavailable)",
-            "final_trade_decision": "FINAL DECISION: BUY"
+            "final_trade_decision": "FINAL DECISION: BUY",
         }
 
         report = reporter.generate_report(result, brief_mode=False)
@@ -366,7 +381,7 @@ class TestReportGeneration:
             "fundamentals_report": "Fundamentals",
             "investment_plan": "BUY recommendation",
             # consultant_review field missing entirely
-            "final_trade_decision": "FINAL DECISION: BUY"
+            "final_trade_decision": "FINAL DECISION: BUY",
         }
 
         report = reporter.generate_report(result, brief_mode=False)
@@ -385,7 +400,7 @@ class TestBackwardsCompatibility:
         state = {
             "company_of_interest": "TEST",
             "market_report": "Report",
-            "fundamentals_report": "Report"
+            "fundamentals_report": "Report",
         }
 
         # Should not raise KeyError
@@ -403,10 +418,10 @@ class TestBackwardsCompatibility:
             "investment_plan": "BUY",
             "consultant_review": "",  # Empty
             "trader_investment_plan": "Trader",
-            "risk_debate_state": {"history": "Risk"}
+            "risk_debate_state": {"history": "Risk"},
         }
 
-        consultant = state.get('consultant_review', '')
+        consultant = state.get("consultant_review", "")
 
         # Should handle empty consultant gracefully
         consultant_section = f"\n\nEXTERNAL CONSULTANT REVIEW:\n{consultant if consultant else 'N/A (consultant disabled or unavailable)'}"
@@ -428,7 +443,7 @@ class TestTokenTracking:
             model_name="gpt-4o",
             prompt_tokens=4000,
             completion_tokens=800,
-            total_tokens=4800
+            total_tokens=4800,
         )
 
         cost = usage.estimated_cost_usd
@@ -448,7 +463,7 @@ class TestTokenTracking:
             model_name="gpt-4o-mini",
             prompt_tokens=100000,
             completion_tokens=50000,
-            total_tokens=150000
+            total_tokens=150000,
         )
 
         cost = usage.estimated_cost_usd
@@ -472,8 +487,8 @@ class TestLargeContextHandling:
         async def mock_invoke(*args, **kwargs):
             return mock_response
 
-        with patch('src.agents.invoke_with_rate_limit_handling', new=mock_invoke):
-            with patch('src.prompts.get_prompt') as mock_get_prompt:
+        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
                 mock_prompt.agent_name = "External Consultant"
@@ -492,10 +507,12 @@ class TestLargeContextHandling:
                     "news_report": "News " * 500,
                     "fundamentals_report": large_report,
                     "investment_debate_state": {"history": "Debate history " * 1000},
-                    "investment_plan": "BUY recommendation " * 100
+                    "investment_plan": "BUY recommendation " * 100,
                 }
 
-                config = RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")})
+                config = RunnableConfig(
+                    configurable={"context": Mock(trade_date="2025-12-13")}
+                )
 
                 result = await consultant_node(state, config)
 

@@ -3,10 +3,10 @@ Token usage tracking and cost estimation module.
 Provides comprehensive logging of LLM token consumption across all agents.
 """
 
-import logging
-from typing import Any
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
+
 import structlog
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
@@ -17,6 +17,7 @@ logger = structlog.get_logger(__name__)
 @dataclass
 class TokenUsage:
     """Token usage data for a single LLM call."""
+
     timestamp: str
     agent_name: str
     model_name: str
@@ -41,49 +42,49 @@ class TokenUsage:
             # Pricing as of Dec 2025: https://openai.com/api/pricing/
             # Note: gpt-4o-mini must come BEFORE gpt-4o due to prefix matching
             "gpt-4o-mini": {
-                "prompt": 0.15,     # $0.15 per 1M input tokens
-                "completion": 0.60  # $0.60 per 1M output tokens
+                "prompt": 0.15,  # $0.15 per 1M input tokens
+                "completion": 0.60,  # $0.60 per 1M output tokens
             },
             "gpt-4o": {
-                "prompt": 2.50,     # $2.50 per 1M input tokens
-                "completion": 10.00 # $10.00 per 1M output tokens
+                "prompt": 2.50,  # $2.50 per 1M input tokens
+                "completion": 10.00,  # $10.00 per 1M output tokens
             },
             "gpt-4-turbo": {
-                "prompt": 10.00,    # $10.00 per 1M input tokens
-                "completion": 30.00 # $30.00 per 1M output tokens
+                "prompt": 10.00,  # $10.00 per 1M input tokens
+                "completion": 30.00,  # $30.00 per 1M output tokens
             },
             "gpt-4": {
-                "prompt": 30.00,    # $30.00 per 1M input tokens
-                "completion": 60.00 # $60.00 per 1M output tokens
+                "prompt": 30.00,  # $30.00 per 1M input tokens
+                "completion": 60.00,  # $60.00 per 1M output tokens
             },
             # Gemini pricing - PAID TIER RATES
             # NOTE: These apply when billing is enabled on your GCP project
             # Gemini 2.0 Flash variants (experimental - but PAID if billing enabled)
             "gemini-2.0-flash-thinking-exp": {
-                "prompt": 0.30,     # Paid tier: $0.30 per 1M input tokens
-                "completion": 2.50  # Paid tier: $2.50 per 1M output tokens
+                "prompt": 0.30,  # Paid tier: $0.30 per 1M input tokens
+                "completion": 2.50,  # Paid tier: $2.50 per 1M output tokens
             },
             "gemini-2.0-flash-exp": {
-                "prompt": 0.30,     # Paid tier: $0.30 per 1M input tokens
-                "completion": 2.50  # Paid tier: $2.50 per 1M output tokens
+                "prompt": 0.30,  # Paid tier: $0.30 per 1M input tokens
+                "completion": 2.50,  # Paid tier: $2.50 per 1M output tokens
             },
             # Gemini 2.5 Flash variants (more specific must come first!)
             "gemini-2.5-flash-lite": {
-                "prompt": 0.10,     # $0.10 per 1M input tokens
-                "completion": 0.40  # $0.40 per 1M output tokens
+                "prompt": 0.10,  # $0.10 per 1M input tokens
+                "completion": 0.40,  # $0.40 per 1M output tokens
             },
             "gemini-2.5-flash": {
-                "prompt": 0.30,     # $0.30 per 1M input tokens
-                "completion": 2.50  # $2.50 per 1M output tokens
+                "prompt": 0.30,  # $0.30 per 1M input tokens
+                "completion": 2.50,  # $2.50 per 1M output tokens
             },
             # Gemini 3 Pro variants
             "gemini-3-pro-preview": {
-                "prompt": 2.00,     # $2.00 per 1M input tokens
-                "completion": 12.00 # $12.00 per 1M output tokens
+                "prompt": 2.00,  # $2.00 per 1M input tokens
+                "completion": 12.00,  # $12.00 per 1M output tokens
             },
             "gemini-3-pro": {
-                "prompt": 2.00,     # $2.00 per 1M input tokens (< 200k context)
-                "completion": 12.00 # $12.00 per 1M output tokens (< 200k context)
+                "prompt": 2.00,  # $2.00 per 1M input tokens (< 200k context)
+                "completion": 12.00,  # $12.00 per 1M output tokens (< 200k context)
             },
         }
 
@@ -98,7 +99,9 @@ class TokenUsage:
                 break
 
         prompt_cost = (self.prompt_tokens / 1_000_000) * model_pricing["prompt"]
-        completion_cost = (self.completion_tokens / 1_000_000) * model_pricing["completion"]
+        completion_cost = (self.completion_tokens / 1_000_000) * model_pricing[
+            "completion"
+        ]
 
         return prompt_cost + completion_cost
 
@@ -106,6 +109,7 @@ class TokenUsage:
 @dataclass
 class AgentTokenStats:
     """Aggregate token statistics for a single agent."""
+
     agent_name: str
     total_calls: int = 0
     total_prompt_tokens: int = 0
@@ -130,7 +134,7 @@ class TokenTracker:
     Thread-safe singleton for tracking LLM token consumption.
     """
 
-    _instance: 'TokenTracker | None' = None
+    _instance: "TokenTracker | None" = None
     _quiet_mode: bool = False
 
     def __new__(cls):
@@ -162,7 +166,7 @@ class TokenTracker:
         agent_name: str,
         model_name: str,
         prompt_tokens: int,
-        completion_tokens: int
+        completion_tokens: int,
     ):
         """Record token usage for a specific agent."""
         usage = TokenUsage(
@@ -171,7 +175,7 @@ class TokenTracker:
             model_name=model_name,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
-            total_tokens=prompt_tokens + completion_tokens
+            total_tokens=prompt_tokens + completion_tokens,
         )
 
         # Add to agent-specific stats
@@ -189,7 +193,7 @@ class TokenTracker:
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=usage.total_tokens,
-                estimated_cost_usd=f"${usage.estimated_cost_usd:.6f}"
+                estimated_cost_usd=f"${usage.estimated_cost_usd:.6f}",
             )
 
     def get_agent_stats(self, agent_name: str) -> AgentTokenStats | None:
@@ -198,8 +202,12 @@ class TokenTracker:
 
     def get_total_stats(self) -> dict[str, Any]:
         """Get aggregate statistics across all agents."""
-        total_prompt = sum(stats.total_prompt_tokens for stats in self.agent_stats.values())
-        total_completion = sum(stats.total_completion_tokens for stats in self.agent_stats.values())
+        total_prompt = sum(
+            stats.total_prompt_tokens for stats in self.agent_stats.values()
+        )
+        total_completion = sum(
+            stats.total_completion_tokens for stats in self.agent_stats.values()
+        )
         total_cost = sum(stats.total_cost_usd for stats in self.agent_stats.values())
 
         return {
@@ -216,10 +224,10 @@ class TokenTracker:
                     "prompt_tokens": stats.total_prompt_tokens,
                     "completion_tokens": stats.total_completion_tokens,
                     "total_tokens": stats.total_tokens,
-                    "cost_usd": stats.total_cost_usd
+                    "cost_usd": stats.total_cost_usd,
                 }
                 for name, stats in self.agent_stats.items()
-            }
+            },
         }
 
     def reset(self):
@@ -237,11 +245,7 @@ class TokenTracker:
 
         stats = self.get_total_stats()
 
-        logger.info(
-            "=" * 80 + "\n" +
-            "TOKEN USAGE SUMMARY\n" +
-            "=" * 80
-        )
+        logger.info("=" * 80 + "\n" + "TOKEN USAGE SUMMARY\n" + "=" * 80)
         logger.info(f"Session Start: {stats['session_start']}")
         logger.info(f"Total LLM Calls: {stats['total_calls']}")
         logger.info(f"Total Agents: {stats['total_agents']}")
@@ -249,15 +253,15 @@ class TokenTracker:
         logger.info(f"Total Completion Tokens: {stats['total_completion_tokens']:,}")
         logger.info(f"Total Tokens: {stats['total_tokens']:,}")
         logger.info(f"Projected Cost (Paid Tier): ${stats['total_cost_usd']:.4f} USD")
-        logger.info("  (Note: Actual cost = $0 if using free tier without billing enabled)")
+        logger.info(
+            "  (Note: Actual cost = $0 if using free tier without billing enabled)"
+        )
         logger.info("\nPer-Agent Breakdown:")
         logger.info("-" * 80)
 
         # Sort agents by cost (descending)
         sorted_agents = sorted(
-            stats['agents'].items(),
-            key=lambda x: x[1]['cost_usd'],
-            reverse=True
+            stats["agents"].items(), key=lambda x: x[1]["cost_usd"], reverse=True
         )
 
         for agent_name, agent_stats in sorted_agents:
@@ -305,15 +309,21 @@ class TokenTrackingCallback(BaseCallbackHandler):
                 first_generation = first_generation_list[0]
 
                 # Check if it's an AIMessage with usage_metadata
-                if hasattr(first_generation, 'message') and hasattr(first_generation.message, 'usage_metadata'):
+                if hasattr(first_generation, "message") and hasattr(
+                    first_generation.message, "usage_metadata"
+                ):
                     usage_metadata = first_generation.message.usage_metadata or {}
 
                 # Get model name from generation_info or response_metadata
-                if hasattr(first_generation, 'generation_info'):
-                    model_name = first_generation.generation_info.get('model_name', 'unknown')
-                if model_name == 'unknown' and hasattr(first_generation, 'message'):
-                    if hasattr(first_generation.message, 'response_metadata'):
-                        model_name = first_generation.message.response_metadata.get('model_name', 'unknown')
+                if hasattr(first_generation, "generation_info"):
+                    model_name = first_generation.generation_info.get(
+                        "model_name", "unknown"
+                    )
+                if model_name == "unknown" and hasattr(first_generation, "message"):
+                    if hasattr(first_generation.message, "response_metadata"):
+                        model_name = first_generation.message.response_metadata.get(
+                            "model_name", "unknown"
+                        )
 
         # Fallback to llm_output (for other LLM providers)
         if not usage_metadata and response.llm_output:
@@ -325,15 +335,19 @@ class TokenTrackingCallback(BaseCallbackHandler):
                 model_name = response.llm_output.get("model_name", "unknown")
 
         if usage_metadata:
-            prompt_tokens = usage_metadata.get("input_tokens", 0) or usage_metadata.get("prompt_tokens", 0)
-            completion_tokens = usage_metadata.get("output_tokens", 0) or usage_metadata.get("completion_tokens", 0)
+            prompt_tokens = usage_metadata.get("input_tokens", 0) or usage_metadata.get(
+                "prompt_tokens", 0
+            )
+            completion_tokens = usage_metadata.get(
+                "output_tokens", 0
+            ) or usage_metadata.get("completion_tokens", 0)
 
             if prompt_tokens > 0 or completion_tokens > 0:
                 self.tracker.record_usage(
                     agent_name=self.agent_name,
                     model_name=model_name,
                     prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens
+                    completion_tokens=completion_tokens,
                 )
 
 

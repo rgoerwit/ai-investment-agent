@@ -47,10 +47,10 @@ rm scripts/deploy.sh                       # Renamed to terraform-ops.sh
 
 - **setup-github-secrets.sh** - Could upload to wrong repo if --repo wrong
   - *Protection*: Requires GitHub CLI auth, shows dry-run
-  
+
 - **setup-terraform-backend.sh** - Creates ~$1-2/month Azure resources
   - *Protection*: Asks subscription confirmation, dry-run mode
-  
+
 - **terraform-ops.sh** - Destroy command can delete infrastructure
   - *Protection*: 4 confirmations, 5-sec countdown, dry-run mode
 

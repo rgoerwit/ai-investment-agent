@@ -9,10 +9,11 @@ Tests cover:
 5. Graph structure with new agent
 """
 
-import pytest
-from unittest.mock import MagicMock, AsyncMock, patch
 import json
 from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 
 class TestForeignLanguageAnalystPrompt:
@@ -73,7 +74,10 @@ class TestForeignLanguageAnalystPrompt:
         system_message = data["system_message"]
 
         # Should mention premium sources as fallback
-        assert "bloomberg" in system_message.lower() or "morningstar" in system_message.lower()
+        assert (
+            "bloomberg" in system_message.lower()
+            or "morningstar" in system_message.lower()
+        )
 
 
 class TestSearchForeignSourcesTool:
@@ -114,10 +118,9 @@ class TestSearchForeignSourcesTool:
 
         # Mock tavily_tool as None
         with patch("src.toolkit.tavily_tool", None):
-            result = await search_foreign_sources.ainvoke({
-                "ticker": "7203.T",
-                "search_query": "Toyota 決算短信"
-            })
+            result = await search_foreign_sources.ainvoke(
+                {"ticker": "7203.T", "search_query": "Toyota 決算短信"}
+            )
 
             assert "unavailable" in result.lower() or "not configured" in result.lower()
 
@@ -143,23 +146,33 @@ class TestAgentStateField:
             foreign_language_report="test foreign data",
             fundamentals_report="",
             investment_debate_state=InvestDebateState(
-                bull_history="", bear_history="", history="",
-                current_response="", judge_decision="", count=0
+                bull_history="",
+                bear_history="",
+                history="",
+                current_response="",
+                judge_decision="",
+                count=0,
             ),
             investment_plan="",
             consultant_review="",
             trader_investment_plan="",
             risk_debate_state=RiskDebateState(
-                risky_history="", safe_history="", neutral_history="",
-                history="", latest_speaker="",
-                current_risky_response="", current_safe_response="",
-                current_neutral_response="", judge_decision="", count=0
+                risky_history="",
+                safe_history="",
+                neutral_history="",
+                history="",
+                latest_speaker="",
+                current_risky_response="",
+                current_safe_response="",
+                current_neutral_response="",
+                judge_decision="",
+                count=0,
             ),
             final_trade_decision="",
             tools_called={},
             prompts_used={},
             red_flags=[],
-            pre_screening_result=""
+            pre_screening_result="",
         )
 
         assert state["foreign_language_report"] == "test foreign data"
@@ -176,7 +189,7 @@ class TestFundamentalsSyncRouter:
         state_junior_only = {
             "raw_fundamentals_data": "some data",
             "foreign_language_report": "",
-            "legal_report": ""
+            "legal_report": "",
         }
         result = fundamentals_sync_router(state_junior_only, {})
         assert result == "__end__"
@@ -185,7 +198,7 @@ class TestFundamentalsSyncRouter:
         state_foreign_only = {
             "raw_fundamentals_data": "",
             "foreign_language_report": "some foreign data",
-            "legal_report": ""
+            "legal_report": "",
         }
         result = fundamentals_sync_router(state_foreign_only, {})
         assert result == "__end__"
@@ -194,7 +207,7 @@ class TestFundamentalsSyncRouter:
         state_legal_only = {
             "raw_fundamentals_data": "",
             "foreign_language_report": "",
-            "legal_report": "some legal data"
+            "legal_report": "some legal data",
         }
         result = fundamentals_sync_router(state_legal_only, {})
         assert result == "__end__"
@@ -203,7 +216,7 @@ class TestFundamentalsSyncRouter:
         state_junior_foreign = {
             "raw_fundamentals_data": "junior data",
             "foreign_language_report": "foreign data",
-            "legal_report": ""
+            "legal_report": "",
         }
         result = fundamentals_sync_router(state_junior_foreign, {})
         assert result == "__end__"
@@ -215,7 +228,7 @@ class TestFundamentalsSyncRouter:
         state_all_done = {
             "raw_fundamentals_data": "junior data",
             "foreign_language_report": "foreign data",
-            "legal_report": "legal data"
+            "legal_report": "legal data",
         }
         result = fundamentals_sync_router(state_all_done, {})
         assert result == "Fundamentals Analyst"
@@ -227,7 +240,7 @@ class TestFundamentalsSyncRouter:
         state_with_none = {
             "raw_fundamentals_data": None,
             "foreign_language_report": None,
-            "legal_report": None
+            "legal_report": None,
         }
         result = fundamentals_sync_router(state_with_none, {})
         assert result == "__end__"
@@ -260,9 +273,7 @@ class TestGraphStructure:
 
         # Create graph with memory disabled to simplify
         graph = create_trading_graph(
-            ticker="TEST",
-            enable_memory=False,
-            quick_mode=True
+            ticker="TEST", enable_memory=False, quick_mode=True
         )
 
         # Graph should compile without errors
@@ -275,6 +286,7 @@ class TestSeniorFundamentalsContextInjection:
     def test_context_injection_code_path_exists(self):
         """Test that the context injection code path for foreign data exists in agents.py."""
         import inspect
+
         from src import agents
 
         # Get the source code of create_analyst_node
@@ -295,10 +307,7 @@ class TestSeniorFundamentalsContextInjection:
         mock_llm.bind_tools = MagicMock(return_value=mock_llm)
 
         node_func = create_analyst_node(
-            mock_llm,
-            "fundamentals_analyst",
-            [],
-            "fundamentals_report"
+            mock_llm, "fundamentals_analyst", [], "fundamentals_report"
         )
 
         # The node function exists and is callable

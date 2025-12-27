@@ -1,4 +1,4 @@
-0#!/usr/bin/env python3
+0  #!/usr/bin/env python3
 """
 Example script demonstrating programmatic access to token tracking.
 
@@ -6,20 +6,19 @@ Usage:
     poetry run python examples/check_token_costs.py results/0005_HK_*.json
 """
 
-import sys
 import json
+import sys
 from pathlib import Path
-from typing import List, Dict
 
 
-def analyze_token_costs(json_files: List[Path]):
+def analyze_token_costs(json_files: list[Path]):
     """Analyze token costs from saved analysis JSON files."""
 
     total_cost = 0.0
     total_tokens = 0
     total_analyses = 0
 
-    agent_totals: Dict[str, Dict[str, float]] = {}
+    agent_totals: dict[str, dict[str, float]] = {}
 
     print("=" * 80)
     print("TOKEN USAGE & COST ANALYSIS (Paid Tier Rates)")
@@ -61,11 +60,7 @@ def analyze_token_costs(json_files: List[Path]):
         agents = token_usage.get("agents", {})
         for agent_name, agent_stats in agents.items():
             if agent_name not in agent_totals:
-                agent_totals[agent_name] = {
-                    "tokens": 0,
-                    "cost": 0.0,
-                    "calls": 0
-                }
+                agent_totals[agent_name] = {"tokens": 0, "cost": 0.0, "calls": 0}
 
             agent_totals[agent_name]["tokens"] += agent_stats.get("total_tokens", 0)
             agent_totals[agent_name]["cost"] += agent_stats.get("cost_usd", 0.0)
@@ -89,9 +84,7 @@ def analyze_token_costs(json_files: List[Path]):
 
     # Sort by cost descending
     sorted_agents = sorted(
-        agent_totals.items(),
-        key=lambda x: x[1]["cost"],
-        reverse=True
+        agent_totals.items(), key=lambda x: x[1]["cost"], reverse=True
     )
 
     print(f"{'Agent':<25} {'Calls':>8} {'Tokens':>15} {'Cost':>12}")
@@ -115,9 +108,14 @@ def analyze_token_costs(json_files: List[Path]):
     # Find most expensive agent
     if sorted_agents:
         most_expensive = sorted_agents[0]
-        print(f"• Most expensive agent: {most_expensive[0]} (${most_expensive[1]['cost']:.4f})")
+        print(
+            f"• Most expensive agent: {most_expensive[0]} (${most_expensive[1]['cost']:.4f})"
+        )
 
-        if "Portfolio Manager" in most_expensive[0] or "Research Manager" in most_expensive[0]:
+        if (
+            "Portfolio Manager" in most_expensive[0]
+            or "Research Manager" in most_expensive[0]
+        ):
             print("  → Consider switching DEEP_MODEL to gemini-2.0-flash-exp (free)")
 
     if total_analyses > 0:
@@ -128,7 +126,7 @@ def analyze_token_costs(json_files: List[Path]):
             print("  → Try using --brief flag to reduce output tokens")
             print("  → Consider gemini-2.5-flash-lite for 70% cost reduction")
         else:
-            print(f"  ✅ Cost per analysis is well optimized for paid tier")
+            print("  ✅ Cost per analysis is well optimized for paid tier")
 
     print()
 
@@ -136,11 +134,15 @@ def analyze_token_costs(json_files: List[Path]):
 def main():
     """Main entry point."""
     if len(sys.argv) < 2:
-        print("Usage: python examples/check_token_costs.py <json_file1> [json_file2] ...")
+        print(
+            "Usage: python examples/check_token_costs.py <json_file1> [json_file2] ..."
+        )
         print()
         print("Examples:")
         print("  # Single file")
-        print("  python examples/check_token_costs.py results/0005_HK_20251205_analysis.json")
+        print(
+            "  python examples/check_token_costs.py results/0005_HK_20251205_analysis.json"
+        )
         print()
         print("  # All analyses for a ticker")
         print("  python examples/check_token_costs.py results/0005_HK_*.json")

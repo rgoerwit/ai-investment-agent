@@ -9,11 +9,9 @@ for response.content. These tests verify:
 """
 
 import pytest
-from typing import Any
 
 from src.agents import extract_string_content
 from src.validators.red_flag_detector import RedFlagDetector, Sector
-
 
 # --- Sample Data ---
 
@@ -104,21 +102,14 @@ class TestExtractStringContentDictHandling:
 
     def test_dict_with_nested_content(self):
         """Nested content dicts should be handled recursively."""
-        input_dict = {
-            "content": {
-                "text": SAMPLE_FUNDAMENTALS_REPORT
-            }
-        }
+        input_dict = {"content": {"text": SAMPLE_FUNDAMENTALS_REPORT}}
         result = extract_string_content(input_dict)
         assert result == SAMPLE_FUNDAMENTALS_REPORT
 
     def test_dict_with_parts_list(self):
         """Dict with 'parts' list (Gemini multi-part format) should join parts."""
         input_dict = {
-            "parts": [
-                {"text": "Part 1: Analysis"},
-                {"text": "Part 2: Conclusion"}
-            ]
+            "parts": [{"text": "Part 1: Analysis"}, {"text": "Part 2: Conclusion"}]
         }
         result = extract_string_content(input_dict)
         assert "Part 1: Analysis" in result
@@ -126,11 +117,7 @@ class TestExtractStringContentDictHandling:
 
     def test_dict_with_parts_containing_report(self):
         """Parts containing a full report should be extractable."""
-        input_dict = {
-            "parts": [
-                {"text": SAMPLE_FUNDAMENTALS_REPORT}
-            ]
-        }
+        input_dict = {"parts": [{"text": SAMPLE_FUNDAMENTALS_REPORT}]}
         result = extract_string_content(input_dict)
         assert "SECTOR: Healthcare" in result
         assert "DATA_BLOCK" in result
@@ -181,21 +168,14 @@ class TestExtractStringContentListHandling:
 
     def test_multiple_dicts_joined(self):
         """Multiple dicts should be processed and joined."""
-        input_list = [
-            {"text": "Section A"},
-            {"text": "Section B"}
-        ]
+        input_list = [{"text": "Section A"}, {"text": "Section B"}]
         result = extract_string_content(input_list)
         assert "Section A" in result
         assert "Section B" in result
 
     def test_mixed_list_types(self):
         """List with mixed types should handle each appropriately."""
-        input_list = [
-            "Plain text",
-            {"text": "Dict text"},
-            42
-        ]
+        input_list = ["Plain text", {"text": "Dict text"}, 42]
         result = extract_string_content(input_list)
         assert "Plain text" in result
         assert "Dict text" in result
@@ -223,10 +203,7 @@ class TestExtractStringContentGeminiFormats:
     def test_gemini_structured_response_dict(self):
         """Gemini structured response as dict (the bug case)."""
         # When Gemini returns structured content
-        input_dict = {
-            "text": SAMPLE_FUNDAMENTALS_REPORT,
-            "role": "model"
-        }
+        input_dict = {"text": SAMPLE_FUNDAMENTALS_REPORT, "role": "model"}
         result = extract_string_content(input_dict)
         assert "SECTOR: Healthcare" in result
         assert "DATA_BLOCK" in result
@@ -236,7 +213,9 @@ class TestExtractStringContentGeminiFormats:
         input_dict = {
             "parts": [
                 {"text": "## Analysis\n\nSECTOR: Technology\n"},
-                {"text": "### --- START DATA_BLOCK ---\nADJUSTED_HEALTH_SCORE: 75%\n### --- END DATA_BLOCK ---"}
+                {
+                    "text": "### --- START DATA_BLOCK ---\nADJUSTED_HEALTH_SCORE: 75%\n### --- END DATA_BLOCK ---"
+                },
             ]
         }
         result = extract_string_content(input_dict)
@@ -248,7 +227,7 @@ class TestExtractStringContentGeminiFormats:
         """Gemini response wrapped in content key."""
         input_dict = {
             "content": SAMPLE_BANKING_REPORT,
-            "metadata": {"model": "gemini-pro"}
+            "metadata": {"model": "gemini-pro"},
         }
         result = extract_string_content(input_dict)
         assert "SECTOR: Banking" in result
@@ -256,15 +235,7 @@ class TestExtractStringContentGeminiFormats:
     def test_deeply_nested_gemini_response(self):
         """Deeply nested response structure."""
         input_dict = {
-            "content": {
-                "parts": [
-                    {
-                        "content": {
-                            "text": SAMPLE_FUNDAMENTALS_REPORT
-                        }
-                    }
-                ]
-            }
+            "content": {"parts": [{"content": {"text": SAMPLE_FUNDAMENTALS_REPORT}}]}
         }
         result = extract_string_content(input_dict)
         assert "SECTOR: Healthcare" in result
@@ -295,29 +266,31 @@ class TestDownstreamCompatibility:
     def test_metrics_extraction_from_string(self):
         """RedFlagDetector should extract metrics from string input."""
         metrics = RedFlagDetector.extract_metrics(SAMPLE_FUNDAMENTALS_REPORT)
-        assert metrics['adjusted_health_score'] == 67.0
-        assert metrics['debt_to_equity'] == 45.0
+        assert metrics["adjusted_health_score"] == 67.0
+        assert metrics["debt_to_equity"] == 45.0
 
     def test_metrics_extraction_from_dict_extraction(self):
         """RedFlagDetector should extract metrics from dict-extracted content."""
         input_dict = {"text": SAMPLE_FUNDAMENTALS_REPORT}
         extracted = extract_string_content(input_dict)
         metrics = RedFlagDetector.extract_metrics(extracted)
-        assert metrics['adjusted_health_score'] == 67.0
-        assert metrics['debt_to_equity'] == 45.0
+        assert metrics["adjusted_health_score"] == 67.0
+        assert metrics["debt_to_equity"] == 45.0
 
     def test_metrics_extraction_from_multipart(self):
         """Metrics should be extractable from multi-part response."""
         input_dict = {
             "parts": [
                 {"text": "SECTOR: Technology\n\n"},
-                {"text": "### --- START DATA_BLOCK ---\nADJUSTED_HEALTH_SCORE: 82%\n### --- END DATA_BLOCK ---\n\n- D/E: 30"}
+                {
+                    "text": "### --- START DATA_BLOCK ---\nADJUSTED_HEALTH_SCORE: 82%\n### --- END DATA_BLOCK ---\n\n- D/E: 30"
+                },
             ]
         }
         extracted = extract_string_content(input_dict)
         metrics = RedFlagDetector.extract_metrics(extracted)
-        assert metrics['adjusted_health_score'] == 82.0
-        assert metrics['debt_to_equity'] == 30.0
+        assert metrics["adjusted_health_score"] == 82.0
+        assert metrics["debt_to_equity"] == 30.0
 
     def test_data_block_preserved_in_list_join(self):
         """DATA_BLOCK structure should be preserved when joining list items."""
@@ -325,12 +298,12 @@ class TestDownstreamCompatibility:
         input_list = [
             "SECTOR: Utilities\n",
             "### --- START DATA_BLOCK ---\nADJUSTED_HEALTH_SCORE: 55%\n### --- END DATA_BLOCK ---",
-            "- D/E: 200"
+            "- D/E: 200",
         ]
         extracted = extract_string_content(input_list)
         metrics = RedFlagDetector.extract_metrics(extracted)
-        assert metrics['adjusted_health_score'] == 55.0
-        assert metrics['debt_to_equity'] == 200.0
+        assert metrics["adjusted_health_score"] == 55.0
+        assert metrics["debt_to_equity"] == 200.0
 
 
 class TestEdgeCasesAndRobustness:
@@ -415,7 +388,7 @@ class TestRealWorldScenarios:
         input_dict = {
             "text": SAMPLE_FUNDAMENTALS_REPORT,
             "tool_calls": [{"name": "get_financial_metrics", "id": "123"}],
-            "usage": {"prompt_tokens": 100, "completion_tokens": 50}
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50},
         }
         result = extract_string_content(input_dict)
         # Should extract just the text, not the metadata
@@ -435,7 +408,7 @@ class TestRealWorldScenarios:
         # LangChain sometimes wraps content in specific structures
         input_content = [
             {"type": "text", "text": "Analysis follows:"},
-            {"type": "text", "text": SAMPLE_FUNDAMENTALS_REPORT}
+            {"type": "text", "text": SAMPLE_FUNDAMENTALS_REPORT},
         ]
         result = extract_string_content(input_content)
         # Should extract text from typed content blocks
@@ -468,14 +441,14 @@ class TestValidatorNodeIntegration:
         metrics = RedFlagDetector.extract_metrics(normalized)
 
         assert isinstance(normalized, str)
-        assert metrics['adjusted_health_score'] == 67.0
+        assert metrics["adjusted_health_score"] == 67.0
 
     def test_validator_receives_list_state(self):
         """Simulate state accumulation resulting in list."""
         # LangGraph state accumulation scenario
         state_value = [
             "Previous partial report",
-            SAMPLE_FUNDAMENTALS_REPORT  # Latest/correct report
+            SAMPLE_FUNDAMENTALS_REPORT,  # Latest/correct report
         ]
 
         if not isinstance(state_value, str):
@@ -486,7 +459,7 @@ class TestValidatorNodeIntegration:
         # Should contain both, but importantly should have DATA_BLOCK
         assert "DATA_BLOCK" in normalized
         metrics = RedFlagDetector.extract_metrics(normalized)
-        assert metrics['adjusted_health_score'] == 67.0
+        assert metrics["adjusted_health_score"] == 67.0
 
 
 class TestRegressionDetection:
@@ -507,12 +480,15 @@ class TestRegressionDetection:
         If this test fails, check that extract_string_content(response.content) is
         being called in create_analyst_node() around line 279 of src/agents.py.
         """
-        from unittest.mock import MagicMock, AsyncMock, patch
+        from unittest.mock import AsyncMock, MagicMock, patch
+
         from src.agents import create_analyst_node
 
         # Create a proper mock response with DICT content (the bug scenario)
         mock_response = MagicMock()
-        mock_response.content = {"text": SAMPLE_FUNDAMENTALS_REPORT}  # DICT, not string!
+        mock_response.content = {
+            "text": SAMPLE_FUNDAMENTALS_REPORT
+        }  # DICT, not string!
         mock_response.tool_calls = None  # No tool calls, so should set output field
 
         # Mock the entire chain: llm.bind_tools(tools) returns something that has ainvoke
@@ -523,24 +499,36 @@ class TestRegressionDetection:
         mock_llm.bind_tools.return_value = mock_bound
 
         # Also need to mock the pipe operator result
-        with patch('src.agents.filter_messages_for_gemini', return_value=[]), \
-             patch('src.agents.invoke_with_rate_limit_handling', new_callable=AsyncMock) as mock_invoke:
+        with (
+            patch("src.agents.filter_messages_for_gemini", return_value=[]),
+            patch(
+                "src.agents.invoke_with_rate_limit_handling", new_callable=AsyncMock
+            ) as mock_invoke,
+        ):
             mock_invoke.return_value = mock_response
 
-            node = create_analyst_node(mock_llm, "fundamentals_analyst", [], "fundamentals_report")
+            node = create_analyst_node(
+                mock_llm, "fundamentals_analyst", [], "fundamentals_report"
+            )
 
             state = {
                 "messages": [],
                 "company_of_interest": "1681.HK",
                 "company_name": "CONSUN PHARMA",
-                "prompts_used": {}
+                "prompts_used": {},
             }
-            config = {"configurable": {"context": MagicMock(ticker="1681.HK", trade_date="2024-01-01")}}
+            config = {
+                "configurable": {
+                    "context": MagicMock(ticker="1681.HK", trade_date="2024-01-01")
+                }
+            }
 
             result = await node(state, config)
 
         # THE CRITICAL ASSERTION: Output must be string, not dict
-        assert "fundamentals_report" in result, "Node should set fundamentals_report in output"
+        assert (
+            "fundamentals_report" in result
+        ), "Node should set fundamentals_report in output"
         output_value = result["fundamentals_report"]
 
         assert isinstance(output_value, str), (
@@ -559,13 +547,16 @@ class TestRegressionDetection:
         If this test fails, check that extract_string_content(response.content) is
         being called in create_researcher_node() around line 348 of src/agents.py.
         """
-        from unittest.mock import MagicMock, AsyncMock
+        from unittest.mock import AsyncMock, MagicMock
+
         from src.agents import create_researcher_node
 
         mock_llm = MagicMock()
         mock_response = MagicMock()
         # DICT response instead of string!
-        mock_response.content = {"text": "BULL CASE: Strong fundamentals support a buy rating."}
+        mock_response.content = {
+            "text": "BULL CASE: Strong fundamentals support a buy rating."
+        }
         mock_llm.ainvoke = AsyncMock(return_value=mock_response)
 
         node = create_researcher_node(mock_llm, None, "bull_researcher")
@@ -579,8 +570,8 @@ class TestRegressionDetection:
                 "history": "",
                 "bull_history": "",
                 "bear_history": "",
-                "count": 0
-            }
+                "count": 0,
+            },
         }
         config = {"configurable": {}}
 
@@ -594,7 +585,9 @@ class TestRegressionDetection:
             f"REGRESSION DETECTED: debate history is {type(history).__name__}, expected str. "
             f"Check that extract_string_content(response.content) is called in create_researcher_node()."
         )
-        assert "Bull" in history or "BULL" in history, "Bull analyst name should be in history"
+        assert (
+            "Bull" in history or "BULL" in history
+        ), "Bull analyst name should be in history"
 
     @pytest.mark.asyncio
     async def test_portfolio_manager_node_handles_dict_response_REGRESSION(self):
@@ -604,13 +597,16 @@ class TestRegressionDetection:
         If this test fails, check that extract_string_content(response.content) is
         being called in create_portfolio_manager_node() around line 483 of src/agents.py.
         """
-        from unittest.mock import MagicMock, AsyncMock
+        from unittest.mock import AsyncMock, MagicMock
+
         from src.agents import create_portfolio_manager_node
 
         mock_llm = MagicMock()
         mock_response = MagicMock()
         # DICT response with final decision
-        mock_response.content = {"text": "## FINAL DECISION: BUY\n\nStrong conviction based on fundamentals."}
+        mock_response.content = {
+            "text": "## FINAL DECISION: BUY\n\nStrong conviction based on fundamentals."
+        }
         mock_llm.ainvoke = AsyncMock(return_value=mock_response)
 
         node = create_portfolio_manager_node(mock_llm, None)
@@ -627,7 +623,7 @@ class TestRegressionDetection:
             "company_of_interest": "1681.HK",
             "company_name": "CONSUN PHARMA",
             "red_flags": [],
-            "pre_screening_result": "PASS"
+            "pre_screening_result": "PASS",
         }
         config = {"configurable": {}}
 
@@ -640,7 +636,9 @@ class TestRegressionDetection:
             f"REGRESSION DETECTED: final_trade_decision is {type(final_decision).__name__}, expected str. "
             f"Check that extract_string_content(response.content) is called in create_portfolio_manager_node()."
         )
-        assert "BUY" in final_decision or "DECISION" in final_decision, "Decision content should be preserved"
+        assert (
+            "BUY" in final_decision or "DECISION" in final_decision
+        ), "Decision content should be preserved"
 
     @pytest.mark.asyncio
     async def test_risk_analyst_node_handles_dict_response_REGRESSION(self):
@@ -650,13 +648,16 @@ class TestRegressionDetection:
         If this test fails, check that extract_string_content(response.content) is
         being called in create_risk_debater_node() around line 431 of src/agents.py.
         """
-        from unittest.mock import MagicMock, AsyncMock
+        from unittest.mock import AsyncMock, MagicMock
+
         from src.agents import create_risk_debater_node
 
         mock_llm = MagicMock()
         mock_response = MagicMock()
         # DICT response
-        mock_response.content = {"text": "RISK ASSESSMENT: Position size should be limited to 2%."}
+        mock_response.content = {
+            "text": "RISK ASSESSMENT: Position size should be limited to 2%."
+        }
         mock_llm.ainvoke = AsyncMock(return_value=mock_response)
 
         node = create_risk_debater_node(mock_llm, "conservative_risk")
@@ -665,7 +666,7 @@ class TestRegressionDetection:
             "trader_investment_plan": "Buy 1681.HK",
             "consultant_review": "",
             "risk_debate_state": {"history": "", "count": 0},
-            "company_of_interest": "1681.HK"
+            "company_of_interest": "1681.HK",
         }
         config = {"configurable": {}}
 
@@ -697,7 +698,7 @@ class TestRegressionDetection:
         state = {
             "fundamentals_report": {"text": SAMPLE_FUNDAMENTALS_REPORT},  # DICT!
             "company_of_interest": "1681.HK",
-            "company_name": "CONSUN PHARMA"
+            "company_name": "CONSUN PHARMA",
         }
         config = {"configurable": {}}
 
@@ -714,7 +715,9 @@ class TestRegressionDetection:
                 )
             raise
 
-        assert "pre_screening_result" in result, "Validator should return pre_screening_result"
+        assert (
+            "pre_screening_result" in result
+        ), "Validator should return pre_screening_result"
 
     def test_extract_string_content_function_exists_REGRESSION(self):
         """
@@ -743,12 +746,13 @@ class TestRegressionDetection:
         If this test fails, SignalProcessor and Reflector may crash on dict responses.
         """
         import importlib
+
         import src.utils as utils_module
 
         # Reload to get fresh import
         importlib.reload(utils_module)
 
-        assert hasattr(utils_module, 'extract_string_content'), (
+        assert hasattr(utils_module, "extract_string_content"), (
             "REGRESSION DETECTED: src/utils.py does not import extract_string_content. "
             "SignalProcessor and Reflector need this to handle Gemini dict responses."
         )
@@ -779,7 +783,7 @@ class TestMockedLLMResponseScenarios:
 
         # Downstream agent (validator) can parse it
         metrics = RedFlagDetector.extract_metrics(output_field_value)
-        assert metrics['adjusted_health_score'] == 67.0
+        assert metrics["adjusted_health_score"] == 67.0
 
     def test_researcher_argument_from_dict_response(self):
         """
@@ -820,7 +824,10 @@ class TestMockedLLMResponseScenarios:
 
         # Signal extraction pattern (from SignalProcessor)
         import re
-        signal_match = re.search(r'FINAL DECISION:\s*(BUY|SELL|HOLD)', final_decision, re.IGNORECASE)
+
+        signal_match = re.search(
+            r"FINAL DECISION:\s*(BUY|SELL|HOLD)", final_decision, re.IGNORECASE
+        )
         assert signal_match is not None
         assert signal_match.group(1).upper() == "BUY"
 
@@ -831,7 +838,9 @@ class TestMockedLLMResponseScenarios:
         mock_response_content = {
             "parts": [
                 {"text": "RISK ASSESSMENT (Conservative):\n"},
-                {"text": "- Position sizing: Recommend 1-2% max\n- Key risks: Currency volatility, regulatory changes"}
+                {
+                    "text": "- Position sizing: Recommend 1-2% max\n- Key risks: Currency volatility, regulatory changes"
+                },
             ]
         }
 
@@ -860,8 +869,8 @@ class TestMockedLLMResponseScenarios:
         metrics = RedFlagDetector.extract_metrics(fundamentals_report)
 
         assert sector == Sector.GENERAL
-        assert metrics['adjusted_health_score'] == 67.0
-        assert metrics['debt_to_equity'] == 45.0
+        assert metrics["adjusted_health_score"] == 67.0
+        assert metrics["debt_to_equity"] == 45.0
 
         # Step 3: Researcher uses the report (dict response)
         researcher_response = {
@@ -891,7 +900,9 @@ Technical indicators suggest continued upward momentum.
         market_report = extract_string_content(market_report_response)
 
         # Researchers use this in their prompt
-        reports_context = f"MARKET: {market_report}\nFUNDAMENTALS: {SAMPLE_FUNDAMENTALS_REPORT}"
+        reports_context = (
+            f"MARKET: {market_report}\nFUNDAMENTALS: {SAMPLE_FUNDAMENTALS_REPORT}"
+        )
 
         assert "Trend:" in reports_context
         assert "SECTOR:" in reports_context
