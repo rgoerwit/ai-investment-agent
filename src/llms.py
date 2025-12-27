@@ -7,16 +7,17 @@ UPDATED: Added OpenAI consultant LLM for cross-validation (Dec 2025).
 """
 
 import logging
-import os
 import re
+
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.language_models import BaseChatModel
+from langchain_core.rate_limiters import InMemoryRateLimiter
 from langchain_google_genai import (
     ChatGoogleGenerativeAI,
     HarmBlockThreshold,
     HarmCategory,
 )
-from langchain_core.language_models import BaseChatModel
-from langchain_core.rate_limiters import InMemoryRateLimiter
-from langchain_core.callbacks import BaseCallbackHandler
+
 from src.config import config
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ SAFETY_SETTINGS = {
     HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
     HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
 }
+
 
 def _is_gemini_v3_or_greater(model_name: str) -> bool:
     """
@@ -43,7 +45,7 @@ def _is_gemini_v3_or_greater(model_name: str) -> bool:
 
     version_str = match.group(1)
     try:
-        major_version = int(version_str.split('.')[0])
+        major_version = int(version_str.split(".")[0])
         return major_version >= 3
     except (ValueError, IndexError):
         return False
@@ -64,6 +66,7 @@ def is_gemini_v3_or_greater(model_name: str) -> bool:
     """
     return _is_gemini_v3_or_greater(model_name)
 
+
 def _create_rate_limiter_from_rpm(rpm: int) -> InMemoryRateLimiter:
     """
     Create a rate limiter from RPM (requests per minute) setting.
@@ -76,10 +79,9 @@ def _create_rate_limiter_from_rpm(rpm: int) -> InMemoryRateLimiter:
         f"(80% of limit, bucket size: {max_bucket})"
     )
     return InMemoryRateLimiter(
-        requests_per_second=rps,
-        check_every_n_seconds=0.1,
-        max_bucket_size=max_bucket
+        requests_per_second=rps, check_every_n_seconds=0.1, max_bucket_size=max_bucket
     )
+
 
 GLOBAL_RATE_LIMITER = _create_rate_limiter_from_rpm(config.gemini_rpm_limit)
 
@@ -105,7 +107,7 @@ def create_gemini_model(
     max_retries: int,
     streaming: bool = False,
     callbacks: list[BaseCallbackHandler] | None = None,
-    thinking_level: str | None = None
+    thinking_level: str | None = None,
 ) -> BaseChatModel:
     """
     Generic factory for Gemini models.
@@ -145,12 +147,13 @@ def create_gemini_model(
 
     return llm
 
+
 def create_quick_thinking_llm(
     temperature: float = 0.3,
     model: str | None = None,
     timeout: int = None,
     max_retries: int = None,
-    callbacks: list[BaseCallbackHandler] | None = None
+    callbacks: list[BaseCallbackHandler] | None = None,
 ) -> BaseChatModel:
     """
     Create a quick thinking LLM.
@@ -182,16 +185,21 @@ def create_quick_thinking_llm(
         f"(timeout={final_timeout}, retries={final_retries})"
     )
     return create_gemini_model(
-        model_name, temperature, final_timeout, final_retries,
-        callbacks=callbacks, thinking_level=thinking_level
+        model_name,
+        temperature,
+        final_timeout,
+        final_retries,
+        callbacks=callbacks,
+        thinking_level=thinking_level,
     )
+
 
 def create_deep_thinking_llm(
     temperature: float = 0.1,
     model: str | None = None,
     timeout: int = None,
     max_retries: int = None,
-    callbacks: list[BaseCallbackHandler] | None = None
+    callbacks: list[BaseCallbackHandler] | None = None,
 ) -> BaseChatModel:
     """
     Create a deep thinking LLM.
@@ -215,13 +223,19 @@ def create_deep_thinking_llm(
         f"(timeout={final_timeout}, retries={final_retries})"
     )
     return create_gemini_model(
-        model_name, temperature, final_timeout, final_retries,
-        callbacks=callbacks, thinking_level=thinking_level
+        model_name,
+        temperature,
+        final_timeout,
+        final_retries,
+        callbacks=callbacks,
+        thinking_level=thinking_level,
     )
+
 
 # Initialize default instances (automatically tracked by create_gemini_model)
 quick_thinking_llm = create_quick_thinking_llm()
 deep_thinking_llm = create_deep_thinking_llm()
+
 
 # ... (rest of the file is the same)
 def create_consultant_llm(
@@ -230,7 +244,7 @@ def create_consultant_llm(
     timeout: int = 120,
     max_retries: int = 3,
     quick_mode: bool = False,
-    callbacks: list[BaseCallbackHandler] | None = None
+    callbacks: list[BaseCallbackHandler] | None = None,
 ) -> BaseChatModel:
     """
     Create an OpenAI consultant LLM for cross-validation.
@@ -268,11 +282,11 @@ def create_consultant_llm(
     """
     try:
         from langchain_openai import ChatOpenAI
-    except ImportError:
+    except ImportError as e:
         raise ImportError(
             "langchain-openai package not found. Install with: "
             "pip install langchain-openai>=0.3.0"
-        )
+        ) from e
 
     # Check if consultant is enabled (via config, not os.environ)
     if not config.enable_consultant:
@@ -318,7 +332,7 @@ def create_consultant_llm(
         # Match Gemini's max output for consistency
         max_tokens=4096,  # OpenAI default, sufficient for consultant reports
         # Enable streaming for better UX (optional)
-        streaming=False
+        streaming=False,
     )
 
     return llm
@@ -329,8 +343,7 @@ _consultant_llm_instance = None
 
 
 def get_consultant_llm(
-    callbacks: list[BaseCallbackHandler] | None = None,
-    quick_mode: bool = False
+    callbacks: list[BaseCallbackHandler] | None = None, quick_mode: bool = False
 ) -> BaseChatModel | None:
     """
     Get or create the consultant LLM instance.
@@ -369,8 +382,7 @@ def get_consultant_llm(
     if _consultant_llm_instance is None:
         try:
             _consultant_llm_instance = create_consultant_llm(
-                callbacks=callbacks,
-                quick_mode=quick_mode
+                callbacks=callbacks, quick_mode=quick_mode
             )
         except Exception as e:
             logger.error(f"Failed to initialize consultant LLM: {str(e)}")

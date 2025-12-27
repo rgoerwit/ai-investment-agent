@@ -13,10 +13,8 @@ Run with: pytest tests/test_red_flag_validator.py -v
 """
 
 import pytest
-from unittest.mock import MagicMock, AsyncMock
-from datetime import datetime
 
-from src.agents import AgentState, create_financial_health_validator_node
+from src.agents import create_financial_health_validator_node
 from src.validators.red_flag_detector import RedFlagDetector
 
 
@@ -65,12 +63,12 @@ ADR_EXISTS: NO
 
         metrics = RedFlagDetector.extract_metrics(report)
 
-        assert metrics['adjusted_health_score'] == 58.0
-        assert metrics['pe_ratio'] == 12.34
-        assert metrics['debt_to_equity'] == 120.0
-        assert metrics['interest_coverage'] == 3.5
-        assert metrics['fcf'] == 450_000_000  # 450M
-        assert metrics['net_income'] == 600_000_000  # 600M
+        assert metrics["adjusted_health_score"] == 58.0
+        assert metrics["pe_ratio"] == 12.34
+        assert metrics["debt_to_equity"] == 120.0
+        assert metrics["interest_coverage"] == 3.5
+        assert metrics["fcf"] == 450_000_000  # 450M
+        assert metrics["net_income"] == 600_000_000  # 600M
 
     def test_extract_multiple_data_blocks_uses_last(self):
         """Test that extraction uses the LAST DATA_BLOCK (self-correction pattern)."""
@@ -91,8 +89,8 @@ PE_RATIO_TTM: 14.50
         metrics = RedFlagDetector.extract_metrics(report)
 
         # Should use the LAST (corrected) block
-        assert metrics['adjusted_health_score'] == 75.0
-        assert metrics['pe_ratio'] == 14.50
+        assert metrics["adjusted_health_score"] == 75.0
+        assert metrics["pe_ratio"] == 14.50
 
     def test_extract_handles_missing_data_block(self):
         """Test extraction when DATA_BLOCK is missing."""
@@ -113,7 +111,7 @@ ADJUSTED_HEALTH_SCORE: 50%
 D/E: 250
 """
         metrics1 = RedFlagDetector.extract_metrics(report1)
-        assert metrics1['debt_to_equity'] == 250.0
+        assert metrics1["debt_to_equity"] == 250.0
 
         # Case 2: Ratio format (<10) - convert to percentage
         report2 = """
@@ -123,7 +121,7 @@ ADJUSTED_HEALTH_SCORE: 50%
 Debt/Equity: 2.5
 """
         metrics2 = RedFlagDetector.extract_metrics(report2)
-        assert metrics2['debt_to_equity'] == 250.0  # 2.5 * 100
+        assert metrics2["debt_to_equity"] == 250.0  # 2.5 * 100
 
     def test_extract_fcf_with_multipliers(self):
         """Test FCF extraction with B/M/K multipliers."""
@@ -135,7 +133,7 @@ ADJUSTED_HEALTH_SCORE: 70%
 Free Cash Flow: $1.5B
 """
         metrics_b = RedFlagDetector.extract_metrics(report_b)
-        assert metrics_b['fcf'] == 1_500_000_000
+        assert metrics_b["fcf"] == 1_500_000_000
 
         # Millions
         report_m = """
@@ -145,7 +143,7 @@ ADJUSTED_HEALTH_SCORE: 70%
 FCF: $250M
 """
         metrics_m = RedFlagDetector.extract_metrics(report_m)
-        assert metrics_m['fcf'] == 250_000_000
+        assert metrics_m["fcf"] == 250_000_000
 
         # Thousands
         report_k = """
@@ -155,7 +153,7 @@ ADJUSTED_HEALTH_SCORE: 70%
 Free Cash Flow: 500K
 """
         metrics_k = RedFlagDetector.extract_metrics(report_k)
-        assert metrics_k['fcf'] == 500_000
+        assert metrics_k["fcf"] == 500_000
 
     def test_extract_negative_fcf(self):
         """Test extraction of negative FCF."""
@@ -166,7 +164,7 @@ ADJUSTED_HEALTH_SCORE: 40%
 Free Cash Flow: -$850M
 """
         metrics = RedFlagDetector.extract_metrics(report)
-        assert metrics['fcf'] == -850_000_000
+        assert metrics["fcf"] == -850_000_000
 
     def test_extract_multi_currency_fcf_and_net_income(self):
         """Test extraction of FCF and Net Income in non-USD currencies (¥, €, £)."""
@@ -179,8 +177,8 @@ Free Cash Flow: -¥978.6B
 Net Income: ¥439.7B
 """
         metrics_jpy = RedFlagDetector.extract_metrics(report_jpy)
-        assert metrics_jpy['fcf'] == -978_600_000_000
-        assert metrics_jpy['net_income'] == 439_700_000_000
+        assert metrics_jpy["fcf"] == -978_600_000_000
+        assert metrics_jpy["net_income"] == 439_700_000_000
 
         # Euro (common for European stocks)
         report_eur = """
@@ -191,8 +189,8 @@ Free Cash Flow: €2.5B
 Net Income: €1.2B
 """
         metrics_eur = RedFlagDetector.extract_metrics(report_eur)
-        assert metrics_eur['fcf'] == 2_500_000_000
-        assert metrics_eur['net_income'] == 1_200_000_000
+        assert metrics_eur["fcf"] == 2_500_000_000
+        assert metrics_eur["net_income"] == 1_200_000_000
 
         # British Pound (common for UK stocks)
         report_gbp = """
@@ -203,8 +201,8 @@ FCF: £500M
 Net Income: -£100M
 """
         metrics_gbp = RedFlagDetector.extract_metrics(report_gbp)
-        assert metrics_gbp['fcf'] == 500_000_000
-        assert metrics_gbp['net_income'] == -100_000_000
+        assert metrics_gbp["fcf"] == 500_000_000
+        assert metrics_gbp["net_income"] == -100_000_000
 
 
 class TestRedFlagValidatorNode:
@@ -219,16 +217,16 @@ class TestRedFlagValidatorNode:
     def base_state(self):
         """Create a base AgentState for testing."""
         return {
-            'company_of_interest': 'TEST.HK',
-            'company_name': 'Test Company Ltd',
-            'fundamentals_report': '',
-            'messages': [],
+            "company_of_interest": "TEST.HK",
+            "company_name": "Test Company Ltd",
+            "fundamentals_report": "",
+            "messages": [],
         }
 
     @pytest.mark.asyncio
     async def test_extreme_leverage_triggers_reject(self, validator_node, base_state):
         """Test that D/E > 500% triggers AUTO_REJECT."""
-        base_state['fundamentals_report'] = """
+        base_state["fundamentals_report"] = """
 ### --- START DATA_BLOCK ---
 ADJUSTED_HEALTH_SCORE: 40%
 PE_RATIO_TTM: 15.0
@@ -241,15 +239,17 @@ PE_RATIO_TTM: 15.0
 
         result = await validator_node(base_state, {})
 
-        assert result['pre_screening_result'] == 'REJECT'
-        assert len(result['red_flags']) > 0
-        assert any(flag['type'] == 'EXTREME_LEVERAGE' for flag in result['red_flags'])
-        assert any(flag['action'] == 'AUTO_REJECT' for flag in result['red_flags'])
+        assert result["pre_screening_result"] == "REJECT"
+        assert len(result["red_flags"]) > 0
+        assert any(flag["type"] == "EXTREME_LEVERAGE" for flag in result["red_flags"])
+        assert any(flag["action"] == "AUTO_REJECT" for flag in result["red_flags"])
 
     @pytest.mark.asyncio
-    async def test_earnings_quality_disconnect_triggers_reject(self, validator_node, base_state):
+    async def test_earnings_quality_disconnect_triggers_reject(
+        self, validator_node, base_state
+    ):
         """Test that positive income + deeply negative FCF triggers AUTO_REJECT."""
-        base_state['fundamentals_report'] = """
+        base_state["fundamentals_report"] = """
 ### --- START DATA_BLOCK ---
 ADJUSTED_HEALTH_SCORE: 60%
 PE_RATIO_TTM: 12.0
@@ -262,15 +262,15 @@ Free Cash Flow: -$1,200M
 
         result = await validator_node(base_state, {})
 
-        assert result['pre_screening_result'] == 'REJECT'
-        assert len(result['red_flags']) > 0
-        assert any(flag['type'] == 'EARNINGS_QUALITY' for flag in result['red_flags'])
+        assert result["pre_screening_result"] == "REJECT"
+        assert len(result["red_flags"]) > 0
+        assert any(flag["type"] == "EARNINGS_QUALITY" for flag in result["red_flags"])
         # FCF is -1200M, which is 2.4x the net income of 500M
 
     @pytest.mark.asyncio
     async def test_refinancing_risk_triggers_reject(self, validator_node, base_state):
         """Test that low interest coverage + high leverage triggers AUTO_REJECT."""
-        base_state['fundamentals_report'] = """
+        base_state["fundamentals_report"] = """
 ### --- START DATA_BLOCK ---
 ADJUSTED_HEALTH_SCORE: 45%
 PE_RATIO_TTM: 8.0
@@ -283,14 +283,14 @@ PE_RATIO_TTM: 8.0
 
         result = await validator_node(base_state, {})
 
-        assert result['pre_screening_result'] == 'REJECT'
-        assert len(result['red_flags']) > 0
-        assert any(flag['type'] == 'REFINANCING_RISK' for flag in result['red_flags'])
+        assert result["pre_screening_result"] == "REJECT"
+        assert len(result["red_flags"]) > 0
+        assert any(flag["type"] == "REFINANCING_RISK" for flag in result["red_flags"])
 
     @pytest.mark.asyncio
     async def test_healthy_company_passes(self, validator_node, base_state):
         """Test that a healthy company passes all checks."""
-        base_state['fundamentals_report'] = """
+        base_state["fundamentals_report"] = """
 ### --- START DATA_BLOCK ---
 ADJUSTED_HEALTH_SCORE: 75%
 PE_RATIO_TTM: 14.5
@@ -308,16 +308,18 @@ PE_RATIO_TTM: 14.5
 
         result = await validator_node(base_state, {})
 
-        assert result['pre_screening_result'] == 'PASS'
-        assert len(result['red_flags']) == 0
+        assert result["pre_screening_result"] == "PASS"
+        assert len(result["red_flags"]) == 0
 
     @pytest.mark.asyncio
-    async def test_marginal_metrics_pass_if_below_thresholds(self, validator_node, base_state):
+    async def test_marginal_metrics_pass_if_below_thresholds(
+        self, validator_node, base_state
+    ):
         """Test that marginal but acceptable metrics pass."""
         # D/E at 450% (below 500% threshold)
         # Interest coverage at 2.5x (above 2.0x threshold)
         # Negative FCF but <2x net income
-        base_state['fundamentals_report'] = """
+        base_state["fundamentals_report"] = """
 ### --- START DATA_BLOCK ---
 ADJUSTED_HEALTH_SCORE: 52%
 PE_RATIO_TTM: 16.0
@@ -338,13 +340,13 @@ PE_RATIO_TTM: 16.0
         # - D/E 450% < 500%
         # - Interest coverage 2.5x > 2.0x
         # - FCF -600M is 1.5x net income (not >2x)
-        assert result['pre_screening_result'] == 'PASS'
-        assert len(result['red_flags']) == 0
+        assert result["pre_screening_result"] == "PASS"
+        assert len(result["red_flags"]) == 0
 
     @pytest.mark.asyncio
     async def test_multiple_red_flags_all_reported(self, validator_node, base_state):
         """Test that multiple red flags are all detected and reported."""
-        base_state['fundamentals_report'] = """
+        base_state["fundamentals_report"] = """
 ### --- START DATA_BLOCK ---
 ADJUSTED_HEALTH_SCORE: 25%
 PE_RATIO_TTM: 20.0
@@ -361,29 +363,31 @@ Free Cash Flow: -$500M
 
         result = await validator_node(base_state, {})
 
-        assert result['pre_screening_result'] == 'REJECT'
-        assert len(result['red_flags']) >= 2
+        assert result["pre_screening_result"] == "REJECT"
+        assert len(result["red_flags"]) >= 2
 
-        flag_types = [flag['type'] for flag in result['red_flags']]
-        assert 'EXTREME_LEVERAGE' in flag_types
-        assert 'REFINANCING_RISK' in flag_types
-        assert 'EARNINGS_QUALITY' in flag_types
+        flag_types = [flag["type"] for flag in result["red_flags"]]
+        assert "EXTREME_LEVERAGE" in flag_types
+        assert "REFINANCING_RISK" in flag_types
+        assert "EARNINGS_QUALITY" in flag_types
 
     @pytest.mark.asyncio
     async def test_no_fundamentals_report_passes(self, validator_node, base_state):
         """Test that missing fundamentals report results in PASS (graceful degradation)."""
-        base_state['fundamentals_report'] = ''
+        base_state["fundamentals_report"] = ""
 
         result = await validator_node(base_state, {})
 
-        assert result['pre_screening_result'] == 'PASS'
-        assert len(result['red_flags']) == 0
+        assert result["pre_screening_result"] == "PASS"
+        assert len(result["red_flags"]) == 0
 
     @pytest.mark.asyncio
-    async def test_incomplete_data_does_not_false_positive(self, validator_node, base_state):
+    async def test_incomplete_data_does_not_false_positive(
+        self, validator_node, base_state
+    ):
         """Test that incomplete data doesn't trigger false positives."""
         # Missing some metrics - should not trigger red flags
-        base_state['fundamentals_report'] = """
+        base_state["fundamentals_report"] = """
 ### --- START DATA_BLOCK ---
 ADJUSTED_HEALTH_SCORE: 60%
 PE_RATIO_TTM: 13.5
@@ -400,26 +404,28 @@ PE_RATIO_TTM: 13.5
         result = await validator_node(base_state, {})
 
         # Should PASS - None values don't trigger checks
-        assert result['pre_screening_result'] == 'PASS'
-        assert len(result['red_flags']) == 0
+        assert result["pre_screening_result"] == "PASS"
+        assert len(result["red_flags"]) == 0
 
     @pytest.mark.asyncio
     async def test_edge_case_exactly_at_threshold(self, validator_node, base_state):
         """Test edge cases at exact threshold values."""
         # D/E exactly 500%
-        base_state['fundamentals_report'] = """
+        base_state["fundamentals_report"] = """
 D/E: 500
 """
 
         result = await validator_node(base_state, {})
 
         # Should PASS - threshold is >, not >=
-        assert result['pre_screening_result'] == 'PASS'
+        assert result["pre_screening_result"] == "PASS"
 
     @pytest.mark.asyncio
-    async def test_interest_coverage_low_but_leverage_ok(self, validator_node, base_state):
+    async def test_interest_coverage_low_but_leverage_ok(
+        self, validator_node, base_state
+    ):
         """Test that low interest coverage alone doesn't trigger if leverage is OK."""
-        base_state['fundamentals_report'] = """
+        base_state["fundamentals_report"] = """
 **Leverage**:
 - D/E: 50
 - Interest Coverage: 1.5x
@@ -428,7 +434,7 @@ D/E: 500
         result = await validator_node(base_state, {})
 
         # Should PASS - refinancing risk requires BOTH low coverage AND high leverage
-        assert result['pre_screening_result'] == 'PASS'
+        assert result["pre_screening_result"] == "PASS"
 
 
 class TestRedFlagIntegration:
@@ -442,47 +448,48 @@ class TestRedFlagIntegration:
         validator = create_financial_health_validator_node()
 
         state = {
-            'company_of_interest': '9999.HK',
-            'company_name': 'Failing Corp',
-            'fundamentals_report': 'D/E: 700\nInterest Coverage: 0.8x',
-            'messages': [],
+            "company_of_interest": "9999.HK",
+            "company_name": "Failing Corp",
+            "fundamentals_report": "D/E: 700\nInterest Coverage: 0.8x",
+            "messages": [],
         }
 
         result = await validator(state, {})
 
         # Verify state updates
-        assert 'red_flags' in result
-        assert 'pre_screening_result' in result
-        assert isinstance(result['red_flags'], list)
-        assert result['pre_screening_result'] in ['PASS', 'REJECT']
+        assert "red_flags" in result
+        assert "pre_screening_result" in result
+        assert isinstance(result["red_flags"], list)
+        assert result["pre_screening_result"] in ["PASS", "REJECT"]
 
     def test_red_flag_structure(self):
         """Test that red flags have required structure."""
-        from src.agents import create_financial_health_validator_node
         import asyncio
+
+        from src.agents import create_financial_health_validator_node
 
         validator = create_financial_health_validator_node()
 
         state = {
-            'company_of_interest': 'TEST',
-            'company_name': 'Test',
-            'fundamentals_report': 'D/E: 600',
-            'messages': [],
+            "company_of_interest": "TEST",
+            "company_name": "Test",
+            "fundamentals_report": "D/E: 600",
+            "messages": [],
         }
 
         result = asyncio.run(validator(state, {}))
 
-        for flag in result['red_flags']:
+        for flag in result["red_flags"]:
             # Verify required fields
-            assert 'type' in flag
-            assert 'severity' in flag
-            assert 'detail' in flag
-            assert 'action' in flag
-            assert 'rationale' in flag
+            assert "type" in flag
+            assert "severity" in flag
+            assert "detail" in flag
+            assert "action" in flag
+            assert "rationale" in flag
 
             # Verify value constraints
-            assert flag['severity'] in ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']
-            assert flag['action'] in ['AUTO_REJECT', 'WARNING']
+            assert flag["severity"] in ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
+            assert flag["action"] in ["AUTO_REJECT", "WARNING"]
 
 
 class TestRealWorldEdgeCases:
@@ -512,9 +519,9 @@ class TestRealWorldEdgeCases:
         Expected: Multiple red flags (EXTREME_LEVERAGE + REFINANCING_RISK)
         """
         state = {
-            'company_of_interest': '9999.HK',
-            'company_name': 'Zombie Retail Corp',
-            'fundamentals_report': """
+            "company_of_interest": "9999.HK",
+            "company_name": "Zombie Retail Corp",
+            "fundamentals_report": """
 ### --- START DATA_BLOCK ---
 RAW_HEALTH_SCORE: 2/12
 ADJUSTED_HEALTH_SCORE: 17% (2/12 available)
@@ -544,20 +551,20 @@ PEG_RATIO: N/A
 - Net Income: -$120M (loss-making)
 - FCF Yield: 0.8%: 0 pts
 """,
-            'messages': [],
+            "messages": [],
         }
 
         result = await validator_node(state, {})
 
         # Should trigger REJECT with multiple red flags
-        assert result['pre_screening_result'] == 'REJECT'
-        assert len(result['red_flags']) >= 2
+        assert result["pre_screening_result"] == "REJECT"
+        assert len(result["red_flags"]) >= 2
 
-        flag_types = [flag['type'] for flag in result['red_flags']]
+        flag_types = [flag["type"] for flag in result["red_flags"]]
         # Extreme leverage: D/E 820% > 500%
-        assert 'EXTREME_LEVERAGE' in flag_types
+        assert "EXTREME_LEVERAGE" in flag_types
         # Refinancing risk: Interest coverage 1.1x < 2.0x AND D/E 820% > 100%
-        assert 'REFINANCING_RISK' in flag_types
+        assert "REFINANCING_RISK" in flag_types
 
     @pytest.mark.asyncio
     async def test_accounting_fraud_pattern_large_numbers(self, validator_node):
@@ -576,9 +583,9 @@ PEG_RATIO: N/A
         Expected: EARNINGS_QUALITY red flag
         """
         state = {
-            'company_of_interest': 'FRAUD.CN',
-            'company_name': 'Suspicious Growth Inc',
-            'fundamentals_report': """
+            "company_of_interest": "FRAUD.CN",
+            "company_name": "Suspicious Growth Inc",
+            "fundamentals_report": """
 ### --- START DATA_BLOCK ---
 RAW_HEALTH_SCORE: 6/12
 ADJUSTED_HEALTH_SCORE: 50% (6/12 available)
@@ -613,24 +620,26 @@ negative due to massive increases in receivables and inventory. Classic fraud pa
 where revenue is recognized but cash never collected. FCF is 3.0x net income in
 negative direction.
 """,
-            'messages': [],
+            "messages": [],
         }
 
         result = await validator_node(state, {})
 
         # Should trigger REJECT with earnings quality red flag
-        assert result['pre_screening_result'] == 'REJECT'
-        assert len(result['red_flags']) >= 1
+        assert result["pre_screening_result"] == "REJECT"
+        assert len(result["red_flags"]) >= 1
 
-        flag_types = [flag['type'] for flag in result['red_flags']]
+        flag_types = [flag["type"] for flag in result["red_flags"]]
         # Earnings quality: Positive income $1,250.5M but negative FCF -$3,800.2M (>2x)
-        assert 'EARNINGS_QUALITY' in flag_types
+        assert "EARNINGS_QUALITY" in flag_types
 
         # Verify the flag detail contains actual numbers
-        earnings_flag = next(f for f in result['red_flags'] if f['type'] == 'EARNINGS_QUALITY')
+        earnings_flag = next(
+            f for f in result["red_flags"] if f["type"] == "EARNINGS_QUALITY"
+        )
         # Numbers are formatted as full integers, e.g., $1,250,500,000
-        assert '1250' in earnings_flag['detail'] or '1,250' in earnings_flag['detail']
-        assert '3800' in earnings_flag['detail'] or '3,800' in earnings_flag['detail']
+        assert "1250" in earnings_flag["detail"] or "1,250" in earnings_flag["detail"]
+        assert "3800" in earnings_flag["detail"] or "3,800" in earnings_flag["detail"]
 
     @pytest.mark.asyncio
     async def test_distressed_debt_maturity_wall(self, validator_node):
@@ -650,9 +659,9 @@ negative direction.
         Expected: REFINANCING_RISK red flag (but NOT extreme leverage, since 280% < 500%)
         """
         state = {
-            'company_of_interest': '8888.HK',
-            'company_name': 'Overleveraged Property Developer',
-            'fundamentals_report': """
+            "company_of_interest": "8888.HK",
+            "company_name": "Overleveraged Property Developer",
+            "fundamentals_report": """
 ### --- START DATA_BLOCK ---
 RAW_HEALTH_SCORE: 5/12
 ADJUSTED_HEALTH_SCORE: 42% (5/12 available)
@@ -687,27 +696,29 @@ PE_RATIO_FORWARD: 5.8
 - Slowing property market reduces asset sale options
 - Interest coverage declining rapidly (1.8x, was 3.5x in 2021)
 """,
-            'messages': [],
+            "messages": [],
         }
 
         result = await validator_node(state, {})
 
         # Should trigger REJECT with refinancing risk
-        assert result['pre_screening_result'] == 'REJECT'
-        assert len(result['red_flags']) == 1  # Only REFINANCING_RISK, not extreme leverage
+        assert result["pre_screening_result"] == "REJECT"
+        assert (
+            len(result["red_flags"]) == 1
+        )  # Only REFINANCING_RISK, not extreme leverage
 
-        flag = result['red_flags'][0]
-        assert flag['type'] == 'REFINANCING_RISK'
-        assert flag['severity'] == 'CRITICAL'
-        assert flag['action'] == 'AUTO_REJECT'
+        flag = result["red_flags"][0]
+        assert flag["type"] == "REFINANCING_RISK"
+        assert flag["severity"] == "CRITICAL"
+        assert flag["action"] == "AUTO_REJECT"
 
         # Verify detail mentions both metrics
-        assert '1.8' in flag['detail']  # Interest coverage
-        assert '280' in flag['detail']  # D/E ratio
+        assert "1.8" in flag["detail"]  # Interest coverage
+        assert "280" in flag["detail"]  # D/E ratio
 
         # Should NOT trigger extreme leverage (280% < 500% threshold)
-        flag_types = [flag['type'] for flag in result['red_flags']]
-        assert 'EXTREME_LEVERAGE' not in flag_types
+        flag_types = [flag["type"] for flag in result["red_flags"]]
+        assert "EXTREME_LEVERAGE" not in flag_types
 
 
 class TestSectorAwareRedFlags:
@@ -728,9 +739,9 @@ class TestSectorAwareRedFlags:
         normal and sustainable given regulated cash flows.
         """
         state = {
-            'company_of_interest': 'UTIL.T',
-            'company_name': 'Tokyo Electric Power',
-            'fundamentals_report': """
+            "company_of_interest": "UTIL.T",
+            "company_name": "Tokyo Electric Power",
+            "fundamentals_report": """
 ### --- START DATA_BLOCK ---
 SECTOR: Utilities
 SECTOR_ADJUSTMENTS: D/E threshold raised to 800% (vs 500% standard) for capital-intensive utilities
@@ -743,14 +754,14 @@ PE_RATIO_TTM: 12.5
 - Interest Coverage: 2.8x
 - NetDebt/EBITDA: 4.5x
 """,
-            'messages': [],
+            "messages": [],
         }
 
         result = await validator_node(state, {})
 
         # Should PASS - 250% D/E is below the 800% utilities threshold
-        assert result['pre_screening_result'] == 'PASS'
-        assert len(result['red_flags']) == 0
+        assert result["pre_screening_result"] == "PASS"
+        assert len(result["red_flags"]) == 0
 
     @pytest.mark.asyncio
     async def test_shipping_sector_allows_higher_leverage(self, validator_node):
@@ -762,9 +773,9 @@ PE_RATIO_TTM: 12.5
         acceptable if they generate strong EBITDA during upturns.
         """
         state = {
-            'company_of_interest': 'SUZ',
-            'company_name': 'Suzano Pulp & Paper',
-            'fundamentals_report': """
+            "company_of_interest": "SUZ",
+            "company_name": "Suzano Pulp & Paper",
+            "fundamentals_report": """
 ### --- START DATA_BLOCK ---
 SECTOR: Shipping & Cyclical Commodities
 SECTOR_ADJUSTMENTS: D/E threshold raised to 800% (vs 500% standard). Interest coverage threshold lowered to 1.5x (vs 2.0x standard) for capital-intensive sector.
@@ -781,26 +792,28 @@ PE_RATIO_TTM: 10.2
 - EBITDA: $2.5B (strong operating performance)
 - Free Cash Flow: $800M (positive, cyclical downturns OK)
 """,
-            'messages': [],
+            "messages": [],
         }
 
         result = await validator_node(state, {})
 
         # Should PASS - 220% D/E < 800% threshold, 1.8x coverage > 1.5x threshold for shipping
-        assert result['pre_screening_result'] == 'PASS'
-        assert len(result['red_flags']) == 0
+        assert result["pre_screening_result"] == "PASS"
+        assert len(result["red_flags"]) == 0
 
     @pytest.mark.asyncio
-    async def test_shipping_sector_refinancing_risk_adjusted_thresholds(self, validator_node):
+    async def test_shipping_sector_refinancing_risk_adjusted_thresholds(
+        self, validator_node
+    ):
         """
         Test that shipping sector uses adjusted thresholds for refinancing risk.
 
         Refinancing risk for shipping: coverage < 1.5x (vs 2.0x) + D/E > 200% (vs 100%)
         """
         state = {
-            'company_of_interest': 'SHIP.HK',
-            'company_name': 'Asian Shipping Corp',
-            'fundamentals_report': """
+            "company_of_interest": "SHIP.HK",
+            "company_name": "Asian Shipping Corp",
+            "fundamentals_report": """
 ### --- START DATA_BLOCK ---
 SECTOR: Shipping & Cyclical Commodities
 ADJUSTED_HEALTH_SCORE: 52%
@@ -810,25 +823,27 @@ ADJUSTED_HEALTH_SCORE: 52%
 - D/E: 180 (below 200% sector threshold)
 - Interest Coverage: 1.6x (above 1.5x sector threshold)
 """,
-            'messages': [],
+            "messages": [],
         }
 
         result = await validator_node(state, {})
 
         # Should PASS - both metrics above sector-adjusted thresholds
         # D/E 180% < 200% threshold, coverage 1.6x > 1.5x threshold
-        assert result['pre_screening_result'] == 'PASS'
-        assert len(result['red_flags']) == 0
+        assert result["pre_screening_result"] == "PASS"
+        assert len(result["red_flags"]) == 0
 
     @pytest.mark.asyncio
-    async def test_shipping_sector_fails_when_exceeds_sector_thresholds(self, validator_node):
+    async def test_shipping_sector_fails_when_exceeds_sector_thresholds(
+        self, validator_node
+    ):
         """
         Test that shipping sector still fails when metrics exceed SECTOR thresholds.
         """
         state = {
-            'company_of_interest': 'FAIL.HK',
-            'company_name': 'Failing Shipping Corp',
-            'fundamentals_report': """
+            "company_of_interest": "FAIL.HK",
+            "company_name": "Failing Shipping Corp",
+            "fundamentals_report": """
 ### --- START DATA_BLOCK ---
 SECTOR: Shipping & Cyclical Commodities
 ADJUSTED_HEALTH_SCORE: 30%
@@ -838,15 +853,15 @@ ADJUSTED_HEALTH_SCORE: 30%
 - D/E: 850 (exceeds 800% sector threshold)
 - Interest Coverage: 1.2x (below 1.5x sector threshold)
 """,
-            'messages': [],
+            "messages": [],
         }
 
         result = await validator_node(state, {})
 
         # Should REJECT - D/E 850% > 800% sector threshold
-        assert result['pre_screening_result'] == 'REJECT'
-        flag_types = [flag['type'] for flag in result['red_flags']]
-        assert 'EXTREME_LEVERAGE' in flag_types
+        assert result["pre_screening_result"] == "REJECT"
+        flag_types = [flag["type"] for flag in result["red_flags"]]
+        assert "EXTREME_LEVERAGE" in flag_types
 
     @pytest.mark.asyncio
     async def test_banking_sector_skips_leverage_checks(self, validator_node):
@@ -857,9 +872,9 @@ ADJUSTED_HEALTH_SCORE: 30%
         liabilities). D/E is meaningless - focus is on Tier 1 Capital, NPL ratios.
         """
         state = {
-            'company_of_interest': '0005.HK',
-            'company_name': 'HSBC Holdings',
-            'fundamentals_report': """
+            "company_of_interest": "0005.HK",
+            "company_name": "HSBC Holdings",
+            "fundamentals_report": """
 ### --- START DATA_BLOCK ---
 SECTOR: Banking
 SECTOR_ADJUSTMENTS: D/E ratio excluded (not applicable for banks) - Leverage score denominator adjusted to 1 pt. ROE threshold lowered to 12% (vs 15% standard). ROA threshold lowered to 1.0% (vs 7% standard).
@@ -877,14 +892,14 @@ PE_RATIO_TTM: 9.8
 - ROE: 13.2% (above 12% bank threshold)
 - ROA: 0.95% (below 1.0% bank threshold but improving)
 """,
-            'messages': [],
+            "messages": [],
         }
 
         result = await validator_node(state, {})
 
         # Should PASS - banking sector skips all D/E and coverage checks
-        assert result['pre_screening_result'] == 'PASS'
-        assert len(result['red_flags']) == 0
+        assert result["pre_screening_result"] == "PASS"
+        assert len(result["red_flags"]) == 0
 
     @pytest.mark.asyncio
     async def test_general_sector_uses_standard_thresholds(self, validator_node):
@@ -892,9 +907,9 @@ PE_RATIO_TTM: 9.8
         Test that General/Diversified sector uses standard thresholds (500% D/E).
         """
         state = {
-            'company_of_interest': 'GEN.HK',
-            'company_name': 'General Manufacturing',
-            'fundamentals_report': """
+            "company_of_interest": "GEN.HK",
+            "company_name": "General Manufacturing",
+            "fundamentals_report": """
 ### --- START DATA_BLOCK ---
 SECTOR: General/Diversified
 SECTOR_ADJUSTMENTS: None - standard thresholds applied
@@ -905,15 +920,15 @@ ADJUSTED_HEALTH_SCORE: 55%
 - D/E: 520 (exceeds 500% standard threshold)
 - Interest Coverage: 1.9x
 """,
-            'messages': [],
+            "messages": [],
         }
 
         result = await validator_node(state, {})
 
         # Should REJECT - 520% D/E > 500% standard threshold
-        assert result['pre_screening_result'] == 'REJECT'
-        flag_types = [flag['type'] for flag in result['red_flags']]
-        assert 'EXTREME_LEVERAGE' in flag_types
+        assert result["pre_screening_result"] == "REJECT"
+        flag_types = [flag["type"] for flag in result["red_flags"]]
+        assert "EXTREME_LEVERAGE" in flag_types
 
     @pytest.mark.asyncio
     async def test_sector_detection_from_report(self, validator_node):
@@ -982,9 +997,9 @@ class TestRealWorldSectorExamples:
         Should PASS utilities sector thresholds (D/E < 800%, coverage > 1.5x).
         """
         state = {
-            'company_of_interest': '9501.T',
-            'company_name': 'Tokyo Electric Power Company (TEPCO)',
-            'fundamentals_report': """
+            "company_of_interest": "9501.T",
+            "company_name": "Tokyo Electric Power Company (TEPCO)",
+            "fundamentals_report": """
 ### --- START DATA_BLOCK ---
 SECTOR: Utilities
 SECTOR_ADJUSTMENTS: D/E threshold raised to 800% (vs 500% standard) for capital-intensive utilities. Interest coverage threshold lowered to 1.5x (vs 2.0x standard).
@@ -1002,13 +1017,13 @@ PE_RATIO_TTM: 11.2
 - Free Cash Flow: ¥180B
 - Operating Cash Flow: ¥320B
 """,
-            'messages': [],
+            "messages": [],
         }
 
         result = await validator_node(state, {})
 
-        assert result['pre_screening_result'] == 'PASS'
-        assert len(result['red_flags']) == 0
+        assert result["pre_screening_result"] == "PASS"
+        assert len(result["red_flags"]) == 0
 
     @pytest.mark.asyncio
     async def test_utilities_fail_distressed_spanish_utility(self, validator_node):
@@ -1019,9 +1034,9 @@ PE_RATIO_TTM: 11.2
         Should REJECT even with utilities sector adjustments.
         """
         state = {
-            'company_of_interest': 'UTIL.MC',
-            'company_name': 'Distressed Utility Corp (Spain)',
-            'fundamentals_report': """
+            "company_of_interest": "UTIL.MC",
+            "company_name": "Distressed Utility Corp (Spain)",
+            "fundamentals_report": """
 ### --- START DATA_BLOCK ---
 SECTOR: Utilities
 SECTOR_ADJUSTMENTS: D/E threshold raised to 800% (vs 500% standard) for capital-intensive utilities
@@ -1039,14 +1054,14 @@ PE_RATIO_TTM: 8.5
 - Free Cash Flow: -€200M (negative due to capex overruns)
 - Debt Maturities: €5B due in 18 months
 """,
-            'messages': [],
+            "messages": [],
         }
 
         result = await validator_node(state, {})
 
-        assert result['pre_screening_result'] == 'REJECT'
-        flag_types = [flag['type'] for flag in result['red_flags']]
-        assert 'EXTREME_LEVERAGE' in flag_types  # 920% > 800% utilities threshold
+        assert result["pre_screening_result"] == "REJECT"
+        flag_types = [flag["type"] for flag in result["red_flags"]]
+        assert "EXTREME_LEVERAGE" in flag_types  # 920% > 800% utilities threshold
 
     # --- SHIPPING & CYCLICAL COMMODITIES SECTOR ---
 
@@ -1060,9 +1075,9 @@ PE_RATIO_TTM: 8.5
         This is the exact use case that motivated sector-aware thresholds.
         """
         state = {
-            'company_of_interest': 'SUZ',
-            'company_name': 'Suzano S.A. (Pulp & Paper)',
-            'fundamentals_report': """
+            "company_of_interest": "SUZ",
+            "company_name": "Suzano S.A. (Pulp & Paper)",
+            "fundamentals_report": """
 ### --- START DATA_BLOCK ---
 SECTOR: Shipping & Cyclical Commodities
 SECTOR_ADJUSTMENTS: D/E threshold raised to 800% (vs 500% standard). Interest coverage threshold lowered to 1.5x (vs 2.0x standard) for capital-intensive sector.
@@ -1084,13 +1099,13 @@ PE_RATIO_TTM: 9.8
 - Pulp prices cyclical but company generates cash through cycle
 - Vertical integration (forestry + mills) supports margins
 """,
-            'messages': [],
+            "messages": [],
         }
 
         result = await validator_node(state, {})
 
-        assert result['pre_screening_result'] == 'PASS'
-        assert len(result['red_flags']) == 0
+        assert result["pre_screening_result"] == "PASS"
+        assert len(result["red_flags"]) == 0
 
     @pytest.mark.asyncio
     async def test_shipping_fail_overleveraged_dry_bulk(self, validator_node):
@@ -1101,9 +1116,9 @@ PE_RATIO_TTM: 9.8
         Should REJECT - classic shipping bankruptcy pattern.
         """
         state = {
-            'company_of_interest': '2866.HK',
-            'company_name': 'Failing Dry Bulk Shipper',
-            'fundamentals_report': """
+            "company_of_interest": "2866.HK",
+            "company_name": "Failing Dry Bulk Shipper",
+            "fundamentals_report": """
 ### --- START DATA_BLOCK ---
 SECTOR: Shipping & Cyclical Commodities
 SECTOR_ADJUSTMENTS: D/E threshold raised to 800% for capital-intensive sector
@@ -1126,15 +1141,15 @@ PE_RATIO_TTM: N/A (losses)
 - Commodity downturn crushed freight rates
 - Debt maturities approaching with no refinancing options
 """,
-            'messages': [],
+            "messages": [],
         }
 
         result = await validator_node(state, {})
 
-        assert result['pre_screening_result'] == 'REJECT'
-        flag_types = [flag['type'] for flag in result['red_flags']]
-        assert 'EXTREME_LEVERAGE' in flag_types  # 850% > 800% threshold
-        assert 'REFINANCING_RISK' in flag_types  # Coverage 0.9x < 1.5x + D/E > 200%
+        assert result["pre_screening_result"] == "REJECT"
+        flag_types = [flag["type"] for flag in result["red_flags"]]
+        assert "EXTREME_LEVERAGE" in flag_types  # 850% > 800% threshold
+        assert "REFINANCING_RISK" in flag_types  # Coverage 0.9x < 1.5x + D/E > 200%
 
     # --- BANKING SECTOR ---
 
@@ -1147,9 +1162,9 @@ PE_RATIO_TTM: N/A (losses)
         Should PASS - banking sector skips D/E checks entirely.
         """
         state = {
-            'company_of_interest': '0005.HK',
-            'company_name': 'HSBC Holdings',
-            'fundamentals_report': """
+            "company_of_interest": "0005.HK",
+            "company_name": "HSBC Holdings",
+            "fundamentals_report": """
 ### --- START DATA_BLOCK ---
 SECTOR: Banking
 SECTOR_ADJUSTMENTS: D/E ratio excluded (not applicable for banks) - Leverage score denominator adjusted to 1 pt. ROE threshold lowered to 12% (vs 15% standard). ROA threshold lowered to 1.0% (vs 7% standard).
@@ -1172,13 +1187,13 @@ PE_RATIO_TTM: 9.2
 - ROA: 0.62% (typical for large global bank)
 - Net Interest Margin: 1.68%
 """,
-            'messages': [],
+            "messages": [],
         }
 
         result = await validator_node(state, {})
 
-        assert result['pre_screening_result'] == 'PASS'
-        assert len(result['red_flags']) == 0
+        assert result["pre_screening_result"] == "PASS"
+        assert len(result["red_flags"]) == 0
 
     @pytest.mark.asyncio
     async def test_banking_pass_even_with_extreme_de(self, validator_node):
@@ -1188,9 +1203,9 @@ PE_RATIO_TTM: 9.2
         Validates that banking sector truly skips D/E checks regardless of ratio.
         """
         state = {
-            'company_of_interest': '8411.T',
-            'company_name': 'Mizuho Financial Group',
-            'fundamentals_report': """
+            "company_of_interest": "8411.T",
+            "company_name": "Mizuho Financial Group",
+            "fundamentals_report": """
 ### --- START DATA_BLOCK ---
 SECTOR: Banking
 SECTOR_ADJUSTMENTS: D/E ratio excluded (not applicable for banks)
@@ -1211,14 +1226,14 @@ PE_RATIO_TTM: 7.8
 - ROE: 8.5% (below 12% threshold but improving)
 - ROA: 0.42%
 """,
-            'messages': [],
+            "messages": [],
         }
 
         result = await validator_node(state, {})
 
         # Should PASS - banking sector skips all leverage checks
-        assert result['pre_screening_result'] == 'PASS'
-        assert len(result['red_flags']) == 0
+        assert result["pre_screening_result"] == "PASS"
+        assert len(result["red_flags"]) == 0
 
     # --- TECHNOLOGY SECTOR ---
 
@@ -1231,9 +1246,9 @@ PE_RATIO_TTM: 7.8
         Should PASS standard thresholds easily.
         """
         state = {
-            'company_of_interest': '005930.KS',
-            'company_name': 'Samsung Electronics',
-            'fundamentals_report': """
+            "company_of_interest": "005930.KS",
+            "company_name": "Samsung Electronics",
+            "fundamentals_report": """
 ### --- START DATA_BLOCK ---
 SECTOR: Technology & Software
 SECTOR_ADJUSTMENTS: None - standard thresholds applied
@@ -1256,13 +1271,13 @@ PE_RATIO_TTM: 12.5
 - ROE: 14.2%
 - Operating Margin: 12.8% (memory cycle downturn)
 """,
-            'messages': [],
+            "messages": [],
         }
 
         result = await validator_node(state, {})
 
-        assert result['pre_screening_result'] == 'PASS'
-        assert len(result['red_flags']) == 0
+        assert result["pre_screening_result"] == "PASS"
+        assert len(result["red_flags"]) == 0
 
     @pytest.mark.asyncio
     async def test_technology_fail_overleveraged_lbo(self, validator_node):
@@ -1273,9 +1288,9 @@ PE_RATIO_TTM: 12.5
         Should REJECT - tech companies shouldn't operate with extreme leverage.
         """
         state = {
-            'company_of_interest': 'TECH.HK',
-            'company_name': 'Overleveraged Tech Corp',
-            'fundamentals_report': """
+            "company_of_interest": "TECH.HK",
+            "company_name": "Overleveraged Tech Corp",
+            "fundamentals_report": """
 ### --- START DATA_BLOCK ---
 SECTOR: Technology & Software
 SECTOR_ADJUSTMENTS: None - standard thresholds applied
@@ -1299,14 +1314,14 @@ PE_RATIO_TTM: 15.2
 - Customer attrition post-acquisition (25% lost)
 - Debt matures in 2026 with refinancing risk
 """,
-            'messages': [],
+            "messages": [],
         }
 
         result = await validator_node(state, {})
 
-        assert result['pre_screening_result'] == 'REJECT'
-        flag_types = [flag['type'] for flag in result['red_flags']]
-        assert 'EXTREME_LEVERAGE' in flag_types  # 580% > 500% standard threshold
+        assert result["pre_screening_result"] == "REJECT"
+        flag_types = [flag["type"] for flag in result["red_flags"]]
+        assert "EXTREME_LEVERAGE" in flag_types  # 580% > 500% standard threshold
 
     # --- GENERAL SECTOR ---
 
@@ -1319,9 +1334,9 @@ PE_RATIO_TTM: 15.2
         Should PASS standard thresholds comfortably.
         """
         state = {
-            'company_of_interest': '7203.T',
-            'company_name': 'Toyota Motor Corporation',
-            'fundamentals_report': """
+            "company_of_interest": "7203.T",
+            "company_name": "Toyota Motor Corporation",
+            "fundamentals_report": """
 ### --- START DATA_BLOCK ---
 SECTOR: General/Diversified
 SECTOR_ADJUSTMENTS: None - standard thresholds applied
@@ -1344,13 +1359,13 @@ PE_RATIO_TTM: 9.8
 - ROE: 16.8%
 - Operating Margin: 10.2% (industry-leading)
 """,
-            'messages': [],
+            "messages": [],
         }
 
         result = await validator_node(state, {})
 
-        assert result['pre_screening_result'] == 'PASS'
-        assert len(result['red_flags']) == 0
+        assert result["pre_screening_result"] == "PASS"
+        assert len(result["red_flags"]) == 0
 
     @pytest.mark.asyncio
     async def test_general_fail_chinese_property_developer(self, validator_node):
@@ -1361,9 +1376,9 @@ PE_RATIO_TTM: 9.8
         Should REJECT - multiple red flags (extreme leverage + refinancing risk).
         """
         state = {
-            'company_of_interest': '3333.HK',
-            'company_name': 'Distressed Property Developer',
-            'fundamentals_report': """
+            "company_of_interest": "3333.HK",
+            "company_name": "Distressed Property Developer",
+            "fundamentals_report": """
 ### --- START DATA_BLOCK ---
 SECTOR: General/Diversified
 SECTOR_ADJUSTMENTS: None - standard thresholds applied
@@ -1393,12 +1408,12 @@ PE_RATIO_TTM: 3.2 (distressed valuation)
 - Property sales down 70% YoY
 - Credit rating: CCC+ (substantial risk)
 """,
-            'messages': [],
+            "messages": [],
         }
 
         result = await validator_node(state, {})
 
-        assert result['pre_screening_result'] == 'REJECT'
-        flag_types = [flag['type'] for flag in result['red_flags']]
-        assert 'EXTREME_LEVERAGE' in flag_types  # 620% > 500% standard threshold
-        assert 'REFINANCING_RISK' in flag_types  # Coverage 0.8x < 2.0x + D/E > 100%
+        assert result["pre_screening_result"] == "REJECT"
+        flag_types = [flag["type"] for flag in result["red_flags"]]
+        assert "EXTREME_LEVERAGE" in flag_types  # 620% > 500% standard threshold
+        assert "REFINANCING_RISK" in flag_types  # Coverage 0.8x < 2.0x + D/E > 100%

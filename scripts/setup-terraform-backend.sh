@@ -109,7 +109,7 @@ EOF
 
 check_prerequisites() {
     print_info "Checking prerequisites..."
-    
+
     # Check Azure CLI
     if ! command -v az &> /dev/null; then
         print_error "Azure CLI is not installed"
@@ -117,7 +117,7 @@ check_prerequisites() {
         echo "Install from: https://docs.microsoft.com/en-us/cli/azure/install-azure-cli"
         exit 1
     fi
-    
+
     # Check jq
     if ! command -v jq &> /dev/null; then
         print_error "jq is not installed (required for JSON parsing)"
@@ -125,13 +125,13 @@ check_prerequisites() {
         echo "Install: brew install jq (macOS) or apt-get install jq (Linux)"
         exit 1
     fi
-    
+
     print_success "Prerequisites found"
 }
 
 check_azure_login() {
     print_info "Checking Azure authentication..."
-    
+
     if ! az account show &> /dev/null; then
         print_error "Not logged into Azure"
         echo ""
@@ -141,12 +141,12 @@ check_azure_login() {
             exit 1
         fi
     fi
-    
+
     local subscription_name
     subscription_name=$(az account show --query name -o tsv)
     local subscription_id
     subscription_id=$(az account show --query id -o tsv)
-    
+
     print_success "Logged in to Azure"
     echo ""
     print_warning "Using subscription: $subscription_name"
@@ -165,20 +165,20 @@ create_resource_group() {
     local rg_name="$1"
     local location="$2"
     local dry_run="$3"
-    
+
     if [[ "$dry_run" == "true" ]]; then
         print_info "[DRY RUN] Would create resource group: $rg_name in $location"
         return 0
     fi
-    
+
     print_info "Creating resource group: $rg_name..."
-    
+
     # Check if exists
     if az group show --name "$rg_name" &> /dev/null; then
         print_warning "Resource group already exists: $rg_name"
         return 0
     fi
-    
+
     if az group create --name "$rg_name" --location "$location" --output none; then
         print_success "Created resource group: $rg_name"
     else
@@ -192,28 +192,28 @@ create_storage_account() {
     local storage_name="$2"
     local location="$3"
     local dry_run="$4"
-    
+
     if [[ "$dry_run" == "true" ]]; then
         print_info "[DRY RUN] Would create storage account: $storage_name"
         return 0
     fi
-    
+
     # Validate storage account name
     if [[ ! "$storage_name" =~ ^[a-z0-9]{3,24}$ ]]; then
         print_error "Invalid storage account name: $storage_name"
         echo "Must be lowercase, alphanumeric, 3-24 characters"
         exit 1
     fi
-    
+
     print_info "Creating storage account: $storage_name..."
     print_warning "This will incur charges (~$1-2/month)"
-    
+
     # Check if exists
     if az storage account show --name "$storage_name" --resource-group "$rg_name" &> /dev/null 2>&1; then
         print_warning "Storage account already exists: $storage_name"
         return 0
     fi
-    
+
     if az storage account create \
         --name "$storage_name" \
         --resource-group "$rg_name" \
@@ -235,14 +235,14 @@ create_container() {
     local storage_name="$1"
     local container_name="$2"
     local dry_run="$3"
-    
+
     if [[ "$dry_run" == "true" ]]; then
         print_info "[DRY RUN] Would create blob container: $container_name"
         return 0
     fi
-    
+
     print_info "Creating blob container: $container_name..."
-    
+
     if az storage container create \
         --name "$container_name" \
         --account-name "$storage_name" \
@@ -259,7 +259,7 @@ show_backend_config() {
     local rg_name="$1"
     local storage_name="$2"
     local container_name="$3"
-    
+
     echo ""
     echo "════════════════════════════════════════════════════════════"
     print_success "Terraform Backend Setup Complete!"
@@ -288,7 +288,7 @@ main() {
     local location="$DEFAULT_LOCATION"
     local container="$DEFAULT_CONTAINER"
     local dry_run="false"
-    
+
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -321,7 +321,7 @@ main() {
                 ;;
         esac
     done
-    
+
     echo ""
     echo "════════════════════════════════════════════════════════════"
     echo "⚠️  Terraform Backend Setup - Creates Billable Resources"
@@ -338,16 +338,16 @@ main() {
         print_warning "This will create billable Azure resources (~$1-2/month)"
     fi
     echo ""
-    
+
     # Checks
     check_prerequisites
     check_azure_login
-    
+
     # Create resources
     create_resource_group "$resource_group" "$location" "$dry_run"
     create_storage_account "$resource_group" "$storage_account" "$location" "$dry_run"
     create_container "$storage_account" "$container" "$dry_run"
-    
+
     if [[ "$dry_run" == "true" ]]; then
         echo ""
         print_info "Dry run complete - no resources were created"
@@ -355,7 +355,7 @@ main() {
     else
         show_backend_config "$resource_group" "$storage_account" "$container"
     fi
-    
+
     echo ""
 }
 

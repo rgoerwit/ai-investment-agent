@@ -12,17 +12,17 @@ FIXED: Corrected memory query parameter name to 'metadata_filter'.
 import asyncio
 import json
 import re
-from typing import Annotated, Any, Callable
-from typing_extensions import TypedDict
+from collections.abc import Callable
 from datetime import datetime
+from typing import Annotated, Any
 
+import structlog
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.graph import MessagesState
 from langgraph.prebuilt import create_react_agent
 from langgraph.types import RunnableConfig
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
-
-import structlog
+from typing_extensions import TypedDict
 
 from src.config import config as settings_config
 
@@ -30,11 +30,9 @@ logger = structlog.get_logger(__name__)
 
 # --- Rate Limit Handling ---
 
+
 async def invoke_with_rate_limit_handling(
-    runnable,
-    input_data: dict[str, Any],
-    max_attempts: int = 3,
-    context: str = "LLM"
+    runnable, input_data: dict[str, Any], max_attempts: int = 3, context: str = "LLM"
 ) -> Any:
     """
     Invoke LLM with explicit 429/ResourceExhausted handling for free tier.
@@ -64,14 +62,16 @@ async def invoke_with_rate_limit_handling(
             error_type = type(e).__name__
 
             # Detect rate limit errors (429, ResourceExhausted, quota exceeded)
-            is_rate_limit = any([
-                "429" in error_str,
-                "rate limit" in error_str,
-                "quota" in error_str,
-                "resourceexhausted" in error_str,
-                "resource exhausted" in error_str,
-                "too many requests" in error_str
-            ])
+            is_rate_limit = any(
+                [
+                    "429" in error_str,
+                    "rate limit" in error_str,
+                    "quota" in error_str,
+                    "resourceexhausted" in error_str,
+                    "resource exhausted" in error_str,
+                    "too many requests" in error_str,
+                ]
+            )
 
             if is_rate_limit and attempt < max_attempts - 1:
                 # Extended exponential backoff: 60s, 120s, 180s
@@ -86,7 +86,7 @@ async def invoke_with_rate_limit_handling(
                         max_attempts=max_attempts,
                         wait_seconds=wait_time,
                         error_type=error_type,
-                        error_message=str(e)[:200]  # Truncate long errors
+                        error_message=str(e)[:200],  # Truncate long errors
                     )
 
                 await asyncio.sleep(wait_time)
@@ -97,6 +97,7 @@ async def invoke_with_rate_limit_handling(
 
 
 # --- News Report Summarization ---
+
 
 def extract_news_highlights(news_report: str, max_chars: int = 1500) -> str:
     """
@@ -113,20 +114,20 @@ def extract_news_highlights(news_report: str, max_chars: int = 1500) -> str:
         return news_report
 
     highlights = []
-    lines = news_report.split('\n')
+    lines = news_report.split("\n")
 
     # Extract US Revenue section (critical for thesis)
     in_geo_section = False
     geo_lines = []
     for line in lines:
         line_upper = line.upper()
-        if 'GEOGRAPHIC REVENUE' in line_upper or 'US REVENUE' in line_upper:
+        if "GEOGRAPHIC REVENUE" in line_upper or "US REVENUE" in line_upper:
             in_geo_section = True
             # Also capture this line if it contains actual data (not just a header)
-            if ':' in line and not line.strip().startswith('###'):
+            if ":" in line and not line.strip().startswith("###"):
                 geo_lines.append(line)
         elif in_geo_section:
-            if line.startswith('---') or line.startswith('###'):
+            if line.startswith("---") or line.startswith("###"):
                 in_geo_section = False
             elif line.strip():
                 geo_lines.append(line)
@@ -142,22 +143,24 @@ def extract_news_highlights(news_report: str, max_chars: int = 1500) -> str:
     catalyst_header_added = False
     catalyst_count = 0
     for line in lines:
-        if 'CATALYST' in line.upper() or 'GROWTH CATALYST' in line.upper():
+        if "CATALYST" in line.upper() or "GROWTH CATALYST" in line.upper():
             in_catalyst_section = True
             if not catalyst_header_added:
                 highlights.append("\n**Growth Catalysts:**")
                 catalyst_header_added = True
         elif in_catalyst_section:
-            if line.startswith('---') or (line.startswith('###') and 'CATALYST' not in line.upper()):
+            if line.startswith("---") or (
+                line.startswith("###") and "CATALYST" not in line.upper()
+            ):
                 in_catalyst_section = False
-            elif line.strip().startswith(('1.', '2.', '3.', '-', '*', '•')):
+            elif line.strip().startswith(("1.", "2.", "3.", "-", "*", "•")):
                 # Only take the first line of each catalyst
                 highlights.append(line.strip()[:150])
                 catalyst_count += 1
                 if catalyst_count >= 3:  # Limit to top 3 catalysts
                     break
 
-    result = '\n'.join(highlights)
+    result = "\n".join(highlights)
 
     # Final safety truncation
     if len(result) > max_chars:
@@ -169,6 +172,7 @@ def extract_news_highlights(news_report: str, max_chars: int = 1500) -> str:
 # --- State Definitions ---
 class InvestDebateState(TypedDict):
     """State tracking bull/bear investment debate progression."""
+
     bull_history: str
     bear_history: str
     history: str
@@ -176,8 +180,10 @@ class InvestDebateState(TypedDict):
     judge_decision: str
     count: int
 
+
 class RiskDebateState(TypedDict):
     """State tracking multi-perspective risk assessment debate."""
+
     risky_history: str
     safe_history: str
     neutral_history: str
@@ -189,9 +195,11 @@ class RiskDebateState(TypedDict):
     judge_decision: str
     count: int
 
+
 def take_last(x, y):
     """Reducer: takes the most recent value. Used with Annotated fields."""
     return y
+
 
 class AgentState(MessagesState):
     company_of_interest: str
@@ -203,7 +211,9 @@ class AgentState(MessagesState):
     sentiment_report: Annotated[str, take_last]
     news_report: Annotated[str, take_last]
     raw_fundamentals_data: Annotated[str, take_last]  # Junior Analyst output
-    foreign_language_report: Annotated[str, take_last]  # Foreign Language Analyst output
+    foreign_language_report: Annotated[
+        str, take_last
+    ]  # Foreign Language Analyst output
     legal_report: Annotated[str, take_last]  # Legal Counsel output (PFIC/VIE JSON)
     fundamentals_report: Annotated[str, take_last]  # Senior Analyst analysis
     investment_debate_state: Annotated[InvestDebateState, take_last]
@@ -219,7 +229,9 @@ class AgentState(MessagesState):
     red_flags: Annotated[list[dict[str, Any]], take_last]
     pre_screening_result: Annotated[str, take_last]  # "PASS" or "REJECT"
 
+
 # --- Helper Functions ---
+
 
 def get_context_from_config(config: RunnableConfig) -> Any | None:
     """Extract TradingContext from RunnableConfig.configurable dict."""
@@ -229,15 +241,27 @@ def get_context_from_config(config: RunnableConfig) -> Any | None:
     except (AttributeError, TypeError):
         return None
 
+
 def get_analysis_context(ticker: str) -> str:
     """Generate contextual guidance based on asset type (ETF vs stock)."""
     etf_indicators = [
-        'VTI', 'SPY', 'QQQ', 'IWM', 'VOO', 'VEA', 'VWO',
-        'BND', 'AGG', 'EFA', 'EEM', 'TLT', 'GLD', 'DIA'
+        "VTI",
+        "SPY",
+        "QQQ",
+        "IWM",
+        "VOO",
+        "VEA",
+        "VWO",
+        "BND",
+        "AGG",
+        "EFA",
+        "EEM",
+        "TLT",
+        "GLD",
+        "DIA",
     ]
     is_etf = (
-        any(ind in ticker.upper() for ind in etf_indicators)
-        or 'ETF' in ticker.upper()
+        any(ind in ticker.upper() for ind in etf_indicators) or "ETF" in ticker.upper()
     )
     if is_etf:
         return (
@@ -248,6 +272,7 @@ def get_analysis_context(ticker: str) -> str:
         "This is an individual stock. "
         "Focus on fundamentals, valuation, and competitive advantage."
     )
+
 
 def filter_messages_for_gemini(messages: list[BaseMessage]) -> list[BaseMessage]:
     if not messages:
@@ -289,16 +314,16 @@ def extract_string_content(content: Any) -> str:
 
     if isinstance(content, dict):
         # Try common keys for text content in structured responses
-        if 'text' in content:
-            return str(content['text'])
-        if 'content' in content:
-            return extract_string_content(content['content'])  # Recursive for nested
-        if 'parts' in content:
+        if "text" in content:
+            return str(content["text"])
+        if "content" in content:
+            return extract_string_content(content["content"])  # Recursive for nested
+        if "parts" in content:
             # Gemini multi-part response format
-            parts = content['parts']
+            parts = content["parts"]
             if isinstance(parts, list):
                 text_parts = [extract_string_content(p) for p in parts]
-                return '\n'.join(filter(None, text_parts))
+                return "\n".join(filter(None, text_parts))
         # Fallback: convert dict to readable string
         logger.warning("response_content_is_dict", keys=list(content.keys()))
         return str(content)
@@ -311,7 +336,7 @@ def extract_string_content(content: Any) -> str:
             return extract_string_content(content[0])
         # Multiple parts - join them
         text_parts = [extract_string_content(item) for item in content]
-        return '\n'.join(filter(None, text_parts))
+        return "\n".join(filter(None, text_parts))
 
     # Fallback for any other type
     return str(content) if content is not None else ""
@@ -368,7 +393,7 @@ def create_analyst_node(
     tools: list[Any],
     output_field: str,
     retry_llm: Any | None = None,
-    allow_retry: bool = False
+    allow_retry: bool = False,
 ) -> Callable:
     """
     Factory function creating data analyst agent nodes.
@@ -384,8 +409,10 @@ def create_analyst_node(
     Note:
         Retry only happens ONCE to prevent infinite loops.
     """
+
     async def analyst_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         from src.prompts import get_prompt
+
         agent_prompt = get_prompt(agent_key)
         if not agent_prompt:
             logger.error(f"Missing prompt for agent: {agent_key}")
@@ -400,21 +427,21 @@ def create_analyst_node(
             prompts_used = state.get("prompts_used", {})
             prompts_used[output_field] = {
                 "agent_name": agent_prompt.agent_name,
-                "version": agent_prompt.version
+                "version": agent_prompt.version,
             }
-            filtered_messages = filter_messages_for_gemini(
-                state.get("messages", [])
-            )
+            filtered_messages = filter_messages_for_gemini(state.get("messages", []))
             context = get_context_from_config(config)
             current_date = (
-                context.trade_date if context
-                else datetime.now().strftime("%Y-%m-%d")
+                context.trade_date if context else datetime.now().strftime("%Y-%m-%d")
             )
             ticker = (
-                context.ticker if context
+                context.ticker
+                if context
                 else state.get("company_of_interest", "UNKNOWN")
             )
-            company_name = state.get("company_name", ticker)  # Get verified company name from state
+            company_name = state.get(
+                "company_name", ticker
+            )  # Get verified company name from state
 
             # --- Context injection for specific agents ---
             extra_context = ""
@@ -447,7 +474,7 @@ def create_analyst_node(
                     logger.warning(
                         "senior_fundamentals_no_raw_data",
                         ticker=ticker,
-                        message="Junior Analyst data not available - this should not happen"
+                        message="Junior Analyst data not available - this should not happen",
                     )
 
                 # Foreign Language Analyst data supplements Junior's data
@@ -461,13 +488,13 @@ def create_analyst_node(
                     logger.info(
                         "senior_fundamentals_has_foreign_data",
                         ticker=ticker,
-                        foreign_data_length=len(foreign_data)
+                        foreign_data_length=len(foreign_data),
                     )
                 else:
                     logger.info(
                         "senior_fundamentals_no_foreign_data",
                         ticker=ticker,
-                        message="Foreign Language Analyst data not available - proceeding with Junior data only"
+                        message="Foreign Language Analyst data not available - proceeding with Junior data only",
                     )
 
                 if news_report:
@@ -482,7 +509,7 @@ def create_analyst_node(
                     logger.info(
                         "senior_fundamentals_no_news",
                         ticker=ticker,
-                        message="News report not yet available (parallel execution) - proceeding without news context"
+                        message="News report not yet available (parallel execution) - proceeding without news context",
                     )
 
                 # Legal Counsel data for PFIC/VIE reconciliation
@@ -498,32 +525,41 @@ def create_analyst_node(
                     logger.info(
                         "senior_fundamentals_has_legal_data",
                         ticker=ticker,
-                        legal_data_length=len(legal_report)
+                        legal_data_length=len(legal_report),
                     )
                 else:
                     logger.info(
                         "senior_fundamentals_no_legal_data",
                         ticker=ticker,
-                        message="Legal Counsel data not yet available - proceeding without legal context"
+                        message="Legal Counsel data not yet available - proceeding without legal context",
                     )
 
             # CRITICAL FIX: Include verified company name to prevent hallucination
             full_system_instruction = f"{agent_prompt.system_message}\n\nDate: {current_date}\nTicker: {ticker}\nCompany: {company_name}\n{get_analysis_context(ticker)}{extra_context}"
-            invocation_messages = [SystemMessage(content=full_system_instruction)] + filtered_messages
+            invocation_messages = [
+                SystemMessage(content=full_system_instruction)
+            ] + filtered_messages
 
             # Use rate limit handling wrapper for free tier support
             response = await invoke_with_rate_limit_handling(
                 runnable,
                 {"messages": invocation_messages},
-                context=agent_prompt.agent_name
+                context=agent_prompt.agent_name,
             )
-            new_state = {"sender": agent_key, "messages": [response], "prompts_used": prompts_used}
+            new_state = {
+                "sender": agent_key,
+                "messages": [response],
+                "prompts_used": prompts_used,
+            }
 
             # Check for tool calls
             has_tool_calls = False
             try:
-                if hasattr(response, 'tool_calls') and response.tool_calls:
-                    has_tool_calls = isinstance(response.tool_calls, list) and len(response.tool_calls) > 0
+                if hasattr(response, "tool_calls") and response.tool_calls:
+                    has_tool_calls = (
+                        isinstance(response.tool_calls, list)
+                        and len(response.tool_calls) > 0
+                    )
             except (AttributeError, TypeError):
                 pass
 
@@ -540,9 +576,9 @@ def create_analyst_node(
             # This handles cases where Gemini 3+ with thinking_level=low returns empty.
             # NO LOOPING: Only one retry attempt is made.
             if (
-                allow_retry and
-                retry_llm is not None and
-                _is_output_insufficient(content_str, agent_key)
+                allow_retry
+                and retry_llm is not None
+                and _is_output_insufficient(content_str, agent_key)
             ):
                 logger.warning(
                     "analyst_retry_with_deep_thinking",
@@ -550,17 +586,21 @@ def create_analyst_node(
                     ticker=ticker,
                     original_length=len(content_str),
                     has_datablock="DATA_BLOCK" in content_str if content_str else False,
-                    message="Insufficient output from quick LLM (thinking_level=low), retrying ONCE with deep thinking"
+                    message="Insufficient output from quick LLM (thinking_level=low), retrying ONCE with deep thinking",
                 )
 
                 # Rebuild runnable with retry_llm (deep thinking)
-                retry_runnable = prompt_template | retry_llm.bind_tools(tools) if tools else prompt_template | retry_llm
+                retry_runnable = (
+                    prompt_template | retry_llm.bind_tools(tools)
+                    if tools
+                    else prompt_template | retry_llm
+                )
 
                 try:
                     retry_response = await invoke_with_rate_limit_handling(
                         retry_runnable,
                         {"messages": invocation_messages},
-                        context=f"{agent_prompt.agent_name} (RETRY-HIGH)"
+                        context=f"{agent_prompt.agent_name} (RETRY-HIGH)",
                     )
 
                     # Extract content from retry response
@@ -569,8 +609,14 @@ def create_analyst_node(
                     # Check if retry produced tool calls (continue tool loop)
                     retry_has_tool_calls = False
                     try:
-                        if hasattr(retry_response, 'tool_calls') and retry_response.tool_calls:
-                            retry_has_tool_calls = isinstance(retry_response.tool_calls, list) and len(retry_response.tool_calls) > 0
+                        if (
+                            hasattr(retry_response, "tool_calls")
+                            and retry_response.tool_calls
+                        ):
+                            retry_has_tool_calls = (
+                                isinstance(retry_response.tool_calls, list)
+                                and len(retry_response.tool_calls) > 0
+                            )
                     except (AttributeError, TypeError):
                         pass
 
@@ -581,7 +627,7 @@ def create_analyst_node(
                             "analyst_retry_produced_tool_calls",
                             agent_key=agent_key,
                             ticker=ticker,
-                            message="Retry with deep thinking produced tool calls, continuing tool loop"
+                            message="Retry with deep thinking produced tool calls, continuing tool loop",
                         )
                         return new_state
 
@@ -592,8 +638,10 @@ def create_analyst_node(
                         ticker=ticker,
                         original_length=len(content_str),
                         retry_length=len(retry_content_str),
-                        retry_has_datablock="DATA_BLOCK" in retry_content_str if retry_content_str else False,
-                        retry_improved=len(retry_content_str) > len(content_str)
+                        retry_has_datablock="DATA_BLOCK" in retry_content_str
+                        if retry_content_str
+                        else False,
+                        retry_improved=len(retry_content_str) > len(content_str),
                     )
                     content_str = retry_content_str
 
@@ -604,44 +652,58 @@ def create_analyst_node(
                         agent_key=agent_key,
                         ticker=ticker,
                         error=str(retry_error),
-                        message="Retry with deep thinking failed, using original output"
+                        message="Retry with deep thinking failed, using original output",
                     )
                     # Keep original content_str
 
             new_state[output_field] = content_str
 
             if agent_key == "fundamentals_analyst":
-                logger.info("fundamentals_output", has_datablock="DATA_BLOCK" in content_str, length=len(content_str))
+                logger.info(
+                    "fundamentals_output",
+                    has_datablock="DATA_BLOCK" in content_str,
+                    length=len(content_str),
+                )
             return new_state
         except Exception as e:
             logger.error(f"Analyst node error {output_field}: {str(e)}")
-            return {"messages": [AIMessage(content=f"Error: {str(e)}")], output_field: f"Error: {str(e)}"}
+            return {
+                "messages": [AIMessage(content=f"Error: {str(e)}")],
+                output_field: f"Error: {str(e)}",
+            }
+
     return analyst_node
 
+
 def create_researcher_node(llm, memory: Any | None, agent_key: str) -> Callable:
-    async def researcher_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+    async def researcher_node(
+        state: AgentState, config: RunnableConfig
+    ) -> dict[str, Any]:
         from src.prompts import get_prompt
+
         agent_prompt = get_prompt(agent_key)
         if not agent_prompt:
             logger.error(f"Missing prompt for researcher: {agent_key}")
-            debate_state = state.get('investment_debate_state', {}).copy()
-            debate_state['history'] += f"\n\n[SYSTEM]: Error - Missing prompt for {agent_key}."
-            debate_state['count'] = debate_state.get('count', 0) + 1
+            debate_state = state.get("investment_debate_state", {}).copy()
+            debate_state["history"] += (
+                f"\n\n[SYSTEM]: Error - Missing prompt for {agent_key}."
+            )
+            debate_state["count"] = debate_state.get("count", 0) + 1
             return {"investment_debate_state": debate_state}
         agent_name = agent_prompt.agent_name
         # Include all 4 analyst reports for comprehensive debate context
         reports = f"""MARKET ANALYST REPORT:
-{state.get('market_report', 'N/A')}
+{state.get("market_report", "N/A")}
 
 SENTIMENT ANALYST REPORT:
-{state.get('sentiment_report', 'N/A')}
+{state.get("sentiment_report", "N/A")}
 
 NEWS ANALYST REPORT:
-{state.get('news_report', 'N/A')}
+{state.get("news_report", "N/A")}
 
 FUNDAMENTALS ANALYST REPORT:
-{state.get('fundamentals_report', 'N/A')}"""
-        history = state.get('investment_debate_state', {}).get('history', '')
+{state.get("fundamentals_report", "N/A")}"""
+        history = state.get("investment_debate_state", {}).get("history", "")
 
         # FIX: Contextualize memory retrieval to prevent cross-contamination
         ticker = state.get("company_of_interest", "UNKNOWN")
@@ -656,10 +718,13 @@ FUNDAMENTALS ANALYST REPORT:
                 relevant = await memory.query_similar_situations(
                     f"risks and upside for {ticker}",
                     n_results=3,
-                    metadata_filter={"ticker": ticker}
+                    metadata_filter={"ticker": ticker},
                 )
                 if relevant:
-                    past_insights = f"\n\nPAST MEMORY INSIGHTS (STRICTLY FOR {ticker}):\n" + "\n".join([r['document'] for r in relevant])
+                    past_insights = (
+                        f"\n\nPAST MEMORY INSIGHTS (STRICTLY FOR {ticker}):\n"
+                        + "\n".join([r["document"] for r in relevant])
+                    )
                 else:
                     # If no strict match, do NOT fallback to semantic search to avoid contamination
                     logger.info("memory_no_exact_match", ticker=ticker)
@@ -681,171 +746,194 @@ Only use data explicitly related to {ticker} ({company_name}).
         try:
             # Use rate limit handling wrapper for free tier support
             response = await invoke_with_rate_limit_handling(
-                llm,
-                [HumanMessage(content=prompt)],
-                context=agent_name
+                llm, [HumanMessage(content=prompt)], context=agent_name
             )
-            debate_state = state.get('investment_debate_state', {}).copy()
+            debate_state = state.get("investment_debate_state", {}).copy()
             # CRITICAL FIX: Normalize response.content to string
             content_str = extract_string_content(response.content)
             argument = f"{agent_name}: {content_str}"
-            debate_state['history'] = debate_state.get('history', '') + f"\n\n{argument}"
-            debate_state['count'] = debate_state.get('count', 0) + 1
-            if agent_name == 'Bull Analyst':
-                debate_state['bull_history'] = debate_state.get('bull_history', '') + f"\n{argument}"
+            debate_state["history"] = (
+                debate_state.get("history", "") + f"\n\n{argument}"
+            )
+            debate_state["count"] = debate_state.get("count", 0) + 1
+            if agent_name == "Bull Analyst":
+                debate_state["bull_history"] = (
+                    debate_state.get("bull_history", "") + f"\n{argument}"
+                )
             else:
-                debate_state['bear_history'] = debate_state.get('bear_history', '') + f"\n{argument}"
+                debate_state["bear_history"] = (
+                    debate_state.get("bear_history", "") + f"\n{argument}"
+                )
             return {"investment_debate_state": debate_state}
         except Exception as e:
             logger.error(f"Researcher error {agent_key}: {str(e)}")
-            return {"investment_debate_state": state.get('investment_debate_state', {})}
+            return {"investment_debate_state": state.get("investment_debate_state", {})}
+
     return researcher_node
 
+
 def create_research_manager_node(llm, memory: Any | None) -> Callable:
-    async def research_manager_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+    async def research_manager_node(
+        state: AgentState, config: RunnableConfig
+    ) -> dict[str, Any]:
         from src.prompts import get_prompt
+
         agent_prompt = get_prompt("research_manager")
         if not agent_prompt:
             return {"investment_plan": "Error: Missing prompt"}
-        debate = state.get('investment_debate_state', {})
-        all_reports = f"""MARKET ANALYST REPORT:\n{state.get('market_report', 'N/A')}\n\nSENTIMENT ANALYST REPORT:\n{state.get('sentiment_report', 'N/A')}\n\nNEWS ANALYST REPORT:\n{state.get('news_report', 'N/A')}\n\nFUNDAMENTALS ANALYST REPORT:\n{state.get('fundamentals_report', 'N/A')}\n\nBULL RESEARCHER:\n{debate.get('bull_history', 'N/A')}\n\nBEAR RESEARCHER:\n{debate.get('bear_history', 'N/A')}"""
+        debate = state.get("investment_debate_state", {})
+        all_reports = f"""MARKET ANALYST REPORT:\n{state.get("market_report", "N/A")}\n\nSENTIMENT ANALYST REPORT:\n{state.get("sentiment_report", "N/A")}\n\nNEWS ANALYST REPORT:\n{state.get("news_report", "N/A")}\n\nFUNDAMENTALS ANALYST REPORT:\n{state.get("fundamentals_report", "N/A")}\n\nBULL RESEARCHER:\n{debate.get("bull_history", "N/A")}\n\nBEAR RESEARCHER:\n{debate.get("bear_history", "N/A")}"""
         prompt = f"""{agent_prompt.system_message}\n\n{all_reports}\n\nProvide Investment Plan."""
         try:
             response = await invoke_with_rate_limit_handling(
-                llm,
-                [HumanMessage(content=prompt)],
-                context=agent_prompt.agent_name
+                llm, [HumanMessage(content=prompt)], context=agent_prompt.agent_name
             )
             # CRITICAL FIX: Normalize response.content to string
             return {"investment_plan": extract_string_content(response.content)}
         except Exception as e:
             return {"investment_plan": f"Error: {str(e)}"}
+
     return research_manager_node
+
 
 def create_trader_node(llm, memory: Any | None) -> Callable:
     async def trader_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         from src.prompts import get_prompt
+
         agent_prompt = get_prompt("trader")
         if not agent_prompt:
             return {"trader_investment_plan": "Error: Missing prompt"}
 
         # Include consultant review if available (external cross-validation)
-        consultant = state.get('consultant_review', '')
-        consultant_section = f"""\n\nEXTERNAL CONSULTANT REVIEW (Cross-Validation):\n{consultant if consultant else 'N/A (consultant disabled or unavailable)'}"""
+        consultant = state.get("consultant_review", "")
+        consultant_section = f"""\n\nEXTERNAL CONSULTANT REVIEW (Cross-Validation):\n{consultant if consultant else "N/A (consultant disabled or unavailable)"}"""
 
         # Include all 4 analyst reports for comprehensive trading context
         all_input = f"""MARKET ANALYST REPORT:
-{state.get('market_report', 'N/A')}
+{state.get("market_report", "N/A")}
 
 SENTIMENT ANALYST REPORT:
-{state.get('sentiment_report', 'N/A')}
+{state.get("sentiment_report", "N/A")}
 
 NEWS ANALYST REPORT:
-{state.get('news_report', 'N/A')}
+{state.get("news_report", "N/A")}
 
 FUNDAMENTALS ANALYST REPORT:
-{state.get('fundamentals_report', 'N/A')}
+{state.get("fundamentals_report", "N/A")}
 
 RESEARCH MANAGER PLAN:
-{state.get('investment_plan', 'N/A')}{consultant_section}"""
-        prompt = f"""{agent_prompt.system_message}\n\n{all_input}\n\nCreate Trading Plan."""
+{state.get("investment_plan", "N/A")}{consultant_section}"""
+        prompt = (
+            f"""{agent_prompt.system_message}\n\n{all_input}\n\nCreate Trading Plan."""
+        )
         try:
             response = await invoke_with_rate_limit_handling(
-                llm,
-                [HumanMessage(content=prompt)],
-                context=agent_prompt.agent_name
+                llm, [HumanMessage(content=prompt)], context=agent_prompt.agent_name
             )
             # CRITICAL FIX: Normalize response.content to string
             return {"trader_investment_plan": extract_string_content(response.content)}
         except Exception as e:
             return {"trader_investment_plan": f"Error: {str(e)}"}
+
     return trader_node
+
 
 def create_risk_debater_node(llm, agent_key: str) -> Callable:
     async def risk_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         from src.prompts import get_prompt
+
         agent_prompt = get_prompt(agent_key)
         if not agent_prompt:
-            risk_state = state.get('risk_debate_state', {}).copy()
-            risk_state['history'] += f"\n[SYSTEM]: Error - Missing prompt for {agent_key}"
-            risk_state['count'] += 1
+            risk_state = state.get("risk_debate_state", {}).copy()
+            risk_state["history"] += (
+                f"\n[SYSTEM]: Error - Missing prompt for {agent_key}"
+            )
+            risk_state["count"] += 1
             return {"risk_debate_state": risk_state}
 
         # Include consultant review if available (external cross-validation)
-        consultant = state.get('consultant_review', '')
-        consultant_section = f"""\n\nEXTERNAL CONSULTANT REVIEW (Cross-Validation):\n{consultant if consultant else 'N/A (consultant disabled or unavailable)'}"""
+        consultant = state.get("consultant_review", "")
+        consultant_section = f"""\n\nEXTERNAL CONSULTANT REVIEW (Cross-Validation):\n{consultant if consultant else "N/A (consultant disabled or unavailable)"}"""
 
-        prompt = f"""{agent_prompt.system_message}\n\nTRADER PLAN: {state.get('trader_investment_plan')}{consultant_section}\n\nProvide risk assessment."""
+        prompt = f"""{agent_prompt.system_message}\n\nTRADER PLAN: {state.get("trader_investment_plan")}{consultant_section}\n\nProvide risk assessment."""
         try:
             response = await invoke_with_rate_limit_handling(
-                llm,
-                [HumanMessage(content=prompt)],
-                context=agent_prompt.agent_name
+                llm, [HumanMessage(content=prompt)], context=agent_prompt.agent_name
             )
-            risk_state = state.get('risk_debate_state', {}).copy()
+            risk_state = state.get("risk_debate_state", {}).copy()
             # CRITICAL FIX: Normalize response.content to string
             content_str = extract_string_content(response.content)
-            risk_state['history'] += f"\n{agent_prompt.agent_name}: {content_str}\n"
-            risk_state['count'] += 1
+            risk_state["history"] += f"\n{agent_prompt.agent_name}: {content_str}\n"
+            risk_state["count"] += 1
             return {"risk_debate_state": risk_state}
         except Exception:
-            return {"risk_debate_state": state.get('risk_debate_state', {})}
+            return {"risk_debate_state": state.get("risk_debate_state", {})}
+
     return risk_node
+
 
 def create_portfolio_manager_node(llm, memory: Any | None) -> Callable:
     async def pm_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         from src.prompts import get_prompt
+
         agent_prompt = get_prompt("portfolio_manager")
         if not agent_prompt:
             return {"final_trade_decision": "Error: Missing prompt"}
-        market = state.get('market_report', '')
-        sentiment = state.get('sentiment_report', '')
-        news = state.get('news_report', '')
-        fundamentals = state.get('fundamentals_report', '')
-        inv_plan = state.get('investment_plan', '')
-        consultant = state.get('consultant_review', '')
-        trader = state.get('trader_investment_plan', '')
-        risk = state.get('risk_debate_state', {}).get('history', '')
+        market = state.get("market_report", "")
+        sentiment = state.get("sentiment_report", "")
+        news = state.get("news_report", "")
+        fundamentals = state.get("fundamentals_report", "")
+        inv_plan = state.get("investment_plan", "")
+        consultant = state.get("consultant_review", "")
+        trader = state.get("trader_investment_plan", "")
+        risk = state.get("risk_debate_state", {}).get("history", "")
 
         # Red-flag pre-screening results
-        pre_screening_result = state.get('pre_screening_result', 'N/A')
-        red_flags = state.get('red_flags', [])
-        
-        logger.info("pm_inputs", 
-                    has_market=bool(market), 
-                    has_sentiment=bool(sentiment), 
-                    has_news=bool(news), 
-                    has_fundamentals=bool(fundamentals), 
-                    has_consultant=bool(consultant), 
-                    has_datablock="DATA_BLOCK" in fundamentals if fundamentals else False, 
-                    fund_len=len(fundamentals) if fundamentals else 0,
-                    red_flags_count=len(red_flags))
+        pre_screening_result = state.get("pre_screening_result", "N/A")
+        red_flags = state.get("red_flags", [])
+
+        logger.info(
+            "pm_inputs",
+            has_market=bool(market),
+            has_sentiment=bool(sentiment),
+            has_news=bool(news),
+            has_fundamentals=bool(fundamentals),
+            has_consultant=bool(consultant),
+            has_datablock="DATA_BLOCK" in fundamentals if fundamentals else False,
+            fund_len=len(fundamentals) if fundamentals else 0,
+            red_flags_count=len(red_flags),
+        )
 
         # Include consultant review in context (if available)
-        consultant_section = f"""\n\nEXTERNAL CONSULTANT REVIEW (Cross-Validation):\n{consultant if consultant else 'N/A (consultant disabled or unavailable)'}"""
+        consultant_section = f"""\n\nEXTERNAL CONSULTANT REVIEW (Cross-Validation):\n{consultant if consultant else "N/A (consultant disabled or unavailable)"}"""
 
         # Include red-flag pre-screening results (critical safety gate)
         red_flag_section = f"""\n\nRED-FLAG PRE-SCREENING:\nPre-Screening Result: {pre_screening_result}"""
         if red_flags:
-            red_flag_list = '\n'.join([f"  - {flag.get('type', 'Unknown')}: {flag.get('detail', 'No detail')}" for flag in red_flags])
+            red_flag_list = "\n".join(
+                [
+                    f"  - {flag.get('type', 'Unknown')}: {flag.get('detail', 'No detail')}"
+                    for flag in red_flags
+                ]
+            )
             red_flag_section += f"\nRed Flags/Warnings Detected:\n{red_flag_list}"
         else:
             red_flag_section += "\nRed Flags Detected: None"
 
-        all_context = f"""MARKET ANALYST REPORT:\n{market if market else 'N/A'}\n\nSENTIMENT ANALYST REPORT:\n{sentiment if sentiment else 'N/A'}\n\nNEWS ANALYST REPORT:\n{news if news else 'N/A'}\n\nFUNDAMENTALS ANALYST REPORT:\n{fundamentals if fundamentals else 'N/A'}{red_flag_section}\n\nRESEARCH MANAGER RECOMMENDATION:\n{inv_plan if inv_plan else 'N/A'}{consultant_section}\n\nTRADER PROPOSAL:\n{trader if trader else 'N/A'}\n\nRISK TEAM DEBATE:\n{risk if risk else 'N/A'}"""
+        all_context = f"""MARKET ANALYST REPORT:\n{market if market else "N/A"}\n\nSENTIMENT ANALYST REPORT:\n{sentiment if sentiment else "N/A"}\n\nNEWS ANALYST REPORT:\n{news if news else "N/A"}\n\nFUNDAMENTALS ANALYST REPORT:\n{fundamentals if fundamentals else "N/A"}{red_flag_section}\n\nRESEARCH MANAGER RECOMMENDATION:\n{inv_plan if inv_plan else "N/A"}{consultant_section}\n\nTRADER PROPOSAL:\n{trader if trader else "N/A"}\n\nRISK TEAM DEBATE:\n{risk if risk else "N/A"}"""
         prompt = f"""{agent_prompt.system_message}\n\n{all_context}\n\nMake Final Decision."""
         try:
             response = await invoke_with_rate_limit_handling(
-                llm,
-                [HumanMessage(content=prompt)],
-                context=agent_prompt.agent_name
+                llm, [HumanMessage(content=prompt)], context=agent_prompt.agent_name
             )
             # CRITICAL FIX: Normalize response.content to string
             return {"final_trade_decision": extract_string_content(response.content)}
         except Exception as e:
             logger.error(f"PM error: {str(e)}")
             return {"final_trade_decision": f"Error: {str(e)}"}
+
     return pm_node
+
 
 def create_consultant_node(llm, agent_key: str = "consultant") -> Callable:
     """
@@ -861,52 +949,59 @@ def create_consultant_node(llm, agent_key: str = "consultant") -> Callable:
     Returns:
         Async function compatible with LangGraph StateGraph.add_node()
     """
-    async def consultant_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+
+    async def consultant_node(
+        state: AgentState, config: RunnableConfig
+    ) -> dict[str, Any]:
         from src.prompts import get_prompt
 
         agent_prompt = get_prompt(agent_key)
         if not agent_prompt:
             logger.error(f"Missing prompt for consultant: {agent_key}")
-            return {"consultant_review": "Error: Missing consultant prompt configuration"}
+            return {
+                "consultant_review": "Error: Missing consultant prompt configuration"
+            }
 
         ticker = state.get("company_of_interest", "UNKNOWN")
         company_name = state.get("company_name", ticker)
 
         context = get_context_from_config(config)
-        current_date = context.trade_date if context else datetime.now().strftime("%Y-%m-%d")
+        current_date = (
+            context.trade_date if context else datetime.now().strftime("%Y-%m-%d")
+        )
 
         # Assemble complete context (everything the Research Manager saw + the synthesis)
         # Safely extract debate history (handle None/missing debate state)
-        debate_state = state.get('investment_debate_state')
-        debate_history = 'N/A'
+        debate_state = state.get("investment_debate_state")
+        debate_history = "N/A"
         if debate_state and isinstance(debate_state, dict):
-            debate_history = debate_state.get('history', 'N/A')
+            debate_history = debate_state.get("history", "N/A")
         elif debate_state is None:
             # DIAGNOSTIC: Log when debate state is unexpectedly None
             # This shouldn't happen in normal execution (consultant runs after debate)
             # If this occurs, it indicates a potential LangGraph state propagation issue
-            ticker = state.get('company_of_interest', 'UNKNOWN')
+            ticker = state.get("company_of_interest", "UNKNOWN")
             logger.error(
                 "consultant_received_none_debate_state",
                 ticker=ticker,
-                message="Consultant node received None debate state - this may indicate a graph execution bug or fast-fail path issue"
+                message="Consultant node received None debate state - this may indicate a graph execution bug or fast-fail path issue",
             )
-            debate_history = '[SYSTEM DIAGNOSTIC: Debate state unexpectedly None. This may indicate the debate was skipped (fast-fail path) or a state propagation issue. Consultant cross-validation may be limited without debate context.]'
+            debate_history = "[SYSTEM DIAGNOSTIC: Debate state unexpectedly None. This may indicate the debate was skipped (fast-fail path) or a state propagation issue. Consultant cross-validation may be limited without debate context.]"
 
         all_context = f"""
 === ANALYST REPORTS (SOURCE DATA) ===
 
 MARKET ANALYST REPORT:
-{state.get('market_report', 'N/A')}
+{state.get("market_report", "N/A")}
 
 SENTIMENT ANALYST REPORT:
-{state.get('sentiment_report', 'N/A')}
+{state.get("sentiment_report", "N/A")}
 
 NEWS ANALYST REPORT:
-{state.get('news_report', 'N/A')}
+{state.get("news_report", "N/A")}
 
 FUNDAMENTALS ANALYST REPORT:
-{state.get('fundamentals_report', 'N/A')}
+{state.get("fundamentals_report", "N/A")}
 
 === BULL/BEAR DEBATE HISTORY ===
 
@@ -914,12 +1009,12 @@ FUNDAMENTALS ANALYST REPORT:
 
 === RESEARCH MANAGER SYNTHESIS ===
 
-{state.get('investment_plan', 'N/A')}
+{state.get("investment_plan", "N/A")}
 
 === RED FLAGS (Pre-Screening Results) ===
 
-Red Flags Detected: {state.get('red_flags', [])}
-Pre-Screening Result: {state.get('pre_screening_result', 'UNKNOWN')}
+Red Flags Detected: {state.get("red_flags", [])}
+Pre-Screening Result: {state.get("pre_screening_result", "UNKNOWN")}
 """
 
         prompt = f"""{agent_prompt.system_message}
@@ -935,9 +1030,7 @@ Provide your independent consultant review."""
         try:
             # Use rate limit handling wrapper for robustness
             response = await invoke_with_rate_limit_handling(
-                llm,
-                [HumanMessage(content=prompt)],
-                context=agent_prompt.agent_name
+                llm, [HumanMessage(content=prompt)], context=agent_prompt.agent_name
             )
 
             # CRITICAL FIX: Normalize response.content to string
@@ -947,7 +1040,8 @@ Provide your independent consultant review."""
                 "consultant_review_complete",
                 ticker=ticker,
                 review_length=len(content_str),
-                has_errors="ERROR" in content_str.upper() or "FAIL" in content_str.upper()
+                has_errors="ERROR" in content_str.upper()
+                or "FAIL" in content_str.upper(),
             )
 
             return {"consultant_review": content_str}
@@ -955,7 +1049,9 @@ Provide your independent consultant review."""
         except Exception as e:
             logger.error(f"Consultant node error for {ticker}: {str(e)}")
             # Return error but don't block the graph
-            return {"consultant_review": f"Consultant Review Error: {str(e)}\n\nNote: Analysis will proceed without external validation."}
+            return {
+                "consultant_review": f"Consultant Review Error: {str(e)}\n\nNote: Analysis will proceed without external validation."
+            }
 
     return consultant_node
 
@@ -974,31 +1070,30 @@ def create_legal_counsel_node(llm, tools: list) -> Callable:
     Returns:
         Async function compatible with LangGraph StateGraph.add_node()
     """
-    async def legal_counsel_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+
+    async def legal_counsel_node(
+        state: AgentState, config: RunnableConfig
+    ) -> dict[str, Any]:
         from src.prompts import get_prompt
 
         agent_prompt = get_prompt("legal_counsel")
         if not agent_prompt:
             logger.error("Missing prompt for legal_counsel")
-            return {"legal_report": json.dumps({"error": "Missing legal_counsel prompt"})}
+            return {
+                "legal_report": json.dumps({"error": "Missing legal_counsel prompt"})
+            }
 
         ticker = state.get("company_of_interest", "UNKNOWN")
         company_name = state.get("company_name", ticker)
 
         context = get_context_from_config(config)
-        current_date = context.trade_date if context else datetime.now().strftime("%Y-%m-%d")
+        current_date = (
+            context.trade_date if context else datetime.now().strftime("%Y-%m-%d")
+        )
 
         # Extract sector and country from Junior's raw data (if available)
         raw_data = state.get("raw_fundamentals_data", "")
         sector, country = _extract_sector_country(raw_data)
-
-        # Build minimal input for Legal Counsel
-        input_data = {
-            "ticker": ticker,
-            "company_name": company_name,
-            "sector": sector,
-            "country": country
-        }
 
         human_msg = f"""Analyze legal/tax risks for:
 Ticker: {ticker}
@@ -1012,12 +1107,14 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
         try:
             # Create agent with tools
             agent = create_react_agent(llm, tools)
-            result = await agent.ainvoke({
-                "messages": [
-                    SystemMessage(content=agent_prompt.system_message),
-                    HumanMessage(content=human_msg)
-                ]
-            })
+            result = await agent.ainvoke(
+                {
+                    "messages": [
+                        SystemMessage(content=agent_prompt.system_message),
+                        HumanMessage(content=human_msg),
+                    ]
+                }
+            )
 
             # Extract final response
             response = result["messages"][-1].content
@@ -1031,54 +1128,53 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
                     "legal_counsel_complete",
                     ticker=ticker,
                     pfic_status=parsed.get("pfic_status"),
-                    vie_structure=parsed.get("vie_structure")
+                    vie_structure=parsed.get("vie_structure"),
                 )
                 return {"legal_report": response_str, "sender": "legal_counsel"}
 
             except json.JSONDecodeError:
                 # Try to extract JSON from response (may be wrapped in text)
-                json_match = re.search(r'\{[^{}]*"pfic_status"[^{}]*\}', response_str, re.DOTALL)
+                json_match = re.search(
+                    r'\{[^{}]*"pfic_status"[^{}]*\}', response_str, re.DOTALL
+                )
                 if json_match:
                     extracted = json_match.group()
                     try:
                         json.loads(extracted)  # Validate
-                        logger.info(
-                            "legal_counsel_extracted_json",
-                            ticker=ticker
-                        )
+                        logger.info("legal_counsel_extracted_json", ticker=ticker)
                         return {"legal_report": extracted, "sender": "legal_counsel"}
-                    except:
+                    except json.JSONDecodeError:
                         pass
 
                 # Return raw response wrapped in error JSON
                 logger.warning(
                     "legal_counsel_invalid_json",
                     ticker=ticker,
-                    response_preview=response_str[:200]
+                    response_preview=response_str[:200],
                 )
                 return {
-                    "legal_report": json.dumps({
-                        "error": "Invalid JSON response",
-                        "raw_response": response_str[:500],
-                        "pfic_status": "UNCERTAIN",
-                        "vie_structure": "N/A"
-                    }),
-                    "sender": "legal_counsel"
+                    "legal_report": json.dumps(
+                        {
+                            "error": "Invalid JSON response",
+                            "raw_response": response_str[:500],
+                            "pfic_status": "UNCERTAIN",
+                            "vie_structure": "N/A",
+                        }
+                    ),
+                    "sender": "legal_counsel",
                 }
 
         except Exception as e:
-            logger.error(
-                "legal_counsel_error",
-                ticker=ticker,
-                error=str(e)
-            )
+            logger.error("legal_counsel_error", ticker=ticker, error=str(e))
             return {
-                "legal_report": json.dumps({
-                    "error": str(e),
-                    "pfic_status": "UNCERTAIN",
-                    "vie_structure": "N/A"
-                }),
-                "sender": "legal_counsel"
+                "legal_report": json.dumps(
+                    {
+                        "error": str(e),
+                        "pfic_status": "UNCERTAIN",
+                        "vie_structure": "N/A",
+                    }
+                ),
+                "sender": "legal_counsel",
             }
 
     return legal_counsel_node
@@ -1101,13 +1197,6 @@ def _extract_sector_country(raw_data: str) -> tuple:
 
     try:
         # Try to find JSON block in raw data
-        # Look for common patterns from get_financial_metrics output
-        json_patterns = [
-            r'"sector"\s*:\s*"([^"]+)"',
-            r'"industry"\s*:\s*"([^"]+)"',
-            r'"country"\s*:\s*"([^"]+)"',
-        ]
-
         sector_match = re.search(r'"sector"\s*:\s*"([^"]+)"', raw_data, re.IGNORECASE)
         if sector_match:
             sector = sector_match.group(1)
@@ -1118,7 +1207,9 @@ def _extract_sector_country(raw_data: str) -> tuple:
 
         # Fallback: try to find industry if sector not found
         if sector == "Unknown":
-            industry_match = re.search(r'"industry"\s*:\s*"([^"]+)"', raw_data, re.IGNORECASE)
+            industry_match = re.search(
+                r'"industry"\s*:\s*"([^"]+)"', raw_data, re.IGNORECASE
+            )
             if industry_match:
                 sector = industry_match.group(1)
 
@@ -1131,25 +1222,28 @@ def _extract_sector_country(raw_data: str) -> tuple:
 def create_state_cleaner_node() -> Callable:
     async def clean_state(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         context = get_context_from_config(config)
-        ticker = context.ticker if context else state.get("company_of_interest", "UNKNOWN")
+        ticker = (
+            context.ticker if context else state.get("company_of_interest", "UNKNOWN")
+        )
 
         logger.debug(
             "State cleaner running",
             context_ticker=context.ticker if context else None,
             state_ticker=state.get("company_of_interest"),
-            final_ticker=ticker
+            final_ticker=ticker,
         )
 
         return {
             "messages": [HumanMessage(content=f"Analyze {ticker}")],
             "tools_called": state.get("tools_called", {}),
-            "company_of_interest": ticker
+            "company_of_interest": ticker,
         }
 
     return clean_state
 
 
 # --- Red-Flag Detection System ---
+
 
 def create_financial_health_validator_node() -> Callable:
     """
@@ -1175,7 +1269,10 @@ def create_financial_health_validator_node() -> Callable:
     Returns:
         Async function compatible with LangGraph StateGraph.add_node()
     """
-    async def financial_health_validator_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+
+    async def financial_health_validator_node(
+        state: AgentState, config: RunnableConfig
+    ) -> dict[str, Any]:
         """
         Pre-screening layer to catch extreme financial risks before detailed scoring.
 
@@ -1192,7 +1289,7 @@ def create_financial_health_validator_node() -> Callable:
         """
         from src.validators.red_flag_detector import RedFlagDetector
 
-        fundamentals_report = state.get('fundamentals_report', '')
+        fundamentals_report = state.get("fundamentals_report", "")
 
         # --- FIX: DEFENSIVE HANDLING FOR NON-STRING STATE VALUES ---
         # LangGraph can sometimes pass accumulated list of state updates,
@@ -1201,8 +1298,8 @@ def create_financial_health_validator_node() -> Callable:
         if not isinstance(fundamentals_report, str):
             fundamentals_report = extract_string_content(fundamentals_report)
 
-        ticker = state.get('company_of_interest', 'UNKNOWN')
-        company_name = state.get('company_name', ticker)
+        ticker = state.get("company_of_interest", "UNKNOWN")
+        company_name = state.get("company_name", ticker)
 
         quiet_mode = settings_config.quiet_mode
 
@@ -1211,12 +1308,9 @@ def create_financial_health_validator_node() -> Callable:
             logger.warning(
                 "validator_no_fundamentals",
                 ticker=ticker,
-                message="No fundamentals report available - skipping pre-screening"
+                message="No fundamentals report available - skipping pre-screening",
             )
-            return {
-                'red_flags': [],
-                'pre_screening_result': 'PASS'
-            }
+            return {"red_flags": [], "pre_screening_result": "PASS"}
 
         # Extract sector classification from fundamentals report
         sector = RedFlagDetector.detect_sector(fundamentals_report)
@@ -1230,20 +1324,22 @@ def create_financial_health_validator_node() -> Callable:
                 "validator_extracted_metrics",
                 ticker=ticker,
                 sector=sector.value,
-                debt_to_equity=metrics.get('debt_to_equity'),
-                fcf=metrics.get('fcf'),
-                net_income=metrics.get('net_income'),
-                interest_coverage=metrics.get('interest_coverage'),
-                adjusted_health_score=metrics.get('adjusted_health_score')
+                debt_to_equity=metrics.get("debt_to_equity"),
+                fcf=metrics.get("fcf"),
+                net_income=metrics.get("net_income"),
+                interest_coverage=metrics.get("interest_coverage"),
+                adjusted_health_score=metrics.get("adjusted_health_score"),
             )
 
         # Apply sector-aware red-flag detection logic
-        red_flags, pre_screening_result = RedFlagDetector.detect_red_flags(metrics, ticker, sector)
+        red_flags, pre_screening_result = RedFlagDetector.detect_red_flags(
+            metrics, ticker, sector
+        )
 
         # --- Legal/Tax Flag Detection ---
         # Extract and process legal_report for PFIC/VIE warnings
         # These are WARNING flags (risk penalty) not AUTO_REJECT flags
-        legal_report = state.get('legal_report', '')
+        legal_report = state.get("legal_report", "")
         if legal_report:
             if not isinstance(legal_report, str):
                 legal_report = extract_string_content(legal_report)
@@ -1257,38 +1353,37 @@ def create_financial_health_validator_node() -> Callable:
                     logger.info(
                         "legal_warnings_detected",
                         ticker=ticker,
-                        warning_types=[w['type'] for w in legal_warnings],
-                        total_risk_penalty=sum(w.get('risk_penalty', 0) for w in legal_warnings)
+                        warning_types=[w["type"] for w in legal_warnings],
+                        total_risk_penalty=sum(
+                            w.get("risk_penalty", 0) for w in legal_warnings
+                        ),
                     )
 
         # Log results
-        if pre_screening_result == 'REJECT':
+        if pre_screening_result == "REJECT":
             logger.warning(
                 "pre_screening_rejected",
                 ticker=ticker,
                 company_name=company_name,
                 red_flags_count=len(red_flags),
-                flag_types=[f['type'] for f in red_flags],
-                message=f"REJECTED: {ticker} ({company_name}) failed pre-screening due to {len(red_flags)} critical red flag(s)"
+                flag_types=[f["type"] for f in red_flags],
+                message=f"REJECTED: {ticker} ({company_name}) failed pre-screening due to {len(red_flags)} critical red flag(s)",
             )
         elif red_flags:
             logger.info(
                 "pre_screening_warnings",
                 ticker=ticker,
                 warnings_count=len(red_flags),
-                message=f"{ticker} has {len(red_flags)} warning(s) but passed pre-screening"
+                message=f"{ticker} has {len(red_flags)} warning(s) but passed pre-screening",
             )
         else:
             if not quiet_mode:
                 logger.info(
                     "pre_screening_passed",
                     ticker=ticker,
-                    message=f"{ticker} passed pre-screening validation"
+                    message=f"{ticker} passed pre-screening validation",
                 )
 
-        return {
-            'red_flags': red_flags,
-            'pre_screening_result': pre_screening_result
-        }
+        return {"red_flags": red_flags, "pre_screening_result": pre_screening_result}
 
     return financial_health_validator_node

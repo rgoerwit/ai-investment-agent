@@ -7,11 +7,11 @@ services:
       dockerfile: Dockerfile
     image: investment-agent:latest
     container_name: investment-agent
-    
+
     # Environment variables from .env file
     env_file:
       - .env
-    
+
     # Or specify environment variables directly
     environment:
       # Note: Model selection is hardcoded in src/llms.py
@@ -31,15 +31,15 @@ services:
       # Silence gRPC warnings (macOS)
       - GRPC_VERBOSITY=ERROR
       - GRPC_TRACE=
-    
+
     # Volume mounts for persistence
     volumes:
       # Persist ChromaDB data
       - chroma-data:/app/chroma_db
-      
+
       # Optional: Mount local code for development
       # - ./src:/app/src:ro
-    
+
     # Resource limits
     deploy:
       resources:
@@ -49,13 +49,13 @@ services:
         reservations:
           cpus: '1.0'
           memory: 2G
-    
+
     # Restart policy
     restart: unless-stopped
-    
+
     # Network mode
     network_mode: bridge
-    
+
     # Command override (examples)
     # Uncomment one of these or override at runtime
     # command: ["--ticker", "AAPL", "--quick"]

@@ -10,15 +10,14 @@ This test suite was created after a bug where parallel agents' tool_calls
 were being processed by the wrong tool nodes, causing data quality regression.
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from typing import Any
 
-from langchain_core.messages import AIMessage, ToolMessage, HumanMessage
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 
-
 # --- Test Fixtures: Simple mock tools ---
+
 
 @tool
 def get_technical_indicators(symbol: str) -> str:
@@ -58,6 +57,7 @@ FUNDAMENTALS_TOOLS = [get_financial_metrics]
 
 # --- Helper: Simplified tool node for testing ---
 
+
 def create_test_tool_node(tools: list, agent_key: str):
     """
     Create a test-friendly version of create_agent_tool_node.
@@ -73,10 +73,16 @@ def create_test_tool_node(tools: list, agent_key: str):
         # Find the AIMessage from THIS agent (has tool_calls for our tools)
         target_message = None
         for msg in reversed(messages):
-            if isinstance(msg, AIMessage) and hasattr(msg, 'tool_calls') and msg.tool_calls:
+            if (
+                isinstance(msg, AIMessage)
+                and hasattr(msg, "tool_calls")
+                and msg.tool_calls
+            ):
                 # Check if any tool_call is for one of our tools
-                msg_tool_names = {tc.get('name', tc.get('function', {}).get('name', ''))
-                                 for tc in msg.tool_calls}
+                msg_tool_names = {
+                    tc.get("name", tc.get("function", {}).get("name", ""))
+                    for tc in msg.tool_calls
+                }
                 if msg_tool_names & tool_names:  # Intersection
                     target_message = msg
                     break
@@ -87,24 +93,26 @@ def create_test_tool_node(tools: list, agent_key: str):
         # Execute tools directly (test mode - no LangGraph runtime needed)
         result_messages = []
         for tc in target_message.tool_calls:
-            tool_name = tc.get('name')
+            tool_name = tc.get("name")
             if tool_name in tools_by_name:
                 tool_fn = tools_by_name[tool_name]
-                args = tc.get('args', {})
+                args = tc.get("args", {})
                 try:
                     result = tool_fn.invoke(args)
-                    result_messages.append(ToolMessage(
-                        content=result,
-                        tool_call_id=tc.get('id'),
-                        name=tool_name
-                    ))
+                    result_messages.append(
+                        ToolMessage(
+                            content=result, tool_call_id=tc.get("id"), name=tool_name
+                        )
+                    )
                 except Exception as e:
-                    result_messages.append(ToolMessage(
-                        content=f"Error: {e}",
-                        tool_call_id=tc.get('id'),
-                        name=tool_name,
-                        status="error"
-                    ))
+                    result_messages.append(
+                        ToolMessage(
+                            content=f"Error: {e}",
+                            tool_call_id=tc.get("id"),
+                            name=tool_name,
+                            status="error",
+                        )
+                    )
 
         return {"messages": result_messages}
 
@@ -112,6 +120,7 @@ def create_test_tool_node(tools: list, agent_key: str):
 
 
 # --- Unit Tests for Tool Filtering Logic ---
+
 
 class TestToolFilteringLogic:
     """Unit tests for the message filtering logic."""
@@ -133,22 +142,30 @@ class TestToolFilteringLogic:
         market_ai_msg = AIMessage(
             content="Calling market tools",
             tool_calls=[
-                {"name": "get_technical_indicators", "args": {"symbol": "TEST"},
-                 "id": "market-1", "type": "tool_call"}
-            ]
+                {
+                    "name": "get_technical_indicators",
+                    "args": {"symbol": "TEST"},
+                    "id": "market-1",
+                    "type": "tool_call",
+                }
+            ],
         )
         sentiment_ai_msg = AIMessage(
             content="Calling sentiment tools",
             tool_calls=[
-                {"name": "get_sentiment", "args": {"ticker": "TEST"},
-                 "id": "sentiment-1", "type": "tool_call"}
-            ]
+                {
+                    "name": "get_sentiment",
+                    "args": {"ticker": "TEST"},
+                    "id": "sentiment-1",
+                    "type": "tool_call",
+                }
+            ],
         )
 
         # Sentiment message is LAST (simulating parallel race condition)
         state = {
             "messages": [market_ai_msg, sentiment_ai_msg],
-            "sender": "market_analyst"
+            "sender": "market_analyst",
         }
 
         # Execute market tool node
@@ -161,10 +178,12 @@ class TestToolFilteringLogic:
         # Verify the tool message is for get_technical_indicators, not get_sentiment
         tool_msg = messages[0]
         assert isinstance(tool_msg, ToolMessage)
-        assert tool_msg.tool_call_id == "market-1", \
-            f"Should process market tool, got {tool_msg.tool_call_id}"
-        assert "RSI" in tool_msg.content, \
-            f"Should have technical indicator data, got: {tool_msg.content}"
+        assert (
+            tool_msg.tool_call_id == "market-1"
+        ), f"Should process market tool, got {tool_msg.tool_call_id}"
+        assert (
+            "RSI" in tool_msg.content
+        ), f"Should have technical indicator data, got: {tool_msg.content}"
 
     @pytest.mark.asyncio
     async def test_handles_no_matching_tools(self):
@@ -177,15 +196,16 @@ class TestToolFilteringLogic:
         sentiment_ai_msg = AIMessage(
             content="Calling sentiment tools",
             tool_calls=[
-                {"name": "get_sentiment", "args": {"ticker": "TEST"},
-                 "id": "sentiment-1", "type": "tool_call"}
-            ]
+                {
+                    "name": "get_sentiment",
+                    "args": {"ticker": "TEST"},
+                    "id": "sentiment-1",
+                    "type": "tool_call",
+                }
+            ],
         )
 
-        state = {
-            "messages": [sentiment_ai_msg],
-            "sender": "market_analyst"
-        }
+        state = {"messages": [sentiment_ai_msg], "sender": "market_analyst"}
 
         result = await market_tool_node(state, {})
 
@@ -204,24 +224,52 @@ class TestToolFilteringLogic:
         # Create a complex message list simulating real parallel execution
         messages = [
             HumanMessage(content="Analyze TEST"),
-            AIMessage(content="Market analysis", tool_calls=[
-                {"name": "get_technical_indicators", "args": {"symbol": "TEST"},
-                 "id": "m1", "type": "tool_call"}
-            ]),
+            AIMessage(
+                content="Market analysis",
+                tool_calls=[
+                    {
+                        "name": "get_technical_indicators",
+                        "args": {"symbol": "TEST"},
+                        "id": "m1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
             ToolMessage(content="RSI: 45", tool_call_id="m1"),
-            AIMessage(content="Sentiment analysis", tool_calls=[
-                {"name": "get_sentiment", "args": {"ticker": "TEST"},
-                 "id": "s1", "type": "tool_call"}
-            ]),
-            AIMessage(content="Fundamentals analysis", tool_calls=[
-                {"name": "get_financial_metrics", "args": {"ticker": "TEST"},
-                 "id": "f1", "type": "tool_call"}
-            ]),
+            AIMessage(
+                content="Sentiment analysis",
+                tool_calls=[
+                    {
+                        "name": "get_sentiment",
+                        "args": {"ticker": "TEST"},
+                        "id": "s1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="Fundamentals analysis",
+                tool_calls=[
+                    {
+                        "name": "get_financial_metrics",
+                        "args": {"ticker": "TEST"},
+                        "id": "f1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
             ToolMessage(content="Sentiment: Bullish", tool_call_id="s1"),
-            AIMessage(content="News analysis", tool_calls=[
-                {"name": "get_news", "args": {"ticker": "TEST", "search_query": "earnings"},
-                 "id": "n1", "type": "tool_call"}
-            ]),
+            AIMessage(
+                content="News analysis",
+                tool_calls=[
+                    {
+                        "name": "get_news",
+                        "args": {"ticker": "TEST", "search_query": "earnings"},
+                        "id": "n1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
         ]
 
         state = {"messages": messages, "sender": "junior_fundamentals_analyst"}
@@ -230,11 +278,13 @@ class TestToolFilteringLogic:
 
         messages_out = result.get("messages", [])
         assert len(messages_out) > 0
-        assert messages_out[0].tool_call_id == "f1", \
-            "Should find fundamentals tool call, not news (which was last)"
+        assert (
+            messages_out[0].tool_call_id == "f1"
+        ), "Should find fundamentals tool call, not news (which was last)"
 
 
 # --- Integration Tests for Parallel Tool Execution ---
+
 
 class TestParallelToolIsolation:
     """
@@ -251,29 +301,59 @@ class TestParallelToolIsolation:
         market_node = create_test_tool_node(MARKET_TOOLS, "market_analyst")
         sentiment_node = create_test_tool_node(SENTIMENT_TOOLS, "sentiment_analyst")
         news_node = create_test_tool_node(NEWS_TOOLS, "news_analyst")
-        fund_node = create_test_tool_node(FUNDAMENTALS_TOOLS, "junior_fundamentals_analyst")
+        fund_node = create_test_tool_node(
+            FUNDAMENTALS_TOOLS, "junior_fundamentals_analyst"
+        )
 
         # Simulate all 4 agents producing tool_calls simultaneously
         # In a race condition, the order in messages list is unpredictable
         all_messages = [
             HumanMessage(content="Analyze TEST"),
             # All 4 AIMessages added "simultaneously" - order unpredictable
-            AIMessage(content="", tool_calls=[
-                {"name": "get_sentiment", "args": {"ticker": "TEST"},
-                 "id": "sent-1", "type": "tool_call"}
-            ]),
-            AIMessage(content="", tool_calls=[
-                {"name": "get_financial_metrics", "args": {"ticker": "TEST"},
-                 "id": "fund-1", "type": "tool_call"}
-            ]),
-            AIMessage(content="", tool_calls=[
-                {"name": "get_news", "args": {"ticker": "TEST", "search_query": "q"},
-                 "id": "news-1", "type": "tool_call"}
-            ]),
-            AIMessage(content="", tool_calls=[
-                {"name": "get_technical_indicators", "args": {"symbol": "TEST"},
-                 "id": "mkt-1", "type": "tool_call"}
-            ]),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_sentiment",
+                        "args": {"ticker": "TEST"},
+                        "id": "sent-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_financial_metrics",
+                        "args": {"ticker": "TEST"},
+                        "id": "fund-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_news",
+                        "args": {"ticker": "TEST", "search_query": "q"},
+                        "id": "news-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_technical_indicators",
+                        "args": {"symbol": "TEST"},
+                        "id": "mkt-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
         ]
 
         # Each tool node should find ITS OWN agent's tool_calls
@@ -283,14 +363,18 @@ class TestParallelToolIsolation:
         fund_result = await fund_node({"messages": all_messages}, {})
 
         # Verify each got the correct tool results
-        assert market_result["messages"][0].tool_call_id == "mkt-1", \
-            "Market node should process market tools"
-        assert sentiment_result["messages"][0].tool_call_id == "sent-1", \
-            "Sentiment node should process sentiment tools"
-        assert news_result["messages"][0].tool_call_id == "news-1", \
-            "News node should process news tools"
-        assert fund_result["messages"][0].tool_call_id == "fund-1", \
-            "Fundamentals node should process fundamentals tools"
+        assert (
+            market_result["messages"][0].tool_call_id == "mkt-1"
+        ), "Market node should process market tools"
+        assert (
+            sentiment_result["messages"][0].tool_call_id == "sent-1"
+        ), "Sentiment node should process sentiment tools"
+        assert (
+            news_result["messages"][0].tool_call_id == "news-1"
+        ), "News node should process news tools"
+        assert (
+            fund_result["messages"][0].tool_call_id == "fund-1"
+        ), "Fundamentals node should process fundamentals tools"
 
     @pytest.mark.asyncio
     async def test_tool_results_contain_expected_data(self):
@@ -302,14 +386,28 @@ class TestParallelToolIsolation:
         sentiment_node = create_test_tool_node(SENTIMENT_TOOLS, "sentiment_analyst")
 
         messages = [
-            AIMessage(content="", tool_calls=[
-                {"name": "get_sentiment", "args": {"ticker": "TEST"},
-                 "id": "s1", "type": "tool_call"}
-            ]),
-            AIMessage(content="", tool_calls=[
-                {"name": "get_technical_indicators", "args": {"symbol": "TEST"},
-                 "id": "m1", "type": "tool_call"}
-            ]),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_sentiment",
+                        "args": {"ticker": "TEST"},
+                        "id": "s1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_technical_indicators",
+                        "args": {"symbol": "TEST"},
+                        "id": "m1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
         ]
 
         market_result = await market_node({"messages": messages}, {})
@@ -317,20 +415,25 @@ class TestParallelToolIsolation:
 
         # Market should have RSI/MACD, NOT sentiment data
         market_content = market_result["messages"][0].content
-        assert "RSI" in market_content or "MACD" in market_content, \
-            f"Market should have technical data, got: {market_content}"
-        assert "Sentiment" not in market_content, \
-            f"Market should NOT have sentiment data, got: {market_content}"
+        assert (
+            "RSI" in market_content or "MACD" in market_content
+        ), f"Market should have technical data, got: {market_content}"
+        assert (
+            "Sentiment" not in market_content
+        ), f"Market should NOT have sentiment data, got: {market_content}"
 
         # Sentiment should have sentiment data, NOT technical
         sentiment_content = sentiment_result["messages"][0].content
-        assert "Sentiment" in sentiment_content or "Bullish" in sentiment_content, \
-            f"Sentiment should have sentiment data, got: {sentiment_content}"
-        assert "RSI" not in sentiment_content, \
-            f"Sentiment should NOT have RSI, got: {sentiment_content}"
+        assert (
+            "Sentiment" in sentiment_content or "Bullish" in sentiment_content
+        ), f"Sentiment should have sentiment data, got: {sentiment_content}"
+        assert (
+            "RSI" not in sentiment_content
+        ), f"Sentiment should NOT have RSI, got: {sentiment_content}"
 
 
 # --- Edge Case Tests ---
+
 
 class TestToolNodeEdgeCases:
     """Tests for edge cases and error handling."""
@@ -344,12 +447,23 @@ class TestToolNodeEdgeCases:
 
         # Market analyst calling both of its tools
         messages = [
-            AIMessage(content="", tool_calls=[
-                {"name": "get_technical_indicators", "args": {"symbol": "TEST"},
-                 "id": "m1", "type": "tool_call"},
-                {"name": "calculate_liquidity_metrics", "args": {"ticker": "TEST"},
-                 "id": "m2", "type": "tool_call"}
-            ])
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_technical_indicators",
+                        "args": {"symbol": "TEST"},
+                        "id": "m1",
+                        "type": "tool_call",
+                    },
+                    {
+                        "name": "calculate_liquidity_metrics",
+                        "args": {"ticker": "TEST"},
+                        "id": "m2",
+                        "type": "tool_call",
+                    },
+                ],
+            )
         ]
 
         result = await market_node({"messages": messages}, {})
@@ -374,7 +488,7 @@ class TestToolNodeEdgeCases:
 
         messages = [
             HumanMessage(content="Analyze TEST"),
-            ToolMessage(content="Old result", tool_call_id="old")
+            ToolMessage(content="Old result", tool_call_id="old"),
         ]
 
         result = await market_node({"messages": messages}, {})
@@ -395,6 +509,7 @@ class TestToolNodeEdgeCases:
 
 
 # --- Regression Tests ---
+
 
 class TestParallelExecutionRegression:
     """
@@ -419,23 +534,38 @@ class TestParallelExecutionRegression:
 
         # Critical scenario: sentiment's AIMessage is LAST
         messages = [
-            AIMessage(content="Market calling tools", tool_calls=[
-                {"name": "get_technical_indicators", "args": {"symbol": "TEST"},
-                 "id": "market-tool-1", "type": "tool_call"}
-            ]),
+            AIMessage(
+                content="Market calling tools",
+                tool_calls=[
+                    {
+                        "name": "get_technical_indicators",
+                        "args": {"symbol": "TEST"},
+                        "id": "market-tool-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
             # This is LAST - the bug would cause market_node to try to execute this
-            AIMessage(content="Sentiment calling tools", tool_calls=[
-                {"name": "get_sentiment", "args": {"ticker": "TEST"},
-                 "id": "sentiment-tool-1", "type": "tool_call"}
-            ]),
+            AIMessage(
+                content="Sentiment calling tools",
+                tool_calls=[
+                    {
+                        "name": "get_sentiment",
+                        "args": {"ticker": "TEST"},
+                        "id": "sentiment-tool-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
         ]
 
         result = await market_node({"messages": messages}, {})
 
         # CRITICAL: Must process market's tool, NOT sentiment's
         assert len(result["messages"]) > 0, "Should have results"
-        assert result["messages"][0].tool_call_id == "market-tool-1", \
-            "REGRESSION: market_node processed wrong agent's tool_calls"
+        assert (
+            result["messages"][0].tool_call_id == "market-tool-1"
+        ), "REGRESSION: market_node processed wrong agent's tool_calls"
 
     @pytest.mark.asyncio
     async def test_interleaved_messages_from_parallel_agents(self):
@@ -448,7 +578,9 @@ class TestParallelExecutionRegression:
             "market": create_test_tool_node(MARKET_TOOLS, "market_analyst"),
             "sentiment": create_test_tool_node(SENTIMENT_TOOLS, "sentiment_analyst"),
             "news": create_test_tool_node(NEWS_TOOLS, "news_analyst"),
-            "fund": create_test_tool_node(FUNDAMENTALS_TOOLS, "junior_fundamentals_analyst"),
+            "fund": create_test_tool_node(
+                FUNDAMENTALS_TOOLS, "junior_fundamentals_analyst"
+            ),
         }
 
         expected_ids = {
@@ -461,23 +593,51 @@ class TestParallelExecutionRegression:
         # Interleaved messages (worst case scenario)
         messages = [
             HumanMessage(content="Start"),
-            AIMessage(content="", tool_calls=[
-                {"name": "get_news", "args": {"ticker": "T", "search_query": "q"},
-                 "id": expected_ids["news"], "type": "tool_call"}
-            ]),
-            AIMessage(content="", tool_calls=[
-                {"name": "get_technical_indicators", "args": {"symbol": "T"},
-                 "id": expected_ids["market"], "type": "tool_call"}
-            ]),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_news",
+                        "args": {"ticker": "T", "search_query": "q"},
+                        "id": expected_ids["news"],
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_technical_indicators",
+                        "args": {"symbol": "T"},
+                        "id": expected_ids["market"],
+                        "type": "tool_call",
+                    }
+                ],
+            ),
             ToolMessage(content="partial", tool_call_id="old"),  # Noise
-            AIMessage(content="", tool_calls=[
-                {"name": "get_financial_metrics", "args": {"ticker": "T"},
-                 "id": expected_ids["fund"], "type": "tool_call"}
-            ]),
-            AIMessage(content="", tool_calls=[
-                {"name": "get_sentiment", "args": {"ticker": "T"},
-                 "id": expected_ids["sentiment"], "type": "tool_call"}
-            ]),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_financial_metrics",
+                        "args": {"ticker": "T"},
+                        "id": expected_ids["fund"],
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_sentiment",
+                        "args": {"ticker": "T"},
+                        "id": expected_ids["sentiment"],
+                        "type": "tool_call",
+                    }
+                ],
+            ),
         ]
 
         # Each node must find its own tool_calls
@@ -485,11 +645,13 @@ class TestParallelExecutionRegression:
             result = await node({"messages": messages}, {})
             actual_id = result["messages"][0].tool_call_id
             expected_id = expected_ids[agent_type]
-            assert actual_id == expected_id, \
-                f"REGRESSION: {agent_type}_node got {actual_id}, expected {expected_id}"
+            assert (
+                actual_id == expected_id
+            ), f"REGRESSION: {agent_type}_node got {actual_id}, expected {expected_id}"
 
 
 # --- Tests using actual create_agent_tool_node from graph.py ---
+
 
 class TestActualCreateAgentToolNode:
     """
@@ -500,6 +662,7 @@ class TestActualCreateAgentToolNode:
     def test_import_works(self):
         """Verify the function can be imported."""
         from src.graph import create_agent_tool_node
+
         assert callable(create_agent_tool_node)
 
     @pytest.mark.asyncio
@@ -509,29 +672,44 @@ class TestActualCreateAgentToolNode:
         We mock the ToolNode to avoid needing LangGraph runtime.
         """
         from src.graph import create_agent_tool_node
-        from unittest.mock import patch, AsyncMock
 
         # Create the actual function with our test tools
-        with patch('src.graph.ToolNode') as MockToolNode:
+        with patch("src.graph.ToolNode") as MockToolNode:
             # Setup mock to capture what messages are passed
             mock_instance = MagicMock()
-            mock_instance.ainvoke = AsyncMock(return_value={"messages": [
-                ToolMessage(content="mocked", tool_call_id="test")
-            ]})
+            mock_instance.ainvoke = AsyncMock(
+                return_value={
+                    "messages": [ToolMessage(content="mocked", tool_call_id="test")]
+                }
+            )
             MockToolNode.return_value = mock_instance
 
             tool_node_fn = create_agent_tool_node(MARKET_TOOLS, "market_analyst")
 
             # Create mixed messages
             messages = [
-                AIMessage(content="", tool_calls=[
-                    {"name": "get_sentiment", "args": {"ticker": "T"},
-                     "id": "wrong", "type": "tool_call"}
-                ]),
-                AIMessage(content="", tool_calls=[
-                    {"name": "get_technical_indicators", "args": {"symbol": "T"},
-                     "id": "correct", "type": "tool_call"}
-                ]),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "get_sentiment",
+                            "args": {"ticker": "T"},
+                            "id": "wrong",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "get_technical_indicators",
+                            "args": {"symbol": "T"},
+                            "id": "correct",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
             ]
 
             result = await tool_node_fn({"messages": messages}, {})
@@ -542,5 +720,6 @@ class TestActualCreateAgentToolNode:
 
             # Should only have the market analyst's message
             assert len(filtered_msgs) == 1
-            assert filtered_msgs[0].tool_calls[0]["id"] == "correct", \
-                "Should filter to only market analyst's message"
+            assert (
+                filtered_msgs[0].tool_calls[0]["id"] == "correct"
+            ), "Should filter to only market analyst's message"

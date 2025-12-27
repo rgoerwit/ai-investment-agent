@@ -12,25 +12,24 @@ Migration Notes (Dec 2025):
 - Config class alias maintained for backwards compatibility
 """
 
-from pathlib import Path
-import os
-from typing import Any
 import logging
+import os
 import sys
+from pathlib import Path
 
+import structlog
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-import structlog
 
 # Note: Pydantic Settings handles .env loading natively via env_file in SettingsConfigDict.
 # No manual load_dotenv() needed - it's cleaner and avoids double-loading issues.
 
 # --- Logging Setup (must happen before Settings to capture validation errors) ---
 logging.basicConfig(
-    format='%(asctime)s [%(levelname)-8s] %(message)s',
+    format="%(asctime)s [%(levelname)-8s] %(message)s",
     stream=sys.stderr,
     level=logging.INFO,
-    force=True
+    force=True,
 )
 
 structlog.configure(
@@ -43,7 +42,9 @@ structlog.configure(
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
         structlog.processors.UnicodeDecoder(),
-        structlog.processors.KeyValueRenderer(key_order=['timestamp', 'level', 'event']),
+        structlog.processors.KeyValueRenderer(
+            key_order=["timestamp", "level", "event"]
+        ),
     ],
     wrapper_class=structlog.stdlib.BoundLogger,
     logger_factory=structlog.stdlib.LoggerFactory(),
@@ -54,6 +55,7 @@ logger = logging.getLogger(__name__)
 
 
 # --- Helper Functions (preserved for backwards compatibility with tests) ---
+
 
 def _get_env_var(var: str, required: bool = True, default: str | None = None) -> str:
     """Get environment variable with validation.
@@ -100,20 +102,20 @@ def _parse_env_file() -> dict:
         return env_values
 
     try:
-        with open(env_file, 'r') as f:
+        with open(env_file) as f:
             for line in f:
                 line = line.strip()
                 # Skip comments and blank lines
-                if not line or line.startswith('#'):
+                if not line or line.startswith("#"):
                     continue
                 # Parse KEY=VALUE
-                if '=' in line:
-                    key, value = line.split('=', 1)
+                if "=" in line:
+                    key, value = line.split("=", 1)
                     key = key.strip()
                     value = value.strip()
                     # Strip inline comments (everything after #)
-                    if '#' in value:
-                        value = value.split('#')[0].strip()
+                    if "#" in value:
+                        value = value.split("#")[0].strip()
                     # Remove quotes if present
                     if value.startswith('"') and value.endswith('"'):
                         value = value[1:-1]
@@ -137,10 +139,10 @@ def _check_env_overrides() -> None:
 
     # Critical variables to check (where override could cause performance issues)
     critical_vars = {
-        'GEMINI_RPM_LIMIT': {
-            'name': 'GEMINI_RPM_LIMIT',
-            'description': 'Gemini API rate limit',
-            'comparison': 'higher'  # Shell override higher than .env is problematic
+        "GEMINI_RPM_LIMIT": {
+            "name": "GEMINI_RPM_LIMIT",
+            "description": "Gemini API rate limit",
+            "comparison": "higher",  # Shell override higher than .env is problematic
         }
     }
 
@@ -163,7 +165,7 @@ def _check_env_overrides() -> None:
                 shell_int = int(shell_value)
 
                 # Check if override is problematic
-                if var_info['comparison'] == 'higher' and shell_int > env_file_int:
+                if var_info["comparison"] == "higher" and shell_int > env_file_int:
                     logger.warning(
                         f"SHELL ENVIRONMENT OVERRIDE DETECTED: {var_key}\n"
                         f"    .env file setting:     {var_key}={env_file_int}\n"
@@ -209,12 +211,16 @@ def validate_environment_variables() -> None:
 
     # Check for EODHD key (Optional but recommended)
     if not config.get_eodhd_api_key():
-        logger.warning("EODHD_API_KEY missing - High quality international data will be disabled.")
+        logger.warning(
+            "EODHD_API_KEY missing - High quality international data will be disabled."
+        )
 
     missing_vars = [name for name, getter in required_checks if not getter()]
 
     if missing_vars:
-        raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+        raise ValueError(
+            f"Missing required environment variables: {', '.join(missing_vars)}"
+        )
 
     # Check for problematic shell environment overrides
     _check_env_overrides()
@@ -224,6 +230,7 @@ def validate_environment_variables() -> None:
 
 
 # --- Pydantic Settings Class ---
+
 
 class Settings(BaseSettings):
     """
@@ -240,35 +247,35 @@ class Settings(BaseSettings):
     results_dir: Path = Field(
         default=Path("./results"),
         validation_alias="RESULTS_DIR",
-        description="Directory for analysis result files"
+        description="Directory for analysis result files",
     )
     data_cache_dir: Path = Field(
         default=Path("./data_cache"),
         validation_alias="DATA_CACHE_DIR",
-        description="Directory for cached data files"
+        description="Directory for cached data files",
     )
     chroma_persist_directory: str = Field(
         default="./chroma_db",
         validation_alias="CHROMA_PERSIST_DIR",
-        description="Directory for ChromaDB vector storage"
+        description="Directory for ChromaDB vector storage",
     )
 
     # --- LLM Configuration ---
     llm_provider: str = Field(
         default="google",
         validation_alias="LLM_PROVIDER",
-        description="LLM provider (google, openai, anthropic)"
+        description="LLM provider (google, openai, anthropic)",
     )
     deep_think_llm: str = Field(
         default="gemini-3-pro-preview",
         validation_alias="DEEP_MODEL",
-        description="Model for deep thinking/synthesis agents"
+        description="Model for deep thinking/synthesis agents",
     )
     # Flash models work with langchain-google-genai 4.0.0+
     quick_think_llm: str = Field(
         default="gemini-2.0-flash",
         validation_alias="QUICK_MODEL",
-        description="Model for quick thinking/data gathering agents"
+        description="Model for quick thinking/data gathering agents",
     )
 
     # --- Debate & Risk Configuration ---
@@ -276,42 +283,42 @@ class Settings(BaseSettings):
         default=2,
         ge=0,
         validation_alias="MAX_DEBATE_ROUNDS",
-        description="Maximum rounds of bull/bear debate"
+        description="Maximum rounds of bull/bear debate",
     )
     max_risk_discuss_rounds: int = Field(
         default=1,
         ge=0,
         validation_alias="MAX_RISK_DISCUSS_ROUNDS",
-        description="Maximum rounds of risk discussion"
+        description="Maximum rounds of risk discussion",
     )
 
     # --- Feature Flags ---
     online_tools: bool = Field(
         default=True,
         validation_alias="ONLINE_TOOLS",
-        description="Enable online data fetching tools"
+        description="Enable online data fetching tools",
     )
     enable_memory: bool = Field(
         default=True,
         validation_alias="ENABLE_MEMORY",
-        description="Enable ChromaDB memory system"
+        description="Enable ChromaDB memory system",
     )
     enable_consultant: bool = Field(
         default=True,
         validation_alias="ENABLE_CONSULTANT",
-        description="Enable OpenAI consultant for cross-validation"
+        description="Enable OpenAI consultant for cross-validation",
     )
 
     # --- Consultant Configuration ---
     consultant_model: str = Field(
         default="gpt-4o",
         validation_alias="CONSULTANT_MODEL",
-        description="OpenAI model for consultant in normal mode"
+        description="OpenAI model for consultant in normal mode",
     )
     consultant_quick_model: str = Field(
         default="gpt-4o-mini",
         validation_alias="CONSULTANT_QUICK_MODEL",
-        description="OpenAI model for consultant in quick mode"
+        description="OpenAI model for consultant in quick mode",
     )
 
     # --- Trading Parameters ---
@@ -320,31 +327,31 @@ class Settings(BaseSettings):
         ge=0.0,
         le=1.0,
         validation_alias="MAX_POSITION_SIZE",
-        description="Maximum position size as fraction of portfolio"
+        description="Maximum position size as fraction of portfolio",
     )
     max_daily_trades: int = Field(
         default=5,
         ge=0,
         validation_alias="MAX_DAILY_TRADES",
-        description="Maximum number of trades per day"
+        description="Maximum number of trades per day",
     )
     risk_free_rate: float = Field(
         default=0.03,
         ge=0.0,
         validation_alias="RISK_FREE_RATE",
-        description="Risk-free rate for calculations"
+        description="Risk-free rate for calculations",
     )
     default_ticker: str = Field(
         default="AAPL",
         validation_alias="DEFAULT_TICKER",
-        description="Default ticker symbol for analysis"
+        description="Default ticker symbol for analysis",
     )
 
     # --- Logging ---
     log_level: str = Field(
         default="INFO",
         validation_alias="LOG_LEVEL",
-        description="Logging level (DEBUG, INFO, WARNING, ERROR)"
+        description="Logging level (DEBUG, INFO, WARNING, ERROR)",
     )
 
     # --- API Configuration ---
@@ -353,14 +360,14 @@ class Settings(BaseSettings):
         default=300,
         ge=1,
         validation_alias="API_TIMEOUT",
-        description="API request timeout in seconds"
+        description="API request timeout in seconds",
     )
     # Retries from 3 -> 10 to aggressively handle 504/503 transient errors
     api_retry_attempts: int = Field(
         default=10,
         ge=0,
         validation_alias="API_RETRY_ATTEMPTS",
-        description="Number of retry attempts for failed API calls"
+        description="Number of retry attempts for failed API calls",
     )
 
     # --- Rate Limiting ---
@@ -369,7 +376,7 @@ class Settings(BaseSettings):
         default=15,
         ge=1,
         validation_alias="GEMINI_RPM_LIMIT",
-        description="Gemini API rate limit (requests per minute)"
+        description="Gemini API rate limit (requests per minute)",
     )
 
     # --- Token Management ---
@@ -378,21 +385,21 @@ class Settings(BaseSettings):
         default=7000,
         ge=100,
         validation_alias="TAVILY_MAX_CHARS",
-        description="Maximum characters per Tavily search result"
+        description="Maximum characters per Tavily search result",
     )
 
     # --- Environment ---
     environment: str = Field(
         default="dev",
         validation_alias="ENVIRONMENT",
-        description="Environment (dev, prod, test)"
+        description="Environment (dev, prod, test)",
     )
 
     # --- Runtime Flags ---
     quiet_mode: bool = Field(
         default=False,
         validation_alias="QUIET_MODE",
-        description="Suppress verbose logging output (set via CLI --quiet)"
+        description="Suppress verbose logging output (set via CLI --quiet)",
     )
 
     # --- Telemetry & System Overrides ---
@@ -401,41 +408,41 @@ class Settings(BaseSettings):
     disable_chroma_telemetry: bool = Field(
         default=True,
         validation_alias="DISABLE_CHROMA_TELEMETRY",
-        description="Disable ChromaDB anonymous telemetry"
+        description="Disable ChromaDB anonymous telemetry",
     )
     grpc_enable_fork_support: bool = Field(
         default=True,
         validation_alias="GRPC_ENABLE_FORK_SUPPORT",
-        description="Enable gRPC fork support (macOS compatibility)"
+        description="Enable gRPC fork support (macOS compatibility)",
     )
     grpc_poll_strategy: str = Field(
         default="poll",
         validation_alias="GRPC_POLL_STRATEGY",
-        description="gRPC poll strategy (poll is most compatible)"
+        description="gRPC poll strategy (poll is most compatible)",
     )
 
     # --- Prompts ---
     prompts_dir: Path = Field(
         default=Path("./prompts"),
         validation_alias="PROMPTS_DIR",
-        description="Directory containing agent prompt JSON files"
+        description="Directory containing agent prompt JSON files",
     )
 
     # --- LangSmith ---
     langsmith_tracing_enabled: bool = Field(
         default=True,
         validation_alias="LANGSMITH_TRACING",
-        description="Enable LangSmith tracing"
+        description="Enable LangSmith tracing",
     )
     langsmith_project: str = Field(
         default="Deep-Trading-System-Gemini3",
         validation_alias="LANGSMITH_PROJECT",
-        description="LangSmith project name"
+        description="LangSmith project name",
     )
     langsmith_endpoint: str = Field(
         default="https://api.smith.langchain.com",
         validation_alias="LANGSMITH_ENDPOINT",
-        description="LangSmith API endpoint"
+        description="LangSmith API endpoint",
     )
 
     # --- API Keys (SecretStr prevents accidental logging) ---
@@ -444,42 +451,42 @@ class Settings(BaseSettings):
     google_api_key: SecretStr = Field(
         default=SecretStr(""),
         validation_alias="GOOGLE_API_KEY",
-        description="Google Gemini API key (required)"
+        description="Google Gemini API key (required)",
     )
     tavily_api_key: SecretStr = Field(
         default=SecretStr(""),
         validation_alias="TAVILY_API_KEY",
-        description="Tavily search API key (required)"
+        description="Tavily search API key (required)",
     )
     finnhub_api_key: SecretStr = Field(
         default=SecretStr(""),
         validation_alias="FINNHUB_API_KEY",
-        description="Finnhub market data API key (required)"
+        description="Finnhub market data API key (required)",
     )
     eodhd_api_key: SecretStr = Field(
         default=SecretStr(""),
         validation_alias="EODHD_API_KEY",
-        description="EODHD international data API key (optional)"
+        description="EODHD international data API key (optional)",
     )
     openai_api_key: SecretStr = Field(
         default=SecretStr(""),
         validation_alias="OPENAI_API_KEY",
-        description="OpenAI API key for consultant agent (optional)"
+        description="OpenAI API key for consultant agent (optional)",
     )
     langsmith_api_key: SecretStr = Field(
         default=SecretStr(""),
         validation_alias="LANGSMITH_API_KEY",
-        description="LangSmith tracing API key (optional)"
+        description="LangSmith tracing API key (optional)",
     )
     fmp_api_key: SecretStr = Field(
         default=SecretStr(""),
         validation_alias="FMP_API_KEY",
-        description="Financial Modeling Prep API key (optional fallback)"
+        description="Financial Modeling Prep API key (optional fallback)",
     )
     alpha_vantage_api_key: SecretStr = Field(
         default=SecretStr(""),
         validation_alias="ALPHAVANTAGE_API_KEY",
-        description="Alpha Vantage API key (optional fallback)"
+        description="Alpha Vantage API key (optional fallback)",
     )
 
     # --- Pydantic Settings Configuration ---
@@ -497,8 +504,8 @@ class Settings(BaseSettings):
         populate_by_name=True,
     )
 
-    @model_validator(mode='after')
-    def setup_environment(self) -> 'Settings':
+    @model_validator(mode="after")
+    def setup_environment(self) -> "Settings":
         """Post-initialization setup: create directories, configure logging, and export SDK settings.
 
         Note: Third-party SDKs (LangSmith, etc.) expect configuration in os.environ.
@@ -506,7 +513,11 @@ class Settings(BaseSettings):
         This is intentional and targeted - we only export what SDKs need.
         """
         # Create required directories
-        for directory in [self.results_dir, self.data_cache_dir, Path(self.chroma_persist_directory)]:
+        for directory in [
+            self.results_dir,
+            self.data_cache_dir,
+            Path(self.chroma_persist_directory),
+        ]:
             directory.mkdir(parents=True, exist_ok=True)
 
         # Set logging level

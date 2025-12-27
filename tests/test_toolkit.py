@@ -11,12 +11,11 @@ Tests cover:
 Each test uses proper async mocking and validates both success and error paths.
 """
 
-import pytest
 import json
-from unittest.mock import patch, MagicMock, AsyncMock
-import pandas as pd
-from datetime import datetime
+from unittest.mock import AsyncMock, patch
 
+import pandas as pd
+import pytest
 
 # Import the module under test
 from src import toolkit
@@ -25,14 +24,14 @@ from src import toolkit
 @pytest.fixture
 def mock_fetcher():
     """Mock the singleton market_data_fetcher used in toolkit."""
-    with patch('src.toolkit.market_data_fetcher') as mock:
+    with patch("src.toolkit.market_data_fetcher") as mock:
         yield mock
 
 
 @pytest.fixture
 def mock_tavily():
     """Mock the global tavily_tool."""
-    with patch('src.toolkit.tavily_tool') as mock:
+    with patch("src.toolkit.tavily_tool") as mock:
         # Setup the mock to support ainvoke
         mock.ainvoke = AsyncMock()
         yield mock
@@ -41,7 +40,7 @@ def mock_tavily():
 @pytest.fixture
 def mock_stocktwits():
     """Mock the stocktwits_api instance."""
-    with patch('src.toolkit.stocktwits_api') as mock:
+    with patch("src.toolkit.stocktwits_api") as mock:
         yield mock
 
 
@@ -52,26 +51,26 @@ class TestGetFinancialMetrics:
     async def test_complete_data_formatting(self, mock_fetcher):
         """Ensure the tool returns complete data as JSON for the LLM to process."""
         mock_data = {
-            'currentPrice': 150.00,
-            'currency': 'USD',
-            'returnOnEquity': 0.25,
-            'returnOnAssets': 0.15,
-            'operatingMargins': 0.30,
-            'debtToEquity': 0.5,
-            'currentRatio': 2.0,
-            'totalCash': 1000000,
-            'totalDebt': 500000,
-            'operatingCashflow': 2000000,
-            'freeCashflow': 1500000,
-            'revenueGrowth': 0.10,
-            'earningsGrowth': 0.12,
-            'grossMargins': 0.40,
-            'trailingPE': 20.5,
-            'forwardPE': 18.0,
-            'priceToBook': 5.0,
-            'pegRatio': 1.1,
-            'numberOfAnalystOpinions': 12,
-            '_data_source': 'yfinance'
+            "currentPrice": 150.00,
+            "currency": "USD",
+            "returnOnEquity": 0.25,
+            "returnOnAssets": 0.15,
+            "operatingMargins": 0.30,
+            "debtToEquity": 0.5,
+            "currentRatio": 2.0,
+            "totalCash": 1000000,
+            "totalDebt": 500000,
+            "operatingCashflow": 2000000,
+            "freeCashflow": 1500000,
+            "revenueGrowth": 0.10,
+            "earningsGrowth": 0.12,
+            "grossMargins": 0.40,
+            "trailingPE": 20.5,
+            "forwardPE": 18.0,
+            "priceToBook": 5.0,
+            "pegRatio": 1.1,
+            "numberOfAnalystOpinions": 12,
+            "_data_source": "yfinance",
         }
         mock_fetcher.get_financial_metrics = AsyncMock(return_value=mock_data)
 
@@ -79,20 +78,20 @@ class TestGetFinancialMetrics:
 
         # Tool now returns raw JSON for agent to process
         parsed = json.loads(result)
-        assert parsed['currentPrice'] == 150.0
-        assert parsed['currency'] == 'USD'
-        assert parsed['returnOnEquity'] == 0.25
-        assert parsed['trailingPE'] == 20.5
-        assert parsed['numberOfAnalystOpinions'] == 12
-        assert parsed['_data_source'] == 'yfinance'
+        assert parsed["currentPrice"] == 150.0
+        assert parsed["currency"] == "USD"
+        assert parsed["returnOnEquity"] == 0.25
+        assert parsed["trailingPE"] == 20.5
+        assert parsed["numberOfAnalystOpinions"] == 12
+        assert parsed["_data_source"] == "yfinance"
 
     async def test_partial_data_handling(self, mock_fetcher):
         """Ensure the tool handles missing (None) values gracefully as null in JSON."""
         # Only minimal data provided
         mock_data = {
-            'currentPrice': 100.0,
-            'currency': 'USD',
-            '_data_source': 'partial'
+            "currentPrice": 100.0,
+            "currency": "USD",
+            "_data_source": "partial",
             # All other fields missing/None
         }
         mock_fetcher.get_financial_metrics = AsyncMock(return_value=mock_data)
@@ -101,16 +100,18 @@ class TestGetFinancialMetrics:
 
         # Tool returns raw JSON - agent is responsible for interpreting null values
         parsed = json.loads(result)
-        assert parsed['currentPrice'] == 100.0
-        assert parsed['currency'] == 'USD'
-        assert parsed['_data_source'] == 'partial'
+        assert parsed["currentPrice"] == 100.0
+        assert parsed["currency"] == "USD"
+        assert parsed["_data_source"] == "partial"
         # Missing keys should not be present (or be None if included)
-        assert parsed.get('returnOnEquity') is None
-        assert parsed.get('trailingPE') is None
+        assert parsed.get("returnOnEquity") is None
+        assert parsed.get("trailingPE") is None
 
     async def test_fetcher_error_propagation(self, mock_fetcher):
         """Ensure errors from the fetcher are reported to the agent as JSON."""
-        mock_fetcher.get_financial_metrics = AsyncMock(return_value={"error": "API Rate Limit"})
+        mock_fetcher.get_financial_metrics = AsyncMock(
+            return_value={"error": "API Rate Limit"}
+        )
 
         result = await toolkit.get_financial_metrics.ainvoke("AAPL")
 
@@ -125,12 +126,12 @@ class TestGetFinancialMetrics:
         Zero growth (stagnation) must be 0.0, not null.
         """
         mock_data = {
-            'currentPrice': 100.0,
-            'currency': 'USD',
-            'revenueGrowth': 0.0,      # Zero growth (stagnation)
-            'earningsGrowth': -0.05,   # Negative growth
-            'grossMargins': None,      # Missing data
-            '_data_source': 'yfinance',
+            "currentPrice": 100.0,
+            "currency": "USD",
+            "revenueGrowth": 0.0,  # Zero growth (stagnation)
+            "earningsGrowth": -0.05,  # Negative growth
+            "grossMargins": None,  # Missing data
+            "_data_source": "yfinance",
         }
         mock_fetcher.get_financial_metrics = AsyncMock(return_value=mock_data)
 
@@ -138,20 +139,20 @@ class TestGetFinancialMetrics:
 
         # Tool returns raw JSON - 0.0 must be preserved as 0.0, not null
         parsed = json.loads(result)
-        assert parsed['revenueGrowth'] == 0.0  # Zero, NOT None
-        assert parsed['earningsGrowth'] == -0.05  # Negative value
-        assert parsed['grossMargins'] is None  # null in JSON
+        assert parsed["revenueGrowth"] == 0.0  # Zero, NOT None
+        assert parsed["earningsGrowth"] == -0.05  # Negative value
+        assert parsed["grossMargins"] is None  # null in JSON
 
     async def test_large_numbers_formatting(self, mock_fetcher):
         """Test that large cash/debt values are preserved as numbers in JSON."""
         mock_data = {
-            'currentPrice': 250.00,
-            'currency': 'USD',
-            'totalCash': 50000000000,      # $50B
-            'totalDebt': 120000000000,     # $120B
-            'operatingCashflow': 15000000000,  # $15B
-            'freeCashflow': 12000000000,   # $12B
-            '_data_source': 'yfinance'
+            "currentPrice": 250.00,
+            "currency": "USD",
+            "totalCash": 50000000000,  # $50B
+            "totalDebt": 120000000000,  # $120B
+            "operatingCashflow": 15000000000,  # $15B
+            "freeCashflow": 12000000000,  # $12B
+            "_data_source": "yfinance",
         }
         mock_fetcher.get_financial_metrics = AsyncMock(return_value=mock_data)
 
@@ -159,18 +160,18 @@ class TestGetFinancialMetrics:
 
         # Tool returns raw JSON - large numbers preserved as integers
         parsed = json.loads(result)
-        assert parsed['totalCash'] == 50000000000
-        assert parsed['totalDebt'] == 120000000000
-        assert parsed['operatingCashflow'] == 15000000000
-        assert parsed['freeCashflow'] == 12000000000
+        assert parsed["totalCash"] == 50000000000
+        assert parsed["totalDebt"] == 120000000000
+        assert parsed["operatingCashflow"] == 15000000000
+        assert parsed["freeCashflow"] == 12000000000
 
     async def test_currency_non_usd(self, mock_fetcher):
         """Test handling of non-USD currencies (GBP, EUR, JPY, KRW, etc)."""
         mock_data = {
-            'currentPrice': 25000.00,
-            'currency': 'JPY',
-            'returnOnEquity': 0.12,
-            '_data_source': 'yfinance'
+            "currentPrice": 25000.00,
+            "currency": "JPY",
+            "returnOnEquity": 0.12,
+            "_data_source": "yfinance",
         }
         mock_fetcher.get_financial_metrics = AsyncMock(return_value=mock_data)
 
@@ -178,9 +179,9 @@ class TestGetFinancialMetrics:
 
         # Tool returns raw JSON - currency included in data
         parsed = json.loads(result)
-        assert parsed['currentPrice'] == 25000.0
-        assert parsed['currency'] == 'JPY'
-        assert parsed['returnOnEquity'] == 0.12
+        assert parsed["currentPrice"] == 25000.0
+        assert parsed["currency"] == "JPY"
+        assert parsed["returnOnEquity"] == 0.12
 
 
 @pytest.mark.asyncio
@@ -190,17 +191,19 @@ class TestGetNews:
     async def test_news_general_and_local_split(self, mock_tavily):
         """Test that news is split into General and Local sections when both exist."""
         # Mocking extract_company_name_async internal call
-        with patch('src.toolkit.extract_company_name_async', new_callable=AsyncMock) as mock_name:
+        with patch(
+            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+        ) as mock_name:
             mock_name.return_value = "Toyota"
-            
+
             # Setup Tavily to return different results for General vs Local queries
             async def side_effect(query_dict):
-                query = query_dict['query']
+                query = query_dict["query"]
                 if "site:" in query:  # Local query pattern
                     return "Local Japanese News: Nikkei reports strong earnings for Toyota."
                 else:  # General query pattern
                     return "General News: Toyota expands manufacturing in US markets."
-            
+
             mock_tavily.ainvoke.side_effect = side_effect
 
             # Use a ticker that triggers local logic (.T for Japan)
@@ -214,30 +217,34 @@ class TestGetNews:
 
     async def test_news_no_results(self, mock_tavily):
         """Test handling of zero results from news search."""
-        with patch('src.toolkit.extract_company_name_async', new_callable=AsyncMock) as mock_name:
+        with patch(
+            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+        ) as mock_name:
             mock_name.return_value = "Ghost Corp"
             mock_tavily.ainvoke.return_value = None  # No results
 
             result = await toolkit.get_news.ainvoke({"ticker": "GHST"})
-            
+
             assert "No news found" in result.lower() or "Ghost Corp" in result
 
     async def test_news_general_only(self, mock_tavily):
         """Test news when only general search returns results (no local)."""
-        with patch('src.toolkit.extract_company_name_async', new_callable=AsyncMock) as mock_name:
+        with patch(
+            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+        ) as mock_name:
             mock_name.return_value = "Apple"
-            
+
             async def side_effect(query_dict):
-                query = query_dict['query']
+                query = query_dict["query"]
                 if "site:" in query:
                     return None  # No local results
                 else:
                     return "Apple announces new iPhone model with improved camera."
-            
+
             mock_tavily.ainvoke.side_effect = side_effect
 
             result = await toolkit.get_news.ainvoke({"ticker": "AAPL"})
-            
+
             assert "Apple" in result
             assert "iPhone model" in result
             # Should not show local section if no local results
@@ -245,25 +252,31 @@ class TestGetNews:
 
     async def test_news_tavily_error(self, mock_tavily):
         """Test handling of Tavily API errors."""
-        with patch('src.toolkit.extract_company_name_async', new_callable=AsyncMock) as mock_name:
+        with patch(
+            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+        ) as mock_name:
             mock_name.return_value = "FailCorp"
-            mock_tavily.ainvoke.side_effect = Exception("Tavily API Error: Rate limit exceeded")
+            mock_tavily.ainvoke.side_effect = Exception(
+                "Tavily API Error: Rate limit exceeded"
+            )
 
             result = await toolkit.get_news.ainvoke({"ticker": "FAIL"})
-            
+
             # Code handles error gracefully by catching and returning "No news found"
             assert "No news found" in result or "FailCorp" in result
 
     async def test_news_ticker_normalization(self, mock_tavily):
         """Test that tickers are properly normalized before searching."""
-        with patch('src.toolkit.extract_company_name_async', new_callable=AsyncMock) as mock_name:
-            with patch('src.toolkit.normalize_ticker') as mock_normalize:
+        with patch(
+            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+        ) as mock_name:
+            with patch("src.toolkit.normalize_ticker") as mock_normalize:
                 mock_normalize.return_value = "AAPL"
                 mock_name.return_value = "Apple Inc."
                 mock_tavily.ainvoke.return_value = "Apple news content"
 
                 await toolkit.get_news.ainvoke({"ticker": "AAPL.US"})
-                
+
                 # Verify normalization was called
                 mock_normalize.assert_called_once()
 
@@ -276,16 +289,16 @@ class TestTechnicalIndicators:
         """Test standard indicator calculation with valid data."""
         # Create a dummy dataframe with enough data for stockstats
         # Needs to be >2y for new moving average logic in toolkit
-        dates = pd.date_range(start='2022-01-01', periods=600) 
+        dates = pd.date_range(start="2022-01-01", periods=600)
         data = {
-            'Open': [100 + i * 0.1 for i in range(600)],
-            'High': [105 + i * 0.1 for i in range(600)],
-            'Low': [95 + i * 0.1 for i in range(600)],
-            'Close': [102 + i * 0.1 for i in range(600)],
-            'Volume': [1000 + i * 10 for i in range(600)]
+            "Open": [100 + i * 0.1 for i in range(600)],
+            "High": [105 + i * 0.1 for i in range(600)],
+            "Low": [95 + i * 0.1 for i in range(600)],
+            "Close": [102 + i * 0.1 for i in range(600)],
+            "Volume": [1000 + i * 10 for i in range(600)],
         }
         df = pd.DataFrame(data, index=dates)
-        
+
         mock_fetcher.get_historical_prices = AsyncMock(return_value=df)
 
         result = await toolkit.get_technical_indicators.ainvoke("AAPL")
@@ -303,67 +316,67 @@ class TestTechnicalIndicators:
         mock_fetcher.get_historical_prices = AsyncMock(return_value=pd.DataFrame())
 
         result = await toolkit.get_technical_indicators.ainvoke("EMPTY")
-        
+
         # Code returns exactly "No data" (case-sensitive match needed)
         assert "No data" in result
 
     async def test_indicators_short_history(self, mock_fetcher):
         """Test handling when history is too short for indicators (< 14 days for RSI)."""
-        dates = pd.date_range(start='2024-01-01', periods=5)
+        dates = pd.date_range(start="2024-01-01", periods=5)
         data = {
-            'Open': [100] * 5,
-            'High': [105] * 5,
-            'Low': [95] * 5,
-            'Close': [102] * 5,
-            'Volume': [1000] * 5
+            "Open": [100] * 5,
+            "High": [105] * 5,
+            "Low": [95] * 5,
+            "Close": [102] * 5,
+            "Volume": [1000] * 5,
         }
         df = pd.DataFrame(data, index=dates)
-        
+
         mock_fetcher.get_historical_prices = AsyncMock(return_value=df)
 
         result = await toolkit.get_technical_indicators.ainvoke("SHORT")
-        
+
         # Should handle gracefully - either error message or skip certain indicators
         assert "SHORT" in result
 
     async def test_indicators_calculation_error(self, mock_fetcher):
         """Test handling of calculation errors (bad data format)."""
         # Create malformed data that will cause stockstats to fail
-        dates = pd.date_range(start='2024-01-01', periods=30)
+        dates = pd.date_range(start="2024-01-01", periods=30)
         data = {
-            'Open': [None] * 30,  # All None values
-            'High': [None] * 30,
-            'Low': [None] * 30,
-            'Close': [None] * 30,
-            'Volume': [None] * 30
+            "Open": [None] * 30,  # All None values
+            "High": [None] * 30,
+            "Low": [None] * 30,
+            "Close": [None] * 30,
+            "Volume": [None] * 30,
         }
         df = pd.DataFrame(data, index=dates)
-        
+
         mock_fetcher.get_historical_prices = AsyncMock(return_value=df)
 
         result = await toolkit.get_technical_indicators.ainvoke("BAD")
-        
+
         # Should return error message, not crash
         assert isinstance(result, str)
         assert "error" in result.lower() or "unavailable" in result.lower()
 
     async def test_indicators_extreme_values(self, mock_fetcher):
         """Test handling of extreme indicator values (RSI = 100, negative MACD, etc)."""
-        dates = pd.date_range(start='2022-01-01', periods=600)
+        dates = pd.date_range(start="2022-01-01", periods=600)
         # Create data that produces extreme RSI (all increases -> RSI ~100)
         data = {
-            'Open': [100 + i * 5 for i in range(600)],
-            'High': [105 + i * 5 for i in range(600)],
-            'Low': [100 + i * 5 for i in range(600)],
-            'Close': [105 + i * 5 for i in range(600)],
-            'Volume': [1000] * 600
+            "Open": [100 + i * 5 for i in range(600)],
+            "High": [105 + i * 5 for i in range(600)],
+            "Low": [100 + i * 5 for i in range(600)],
+            "Close": [105 + i * 5 for i in range(600)],
+            "Volume": [1000] * 600,
         }
         df = pd.DataFrame(data, index=dates)
-        
+
         mock_fetcher.get_historical_prices = AsyncMock(return_value=df)
 
         result = await toolkit.get_technical_indicators.ainvoke("EXTREME")
-        
+
         # Should format extreme values properly (not crash)
         # Check for RSI presence generally, avoiding strict "RSI:" check if formatting differs
         assert "RSI" in result
@@ -376,9 +389,11 @@ class TestFundamentalAnalysis:
 
     async def test_primary_search_success(self, mock_tavily):
         """Test simple success path with adequate primary search results."""
-        with patch('src.toolkit.extract_company_name_async', new_callable=AsyncMock) as mock_name:
+        with patch(
+            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+        ) as mock_name:
             mock_name.return_value = "Samsung"
-            
+
             # FIX: Make result long enough to pass length threshold (>200 chars)
             long_result = (
                 "Samsung Electronics Co., Ltd. is a South Korean multinational "
@@ -402,14 +417,16 @@ class TestFundamentalAnalysis:
 
     async def test_surgical_fallback_logic(self, mock_tavily):
         """
-        Test the specific logic where primary search lacks ADR info, 
+        Test the specific logic where primary search lacks ADR info,
         triggering a secondary 'surgical' search.
         """
-        with patch('src.toolkit.extract_company_name_async', new_callable=AsyncMock) as mock_name:
+        with patch(
+            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+        ) as mock_name:
             mock_name.return_value = "Samsung"
-            
+
             async def side_effect(query_dict):
-                query = query_dict['query']
+                query = query_dict["query"]
                 # Case 1: Primary search (ticker match)
                 if "005930.KS" in query:
                     # Primary search returns long data, but NO ADR info
@@ -428,9 +445,9 @@ class TestFundamentalAnalysis:
                 if "Samsung" in query and "ADR" in query:
                     # Surgical search finds the ADR
                     return "Samsung has a Global Depositary Receipt (GDR) and OTC ADR under SSNLF."
-                
+
                 return "No data"
-            
+
             mock_tavily.ainvoke.side_effect = side_effect
 
             result = await toolkit.get_fundamental_analysis.ainvoke("005930.KS")
@@ -441,14 +458,16 @@ class TestFundamentalAnalysis:
 
     async def test_full_fallback_on_weak_result(self, mock_tavily):
         """
-        Test that if primary ticker search is too short/weak, 
+        Test that if primary ticker search is too short/weak,
         it falls back to a full company name search.
         """
-        with patch('src.toolkit.extract_company_name_async', new_callable=AsyncMock) as mock_name:
+        with patch(
+            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+        ) as mock_name:
             mock_name.return_value = "HSBC Holdings"
-            
+
             async def side_effect(query_dict):
-                query = query_dict['query']
+                query = query_dict["query"]
                 if "0005.HK" in query:
                     return "Weak result."  # < 200 chars, triggers fallback
                 if "HSBC Holdings" in query:
@@ -461,34 +480,41 @@ class TestFundamentalAnalysis:
                         "The bank operates globally with strong presence in Asia."
                     )
                 return "No data"
-            
+
             mock_tavily.ainvoke.side_effect = side_effect
-            
+
             result = await toolkit.get_fundamental_analysis.ainvoke("0005.HK")
-            
-            assert "Fallback Name Search" in result or "switched to company name search" in result
+
+            assert (
+                "Fallback Name Search" in result
+                or "switched to company name search" in result
+            )
             assert "HSBC Holdings" in result
             assert "ADR" in result
 
     async def test_both_searches_fail(self, mock_tavily):
         """Test handling when both primary and fallback searches return nothing."""
-        with patch('src.toolkit.extract_company_name_async', new_callable=AsyncMock) as mock_name:
+        with patch(
+            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+        ) as mock_name:
             mock_name.return_value = "Unknown Corp"
-            
+
             # All searches return empty/None
             mock_tavily.ainvoke.return_value = None
-            
+
             result = await toolkit.get_fundamental_analysis.ainvoke("UNKN.XX")
-            
+
             # Code still formats output, showing "None" in the content
             assert "Unknown Corp" in result
-            assert ("None" in result or "No information" in result)
+            assert "None" in result or "No information" in result
 
     async def test_adr_detection_nyse(self, mock_tavily):
         """Test detection of NYSE-listed ADRs (most common type)."""
-        with patch('src.toolkit.extract_company_name_async', new_callable=AsyncMock) as mock_name:
+        with patch(
+            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+        ) as mock_name:
             mock_name.return_value = "Alibaba"
-            
+
             long_result = (
                 "Alibaba Group Holding Limited is a Chinese e-commerce giant. "
                 "The company's American Depositary Shares (ADS) trade on the "
@@ -498,17 +524,19 @@ class TestFundamentalAnalysis:
                 "The company faces regulatory scrutiny but maintains strong fundamentals."
             )
             mock_tavily.ainvoke.return_value = long_result
-            
+
             result = await toolkit.get_fundamental_analysis.ainvoke("9988.HK")
-            
+
             assert "ADS" in result or "ADR" in result or "American Depositary" in result
             assert "NYSE" in result or "New York Stock Exchange" in result
 
     async def test_adr_detection_otc(self, mock_tavily):
         """Test detection of OTC-traded ADRs (less liquid, unsponsored)."""
-        with patch('src.toolkit.extract_company_name_async', new_callable=AsyncMock) as mock_name:
+        with patch(
+            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+        ) as mock_name:
             mock_name.return_value = "Sony"
-            
+
             long_result = (
                 "Sony Group Corporation is a Japanese conglomerate. "
                 "The company has unsponsored ADRs trading over-the-counter "
@@ -518,16 +546,18 @@ class TestFundamentalAnalysis:
                 "The company operates in entertainment, gaming, and electronics sectors."
             )
             mock_tavily.ainvoke.return_value = long_result
-            
+
             result = await toolkit.get_fundamental_analysis.ainvoke("6758.T")
-            
+
             assert "ADR" in result or "over-the-counter" in result or "OTC" in result
 
     async def test_search_with_very_long_response(self, mock_tavily):
         """Test handling of extremely long search responses (>5000 chars)."""
-        with patch('src.toolkit.extract_company_name_async', new_callable=AsyncMock) as mock_name:
+        with patch(
+            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+        ) as mock_name:
             mock_name.return_value = "MegaCorp"
-            
+
             # Create very long response
             long_result = (
                 "MegaCorp is a company. " * 300  # ~6000 chars
@@ -535,9 +565,9 @@ class TestFundamentalAnalysis:
                 + "Analysts cover it extensively. " * 100
             )
             mock_tavily.ainvoke.return_value = long_result
-            
+
             result = await toolkit.get_fundamental_analysis.ainvoke("MEGA.XX")
-            
+
             # Should handle without crashing
             assert isinstance(result, str)
             assert "MegaCorp" in result
@@ -549,15 +579,17 @@ class TestStockTwitsSentiment:
 
     async def test_sentiment_success(self, mock_stocktwits):
         """Test successful sentiment retrieval with mixed sentiment."""
-        mock_stocktwits.get_sentiment = AsyncMock(return_value={
-            "source": "StockTwits",
-            "bullish_pct": 75.5,
-            "bearish_pct": 24.5,
-            "messages": ["Bullish on earnings!", "Going up", "Great quarter"]
-        })
+        mock_stocktwits.get_sentiment = AsyncMock(
+            return_value={
+                "source": "StockTwits",
+                "bullish_pct": 75.5,
+                "bearish_pct": 24.5,
+                "messages": ["Bullish on earnings!", "Going up", "Great quarter"],
+            }
+        )
 
         result = await toolkit.get_social_media_sentiment.ainvoke("AAPL")
-        
+
         # Tool returns dict as string representation
         assert "'source': 'StockTwits'" in result or "StockTwits" in result
         assert "75.5" in result or "75" in result
@@ -565,69 +597,79 @@ class TestStockTwitsSentiment:
 
     async def test_sentiment_api_error(self, mock_stocktwits):
         """Test handling of StockTwits API errors."""
-        mock_stocktwits.get_sentiment = AsyncMock(return_value={
-            "error": "Rate limit exceeded. Please try again later."
-        })
+        mock_stocktwits.get_sentiment = AsyncMock(
+            return_value={"error": "Rate limit exceeded. Please try again later."}
+        )
 
         result = await toolkit.get_social_media_sentiment.ainvoke("AAPL")
-        
+
         assert "error" in result.lower() or "Rate limit" in result
 
     async def test_sentiment_no_data(self, mock_stocktwits):
         """Test handling when no sentiment data is available for ticker."""
-        mock_stocktwits.get_sentiment = AsyncMock(return_value={
-            "source": "StockTwits",
-            "bullish_pct": 0.0,
-            "bearish_pct": 0.0,
-            "messages": []
-        })
+        mock_stocktwits.get_sentiment = AsyncMock(
+            return_value={
+                "source": "StockTwits",
+                "bullish_pct": 0.0,
+                "bearish_pct": 0.0,
+                "messages": [],
+            }
+        )
 
         result = await toolkit.get_social_media_sentiment.ainvoke("OBSCURE")
-        
+
         # Should return the data structure even if empty
         assert isinstance(result, str)
-        assert "0.0" in result or "No messages" in result or "messages" in result.lower()
+        assert (
+            "0.0" in result or "No messages" in result or "messages" in result.lower()
+        )
 
     async def test_sentiment_extreme_bullish(self, mock_stocktwits):
         """Test handling of extreme bullish sentiment (>95%)."""
-        mock_stocktwits.get_sentiment = AsyncMock(return_value={
-            "source": "StockTwits",
-            "bullish_pct": 98.5,
-            "bearish_pct": 1.5,
-            "messages": ["To the moon!", "Best stock ever!", "Loading up"]
-        })
+        mock_stocktwits.get_sentiment = AsyncMock(
+            return_value={
+                "source": "StockTwits",
+                "bullish_pct": 98.5,
+                "bearish_pct": 1.5,
+                "messages": ["To the moon!", "Best stock ever!", "Loading up"],
+            }
+        )
 
         result = await toolkit.get_social_media_sentiment.ainvoke("MEME")
-        
+
         assert "98.5" in result or "98" in result
         assert "1.5" in result or "1" in result
 
     async def test_sentiment_extreme_bearish(self, mock_stocktwits):
         """Test handling of extreme bearish sentiment (>95%)."""
-        mock_stocktwits.get_sentiment = AsyncMock(return_value={
-            "source": "StockTwits",
-            "bullish_pct": 3.0,
-            "bearish_pct": 97.0,
-            "messages": ["Shorting this", "Overvalued", "Going down"]
-        })
+        mock_stocktwits.get_sentiment = AsyncMock(
+            return_value={
+                "source": "StockTwits",
+                "bullish_pct": 3.0,
+                "bearish_pct": 97.0,
+                "messages": ["Shorting this", "Overvalued", "Going down"],
+            }
+        )
 
         result = await toolkit.get_social_media_sentiment.ainvoke("FAIL")
-        
+
         assert "3.0" in result or "3" in result
         assert "97.0" in result or "97" in result
 
     async def test_sentiment_ticker_suffix_handling(self, mock_stocktwits):
         """Test that ticker suffixes are handled properly (AAPL.US -> AAPL)."""
         # StockTwits doesn't recognize exchange suffixes
-        mock_stocktwits.get_sentiment = AsyncMock(return_value={
-            "source": "StockTwits",
-            "bullish_pct": 60.0,
-            "bearish_pct": 40.0,
-            "messages": ["Neutral"]
-        })
+        mock_stocktwits.get_sentiment = AsyncMock(
+            return_value={
+                "source": "StockTwits",
+                "bullish_pct": 60.0,
+                "bearish_pct": 40.0,
+                "messages": ["Neutral"],
+            }
+        )
 
         result = await toolkit.get_social_media_sentiment.ainvoke("AAPL.US")
-        
+
         # Should work without error
         assert isinstance(result, str)
         # Verify that get_sentiment was called (suffix stripping happens in stocktwits_api)
@@ -637,12 +679,12 @@ class TestStockTwitsSentiment:
         """Test handling of unexpected exceptions from StockTwits API."""
         # Return error dict instead of raising exception
         # (toolkit wraps the call and returns the error dict)
-        mock_stocktwits.get_sentiment = AsyncMock(return_value={
-            "error": "Network timeout"
-        })
+        mock_stocktwits.get_sentiment = AsyncMock(
+            return_value={"error": "Network timeout"}
+        )
 
         result = await toolkit.get_social_media_sentiment.ainvoke("AAPL")
-        
+
         # Should return error message in dict format
         assert isinstance(result, str)
         assert "error" in result.lower() or "timeout" in result.lower()
@@ -652,7 +694,9 @@ class TestStockTwitsSentiment:
 class TestIntegration:
     """Integration tests that combine multiple tools/functions."""
 
-    async def test_international_ticker_full_workflow(self, mock_fetcher, mock_tavily, mock_stocktwits):
+    async def test_international_ticker_full_workflow(
+        self, mock_fetcher, mock_tavily, mock_stocktwits
+    ):
         """
         Test complete workflow for international ticker:
         1. Financial metrics (with currency)
@@ -661,18 +705,22 @@ class TestIntegration:
         4. Sentiment (suffix stripping)
         """
         # Setup financial metrics
-        mock_fetcher.get_financial_metrics = AsyncMock(return_value={
-            'currentPrice': 50000.0,
-            'currency': 'KRW',
-            'returnOnEquity': 0.18,
-            '_data_source': 'yfinance'
-        })
-        
+        mock_fetcher.get_financial_metrics = AsyncMock(
+            return_value={
+                "currentPrice": 50000.0,
+                "currency": "KRW",
+                "returnOnEquity": 0.18,
+                "_data_source": "yfinance",
+            }
+        )
+
         # Setup news
-        with patch('src.toolkit.extract_company_name_async', new_callable=AsyncMock) as mock_name:
+        with patch(
+            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+        ) as mock_name:
             mock_name.return_value = "Samsung"
             mock_tavily.ainvoke.return_value = "Samsung reports strong Q4 results."
-            
+
             # Setup fundamental research
             long_result = (
                 "Samsung Electronics is a South Korean tech giant. "
@@ -681,55 +729,71 @@ class TestIntegration:
                 "Analysts rate it as a buy with strong fundamentals. "
                 "Market leader in memory chips and displays."
             )
-            
+
             # Setup sentiment
-            mock_stocktwits.get_sentiment = AsyncMock(return_value={
-                "source": "StockTwits",
-                "bullish_pct": 70.0,
-                "bearish_pct": 30.0,
-                "messages": ["Bullish on semis"]
-            })
-            
+            mock_stocktwits.get_sentiment = AsyncMock(
+                return_value={
+                    "source": "StockTwits",
+                    "bullish_pct": 70.0,
+                    "bearish_pct": 30.0,
+                    "messages": ["Bullish on semis"],
+                }
+            )
+
             # Execute all tools
             ticker = "005930.KS"
 
             metrics_result = await toolkit.get_financial_metrics.ainvoke(ticker)
             # Tool returns raw JSON
             parsed = json.loads(metrics_result)
-            assert parsed['currentPrice'] == 50000.0
-            assert parsed['currency'] == 'KRW'
-            
+            assert parsed["currentPrice"] == 50000.0
+            assert parsed["currency"] == "KRW"
+
             news_result = await toolkit.get_news.ainvoke({"ticker": ticker})
             assert "Samsung" in news_result
-            
+
             # For fundamental analysis, need to adjust mock for this call
             mock_tavily.ainvoke.return_value = long_result
             fundamental_result = await toolkit.get_fundamental_analysis.ainvoke(ticker)
             assert "ADR" in fundamental_result
-            
+
             sentiment_result = await toolkit.get_social_media_sentiment.ainvoke(ticker)
             assert "70" in sentiment_result
 
-    async def test_error_cascade_handling(self, mock_fetcher, mock_tavily, mock_stocktwits):
+    async def test_error_cascade_handling(
+        self, mock_fetcher, mock_tavily, mock_stocktwits
+    ):
         """
         Test that errors in one tool don't crash others.
         Verify graceful degradation when multiple tools fail.
         """
         # All tools return errors
-        mock_fetcher.get_financial_metrics = AsyncMock(return_value={"error": "API down"})
+        mock_fetcher.get_financial_metrics = AsyncMock(
+            return_value={"error": "API down"}
+        )
         mock_tavily.ainvoke.side_effect = Exception("Network error")
-        mock_stocktwits.get_sentiment = AsyncMock(return_value={"error": "Rate limited"})
-        
-        with patch('src.toolkit.extract_company_name_async', new_callable=AsyncMock) as mock_name:
+        mock_stocktwits.get_sentiment = AsyncMock(
+            return_value={"error": "Rate limited"}
+        )
+
+        with patch(
+            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+        ) as mock_name:
             mock_name.return_value = "TestCorp"
-            
+
             # Each tool should handle its own errors
             metrics_result = await toolkit.get_financial_metrics.ainvoke("TEST")
-            assert "error" in metrics_result.lower() or "unavailable" in metrics_result.lower()
-            
+            assert (
+                "error" in metrics_result.lower()
+                or "unavailable" in metrics_result.lower()
+            )
+
             news_result = await toolkit.get_news.ainvoke({"ticker": "TEST"})
             # News tool catches errors and returns "No news found"
             assert "No news found" in news_result or "TestCorp" in news_result
-            
+
             sentiment_result = await toolkit.get_social_media_sentiment.ainvoke("TEST")
-            assert "error" in sentiment_result.lower() or "Rate limited" in sentiment_result
+            assert (
+                "error" in sentiment_result.lower()
+                or "Rate limited" in sentiment_result
+            )

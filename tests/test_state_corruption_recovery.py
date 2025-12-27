@@ -12,15 +12,12 @@ Key scenarios tested:
 5. Information preservation during recovery
 """
 
+from unittest.mock import Mock, patch
+
 import pytest
-from unittest.mock import Mock, patch, AsyncMock
 from langgraph.types import RunnableConfig
 
-from src.agents import (
-    create_consultant_node,
-    InvestDebateState,
-    AgentState
-)
+from src.agents import create_consultant_node
 
 
 class TestTypedDictStructuralIssues:
@@ -39,9 +36,9 @@ class TestTypedDictStructuralIssues:
             invoke_calls.append(args)
             return mock_response
 
-        with patch('src.agents.invoke_with_rate_limit_handling', new=mock_invoke):
-            with patch('src.prompts.get_prompt') as mock_get_prompt:
-                with patch('src.agents.logger') as mock_logger:
+        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                with patch("src.agents.logger") as mock_logger:
                     mock_prompt = Mock()
                     mock_prompt.system_message = "You are a consultant."
                     mock_prompt.agent_name = "External Consultant"
@@ -60,10 +57,12 @@ class TestTypedDictStructuralIssues:
                         "investment_debate_state": {},  # Empty dict
                         "investment_plan": "BUY recommendation",
                         "red_flags": [],
-                        "pre_screening_result": "PASS"
+                        "pre_screening_result": "PASS",
                     }
 
-                    config = RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")})
+                    config = RunnableConfig(
+                        configurable={"context": Mock(trade_date="2025-12-13")}
+                    )
 
                     result = await consultant_node(state, config)
 
@@ -76,7 +75,10 @@ class TestTypedDictStructuralIssues:
                     message_content = invoke_calls[0][1][0].content
                     assert "BULL/BEAR DEBATE HISTORY" in message_content
                     # Empty dict returns 'N/A' since .get('history', 'N/A') will return 'N/A'
-                    assert "N/A" in message_content or "RESEARCH MANAGER SYNTHESIS" in message_content
+                    assert (
+                        "N/A" in message_content
+                        or "RESEARCH MANAGER SYNTHESIS" in message_content
+                    )
 
     @pytest.mark.asyncio
     async def test_debate_state_partial_keys(self):
@@ -91,8 +93,8 @@ class TestTypedDictStructuralIssues:
             invoke_calls.append(args)
             return mock_response
 
-        with patch('src.agents.invoke_with_rate_limit_handling', new=mock_invoke):
-            with patch('src.prompts.get_prompt') as mock_get_prompt:
+        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
                 mock_prompt.agent_name = "External Consultant"
@@ -114,10 +116,12 @@ class TestTypedDictStructuralIssues:
                     },
                     "investment_plan": "BUY recommendation",
                     "red_flags": [],
-                    "pre_screening_result": "PASS"
+                    "pre_screening_result": "PASS",
                 }
 
-                config = RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")})
+                config = RunnableConfig(
+                    configurable={"context": Mock(trade_date="2025-12-13")}
+                )
 
                 result = await consultant_node(state, config)
 
@@ -144,8 +148,8 @@ class TestTypedDictStructuralIssues:
             invoke_calls.append(args)
             return mock_response
 
-        with patch('src.agents.invoke_with_rate_limit_handling', new=mock_invoke):
-            with patch('src.prompts.get_prompt') as mock_get_prompt:
+        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
                 mock_prompt.agent_name = "External Consultant"
@@ -167,14 +171,16 @@ class TestTypedDictStructuralIssues:
                         "bear_history": "Bear arguments",
                         "count": "4",  # Should be int, is string
                         "current_response": "",
-                        "judge_decision": ""
+                        "judge_decision": "",
                     },
                     "investment_plan": "BUY recommendation",
                     "red_flags": [],
-                    "pre_screening_result": "PASS"
+                    "pre_screening_result": "PASS",
                 }
 
-                config = RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")})
+                config = RunnableConfig(
+                    configurable={"context": Mock(trade_date="2025-12-13")}
+                )
 
                 result = await consultant_node(state, config)
 
@@ -201,7 +207,9 @@ class TestFastFailRouting:
         """
         mock_llm = Mock()
         mock_response = Mock()
-        mock_response.content = "CONSULTANT REVIEW: No debate available (fast-fail path)"
+        mock_response.content = (
+            "CONSULTANT REVIEW: No debate available (fast-fail path)"
+        )
 
         invoke_calls = []
 
@@ -209,9 +217,9 @@ class TestFastFailRouting:
             invoke_calls.append(args)
             return mock_response
 
-        with patch('src.agents.invoke_with_rate_limit_handling', new=mock_invoke):
-            with patch('src.prompts.get_prompt') as mock_get_prompt:
-                with patch('src.agents.logger') as mock_logger:
+        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                with patch("src.agents.logger") as mock_logger:
                     mock_prompt = Mock()
                     mock_prompt.system_message = "You are a consultant."
                     mock_prompt.agent_name = "External Consultant"
@@ -234,13 +242,15 @@ class TestFastFailRouting:
                                 "severity": "CRITICAL",
                                 "type": "EXTREME_LEVERAGE",
                                 "detail": "D/E ratio 650% exceeds 500% threshold",
-                                "action": "AUTO_REJECT"
+                                "action": "AUTO_REJECT",
                             }
                         ],
-                        "pre_screening_result": "REJECT"
+                        "pre_screening_result": "REJECT",
                     }
 
-                    config = RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")})
+                    config = RunnableConfig(
+                        configurable={"context": Mock(trade_date="2025-12-13")}
+                    )
 
                     result = await consultant_node(state, config)
 
@@ -260,7 +270,9 @@ class TestFastFailRouting:
                     assert "fast-fail path" in message_content.lower()
 
                     # Should still receive red-flag information (preserved context)
-                    assert "650%" in state["fundamentals_report"]  # Case-insensitive check
+                    assert (
+                        "650%" in state["fundamentals_report"]
+                    )  # Case-insensitive check
 
 
 class TestPartialStateCorruption:
@@ -279,8 +291,8 @@ class TestPartialStateCorruption:
             invoke_calls.append(args)
             return mock_response
 
-        with patch('src.agents.invoke_with_rate_limit_handling', new=mock_invoke):
-            with patch('src.prompts.get_prompt') as mock_get_prompt:
+        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
                 mock_prompt.agent_name = "External Consultant"
@@ -302,14 +314,16 @@ class TestPartialStateCorruption:
                         "bear_history": "",
                         "count": 2,
                         "current_response": "",
-                        "judge_decision": ""
+                        "judge_decision": "",
                     },
                     "investment_plan": "BUY recommendation",
                     "red_flags": [],
-                    "pre_screening_result": "PASS"
+                    "pre_screening_result": "PASS",
                 }
 
-                config = RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")})
+                config = RunnableConfig(
+                    configurable={"context": Mock(trade_date="2025-12-13")}
+                )
 
                 result = await consultant_node(state, config)
 
@@ -341,8 +355,8 @@ class TestPartialStateCorruption:
             invoke_calls.append(args)
             return mock_response
 
-        with patch('src.agents.invoke_with_rate_limit_handling', new=mock_invoke):
-            with patch('src.prompts.get_prompt') as mock_get_prompt:
+        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
                 mock_prompt.agent_name = "External Consultant"
@@ -364,14 +378,16 @@ class TestPartialStateCorruption:
                         "bear_history": "",
                         "count": 2,
                         "current_response": "",
-                        "judge_decision": ""
+                        "judge_decision": "",
                     },
                     "investment_plan": "",  # Missing/empty
                     "red_flags": [],
-                    "pre_screening_result": "PASS"
+                    "pre_screening_result": "PASS",
                 }
 
-                config = RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")})
+                config = RunnableConfig(
+                    configurable={"context": Mock(trade_date="2025-12-13")}
+                )
 
                 result = await consultant_node(state, config)
 
@@ -405,8 +421,8 @@ class TestInformationPreservation:
             invoke_calls.append(args)
             return mock_response
 
-        with patch('src.agents.invoke_with_rate_limit_handling', new=mock_invoke):
-            with patch('src.prompts.get_prompt') as mock_get_prompt:
+        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
                 mock_prompt.agent_name = "External Consultant"
@@ -427,14 +443,16 @@ class TestInformationPreservation:
                         # Missing bull_history and bear_history
                         "count": 3,
                         "current_response": "",
-                        "judge_decision": ""
+                        "judge_decision": "",
                     },
                     "investment_plan": "HOLD - conflicting signals",
                     "red_flags": [],
-                    "pre_screening_result": "PASS"
+                    "pre_screening_result": "PASS",
                 }
 
-                config = RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")})
+                config = RunnableConfig(
+                    configurable={"context": Mock(trade_date="2025-12-13")}
+                )
 
                 result = await consultant_node(state, config)
 
@@ -457,7 +475,9 @@ class TestInformationPreservation:
         """
         mock_llm = Mock()
         mock_response = Mock()
-        mock_response.content = "CONSULTANT REVIEW: Analysis based on synthesis and reports"
+        mock_response.content = (
+            "CONSULTANT REVIEW: Analysis based on synthesis and reports"
+        )
 
         invoke_calls = []
 
@@ -465,8 +485,8 @@ class TestInformationPreservation:
             invoke_calls.append(args)
             return mock_response
 
-        with patch('src.agents.invoke_with_rate_limit_handling', new=mock_invoke):
-            with patch('src.prompts.get_prompt') as mock_get_prompt:
+        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
                 mock_prompt.agent_name = "External Consultant"
@@ -485,10 +505,12 @@ class TestInformationPreservation:
                     "investment_debate_state": None,  # No debate
                     "investment_plan": "BUY - undervalued with growth catalysts. Technical breakout imminent.",
                     "red_flags": [],
-                    "pre_screening_result": "PASS"
+                    "pre_screening_result": "PASS",
                 }
 
-                config = RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")})
+                config = RunnableConfig(
+                    configurable={"context": Mock(trade_date="2025-12-13")}
+                )
 
                 result = await consultant_node(state, config)
 
@@ -523,9 +545,9 @@ class TestLoggingQuietModeRespect:
         async def mock_invoke(*args, **kwargs):
             return mock_response
 
-        with patch('src.agents.invoke_with_rate_limit_handling', new=mock_invoke):
-            with patch('src.prompts.get_prompt') as mock_get_prompt:
-                with patch('src.agents.logger') as mock_logger:
+        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                with patch("src.agents.logger") as mock_logger:
                     mock_prompt = Mock()
                     mock_prompt.system_message = "You are a consultant."
                     mock_prompt.agent_name = "External Consultant"
@@ -543,10 +565,12 @@ class TestLoggingQuietModeRespect:
                         "investment_debate_state": None,  # Triggers diagnostic
                         "investment_plan": "BUY",
                         "red_flags": [],
-                        "pre_screening_result": "PASS"
+                        "pre_screening_result": "PASS",
                     }
 
-                    config = RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")})
+                    config = RunnableConfig(
+                        configurable={"context": Mock(trade_date="2025-12-13")}
+                    )
 
                     await consultant_node(state, config)
 
@@ -582,8 +606,8 @@ class TestStateMergeConflicts:
             invoke_calls.append(args)
             return mock_response
 
-        with patch('src.agents.invoke_with_rate_limit_handling', new=mock_invoke):
-            with patch('src.prompts.get_prompt') as mock_get_prompt:
+        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
                 mock_prompt.agent_name = "External Consultant"
@@ -601,14 +625,16 @@ class TestStateMergeConflicts:
                     "fundamentals_report": "Data",
                     "investment_debate_state": [  # List instead of dict!
                         {"history": "First attempt"},
-                        {"history": "Second attempt"}
+                        {"history": "Second attempt"},
                     ],
                     "investment_plan": "BUY",
                     "red_flags": [],
-                    "pre_screening_result": "PASS"
+                    "pre_screening_result": "PASS",
                 }
 
-                config = RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")})
+                config = RunnableConfig(
+                    configurable={"context": Mock(trade_date="2025-12-13")}
+                )
 
                 result = await consultant_node(state, config)
 
@@ -621,7 +647,10 @@ class TestStateMergeConflicts:
                 assert len(invoke_calls) > 0
                 message_content = invoke_calls[0][1][0].content
                 # Should show N/A since list is not a dict
-                assert "N/A" in message_content or "RESEARCH MANAGER SYNTHESIS" in message_content
+                assert (
+                    "N/A" in message_content
+                    or "RESEARCH MANAGER SYNTHESIS" in message_content
+                )
 
 
 class TestEndToEndInformationFlow:
@@ -656,52 +685,51 @@ class TestEndToEndInformationFlow:
                 "P/E ratio: 12.5": "Valuation metric",
                 "D/E ratio: 45%": "Leverage metric",
                 "Revenue growth: 23%": "Growth metric",
-                "DATA_BLOCK": "Mandatory structured data section"
+                "DATA_BLOCK": "Mandatory structured data section",
             },
             # From market analyst
             "market": {
                 "Daily volume: $2.5M USD": "Liquidity check",
-                "52-week high: $145": "Technical reference"
+                "52-week high: $145": "Technical reference",
             },
             # From news analyst
             "news": {
                 "Announced expansion into US market": "Growth catalyst",
-                "CEO confirmed Q4 earnings": "Upcoming event"
+                "CEO confirmed Q4 earnings": "Upcoming event",
             },
             # From sentiment analyst
             "sentiment": {
                 "Analyst coverage: 8 analysts": "Coverage metric",
-                "Average rating: BUY": "Consensus view"
+                "Average rating: BUY": "Consensus view",
             },
             # From research manager synthesis
             "synthesis": {
                 "RECOMMENDATION: BUY": "Final synthesis decision",
-                "Target position: 2.5%": "Position sizing"
+                "Target position: 2.5%": "Position sizing",
             },
             # From consultant review
             "consultant": {
                 "VALIDATION RESULT: APPROVED": "External validation",
-                "No material biases detected": "Quality check"
+                "No material biases detected": "Quality check",
             },
             # From risk debate
             "risk": {
                 "MODERATE risk": "Risk assessment",
-                "Stop loss: $95": "Risk parameter"
+                "Stop loss: $95": "Risk parameter",
             },
             # From red-flag pre-screening
             "red_flags": {
                 "Pre-Screening Result: PASS": "Gate check",
-                "Red Flags Detected: None": "Safety check"
-            }
+                "Red Flags Detected: None": "Safety check",
+            },
         }
 
         # Build state with all critical data points
         state = {
             "company_of_interest": "TEST",
             "company_name": "Test Company Ltd",
-
             # Fundamentals report with critical metrics
-            "fundamentals_report": f"""
+            "fundamentals_report": """
             FUNDAMENTALS ANALYSIS - TEST
 
             === DATA_BLOCK ===
@@ -713,9 +741,8 @@ class TestEndToEndInformationFlow:
 
             Company shows strong fundamentals with reasonable valuation.
             """,
-
             # Market report with liquidity data
-            "market_report": f"""
+            "market_report": """
             MARKET ANALYSIS - TEST
 
             Daily volume: $2.5M USD
@@ -723,9 +750,8 @@ class TestEndToEndInformationFlow:
             Current price: $120
             Trend: UPTREND
             """,
-
             # News report with catalysts
-            "news_report": f"""
+            "news_report": """
             NEWS ANALYSIS - TEST
 
             Recent developments:
@@ -733,18 +759,16 @@ class TestEndToEndInformationFlow:
             - CEO confirmed Q4 earnings beat expectations
             - New product launch scheduled for Q1 2026
             """,
-
             # Sentiment report with coverage
-            "sentiment_report": f"""
+            "sentiment_report": """
             SENTIMENT ANALYSIS - TEST
 
             Analyst coverage: 8 analysts
             Average rating: BUY
             Price target range: $130-$160
             """,
-
             # Research manager synthesis
-            "investment_plan": f"""
+            "investment_plan": """
             RESEARCH MANAGER SYNTHESIS
 
             RECOMMENDATION: BUY
@@ -753,9 +777,8 @@ class TestEndToEndInformationFlow:
 
             Rationale: Strong fundamentals, reasonable valuation, growth catalysts.
             """,
-
             # Consultant review
-            "consultant_review": f"""
+            "consultant_review": """
             EXTERNAL CONSULTANT REVIEW
 
             VALIDATION RESULT: APPROVED
@@ -764,19 +787,17 @@ class TestEndToEndInformationFlow:
             No material biases detected
             Research manager synthesis is well-supported by data.
             """,
-
             # Trader investment plan
-            "trader_investment_plan": f"""
+            "trader_investment_plan": """
             TRADER EXECUTION PLAN
 
             Action: BUY
             Entry: Market order at $120
             Stop loss: $95 (20% downside)
             """,
-
             # Risk debate (from risk team)
             "risk_debate_state": {
-                "history": f"""
+                "history": """
                 RISK TEAM DEBATE
 
                 Conservative Risk Analyst: MODERATE risk
@@ -790,10 +811,9 @@ class TestEndToEndInformationFlow:
                 - Strong growth justifies position
                 """
             },
-
             # Red-flag pre-screening results
             "pre_screening_result": "PASS",
-            "red_flags": []
+            "red_flags": [],
         }
 
         # Mock LLM and track what context is passed to portfolio manager
@@ -809,14 +829,16 @@ class TestEndToEndInformationFlow:
         mock_llm = Mock()
         pm_node = create_portfolio_manager_node(mock_llm, memory=None)
 
-        with patch('src.agents.invoke_with_rate_limit_handling', new=mock_pm_invoke):
-            with patch('src.prompts.get_prompt') as mock_get_prompt:
+        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_pm_invoke):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are the portfolio manager."
                 mock_prompt.agent_name = "Portfolio Manager"
                 mock_get_prompt.return_value = mock_prompt
 
-                config = RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")})
+                config = RunnableConfig(
+                    configurable={"context": Mock(trade_date="2025-12-13")}
+                )
 
                 # Execute portfolio manager node
                 result = await pm_node(state, config)
@@ -826,7 +848,9 @@ class TestEndToEndInformationFlow:
                 assert len(result["final_trade_decision"]) > 0
 
                 # Verify portfolio manager was invoked
-                assert len(pm_invoke_calls) > 0, "Portfolio manager should have been invoked"
+                assert (
+                    len(pm_invoke_calls) > 0
+                ), "Portfolio manager should have been invoked"
 
                 # Extract the context passed to portfolio manager
                 pm_context = pm_invoke_calls[0][1][0].content
@@ -837,11 +861,13 @@ class TestEndToEndInformationFlow:
                 for category, data_points in CRITICAL_DATA_POINTS.items():
                     for data_point, description in data_points.items():
                         if data_point not in pm_context:
-                            missing_data_points.append({
-                                "category": category,
-                                "data_point": data_point,
-                                "description": description
-                            })
+                            missing_data_points.append(
+                                {
+                                    "category": category,
+                                    "data_point": data_point,
+                                    "description": description,
+                                }
+                            )
 
                 # Assert no information was lost
                 if missing_data_points:
@@ -849,15 +875,23 @@ class TestEndToEndInformationFlow:
                     for missing in missing_data_points:
                         error_msg += f"  [{missing['category']}] {missing['data_point']} ({missing['description']})\n"
                     error_msg += f"\nPortfolio Manager Context:\n{pm_context}"
-                    assert False, error_msg
+                    raise AssertionError(error_msg)
 
                 # Verify specific critical sections are present
-                assert "FUNDAMENTALS ANALYST REPORT" in pm_context, "Fundamentals section missing"
+                assert (
+                    "FUNDAMENTALS ANALYST REPORT" in pm_context
+                ), "Fundamentals section missing"
                 assert "MARKET ANALYST REPORT" in pm_context, "Market section missing"
                 assert "NEWS ANALYST REPORT" in pm_context, "News section missing"
-                assert "SENTIMENT ANALYST REPORT" in pm_context, "Sentiment section missing"
-                assert "RESEARCH MANAGER RECOMMENDATION" in pm_context, "Research manager section missing"
-                assert "EXTERNAL CONSULTANT REVIEW" in pm_context, "Consultant section missing"
+                assert (
+                    "SENTIMENT ANALYST REPORT" in pm_context
+                ), "Sentiment section missing"
+                assert (
+                    "RESEARCH MANAGER RECOMMENDATION" in pm_context
+                ), "Research manager section missing"
+                assert (
+                    "EXTERNAL CONSULTANT REVIEW" in pm_context
+                ), "Consultant section missing"
                 assert "TRADER PROPOSAL" in pm_context, "Trader section missing"
                 assert "RISK TEAM DEBATE" in pm_context, "Risk section missing"
 
@@ -877,15 +911,13 @@ class TestEndToEndInformationFlow:
         state = {
             "company_of_interest": "RISKY",
             "company_name": "Risky Corp",
-
             # Critical red-flag information
             "pre_screening_result": "REJECT",
             "red_flags_detected": [
                 "Extreme leverage: D/E Ratio: 850% (>500% threshold)",
                 "Earnings quality issue: Positive NI $50M, Negative FCF -$120M",
-                "Refinancing risk: Interest coverage 1.2x (< 2.0x threshold)"
+                "Refinancing risk: Interest coverage 1.2x (< 2.0x threshold)",
             ],
-
             # Fundamentals report contains the detailed red flags
             "fundamentals_report": """
             FUNDAMENTALS ANALYSIS - RISKY
@@ -899,7 +931,6 @@ class TestEndToEndInformationFlow:
 
             WARNING: Multiple red flags detected. See pre-screening results.
             """,
-
             # Fast-fail path: these would normally be empty since debate is skipped
             "market_report": "",
             "news_report": "",
@@ -907,7 +938,7 @@ class TestEndToEndInformationFlow:
             "investment_plan": "REJECTED - Pre-screening failed",
             "consultant_review": "",
             "trader_investment_plan": "",
-            "risk_debate_state": {}
+            "risk_debate_state": {},
         }
 
         # Mock LLM and track context
@@ -922,14 +953,16 @@ class TestEndToEndInformationFlow:
         mock_llm = Mock()
         pm_node = create_portfolio_manager_node(mock_llm, memory=None)
 
-        with patch('src.agents.invoke_with_rate_limit_handling', new=mock_pm_invoke):
-            with patch('src.prompts.get_prompt') as mock_get_prompt:
+        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_pm_invoke):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are the portfolio manager."
                 mock_prompt.agent_name = "Portfolio Manager"
                 mock_get_prompt.return_value = mock_prompt
 
-                config = RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")})
+                config = RunnableConfig(
+                    configurable={"context": Mock(trade_date="2025-12-13")}
+                )
 
                 # Execute portfolio manager node
                 result = await pm_node(state, config)
@@ -943,11 +976,17 @@ class TestEndToEndInformationFlow:
 
                 # Verify ALL red-flag information is preserved
                 assert "850%" in pm_context, "D/E ratio red flag missing"
-                assert "Negative FCF" in pm_context or "-$120M" in pm_context, "FCF red flag missing"
-                assert "Interest coverage" in pm_context or "1.2x" in pm_context, "Interest coverage red flag missing"
+                assert (
+                    "Negative FCF" in pm_context or "-$120M" in pm_context
+                ), "FCF red flag missing"
+                assert (
+                    "Interest coverage" in pm_context or "1.2x" in pm_context
+                ), "Interest coverage red flag missing"
 
                 # Verify fundamentals report (which contains red flags) is present
                 assert "FUNDAMENTALS ANALYST REPORT" in pm_context
 
                 # Even in fast-fail, PM should have access to the rejection reason
-                assert "DATA_BLOCK" in pm_context, "Structured data section missing in fast-fail path"
+                assert (
+                    "DATA_BLOCK" in pm_context
+                ), "Structured data section missing in fast-fail path"

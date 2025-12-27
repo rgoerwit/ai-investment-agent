@@ -10,22 +10,22 @@ Compares old static rates vs new dynamic rates (mocked) to ensure:
 3. No calculation logic bugs introduced
 """
 
-import pytest
+from unittest.mock import AsyncMock, patch
+
 import pandas as pd
-from unittest.mock import patch, AsyncMock
+import pytest
 
 from src.liquidity_calculation_tool import calculate_liquidity_metrics
 
-
 # Old static rates from before FX normalization changes
 OLD_STATIC_RATES = {
-    'JPY': 0.0067,
-    'HKD': 0.129,
-    'TWD': 0.031,
-    'KRW': 0.00072,
-    'CNY': 0.138,
-    'GBP': 1.27,
-    'EUR': 1.05,
+    "JPY": 0.0067,
+    "HKD": 0.129,
+    "TWD": 0.031,
+    "KRW": 0.00072,
+    "CNY": 0.138,
+    "GBP": 1.27,
+    "EUR": 1.05,
 }
 
 
@@ -36,17 +36,20 @@ class TestBackwardsCompatibility:
     async def test_hkd_calculation_consistency(self):
         """Test HKD calculation is consistent with old static rate."""
         # HKD 60 * 100k volume * 0.129 old rate = $774k USD (PASS)
-        mock_hist = pd.DataFrame({
-            'Close': [60.0] * 60,
-            'Volume': [100_000] * 60
-        })
+        mock_hist = pd.DataFrame({"Close": [60.0] * 60, "Volume": [100_000] * 60})
 
-        with patch('src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices',
-                   return_value=mock_hist):
+        with patch(
+            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+            return_value=mock_hist,
+        ):
             # Mock FX rate to match old static rate
-            with patch('src.liquidity_calculation_tool.get_fx_rate',
-                       new=AsyncMock(return_value=(0.129, "yfinance"))):
-                result = await calculate_liquidity_metrics.ainvoke({"ticker": "0005.HK"})
+            with patch(
+                "src.liquidity_calculation_tool.get_fx_rate",
+                new=AsyncMock(return_value=(0.129, "yfinance")),
+            ):
+                result = await calculate_liquidity_metrics.ainvoke(
+                    {"ticker": "0005.HK"}
+                )
 
         # Should pass (>$500k threshold)
         assert "Status: PASS" in result
@@ -58,16 +61,17 @@ class TestBackwardsCompatibility:
     async def test_jpy_calculation_consistency(self):
         """Test JPY calculation is consistent with old static rate."""
         # JPY 2500 * 100k volume * 0.0067 old rate = $1,675,000 USD (PASS)
-        mock_hist = pd.DataFrame({
-            'Close': [2500.0] * 60,
-            'Volume': [100_000] * 60
-        })
+        mock_hist = pd.DataFrame({"Close": [2500.0] * 60, "Volume": [100_000] * 60})
 
-        with patch('src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices',
-                   return_value=mock_hist):
+        with patch(
+            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+            return_value=mock_hist,
+        ):
             # Mock FX rate to match old static rate
-            with patch('src.liquidity_calculation_tool.get_fx_rate',
-                       new=AsyncMock(return_value=(0.0067, "yfinance"))):
+            with patch(
+                "src.liquidity_calculation_tool.get_fx_rate",
+                new=AsyncMock(return_value=(0.0067, "yfinance")),
+            ):
                 result = await calculate_liquidity_metrics.ainvoke({"ticker": "7203.T"})
 
         # Should pass
@@ -80,17 +84,20 @@ class TestBackwardsCompatibility:
     async def test_twd_calculation_consistency(self):
         """Test TWD calculation is consistent with old static rate."""
         # TWD 500 * 100k volume * 0.031 old rate = $1,550,000 USD (PASS)
-        mock_hist = pd.DataFrame({
-            'Close': [500.0] * 60,
-            'Volume': [100_000] * 60
-        })
+        mock_hist = pd.DataFrame({"Close": [500.0] * 60, "Volume": [100_000] * 60})
 
-        with patch('src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices',
-                   return_value=mock_hist):
+        with patch(
+            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+            return_value=mock_hist,
+        ):
             # Mock FX rate to match old static rate
-            with patch('src.liquidity_calculation_tool.get_fx_rate',
-                       new=AsyncMock(return_value=(0.031, "yfinance"))):
-                result = await calculate_liquidity_metrics.ainvoke({"ticker": "2330.TW"})
+            with patch(
+                "src.liquidity_calculation_tool.get_fx_rate",
+                new=AsyncMock(return_value=(0.031, "yfinance")),
+            ):
+                result = await calculate_liquidity_metrics.ainvoke(
+                    {"ticker": "2330.TW"}
+                )
 
         # Should pass
         assert "Status: PASS" in result
@@ -104,24 +111,33 @@ class TestBackwardsCompatibility:
         # - New rate 0.128: 40 * 100k * 0.128 = $512,000 (PASS)
         # Both should pass - difference is small
 
-        mock_hist = pd.DataFrame({
-            'Close': [40.0] * 60,
-            'Volume': [100_000] * 60
-        })
+        mock_hist = pd.DataFrame({"Close": [40.0] * 60, "Volume": [100_000] * 60})
 
         # Test with old rate
-        with patch('src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices',
-                   return_value=mock_hist):
-            with patch('src.liquidity_calculation_tool.get_fx_rate',
-                       new=AsyncMock(return_value=(0.129, "fallback"))):
-                result_old = await calculate_liquidity_metrics.ainvoke({"ticker": "TEST.HK"})
+        with patch(
+            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+            return_value=mock_hist,
+        ):
+            with patch(
+                "src.liquidity_calculation_tool.get_fx_rate",
+                new=AsyncMock(return_value=(0.129, "fallback")),
+            ):
+                result_old = await calculate_liquidity_metrics.ainvoke(
+                    {"ticker": "TEST.HK"}
+                )
 
         # Test with new rate
-        with patch('src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices',
-                   return_value=mock_hist):
-            with patch('src.liquidity_calculation_tool.get_fx_rate',
-                       new=AsyncMock(return_value=(0.128, "yfinance"))):
-                result_new = await calculate_liquidity_metrics.ainvoke({"ticker": "TEST.HK"})
+        with patch(
+            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+            return_value=mock_hist,
+        ):
+            with patch(
+                "src.liquidity_calculation_tool.get_fx_rate",
+                new=AsyncMock(return_value=(0.128, "yfinance")),
+            ):
+                result_new = await calculate_liquidity_metrics.ainvoke(
+                    {"ticker": "TEST.HK"}
+                )
 
         # Both should pass (both above $500k threshold)
         assert "Status: PASS" in result_old
@@ -129,8 +145,17 @@ class TestBackwardsCompatibility:
 
         # Extract turnover values
         import re
-        turnover_old = int(re.search(r'Turnover \(USD\): \$(\d+,\d+)', result_old).group(1).replace(',', ''))
-        turnover_new = int(re.search(r'Turnover \(USD\): \$(\d+,\d+)', result_new).group(1).replace(',', ''))
+
+        turnover_old = int(
+            re.search(r"Turnover \(USD\): \$(\d+,\d+)", result_old)
+            .group(1)
+            .replace(",", "")
+        )
+        turnover_new = int(
+            re.search(r"Turnover \(USD\): \$(\d+,\d+)", result_new)
+            .group(1)
+            .replace(",", "")
+        )
 
         # Difference should be small (within 5%)
         diff_pct = abs(turnover_old - turnover_new) / turnover_old
@@ -148,21 +173,23 @@ class TestBackwardsCompatibility:
             assert fallback_rate is not None, f"Missing fallback rate for {currency}"
 
             diff_pct = abs(fallback_rate - old_rate) / old_rate
-            assert diff_pct < 0.15, \
-                f"{currency}: Fallback rate {fallback_rate} differs too much from old static {old_rate} ({diff_pct:.1%})"
+            assert (
+                diff_pct < 0.15
+            ), f"{currency}: Fallback rate {fallback_rate} differs too much from old static {old_rate} ({diff_pct:.1%})"
 
     @pytest.mark.asyncio
     async def test_usd_stocks_unchanged(self):
         """Test USD stocks work exactly as before (no FX conversion needed)."""
-        mock_hist = pd.DataFrame({
-            'Close': [150.0] * 60,
-            'Volume': [50_000_000] * 60
-        })
+        mock_hist = pd.DataFrame({"Close": [150.0] * 60, "Volume": [50_000_000] * 60})
 
-        with patch('src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices',
-                   return_value=mock_hist):
-            with patch('src.liquidity_calculation_tool.get_fx_rate',
-                       new=AsyncMock(return_value=(1.0, "identity"))):
+        with patch(
+            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+            return_value=mock_hist,
+        ):
+            with patch(
+                "src.liquidity_calculation_tool.get_fx_rate",
+                new=AsyncMock(return_value=(1.0, "identity")),
+            ):
                 result = await calculate_liquidity_metrics.ainvoke({"ticker": "AAPL"})
 
         # Should pass
@@ -175,15 +202,21 @@ class TestBackwardsCompatibility:
         """Test UK stocks pence adjustment still works correctly."""
         # 400 pence = £4.00
         # £4.00 * 100k volume * 1.27 FX = $508,000 USD
-        mock_hist = pd.DataFrame({
-            'Close': [400.0] * 60,  # 400 pence
-            'Volume': [100_000] * 60
-        })
+        mock_hist = pd.DataFrame(
+            {
+                "Close": [400.0] * 60,  # 400 pence
+                "Volume": [100_000] * 60,
+            }
+        )
 
-        with patch('src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices',
-                   return_value=mock_hist):
-            with patch('src.liquidity_calculation_tool.get_fx_rate',
-                       new=AsyncMock(return_value=(1.27, "yfinance"))):
+        with patch(
+            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+            return_value=mock_hist,
+        ):
+            with patch(
+                "src.liquidity_calculation_tool.get_fx_rate",
+                new=AsyncMock(return_value=(1.27, "yfinance")),
+            ):
                 result = await calculate_liquidity_metrics.ainvoke({"ticker": "VOD.L"})
 
         # Should pass
@@ -196,16 +229,24 @@ class TestBackwardsCompatibility:
     async def test_calculation_logic_unchanged(self):
         """Test that core calculation logic (avg volume * avg price * FX) is unchanged."""
         # Use different prices and volumes to test averaging
-        mock_hist = pd.DataFrame({
-            'Close': [100.0, 110.0, 90.0] * 20,  # avg = 100
-            'Volume': [80_000, 100_000, 120_000] * 20  # avg = 100,000
-        })
+        mock_hist = pd.DataFrame(
+            {
+                "Close": [100.0, 110.0, 90.0] * 20,  # avg = 100
+                "Volume": [80_000, 100_000, 120_000] * 20,  # avg = 100,000
+            }
+        )
 
-        with patch('src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices',
-                   return_value=mock_hist):
-            with patch('src.liquidity_calculation_tool.get_fx_rate',
-                       new=AsyncMock(return_value=(0.129, "yfinance"))):
-                result = await calculate_liquidity_metrics.ainvoke({"ticker": "TEST.HK"})
+        with patch(
+            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+            return_value=mock_hist,
+        ):
+            with patch(
+                "src.liquidity_calculation_tool.get_fx_rate",
+                new=AsyncMock(return_value=(0.129, "yfinance")),
+            ):
+                result = await calculate_liquidity_metrics.ainvoke(
+                    {"ticker": "TEST.HK"}
+                )
 
         # Expected: avg_price=100 * avg_volume=100,000 * fx=0.129 = $1,290,000
         assert "Status: PASS" in result
@@ -216,16 +257,19 @@ class TestBackwardsCompatibility:
         """Test that $500k USD threshold is unchanged."""
         # Test at exactly $500k (should FAIL - threshold is >500k, not >=)
         # Price $5 * volume 100k * FX 1.0 = $500,000
-        mock_hist = pd.DataFrame({
-            'Close': [5.0] * 60,
-            'Volume': [100_000] * 60
-        })
+        mock_hist = pd.DataFrame({"Close": [5.0] * 60, "Volume": [100_000] * 60})
 
-        with patch('src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices',
-                   return_value=mock_hist):
-            with patch('src.liquidity_calculation_tool.get_fx_rate',
-                       new=AsyncMock(return_value=(1.0, "identity"))):
-                result = await calculate_liquidity_metrics.ainvoke({"ticker": "BOUNDARY"})
+        with patch(
+            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+            return_value=mock_hist,
+        ):
+            with patch(
+                "src.liquidity_calculation_tool.get_fx_rate",
+                new=AsyncMock(return_value=(1.0, "identity")),
+            ):
+                result = await calculate_liquidity_metrics.ainvoke(
+                    {"ticker": "BOUNDARY"}
+                )
 
         # At exactly $500k, should FAIL (threshold is > not >=)
         assert "Status: FAIL" in result
@@ -240,16 +284,19 @@ class TestRealWorldScenarios:
     async def test_hsbc_real_world(self):
         """Test HSBC (0005.HK) with realistic prices and volume."""
         # HSBC typically trades around HKD 60-70, volume 10-20M shares
-        mock_hist = pd.DataFrame({
-            'Close': [65.0] * 60,
-            'Volume': [15_000_000] * 60
-        })
+        mock_hist = pd.DataFrame({"Close": [65.0] * 60, "Volume": [15_000_000] * 60})
 
-        with patch('src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices',
-                   return_value=mock_hist):
-            with patch('src.liquidity_calculation_tool.get_fx_rate',
-                       new=AsyncMock(return_value=(0.128, "yfinance"))):
-                result = await calculate_liquidity_metrics.ainvoke({"ticker": "0005.HK"})
+        with patch(
+            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+            return_value=mock_hist,
+        ):
+            with patch(
+                "src.liquidity_calculation_tool.get_fx_rate",
+                new=AsyncMock(return_value=(0.128, "yfinance")),
+            ):
+                result = await calculate_liquidity_metrics.ainvoke(
+                    {"ticker": "0005.HK"}
+                )
 
         # Should easily pass
         assert "Status: PASS" in result
@@ -260,16 +307,19 @@ class TestRealWorldScenarios:
     async def test_tsmc_real_world(self):
         """Test TSMC (2330.TW) with realistic prices and volume."""
         # TSMC typically trades around TWD 500-600, volume 20-40M shares
-        mock_hist = pd.DataFrame({
-            'Close': [550.0] * 60,
-            'Volume': [30_000_000] * 60
-        })
+        mock_hist = pd.DataFrame({"Close": [550.0] * 60, "Volume": [30_000_000] * 60})
 
-        with patch('src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices',
-                   return_value=mock_hist):
-            with patch('src.liquidity_calculation_tool.get_fx_rate',
-                       new=AsyncMock(return_value=(0.032, "yfinance"))):
-                result = await calculate_liquidity_metrics.ainvoke({"ticker": "2330.TW"})
+        with patch(
+            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+            return_value=mock_hist,
+        ):
+            with patch(
+                "src.liquidity_calculation_tool.get_fx_rate",
+                new=AsyncMock(return_value=(0.032, "yfinance")),
+            ):
+                result = await calculate_liquidity_metrics.ainvoke(
+                    {"ticker": "2330.TW"}
+                )
 
         # Should easily pass
         assert "Status: PASS" in result
@@ -280,15 +330,16 @@ class TestRealWorldScenarios:
     async def test_toyota_real_world(self):
         """Test Toyota (7203.T) with realistic prices and volume."""
         # Toyota typically trades around JPY 2500, volume 5-10M shares
-        mock_hist = pd.DataFrame({
-            'Close': [2500.0] * 60,
-            'Volume': [7_000_000] * 60
-        })
+        mock_hist = pd.DataFrame({"Close": [2500.0] * 60, "Volume": [7_000_000] * 60})
 
-        with patch('src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices',
-                   return_value=mock_hist):
-            with patch('src.liquidity_calculation_tool.get_fx_rate',
-                       new=AsyncMock(return_value=(0.0067, "yfinance"))):
+        with patch(
+            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+            return_value=mock_hist,
+        ):
+            with patch(
+                "src.liquidity_calculation_tool.get_fx_rate",
+                new=AsyncMock(return_value=(0.0067, "yfinance")),
+            ):
                 result = await calculate_liquidity_metrics.ainvoke({"ticker": "7203.T"})
 
         # Should easily pass

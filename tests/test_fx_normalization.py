@@ -9,24 +9,23 @@ Tests cover:
 5. Integration with financial data formats (yfinance/FMP schemas)
 """
 
+from unittest.mock import patch
+
 import pytest
-import asyncio
-from unittest.mock import patch, AsyncMock, MagicMock
-from typing import Any
 
 from src.fx_normalization import (
-    get_fx_rate_yfinance,
-    get_fx_rate_fallback,
+    FALLBACK_RATES_TO_USD,
     get_fx_rate,
-    normalize_to_usd,
+    get_fx_rate_fallback,
+    get_fx_rate_yfinance,
     normalize_financial_dict,
-    FALLBACK_RATES_TO_USD
+    normalize_to_usd,
 )
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TIER 1: FX Rate Fetching Tests
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 class TestFXRateFetching:
     """Test FX rate fetching from yfinance and fallback sources."""
@@ -94,8 +93,7 @@ class TestFXRateFetching:
     async def test_get_fx_rate_unified_fallback_to_hardcoded(self):
         """Test unified interface falls back to hardcoded rates."""
         # Mock yfinance failure
-        with patch('src.fx_normalization.get_fx_rate_yfinance',
-                   return_value=None):
+        with patch("src.fx_normalization.get_fx_rate_yfinance", return_value=None):
             rate, source = await get_fx_rate("JPY", "USD", allow_fallback=True)
 
             assert rate is not None
@@ -106,8 +104,7 @@ class TestFXRateFetching:
     async def test_get_fx_rate_unified_no_fallback(self):
         """Test unified interface respects allow_fallback=False."""
         # Mock yfinance failure
-        with patch('src.fx_normalization.get_fx_rate_yfinance',
-                   return_value=None):
+        with patch("src.fx_normalization.get_fx_rate_yfinance", return_value=None):
             rate, source = await get_fx_rate("ZZZ", "USD", allow_fallback=False)
 
             assert rate is None
@@ -126,6 +123,7 @@ class TestFXRateFetching:
 # ══════════════════════════════════════════════════════════════════════════════
 # TIER 2: Single Value Normalization Tests
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 class TestNormalizeToUSD:
     """Test single value normalization with metadata tracking."""
@@ -192,8 +190,8 @@ class TestNormalizeToUSD:
         value = 100.0
 
         # Mock both yfinance and fallback failure
-        with patch('src.fx_normalization.get_fx_rate_yfinance', return_value=None):
-            with patch('src.fx_normalization.get_fx_rate_fallback', return_value=None):
+        with patch("src.fx_normalization.get_fx_rate_yfinance", return_value=None):
+            with patch("src.fx_normalization.get_fx_rate_fallback", return_value=None):
                 result, metadata = await normalize_to_usd(value, "ZZZ")
 
                 # Should return original value
@@ -206,6 +204,7 @@ class TestNormalizeToUSD:
 # TIER 3: Full Dict Normalization Tests
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 class TestNormalizeFinancialDict:
     """Test full financial dict normalization (selective field conversion)."""
 
@@ -217,7 +216,7 @@ class TestNormalizeFinancialDict:
             "revenue_ttm": 500e9,  # Should convert
             "pe": 12.5,  # Should NOT convert (ratio)
             "profit_margin": 0.15,  # Should NOT convert (percentage)
-            "currency": "HKD"
+            "currency": "HKD",
         }
 
         # Save original values (dict is modified in place)
@@ -247,10 +246,7 @@ class TestNormalizeFinancialDict:
     @pytest.mark.asyncio
     async def test_normalize_dict_already_usd(self):
         """Test dict already in USD is not modified."""
-        data = {
-            "market_cap": 100e9,
-            "currency": "USD"
-        }
+        data = {"market_cap": 100e9, "currency": "USD"}
 
         result = await normalize_financial_dict(data)
 
@@ -265,7 +261,7 @@ class TestNormalizeFinancialDict:
             "marketCap": 1.2e12,  # yfinance uses camelCase
             "totalRevenue": 500e9,
             "freeCashflow": 50e9,
-            "currency": "HKD"
+            "currency": "HKD",
         }
 
         # Save original values
@@ -277,7 +273,9 @@ class TestNormalizeFinancialDict:
 
         # Check yfinance-style fields were converted (should be ~12.8% of original for HKD)
         assert result["marketCap"] < original_market_cap
-        assert result["marketCap"] < original_market_cap * 0.2  # Much smaller than original
+        assert (
+            result["marketCap"] < original_market_cap * 0.2
+        )  # Much smaller than original
         assert result["totalRevenue"] < original_revenue * 0.2
         assert result["freeCashflow"] < original_fcf * 0.2
 
@@ -287,7 +285,7 @@ class TestNormalizeFinancialDict:
         data = {
             "market_cap": 1e12,  # snake_case (FMP style)
             "totalRevenue": 500e9,  # camelCase (yfinance style)
-            "currency": "JPY"
+            "currency": "JPY",
         }
 
         # Save original values
@@ -304,11 +302,7 @@ class TestNormalizeFinancialDict:
     @pytest.mark.asyncio
     async def test_normalize_dict_preserves_nones(self):
         """Test None values are preserved during normalization."""
-        data = {
-            "market_cap": None,
-            "revenue_ttm": 500e9,
-            "currency": "JPY"
-        }
+        data = {"market_cap": None, "revenue_ttm": 500e9, "currency": "JPY"}
 
         # Save original value
         original_revenue = data["revenue_ttm"]
@@ -326,11 +320,13 @@ class TestNormalizeFinancialDict:
         """Test dict normalization when FX rate unavailable."""
         data = {
             "market_cap": 100e9,
-            "currency": "ZZZ"  # Invalid currency
+            "currency": "ZZZ",  # Invalid currency
         }
 
         # Mock FX failure
-        with patch('src.fx_normalization.get_fx_rate', return_value=(None, "unavailable")):
+        with patch(
+            "src.fx_normalization.get_fx_rate", return_value=(None, "unavailable")
+        ):
             result = await normalize_financial_dict(data)
 
             # Values should remain unchanged
@@ -357,6 +353,7 @@ class TestNormalizeFinancialDict:
 # TIER 4: Integration Tests (Realistic Scenarios)
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 class TestFXNormalizationIntegration:
     """Test normalization with realistic financial data structures."""
 
@@ -371,7 +368,7 @@ class TestFXNormalizationIntegration:
             "pb": 0.8,
             "profit_margin": 0.15,
             "debt_to_equity": 1.2,
-            "currency": "HKD"
+            "currency": "HKD",
         }
 
         result = await normalize_financial_dict(hsbc_data)
@@ -397,7 +394,7 @@ class TestFXNormalizationIntegration:
             "freeCashflow": 5e12,
             "trailingPE": 9.8,
             "priceToBook": 0.9,
-            "currency": "JPY"
+            "currency": "JPY",
         }
 
         result = await normalize_financial_dict(toyota_data)
@@ -415,7 +412,7 @@ class TestFXNormalizationIntegration:
         tsmc_data = {
             "market_cap": 16e12,  # ~$520B USD
             "revenue_ttm": 2e12,
-            "currency": "TWD"
+            "currency": "TWD",
         }
 
         result = await normalize_financial_dict(tsmc_data)
@@ -437,12 +434,15 @@ class TestFXNormalizationIntegration:
         tsmc_usd = await normalize_financial_dict(tsmc)
 
         # After normalization: TSMC > Toyota > HSBC (correct order)
-        assert tsmc_usd["market_cap"] > toyota_usd["market_cap"] > hsbc_usd["market_cap"]
+        assert (
+            tsmc_usd["market_cap"] > toyota_usd["market_cap"] > hsbc_usd["market_cap"]
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TIER 5: Edge Case Tests
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 class TestFXNormalizationEdgeCases:
     """Test edge cases and error handling."""
@@ -491,7 +491,7 @@ class TestFXNormalizationEdgeCases:
             "currency": "JPY",
             "ticker": "7203.T",  # Should be preserved
             "company_name": "Toyota",  # Should be preserved
-            "_source": "yfinance"  # Metadata field should be preserved
+            "_source": "yfinance",  # Metadata field should be preserved
         }
 
         result = await normalize_financial_dict(data)
@@ -503,10 +503,7 @@ class TestFXNormalizationEdgeCases:
     @pytest.mark.asyncio
     async def test_string_numbers_cause_no_crash(self):
         """Test string values don't cause crashes."""
-        data = {
-            "market_cap": "not a number",
-            "currency": "JPY"
-        }
+        data = {"market_cap": "not a number", "currency": "JPY"}
 
         # Should not crash, but won't convert the field
         result = await normalize_financial_dict(data)
@@ -516,6 +513,7 @@ class TestFXNormalizationEdgeCases:
 # ══════════════════════════════════════════════════════════════════════════════
 # TIER 6: Performance Tests
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 class TestFXNormalizationPerformance:
     """Test performance characteristics of FX normalization."""

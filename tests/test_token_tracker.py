@@ -9,18 +9,15 @@ Tests the token tracking functionality:
 - Statistics aggregation and reporting
 """
 
-import pytest
-from unittest.mock import Mock, MagicMock, patch
-from datetime import datetime
-from langchain_core.outputs import LLMResult, ChatGeneration
 from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, LLMResult
 
 from src.token_tracker import (
-    TokenUsage,
     AgentTokenStats,
     TokenTracker,
     TokenTrackingCallback,
-    get_tracker
+    TokenUsage,
+    get_tracker,
 )
 
 
@@ -35,7 +32,7 @@ class TestTokenUsage:
             model_name="gemini-2.5-flash",
             prompt_tokens=1000,
             completion_tokens=500,
-            total_tokens=1500
+            total_tokens=1500,
         )
 
         assert usage.agent_name == "test_agent"
@@ -52,7 +49,7 @@ class TestTokenUsage:
             model_name="gemini-2.5-flash",
             prompt_tokens=1_000_000,  # 1M tokens
             completion_tokens=1_000_000,  # 1M tokens
-            total_tokens=2_000_000
+            total_tokens=2_000_000,
         )
 
         # Expected: $0.30 + $2.50 = $2.80
@@ -67,7 +64,7 @@ class TestTokenUsage:
             model_name="gemini-3-pro-preview",
             prompt_tokens=500_000,  # 0.5M tokens
             completion_tokens=250_000,  # 0.25M tokens
-            total_tokens=750_000
+            total_tokens=750_000,
         )
 
         # Expected: (0.5 * $2.00) + (0.25 * $12.00) = $1.00 + $3.00 = $4.00
@@ -82,7 +79,7 @@ class TestTokenUsage:
             model_name="gemini-2.0-flash-exp",
             prompt_tokens=2_000_000,  # 2M tokens
             completion_tokens=1_000_000,  # 1M tokens
-            total_tokens=3_000_000
+            total_tokens=3_000_000,
         )
 
         # Paid tier pricing: (2 * $0.30) + (1 * $2.50) = $0.60 + $2.50 = $3.10
@@ -97,7 +94,7 @@ class TestTokenUsage:
             model_name="gemini-2.5-flash-lite",
             prompt_tokens=1_000_000,  # 1M tokens
             completion_tokens=1_000_000,  # 1M tokens
-            total_tokens=2_000_000
+            total_tokens=2_000_000,
         )
 
         # Expected: $0.10 + $0.40 = $0.50
@@ -112,7 +109,7 @@ class TestTokenUsage:
             model_name="unknown-model-xyz",
             prompt_tokens=1_000_000,  # 1M tokens
             completion_tokens=1_000_000,  # 1M tokens
-            total_tokens=2_000_000
+            total_tokens=2_000_000,
         )
 
         # Should default to Flash pricing: $0.30 + $2.50 = $2.80
@@ -127,7 +124,7 @@ class TestTokenUsage:
             model_name="gemini-2.5-flash",
             prompt_tokens=0,
             completion_tokens=0,
-            total_tokens=0
+            total_tokens=0,
         )
 
         assert usage.estimated_cost_usd == 0.0
@@ -139,8 +136,8 @@ class TestTokenUsage:
             agent_name="test_agent",
             model_name="gemini-2.5-flash",
             prompt_tokens=100,  # 0.0001M tokens
-            completion_tokens=50,   # 0.00005M tokens
-            total_tokens=150
+            completion_tokens=50,  # 0.00005M tokens
+            total_tokens=150,
         )
 
         # Expected: (0.0001 * $0.30) + (0.00005 * $2.50) = $0.00003 + $0.000125 = $0.000155
@@ -173,7 +170,7 @@ class TestAgentTokenStats:
             model_name="gemini-2.5-flash",
             prompt_tokens=1000,
             completion_tokens=500,
-            total_tokens=1500
+            total_tokens=1500,
         )
 
         stats.add_usage(usage)
@@ -194,7 +191,7 @@ class TestAgentTokenStats:
             model_name="gemini-2.5-flash",
             prompt_tokens=1000,
             completion_tokens=500,
-            total_tokens=1500
+            total_tokens=1500,
         )
 
         usage2 = TokenUsage(
@@ -203,7 +200,7 @@ class TestAgentTokenStats:
             model_name="gemini-2.5-flash",
             prompt_tokens=2000,
             completion_tokens=1000,
-            total_tokens=3000
+            total_tokens=3000,
         )
 
         stats.add_usage(usage1)
@@ -226,7 +223,7 @@ class TestAgentTokenStats:
             model_name="gemini-2.5-flash",
             prompt_tokens=1_000_000,  # $0.30
             completion_tokens=1_000_000,  # $2.50
-            total_tokens=2_000_000
+            total_tokens=2_000_000,
         )
 
         usage2 = TokenUsage(
@@ -235,7 +232,7 @@ class TestAgentTokenStats:
             model_name="gemini-2.5-flash",
             prompt_tokens=500_000,  # $0.15
             completion_tokens=500_000,  # $1.25
-            total_tokens=1_000_000
+            total_tokens=1_000_000,
         )
 
         stats.add_usage(usage1)
@@ -272,7 +269,7 @@ class TestTokenTracker:
             agent_name="new_agent",
             model_name="gemini-2.5-flash",
             prompt_tokens=1000,
-            completion_tokens=500
+            completion_tokens=500,
         )
 
         assert "new_agent" in tracker.agent_stats
@@ -290,14 +287,14 @@ class TestTokenTracker:
             agent_name="test_agent",
             model_name="gemini-2.5-flash",
             prompt_tokens=1000,
-            completion_tokens=500
+            completion_tokens=500,
         )
 
         tracker.record_usage(
             agent_name="test_agent",
             model_name="gemini-2.5-flash",
             prompt_tokens=2000,
-            completion_tokens=1000
+            completion_tokens=1000,
         )
 
         assert tracker.agent_stats["test_agent"].total_calls == 2
@@ -314,7 +311,7 @@ class TestTokenTracker:
             agent_name="test_agent",
             model_name="gemini-2.5-flash",
             prompt_tokens=1000,
-            completion_tokens=500
+            completion_tokens=500,
         )
 
         stats = tracker.get_agent_stats("test_agent")
@@ -356,14 +353,14 @@ class TestTokenTracker:
             agent_name="agent1",
             model_name="gemini-2.5-flash",
             prompt_tokens=1000,
-            completion_tokens=500
+            completion_tokens=500,
         )
 
         tracker.record_usage(
             agent_name="agent2",
             model_name="gemini-3-pro-preview",
             prompt_tokens=2000,
-            completion_tokens=1000
+            completion_tokens=1000,
         )
 
         stats = tracker.get_total_stats()
@@ -385,7 +382,7 @@ class TestTokenTracker:
             agent_name="test_agent",
             model_name="gemini-2.5-flash",
             prompt_tokens=1000,
-            completion_tokens=500
+            completion_tokens=500,
         )
 
         # Reset
@@ -400,8 +397,8 @@ class TestTokenTracker:
 
     def test_quiet_mode_suppresses_logging(self):
         """Test that quiet mode suppresses all logging from TokenTracker."""
-        import logging
         import io
+        import logging
 
         # Create a log handler to capture logs
         log_capture = io.StringIO()
@@ -423,7 +420,7 @@ class TestTokenTracker:
             agent_name="test_agent",
             model_name="gemini-2.5-flash",
             prompt_tokens=1000,
-            completion_tokens=500
+            completion_tokens=500,
         )
 
         # Print summary should not log in quiet mode
@@ -450,7 +447,7 @@ class TestTokenTracker:
             agent_name="quiet_test_agent",
             model_name="gemini-2.5-flash",
             prompt_tokens=5000,
-            completion_tokens=2500
+            completion_tokens=2500,
         )
 
         # Verify data is still tracked despite quiet mode
@@ -474,6 +471,7 @@ class TestTokenTracker:
 
         # Reset the global tracker to None to simulate fresh import
         import src.token_tracker as tt_module
+
         old_tracker = tt_module._global_tracker
         tt_module._global_tracker = None
 
@@ -489,14 +487,14 @@ class TestTokenTracker:
 
             # Verify tracker is initialized
             assert tracker is not None
-            assert tracker._quiet_mode == True
+            assert tracker._quiet_mode
 
             # Record some usage to verify tracker still works
             tracker.record_usage(
                 agent_name="init_test_agent",
                 model_name="gemini-2.5-flash",
                 prompt_tokens=100,
-                completion_tokens=50
+                completion_tokens=50,
             )
 
             # Verify data is tracked
@@ -523,7 +521,9 @@ class TestTokenTrackingCallback:
     def test_callback_with_custom_tracker(self):
         """Test creating callback with custom tracker instance."""
         custom_tracker = TokenTracker()
-        callback = TokenTrackingCallback(agent_name="test_agent", tracker=custom_tracker)
+        callback = TokenTrackingCallback(
+            agent_name="test_agent", tracker=custom_tracker
+        )
 
         assert callback.tracker is custom_tracker
 
@@ -539,11 +539,8 @@ class TestTokenTrackingCallback:
             generations=[],
             llm_output={
                 "model_name": "gemini-2.5-flash",
-                "usage_metadata": {
-                    "input_tokens": 1000,
-                    "output_tokens": 500
-                }
-            }
+                "usage_metadata": {"input_tokens": 1000, "output_tokens": 500},
+            },
         )
 
         callback.on_llm_end(llm_result)
@@ -567,11 +564,8 @@ class TestTokenTrackingCallback:
             generations=[],
             llm_output={
                 "model_name": "gemini-2.5-flash",
-                "token_usage": {
-                    "prompt_tokens": 2000,
-                    "completion_tokens": 1000
-                }
-            }
+                "token_usage": {"prompt_tokens": 2000, "completion_tokens": 1000},
+            },
         )
 
         callback.on_llm_end(llm_result)
@@ -591,10 +585,7 @@ class TestTokenTrackingCallback:
         callback = TokenTrackingCallback(agent_name="test_agent", tracker=tracker)
 
         # Mock LLM response with no llm_output
-        llm_result = LLMResult(
-            generations=[],
-            llm_output=None
-        )
+        llm_result = LLMResult(generations=[], llm_output=None)
 
         callback.on_llm_end(llm_result)
 
@@ -615,7 +606,7 @@ class TestTokenTrackingCallback:
             llm_output={
                 "model_name": "gemini-2.5-flash"
                 # No usage_metadata or token_usage
-            }
+            },
         )
 
         callback.on_llm_end(llm_result)
@@ -636,11 +627,8 @@ class TestTokenTrackingCallback:
             generations=[],
             llm_output={
                 "model_name": "gemini-2.5-flash",
-                "usage_metadata": {
-                    "input_tokens": 0,
-                    "output_tokens": 0
-                }
-            }
+                "usage_metadata": {"input_tokens": 0, "output_tokens": 0},
+            },
         )
 
         callback.on_llm_end(llm_result)
@@ -663,23 +651,18 @@ class TestTokenTrackingCallback:
             usage_metadata={
                 "input_tokens": 1500,
                 "output_tokens": 800,
-                "total_tokens": 2300
+                "total_tokens": 2300,
             },
-            response_metadata={
-                "model_name": "gemini-2.5-flash"
-            }
+            response_metadata={"model_name": "gemini-2.5-flash"},
         )
 
         generation = ChatGeneration(
-            message=message,
-            generation_info={
-                "model_name": "gemini-2.5-flash"
-            }
+            message=message, generation_info={"model_name": "gemini-2.5-flash"}
         )
 
         llm_result = LLMResult(
             generations=[[generation]],
-            llm_output={}  # Empty, as Gemini doesn't populate this
+            llm_output={},  # Empty, as Gemini doesn't populate this
         )
 
         callback.on_llm_end(llm_result)
@@ -704,7 +687,7 @@ class TestCostAccuracy:
             model_name="gemini-2.5-flash",
             prompt_tokens=50_000,  # 50k input
             completion_tokens=10_000,  # 10k output
-            total_tokens=60_000
+            total_tokens=60_000,
         )
 
         # Expected: (0.05 * $0.30) + (0.01 * $2.50) = $0.015 + $0.025 = $0.04
@@ -719,7 +702,7 @@ class TestCostAccuracy:
             model_name="gemini-3-pro-preview",
             prompt_tokens=100_000,  # 100k input
             completion_tokens=20_000,  # 20k output
-            total_tokens=120_000
+            total_tokens=120_000,
         )
 
         # Expected: (0.1 * $2.00) + (0.02 * $12.00) = $0.20 + $0.24 = $0.44
@@ -734,7 +717,7 @@ class TestCostAccuracy:
             model_name="gemini-2.5-flash",
             prompt_tokens=1_000_000,
             completion_tokens=1_000_000,
-            total_tokens=2_000_000
+            total_tokens=2_000_000,
         )
 
         flash_lite_usage = TokenUsage(
@@ -743,7 +726,7 @@ class TestCostAccuracy:
             model_name="gemini-2.5-flash-lite",
             prompt_tokens=1_000_000,
             completion_tokens=1_000_000,
-            total_tokens=2_000_000
+            total_tokens=2_000_000,
         )
 
         # Flash: $0.30 + $2.50 = $2.80
@@ -751,5 +734,7 @@ class TestCostAccuracy:
         # Savings: $2.30 (82% cheaper)
 
         assert flash_usage.estimated_cost_usd > flash_lite_usage.estimated_cost_usd
-        savings_percentage = (1 - flash_lite_usage.estimated_cost_usd / flash_usage.estimated_cost_usd) * 100
+        savings_percentage = (
+            1 - flash_lite_usage.estimated_cost_usd / flash_usage.estimated_cost_usd
+        ) * 100
         assert savings_percentage > 80  # At least 80% cheaper

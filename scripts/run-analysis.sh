@@ -106,7 +106,7 @@ cd "$PROJECT_ROOT" || exit 1
 # Check if .env file exists
 if [[ ! -f ".env" ]]; then
     print_warning ".env file not found"
-    
+
     if [[ -f ".env.example" ]]; then
         print_info "Creating .env from .env.example..."
         cp .env.example .env

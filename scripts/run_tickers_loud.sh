@@ -140,16 +140,16 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     if [[ -z "$line" ]] || [[ "$line" =~ ^[[:space:]]*# ]]; then
         continue
     fi
-    
+
     # Trim whitespace
     ticker=$(echo "$line" | xargs)
-    
+
     if [[ -z "$ticker" ]]; then
         continue
     fi
-    
+
     processed=$((processed + 1))
-    
+
     echo "========================================"
     print_info "[$processed/$ticker_count] Analyzing: $ticker"
     echo "========================================"
@@ -162,15 +162,15 @@ while IFS= read -r line || [[ -n "$line" ]]; do
         print_error "Failed: $ticker (check logs and $OUTPUT_FILE for details)"
         failed=$((failed + 1))
     fi
-    
+
     # Add separator to output file
     echo "" >> "$OUTPUT_FILE"
     echo "---" >> "$OUTPUT_FILE"
     echo "" >> "$OUTPUT_FILE"
-    
+
     # Small delay to allow connections to close cleanly
     sleep 2
-    
+
 done < "$INPUT_FILE"
 
 echo ""

@@ -163,7 +163,7 @@ EX-US SPECIFIC CHECKS
 ─────────────────────
 US Revenue Analysis: Not disclosed (Status: NOT AVAILABLE)
 
-ADR Status: HSBC Holdings plc has a Sponsored Level 1 ADR (HSNCY) 
+ADR Status: HSBC Holdings plc has a Sponsored Level 1 ADR (HSNCY)
 trading on the OTCQX.
 Thesis Impact: MODERATE_CONCERN - Sponsored OTC ADR exists, indicating
 some US investor awareness.

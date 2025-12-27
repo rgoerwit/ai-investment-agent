@@ -7,14 +7,16 @@ Verifies that optional data sources gracefully handle missing API keys:
 3. No crashes or exceptions
 """
 
-import pytest
-import os
 import logging
-from unittest.mock import patch, MagicMock
+import os
+from unittest.mock import MagicMock, patch
+
+import pytest
+
 from src.data.alpha_vantage_fetcher import AlphaVantageFetcher, get_av_fetcher
 from src.data.eodhd_fetcher import EODHDFetcher, get_eodhd_fetcher
-from src.data.fmp_fetcher import FMPFetcher, get_fmp_fetcher
 from src.data.fetcher import SmartMarketDataFetcher
+from src.data.fmp_fetcher import FMPFetcher, get_fmp_fetcher
 
 
 class TestAlphaVantageMissingKey:
@@ -139,9 +141,9 @@ class TestSmartFetcherMissingKeys:
     """Test SmartMarketDataFetcher with missing optional API keys."""
 
     @patch.dict(os.environ, {}, clear=True)
-    @patch('src.data.fetcher.ALPHA_VANTAGE_AVAILABLE', False)
-    @patch('src.data.fetcher.EODHD_AVAILABLE', False)
-    @patch('src.data.fetcher.FMP_AVAILABLE', False)
+    @patch("src.data.fetcher.ALPHA_VANTAGE_AVAILABLE", False)
+    @patch("src.data.fetcher.EODHD_AVAILABLE", False)
+    @patch("src.data.fetcher.FMP_AVAILABLE", False)
     def test_initialization_without_optional_keys(self):
         """Verify SmartMarketDataFetcher initializes correctly without optional keys."""
         fetcher = SmartMarketDataFetcher()
@@ -152,13 +154,13 @@ class TestSmartFetcherMissingKeys:
         assert fetcher.fmp_fetcher is None
 
         # Stats should still be initialized
-        assert 'alpha_vantage' in fetcher.stats['sources']
-        assert 'eodhd' in fetcher.stats['sources']
-        assert 'fmp' in fetcher.stats['sources']
+        assert "alpha_vantage" in fetcher.stats["sources"]
+        assert "eodhd" in fetcher.stats["sources"]
+        assert "fmp" in fetcher.stats["sources"]
 
     @pytest.mark.asyncio
-    @patch('src.data.fetcher.ALPHA_VANTAGE_AVAILABLE', True)
-    @patch('src.data.fetcher.get_av_fetcher')
+    @patch("src.data.fetcher.ALPHA_VANTAGE_AVAILABLE", True)
+    @patch("src.data.fetcher.get_av_fetcher")
     async def test_av_fallback_skipped_when_unavailable(self, mock_get_av_fetcher):
         """Verify Alpha Vantage fallback is skipped when API key missing."""
         mock_av = MagicMock()
@@ -173,9 +175,11 @@ class TestSmartFetcherMissingKeys:
         mock_av.get_financial_metrics.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch('src.data.fetcher.EODHD_AVAILABLE', True)
-    @patch('src.data.fetcher.get_eodhd_fetcher')
-    async def test_eodhd_fallback_skipped_when_unavailable(self, mock_get_eodhd_fetcher):
+    @patch("src.data.fetcher.EODHD_AVAILABLE", True)
+    @patch("src.data.fetcher.get_eodhd_fetcher")
+    async def test_eodhd_fallback_skipped_when_unavailable(
+        self, mock_get_eodhd_fetcher
+    ):
         """Verify EODHD fallback is skipped when API key missing."""
         mock_eodhd = MagicMock()
         mock_eodhd.is_available.return_value = False  # No API key
@@ -189,8 +193,8 @@ class TestSmartFetcherMissingKeys:
         mock_eodhd.get_financial_metrics.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch('src.data.fetcher.FMP_AVAILABLE', True)
-    @patch('src.data.fetcher.get_fmp_fetcher')
+    @patch("src.data.fetcher.FMP_AVAILABLE", True)
+    @patch("src.data.fetcher.get_fmp_fetcher")
     async def test_fmp_fallback_skipped_when_unavailable(self, mock_get_fmp_fetcher):
         """Verify FMP fallback is skipped when API key missing."""
         mock_fmp = MagicMock()

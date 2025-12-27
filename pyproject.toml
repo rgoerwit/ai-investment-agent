@@ -33,7 +33,7 @@ langchain-tavily = ">=0.2.0,<1.0.0"
 tavily-python = ">=0.5.0,<1.0.0"
 
 # Financial data
-yfinance = ">=0.2.40"
+yfinance = ">=1.0"  # yfinance 1.0 released Dec 2025
 # ADDED: yahooquery for multi-source fallback
 yahooquery = ">=2.3.0"
 finnhub-python = ">=2.4.20"
@@ -88,7 +88,7 @@ build-backend = "poetry.core.masonry.api"
 [tool.black]
 line-length = 88
 target-version = ['py310', 'py311', 'py312']
-include = '\.pyi?$' 
+include = '\.pyi?$'
 
 [tool.ruff]
 line-length = 88
@@ -96,7 +96,23 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "C4", "UP"]
-ignore = ["E501", "B008", "C901"]
+ignore = [
+    "E501",  # Line too long (handled by formatter)
+    "E701",  # Multiple statements on one line - used intentionally in dispatch tables
+    "E402",  # Module level import not at top - intentional in some files
+    "B008",  # Function call in default argument
+    "C901",  # Function too complex
+]
+
+[tool.ruff.lint.per-file-ignores]
+# health_check.py imports modules to verify they're installed
+"src/health_check.py" = ["F401"]
+# Tests often have unused variables for side effects (patches, mocks)
+# F401: Imports for availability checks (try/except ImportError pattern)
+"tests/*.py" = ["F841", "F401"]
+"tests/**/*.py" = ["F841", "F401"]
+# Examples may have demonstration code
+"examples/*.py" = ["B018"]
 
 [tool.mypy]
 python_version = "3.10"

@@ -4,25 +4,25 @@ Includes fixes for News Analyst alignment and local domain searching.
 Updated for LangChain/LangGraph Fall 2025 standards.
 """
 
-import os
 import asyncio
-import math
 import html
-from typing import Any, Annotated
+import math
+from typing import Annotated, Any
+
 import pandas as pd
 import structlog
 import yfinance as yf
 from langchain_core.tools import tool
 from stockstats import wrap as stockstats_wrap
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 from src.config import config
-# FIX: Use dynamic ticker utils for normalization and name cleaning
-from src.ticker_utils import normalize_ticker, normalize_company_name
+from src.data.fetcher import fetcher as market_data_fetcher
 from src.enhanced_sentiment_toolkit import get_multilingual_sentiment_search
 from src.liquidity_calculation_tool import calculate_liquidity_metrics
 from src.stocktwits_api import StockTwitsAPI
-from src.data.fetcher import fetcher as market_data_fetcher
+
+# FIX: Use dynamic ticker utils for normalization and name cleaning
+from src.ticker_utils import normalize_company_name, normalize_ticker
 
 logger = structlog.get_logger(__name__)
 stocktwits_api = StockTwitsAPI()
@@ -37,20 +37,29 @@ _tavily_api_key = config.get_tavily_api_key()
 if _tavily_api_key:
     try:
         from langchain_tavily import TavilySearch
+
         tavily_tool = TavilySearch(max_results=5, tavily_api_key=_tavily_api_key)
         TAVILY_AVAILABLE = True
     except ImportError:
         try:
             from langchain_community.tools import TavilySearchResults
-            tavily_tool = TavilySearchResults(max_results=5, tavily_api_key=_tavily_api_key)
+
+            tavily_tool = TavilySearchResults(
+                max_results=5, tavily_api_key=_tavily_api_key
+            )
             TAVILY_AVAILABLE = True
         except ImportError:
             try:
                 from langchain_community.tools.tavily_search import TavilySearchResults
-                tavily_tool = TavilySearchResults(max_results=5, tavily_api_key=_tavily_api_key)
+
+                tavily_tool = TavilySearchResults(
+                    max_results=5, tavily_api_key=_tavily_api_key
+                )
                 TAVILY_AVAILABLE = True
             except ImportError:
-                logger.warning("Tavily tools not available. Install langchain-tavily or langchain-community.")
+                logger.warning(
+                    "Tavily tools not available. Install langchain-tavily or langchain-community."
+                )
 else:
     logger.warning("TAVILY_API_KEY not set. Tavily tools disabled.")
 
@@ -62,6 +71,7 @@ def _truncate_tavily_result(result: Any, max_chars: int | None = None) -> str:
     Uses TAVILY_MAX_CHARS from config (default 7000 chars ~1750 tokens).
     """
     from src.config import config
+
     if max_chars is None:
         max_chars = config.tavily_max_chars
 
@@ -81,58 +91,68 @@ async def fetch_with_timeout(coroutine, timeout_seconds=10, error_msg="Timeout")
         logger.warning(f"YFINANCE ERROR: {error_msg} - {str(e)}")
         return None
 
+
 async def extract_company_name_async(ticker_obj) -> str:
     """Robust company name extraction with dynamic cleaning."""
     ticker_str = ticker_obj.ticker
-    
+
     try:
         # 1. Try yfinance fast_info (no network call if cached)
-        if hasattr(ticker_obj, 'fast_info'):
+        if hasattr(ticker_obj, "fast_info"):
             # fast_info is lazy, accessing it triggers load
             pass
-            
+
         # 2. Try standard info with timeout
         info = await fetch_with_timeout(
-            asyncio.to_thread(lambda: ticker_obj.info), 
-            timeout_seconds=5, error_msg="Name Extraction"
+            asyncio.to_thread(lambda: ticker_obj.info),
+            timeout_seconds=5,
+            error_msg="Name Extraction",
         )
-        
+
         if info:
-            long_name = info.get('longName') or info.get('shortName')
+            long_name = info.get("longName") or info.get("shortName")
             if long_name:
                 # Use dynamic cleaner to strip legal suffixes
                 return normalize_company_name(long_name)
-                
+
         return ticker_str
-        
+
     except Exception:
         return ticker_str
 
-def extract_from_dataframe(df: pd.DataFrame, field_name: str, row_index: int = 0) -> float | None:
-    if df is None or df.empty: return None
+
+def extract_from_dataframe(
+    df: pd.DataFrame, field_name: str, row_index: int = 0
+) -> float | None:
+    if df is None or df.empty:
+        return None
     try:
         if field_name in df.index:
             val = df.loc[field_name].iloc[row_index]
             return float(val) if not pd.isna(val) else None
         return None
-    except Exception: return None
+    except Exception:
+        return None
+
 
 # --- DATA UTILS ---
+
 
 def _safe_float(value: Any) -> float | None:
     """Safely convert value to float, handling None, strings, NaN, and Inf."""
     try:
-        if value is None: 
+        if value is None:
             return None
         # Handle percentage strings "15%"
         if isinstance(value, str):
-            value = value.replace('%', '').replace(',', '')
+            value = value.replace("%", "").replace(",", "")
         f = float(value)
-        if math.isnan(f) or math.isinf(f): 
+        if math.isnan(f) or math.isinf(f):
             return None
         return f
     except (ValueError, TypeError):
         return None
+
 
 def _format_val(value: Any, fmt: str = "{:.2f}", default: str = "N/A") -> str:
     """Format a value safely, returning default if invalid."""
@@ -141,10 +161,10 @@ def _format_val(value: Any, fmt: str = "{:.2f}", default: str = "N/A") -> str:
         return default
     return fmt.format(val)
 
+
 # --- DATA TOOLS ---
 
 import json
-import math
 
 
 def _sanitize_for_json(data: dict) -> dict:
@@ -161,19 +181,23 @@ def _sanitize_for_json(data: dict) -> dict:
         elif isinstance(value, list):
             # Sanitize list elements
             sanitized[key] = [
-                _sanitize_for_json(v) if isinstance(v, dict) else v
-                for v in value
+                _sanitize_for_json(v) if isinstance(v, dict) else v for v in value
             ]
         elif isinstance(value, float):
             # Handle infinity and NaN - convert to None for valid JSON
             if math.isinf(value) or math.isnan(value):
                 sanitized[key] = None
             # Handle negative prices (data corruption)
-            elif key == 'currentPrice' and value < 0:
+            elif key == "currentPrice" and value < 0:
                 sanitized[key] = None
             else:
                 sanitized[key] = value
-        elif isinstance(value, str) and key != '_data_source' and key != 'currency' and key != 'symbol':
+        elif (
+            isinstance(value, str)
+            and key != "_data_source"
+            and key != "currency"
+            and key != "symbol"
+        ):
             # Try to convert string numbers to float
             try:
                 sanitized[key] = float(value)
@@ -191,8 +215,8 @@ async def get_financial_metrics(ticker: Annotated[str, "Stock ticker symbol"]) -
         normalized_symbol = normalize_ticker(ticker)
         data = await market_data_fetcher.get_financial_metrics(normalized_symbol)
 
-        if 'error' in data:
-            return json.dumps({"error": data.get('error')})
+        if "error" in data:
+            return json.dumps({"error": data.get("error")})
 
         # Sanitize data for valid JSON output (handle inf/nan/negative prices)
         sanitized_data = _sanitize_for_json(data)
@@ -202,41 +226,47 @@ async def get_financial_metrics(ticker: Annotated[str, "Stock ticker symbol"]) -
     except Exception as e:
         return json.dumps({"error": str(e)})
 
+
 @tool
 async def get_news(
     ticker: Annotated[str, "Stock ticker symbol"],
-    search_query: Annotated[str, "Specific query"] = None
+    search_query: Annotated[str, "Specific query"] = None,
 ) -> str:
     """
     Get recent news using Tavily with ENHANCED multi-query strategy.
     Structures output for News Analyst prompt ingestion.
     """
-    if not tavily_tool: return "News tool unavailable."
-    
+    if not tavily_tool:
+        return "News tool unavailable."
+
     try:
         normalized_symbol = normalize_ticker(ticker)
         ticker_obj = yf.Ticker(normalized_symbol)
         company_name = await extract_company_name_async(ticker_obj)
-        
+
         # Local Domain Mapping
         local_source_hints = {
             ".KS": "site:pulsenews.co.kr OR site:koreatimes.co.kr OR site:koreaherald.com",
             ".HK": "site:scmp.com OR site:thestandard.com.hk OR site:ejinsight.com",
-            ".T":  "site:japantimes.co.jp OR site:nikkei.com",
-            ".L":  "site:ft.com OR site:bbc.co.uk/news/business",
+            ".T": "site:japantimes.co.jp OR site:nikkei.com",
+            ".L": "site:ft.com OR site:bbc.co.uk/news/business",
             ".PA": "site:france24.com OR site:lemonde.fr",
             ".DE": "site:dw.com OR site:handelsblatt.com",
         }
-        
+
         suffix = ""
         if "." in normalized_symbol:
             suffix = "." + normalized_symbol.split(".")[-1]
         local_hint = local_source_hints.get(suffix, "")
-        
+
         results = []
-        
+
         # 1. General Search - Use Clean Name
-        general_query = f'"{company_name}" {search_query}' if search_query else f'"{company_name}" (earnings OR merger OR acquisition OR regulatory)'
+        general_query = (
+            f'"{company_name}" {search_query}'
+            if search_query
+            else f'"{company_name}" (earnings OR merger OR acquisition OR regulatory)'
+        )
         try:
             general_result = await tavily_tool.ainvoke({"query": general_query})
             if general_result:
@@ -248,34 +278,44 @@ async def get_news(
 
         # 2. Local Search - Use Clean Name
         if local_hint and not search_query:
-            local_query = f'"{company_name}" {local_hint} (earnings OR guidance OR strategy)'
+            local_query = (
+                f'"{company_name}" {local_hint} (earnings OR guidance OR strategy)'
+            )
             try:
                 local_result = await tavily_tool.ainvoke({"query": local_query})
                 if local_result:
                     # Sanitize and truncate using global limit
                     sanitized_local = html.escape(_truncate_tavily_result(local_result))
-                    results.append(f"=== LOCAL/REGIONAL NEWS SOURCES ===\n{sanitized_local}\n")
+                    results.append(
+                        f"=== LOCAL/REGIONAL NEWS SOURCES ===\n{sanitized_local}\n"
+                    )
             except Exception as e:
                 logger.warning(f"Local news search failed: {e}")
-                
+
         if not results:
             return f"No news found for {company_name}."
-            
+
         return f"News Results for {company_name}:\n\n" + "\n".join(results)
     except Exception as e:
         logger.error(f"News fetch failed for {ticker}: {e}")
         # Propagate error message instead of generic "No news found"
         return f"Error fetching news: {str(e)}"
 
+
 @tool
-async def get_yfinance_data(symbol: str, start_date: str = None, end_date: str = None) -> str:
+async def get_yfinance_data(
+    symbol: str, start_date: str = None, end_date: str = None
+) -> str:
     """Get historical stock price data."""
     try:
         normalized = normalize_ticker(symbol)
         hist = await market_data_fetcher.get_historical_prices(normalized)
-        if hist.empty: return "No data"
+        if hist.empty:
+            return "No data"
         return hist.reset_index().to_csv(index=False)
-    except Exception as e: return f"Error: {e}"
+    except Exception as e:
+        return f"Error: {e}"
+
 
 @tool
 async def get_technical_indicators(symbol: str) -> str:
@@ -284,19 +324,21 @@ async def get_technical_indicators(symbol: str) -> str:
         normalized = normalize_ticker(symbol)
         # FIX: Fetch '2y' to ensure enough data for 200-day MA
         hist = await market_data_fetcher.get_historical_prices(normalized, period="2y")
-        
-        if hist.empty: return "No data"
-        
+
+        if hist.empty:
+            return "No data"
+
         stock = stockstats_wrap(hist)
         latest = hist.iloc[-1]
-        
+
         # Explicitly calculate MAs
-        sma_50 = _safe_float(stock['close_50_sma'].iloc[-1])
-        sma_200 = _safe_float(stock['close_200_sma'].iloc[-1])
-        
+        sma_50 = _safe_float(stock["close_50_sma"].iloc[-1])
+        sma_200 = _safe_float(stock["close_200_sma"].iloc[-1])
+
         # Format with safety checks
-        def fmt(val): return _format_val(val)
-        
+        def fmt(val):
+            return _format_val(val)
+
         return (
             f"Technical Indicators for {symbol}:\n"
             f"Current Price: {fmt(latest['Close'])}\n"
@@ -307,8 +349,10 @@ async def get_technical_indicators(symbol: str) -> str:
             f"Bollinger Upper: {fmt(stock['boll_ub'].iloc[-1])}\n"
             f"Bollinger Lower: {fmt(stock['boll_lb'].iloc[-1])}"
         )
-    except Exception as e: return f"Error: {e}"
-    
+    except Exception as e:
+        return f"Error: {e}"
+
+
 @tool
 async def get_social_media_sentiment(ticker: str) -> str:
     """Get sentiment from StockTwits."""
@@ -319,31 +363,37 @@ async def get_social_media_sentiment(ticker: str) -> str:
     except Exception as e:
         return f"Error getting sentiment: {str(e)}"
 
+
 @tool
 async def get_macroeconomic_news(trade_date: str) -> str:
     """Get macroeconomic news context for a specific date."""
-    if not tavily_tool: return "Tool unavailable"
+    if not tavily_tool:
+        return "Tool unavailable"
     result = await tavily_tool.ainvoke({"query": f"macroeconomic news {trade_date}"})
     return _truncate_tavily_result(result)
 
+
 @tool
-async def get_fundamental_analysis(ticker: Annotated[str, "Stock ticker symbol"]) -> str:
+async def get_fundamental_analysis(
+    ticker: Annotated[str, "Stock ticker symbol"],
+) -> str:
     """
     Perform web search for qualitative fundamental factors (Analyst coverage, ADRs).
-    
+
     IMPLEMENTS SURGICAL FALLBACK LOGIC:
     1. Primary Search: Uses specific ticker (best for exact listing).
     2. Check Success: If ticker search fails (insufficient data), do full fallback to Company Name search.
     3. Check ADR Miss: If ticker search succeeds but finds NO ADR info, perform SURGICAL append search using Company Name.
     """
-    if not tavily_tool: return "Tool unavailable"
-    
+    if not tavily_tool:
+        return "Tool unavailable"
+
     try:
         # Get company name for potential fallback/surgical search
         normalized_symbol = normalize_ticker(ticker)
         ticker_obj = yf.Ticker(normalized_symbol)
         company_name = await extract_company_name_async(ticker_obj)
-        
+
         # 1. Primary Search: Ticker-based (Most specific to the listing)
         # Use strict quoting for the ticker name if we have it, otherwise just ticker
         ticker_query = f"{ticker} stock analyst coverage count consensus rating American Depositary Receipt exchange listing ADR status"
@@ -369,14 +419,25 @@ async def get_fundamental_analysis(ticker: Annotated[str, "Stock ticker symbol"]
 
         # CASE B: SUCCESS BUT POTENTIAL ADR MISS -> Surgical Append
         # Check if the ticker results actually mention ADR/Depositary keywords
-        adr_keywords = ["ADR", "American Depositary", "Depositary Receipt", "OTC", "Pink Sheets", "sponsored"]
-        found_adr_info = any(kw.lower() in ticker_results_str.lower() for kw in adr_keywords)
+        adr_keywords = [
+            "ADR",
+            "American Depositary",
+            "Depositary Receipt",
+            "OTC",
+            "Pink Sheets",
+            "sponsored",
+        ]
+        found_adr_info = any(
+            kw.lower() in ticker_results_str.lower() for kw in adr_keywords
+        )
 
         # If we have a good company name, the ticker search succeeded, BUT it missed ADR info...
         if not found_adr_info and company_name and company_name != ticker:
             # Run a targeted "Surgical" search just for the ADR
             # Use quoted company name
-            adr_query = f'"{company_name}" American Depositary Receipt ADR ticker status'
+            adr_query = (
+                f'"{company_name}" American Depositary Receipt ADR ticker status'
+            )
             adr_results = await tavily_tool.ainvoke({"query": adr_query})
             adr_results_str = str(adr_results)
 
@@ -397,10 +458,11 @@ async def get_fundamental_analysis(ticker: Annotated[str, "Stock ticker symbol"]
     except Exception as e:
         return f"Error searching for fundamentals: {e}"
 
+
 @tool
 async def search_foreign_sources(
     ticker: Annotated[str, "Stock ticker symbol"],
-    search_query: Annotated[str, "Search query (can include native language terms)"]
+    search_query: Annotated[str, "Search query (can include native language terms)"],
 ) -> str:
     """
     Search for financial data from foreign-language and premium English sources.
@@ -427,7 +489,7 @@ async def search_foreign_sources(
         logger.info(
             "foreign_source_search",
             ticker=ticker,
-            query=full_query[:100]  # Truncate for logging
+            query=full_query[:100],  # Truncate for logging
         )
 
         results = await tavily_tool.ainvoke({"query": full_query})
@@ -460,33 +522,33 @@ Note: Verify dates and currencies in the source data."""
 # Last updated: 2025-01-01 | Source: IRS Publication 515, bilateral tax treaties
 # Note: These are standard treaty rates; actual rates may vary based on investor status
 WITHHOLDING_TAX_RATES = {
-    'japan': '15%',           # US-Japan Treaty Art. 10 (reduced from 20%)
-    'hong kong': '0%',        # No withholding tax on dividends
-    'singapore': '0%',        # US-Singapore Treaty
-    'united kingdom': '0%',   # US-UK Treaty (0% for qualified dividends)
-    'uk': '0%',               # Alias
-    'germany': '15%',         # US-Germany Treaty (reduced from 26.375%)
-    'france': '15%',          # US-France Treaty (reduced from 30%)
-    'australia': '15%',       # US-Australia Treaty
-    'canada': '15%',          # US-Canada Treaty
-    'taiwan': '21%',          # No treaty, statutory rate
-    'south korea': '15%',     # US-Korea Treaty
-    'korea': '15%',           # Alias
-    'china': '10%',           # US-China Treaty
-    'india': '25%',           # US-India Treaty
-    'brazil': '15%',          # US-Brazil Treaty (interest; no dividend treaty)
-    'switzerland': '15%',     # US-Switzerland Treaty
-    'netherlands': '15%',     # US-Netherlands Treaty
-    'ireland': '15%',         # US-Ireland Treaty
-    'sweden': '15%',          # US-Sweden Treaty
-    'norway': '15%',          # US-Norway Treaty
-    'denmark': '15%',         # US-Denmark Treaty
-    'finland': '15%',         # US-Finland Treaty
-    'israel': '25%',          # US-Israel Treaty
-    'mexico': '10%',          # US-Mexico Treaty
-    'cayman islands': '0%',   # No local tax
-    'british virgin islands': '0%',  # No local tax
-    'bermuda': '0%',          # No local tax
+    "japan": "15%",  # US-Japan Treaty Art. 10 (reduced from 20%)
+    "hong kong": "0%",  # No withholding tax on dividends
+    "singapore": "0%",  # US-Singapore Treaty
+    "united kingdom": "0%",  # US-UK Treaty (0% for qualified dividends)
+    "uk": "0%",  # Alias
+    "germany": "15%",  # US-Germany Treaty (reduced from 26.375%)
+    "france": "15%",  # US-France Treaty (reduced from 30%)
+    "australia": "15%",  # US-Australia Treaty
+    "canada": "15%",  # US-Canada Treaty
+    "taiwan": "21%",  # No treaty, statutory rate
+    "south korea": "15%",  # US-Korea Treaty
+    "korea": "15%",  # Alias
+    "china": "10%",  # US-China Treaty
+    "india": "25%",  # US-India Treaty
+    "brazil": "15%",  # US-Brazil Treaty (interest; no dividend treaty)
+    "switzerland": "15%",  # US-Switzerland Treaty
+    "netherlands": "15%",  # US-Netherlands Treaty
+    "ireland": "15%",  # US-Ireland Treaty
+    "sweden": "15%",  # US-Sweden Treaty
+    "norway": "15%",  # US-Norway Treaty
+    "denmark": "15%",  # US-Denmark Treaty
+    "finland": "15%",  # US-Finland Treaty
+    "israel": "25%",  # US-Israel Treaty
+    "mexico": "10%",  # US-Mexico Treaty
+    "cayman islands": "0%",  # No local tax
+    "british virgin islands": "0%",  # No local tax
+    "bermuda": "0%",  # No local tax
 }
 
 
@@ -495,7 +557,7 @@ async def search_legal_tax_disclosures(
     ticker: Annotated[str, "Stock ticker symbol (e.g., 8591.T, 0005.HK)"],
     company_name: Annotated[str, "Full company name"],
     sector: Annotated[str, "Company sector from financial data"],
-    country: Annotated[str, "Country of domicile"]
+    country: Annotated[str, "Country of domicile"],
 ) -> str:
     """
     Search for US investor legal/tax disclosures: PFIC status and VIE structures.
@@ -510,36 +572,56 @@ async def search_legal_tax_disclosures(
     import json
 
     if not tavily_tool:
-        return json.dumps({
-            "error": "Legal/tax search unavailable (Tavily not configured)",
-            "searches_performed": []
-        })
+        return json.dumps(
+            {
+                "error": "Legal/tax search unavailable (Tavily not configured)",
+                "searches_performed": [],
+            }
+        )
 
     # Determine risk profile
     PFIC_RISK_SECTORS = {
-        'Financial Services', 'Insurance', 'Banks', 'Capital Markets',
-        'Diversified Financial Services', 'Real Estate', 'Thrifts & Mortgage Finance',
-        'Asset Management', 'Investment Banking & Brokerage'
+        "Financial Services",
+        "Insurance",
+        "Banks",
+        "Capital Markets",
+        "Diversified Financial Services",
+        "Real Estate",
+        "Thrifts & Mortgage Finance",
+        "Asset Management",
+        "Investment Banking & Brokerage",
     }
-    PFIC_RISK_KEYWORDS = ['Leasing', 'REIT', 'Investment Trust', 'Asset Management',
-                          'Holding', 'Private Equity', 'Venture Capital']
+    PFIC_RISK_KEYWORDS = [
+        "Leasing",
+        "REIT",
+        "Investment Trust",
+        "Asset Management",
+        "Holding",
+        "Private Equity",
+        "Venture Capital",
+    ]
 
-    CHINA_SUFFIXES = ('.HK', '.SS', '.SZ')
-    CHINA_DOMICILES = ['china', 'hong kong', 'cayman islands', 'british virgin islands', 'bermuda']
+    CHINA_SUFFIXES = (".HK", ".SS", ".SZ")
+    CHINA_DOMICILES = [
+        "china",
+        "hong kong",
+        "cayman islands",
+        "british virgin islands",
+        "bermuda",
+    ]
 
-    is_pfic_risk = (
-        sector in PFIC_RISK_SECTORS or
-        any(kw.lower() in sector.lower() for kw in PFIC_RISK_KEYWORDS)
+    is_pfic_risk = sector in PFIC_RISK_SECTORS or any(
+        kw.lower() in sector.lower() for kw in PFIC_RISK_KEYWORDS
     )
 
     is_china_connected = (
-        any(ticker.upper().endswith(suffix) for suffix in CHINA_SUFFIXES) or
-        country.lower() in CHINA_DOMICILES
+        any(ticker.upper().endswith(suffix) for suffix in CHINA_SUFFIXES)
+        or country.lower() in CHINA_DOMICILES
     )
 
     # Get withholding rate from lookup table
     country_lower = country.lower().strip()
-    withholding_rate = WITHHOLDING_TAX_RATES.get(country_lower, 'UNKNOWN')
+    withholding_rate = WITHHOLDING_TAX_RATES.get(country_lower, "UNKNOWN")
 
     # If no risk factors, return early with minimal data
     if not is_pfic_risk and not is_china_connected:
@@ -548,24 +630,30 @@ async def search_legal_tax_disclosures(
             ticker=ticker,
             sector=sector,
             country=country,
-            reason="Low-risk profile"
+            reason="Low-risk profile",
         )
-        return json.dumps({
-            "searches_performed": [],
-            "pfic_relevant": False,
-            "vie_relevant": False,
-            "withholding_rate": withholding_rate,
-            "country": country,
-            "sector": sector,
-            "note": "Low-risk profile - no legal/tax search required"
-        })
+        return json.dumps(
+            {
+                "searches_performed": [],
+                "pfic_relevant": False,
+                "vie_relevant": False,
+                "withholding_rate": withholding_rate,
+                "country": country,
+                "sector": sector,
+                "note": "Low-risk profile - no legal/tax search required",
+            }
+        )
 
     # Build ONE combined search query (rate limit efficient)
     search_terms = []
     if is_pfic_risk:
-        search_terms.append('PFIC "passive foreign investment company" 20-F "US investors" tax')
+        search_terms.append(
+            'PFIC "passive foreign investment company" 20-F "US investors" tax'
+        )
     if is_china_connected:
-        search_terms.append('VIE "variable interest entity" "contractual arrangements" structure')
+        search_terms.append(
+            'VIE "variable interest entity" "contractual arrangements" structure'
+        )
 
     query = f'"{company_name}" ({ticker}) {" ".join(search_terms)}'
 
@@ -575,7 +663,7 @@ async def search_legal_tax_disclosures(
         company=company_name,
         pfic_risk=is_pfic_risk,
         vie_risk=is_china_connected,
-        query_length=len(query)
+        query_length=len(query),
     )
 
     try:
@@ -588,49 +676,51 @@ async def search_legal_tax_disclosures(
         if is_china_connected:
             searches.append("VIE")
 
-        return json.dumps({
-            "searches_performed": searches,
-            "pfic_relevant": is_pfic_risk,
-            "vie_relevant": is_china_connected,
-            "withholding_rate": withholding_rate,
-            "country": country,
-            "sector": sector,
-            "results": results_str
-        })
+        return json.dumps(
+            {
+                "searches_performed": searches,
+                "pfic_relevant": is_pfic_risk,
+                "vie_relevant": is_china_connected,
+                "withholding_rate": withholding_rate,
+                "country": country,
+                "sector": sector,
+                "results": results_str,
+            }
+        )
 
     except Exception as e:
-        logger.error(
-            "legal_tax_search_error",
-            ticker=ticker,
-            error=str(e)
+        logger.error("legal_tax_search_error", ticker=ticker, error=str(e))
+        return json.dumps(
+            {
+                "error": str(e),
+                "searches_performed": [],
+                "pfic_relevant": is_pfic_risk,
+                "vie_relevant": is_china_connected,
+                "withholding_rate": withholding_rate,
+                "country": country,
+                "sector": sector,
+            }
         )
-        return json.dumps({
-            "error": str(e),
-            "searches_performed": [],
-            "pfic_relevant": is_pfic_risk,
-            "vie_relevant": is_china_connected,
-            "withholding_rate": withholding_rate,
-            "country": country,
-            "sector": sector
-        })
 
 
 class Toolkit:
     def __init__(self):
         self.market_data_fetcher = market_data_fetcher
 
-    def get_core_tools(self): return [get_yfinance_data, get_technical_indicators]
-    
-    def get_technical_tools(self): return [
-        get_yfinance_data,
-        get_technical_indicators,
-        calculate_liquidity_metrics
-    ]
+    def get_core_tools(self):
+        return [get_yfinance_data, get_technical_indicators]
+
+    def get_technical_tools(self):
+        return [
+            get_yfinance_data,
+            get_technical_indicators,
+            calculate_liquidity_metrics,
+        ]
 
     # Alias for market analyst (uses technical tools)
     def get_market_tools(self):
         return self.get_technical_tools()
-    
+
     def get_junior_fundamental_tools(self):
         """Tools for Junior Fundamentals Analyst (data gathering)."""
         return [get_financial_metrics, get_fundamental_analysis]
@@ -657,18 +747,20 @@ class Toolkit:
         """Tools for Legal Counsel (PFIC/VIE detection for US investors)."""
         return [search_legal_tax_disclosures]
 
-    def get_all_tools(self): return [
-        get_yfinance_data,
-        get_technical_indicators,
-        get_financial_metrics,
-        get_news,
-        get_social_media_sentiment,
-        get_multilingual_sentiment_search,
-        calculate_liquidity_metrics,
-        get_macroeconomic_news,
-        get_fundamental_analysis,
-        search_foreign_sources,
-        search_legal_tax_disclosures
-    ]
+    def get_all_tools(self):
+        return [
+            get_yfinance_data,
+            get_technical_indicators,
+            get_financial_metrics,
+            get_news,
+            get_social_media_sentiment,
+            get_multilingual_sentiment_search,
+            calculate_liquidity_metrics,
+            get_macroeconomic_news,
+            get_fundamental_analysis,
+            search_foreign_sources,
+            search_legal_tax_disclosures,
+        ]
+
 
 toolkit = Toolkit()

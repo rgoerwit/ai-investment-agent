@@ -5,13 +5,14 @@ Tests both the functionality of the consultant node and non-regression
 of existing system behavior when consultant is enabled/disabled.
 """
 
+from unittest.mock import Mock, patch
+
 import pytest
-import os
-from unittest.mock import Mock, patch, AsyncMock
-from src.agents import create_consultant_node, AgentState
-from src.llms import get_consultant_llm, create_consultant_llm
-from src.graph import create_trading_graph
 from langgraph.types import RunnableConfig
+
+from src.agents import create_consultant_node
+from src.graph import create_trading_graph
+from src.llms import create_consultant_llm, get_consultant_llm
 
 
 class TestConsultantNodeCreation:
@@ -20,10 +21,11 @@ class TestConsultantNodeCreation:
     def test_consultant_llm_disabled_env_var(self):
         """Test that consultant is disabled when ENABLE_CONSULTANT=false."""
         import src.llms
+
         # Reset singleton to force re-evaluation
         src.llms._consultant_llm_instance = None
 
-        with patch('src.llms.config') as mock_config:
+        with patch("src.llms.config") as mock_config:
             mock_config.enable_consultant = False
             llm = get_consultant_llm()
             assert llm is None
@@ -34,10 +36,11 @@ class TestConsultantNodeCreation:
     def test_consultant_llm_missing_api_key(self):
         """Test that consultant returns None when OPENAI_API_KEY missing."""
         import src.llms
+
         # Reset singleton to force re-evaluation
         src.llms._consultant_llm_instance = None
 
-        with patch('src.llms.config') as mock_config:
+        with patch("src.llms.config") as mock_config:
             mock_config.enable_consultant = True
             mock_config.get_openai_api_key.return_value = ""
             llm = get_consultant_llm()
@@ -54,11 +57,11 @@ class TestConsultantNodeCreation:
         except ImportError:
             pytest.skip("langchain-openai not installed (optional dependency)")
 
-        with patch('langchain_openai.ChatOpenAI') as mock_chatgpt:
+        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
             mock_llm = Mock()
             mock_chatgpt.return_value = mock_llm
 
-            with patch('src.llms.config') as mock_config:
+            with patch("src.llms.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.consultant_model = "gpt-4o"
                 mock_config.get_openai_api_key.return_value = "test-key"
@@ -94,8 +97,8 @@ class TestConsultantNodeExecution:
         async def mock_invoke(*args, **kwargs):
             return mock_response
 
-        with patch('src.agents.invoke_with_rate_limit_handling', new=mock_invoke):
-            with patch('src.prompts.get_prompt') as mock_get_prompt:
+        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
                 mock_prompt.agent_name = "External Consultant"
@@ -113,10 +116,12 @@ class TestConsultantNodeExecution:
                     "investment_debate_state": {"history": "Bull: ... Bear: ..."},
                     "investment_plan": "Research Manager recommends BUY",
                     "red_flags": [],
-                    "pre_screening_result": "PASS"
+                    "pre_screening_result": "PASS",
                 }
 
-                config = RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")})
+                config = RunnableConfig(
+                    configurable={"context": Mock(trade_date="2025-12-13")}
+                )
 
                 result = await consultant_node(state, config)
 
@@ -128,11 +133,13 @@ class TestConsultantNodeExecution:
         """Test graceful handling when consultant prompt is missing."""
         mock_llm = Mock()
 
-        with patch('src.prompts.get_prompt', return_value=None):
+        with patch("src.prompts.get_prompt", return_value=None):
             consultant_node = create_consultant_node(mock_llm, "consultant")
 
             state = {"company_of_interest": "TEST"}
-            config = RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")})
+            config = RunnableConfig(
+                configurable={"context": Mock(trade_date="2025-12-13")}
+            )
 
             result = await consultant_node(state, config)
 
@@ -147,8 +154,8 @@ class TestConsultantNodeExecution:
         async def mock_invoke_error(*args, **kwargs):
             raise Exception("OpenAI API timeout")
 
-        with patch('src.agents.invoke_with_rate_limit_handling', new=mock_invoke_error):
-            with patch('src.prompts.get_prompt') as mock_get_prompt:
+        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke_error):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
                 mock_prompt.agent_name = "External Consultant"
@@ -164,10 +171,12 @@ class TestConsultantNodeExecution:
                     "news_report": "Report",
                     "fundamentals_report": "Report",
                     "investment_debate_state": {"history": "Debate"},
-                    "investment_plan": "Plan"
+                    "investment_plan": "Plan",
                 }
 
-                config = RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")})
+                config = RunnableConfig(
+                    configurable={"context": Mock(trade_date="2025-12-13")}
+                )
 
                 result = await consultant_node(state, config)
 
@@ -179,7 +188,7 @@ class TestConsultantNodeExecution:
 class TestGraphIntegration:
     """Test suite for consultant integration into the graph."""
 
-    @patch('src.llms.get_consultant_llm')
+    @patch("src.llms.get_consultant_llm")
     def test_graph_skips_consultant_when_disabled(self, mock_get_consultant):
         """Test that graph routes directly to Trader when consultant unavailable."""
         mock_get_consultant.return_value = None
@@ -190,7 +199,7 @@ class TestGraphIntegration:
         assert graph is not None
         # The graph should have Research Manager → Trader edge when consultant is disabled
 
-    @patch('src.llms.get_consultant_llm')
+    @patch("src.llms.get_consultant_llm")
     def test_graph_includes_consultant_when_enabled(self, mock_get_consultant):
         """Test that graph includes consultant node when available."""
         mock_llm = Mock()
@@ -225,8 +234,8 @@ Status: ⚠ BIASES IDENTIFIED
         async def mock_invoke(*args, **kwargs):
             return mock_response
 
-        with patch('src.agents.invoke_with_rate_limit_handling', new=mock_invoke):
-            with patch('src.prompts.get_prompt') as mock_get_prompt:
+        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
                 mock_prompt.agent_name = "External Consultant"
@@ -246,10 +255,12 @@ Status: ⚠ BIASES IDENTIFIED
                     },
                     "investment_plan": "BUY",
                     "red_flags": [],
-                    "pre_screening_result": "PASS"
+                    "pre_screening_result": "PASS",
                 }
 
-                config = RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")})
+                config = RunnableConfig(
+                    configurable={"context": Mock(trade_date="2025-12-13")}
+                )
 
                 result = await consultant_node(state, config)
 
@@ -275,8 +286,8 @@ Material Errors:
         async def mock_invoke(*args, **kwargs):
             return mock_response
 
-        with patch('src.agents.invoke_with_rate_limit_handling', new=mock_invoke):
-            with patch('src.prompts.get_prompt') as mock_get_prompt:
+        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
                 mock_prompt.agent_name = "External Consultant"
@@ -294,10 +305,12 @@ Material Errors:
                     "investment_debate_state": {"history": "Debate"},
                     "investment_plan": "BUY based on P/E of 15",
                     "red_flags": [],
-                    "pre_screening_result": "PASS"
+                    "pre_screening_result": "PASS",
                 }
 
-                config = RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")})
+                config = RunnableConfig(
+                    configurable={"context": Mock(trade_date="2025-12-13")}
+                )
 
                 result = await consultant_node(state, config)
 
@@ -308,16 +321,14 @@ Material Errors:
 class TestNonRegression:
     """Test suite ensuring consultant doesn't break existing functionality."""
 
-    @patch('src.llms.get_consultant_llm')
+    @patch("src.llms.get_consultant_llm")
     def test_graph_execution_without_consultant(self, mock_get_consultant):
         """Test that graph still executes correctly when consultant is disabled."""
         mock_get_consultant.return_value = None
 
         # This should not raise any errors
         graph = create_trading_graph(
-            ticker="TEST",
-            max_debate_rounds=1,
-            enable_memory=False
+            ticker="TEST", max_debate_rounds=1, enable_memory=False
         )
 
         assert graph is not None
@@ -329,7 +340,7 @@ class TestNonRegression:
             "market_report": "Report",
             "sentiment_report": "Report",
             "news_report": "Report",
-            "fundamentals_report": "Report"
+            "fundamentals_report": "Report",
         }
 
         # Should not raise KeyError when accessing consultant_review
@@ -339,6 +350,7 @@ class TestNonRegression:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
 
 class TestConsultantQuickMode:
     """Test consultant LLM quick mode functionality."""
@@ -351,13 +363,14 @@ class TestConsultantQuickMode:
         except ImportError:
             pytest.skip("langchain-openai not installed (optional dependency)")
 
-        from src.llms import create_consultant_llm
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
 
-        with patch('langchain_openai.ChatOpenAI') as mock_chatgpt:
+        from src.llms import create_consultant_llm
+
+        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
-            with patch('src.llms.config') as mock_config:
+            with patch("src.llms.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.consultant_quick_model = "gpt-4o-mini"
                 mock_config.get_openai_api_key.return_value = "test-key"
@@ -376,13 +389,14 @@ class TestConsultantQuickMode:
         except ImportError:
             pytest.skip("langchain-openai not installed (optional dependency)")
 
-        from src.llms import create_consultant_llm
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
 
-        with patch('langchain_openai.ChatOpenAI') as mock_chatgpt:
+        from src.llms import create_consultant_llm
+
+        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
-            with patch('src.llms.config') as mock_config:
+            with patch("src.llms.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.consultant_model = "gpt-4o"
                 mock_config.get_openai_api_key.return_value = "test-key"
@@ -401,13 +415,14 @@ class TestConsultantQuickMode:
         except ImportError:
             pytest.skip("langchain-openai not installed (optional dependency)")
 
-        from src.llms import create_consultant_llm
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
 
-        with patch('langchain_openai.ChatOpenAI') as mock_chatgpt:
+        from src.llms import create_consultant_llm
+
+        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
-            with patch('src.llms.config') as mock_config:
+            with patch("src.llms.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.consultant_quick_model = "gpt-4o-mini"  # Default value
                 mock_config.get_openai_api_key.return_value = "test-key"
@@ -426,17 +441,18 @@ class TestConsultantQuickMode:
         except ImportError:
             pytest.skip("langchain-openai not installed (optional dependency)")
 
-        from src.llms import get_consultant_llm, _consultant_llm_instance
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
+
         import src.llms
+        from src.llms import get_consultant_llm
 
         # Reset the global instance
         src.llms._consultant_llm_instance = None
 
-        with patch('langchain_openai.ChatOpenAI') as mock_chatgpt:
+        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
-            with patch('src.llms.config') as mock_config:
+            with patch("src.llms.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.consultant_quick_model = "gpt-4o-mini-test"
                 mock_config.get_openai_api_key.return_value = "test-key"

@@ -11,8 +11,8 @@ UPDATED: Dec 2025 - Aligned with modern yfinance patterns
 """
 
 import asyncio
+
 import structlog
-from datetime import datetime, timedelta
 
 logger = structlog.get_logger(__name__)
 
@@ -20,7 +20,10 @@ logger = structlog.get_logger(__name__)
 # TIER 1: Dynamic FX Rates (yfinance - always up-to-date)
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def get_fx_rate_yfinance(from_currency: str, to_currency: str = "USD") -> float | None:
+
+async def get_fx_rate_yfinance(
+    from_currency: str, to_currency: str = "USD"
+) -> float | None:
     """
     Get live FX rate from yfinance using standard forex pairs.
 
@@ -48,19 +51,21 @@ async def get_fx_rate_yfinance(from_currency: str, to_currency: str = "USD") -> 
         def _fetch_rate():
             ticker = yf.Ticker(fx_ticker)
             # Try fast_info first (faster)
-            if hasattr(ticker, 'fast_info') and hasattr(ticker.fast_info, 'last_price'):
+            if hasattr(ticker, "fast_info") and hasattr(ticker.fast_info, "last_price"):
                 return ticker.fast_info.last_price
             # Fallback to info dict
             info = ticker.info
-            return info.get('regularMarketPrice') or info.get('previousClose')
+            return info.get("regularMarketPrice") or info.get("previousClose")
 
         rate = await asyncio.wait_for(
             asyncio.to_thread(_fetch_rate),
-            timeout=3.0  # Quick timeout - we have fallbacks
+            timeout=3.0,  # Quick timeout - we have fallbacks
         )
 
         if rate and rate > 0:
-            logger.debug("fx_rate_fetched", pair=fx_ticker, rate=rate, source="yfinance")
+            logger.debug(
+                "fx_rate_fetched", pair=fx_ticker, rate=rate, source="yfinance"
+            )
             return float(rate)
         else:
             logger.debug("fx_rate_invalid", pair=fx_ticker, rate=rate)
@@ -82,29 +87,27 @@ async def get_fx_rate_yfinance(from_currency: str, to_currency: str = "USD") -> 
 # Source: ECB reference rates, BoJ, HKMA
 FALLBACK_RATES_TO_USD = {
     # Major Asian currencies (your primary use case)
-    "JPY": 0.0067,   # Japanese Yen (¥150 = $1)
-    "HKD": 0.128,    # Hong Kong Dollar (HK$7.80 = $1)
-    "TWD": 0.032,    # Taiwan Dollar (NT$31 = $1)
+    "JPY": 0.0067,  # Japanese Yen (¥150 = $1)
+    "HKD": 0.128,  # Hong Kong Dollar (HK$7.80 = $1)
+    "TWD": 0.032,  # Taiwan Dollar (NT$31 = $1)
     "KRW": 0.00075,  # Korean Won (₩1,330 = $1)
-    "CNY": 0.14,     # Chinese Yuan (¥7.2 = $1)
-    "INR": 0.012,    # Indian Rupee (₹83 = $1)
-    "SGD": 0.74,     # Singapore Dollar (S$1.35 = $1)
-
+    "CNY": 0.14,  # Chinese Yuan (¥7.2 = $1)
+    "INR": 0.012,  # Indian Rupee (₹83 = $1)
+    "SGD": 0.74,  # Singapore Dollar (S$1.35 = $1)
     # European currencies
-    "EUR": 1.09,     # Euro
-    "GBP": 1.27,     # British Pound
-    "CHF": 1.13,     # Swiss Franc
-
+    "EUR": 1.09,  # Euro
+    "GBP": 1.27,  # British Pound
+    "CHF": 1.13,  # Swiss Franc
     # Other major currencies
-    "CAD": 0.72,     # Canadian Dollar
-    "AUD": 0.64,     # Australian Dollar
-    "NZD": 0.60,     # New Zealand Dollar
-    "MXN": 0.049,    # Mexican Peso
-    "BRL": 0.20,     # Brazilian Real
-
+    "CAD": 0.72,  # Canadian Dollar
+    "AUD": 0.64,  # Australian Dollar
+    "NZD": 0.60,  # New Zealand Dollar
+    "MXN": 0.049,  # Mexican Peso
+    "BRL": 0.20,  # Brazilian Real
     # Identity
     "USD": 1.0,
 }
+
 
 def get_fx_rate_fallback(from_currency: str, to_currency: str = "USD") -> float | None:
     """
@@ -123,7 +126,7 @@ def get_fx_rate_fallback(from_currency: str, to_currency: str = "USD") -> float 
             from_currency=from_currency,
             to_currency=to_currency,
             rate=rate,
-            warning="Fallback rate may be stale - update FALLBACK_RATES_TO_USD quarterly"
+            warning="Fallback rate may be stale - update FALLBACK_RATES_TO_USD quarterly",
         )
         return rate
 
@@ -134,10 +137,9 @@ def get_fx_rate_fallback(from_currency: str, to_currency: str = "USD") -> float 
 # TIER 3: Unified Interface with Smart Fallback
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 async def get_fx_rate(
-    from_currency: str,
-    to_currency: str = "USD",
-    allow_fallback: bool = True
+    from_currency: str, to_currency: str = "USD", allow_fallback: bool = True
 ) -> tuple[float | None, str]:
     """
     Get FX rate with smart fallback chain.
@@ -184,7 +186,7 @@ async def get_fx_rate(
         "fx_rate_unavailable",
         from_currency=from_currency,
         to_currency=to_currency,
-        tried_sources=["yfinance", "fallback"] if allow_fallback else ["yfinance"]
+        tried_sources=["yfinance", "fallback"] if allow_fallback else ["yfinance"],
     )
     return None, "unavailable"
 
@@ -193,10 +195,9 @@ async def get_fx_rate(
 # CONVENIENCE FUNCTIONS: Normalize Specific Metric Types
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 async def normalize_to_usd(
-    value: float | None,
-    currency: str,
-    metric_name: str = "value"
+    value: float | None, currency: str, metric_name: str = "value"
 ) -> tuple[float | None, dict[str, any]]:
     """
     Normalize a single value to USD with metadata tracking.
@@ -226,7 +227,7 @@ async def normalize_to_usd(
         "original_currency": currency,
         "fx_rate": None,
         "fx_source": None,
-        "normalized": False
+        "normalized": False,
     }
 
     # Handle None/missing values
@@ -249,7 +250,7 @@ async def normalize_to_usd(
             metric=metric_name,
             value=value,
             currency=currency,
-            reason="No FX rate available"
+            reason="No FX rate available",
         )
         # Return original value with warning metadata
         metadata["fx_source"] = "unavailable"
@@ -268,15 +269,14 @@ async def normalize_to_usd(
         currency=currency,
         fx_rate=fx_rate,
         normalized_value=normalized_value,
-        source=source
+        source=source,
     )
 
     return normalized_value, metadata
 
 
 async def normalize_financial_dict(
-    data: dict[str, any],
-    currency_field: str = "currency"
+    data: dict[str, any], currency_field: str = "currency"
 ) -> dict[str, any]:
     """
     Normalize all currency-dependent fields in a financial data dict.
@@ -337,7 +337,7 @@ async def normalize_financial_dict(
         logger.warning(
             "fx_normalization_skipped",
             currency=currency,
-            reason="FX rate unavailable - values remain in local currency"
+            reason="FX rate unavailable - values remain in local currency",
         )
         data["_currency_normalized"] = False
         data["_fx_rate_applied"] = None
@@ -370,14 +370,14 @@ async def normalize_financial_dict(
                     original=original_value,
                     normalized=data[field],
                     currency=currency,
-                    fx_rate=fx_rate
+                    fx_rate=fx_rate,
                 )
             except (ValueError, TypeError) as e:
                 logger.warning(
                     "field_normalization_failed",
                     field=field,
                     value=data[field],
-                    error=str(e)
+                    error=str(e),
                 )
 
     # Add metadata
@@ -392,7 +392,7 @@ async def normalize_financial_dict(
         original_currency=currency,
         fields_normalized=normalized_count,
         fx_rate=fx_rate,
-        source=source
+        source=source,
     )
 
     return data
@@ -401,6 +401,7 @@ async def normalize_financial_dict(
 # ══════════════════════════════════════════════════════════════════════════════
 # TEST HELPERS (for development/debugging)
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 async def test_fx_normalization():
     """Test FX normalization with sample data."""
@@ -418,12 +419,16 @@ async def test_fx_normalization():
         normalized, meta = await normalize_to_usd(value, currency, description)
         print(f"{description}:")
         print(f"  Original: {value:,.0f} {currency}")
-        if normalized and meta['fx_rate'] is not None:
+        if normalized and meta["fx_rate"] is not None:
             print(f"  USD: ${normalized:,.0f}")
             print(f"  FX Rate: {meta['fx_rate']:.6f} (from {meta['fx_source']})")
         else:
             print(f"  Normalization failed: {meta['fx_source']}")
-            print(f"  Returned value: ${normalized:,.0f} (original)" if normalized else "  Returned: None")
+            print(
+                f"  Returned value: ${normalized:,.0f} (original)"
+                if normalized
+                else "  Returned: None"
+            )
         print()
 
 

@@ -30,7 +30,7 @@
 # 3. Create GitHub Secrets (Settings → Secrets and variables → Actions):
 #    - ARM_CLIENT_ID: Your Azure service principal's client ID
 #    - ARM_CLIENT_SECRET: Your service principal's secret
-#    - ARM_TENANT_ID: Your Azure AD tenant ID  
+#    - ARM_TENANT_ID: Your Azure AD tenant ID
 #    - ARM_SUBSCRIPTION_ID: Your Azure subscription ID
 #    - GOOGLE_API_KEY: Your Google Gemini API key
 #    - TAVILY_API_KEY: (Optional) Tavily search API key
@@ -148,34 +148,34 @@ jobs:
       - name: Validate Required Secrets
         run: |
           missing_secrets=()
-          
+
           if [ -z "${{ secrets.ARM_CLIENT_ID }}" ]; then
             missing_secrets+=("ARM_CLIENT_ID")
           fi
-          
+
           if [ -z "${{ secrets.ARM_CLIENT_SECRET }}" ]; then
             missing_secrets+=("ARM_CLIENT_SECRET")
           fi
-          
+
           if [ -z "${{ secrets.ARM_TENANT_ID }}" ]; then
             missing_secrets+=("ARM_TENANT_ID")
           fi
-          
+
           if [ -z "${{ secrets.ARM_SUBSCRIPTION_ID }}" ]; then
             missing_secrets+=("ARM_SUBSCRIPTION_ID")
           fi
-          
+
           if [ -z "${{ secrets.GOOGLE_API_KEY }}" ]; then
             missing_secrets+=("GOOGLE_API_KEY")
           fi
-          
+
           if [ ${#missing_secrets[@]} -ne 0 ]; then
             echo "❌ Missing required secrets: ${missing_secrets[*]}"
             echo ""
             echo "Configure these in: Settings → Secrets and variables → Actions"
             exit 1
           fi
-          
+
           echo "✅ All required secrets are configured"
 
   # Optional: Build container image
@@ -226,11 +226,11 @@ jobs:
     needs: [preflight-check]
     steps:
       - uses: actions/checkout@v4
-      
+
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.5.0
-      
+
       - name: Check Terraform Directory Exists
         run: |
           if [ ! -d "terraform/environments/${{ github.event.inputs.environment }}" ]; then
@@ -240,15 +240,15 @@ jobs:
             exit 1
           fi
           echo "✅ Terraform directory exists"
-      
+
       - name: Terraform Format Check
         working-directory: terraform
         run: terraform fmt -check -recursive || echo "⚠️  Format issues found (non-blocking)"
-      
+
       - name: Terraform Init (validation only)
         working-directory: terraform/environments/${{ github.event.inputs.environment }}
         run: terraform init -backend=false
-      
+
       - name: Terraform Validate
         working-directory: terraform/environments/${{ github.event.inputs.environment }}
         run: terraform validate
@@ -259,22 +259,22 @@ jobs:
     needs: [preflight-check, terraform-validate]
     steps:
       - uses: actions/checkout@v4
-      
+
       - uses: azure/login@v2
         with:
           client-id: ${{ secrets.ARM_CLIENT_ID }}
           tenant-id: ${{ secrets.ARM_TENANT_ID }}
           subscription-id: ${{ secrets.ARM_SUBSCRIPTION_ID }}
-      
+
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.5.0
           terraform_wrapper: false
-      
+
       - name: Terraform Init
         working-directory: terraform/environments/${{ github.event.inputs.environment }}
         run: terraform init
-      
+
       - name: Terraform Plan
         working-directory: terraform/environments/${{ github.event.inputs.environment }}
         env:
@@ -284,14 +284,14 @@ jobs:
           TF_VAR_langsmith_api_key: ${{ secrets.LANGSMITH_API_KEY }}
         run: |
           terraform plan -detailed-exitcode -out=tfplan.binary || export TF_PLAN_EXIT_CODE=$?
-          
+
           # Generate human-readable plan
           terraform show -no-color tfplan.binary > tfplan.txt
-          
+
           echo "## 📋 Terraform Plan Output"
           echo ""
           cat tfplan.txt
-          
+
           if [ "${TF_PLAN_EXIT_CODE:-0}" -eq 0 ]; then
             echo ""
             echo "✅ No changes detected"
@@ -302,7 +302,7 @@ jobs:
             echo "❌ Plan failed with exit code ${TF_PLAN_EXIT_CODE}"
             exit 1
           fi
-      
+
       - name: Upload Plan
         uses: actions/upload-artifact@v4
         with:
@@ -315,31 +315,31 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event.inputs.action == 'apply'
     needs: [terraform-plan, build-container]
-    environment: 
+    environment:
       name: ${{ github.event.inputs.environment }}
     steps:
       - uses: actions/checkout@v4
-      
+
       - uses: azure/login@v2
         with:
           client-id: ${{ secrets.ARM_CLIENT_ID }}
           tenant-id: ${{ secrets.ARM_TENANT_ID }}
           subscription-id: ${{ secrets.ARM_SUBSCRIPTION_ID }}
-      
+
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.5.0
-      
+
       - name: Download Plan
         uses: actions/download-artifact@v4
         with:
           name: terraform-plan-${{ github.event.inputs.environment }}-${{ github.sha }}
           path: terraform/environments/${{ github.event.inputs.environment }}/
-      
+
       - name: Terraform Init
         working-directory: terraform/environments/${{ github.event.inputs.environment }}
         run: terraform init
-      
+
       - name: Final Confirmation
         run: |
           echo "════════════════════════════════════════════════════════════════"
@@ -352,11 +352,11 @@ jobs:
           echo "Proceeding with apply in 10 seconds..."
           echo "Press Ctrl+C to cancel!"
           sleep 10
-      
+
       - name: Terraform Apply
         working-directory: terraform/environments/${{ github.event.inputs.environment }}
         run: terraform apply -auto-approve tfplan.binary
-      
+
       - name: Output Deployment Info
         working-directory: terraform/environments/${{ github.event.inputs.environment }}
         run: |
