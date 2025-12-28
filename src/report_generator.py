@@ -364,14 +364,29 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
             if isinstance(risk_state, list):
                 risk_state = risk_state[-1] if risk_state else {}
 
-            risk_history = (
-                risk_state.get("history", "") if isinstance(risk_state, dict) else ""
-            )
-            if risk_history:
-                report_parts.append("## Risk Assessment\n\n")
-                report_parts.append(
-                    f"{self._clean_text(risk_history, demote_headers=True)}\n\n"
-                )
+            if isinstance(risk_state, dict):
+                # Read from dedicated fields (parallel-safe architecture)
+                risky = risk_state.get("current_risky_response", "")
+                safe = risk_state.get("current_safe_response", "")
+                neutral = risk_state.get("current_neutral_response", "")
+
+                if risky or safe or neutral:
+                    report_parts.append("## Risk Assessment\n\n")
+                    if risky:
+                        report_parts.append("### Risky Analyst (Aggressive)\n\n")
+                        report_parts.append(
+                            f"{self._clean_text(risky, demote_headers=True)}\n\n"
+                        )
+                    if safe:
+                        report_parts.append("### Safe Analyst (Conservative)\n\n")
+                        report_parts.append(
+                            f"{self._clean_text(safe, demote_headers=True)}\n\n"
+                        )
+                    if neutral:
+                        report_parts.append("### Neutral Analyst (Balanced)\n\n")
+                        report_parts.append(
+                            f"{self._clean_text(neutral, demote_headers=True)}\n\n"
+                        )
 
         # Footer
         mode_suffix = " (Quick Models)" if self.quick_mode else ""

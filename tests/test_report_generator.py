@@ -385,11 +385,15 @@ class TestGenerateReport:
         assert "MACD: Bullish" in report
 
     def test_generate_report_risk_state_dict(self):
-        """Test risk assessment from nested dict."""
+        """Test risk assessment from nested dict with dedicated fields."""
         reporter = QuietModeReporter("AMD")
         result_dict = {
             "final_trade_decision": "Action: HOLD",
-            "risk_debate_state": {"history": "Risky: High risk\nSafe: Low risk"},
+            "risk_debate_state": {
+                "current_risky_response": "High risk tolerance recommended",
+                "current_safe_response": "Low risk approach preferred",
+                "current_neutral_response": "",
+            },
         }
 
         report = reporter.generate_report(result_dict)
@@ -403,16 +407,19 @@ class TestGenerateReport:
         result_dict = {
             "final_trade_decision": "Action: BUY",
             "risk_debate_state": [
-                {"history": "Old debate"},
-                {"history": "Latest debate: This is current"},
+                {"current_risky_response": "Old risky view"},
+                {
+                    "current_risky_response": "Latest risky: This is current",
+                    "current_safe_response": "Latest safe view",
+                },
             ],
         }
 
         report = reporter.generate_report(result_dict)
 
         assert "Risk Assessment" in report
-        assert "Latest debate" in report
-        assert "Old debate" not in report
+        assert "Latest" in report
+        assert "Old risky" not in report
 
     def test_generate_report_timestamp_format(self):
         """Test timestamp is properly formatted."""
@@ -436,7 +443,11 @@ class TestGenerateReport:
             "news_report": "New product launch",
             "investment_plan": "Recommend BUY",
             "trader_investment_plan": "Entry: $300",
-            "risk_debate_state": {"history": "Moderate risk"},
+            "risk_debate_state": {
+                "current_risky_response": "Moderate risk acceptable",
+                "current_safe_response": "",
+                "current_neutral_response": "",
+            },
         }
 
         report = reporter.generate_report(result_dict)

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 import structlog
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.types import RunnableConfig
@@ -178,7 +178,16 @@ def create_agent_tool_node(tools: list, agent_key: str):
         # Execute the tools using the filtered messages
         result = await tool_node.ainvoke({"messages": filtered_messages}, config)
 
-        # Return the tool messages
+        # CRITICAL: Tag ToolMessages with agent_key for parallel execution filtering
+        # This allows the analyst to identify its own tool results
+        if "messages" in result:
+            for msg in result["messages"]:
+                if isinstance(msg, ToolMessage):
+                    # Preserve tool name, add agent_key to additional_kwargs
+                    if msg.additional_kwargs is None:
+                        msg.additional_kwargs = {}
+                    msg.additional_kwargs["agent_key"] = agent_key
+
         return result
 
     return agent_tool_node
@@ -773,10 +782,14 @@ def create_trading_graph(
     else:
         workflow.add_edge("Research Manager", "Trader")
 
-    # Trader → Risk Team → Portfolio Manager
+    # Trader → Risk Team (parallel) → Portfolio Manager
+    # Risk analysts run in parallel for ~40 sec savings
     workflow.add_edge("Trader", "Risky Analyst")
-    workflow.add_edge("Risky Analyst", "Safe Analyst")
-    workflow.add_edge("Safe Analyst", "Neutral Analyst")
+    workflow.add_edge("Trader", "Safe Analyst")
+    workflow.add_edge("Trader", "Neutral Analyst")
+    # All three converge - PM waits for all to complete
+    workflow.add_edge("Risky Analyst", "Portfolio Manager")
+    workflow.add_edge("Safe Analyst", "Portfolio Manager")
     workflow.add_edge("Neutral Analyst", "Portfolio Manager")
     workflow.add_edge("Portfolio Manager", END)
 
@@ -793,6 +806,7 @@ def create_trading_graph(
             "Legal Counsel",
         ],
         fundamentals_sync="Junior + Foreign + Legal → Senior → Validator",
+        risk_team_parallel=["Risky Analyst", "Safe Analyst", "Neutral Analyst"],
     )
 
     return workflow.compile()
