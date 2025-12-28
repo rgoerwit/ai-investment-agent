@@ -619,7 +619,7 @@ class TestRegressionDetection:
             "investment_plan": "Buy recommendation",
             "consultant_review": "",
             "trader_investment_plan": "Execute buy",
-            "risk_debate_state": {"history": "Risk acceptable"},
+            "risk_debate_state": {"current_risky_response": "Risk acceptable"},
             "company_of_interest": "1681.HK",
             "company_name": "CONSUN PHARMA",
             "red_flags": [],
@@ -660,24 +660,28 @@ class TestRegressionDetection:
         }
         mock_llm.ainvoke = AsyncMock(return_value=mock_response)
 
-        node = create_risk_debater_node(mock_llm, "conservative_risk")
+        node = create_risk_debater_node(mock_llm, "safe_analyst")
 
         state = {
             "trader_investment_plan": "Buy 1681.HK",
             "consultant_review": "",
-            "risk_debate_state": {"history": "", "count": 0},
+            "risk_debate_state": {
+                "current_risky_response": "",
+                "current_safe_response": "",
+                "current_neutral_response": "",
+            },
             "company_of_interest": "1681.HK",
         }
         config = {"configurable": {}}
 
         result = await node(state, config)
 
-        # THE CRITICAL ASSERTION
+        # THE CRITICAL ASSERTION - now checks dedicated field
         risk_state = result.get("risk_debate_state", {})
-        history = risk_state.get("history", "")
+        safe_response = risk_state.get("current_safe_response", "")
 
-        assert isinstance(history, str), (
-            f"REGRESSION DETECTED: risk history is {type(history).__name__}, expected str. "
+        assert isinstance(safe_response, str), (
+            f"REGRESSION DETECTED: safe_response is {type(safe_response).__name__}, expected str. "
             f"Check that extract_string_content(response.content) is called in create_risk_debater_node()."
         )
 

@@ -365,6 +365,11 @@ def get_consultant_llm(
     """
     global _consultant_llm_instance
 
+    # Skip consultant in quick mode for performance
+    if quick_mode:
+        logger.info("Consultant LLM skipped in quick mode for performance")
+        return None
+
     # Check if consultant is enabled (via config, not os.environ)
     if not config.enable_consultant:
         logger.info("Consultant LLM disabled via ENABLE_CONSULTANT=false")

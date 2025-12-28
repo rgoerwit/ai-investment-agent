@@ -449,19 +449,10 @@ class TestConsultantQuickMode:
         # Reset the global instance
         src.llms._consultant_llm_instance = None
 
-        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
-            mock_chatgpt.return_value = MagicMock()
-
-            with patch("src.llms.config") as mock_config:
-                mock_config.enable_consultant = True
-                mock_config.consultant_quick_model = "gpt-4o-mini-test"
-                mock_config.get_openai_api_key.return_value = "test-key"
-                llm = get_consultant_llm(quick_mode=True)
-
-                assert llm is not None
-                mock_chatgpt.assert_called_once()
-                call_kwargs = mock_chatgpt.call_args[1]
-                assert call_kwargs["model"] == "gpt-4o-mini-test"
+        # quick_mode now skips the consultant entirely for performance
+        # (saves ~34 seconds per analysis)
+        llm = get_consultant_llm(quick_mode=True)
+        assert llm is None, "quick_mode should skip consultant for performance"
 
         # Reset for other tests
         src.llms._consultant_llm_instance = None

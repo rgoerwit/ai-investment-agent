@@ -430,7 +430,7 @@ def save_results_to_file(result: dict, ticker: str) -> Path:
                 "neutral_perspective": result.get("risk_debate_state", {}).get(
                     "current_neutral_response", ""
                 ),
-                "debate_rounds": result.get("risk_debate_state", {}).get("count", 0),
+                "debate_rounds": 1,  # Risk analysts run in parallel (1 round each)
             }
         },
         "final_decision": {
@@ -537,16 +537,10 @@ async def run_analysis(ticker: str, quick_mode: bool) -> dict | None:
             investment_plan="",
             trader_investment_plan="",
             risk_debate_state=RiskDebateState(
-                risky_history="",
-                safe_history="",
-                neutral_history="",
-                history="",
                 latest_speaker="",
                 current_risky_response="",
                 current_safe_response="",
                 current_neutral_response="",
-                judge_decision="",
-                count=0,
             ),
             final_trade_decision="",
             tools_called={},

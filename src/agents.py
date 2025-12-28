@@ -17,7 +17,13 @@ from datetime import datetime
 from typing import Annotated, Any
 
 import structlog
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.graph import MessagesState
 from langgraph.prebuilt import create_react_agent
@@ -182,23 +188,48 @@ class InvestDebateState(TypedDict):
 
 
 class RiskDebateState(TypedDict):
-    """State tracking multi-perspective risk assessment debate."""
+    """State tracking multi-perspective risk assessment debate (parallel-safe)."""
 
-    risky_history: str
-    safe_history: str
-    neutral_history: str
-    history: str
     latest_speaker: str
     current_risky_response: str
     current_safe_response: str
     current_neutral_response: str
-    judge_decision: str
-    count: int
 
 
 def take_last(x, y):
     """Reducer: takes the most recent value. Used with Annotated fields."""
     return y
+
+
+def merge_dicts(x: dict | None, y: dict | None) -> dict:
+    """Reducer: merges dictionaries. Used for parallel agent state updates."""
+    if x is None:
+        return y or {}
+    if y is None:
+        return x
+    return {**x, **y}
+
+
+def merge_risk_state(
+    x: RiskDebateState | None, y: RiskDebateState | None
+) -> RiskDebateState:
+    """
+    Reducer for RiskDebateState that merges parallel updates.
+
+    Simple merge is safe because each parallel agent writes to a DISTINCT key
+    (current_risky_response vs current_safe_response vs current_neutral_response).
+    The only shared key is 'latest_speaker', where last-write-wins is acceptable.
+    """
+    if x is None:
+        return y or RiskDebateState(
+            latest_speaker="",
+            current_risky_response="",
+            current_safe_response="",
+            current_neutral_response="",
+        )
+    if y is None:
+        return x
+    return {**x, **y}
 
 
 class AgentState(MessagesState):
@@ -220,10 +251,10 @@ class AgentState(MessagesState):
     investment_plan: Annotated[str, take_last]
     consultant_review: Annotated[str, take_last]  # External consultant validation
     trader_investment_plan: Annotated[str, take_last]
-    risk_debate_state: Annotated[RiskDebateState, take_last]
+    risk_debate_state: Annotated[RiskDebateState, merge_risk_state]
     final_trade_decision: Annotated[str, take_last]
-    tools_called: Annotated[dict[str, set[str]], take_last]
-    prompts_used: Annotated[dict[str, dict[str, str]], take_last]
+    tools_called: Annotated[dict[str, set[str]], merge_dicts]
+    prompts_used: Annotated[dict[str, dict[str, str]], merge_dicts]
 
     # Red-flag detection fields
     red_flags: Annotated[list[dict[str, Any]], take_last]
@@ -274,9 +305,71 @@ def get_analysis_context(ticker: str) -> str:
     )
 
 
-def filter_messages_for_gemini(messages: list[BaseMessage]) -> list[BaseMessage]:
+def filter_messages_by_agent(
+    messages: list[BaseMessage], agent_key: str
+) -> list[BaseMessage]:
+    """
+    Filter messages to only include this agent's conversation history.
+
+    CRITICAL FIX for parallel execution: In LangGraph parallel branches, all agents
+    share the messages list. Without filtering, Agent A can see Agent B's tool calls,
+    causing confusion and incorrect responses.
+
+    Keeps:
+    - HumanMessage: Initial instructions (shared by all)
+    - AIMessage with name == agent_key: This agent's responses
+    - ToolMessage with agent_key in additional_kwargs: This agent's tool results
+
+    Args:
+        messages: All messages from state
+        agent_key: The agent's identifier (e.g., "market_analyst")
+
+    Returns:
+        Filtered messages for this agent only
+    """
     if not messages:
         return []
+
+    filtered = []
+    for msg in messages:
+        # Always include HumanMessages (initial instructions)
+        if isinstance(msg, HumanMessage):
+            filtered.append(msg)
+        # Include AIMessages tagged with this agent
+        elif isinstance(msg, AIMessage):
+            if getattr(msg, "name", None) == agent_key:
+                filtered.append(msg)
+        # Include ToolMessages tagged with this agent
+        elif isinstance(msg, ToolMessage):
+            msg_agent = (
+                msg.additional_kwargs.get("agent_key")
+                if msg.additional_kwargs
+                else None
+            )
+            if msg_agent == agent_key:
+                filtered.append(msg)
+        # Skip SystemMessages (re-added fresh by analyst node)
+
+    return filtered
+
+
+def filter_messages_for_gemini(
+    messages: list[BaseMessage], agent_key: str | None = None
+) -> list[BaseMessage]:
+    """
+    Filter and format messages for Gemini API compatibility.
+
+    If agent_key is provided, first filters to only this agent's messages (parallel-safe).
+    Then applies Gemini-specific formatting (merge consecutive HumanMessages).
+    """
+    # Step 1: Filter by agent if provided (parallel execution safety)
+    if agent_key:
+        messages = filter_messages_by_agent(messages, agent_key)
+
+    if not messages:
+        return []
+
+    # Step 2: Apply Gemini formatting (merge consecutive HumanMessages)
     filtered = []
     for msg in messages:
         if isinstance(msg, SystemMessage):
@@ -429,7 +522,10 @@ def create_analyst_node(
                 "agent_name": agent_prompt.agent_name,
                 "version": agent_prompt.version,
             }
-            filtered_messages = filter_messages_for_gemini(state.get("messages", []))
+            # CRITICAL: Filter messages to only this agent's history (parallel execution safety)
+            filtered_messages = filter_messages_for_gemini(
+                state.get("messages", []), agent_key=agent_key
+            )
             context = get_context_from_config(config)
             current_date = (
                 context.trade_date if context else datetime.now().strftime("%Y-%m-%d")
@@ -546,6 +642,11 @@ def create_analyst_node(
                 {"messages": invocation_messages},
                 context=agent_prompt.agent_name,
             )
+
+            # CRITICAL: Tag outgoing message with agent_key for parallel execution filtering
+            # This allows other iterations of this agent to identify its own messages
+            response.name = agent_key
+
             new_state = {
                 "sender": agent_key,
                 "messages": [response],
@@ -602,6 +703,9 @@ def create_analyst_node(
                         {"messages": invocation_messages},
                         context=f"{agent_prompt.agent_name} (RETRY-HIGH)",
                     )
+
+                    # CRITICAL: Tag retry response for parallel execution filtering
+                    retry_response.name = agent_key
 
                     # Extract content from retry response
                     retry_content_str = extract_string_content(retry_response.content)
@@ -839,17 +943,27 @@ RESEARCH MANAGER PLAN:
 
 
 def create_risk_debater_node(llm, agent_key: str) -> Callable:
+    # Map agent_key to the dedicated field for parallel-safe writes
+    AGENT_FIELD_MAP = {
+        "risky_analyst": "current_risky_response",
+        "safe_analyst": "current_safe_response",
+        "neutral_analyst": "current_neutral_response",
+    }
+
     async def risk_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         from src.prompts import get_prompt
 
         agent_prompt = get_prompt(agent_key)
+        field_name = AGENT_FIELD_MAP.get(agent_key, "history")
+
         if not agent_prompt:
-            risk_state = state.get("risk_debate_state", {}).copy()
-            risk_state["history"] += (
-                f"\n[SYSTEM]: Error - Missing prompt for {agent_key}"
-            )
-            risk_state["count"] += 1
-            return {"risk_debate_state": risk_state}
+            # Return only the field this agent writes to (parallel-safe)
+            return {
+                "risk_debate_state": {
+                    field_name: f"[SYSTEM]: Error - Missing prompt for {agent_key}",
+                    "latest_speaker": agent_key,
+                }
+            }
 
         # Include consultant review if available (external cross-validation)
         consultant = state.get("consultant_review", "")
@@ -860,14 +974,24 @@ def create_risk_debater_node(llm, agent_key: str) -> Callable:
             response = await invoke_with_rate_limit_handling(
                 llm, [HumanMessage(content=prompt)], context=agent_prompt.agent_name
             )
-            risk_state = state.get("risk_debate_state", {}).copy()
             # CRITICAL FIX: Normalize response.content to string
             content_str = extract_string_content(response.content)
-            risk_state["history"] += f"\n{agent_prompt.agent_name}: {content_str}\n"
-            risk_state["count"] += 1
-            return {"risk_debate_state": risk_state}
-        except Exception:
-            return {"risk_debate_state": state.get("risk_debate_state", {})}
+
+            # Each analyst writes ONLY to its dedicated field (parallel-safe)
+            # The merge_risk_state reducer will combine all three
+            return {
+                "risk_debate_state": {
+                    field_name: f"{agent_prompt.agent_name}: {content_str}",
+                    "latest_speaker": agent_prompt.agent_name,
+                }
+            }
+        except Exception as e:
+            return {
+                "risk_debate_state": {
+                    field_name: f"[ERROR]: {agent_key} failed - {str(e)}",
+                    "latest_speaker": agent_key,
+                }
+            }
 
     return risk_node
 
@@ -886,7 +1010,18 @@ def create_portfolio_manager_node(llm, memory: Any | None) -> Callable:
         inv_plan = state.get("investment_plan", "")
         consultant = state.get("consultant_review", "")
         trader = state.get("trader_investment_plan", "")
-        risk = state.get("risk_debate_state", {}).get("history", "")
+
+        # Read from all three dedicated risk fields (parallel-safe)
+        risk_state = state.get("risk_debate_state", {})
+        risky_view = risk_state.get("current_risky_response", "")
+        safe_view = risk_state.get("current_safe_response", "")
+        neutral_view = risk_state.get("current_neutral_response", "")
+        # Combine all three perspectives for the PM
+        risk = f"""RISKY ANALYST (Aggressive):\n{risky_view if risky_view else "N/A"}
+
+SAFE ANALYST (Conservative):\n{safe_view if safe_view else "N/A"}
+
+NEUTRAL ANALYST (Balanced):\n{neutral_view if neutral_view else "N/A"}"""
 
         # Red-flag pre-screening results
         pre_screening_result = state.get("pre_screening_result", "N/A")

@@ -418,7 +418,7 @@ class TestBackwardsCompatibility:
             "investment_plan": "BUY",
             "consultant_review": "",  # Empty
             "trader_investment_plan": "Trader",
-            "risk_debate_state": {"history": "Risk"},
+            "risk_debate_state": {"current_risky_response": "Risk assessment"},
         }
 
         consultant = state.get("consultant_review", "")

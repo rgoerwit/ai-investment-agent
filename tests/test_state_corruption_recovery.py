@@ -795,21 +795,21 @@ class TestEndToEndInformationFlow:
             Entry: Market order at $120
             Stop loss: $95 (20% downside)
             """,
-            # Risk debate (from risk team)
+            # Risk debate (from risk team - parallel-safe dedicated fields)
             "risk_debate_state": {
-                "history": """
-                RISK TEAM DEBATE
-
+                "current_safe_response": """
                 Conservative Risk Analyst: MODERATE risk
                 - Leverage at 45% is manageable
                 - Stop loss: $95 protects downside
-
+                """,
+                "current_neutral_response": """
                 Neutral Risk Analyst: MODERATE risk
                 - Agrees with conservative assessment
-
+                """,
+                "current_risky_response": """
                 Aggressive Risk Analyst: LOW risk
                 - Strong growth justifies position
-                """
+                """,
             },
             # Red-flag pre-screening results
             "pre_screening_result": "PASS",
