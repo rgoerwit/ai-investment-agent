@@ -94,7 +94,7 @@ class TestResearcherNode:
 
     @pytest.mark.asyncio
     async def test_create_researcher_node(self):
-        """Test researcher node creation."""
+        """Test researcher node creation with round-aware output."""
         from src.agents import create_researcher_node
 
         mock_llm = MagicMock()
@@ -102,26 +102,71 @@ class TestResearcherNode:
         mock_response.content = "Bull argument"
         mock_llm.ainvoke = AsyncMock(return_value=mock_response)
 
-        node = create_researcher_node(mock_llm, None, "bull_researcher")
+        # Test Round 1 node (default)
+        node_r1 = create_researcher_node(mock_llm, None, "bull_researcher", round_num=1)
 
-        # Fixed: Initialize debate state with all required fields
         state = {
             "market_report": "Market report",
             "fundamentals_report": "Fundamentals report",
             "company_of_interest": "AAPL",
             "investment_debate_state": {
+                "bull_round1": "",
+                "bear_round1": "",
+                "bull_round2": "",
+                "bear_round2": "",
+                "current_round": 1,
                 "history": "",
                 "count": 0,
-                "bull_history": "",  # Required field
-                "bear_history": "",  # Required field
+                "bull_history": "",
+                "bear_history": "",
             },
         }
         config = {}
 
-        result = await node(state, config)
+        result = await node_r1(state, config)
 
         assert "investment_debate_state" in result
-        assert result["investment_debate_state"]["count"] == 1
+        # Round 1 writes to bull_round1 field
+        assert "bull_round1" in result["investment_debate_state"]
+        assert "Bull Analyst" in result["investment_debate_state"]["bull_round1"]
+
+    @pytest.mark.asyncio
+    async def test_create_researcher_node_round2(self):
+        """Test researcher node for Round 2 with opponent context."""
+        from src.agents import create_researcher_node
+
+        mock_llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "Bull rebuttal"
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
+
+        # Test Round 2 node
+        node_r2 = create_researcher_node(mock_llm, None, "bull_researcher", round_num=2)
+
+        state = {
+            "market_report": "Market report",
+            "fundamentals_report": "Fundamentals report",
+            "company_of_interest": "AAPL",
+            "investment_debate_state": {
+                "bull_round1": "Bull R1 argument",
+                "bear_round1": "Bear R1 argument",
+                "bull_round2": "",
+                "bear_round2": "",
+                "current_round": 2,
+                "history": "",
+                "count": 2,
+                "bull_history": "",
+                "bear_history": "",
+            },
+        }
+        config = {}
+
+        result = await node_r2(state, config)
+
+        assert "investment_debate_state" in result
+        # Round 2 writes to bull_round2 field
+        assert "bull_round2" in result["investment_debate_state"]
+        assert "Bull Analyst" in result["investment_debate_state"]["bull_round2"]
 
     @pytest.mark.asyncio
     async def test_researcher_memory_contamination_fix(self):
@@ -411,6 +456,228 @@ class TestFundamentalsAnalystPrompt:
         assert "version" in prompt_info  # Has some version
         assert "agent_name" in prompt_info  # Has an agent name
         assert prompt_info["agent_name"]  # Agent name is not empty
+
+
+class TestParallelDebateInfrastructure:
+    """Test parallel debate state management and merging."""
+
+    def test_merge_invest_debate_state_handles_none(self):
+        """Test merger handles None inputs correctly."""
+        from src.agents import merge_invest_debate_state
+
+        # Both None
+        result = merge_invest_debate_state(None, None)
+        assert result is not None
+        assert result["bull_round1"] == ""
+        assert result["bear_round1"] == ""
+
+        # First None, second has values
+        y = {"bull_round1": "Bull argument", "current_round": 1}
+        result = merge_invest_debate_state(None, y)
+        assert result["bull_round1"] == "Bull argument"
+
+        # First has values, second None
+        x = {"bear_round1": "Bear argument", "current_round": 1}
+        result = merge_invest_debate_state(x, None)
+        assert result["bear_round1"] == "Bear argument"
+
+    def test_merge_invest_debate_state_parallel_safety(self):
+        """Test that parallel Bull/Bear writes merge correctly without overwriting."""
+        from src.agents import merge_invest_debate_state
+
+        # Simulate parallel Bull and Bear R1 results
+        bull_result = {
+            "bull_round1": "Bull R1: Strong fundamentals",
+            "bear_round1": "",
+            "current_round": 1,
+        }
+        bear_result = {
+            "bull_round1": "",
+            "bear_round1": "Bear R1: Overvalued",
+            "current_round": 1,
+        }
+
+        # Merge order 1: Bull first, Bear second
+        merged1 = merge_invest_debate_state(bull_result, bear_result)
+        assert merged1["bull_round1"] == "Bull R1: Strong fundamentals"
+        assert merged1["bear_round1"] == "Bear R1: Overvalued"
+
+        # Merge order 2: Bear first, Bull second (should produce same result)
+        merged2 = merge_invest_debate_state(bear_result, bull_result)
+        assert merged2["bull_round1"] == "Bull R1: Strong fundamentals"
+        assert merged2["bear_round1"] == "Bear R1: Overvalued"
+
+    def test_merge_invest_debate_state_last_writer_wins(self):
+        """Test that non-empty values override empty values."""
+        from src.agents import merge_invest_debate_state
+
+        # Base state with some values
+        base = {
+            "bull_round1": "Old bull",
+            "bear_round1": "",
+            "bull_round2": "",
+            "bear_round2": "",
+            "history": "",
+            "current_round": 1,
+        }
+
+        # Update with new bear value (bull_round1 empty in update)
+        update = {
+            "bull_round1": "",
+            "bear_round1": "New bear",
+            "current_round": 1,
+        }
+
+        merged = merge_invest_debate_state(base, update)
+        # Non-empty base value preserved, new non-empty value merged
+        assert merged["bull_round1"] == "Old bull"
+        assert merged["bear_round1"] == "New bear"
+
+    def test_invest_debate_state_has_required_fields(self):
+        """Verify InvestDebateState has all required parallel fields."""
+        from src.agents import InvestDebateState
+
+        annotations = InvestDebateState.__annotations__
+
+        # Dedicated round fields for parallel safety
+        assert "bull_round1" in annotations
+        assert "bear_round1" in annotations
+        assert "bull_round2" in annotations
+        assert "bear_round2" in annotations
+
+        # Control fields
+        assert "current_round" in annotations
+        assert "history" in annotations
+        assert "bull_history" in annotations
+        assert "bear_history" in annotations
+
+
+class TestParallelResearcherNodes:
+    """Test researcher node round-aware behavior."""
+
+    @pytest.mark.asyncio
+    async def test_bull_r1_and_bear_r1_write_to_different_fields(self):
+        """Verify Bull R1 and Bear R1 don't conflict in state."""
+        from src.agents import create_researcher_node
+
+        # Bull R1 mock
+        bull_llm = MagicMock()
+        bull_llm.ainvoke = AsyncMock(return_value=MagicMock(content="Bull case"))
+        bull_r1 = create_researcher_node(bull_llm, None, "bull_researcher", round_num=1)
+
+        # Bear R1 mock
+        bear_llm = MagicMock()
+        bear_llm.ainvoke = AsyncMock(return_value=MagicMock(content="Bear case"))
+        bear_r1 = create_researcher_node(bear_llm, None, "bear_researcher", round_num=1)
+
+        state = {
+            "market_report": "Market report",
+            "fundamentals_report": "Fundamentals report",
+            "company_of_interest": "AAPL",
+            "investment_debate_state": {
+                "bull_round1": "",
+                "bear_round1": "",
+                "bull_round2": "",
+                "bear_round2": "",
+                "current_round": 1,
+                "history": "",
+                "bull_history": "",
+                "bear_history": "",
+                "count": 0,
+            },
+        }
+        config = {}
+
+        # Simulate parallel execution
+        bull_result = await bull_r1(state, config)
+        bear_result = await bear_r1(state, config)
+
+        # Bull writes to bull_round1 only
+        assert "bull_round1" in bull_result["investment_debate_state"]
+        assert bull_result["investment_debate_state"]["bull_round1"] != ""
+
+        # Bear writes to bear_round1 only
+        assert "bear_round1" in bear_result["investment_debate_state"]
+        assert bear_result["investment_debate_state"]["bear_round1"] != ""
+
+    @pytest.mark.asyncio
+    async def test_round2_researcher_sees_opponent_context(self):
+        """Verify Round 2 researcher has access to opponent's R1 argument."""
+        from src.agents import create_researcher_node
+
+        # Capture what's sent to the LLM
+        captured_messages = []
+        mock_llm = MagicMock()
+
+        async def capture_invoke(messages):
+            captured_messages.append(messages)
+            return MagicMock(content="Bull rebuttal")
+
+        mock_llm.ainvoke = AsyncMock(side_effect=capture_invoke)
+
+        # Bull R2 node
+        bull_r2 = create_researcher_node(mock_llm, None, "bull_researcher", round_num=2)
+
+        state = {
+            "market_report": "Market report",
+            "fundamentals_report": "Fundamentals report",
+            "company_of_interest": "AAPL",
+            "investment_debate_state": {
+                "bull_round1": "Bull R1: Strong growth",
+                "bear_round1": "Bear R1: High valuation risk",  # Opponent's R1
+                "bull_round2": "",
+                "bear_round2": "",
+                "current_round": 2,
+                "history": "",
+                "bull_history": "",
+                "bear_history": "",
+                "count": 2,
+            },
+        }
+        config = {}
+
+        await bull_r2(state, config)
+
+        # Verify opponent's R1 argument is in the prompt
+        prompt_content = captured_messages[0][0].content
+        assert "Bear R1" in prompt_content or "valuation risk" in prompt_content
+
+    @pytest.mark.asyncio
+    async def test_quick_mode_compatible_state(self):
+        """Verify state structure works for quick mode (R1 only)."""
+        from src.agents import create_researcher_node
+
+        mock_llm = MagicMock()
+        mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content="Quick analysis"))
+
+        node = create_researcher_node(mock_llm, None, "bull_researcher", round_num=1)
+
+        state = {
+            "market_report": "M",
+            "fundamentals_report": "F",
+            "company_of_interest": "AAPL",
+            "investment_debate_state": {
+                "bull_round1": "",
+                "bear_round1": "",
+                "bull_round2": "",
+                "bear_round2": "",
+                "current_round": 1,
+                "history": "",
+                "bull_history": "",
+                "bear_history": "",
+                "count": 0,
+            },
+        }
+        config = {}
+
+        result = await node(state, config)
+
+        # Quick mode only runs R1, so bull_round1 should be populated
+        assert result["investment_debate_state"]["bull_round1"] != ""
+        # R2 fields should remain empty (quick mode skips them)
+        assert "bull_round2" not in result["investment_debate_state"] or (
+            result["investment_debate_state"].get("bull_round2", "") == ""
+        )
 
 
 if __name__ == "__main__":

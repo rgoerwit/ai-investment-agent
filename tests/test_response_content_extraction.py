@@ -559,7 +559,8 @@ class TestRegressionDetection:
         }
         mock_llm.ainvoke = AsyncMock(return_value=mock_response)
 
-        node = create_researcher_node(mock_llm, None, "bull_researcher")
+        # Round 1 node writes to bull_round1 field
+        node = create_researcher_node(mock_llm, None, "bull_researcher", round_num=1)
 
         state = {
             "market_report": "Market is bullish",
@@ -567,6 +568,11 @@ class TestRegressionDetection:
             "company_of_interest": "1681.HK",
             "company_name": "CONSUN PHARMA",
             "investment_debate_state": {
+                "bull_round1": "",
+                "bear_round1": "",
+                "bull_round2": "",
+                "bear_round2": "",
+                "current_round": 1,
                 "history": "",
                 "bull_history": "",
                 "bear_history": "",
@@ -577,17 +583,17 @@ class TestRegressionDetection:
 
         result = await node(state, config)
 
-        # THE CRITICAL ASSERTION
+        # THE CRITICAL ASSERTION - now checks dedicated round field
         debate_state = result.get("investment_debate_state", {})
-        history = debate_state.get("history", "")
+        bull_round1 = debate_state.get("bull_round1", "")
 
-        assert isinstance(history, str), (
-            f"REGRESSION DETECTED: debate history is {type(history).__name__}, expected str. "
+        assert isinstance(bull_round1, str), (
+            f"REGRESSION DETECTED: bull_round1 is {type(bull_round1).__name__}, expected str. "
             f"Check that extract_string_content(response.content) is called in create_researcher_node()."
         )
         assert (
-            "Bull" in history or "BULL" in history
-        ), "Bull analyst name should be in history"
+            "Bull" in bull_round1 or "BULL" in bull_round1
+        ), "Bull analyst name should be in bull_round1"
 
     @pytest.mark.asyncio
     async def test_portfolio_manager_node_handles_dict_response_REGRESSION(self):

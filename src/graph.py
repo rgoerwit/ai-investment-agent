@@ -252,7 +252,7 @@ def fundamentals_sync_router(
 
 def sync_check_router(
     state: AgentState, config: RunnableConfig
-) -> Literal["Research Manager", "Portfolio Manager", "__end__"]:
+) -> Literal["Portfolio Manager", "__end__"] | list[str]:
     """
     Synchronization barrier for parallel analyst streams (fan-in pattern).
 
@@ -267,7 +267,7 @@ def sync_check_router(
     - If NOT all reports present: Return __end__ to terminate THIS branch
       (other branches continue running and will hit sync_check later)
     - If all present AND pre_screening=REJECT: Route to Portfolio Manager (fast-fail)
-    - If all present AND pre_screening=PASS: Route to Bull Researcher (start debate)
+    - If all present AND pre_screening=PASS: Fan-out to Bull/Bear Researcher R1 (parallel)
 
     The LAST branch to complete will see all reports and proceed to the next phase.
     """
@@ -305,28 +305,11 @@ def sync_check_router(
         return "Portfolio Manager"
 
     logger.info(
-        "sync_routing_to_research_manager",
-        message="All analysts complete - proceeding to Research Manager",
+        "sync_routing_to_debate",
+        message="All analysts complete - proceeding to Bull/Bear Debate Round 1",
     )
-    return "Research Manager"
-
-
-def debate_router(state: AgentState, config: RunnableConfig):
-    """
-    Route debate flow between Bull and Bear researchers.
-    After debate converges, routes to Research Manager.
-    """
-    context = config.get("configurable", {}).get("context")
-    max_rounds = getattr(context, "max_debate_rounds", 2) if context else 2
-    limit = max_rounds * 2  # Bull + Bear per round
-
-    count = state.get("investment_debate_state", {}).get("count", 0)
-
-    if count >= limit:
-        return "Research Manager"
-
-    # Alternating flow
-    return "Bear Researcher" if count % 2 != 0 else "Bull Researcher"
+    # Fan-out to parallel Bull/Bear R1 by returning list
+    return ["Bull Researcher R1", "Bear Researcher R1"]
 
 
 # --- Graph Creation ---
@@ -604,8 +587,19 @@ def create_trading_graph(
     legal_tools = create_agent_tool_node(toolkit.get_legal_tools(), "legal_counsel")
 
     # Research & Decision nodes
-    bull = create_researcher_node(bull_llm, bull_memory, "bull_researcher")
-    bear = create_researcher_node(bear_llm, bear_memory, "bear_researcher")
+    # Create separate nodes for each debate round (enables parallel execution)
+    bull_r1 = create_researcher_node(
+        bull_llm, bull_memory, "bull_researcher", round_num=1
+    )
+    bear_r1 = create_researcher_node(
+        bear_llm, bear_memory, "bear_researcher", round_num=1
+    )
+    bull_r2 = create_researcher_node(
+        bull_llm, bull_memory, "bull_researcher", round_num=2
+    )
+    bear_r2 = create_researcher_node(
+        bear_llm, bear_memory, "bear_researcher", round_num=2
+    )
     res_mgr = create_research_manager_node(res_mgr_llm, invest_judge_memory)
     trader = create_trader_node(trader_llm, trader_memory)
 
@@ -647,6 +641,109 @@ def create_trading_graph(
 
     workflow.add_node("Fundamentals Sync Check", fundamentals_sync_node)
 
+    # Debate Sync R1 node - assembles R1 outputs for R2 context
+    async def debate_sync_r1_node(state: AgentState, config: RunnableConfig):
+        """
+        Synchronization point after Round 1 of Bull/Bear debate.
+        Assembles R1 outputs so R2 agents can reference opponent arguments.
+        """
+        debate = state.get("investment_debate_state", {})
+        bull_r1 = debate.get("bull_round1", "")
+        bear_r1 = debate.get("bear_round1", "")
+
+        # Build partial history (R1 only) for any downstream use
+        history = f"""=== ROUND 1 ===
+
+BULL RESEARCHER:
+{bull_r1}
+
+BEAR RESEARCHER:
+{bear_r1}
+"""
+        logger.info(
+            "debate_sync_r1_complete",
+            bull_r1_len=len(bull_r1),
+            bear_r1_len=len(bear_r1),
+        )
+
+        return {
+            "investment_debate_state": {
+                "history": history,
+                "bull_history": bull_r1,
+                "bear_history": bear_r1,
+                "current_round": 2,
+                "count": 2,  # 2 arguments completed
+            }
+        }
+
+    workflow.add_node("Debate Sync R1", debate_sync_r1_node)
+
+    # Debate Sync Final node - assembles full debate history for Research Manager
+    async def debate_sync_final_node(state: AgentState, config: RunnableConfig):
+        """
+        Final synchronization after debate completion.
+        Assembles full debate history (R1 + R2) for Research Manager.
+        Works for both quick mode (R1 only) and standard mode (R1 + R2).
+        """
+        debate = state.get("investment_debate_state", {})
+        bull_r1 = debate.get("bull_round1", "")
+        bear_r1 = debate.get("bear_round1", "")
+        bull_r2 = debate.get("bull_round2", "")
+        bear_r2 = debate.get("bear_round2", "")
+
+        # Build full history
+        if bull_r2 or bear_r2:
+            # Standard mode: 2 rounds
+            history = f"""=== ROUND 1 ===
+
+BULL RESEARCHER:
+{bull_r1}
+
+BEAR RESEARCHER:
+{bear_r1}
+
+=== ROUND 2 ===
+
+BULL RESEARCHER (Rebuttal):
+{bull_r2}
+
+BEAR RESEARCHER (Rebuttal):
+{bear_r2}
+"""
+            bull_history = f"{bull_r1}\n\n{bull_r2}"
+            bear_history = f"{bear_r1}\n\n{bear_r2}"
+            count = 4
+        else:
+            # Quick mode: 1 round only
+            history = f"""=== ROUND 1 ===
+
+BULL RESEARCHER:
+{bull_r1}
+
+BEAR RESEARCHER:
+{bear_r1}
+"""
+            bull_history = bull_r1
+            bear_history = bear_r1
+            count = 2
+
+        logger.info(
+            "debate_sync_final_complete",
+            rounds=2 if bull_r2 else 1,
+            total_arguments=count,
+        )
+
+        return {
+            "investment_debate_state": {
+                "history": history,
+                "bull_history": bull_history,
+                "bear_history": bear_history,
+                "count": count,
+            }
+        }
+
+    workflow.add_node("Debate Sync Final", debate_sync_final_node)
+
     # Add analyst nodes
     workflow.add_node("Market Analyst", market)
     workflow.add_node("Sentiment Analyst", sentiment)
@@ -664,9 +761,11 @@ def create_trading_graph(
     workflow.add_node("foreign_tools", foreign_tools)
     workflow.add_node("legal_tools", legal_tools)
 
-    # Add research and risk nodes
-    workflow.add_node("Bull Researcher", bull)
-    workflow.add_node("Bear Researcher", bear)
+    # Add research nodes (separate nodes for each round enables parallel execution)
+    workflow.add_node("Bull Researcher R1", bull_r1)
+    workflow.add_node("Bear Researcher R1", bear_r1)
+    workflow.add_node("Bull Researcher R2", bull_r2)
+    workflow.add_node("Bear Researcher R2", bear_r2)
     workflow.add_node("Research Manager", res_mgr)
 
     if consultant is not None:
@@ -757,23 +856,53 @@ def create_trading_graph(
     workflow.add_edge("Financial Validator", "Sync Check")
 
     # Sync Check: wait for all streams, then route
+    # Uses list-style destinations to support fan-out (router returns list for parallel R1)
     workflow.add_conditional_edges(
         "Sync Check",
         sync_check_router,
-        {
-            "__end__": END,
-            "Portfolio Manager": "Portfolio Manager",
-            "Research Manager": "Bull Researcher",  # Start debate with Bull
-        },
+        ["__end__", "Portfolio Manager", "Bull Researcher R1", "Bear Researcher R1"],
     )
 
-    # Bull/Bear Debate Flow
+    # === PARALLEL BULL/BEAR DEBATE ===
+
+    # Round 1: Bull and Bear run in parallel
+    # Fan-out handled by sync_check_router returning ["Bull Researcher R1", "Bear Researcher R1"]
+    # Both R1 nodes converge at Debate Sync R1
+    workflow.add_edge("Bull Researcher R1", "Debate Sync R1")
+    workflow.add_edge("Bear Researcher R1", "Debate Sync R1")
+
+    # Router after R1: go to R2 (standard) or skip to Final (quick mode)
+    def debate_r1_router(
+        state: AgentState, config: RunnableConfig
+    ) -> Literal["Debate Sync Final"] | list[str]:
+        """Route after Round 1: to Round 2 or directly to final sync (quick mode)."""
+        context = config.get("configurable", {}).get("context")
+        max_rounds = getattr(context, "max_debate_rounds", 2) if context else 2
+
+        if max_rounds <= 1:
+            # Quick mode: skip R2, go directly to final sync
+            logger.info("debate_r1_router", decision="skip_r2_quick_mode")
+            return "Debate Sync Final"
+        else:
+            # Standard mode: fan-out to parallel R2
+            logger.info("debate_r1_router", decision="proceed_to_r2")
+            return ["Bull Researcher R2", "Bear Researcher R2"]
+
+    # Uses list-style destinations to support fan-out (router returns list for parallel R2)
     workflow.add_conditional_edges(
-        "Bull Researcher", debate_router, ["Bear Researcher", "Research Manager"]
+        "Debate Sync R1",
+        debate_r1_router,
+        ["Debate Sync Final", "Bull Researcher R2", "Bear Researcher R2"],
     )
-    workflow.add_conditional_edges(
-        "Bear Researcher", debate_router, ["Bull Researcher", "Research Manager"]
-    )
+
+    # Round 2: Bull and Bear run in parallel (both have R1 context)
+    # Fan-out handled by debate_r1_router returning ["Bull Researcher R2", "Bear Researcher R2"]
+    # Both R2 nodes converge at Debate Sync Final
+    workflow.add_edge("Bull Researcher R2", "Debate Sync Final")
+    workflow.add_edge("Bear Researcher R2", "Debate Sync Final")
+
+    # Final sync → Research Manager
+    workflow.add_edge("Debate Sync Final", "Research Manager")
 
     # Research Manager → Consultant → Trader (or direct to Trader)
     if consultant is not None:
@@ -806,7 +935,14 @@ def create_trading_graph(
             "Legal Counsel",
         ],
         fundamentals_sync="Junior + Foreign + Legal → Senior → Validator",
+        debate_parallel=[
+            "Bull R1 || Bear R1",
+            "Sync R1",
+            "Bull R2 || Bear R2 (if max_rounds > 1)",
+            "Sync Final",
+        ],
         risk_team_parallel=["Risky Analyst", "Safe Analyst", "Neutral Analyst"],
+        quick_mode=quick_mode,
     )
 
     return workflow.compile()

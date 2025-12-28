@@ -177,14 +177,33 @@ def extract_news_highlights(news_report: str, max_chars: int = 1500) -> str:
 
 # --- State Definitions ---
 class InvestDebateState(TypedDict):
-    """State tracking bull/bear investment debate progression."""
+    """
+    State tracking bull/bear investment debate progression (parallel-safe).
 
-    bull_history: str
-    bear_history: str
-    history: str
+    Uses dedicated fields per round to allow parallel execution of Bull/Bear
+    in each round without race conditions.
+    """
+
+    # Round 1 outputs (dedicated fields for parallel safety)
+    bull_round1: str
+    bear_round1: str
+
+    # Round 2 outputs (dedicated fields for parallel safety)
+    bull_round2: str
+    bear_round2: str
+
+    # Current round (1 or 2)
+    current_round: int
+
+    # Assembled histories (built at sync points for downstream consumers)
+    bull_history: str  # All Bull arguments concatenated
+    bear_history: str  # All Bear arguments concatenated
+    history: str  # Full debate history for Research Manager
+
+    # Legacy fields (kept for backward compatibility)
     current_response: str
     judge_decision: str
-    count: int
+    count: int  # Total argument count (for compatibility)
 
 
 class RiskDebateState(TypedDict):
@@ -232,6 +251,54 @@ def merge_risk_state(
     return {**x, **y}
 
 
+def merge_invest_debate_state(
+    x: InvestDebateState | None, y: InvestDebateState | None
+) -> InvestDebateState:
+    """
+    Reducer for InvestDebateState that merges parallel updates.
+
+    Safe for parallel Bull/Bear execution because each writes to DISTINCT fields:
+    - Bull writes to bull_round1 or bull_round2
+    - Bear writes to bear_round1 or bear_round2
+
+    For string fields, prefers non-empty values to allow parallel writes.
+    For numeric fields (current_round, count), uses last-write-wins.
+    """
+    default_state = InvestDebateState(
+        bull_round1="",
+        bear_round1="",
+        bull_round2="",
+        bear_round2="",
+        current_round=1,
+        bull_history="",
+        bear_history="",
+        history="",
+        current_response="",
+        judge_decision="",
+        count=0,
+    )
+    if x is None:
+        return y or default_state
+    if y is None:
+        return x
+
+    # Merge with preference for non-empty string values
+    result = {}
+    all_keys = set(x.keys()) | set(y.keys())
+    for key in all_keys:
+        x_val = x.get(key, default_state.get(key))
+        y_val = y.get(key, default_state.get(key))
+
+        # For string fields, prefer non-empty value
+        if isinstance(x_val, str) and isinstance(y_val, str):
+            result[key] = y_val if y_val else x_val
+        else:
+            # For numeric/other fields, last-write-wins (prefer y)
+            result[key] = y_val if y_val is not None else x_val
+
+    return result
+
+
 class AgentState(MessagesState):
     company_of_interest: str
     company_name: str  # ADDED: Verified company name to prevent LLM hallucination
@@ -247,7 +314,7 @@ class AgentState(MessagesState):
     ]  # Foreign Language Analyst output
     legal_report: Annotated[str, take_last]  # Legal Counsel output (PFIC/VIE JSON)
     fundamentals_report: Annotated[str, take_last]  # Senior Analyst analysis
-    investment_debate_state: Annotated[InvestDebateState, take_last]
+    investment_debate_state: Annotated[InvestDebateState, merge_invest_debate_state]
     investment_plan: Annotated[str, take_last]
     consultant_review: Annotated[str, take_last]  # External consultant validation
     trader_investment_plan: Annotated[str, take_last]
@@ -779,7 +846,23 @@ def create_analyst_node(
     return analyst_node
 
 
-def create_researcher_node(llm, memory: Any | None, agent_key: str) -> Callable:
+def create_researcher_node(
+    llm, memory: Any | None, agent_key: str, round_num: int = 1
+) -> Callable:
+    """
+    Create a researcher node for Bull/Bear debate.
+
+    Args:
+        llm: Language model instance
+        memory: Memory instance for this researcher
+        agent_key: "bull_researcher" or "bear_researcher"
+        round_num: Debate round (1 or 2). Round 1 runs in parallel,
+                   Round 2 includes opponent's R1 output for rebuttal.
+    """
+    is_bull = agent_key == "bull_researcher"
+    researcher_type = "bull" if is_bull else "bear"
+    opponent_type = "bear" if is_bull else "bull"
+
     async def researcher_node(
         state: AgentState, config: RunnableConfig
     ) -> dict[str, Any]:
@@ -788,14 +871,18 @@ def create_researcher_node(llm, memory: Any | None, agent_key: str) -> Callable:
         agent_prompt = get_prompt(agent_key)
         if not agent_prompt:
             logger.error(f"Missing prompt for researcher: {agent_key}")
-            debate_state = state.get("investment_debate_state", {}).copy()
-            debate_state["history"] += (
-                f"\n\n[SYSTEM]: Error - Missing prompt for {agent_key}."
-            )
-            debate_state["count"] = debate_state.get("count", 0) + 1
-            return {"investment_debate_state": debate_state}
+            # Write to dedicated round field
+            field_name = f"{researcher_type}_round{round_num}"
+            return {
+                "investment_debate_state": {
+                    field_name: f"[SYSTEM]: Error - Missing prompt for {agent_key}.",
+                    "count": state.get("investment_debate_state", {}).get("count", 0)
+                    + 1,
+                }
+            }
         agent_name = agent_prompt.agent_name
-        # Include all 4 analyst reports for comprehensive debate context
+
+        # Include all analyst reports for comprehensive debate context
         reports = f"""MARKET ANALYST REPORT:
 {state.get("market_report", "N/A")}
 
@@ -807,18 +894,38 @@ NEWS ANALYST REPORT:
 
 FUNDAMENTALS ANALYST REPORT:
 {state.get("fundamentals_report", "N/A")}"""
-        history = state.get("investment_debate_state", {}).get("history", "")
 
-        # FIX: Contextualize memory retrieval to prevent cross-contamination
+        # Build debate history context based on round
+        debate_state = state.get("investment_debate_state", {})
+
+        if round_num == 1:
+            # Round 1: No opponent context (parallel execution)
+            debate_history = ""
+        else:
+            # Round 2: Include opponent's Round 1 for rebuttal
+            opponent_r1 = debate_state.get(f"{opponent_type}_round1", "")
+            own_r1 = debate_state.get(f"{researcher_type}_round1", "")
+            debate_history = f"""
+=== ROUND 1 ARGUMENTS ===
+
+YOUR ROUND 1 ARGUMENT:
+{own_r1}
+
+OPPONENT'S ROUND 1 ARGUMENT (REBUT THIS):
+{opponent_r1}
+
+=== END ROUND 1 ===
+
+Now provide your Round 2 rebuttal, addressing the opponent's key points."""
+
+        # Contextualize memory retrieval to prevent cross-contamination
         ticker = state.get("company_of_interest", "UNKNOWN")
-        company_name = state.get("company_name", ticker)  # Get verified company name
+        company_name = state.get("company_name", ticker)
 
-        # If we have memory, retrieve RELEVANT past insights for THIS ticker
+        # Retrieve RELEVANT past insights for THIS ticker
         past_insights = ""
         if memory:
             try:
-                # FIX: Strictly enforce metadata filtering
-                # CORRECTED PARAMETER NAME: metadata_filter (was filter_metadata in some versions)
                 relevant = await memory.query_similar_situations(
                     f"risks and upside for {ticker}",
                     n_results=3,
@@ -830,15 +937,13 @@ FUNDAMENTALS ANALYST REPORT:
                         + "\n".join([r["document"] for r in relevant])
                     )
                 else:
-                    # If no strict match, do NOT fallback to semantic search to avoid contamination
                     logger.info("memory_no_exact_match", ticker=ticker)
                     past_insights = ""
-
             except Exception as e:
                 logger.error("memory_retrieval_failed", ticker=ticker, error=str(e))
                 past_insights = ""
 
-        # FIX: Add Negative Constraint with explicit company name to prevent hallucination
+        # Add Negative Constraint to prevent hallucination
         negative_constraint = f"""
 CRITICAL INSTRUCTION:
 You are analyzing **{ticker} ({company_name})**.
@@ -846,32 +951,43 @@ If the provided context or memory contains information about a DIFFERENT company
 Only use data explicitly related to {ticker} ({company_name}).
 """
 
-        prompt = f"""{agent_prompt.system_message}\n{negative_constraint}\n\nREPORTS:\n{reports}\n{past_insights}\n\nDEBATE HISTORY:\n{history}\n\nProvide your argument."""
+        # Build prompt with round context
+        round_instruction = (
+            "Provide your initial argument."
+            if round_num == 1
+            else "Provide your rebuttal to the opponent's Round 1 argument."
+        )
+
+        prompt = f"""{agent_prompt.system_message}\n{negative_constraint}\n\nREPORTS:\n{reports}\n{past_insights}\n\nDEBATE CONTEXT:\n{debate_history}\n\n{round_instruction}"""
+
         try:
-            # Use rate limit handling wrapper for free tier support
             response = await invoke_with_rate_limit_handling(
-                llm, [HumanMessage(content=prompt)], context=agent_name
+                llm,
+                [HumanMessage(content=prompt)],
+                context=f"{agent_name} R{round_num}",
             )
-            debate_state = state.get("investment_debate_state", {}).copy()
-            # CRITICAL FIX: Normalize response.content to string
             content_str = extract_string_content(response.content)
-            argument = f"{agent_name}: {content_str}"
-            debate_state["history"] = (
-                debate_state.get("history", "") + f"\n\n{argument}"
+            argument = f"{agent_name} (Round {round_num}): {content_str}"
+
+            # Write to dedicated round field (parallel-safe)
+            field_name = f"{researcher_type}_round{round_num}"
+
+            logger.info(
+                "researcher_completed",
+                agent=agent_key,
+                round=round_num,
+                field=field_name,
+                content_length=len(content_str),
             )
-            debate_state["count"] = debate_state.get("count", 0) + 1
-            if agent_name == "Bull Analyst":
-                debate_state["bull_history"] = (
-                    debate_state.get("bull_history", "") + f"\n{argument}"
-                )
-            else:
-                debate_state["bear_history"] = (
-                    debate_state.get("bear_history", "") + f"\n{argument}"
-                )
-            return {"investment_debate_state": debate_state}
+
+            return {
+                "investment_debate_state": {
+                    field_name: argument,
+                }
+            }
         except Exception as e:
-            logger.error(f"Researcher error {agent_key}: {str(e)}")
-            return {"investment_debate_state": state.get("investment_debate_state", {})}
+            logger.error(f"Researcher error {agent_key} R{round_num}: {str(e)}")
+            return {"investment_debate_state": {}}
 
     return researcher_node
 
