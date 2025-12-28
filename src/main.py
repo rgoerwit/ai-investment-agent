@@ -527,6 +527,11 @@ async def run_analysis(ticker: str, quick_mode: bool) -> dict | None:
             foreign_language_report="",
             fundamentals_report="",
             investment_debate_state=InvestDebateState(
+                bull_round1="",
+                bear_round1="",
+                bull_round2="",
+                bear_round2="",
+                current_round=1,
                 bull_history="",
                 bear_history="",
                 history="",

@@ -96,6 +96,58 @@ class TestDebateRouter:
         assert graph is not None
 
 
+class TestSyncCheckRouter:
+    """Test sync_check_router for parallel debate fan-out."""
+
+    def test_sync_check_returns_end_when_incomplete(self):
+        """Test router returns __end__ when not all analysts complete."""
+        from src.graph import sync_check_router
+
+        state = {
+            "market_report": "done",
+            "sentiment_report": "",  # Not complete
+            "news_report": "done",
+            "pre_screening_result": "PASS",
+        }
+        config = {}
+
+        result = sync_check_router(state, config)
+        assert result == "__end__"
+
+    def test_sync_check_returns_pm_on_reject(self):
+        """Test router returns Portfolio Manager on REJECT."""
+        from src.graph import sync_check_router
+
+        state = {
+            "market_report": "done",
+            "sentiment_report": "done",
+            "news_report": "done",
+            "pre_screening_result": "REJECT",
+        }
+        config = {}
+
+        result = sync_check_router(state, config)
+        assert result == "Portfolio Manager"
+
+    def test_sync_check_returns_list_for_parallel_r1(self):
+        """Test router returns list for parallel Bull/Bear R1 on PASS."""
+        from src.graph import sync_check_router
+
+        state = {
+            "market_report": "done",
+            "sentiment_report": "done",
+            "news_report": "done",
+            "pre_screening_result": "PASS",
+        }
+        config = {}
+
+        result = sync_check_router(state, config)
+        assert isinstance(result, list)
+        assert "Bull Researcher R1" in result
+        assert "Bear Researcher R1" in result
+        assert len(result) == 2
+
+
 class TestTradingContext:
     """Test TradingContext dataclass."""
 
@@ -111,6 +163,20 @@ class TestTradingContext:
         assert context.trade_date == "2024-01-01"
         assert context.max_debate_rounds == 2
         assert context.max_risk_rounds == 1
+
+    def test_trading_context_quick_mode(self):
+        """Test TradingContext in quick mode."""
+        from src.graph import TradingContext
+
+        context = TradingContext(
+            ticker="AAPL",
+            trade_date="2024-01-01",
+            quick_mode=True,
+            max_debate_rounds=1,  # Quick mode uses 1 round
+        )
+
+        assert context.quick_mode is True
+        assert context.max_debate_rounds == 1
 
 
 class TestGraphCompilation:
