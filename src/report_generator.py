@@ -277,6 +277,17 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
 
             report_parts.append("\n---\n\n")
 
+        # Thesis Compliance Visual (quick-scan bar charts)
+        try:
+            from src.thesis_visualizer import generate_thesis_visual
+
+            thesis_visual = generate_thesis_visual(final_decision_raw)
+            if thesis_visual:
+                report_parts.append("## Thesis Compliance at a Glance\n\n")
+                report_parts.append(f"{thesis_visual}\n\n---\n")
+        except ImportError:
+            pass  # Visualizer not available, skip
+
         # Executive Summary (always included)
         if final_decision_raw:
             report_parts.append("## Executive Summary\n\n")
