@@ -31,6 +31,7 @@ from src.agents import (
     create_researcher_node,
     create_risk_debater_node,
     create_trader_node,
+    create_valuation_calculator_node,
 )
 from src.config import config
 from src.llms import (
@@ -500,6 +501,11 @@ def create_trading_graph(
         callbacks=[TokenTrackingCallback("Trader", tracker)]
     )
 
+    # Valuation Calculator: Always quick thinking (simple parameter extraction)
+    valuation_llm = create_quick_thinking_llm(
+        callbacks=[TokenTrackingCallback("Valuation Calculator", tracker)]
+    )
+
     consultant_llm = get_consultant_llm(
         callbacks=[TokenTrackingCallback("Consultant", tracker)], quick_mode=quick_mode
     )
@@ -616,6 +622,9 @@ def create_trading_graph(
         logger.info("consultant_node_enabled", ticker=ticker)
     else:
         logger.info("consultant_node_disabled", ticker=ticker)
+
+    # Valuation Calculator node (extracts params for chart generation)
+    valuation_calc = create_valuation_calculator_node(valuation_llm)
 
     # --- Graph Construction ---
     workflow = StateGraph(AgentState)
@@ -767,6 +776,7 @@ BEAR RESEARCHER:
     workflow.add_node("Bull Researcher R2", bull_r2)
     workflow.add_node("Bear Researcher R2", bear_r2)
     workflow.add_node("Research Manager", res_mgr)
+    workflow.add_node("Valuation Calculator", valuation_calc)
 
     if consultant is not None:
         workflow.add_node("Consultant", consultant)
@@ -904,12 +914,15 @@ BEAR RESEARCHER:
     # Final sync → Research Manager
     workflow.add_edge("Debate Sync Final", "Research Manager")
 
-    # Research Manager → Consultant → Trader (or direct to Trader)
+    # Research Manager → [Valuation Calculator || Consultant] → Trader
+    # Valuation Calculator always runs; Consultant is optional
+    # Both run in parallel after Research Manager, converge at Trader
+    workflow.add_edge("Research Manager", "Valuation Calculator")
+    workflow.add_edge("Valuation Calculator", "Trader")
+
     if consultant is not None:
         workflow.add_edge("Research Manager", "Consultant")
         workflow.add_edge("Consultant", "Trader")
-    else:
-        workflow.add_edge("Research Manager", "Trader")
 
     # Trader → Risk Team (parallel) → Portfolio Manager
     # Risk analysts run in parallel for ~40 sec savings
@@ -941,6 +954,11 @@ BEAR RESEARCHER:
             "Bull R2 || Bear R2 (if max_rounds > 1)",
             "Sync Final",
         ],
+        post_research_parallel=(
+            "Valuation Calculator || Consultant"
+            if consultant is not None
+            else "Valuation Calculator"
+        ),
         risk_team_parallel=["Risky Analyst", "Safe Analyst", "Neutral Analyst"],
         quick_mode=quick_mode,
     )

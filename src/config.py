@@ -259,6 +259,11 @@ class Settings(BaseSettings):
         validation_alias="CHROMA_PERSIST_DIR",
         description="Directory for ChromaDB vector storage",
     )
+    images_dir: Path = Field(
+        default=Path("./images"),
+        validation_alias="IMAGES_DIR",
+        description="Directory for generated chart images",
+    )
 
     # --- LLM Configuration ---
     llm_provider: str = Field(
@@ -517,6 +522,7 @@ class Settings(BaseSettings):
             self.results_dir,
             self.data_cache_dir,
             Path(self.chroma_persist_directory),
+            self.images_dir,
         ]:
             directory.mkdir(parents=True, exist_ok=True)
 
