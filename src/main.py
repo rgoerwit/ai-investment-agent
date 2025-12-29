@@ -155,26 +155,23 @@ Examples:
 
 
 def display_welcome_banner(ticker: str, quick_mode: bool):
-    """Display welcome banner with configuration."""
-    title = "Multi-Agent Investment Analysis System (Gemini Powered)"
+    """Display welcome banner with configuration.
 
-    config_table = Table(show_header=False, box=box.SIMPLE)
-    config_table.add_column("Setting", style="cyan")
-    config_table.add_column("Value", style="green")
-
-    config_table.add_row("Ticker", ticker.upper())
-    config_table.add_row("Analysis Mode", "Quick" if quick_mode else "Deep")
-    config_table.add_row("Quick Model", config.quick_think_llm)
-    config_table.add_row("Deep Model", config.deep_think_llm)
-    config_table.add_row(
-        "Memory System", "Enabled" if config.enable_memory else "Disabled"
+    Uses markdown-compatible formatting that renders well in both
+    terminals and when redirected to .md files.
+    """
+    print("# Multi-Agent Investment Analysis System")
+    print()
+    print(f"**Ticker:** {ticker.upper()}  ")
+    print(f"**Analysis Mode:** {'Quick' if quick_mode else 'Deep'}  ")
+    print(f"**Quick Model:** {config.quick_think_llm}  ")
+    print(f"**Deep Model:** {config.deep_think_llm}  ")
+    print(f"**Memory System:** {'Enabled' if config.enable_memory else 'Disabled'}  ")
+    print(
+        f"**LangSmith Tracing:** "
+        f"{'Enabled' if config.langsmith_tracing_enabled else 'Disabled'}  "
     )
-    config_table.add_row(
-        "LangSmith Tracing",
-        "Enabled" if config.langsmith_tracing_enabled else "Disabled",
-    )
-
-    console.print(Panel(config_table, title=title, border_style="blue"))
+    print()
 
 
 def display_memory_statistics(ticker: str):

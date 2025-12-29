@@ -168,18 +168,20 @@ def generate_football_field(
             fontsize=8,
         )
 
-    # Current price line (prominent)
+    # Current price line (prominent) - contained within plot area
     ax.axvline(
         x=data.current_price,
         color="#E74C3C",
         linewidth=2.5,
         linestyle="--",
         label=f"Current: ${data.current_price:.2f}",
+        ymin=0,
+        ymax=0.95,  # Stop before title
         zorder=10,
     )
 
     # Moving averages (if available) - subtle reference lines
-    # Labels use axis transform to anchor above plot area (y=1.0 is top edge)
+    # Lines limited to bar area, labels placed below x-axis to avoid title clutter
     if data.moving_avg_50 is not None and data.moving_avg_50 > 0:
         ax.axvline(
             x=data.moving_avg_50,
@@ -187,16 +189,18 @@ def generate_football_field(
             linewidth=1,
             linestyle=":",
             alpha=0.7,
+            ymin=0,
+            ymax=0.90,  # Shorter than current price line
         )
         ax.text(
             data.moving_avg_50,
-            1.01,  # Just above plot area (axis coordinates)
+            -0.55,  # Below the bottom bar (in data coordinates)
             "50MA",
-            transform=ax.get_xaxis_transform(),
             fontsize=7,
             ha="center",
-            va="bottom",
+            va="top",
             color="#F39C12",
+            fontweight="bold",
         )
 
     if data.moving_avg_200 is not None and data.moving_avg_200 > 0:
@@ -206,16 +210,18 @@ def generate_football_field(
             linewidth=1,
             linestyle=":",
             alpha=0.7,
+            ymin=0,
+            ymax=0.90,  # Shorter than current price line
         )
         ax.text(
             data.moving_avg_200,
-            1.05,  # Slightly higher to avoid overlap with 50MA label
+            -0.55,  # Below the bottom bar (in data coordinates)
             "200MA",
-            transform=ax.get_xaxis_transform(),
             fontsize=7,
             ha="center",
-            va="bottom",
+            va="top",
             color="#9B59B6",
+            fontweight="bold",
         )
 
     # Formatting
@@ -223,7 +229,14 @@ def generate_football_field(
     ax.set_yticklabels(labels)
     ax.set_xlabel("Price")
     ax.set_title(f"{data.ticker} Valuation Range ({data.trade_date})")
-    ax.legend(loc="upper left", fontsize=8, framealpha=0.9)
+    # Place legend below chart to avoid any overlap with data
+    ax.legend(
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.18),
+        ncol=2,  # Two columns for compact horizontal layout
+        fontsize=8,
+        framealpha=0.9,
+    )
 
     # Determine x-axis range with padding
     all_values = [data.fifty_two_week_low, data.fifty_two_week_high, data.current_price]
@@ -247,6 +260,9 @@ def generate_football_field(
     padding = max(padding, min_padding)
     # Clamp lower bound to 0 to avoid negative prices on chart (penny stocks edge case)
     ax.set_xlim(max(0, min_val - padding), max_val + padding)
+
+    # Set y-axis limits with padding below for MA labels
+    ax.set_ylim(-0.8, len(bars) - 0.5)
 
     plt.tight_layout()
 

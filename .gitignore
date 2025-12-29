@@ -156,7 +156,7 @@ credentials/
 outputs/
 results/
 reports/
-images/
+# images/
 
 # Local configuration overrides
 local_config.py
