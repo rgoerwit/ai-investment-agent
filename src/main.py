@@ -133,6 +133,24 @@ Examples:
         "--no-memory", action="store_true", help="Disable persistent memory (ChromaDB)"
     )
 
+    parser.add_argument(
+        "--svg",
+        action="store_true",
+        help="Generate charts in SVG format (default: PNG)",
+    )
+
+    parser.add_argument(
+        "--transparent",
+        action="store_true",
+        help="Use transparent background for charts (default: white grid)",
+    )
+
+    parser.add_argument(
+        "--no-charts",
+        action="store_true",
+        help="Skip chart generation entirely",
+    )
+
     return parser.parse_args()
 
 
@@ -658,7 +676,12 @@ async def main():
                     pass
 
                 reporter = QuietModeReporter(
-                    args.ticker, company_name, quick_mode=args.quick
+                    args.ticker,
+                    company_name,
+                    quick_mode=args.quick,
+                    chart_format="svg" if args.svg else "png",
+                    transparent_charts=args.transparent,
+                    skip_charts=args.no_charts,
                 )
                 report = reporter.generate_report(result, brief_mode=args.brief)
                 print(report)

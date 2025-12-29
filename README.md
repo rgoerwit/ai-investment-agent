@@ -25,10 +25,11 @@
 
 ### This System Provides
 
-✅ **Multi-Agent Debate Pattern** - Bull/Bear/Risk analysts argue, then a Portfolio Manager decides  
-✅ **International Coverage** - Handles HK, Japan, Taiwan, Korea with proper FX/exchange logic  
-✅ **Disciplined Risk Framework** - Hard-fail gatekeeping prevents emotional/hype-driven decisions  
-✅ **Zero Marginal Cost** - Can run (amidst 429s and retries) on free-tier Gemini API, albeit slowly  
+✅ **Multi-Agent Debate Pattern** - Bull/Bear/Risk analysts argue, then a Portfolio Manager decides
+✅ **International Coverage** - Handles HK, Japan, Taiwan, Korea with proper FX/exchange logic
+✅ **Disciplined Risk Framework** - Hard-fail gatekeeping prevents emotional/hype-driven decisions
+✅ **Visual Valuation Charts** - "Football Field" charts showing price ranges, targets, and moving averages
+✅ **Zero Marginal Cost** - Can run (amidst 429s and retries) on free-tier Gemini API, albeit slowly
 ✅ **Full Transparency** - Every decision explained with supporting data and reasoning
 
 ---
@@ -73,37 +74,40 @@ graph TB
     Debate -->|Round 1-2| BearResearcher
     Debate -->|Converged| ResearchManager["Research Manager<br/>(Synthesize All Data)"]
 
+    %% Post-Research Manager: Valuation Calculator and Consultant run in parallel
+    ResearchManager --> ValuationCalc["Valuation Calculator<br/>(Chart Parameters)"]
     ResearchManager --> Consultant["External Consultant<br/>(Cross-Validation)<br/>Optional"]
 
-    Consultant -->|OpenAI Review| Trader["Trader<br/>(Trade Plan)"]
-    ResearchManager -.->|If Disabled| Trader
+    ValuationCalc --> Trader["Trader<br/>(Trade Plan)"]
+    Consultant -->|OpenAI Review| Trader
 
     Trader --> RiskTeam["Risk Assessment Team<br/>(Risky → Safe → Neutral)"]
 
     RiskTeam --> PortfolioManager
 
-    PortfolioManager --> Decision([BUY / SELL / HOLD<br/>+ Position Size])
+    PortfolioManager --> Decision([BUY / SELL / HOLD<br/>+ Position Size<br/>+ Valuation Chart])
 
-    style Dispatcher fill:#ffeaa7
-    style MarketAnalyst fill:#e1f5ff
-    style NewsAnalyst fill:#e1f5ff
-    style SentimentAnalyst fill:#e1f5ff
-    style JuniorFund fill:#e1f5ff
-    style ForeignLang fill:#e1ffe1
-    style LegalCounsel fill:#e1ffe1
-    style FundSync fill:#e0e0e0
-    style SeniorFund fill:#e1f5ff
-    style Validator fill:#ffcccc
-    style SyncCheck fill:#e0e0e0
-    style ResearchManager fill:#fff4e1
-    style BullResearcher fill:#d4edda
-    style BearResearcher fill:#f8d7da
-    style Consultant fill:#e8daff
-    style Trader fill:#ffe4e1
-    style RiskTeam fill:#fff3cd
-    style PortfolioManager fill:#d1ecf1
-    style Debate fill:#ffeaa7
-    style Decision fill:#55efc4
+    style Dispatcher fill:#ffeaa7,color:#333
+    style MarketAnalyst fill:#e1f5ff,color:#333
+    style NewsAnalyst fill:#e1f5ff,color:#333
+    style SentimentAnalyst fill:#e1f5ff,color:#333
+    style JuniorFund fill:#e1f5ff,color:#333
+    style ForeignLang fill:#e1ffe1,color:#333
+    style LegalCounsel fill:#e1ffe1,color:#333
+    style FundSync fill:#e0e0e0,color:#333
+    style SeniorFund fill:#e1f5ff,color:#333
+    style Validator fill:#ffcccc,color:#333
+    style SyncCheck fill:#e0e0e0,color:#333
+    style ResearchManager fill:#fff4e1,color:#333
+    style BullResearcher fill:#d4edda,color:#333
+    style BearResearcher fill:#f8d7da,color:#333
+    style ValuationCalc fill:#e6f3ff,color:#333
+    style Consultant fill:#e8daff,color:#333
+    style Trader fill:#ffe4e1,color:#333
+    style RiskTeam fill:#fff3cd,color:#333
+    style PortfolioManager fill:#d1ecf1,color:#333
+    style Debate fill:#ffeaa7,color:#333
+    style Decision fill:#55efc4,color:#333
 ```
 
 ### How Agents Collaborate
@@ -128,7 +132,9 @@ graph TB
 
 6. **Research Synthesis** - After debate converges, the Research Manager combines all analyst reports with debate history to create an investment plan.
 
-7. **External Consultant** (Optional) - Independent cross-validation using OpenAI ChatGPT to detect biases and validate Gemini's analysis.
+7. **Post-Research Parallel Processing** - Two agents run in parallel after Research Manager:
+   - **Valuation Calculator** - Extracts valuation parameters (P/E, PEG, sector) from DATA_BLOCK and selects the best valuation method. Python code then calculates price targets (avoiding LLM arithmetic errors). Outputs parameters for "Football Field" valuation chart generation.
+   - **External Consultant** (Optional) - Independent cross-validation using OpenAI ChatGPT to detect biases and validate Gemini's analysis.
 
 8. **Trade Planning** - Trader creates specific execution parameters based on the investment plan.
 
@@ -136,7 +142,7 @@ graph TB
 
 10. **Executive Decision** - Portfolio Manager synthesizes all viewpoints, applies thesis criteria, and makes final BUY/SELL/HOLD decision.
 
-**Why This Matters:** Single-LLM (and worse yet, single-prompt) systems are prone to confirmation bias. Multi-model + multi-agent debate forces the system as a whole to consider contradictory evidence, mimicking how institutional research teams actually work. The parallel fan-out/fan-in pattern provides speed without sacrificing data quality. The Junior/Senior/Foreign split uses multiple data pathways (APIs + native-language web sources) to reduce data gaps common when analyzing international stocks. The Financial Validator provides deterministic pre-screening to catch catastrophic risks before debate. The optional External Consultant uses a different AI model (OpenAI) to catch groupthink.
+**Why This Matters:** Single-LLM (and worse yet, single-prompt) systems are prone to confirmation bias. Multi-model + multi-agent debate forces the system as a whole to consider contradictory evidence, mimicking how institutional research teams actually work. The parallel fan-out/fan-in pattern provides speed without sacrificing data quality. The Junior/Senior/Foreign split uses multiple data pathways (APIs + native-language web sources) to reduce data gaps common when analyzing international stocks. The Financial Validator provides deterministic pre-screening to catch catastrophic risks before debate. The Valuation Calculator separates LLM judgment (method selection) from Python calculation (arithmetic), avoiding LLM math hallucinations while generating visual "Football Field" valuation charts. The optional External Consultant uses a different AI model (OpenAI) to catch groupthink.
 
 ---
 
@@ -194,6 +200,15 @@ poetry run python -m src.main --ticker 0005.HK --brief
 
 # Quick mode (faster, 1 debate round); not brief output!
 poetry run python -m src.main --ticker 7203.T --quick
+
+# Generate SVG charts instead of PNG (for vector graphics)
+poetry run python -m src.main --ticker 0005.HK --svg
+
+# Transparent chart backgrounds (for dark themes)
+poetry run python -m src.main --ticker 0005.HK --transparent
+
+# Skip chart generation entirely
+poetry run python -m src.main --ticker 0005.HK --no-charts
 
 # Run with real-time logging visible (unbuffered Python output)
 # Redirect to file and monitor with: tail -f scratch/ticker_analysis_info.txt
@@ -655,6 +670,10 @@ src/
 ├── toolkit.py         # Tool definitions (get_financial_metrics, get_news)
 ├── memory.py          # ChromaDB vector storage with ticker isolation
 ├── prompts/           # Versioned, structured agent prompts (JSON)
+├── charts/
+│   ├── base.py        # Chart dataclasses (FootballFieldData, ChartConfig)
+│   ├── extractors/    # Parse DATA_BLOCK and VALUATION_PARAMS
+│   └── generators/    # Seaborn/Matplotlib chart generation
 ├── data/
 │   ├── fetcher.py     # Smart multi-source data pipeline
 │   └── validator.py   # Financial data sanity checks

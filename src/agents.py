@@ -316,6 +316,9 @@ class AgentState(MessagesState):
     fundamentals_report: Annotated[str, take_last]  # Senior Analyst analysis
     investment_debate_state: Annotated[InvestDebateState, merge_invest_debate_state]
     investment_plan: Annotated[str, take_last]
+    valuation_params: Annotated[
+        str, take_last
+    ]  # Valuation Calculator output for charts
     consultant_review: Annotated[str, take_last]  # External consultant validation
     trader_investment_plan: Annotated[str, take_last]
     risk_debate_state: Annotated[RiskDebateState, merge_risk_state]
@@ -990,6 +993,85 @@ Only use data explicitly related to {ticker} ({company_name}).
             return {"investment_debate_state": {}}
 
     return researcher_node
+
+
+def create_valuation_calculator_node(llm) -> Callable:
+    """
+    Factory function creating Valuation Calculator node for chart generation.
+
+    This lightweight agent extracts valuation PARAMETERS from DATA_BLOCK.
+    It does NOT calculate targets - Python code does the math.
+
+    Args:
+        llm: LLM instance (should be QUICK_MODEL - simple extraction task)
+
+    Returns:
+        Async function compatible with LangGraph StateGraph.add_node()
+    """
+
+    async def valuation_calculator_node(
+        state: AgentState, config: RunnableConfig
+    ) -> dict[str, Any]:
+        from src.prompts import get_prompt
+
+        agent_prompt = get_prompt("valuation_calculator")
+        if not agent_prompt:
+            logger.error("Missing prompt for valuation_calculator")
+            return {"valuation_params": ""}
+
+        ticker = state.get("company_of_interest", "UNKNOWN")
+        company_name = state.get("company_name", ticker)
+        fundamentals_report = state.get("fundamentals_report", "")
+
+        # Normalize fundamentals_report to string
+        if not isinstance(fundamentals_report, str):
+            fundamentals_report = extract_string_content(fundamentals_report)
+
+        if not fundamentals_report or "DATA_BLOCK" not in fundamentals_report:
+            logger.warning(
+                "valuation_calculator_no_datablock",
+                ticker=ticker,
+                message="No DATA_BLOCK found - skipping valuation params extraction",
+            )
+            return {"valuation_params": ""}
+
+        # Extract just the DATA_BLOCK for the prompt (reduce token usage)
+        data_block_pattern = (
+            r"### --- START DATA_BLOCK ---(.+?)### --- END DATA_BLOCK ---"
+        )
+        blocks = list(re.finditer(data_block_pattern, fundamentals_report, re.DOTALL))
+        data_block = blocks[-1].group(0) if blocks else fundamentals_report
+
+        prompt = f"""{agent_prompt.system_message}
+
+TICKER: {ticker}
+COMPANY: {company_name}
+
+DATA_BLOCK:
+{data_block}
+
+Extract valuation parameters and output in the required format."""
+
+        try:
+            response = await invoke_with_rate_limit_handling(
+                llm, [HumanMessage(content=prompt)], context=agent_prompt.agent_name
+            )
+            content_str = extract_string_content(response.content)
+
+            logger.info(
+                "valuation_calculator_complete",
+                ticker=ticker,
+                has_params_block="VALUATION_PARAMS" in content_str,
+                content_length=len(content_str),
+            )
+
+            return {"valuation_params": content_str}
+
+        except Exception as e:
+            logger.error(f"Valuation calculator error for {ticker}: {str(e)}")
+            return {"valuation_params": ""}
+
+    return valuation_calculator_node
 
 
 def create_research_manager_node(llm, memory: Any | None) -> Callable:

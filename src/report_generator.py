@@ -5,13 +5,19 @@ FIXED: Added deduplication to prevent stuttering output in final reports.
 FIXED: Case-insensitive regex matching for decision extraction.
 UPDATED: Added brief_mode flag for condensed output.
 UPDATED: Added comprehensive error handling and fallback logic for missing Portfolio Manager output.
+UPDATED: Added Football Field chart generation integration.
 """
 
 import logging
 import re
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Any
+
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 # Local import for utility function to avoid circular dependency at module level
 # We import inside the method where it is needed
@@ -21,12 +27,119 @@ class QuietModeReporter:
     """Generates clean markdown reports with minimal output."""
 
     def __init__(
-        self, ticker: str, company_name: str | None = None, quick_mode: bool = False
+        self,
+        ticker: str,
+        company_name: str | None = None,
+        quick_mode: bool = False,
+        chart_format: str = "png",
+        transparent_charts: bool = False,
+        skip_charts: bool = False,
     ):
         self.ticker = ticker.upper()
         self.company_name = company_name
         self.timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.trade_date = datetime.now().strftime("%Y-%m-%d")
         self.quick_mode = quick_mode
+        self.chart_format = chart_format
+        self.transparent_charts = transparent_charts
+        self.skip_charts = skip_charts
+
+    def _generate_chart(self, result: dict) -> Path | None:
+        """Generate football field chart from analysis results.
+
+        Args:
+            result: Dictionary containing analysis results with fundamentals_report
+                   and investment_plan fields
+
+        Returns:
+            Path to generated chart image, or None if chart generation failed/skipped
+        """
+        # Skip if charts disabled or quick mode
+        if self.skip_charts or self.quick_mode:
+            logger.debug(
+                "Chart generation skipped",
+                skip_charts=self.skip_charts,
+                quick_mode=self.quick_mode,
+            )
+            return None
+
+        try:
+            from src.charts.base import ChartConfig, ChartFormat, FootballFieldData
+            from src.charts.extractors.data_block import (
+                extract_chart_data_from_data_block,
+            )
+            from src.charts.extractors.valuation import calculate_valuation_targets
+            from src.charts.generators.football_field import generate_football_field
+            from src.config import config
+
+            # Extract raw facts from DATA_BLOCK in fundamentals report
+            fundamentals_report = self._normalize_string(
+                result.get("fundamentals_report", "")
+            )
+            chart_data = extract_chart_data_from_data_block(fundamentals_report)
+
+            # Extract valuation targets from Valuation Calculator output
+            # Uses VALUATION_PARAMS block, Python calculates actual targets
+            valuation_params = self._normalize_string(
+                result.get("valuation_params", "")
+            )
+            targets = calculate_valuation_targets(valuation_params)
+
+            # Check if we have minimum data
+            if not chart_data.current_price or not chart_data.fifty_two_week_high:
+                logger.debug(
+                    "Insufficient data for chart generation",
+                    ticker=self.ticker,
+                    current_price=chart_data.current_price,
+                    fifty_two_week_high=chart_data.fifty_two_week_high,
+                )
+                return None
+
+            # Combine into FootballFieldData
+            football_data = FootballFieldData(
+                ticker=self.ticker,
+                trade_date=self.trade_date,
+                current_price=chart_data.current_price,
+                fifty_two_week_high=chart_data.fifty_two_week_high,
+                fifty_two_week_low=chart_data.fifty_two_week_low,
+                moving_avg_50=chart_data.moving_avg_50,
+                moving_avg_200=chart_data.moving_avg_200,
+                external_target_high=chart_data.external_target_high,
+                external_target_low=chart_data.external_target_low,
+                external_target_mean=chart_data.external_target_mean,
+                our_target_low=targets.low,
+                our_target_high=targets.high,
+                target_methodology=targets.methodology,
+                target_confidence=targets.confidence,
+            )
+
+            # Configure chart generation
+            chart_config = ChartConfig(
+                output_dir=config.images_dir,
+                format=ChartFormat.SVG
+                if self.chart_format == "svg"
+                else ChartFormat.PNG,
+                transparent=self.transparent_charts,
+            )
+
+            # Generate chart
+            chart_path = generate_football_field(football_data, chart_config)
+
+            if chart_path:
+                logger.info(
+                    "Chart generated successfully",
+                    ticker=self.ticker,
+                    path=str(chart_path),
+                )
+
+            return chart_path
+
+        except ImportError as e:
+            logger.warning(f"Chart generation dependencies not available: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"Chart generation failed: {e}")
+            return None
 
     def _normalize_string(self, content: Any) -> str:
         """
@@ -287,6 +400,12 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
                 report_parts.append(f"{thesis_visual}\n\n---\n")
         except ImportError:
             pass  # Visualizer not available, skip
+
+        # Football Field Valuation Chart (skip in quick mode)
+        chart_path = self._generate_chart(result)
+        if chart_path:
+            report_parts.append("## Valuation Chart\n\n")
+            report_parts.append(f"![Football Field Chart]({chart_path})\n\n---\n")
 
         # Executive Summary (always included)
         if final_decision_raw:

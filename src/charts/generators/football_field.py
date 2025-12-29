@@ -1,0 +1,286 @@
+"""
+Football Field valuation chart generator using Seaborn/Matplotlib.
+
+Generates horizontal bar charts showing valuation ranges:
+- 52-Week Range (always present)
+- External Analyst Consensus (if available)
+- Our Target Range (if available)
+- Current price marked with vertical line
+- Moving averages as reference lines (if available)
+"""
+
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import structlog
+
+from src.charts.base import ChartConfig, ChartFormat, FootballFieldData
+
+logger = structlog.get_logger(__name__)
+
+
+def _is_target_reasonable(
+    target: float | None, current_price: float, max_deviation: float = 1.5
+) -> bool:
+    """Check if a price target is within reasonable bounds.
+
+    LLMs can hallucinate arithmetic results. This filters out obviously wrong
+    targets that would distort the chart scale.
+
+    Args:
+        target: The target price to validate
+        current_price: Current stock price for reference
+        max_deviation: Maximum allowed deviation as fraction (1.5 = 150%)
+                      Set higher to accommodate volatile "undiscovered" stocks
+
+    Returns:
+        True if target is reasonable, False if it's an outlier
+    """
+    if target is None or target <= 0:
+        return False
+
+    # Check if target is within reasonable range of current price
+    # Allow targets between 50% below and 300% above current price
+    # (generous bounds for volatile small-caps, still catches 10x errors)
+    lower_bound = current_price * (1 - max_deviation / 2)  # 25% below at 1.5
+    upper_bound = current_price * (1 + max_deviation * 2)  # 400% above at 1.5
+
+    if target < lower_bound or target > upper_bound:
+        logger.warning(
+            "Target price outside reasonable bounds - likely LLM calculation error",
+            target=target,
+            current_price=current_price,
+            lower_bound=lower_bound,
+            upper_bound=upper_bound,
+        )
+        return False
+
+    return True
+
+
+def generate_football_field(
+    data: FootballFieldData,
+    config: ChartConfig | None = None,
+) -> Path | None:
+    """Generate football field valuation chart.
+
+    Creates a horizontal bar chart showing valuation ranges for the stock.
+    Following Cleveland's graphical perception theory (bars enable accurate
+    length judgment) and Tufte's data-ink principles.
+
+    Args:
+        data: FootballFieldData with price and target information
+        config: ChartConfig for styling options (format, transparency, etc.)
+
+    Returns:
+        Path to generated image file, or None if insufficient data
+    """
+    if not data.has_minimum_data():
+        logger.warning(
+            "Insufficient data for football field chart",
+            ticker=data.ticker,
+            current_price=data.current_price,
+            high=data.fifty_two_week_high,
+            low=data.fifty_two_week_low,
+        )
+        return None
+
+    config = config or ChartConfig()
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Set Seaborn style with white grid
+    sns.set_style("whitegrid")
+
+    fig, ax = plt.subplots(figsize=(config.width_inches, config.height_inches))
+
+    # Handle transparency
+    if config.transparent:
+        fig.patch.set_alpha(0)
+        ax.patch.set_alpha(0)
+    else:
+        fig.patch.set_facecolor("white")
+        ax.patch.set_facecolor("white")
+
+    # Build bars (bottom to top)
+    bars = []
+    colors = []
+    labels = []
+
+    # 52-Week Range (always present)
+    bars.append(
+        (data.fifty_two_week_low, data.fifty_two_week_high - data.fifty_two_week_low)
+    )
+    colors.append("#4A90D9")  # Blue
+    labels.append("52-Week Range")
+
+    # External Analyst Range (if available and reasonable)
+    if data.has_external_targets():
+        ext_low_ok = _is_target_reasonable(data.external_target_low, data.current_price)
+        ext_high_ok = _is_target_reasonable(
+            data.external_target_high, data.current_price
+        )
+        if ext_low_ok and ext_high_ok:
+            bars.append(
+                (
+                    data.external_target_low,
+                    data.external_target_high - data.external_target_low,
+                )
+            )
+            colors.append("#7B68EE")  # Purple
+            labels.append("Analyst Consensus")
+
+    # Our Target Range (if available and reasonable - LLM math can hallucinate)
+    if data.has_our_targets():
+        our_low_ok = _is_target_reasonable(data.our_target_low, data.current_price)
+        our_high_ok = _is_target_reasonable(data.our_target_high, data.current_price)
+        if our_low_ok and our_high_ok:
+            bars.append(
+                (data.our_target_low, data.our_target_high - data.our_target_low)
+            )
+            colors.append("#2ECC71")  # Green
+            label = "Our Target"
+            if data.target_confidence:
+                label += f" ({data.target_confidence})"
+            labels.append(label)
+
+    # Draw horizontal bars
+    y_positions = list(range(len(bars)))
+    for i, ((left, width), color, label) in enumerate(
+        zip(bars, colors, labels, strict=True)
+    ):
+        ax.barh(i, width, left=left, height=0.6, color=color, alpha=0.7, label=label)
+        # Add range labels at ends of bars
+        ax.text(
+            left - 0.02 * (data.fifty_two_week_high - data.fifty_two_week_low),
+            i,
+            f"${left:.2f}",
+            ha="right",
+            va="center",
+            fontsize=8,
+        )
+        ax.text(
+            left + width + 0.02 * (data.fifty_two_week_high - data.fifty_two_week_low),
+            i,
+            f"${left + width:.2f}",
+            ha="left",
+            va="center",
+            fontsize=8,
+        )
+
+    # Current price line (prominent)
+    ax.axvline(
+        x=data.current_price,
+        color="#E74C3C",
+        linewidth=2.5,
+        linestyle="--",
+        label=f"Current: ${data.current_price:.2f}",
+        zorder=10,
+    )
+
+    # Moving averages (if available) - subtle reference lines
+    # Labels use axis transform to anchor above plot area (y=1.0 is top edge)
+    if data.moving_avg_50 is not None and data.moving_avg_50 > 0:
+        ax.axvline(
+            x=data.moving_avg_50,
+            color="#F39C12",
+            linewidth=1,
+            linestyle=":",
+            alpha=0.7,
+        )
+        ax.text(
+            data.moving_avg_50,
+            1.01,  # Just above plot area (axis coordinates)
+            "50MA",
+            transform=ax.get_xaxis_transform(),
+            fontsize=7,
+            ha="center",
+            va="bottom",
+            color="#F39C12",
+        )
+
+    if data.moving_avg_200 is not None and data.moving_avg_200 > 0:
+        ax.axvline(
+            x=data.moving_avg_200,
+            color="#9B59B6",
+            linewidth=1,
+            linestyle=":",
+            alpha=0.7,
+        )
+        ax.text(
+            data.moving_avg_200,
+            1.05,  # Slightly higher to avoid overlap with 50MA label
+            "200MA",
+            transform=ax.get_xaxis_transform(),
+            fontsize=7,
+            ha="center",
+            va="bottom",
+            color="#9B59B6",
+        )
+
+    # Formatting
+    ax.set_yticks(y_positions)
+    ax.set_yticklabels(labels)
+    ax.set_xlabel("Price")
+    ax.set_title(f"{data.ticker} Valuation Range ({data.trade_date})")
+    ax.legend(loc="upper left", fontsize=8, framealpha=0.9)
+
+    # Determine x-axis range with padding
+    all_values = [data.fifty_two_week_low, data.fifty_two_week_high, data.current_price]
+    if data.external_target_low:
+        all_values.append(data.external_target_low)
+    if data.external_target_high:
+        all_values.append(data.external_target_high)
+    if data.our_target_low:
+        all_values.append(data.our_target_low)
+    if data.our_target_high:
+        all_values.append(data.our_target_high)
+    if data.moving_avg_50:
+        all_values.append(data.moving_avg_50)
+    if data.moving_avg_200:
+        all_values.append(data.moving_avg_200)
+
+    min_val, max_val = min(all_values), max(all_values)
+    padding = (max_val - min_val) * 0.25  # 25% padding for labels
+    # Ensure minimum padding for tight ranges (at least 5% of current price)
+    min_padding = data.current_price * 0.05
+    padding = max(padding, min_padding)
+    # Clamp lower bound to 0 to avoid negative prices on chart (penny stocks edge case)
+    ax.set_xlim(max(0, min_val - padding), max_val + padding)
+
+    plt.tight_layout()
+
+    # Generate filename
+    safe_ticker = data.ticker.replace(".", "_").replace("/", "_")
+    filename = f"{safe_ticker}_{data.trade_date}_football_field"
+
+    # Save in requested format
+    if config.format == ChartFormat.SVG:
+        output_path = config.output_dir / f"{filename}.svg"
+        plt.savefig(
+            output_path,
+            format="svg",
+            dpi=config.dpi,
+            transparent=config.transparent,
+            bbox_inches="tight",
+        )
+    else:
+        output_path = config.output_dir / f"{filename}.png"
+        plt.savefig(
+            output_path,
+            format="png",
+            dpi=config.dpi,
+            transparent=config.transparent,
+            bbox_inches="tight",
+        )
+
+    plt.close(fig)
+
+    logger.info(
+        "Generated football field chart",
+        ticker=data.ticker,
+        output_path=str(output_path),
+        format=config.format.value,
+    )
+
+    return output_path

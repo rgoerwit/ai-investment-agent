@@ -48,6 +48,7 @@ COMPANY_NAME_TRANSLATIONS = {
 }
 
 # Accessible platforms that aggregate sentiment (no login required)
+# NOTE: Currently unused - kept as reference for future sentiment integration
 ACCESSIBLE_SENTIMENT_PLATFORMS = {
     "tradingview.com": "Technical + sentiment charts",
     "investing.com": "Community comments and sentiment",
