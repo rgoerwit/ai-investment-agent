@@ -105,7 +105,7 @@ async def invoke_with_rate_limit_handling(
 # --- News Report Summarization ---
 
 
-def extract_news_highlights(news_report: str, max_chars: int = 1500) -> str:
+def extract_news_highlights(news_report: str, max_chars: int = 25000) -> str:
     """
     Extract key highlights from a news report for Senior Fundamentals.
 
@@ -114,7 +114,7 @@ def extract_news_highlights(news_report: str, max_chars: int = 1500) -> str:
     - Geographic breakdown (summarized)
     - Top growth catalysts
 
-    This reduces token usage by ~70% while preserving decision-relevant data.
+    This reduces token usage while preserving decision-relevant data.
     """
     if not news_report or len(news_report) < 300:
         return news_report
