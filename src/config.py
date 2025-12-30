@@ -260,7 +260,7 @@ class Settings(BaseSettings):
         description="Directory for ChromaDB vector storage",
     )
     images_dir: Path = Field(
-        default=Path("./images"),
+        default=Path("images"),
         validation_alias="IMAGES_DIR",
         description="Directory for generated chart images",
     )

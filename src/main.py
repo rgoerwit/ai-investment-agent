@@ -151,27 +151,85 @@ Examples:
         help="Skip chart generation entirely",
     )
 
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Output file path (default: stdout). If set, images will default to {output_dir}/images",
+    )
+
+    parser.add_argument(
+        "--imagedir",
+        type=str,
+        default=None,
+        help="Directory for chart images. If --output is set, defaults to {output_dir}/images. If not set, defaults to 'images' in current dir.",
+    )
+
     return parser.parse_args()
+
+
+def resolve_output_paths(args) -> tuple[Path | None, Path]:
+    """
+    Determine output file and image directory based on arguments.
+
+    Args:
+        args: Parsed arguments namespace
+
+    Returns:
+        Tuple of (output_file_path, image_dir_path)
+    """
+    # Determine output location
+    output_file = Path(args.output) if args.output else None
+    output_dir = output_file.parent if output_file else Path.cwd()
+
+    # Determine image directory
+    if args.imagedir:
+        # User specified image directory
+        image_dir = Path(args.imagedir)
+    elif output_file:
+        # Default to {output_dir}/images if writing to file
+        image_dir = output_dir / "images"
+    else:
+        # Default to current directory's images if stdout
+        image_dir = Path("images")
+
+    return output_file, image_dir
+
+
+def validate_imagedir(imagedir: str) -> Path:
+    """Validate image directory path.
+
+    Allow any path (relative or absolute).
+    """
+    return Path(imagedir)
+
+
+def get_welcome_banner(ticker: str, quick_mode: bool) -> str:
+    """Generate welcome banner string with configuration."""
+    banner = []
+    banner.append("# Multi-Agent Investment Analysis System")
+    banner.append("")
+    banner.append(f"**Ticker:** {ticker.upper()}  ")
+    banner.append(f"**Analysis Mode:** {'Quick' if quick_mode else 'Deep'}  ")
+    banner.append(f"**Quick Model:** {config.quick_think_llm}  ")
+    banner.append(f"**Deep Model:** {config.deep_think_llm}  ")
+    banner.append(
+        f"**Memory System:** {'Enabled' if config.enable_memory else 'Disabled'}  "
+    )
+    banner.append(
+        f"**LangSmith Tracing:** "
+        f"{'Enabled' if config.langsmith_tracing_enabled else 'Disabled'}  "
+    )
+    banner.append("")
+    return "\n".join(banner)
 
 
 def display_welcome_banner(ticker: str, quick_mode: bool):
     """Display welcome banner with configuration.
 
-    Uses markdown-compatible formatting that renders well in both
-    terminals and when redirected to .md files.
+    Deprecated: Use get_welcome_banner() instead.
     """
-    print("# Multi-Agent Investment Analysis System")
-    print()
-    print(f"**Ticker:** {ticker.upper()}  ")
-    print(f"**Analysis Mode:** {'Quick' if quick_mode else 'Deep'}  ")
-    print(f"**Quick Model:** {config.quick_think_llm}  ")
-    print(f"**Deep Model:** {config.deep_think_llm}  ")
-    print(f"**Memory System:** {'Enabled' if config.enable_memory else 'Disabled'}  ")
-    print(
-        f"**LangSmith Tracing:** "
-        f"{'Enabled' if config.langsmith_tracing_enabled else 'Disabled'}  "
-    )
-    print()
+    print(get_welcome_banner(ticker, quick_mode))
 
 
 def display_memory_statistics(ticker: str):
@@ -634,6 +692,39 @@ async def main():
         if args.no_memory:
             config.enable_memory = False
 
+        # --- Output and Image Directory Logic ---
+        output_file, image_dir = resolve_output_paths(args)
+        output_dir = output_file.parent if output_file else Path.cwd()
+
+        config.images_dir = image_dir
+
+        # Handle stdout case: suppress charts and warn
+        if not output_file and not args.quiet and not args.brief:
+            if not args.no_charts:
+                # Only warn if user didn't explicitly ask for no charts
+                logger.warning(
+                    "Writing to stdout: Charts will be disabled. Use --output to enable charts."
+                )
+                args.no_charts = True
+
+        # Validate image directory relative to output directory (for linking)
+        # Only relevant if we are generating charts
+        if not args.no_charts and output_file:
+            try:
+                # Check if image_dir is inside output_dir
+                # We use absolute paths for the check to be robust
+                abs_image_dir = image_dir.resolve()
+                abs_output_dir = output_dir.resolve()
+
+                # attempt to find relative path
+                abs_image_dir.relative_to(abs_output_dir)
+            except ValueError:
+                # Not a subdirectory
+                logger.warning(
+                    f"Image directory ({image_dir}) is not a subdirectory of output directory ({output_dir}). "
+                    "Report will contain absolute paths to images, which may not render correctly on other systems."
+                )
+
         if args.verbose and not args.quiet and not args.brief:
             logging.getLogger().setLevel(logging.DEBUG)
             for name in logging.root.manager.loggerDict:
@@ -651,15 +742,28 @@ async def main():
                 )
             sys.exit(1)
 
-        if not args.quiet and not args.brief:
-            display_welcome_banner(args.ticker, args.quick)
+        # Generate welcome banner
+        welcome_banner = get_welcome_banner(args.ticker, args.quick)
+
+        # If writing to stdout (no output file), print banner immediately unless quiet/brief
+        if not output_file and not args.quiet and not args.brief:
+            print(welcome_banner)
+
+        # If writing to file, we will prepend the banner to the file content later
+        # We might still want to log that analysis is starting, but use logger for that
+        if output_file and not args.quiet and not args.brief:
+            logger.info(
+                f"Starting analysis for {args.ticker} (output to {output_file})"
+            )
 
         result = await run_analysis(args.ticker, args.quick)
 
         if result:
             # Auto-detect non-TTY stdout (e.g., output redirected to file)
             # Use markdown output instead of Rich formatting to avoid box-drawing characters
-            use_markdown = args.brief or args.quiet or not sys.stdout.isatty()
+            use_markdown = (
+                args.brief or args.quiet or not sys.stdout.isatty() or args.output
+            )
 
             if use_markdown:
                 company_name = None
@@ -679,9 +783,40 @@ async def main():
                     chart_format="svg" if args.svg else "png",
                     transparent_charts=args.transparent,
                     skip_charts=args.no_charts,
+                    image_dir=image_dir,
+                    report_dir=output_dir,  # Pass output dir for relative link calculation
                 )
                 report = reporter.generate_report(result, brief_mode=args.brief)
-                print(report)
+
+                # Prepend welcome banner if we generated it and are writing to file (or stdout in full markdown mode)
+                # But careful: if we already printed it (stdout case above), don't duplicate.
+                # Logic:
+                # 1. If output_file: Prepend banner to report content.
+                # 2. If stdout: We already printed banner above. BUT generate_report creates a full markdown string.
+                #    If we print that string, it's fine.
+
+                if args.output:
+                    # Prepend banner to file content
+                    full_content = welcome_banner + "\n" + report
+
+                    try:
+                        # Ensure parent directory exists
+                        if output_file.parent != Path("."):
+                            output_file.parent.mkdir(parents=True, exist_ok=True)
+
+                        with open(output_file, "w") as f:
+                            f.write(full_content)
+
+                        if not args.quiet and not args.brief:
+                            console.print(
+                                f"[green]Report saved to:[/green] [cyan]{output_file}[/cyan]"
+                            )
+                    except Exception as e:
+                        logger.error(f"Failed to write report to {output_file}: {e}")
+                        sys.exit(1)
+                else:
+                    # Writing to stdout
+                    print(report)
             else:
                 display_results(result, args.ticker)
 
@@ -689,7 +824,7 @@ async def main():
                 filepath = save_results_to_file(result, args.ticker)
                 if not args.quiet and not args.brief:
                     console.print(
-                        f"\n[green]Results saved to:[/green] [cyan]{filepath}[/cyan]\n"
+                        f"[green]Results saved to:[/green] [cyan]{filepath}[/cyan]"
                     )
             except Exception as e:
                 logger.error(f"Failed to save results: {e}")

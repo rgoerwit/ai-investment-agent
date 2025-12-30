@@ -190,29 +190,30 @@ export GRPC_TRACE=""
 poetry run python -m src.main --ticker 0005.HK
 
 # Output to file (auto-detects non-TTY, outputs clean markdown)
-poetry run python -m src.main --ticker 0005.HK > results/0005.HK.md
+# Use --output to ensure charts are generated and links are correct
+poetry run python -m src.main --ticker 0005.HK --output results/0005.HK.md
 
 # Quiet mode (suppress logging, output markdown only)
-poetry run python -m src.main --ticker 0005.HK --quiet
+poetry run python -m src.main --ticker 0005.HK --quiet --output results/0005.HK.md
 
-# Brief output mode (compact markdown: header, summary, decision only)
-poetry run python -m src.main --ticker 0005.HK --brief
+# Brief mode (header, summary, decision only)
+poetry run python -m src.main --ticker 0005.HK --brief --output results/0005.HK_brief.md
 
-# Quick mode (faster, 1 debate round); not brief output!
-poetry run python -m src.main --ticker 7203.T --quick
-
-# Generate SVG charts instead of PNG (for vector graphics)
-poetry run python -m src.main --ticker 0005.HK --svg
-
-# Transparent chart backgrounds (for dark themes)
-poetry run python -m src.main --ticker 0005.HK --transparent
+# Custom chart format (SVG) and transparency
+poetry run python -m src.main --ticker 0005.HK --svg --transparent --output results/0005.HK.md
 
 # Skip chart generation entirely
 poetry run python -m src.main --ticker 0005.HK --no-charts
 
+# Custom image directory
+# If --output is provided, --imagedir defaults to {output_dir}/images
+# You can override it:
+poetry run python -m src.main --ticker 0005.HK --output results/report.md --imagedir results/assets/charts
+
 # Run with real-time logging visible (unbuffered Python output)
 # Redirect to file and monitor with: tail -f scratch/ticker_analysis_info.txt
-poetry run python -u -m src.main --ticker 0005.HK >scratch/ticker_analysis_0005-HK.txt 2>&1 &
+# Note: Use --output for the report so that charts are generated
+poetry run python -u -m src.main --ticker 0005.HK --output scratch/report.md >scratch/ticker_analysis_info.txt 2>&1 &
 
 # Batch analysis
 poetry run bash run_tickers.sh
@@ -402,8 +403,8 @@ caffeinate -i ./scripts/run_tickers.sh
 # Linux/WSL users: Run normally
 ./scripts/run_tickers.sh
 
-# Or run in background with logging
-./scripts/run_tickers.sh > batch_analysis.log 2>&1 &
+# Or run in background with logging (logs still go to stderr/file depending on mode)
+./scripts/run_tickers.sh --loud 2> batch_analysis.log &
 ```
 
 **Timing estimates (Google Tier 1):**

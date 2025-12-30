@@ -194,7 +194,7 @@ def generate_football_field(
         )
         ax.text(
             data.moving_avg_50,
-            -0.55,  # Below the bottom bar (in data coordinates)
+            -0.52,  # Below the bottom bar (in data coordinates)
             "50MA",
             fontsize=7,
             ha="center",
@@ -215,7 +215,7 @@ def generate_football_field(
         )
         ax.text(
             data.moving_avg_200,
-            -0.55,  # Below the bottom bar (in data coordinates)
+            -0.72,  # Below 50MA label (in data coordinates)
             "200MA",
             fontsize=7,
             ha="center",
@@ -261,8 +261,8 @@ def generate_football_field(
     # Clamp lower bound to 0 to avoid negative prices on chart (penny stocks edge case)
     ax.set_xlim(max(0, min_val - padding), max_val + padding)
 
-    # Set y-axis limits with padding below for MA labels
-    ax.set_ylim(-0.8, len(bars) - 0.5)
+    # Set y-axis limits with padding below for MA labels (two rows)
+    ax.set_ylim(-1.0, len(bars) - 0.5)
 
     plt.tight_layout()
 

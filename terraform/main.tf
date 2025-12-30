@@ -279,6 +279,10 @@ resource "azurerm_container_group" "main" {
     #   protocol = "TCP"
     # }
 
+    # Default command - runs the batch analysis script
+    # Override with --ticker for single runs
+    command = ["./scripts/run_tickers.sh", "--loud"]
+
     # Application environment variables with enhanced configuration
     environment_variables = {
       # Core application settings

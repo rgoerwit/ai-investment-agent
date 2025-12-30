@@ -119,8 +119,9 @@ echo ""
 echo "───────────────────────────────────────────────────────────────────────"
 echo ""
 
-# Build command with optional --quick flag
-CMD="poetry run python -m src.main --ticker $TICKER"
+# Run analysis
+# Using --output to ensure charts are generated and saved correctly
+CMD="poetry run python -m src.main --ticker $TICKER --output results/${TICKER}.md"
 if [ "$QUICK_MODE" = "--quick" ]; then
     CMD="$CMD --quick"
 fi

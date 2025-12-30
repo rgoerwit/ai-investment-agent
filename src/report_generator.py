@@ -34,6 +34,8 @@ class QuietModeReporter:
         chart_format: str = "png",
         transparent_charts: bool = False,
         skip_charts: bool = False,
+        image_dir: Path | None = None,
+        report_dir: Path | None = None,
     ):
         self.ticker = ticker.upper()
         self.company_name = company_name
@@ -43,6 +45,8 @@ class QuietModeReporter:
         self.chart_format = chart_format
         self.transparent_charts = transparent_charts
         self.skip_charts = skip_charts
+        self.image_dir = image_dir  # Custom image directory (relative path)
+        self.report_dir = report_dir  # Directory where report is being written
 
     def _generate_chart(self, result: dict) -> Path | None:
         """Generate football field chart from analysis results.
@@ -114,8 +118,10 @@ class QuietModeReporter:
             )
 
             # Configure chart generation
+            # Use custom image_dir if provided, otherwise fall back to config default
+            output_dir = self.image_dir if self.image_dir else config.images_dir
             chart_config = ChartConfig(
-                output_dir=config.images_dir,
+                output_dir=output_dir,
                 format=ChartFormat.SVG
                 if self.chart_format == "svg"
                 else ChartFormat.PNG,
@@ -405,7 +411,24 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         chart_path = self._generate_chart(result)
         if chart_path:
             report_parts.append("## Valuation Chart\n\n")
-            report_parts.append(f"![Football Field Chart]({chart_path})\n\n---\n")
+
+            # Calculate link path
+            if self.report_dir:
+                try:
+                    # Try to make path relative to report directory
+                    # We resolve both to absolute paths first to be safe
+                    chart_link = chart_path.resolve().relative_to(
+                        self.report_dir.resolve()
+                    )
+                except ValueError:
+                    # If not relative (not a subdir), use absolute path
+                    # This happens if --imagedir is outside --output directory tree
+                    chart_link = chart_path.resolve()
+            else:
+                # Fallback for stdout or undefined report dir (try simple relative)
+                chart_link = f"{chart_path.parent.name}/{chart_path.name}"
+
+            report_parts.append(f"![Football Field Chart]({chart_link})\n\n---\n")
 
         # Executive Summary (always included)
         if final_decision_raw:
