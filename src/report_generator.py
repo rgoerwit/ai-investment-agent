@@ -184,6 +184,17 @@ class QuietModeReporter:
         # Look for explicit decision markers in order of preference
         # Use UPPER CASE matching since we upper() the input string
 
+        # 0. "PORTFOLIO MANAGER VERDICT:" (NEW SENTINEL - Highest Priority)
+        # Unique token that prevents capturing quoted text from other agents
+        verdict_match = re.search(
+            r"\bPORTFOLIO\s+MANAGER\s+VERDICT\s*:\s*\*?\*?([A-Z]+)\*?\*?",
+            final_decision.upper(),
+        )
+        if verdict_match:
+            decision = verdict_match.group(1)
+            if decision in ["BUY", "SELL", "HOLD"]:
+                return decision
+
         # 1. "Action:" in FINAL EXECUTION PARAMETERS (highest priority)
         action_match = re.search(
             r"\bACTION\s*:\s*\*?\*?([A-Z]+)\*?\*?", final_decision.upper()

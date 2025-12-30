@@ -431,12 +431,12 @@ Results are saved to `scratch/ticker_analysis_results.md`:
 cat scratch/ticker_analysis_results.md
 
 # Filter for BUY recommendations only
-egrep '^###.*FINAL DECISION.*BUY *$' scratch/ticker_analysis_results.md
+egrep '^###.*PORTFOLIO MANAGER VERDICT.*BUY *$' scratch/ticker_analysis_results.md
 
 # Count decisions
-echo "BUY: $(egrep -c '^###.*FINAL DECISION.*BUY *$' scratch/ticker_analysis_results.md)"
-echo "HOLD: $(egrep -c '^###.*FINAL DECISION.*HOLD *$' scratch/ticker_analysis_results.md)"
-echo "SELL: $(egrep -c '^###.*FINAL DECISION.*SELL *$' scratch/ticker_analysis_results.md)"
+echo "BUY: $(egrep -c '^###.*PORTFOLIO MANAGER VERDICT.*BUY *$' scratch/ticker_analysis_results.md)"
+echo "HOLD: $(egrep -c '^###.*PORTFOLIO MANAGER VERDICT.*HOLD *$' scratch/ticker_analysis_results.md)"
+echo "SELL: $(egrep -c '^###.*PORTFOLIO MANAGER VERDICT.*SELL *$' scratch/ticker_analysis_results.md)"
 ```
 
 #### What to Expect

@@ -209,7 +209,7 @@ class ThesisVisualizer:
 
         # Decision: BUY/SELL/HOLD
         decision_match = re.search(
-            r"(?:FINAL DECISION|Action)[:\s]*\*?\*?(BUY|SELL|HOLD)\*?\*?",
+            r"(?:PORTFOLIO MANAGER VERDICT|FINAL DECISION|Action)[:\s]*\*?\*?(BUY|SELL|HOLD)\*?\*?",
             self.text,
             re.IGNORECASE,
         )
