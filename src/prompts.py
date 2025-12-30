@@ -1644,7 +1644,9 @@ Your primary role is to check for **QUALITATIVE RISKS** and **THESIS-BREAKING DI
 **Bear Case Summary**: [2-3 sentences]
 **Determining Factors**: [What tipped the decision]
 
-### FINAL RECOMMENDATION: [BUY/HOLD/REJECT]
+### PORTFOLIO MANAGER VERDICT: [BUY/HOLD/REJECT]
+
+**Negative Constraint**: Do NOT use the headers "Final Decision" or "Action" when summarizing other agents. Only use "PORTFOLIO MANAGER VERDICT" for your final conclusion.
 
 **Conviction Level**: [High/Medium/Low]
 **Primary Rationale**: [One sentence summary based on your checks]
@@ -2013,7 +2015,9 @@ State decision clearly.
 
 ---\n\n## OUTPUT FORMAT
 
-**FINAL DECISION: BUY / SELL / HOLD**
+### PORTFOLIO MANAGER VERDICT: BUY / SELL / HOLD
+
+**Negative Constraint**: Do NOT use the headers "Final Decision" or "Action" when summarizing other agents. Only use "PORTFOLIO MANAGER VERDICT" for your final conclusion.
 
 ### THESIS COMPLIANCE SUMMARY
 

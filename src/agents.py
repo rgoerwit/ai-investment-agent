@@ -1254,7 +1254,7 @@ NEUTRAL ANALYST (Balanced):\n{neutral_view if neutral_view else "N/A"}"""
             red_flag_section += "\nRed Flags Detected: None"
 
         all_context = f"""MARKET ANALYST REPORT:\n{market if market else "N/A"}\n\nSENTIMENT ANALYST REPORT:\n{sentiment if sentiment else "N/A"}\n\nNEWS ANALYST REPORT:\n{news if news else "N/A"}\n\nFUNDAMENTALS ANALYST REPORT:\n{fundamentals if fundamentals else "N/A"}{red_flag_section}\n\nRESEARCH MANAGER RECOMMENDATION:\n{inv_plan if inv_plan else "N/A"}{consultant_section}\n\nTRADER PROPOSAL:\n{trader if trader else "N/A"}\n\nRISK TEAM DEBATE:\n{risk if risk else "N/A"}"""
-        prompt = f"""{agent_prompt.system_message}\n\n{all_context}\n\nMake Final Decision."""
+        prompt = f"""{agent_prompt.system_message}\n\n{all_context}\n\nMake Portfolio Manager Verdict."""
         try:
             response = await invoke_with_rate_limit_handling(
                 llm, [HumanMessage(content=prompt)], context=agent_prompt.agent_name
