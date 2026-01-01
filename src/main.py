@@ -165,6 +165,18 @@ Examples:
         help="Directory for chart images. If --output is set, defaults to {output_dir}/images. If not set, defaults to 'images' in current dir.",
     )
 
+    parser.add_argument(
+        "--article",
+        nargs="?",
+        const=True,
+        default=False,
+        help=(
+            "Generate a Medium-style article from the analysis. "
+            "Can specify output path (e.g., --article article.md) or use default "
+            "(e.g., --article generates {ticker}_article.md in results dir)."
+        ),
+    )
+
     return parser.parse_args()
 
 
@@ -202,6 +214,112 @@ def validate_imagedir(imagedir: str) -> Path:
     Allow any path (relative or absolute).
     """
     return Path(imagedir)
+
+
+def resolve_article_path(args, ticker: str) -> Path | None:
+    """
+    Determine article output path based on arguments.
+
+    Args:
+        args: Parsed arguments namespace
+        ticker: Stock ticker symbol
+
+    Returns:
+        Path for article output, or None if --article not specified
+
+    Path resolution logic:
+        1. --article /abs/path.md  -> Use absolute path as-is
+        2. --article rel.md --output /dir/report.md  -> /dir/rel.md (relative to output dir)
+        3. --article rel.md (no --output)  -> rel.md (relative to cwd)
+        4. --article --output /dir/report.md  -> /dir/report-ARTICLE.md
+        5. --article (no --output)  -> results/{ticker}_article.md
+    """
+    if not args.article:
+        return None
+
+    if isinstance(args.article, str):
+        # --article with explicit path
+        article_path = Path(args.article)
+        if not article_path.suffix:
+            article_path = article_path.with_suffix(".md")
+
+        # If absolute path, use as-is
+        if article_path.is_absolute():
+            return article_path
+
+        # If relative path and --output specified, resolve relative to output directory
+        if args.output:
+            output_dir = Path(args.output).parent
+            return output_dir / article_path
+
+        # Otherwise, relative to current working directory
+        return article_path
+
+    elif args.article is True:
+        # --article with no value
+        if args.output:
+            # Derive from --output path: add "-ARTICLE" before extension
+            output_path = Path(args.output)
+            stem = output_path.stem  # e.g., "0005_HK_2026-01-01"
+            suffix = output_path.suffix or ".md"  # e.g., ".md"
+            article_name = f"{stem}-ARTICLE{suffix}"
+            return output_path.parent / article_name
+        else:
+            # No --output: use default path in results dir
+            safe_ticker = ticker.replace(".", "_").replace("/", "_")
+            return config.results_dir / f"{safe_ticker}_article.md"
+    else:
+        return None
+
+
+async def handle_article_generation(
+    args,
+    ticker: str,
+    company_name: str,
+    report_text: str,
+    trade_date: str,
+) -> None:
+    """
+    Generate article if --article flag is set.
+
+    Args:
+        args: Parsed arguments namespace
+        ticker: Stock ticker symbol
+        company_name: Full company name
+        report_text: The full analysis report
+        trade_date: Date of the analysis
+    """
+    article_path = resolve_article_path(args, ticker)
+    if not article_path:
+        return
+
+    try:
+        from src.article_writer import ArticleWriter
+
+        if not args.quiet and not args.brief:
+            console.print("\n[cyan]Generating article...[/cyan]")
+
+        writer = ArticleWriter(use_github_urls=True)
+        article = writer.write(
+            ticker=ticker,
+            company_name=company_name,
+            report_text=report_text,
+            trade_date=trade_date,
+            output_path=article_path,
+        )
+
+        if not args.quiet and not args.brief:
+            console.print(
+                f"[green]Article saved to:[/green] [cyan]{article_path}[/cyan]"
+            )
+            # Defensive: ensure article is a string before counting words
+            word_count = len(article.split()) if isinstance(article, str) else 0
+            console.print(f"[dim]Word count: {word_count} words[/dim]")
+
+    except Exception as e:
+        logger.error(f"Article generation failed: {e}", exc_info=True)
+        if not args.quiet and not args.brief:
+            console.print(f"[yellow]Warning: Article generation failed: {e}[/yellow]")
 
 
 def get_welcome_banner(ticker: str, quick_mode: bool) -> str:
@@ -765,8 +883,11 @@ async def main():
                 args.brief or args.quiet or not sys.stdout.isatty() or args.output
             )
 
+            # Initialize variables that may be needed for article generation
+            company_name = None
+            report = None
+
             if use_markdown:
-                company_name = None
                 try:
                     import yfinance as yf
 
@@ -832,6 +953,50 @@ async def main():
                     console.print(
                         f"\n[yellow]Warning: Could not save results to file: {e}[/yellow]\n"
                     )
+
+            # Generate article if --article flag is set
+            if args.article:
+                # Get trade_date from result or current date
+                trade_date = result.get("trade_date") or datetime.now().strftime(
+                    "%Y-%m-%d"
+                )
+
+                # Generate report text for article if not already done
+                if not use_markdown:
+                    # Need to generate markdown report for article
+                    if company_name is None:
+                        try:
+                            import yfinance as yf
+
+                            ticker_obj = yf.Ticker(args.ticker)
+                            info = ticker_obj.info
+                            company_name = (
+                                info.get("longName")
+                                or info.get("shortName")
+                                or args.ticker
+                            )
+                        except Exception:
+                            company_name = args.ticker
+
+                    reporter = QuietModeReporter(
+                        args.ticker,
+                        company_name,
+                        quick_mode=args.quick,
+                        chart_format="svg" if args.svg else "png",
+                        transparent_charts=args.transparent,
+                        skip_charts=args.no_charts,
+                        image_dir=image_dir,
+                        report_dir=output_dir,
+                    )
+                    report = reporter.generate_report(result, brief_mode=False)
+
+                await handle_article_generation(
+                    args=args,
+                    ticker=args.ticker,
+                    company_name=company_name or args.ticker,
+                    report_text=report,
+                    trade_date=trade_date,
+                )
 
             sys.exit(0)
         else:

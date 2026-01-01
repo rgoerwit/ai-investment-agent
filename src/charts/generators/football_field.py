@@ -255,11 +255,13 @@ def generate_football_field(
             bbox_to_anchor=(0.5, -0.18),
             ncol=2,  # Two columns for compact horizontal layout
             fontsize=8,
-            facecolor="none",  # Transparent background
-            edgecolor=text_color,  # Border for visibility
         )
-        legend.get_frame().set_linewidth(1.0)
-        legend.get_frame().set_alpha(1.0)  # Keep border fully visible
+        # Set facecolor and edgecolor separately on the frame
+        # (passing facecolor="none" to legend() can be overridden by set_alpha)
+        frame = legend.get_frame()
+        frame.set_facecolor("none")  # Transparent background
+        frame.set_edgecolor(text_color)  # Border for visibility
+        frame.set_linewidth(1.0)
         plt.setp(legend.get_texts(), color=text_color)
     else:
         legend = ax.legend(

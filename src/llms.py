@@ -33,11 +33,18 @@ SAFETY_SETTINGS = {
 
 def _is_gemini_v3_or_greater(model_name: str) -> bool:
     """
-    Checks if a Gemini model name is version 3.0 or greater.
-    This is used to determine if the 'thinking_level' parameter is supported.
+    Checks if a Gemini model supports 'thinking_level' parameter.
+
+    Includes:
+    - Gemini 3.0+ models (e.g., gemini-3-pro-preview)
+    - Any model with 'thinking' in the name (e.g., gemini-2.0-flash-thinking-exp)
     """
     if not model_name.startswith("gemini-"):
         return False
+
+    # Explicit support for "thinking" models regardless of version number
+    if "thinking" in model_name.lower():
+        return True
 
     match = re.search(r"gemini-([0-9.]+)", model_name)
     if not match:

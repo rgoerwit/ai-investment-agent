@@ -5,10 +5,11 @@ CLAUDE.md
 
 # Local things we ignore
 examples/~*
-scratch/
-scratch/*
 data_cache/
 data_cache/*
+# Keep only the directory
+writing_samples/*
+scratch/*
 
 # Scratch dir should exist, but don't save anything there
 scratch/*

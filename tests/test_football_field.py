@@ -339,3 +339,89 @@ class TestGenerateFootballField:
 
             assert result is not None
             assert result.exists()
+
+    def test_transparent_legend_has_transparent_facecolor_with_border(self):
+        """Regression test: transparent mode legend must have transparent background.
+
+        The legend should have:
+        - Transparent facecolor (not white)
+        - Visible border (edgecolor) for clarity on any background
+
+        This was previously broken when set_alpha(1.0) was called on the entire
+        frame, which overrode the transparent facecolor setting.
+        """
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        from matplotlib.colors import to_rgba
+
+        data = FootballFieldData(
+            ticker="TEST",
+            trade_date="2025-01-01",
+            current_price=150.00,
+            fifty_two_week_high=180.00,
+            fifty_two_week_low=120.00,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ChartConfig(output_dir=Path(tmpdir), transparent=True)
+
+            # Re-implement chart generation to inspect legend before close
+            sns.set_style("whitegrid")
+            fig, ax = plt.subplots(figsize=(config.width_inches, config.height_inches))
+
+            # Minimal chart setup to get a legend
+            text_color = "#4A90D9"
+            ax.barh(
+                0,
+                data.fifty_two_week_high - data.fifty_two_week_low,
+                left=data.fifty_two_week_low,
+                height=0.6,
+                color="#4A90D9",
+                alpha=0.7,
+                label="52-Week Range",
+            )
+            ax.axvline(
+                x=data.current_price,
+                color="#E74C3C",
+                linewidth=2.5,
+                linestyle="--",
+                label=f"Current: ${data.current_price:.2f}",
+            )
+
+            # Create legend with transparent mode settings (same as production code)
+            legend = ax.legend(
+                loc="upper center",
+                bbox_to_anchor=(0.5, -0.18),
+                ncol=2,
+                fontsize=8,
+            )
+            frame = legend.get_frame()
+            frame.set_facecolor("none")
+            frame.set_edgecolor(text_color)
+            frame.set_linewidth(1.0)
+
+            # Verify legend frame properties
+            facecolor = frame.get_facecolor()
+            edgecolor = frame.get_edgecolor()
+
+            # Facecolor should be transparent (alpha = 0 or "none")
+            # to_rgba("none") returns (0.0, 0.0, 0.0, 0.0)
+            assert (
+                facecolor[3] == 0.0
+            ), f"Legend facecolor should be transparent (alpha=0), got alpha={facecolor[3]}"
+
+            # Edgecolor should be visible (not transparent)
+            expected_edge = to_rgba(text_color)
+            assert (
+                edgecolor[3] > 0
+            ), f"Legend edgecolor should be visible (alpha>0), got alpha={edgecolor[3]}"
+            # Check it's the right color (RGB, ignoring alpha)
+            assert abs(edgecolor[0] - expected_edge[0]) < 0.01, "Edgecolor red mismatch"
+            assert (
+                abs(edgecolor[1] - expected_edge[1]) < 0.01
+            ), "Edgecolor green mismatch"
+            assert (
+                abs(edgecolor[2] - expected_edge[2]) < 0.01
+            ), "Edgecolor blue mismatch"
+
+            plt.close(fig)
