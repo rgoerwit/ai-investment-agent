@@ -248,15 +248,27 @@ def generate_football_field(
     ax.tick_params(axis="both", colors=tick_color)
 
     # Place legend below chart to avoid any overlap with data
-    legend = ax.legend(
-        loc="upper center",
-        bbox_to_anchor=(0.5, -0.18),
-        ncol=2,  # Two columns for compact horizontal layout
-        fontsize=8,
-        framealpha=0.9,
-    )
     if config.transparent:
+        # Transparent mode: no background fill, but add border for clarity
+        legend = ax.legend(
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.18),
+            ncol=2,  # Two columns for compact horizontal layout
+            fontsize=8,
+            facecolor="none",  # Transparent background
+            edgecolor=text_color,  # Border for visibility
+        )
+        legend.get_frame().set_linewidth(1.0)
+        legend.get_frame().set_alpha(1.0)  # Keep border fully visible
         plt.setp(legend.get_texts(), color=text_color)
+    else:
+        legend = ax.legend(
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.18),
+            ncol=2,  # Two columns for compact horizontal layout
+            fontsize=8,
+            framealpha=0.9,
+        )
 
     # Determine x-axis range with padding
     all_values = [data.fifty_two_week_low, data.fifty_two_week_high, data.current_price]
@@ -284,16 +296,17 @@ def generate_football_field(
     # Set y-axis limits with padding below for MA labels (two rows)
     ax.set_ylim(-1.0, len(bars) - 0.5)
 
-    plt.tight_layout()
+    # Use OO API for thread-safety (avoid plt global state)
+    fig.tight_layout()
 
     # Generate filename
     safe_ticker = data.ticker.replace(".", "_").replace("/", "_")
     filename = f"{safe_ticker}_{data.trade_date}_football_field"
 
-    # Save in requested format
+    # Save in requested format (use fig.savefig for OO API)
     if config.format == ChartFormat.SVG:
         output_path = config.output_dir / f"{filename}.svg"
-        plt.savefig(
+        fig.savefig(
             output_path,
             format="svg",
             dpi=config.dpi,
@@ -302,7 +315,7 @@ def generate_football_field(
         )
     else:
         output_path = config.output_dir / f"{filename}.png"
-        plt.savefig(
+        fig.savefig(
             output_path,
             format="png",
             dpi=config.dpi,

@@ -33,6 +33,13 @@ class ChartRawData:
     adr_impact: str | None = None
     us_revenue_percent: str | None = None
 
+    # Additional metrics for enhanced radar (extracted from narrative)
+    de_ratio: float | None = None  # D/E ratio (Debt-to-Equity)
+    roa: float | None = None  # Return on Assets (%)
+    jurisdiction: str | None = None  # Country/exchange jurisdiction
+    vie_structure: bool | None = None  # VIE structure present
+    cmic_flagged: bool | None = None  # CMIC list concern
+
 
 def _extract_float(pattern: str, text: str) -> float | None:
     """Extract a float value using regex pattern.
@@ -59,6 +66,36 @@ def _extract_str(pattern: str, text: str) -> str | None:
     match = re.search(pattern, text, re.IGNORECASE)
     if match:
         return match.group(1).strip()
+    return None
+
+
+def _extract_vie_from_block(data_block: str) -> bool | None:
+    """Extract VIE_STRUCTURE from DATA_BLOCK.
+
+    Expected format: VIE_STRUCTURE: [YES / NO / N/A]
+    """
+    match = re.search(r"VIE_STRUCTURE:\s*(YES|NO|N/A)", data_block, re.IGNORECASE)
+    if match:
+        value = match.group(1).upper()
+        if value == "YES":
+            return True
+        elif value == "NO":
+            return False
+    return None
+
+
+def _extract_cmic_from_block(data_block: str) -> bool | None:
+    """Extract CMIC_STATUS from DATA_BLOCK.
+
+    Expected format: CMIC_STATUS: [FLAGGED / CLEAR / N/A]
+    """
+    match = re.search(r"CMIC_STATUS:\s*(FLAGGED|CLEAR|N/A)", data_block, re.IGNORECASE)
+    if match:
+        value = match.group(1).upper()
+        if value == "FLAGGED":
+            return True
+        elif value == "CLEAR":
+            return False
     return None
 
 
@@ -131,6 +168,13 @@ def extract_chart_data_from_data_block(fundamentals_report: str) -> ChartRawData
         pfic_risk=_extract_str(r"PFIC_RISK:\s*([A-Za-z]+)", data_block),
         adr_impact=_extract_str(r"ADR_THESIS_IMPACT:\s*([A-Za-z_]+)", data_block),
         us_revenue_percent=_extract_str(r"US_REVENUE_PERCENT:\s*(.+)", data_block),
+        # Extract from DATA_BLOCK (structured fields added in prompt v7.4)
+        de_ratio=_extract_float(rf"DE_RATIO:\s*{num_pattern}", data_block),
+        roa=_extract_float(rf"ROA_PERCENT:\s*{num_pattern}", data_block),
+        # Permissive pattern: captures until newline/comment to handle spaces (e.g., "Hong Kong.HKEX")
+        jurisdiction=_extract_str(r"JURISDICTION:\s*([^\n#]+)", data_block),
+        vie_structure=_extract_vie_from_block(data_block),
+        cmic_flagged=_extract_cmic_from_block(data_block),
     )
 
     logger.debug(
@@ -138,6 +182,8 @@ def extract_chart_data_from_data_block(fundamentals_report: str) -> ChartRawData
         current_price=result.current_price,
         health=result.adjusted_health_score,
         pe=result.pe_ratio_ttm,
+        de_ratio=result.de_ratio,
+        roa=result.roa,
     )
 
     return result

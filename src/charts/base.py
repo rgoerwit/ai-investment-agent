@@ -103,20 +103,30 @@ class RadarChartData:
     """Data required for thesis alignment radar chart.
 
     Scores are normalized to 0-100 where 100 is best.
+    Uses 6 axes for comprehensive thesis alignment visualization:
+    - Health: Financial health composite (D/E, ROA influence)
+    - Growth: Growth transition score
+    - Valuation: P/E and PEG-based value assessment
+    - Undiscovered: Low analyst coverage = higher score
+    - Regulatory: PFIC, VIE, CMIC, ADR risk factors
+    - Jurisdiction: Country/exchange stability
     """
 
     ticker: str
     trade_date: str
 
-    # Core Dimensions (0-100)
+    # Core Dimensions (0-100) - 6 axes
     health_score: float
     growth_score: float
     valuation_score: float
     undiscovered_score: float
-    safety_score: float
+    regulatory_score: float  # Split from old "safety" - PFIC/VIE/CMIC/ADR risks
+    jurisdiction_score: float  # Split from old "safety" - country/exchange risk
 
-    # Raw values for labels
+    # Raw values for labels and tooltips
     pe_ratio: float | None = None
     peg_ratio: float | None = None
+    de_ratio: float | None = None
+    roa: float | None = None
     analyst_count: int | None = None
     risk_tally: float | None = None

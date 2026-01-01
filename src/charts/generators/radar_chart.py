@@ -1,12 +1,13 @@
 """
 Radar chart generator for Thesis Alignment.
 
-Generates a 5-axis radar chart showing:
-- Financial Health
+Generates a 6-axis radar chart showing:
+- Financial Health (incorporates D/E, ROA)
 - Growth Transition
 - Valuation Alignment
 - Undiscovered Status
-- Safety/Risk Profile
+- Regulatory Risk (PFIC, VIE, CMIC, ADR)
+- Jurisdiction Score (country/exchange stability)
 """
 
 from pathlib import Path
@@ -40,22 +41,37 @@ def generate_radar_chart(
     # Set style
     sns.set_style("whitegrid")
 
-    # Dimensions
-    categories = ["Health", "Growth", "Valuation", "Undiscovered", "Safety"]
+    # 6 Dimensions - ordered for visual balance (alternating position importance)
+    # Top: Health, Growth (most important)
+    # Sides: Valuation, Regulatory
+    # Bottom: Undiscovered, Jurisdiction
+    categories = [
+        "Health",
+        "Growth",
+        "Valuation",
+        "Regulatory",
+        "Undiscovered",
+        "Jurisdiction",
+    ]
     values = [
         data.health_score,
         data.growth_score,
         data.valuation_score,
+        data.regulatory_score,
         data.undiscovered_score,
-        data.safety_score,
+        data.jurisdiction_score,
     ]
 
-    # Close the loop for radar chart
-    values += values[:1]
-    angles = np.linspace(0, 2 * np.pi, len(categories), endpoint=False).tolist()
-    angles += angles[:1]
+    # Clamp values to 0-100 range (defensive)
+    values = [max(0.0, min(100.0, v)) for v in values]
 
-    # Create plot
+    # Close the loop for radar chart
+    values_closed = values + values[:1]
+    num_vars = len(categories)
+    angles = np.linspace(0, 2 * np.pi, num_vars, endpoint=False).tolist()
+    angles_closed = angles + angles[:1]
+
+    # Create plot - slightly larger for 6 axes
     fig, ax = plt.subplots(
         figsize=(config.width_inches, config.height_inches),
         subplot_kw=({"polar": True}),
@@ -83,65 +99,84 @@ def generate_radar_chart(
         tick_label_color = "grey"
         title_color = "black"
 
-    # Draw one axe per variable + labels
-    plt.xticks(angles[:-1], categories, color=axis_label_color, size=10)
+    # Draw axis labels (categories) with abbreviations for long names
+    # Use shorter labels to prevent overlap with 6 axes
+    display_labels = [
+        "Health",
+        "Growth",
+        "Value",  # Shortened from "Valuation"
+        "Reg",  # Shortened from "Regulatory"
+        "Undiscov",  # Shortened from "Undiscovered"
+        "Jurisd",  # Shortened from "Jurisdiction"
+    ]
+
+    # Use OO API for thread-safety (avoid plt global state)
+    ax.set_xticks(angles)
+    ax.set_xticklabels(display_labels, color=axis_label_color, size=9)
 
     # Push the axis labels (categories) further out to avoid overlapping with data labels
-    # pad=30 moves the text away from the outer circle
-    ax.tick_params(axis="x", pad=30)
+    # Reduced pad from 30 to 25 for 6-axis (labels are shorter, so less pad needed)
+    ax.tick_params(axis="x", pad=25)
 
-    # Draw ylabels
-    ax.set_rlabel_position(0)
-    plt.yticks([25, 50, 75], ["25", "50", "75"], color=tick_label_color, size=7)
-    plt.ylim(0, 100)
+    # Draw ylabels - positioned at 30 degrees to avoid overlap with top axis
+    ax.set_rlabel_position(30)
+    ax.set_yticks([25, 50, 75])
+    ax.set_yticklabels(["25", "50", "75"], color=tick_label_color, size=7)
+    ax.set_ylim(0, 100)
 
     # Plot data - Using colorblind-safe Cyan (matches PASS color in CLI)
     chart_color = "#00B4D8"  # Cyan/Blue
 
-    ax.plot(angles, values, linewidth=2, linestyle="solid", color=chart_color)
+    ax.plot(
+        angles_closed, values_closed, linewidth=2, linestyle="solid", color=chart_color
+    )
 
     # Fill area
-    ax.fill(angles, values, chart_color, alpha=0.25)
+    ax.fill(angles_closed, values_closed, chart_color, alpha=0.25)
 
-    # Add specific data labels
-    # Calculate label positions
-    for angle, value, _label in zip(angles[:-1], values[:-1], categories, strict=True):
-        # Add value annotation
-        # If value is very low, push it out a bit more to be visible
-        # If value is high, +15 keeps it distinct from the 100-line
-        offset = 15
+    # Add data value labels
+    # Position labels carefully to avoid overlap with axis labels
+    for angle, value, _label in zip(angles, values, categories, strict=True):
+        # Calculate label offset based on value
+        # Low values: push label outward so it's visible
+        # High values: keep label close but above the line
+        if value < 30:
+            label_r = value + 18  # Push out more for low values
+        elif value > 80:
+            label_r = value + 12  # Less offset for high values (near edge)
+        else:
+            label_r = value + 15  # Standard offset
+
+        # Ensure label doesn't exceed chart bounds
+        label_r = min(label_r, 98)
 
         ax.text(
             angle,
-            value + offset,
+            label_r,
             f"{value:.0f}%",
             ha="center",
             va="center",
-            fontsize=9,
+            fontsize=8,
             fontweight="bold",
             color=data_label_color,
         )
 
-    # Title
-    # Shortened title to avoid overlap with top dimensions (Growth/Valuation)
+    # Title - use fig.suptitle (OO API) to keep it fixed at top, avoiding axis label overlap
     title_text = f"{data.ticker} Thesis Alignment ({data.trade_date})"
 
-    # Use suptitle (figure-level) instead of axes-level title to keep it fixed at the top
-    # This prevents overlap with the "Growth" label which pushes out due to padding
-    plt.suptitle(title_text, size=10, y=0.98, fontweight="bold", color=title_color)
+    fig.suptitle(title_text, size=10, y=0.98, fontweight="bold", color=title_color)
 
     # Reserve top space for title (0.92 top limit)
-    # This forces the chart and its padded labels to fit in the bottom 92%
-    plt.tight_layout(rect=[0, 0, 1, 0.92])
+    fig.tight_layout(rect=[0, 0, 1, 0.92])
 
     # Generate filename
     safe_ticker = data.ticker.replace(".", "_").replace("/", "_")
     filename = f"{safe_ticker}_{data.trade_date}_radar"
 
-    # Save
+    # Save (use fig.savefig for OO API)
     if config.format == ChartFormat.SVG:
         output_path = config.output_dir / f"{filename}.svg"
-        plt.savefig(
+        fig.savefig(
             output_path,
             format="svg",
             dpi=config.dpi,
@@ -150,7 +185,7 @@ def generate_radar_chart(
         )
     else:
         output_path = config.output_dir / f"{filename}.png"
-        plt.savefig(
+        fig.savefig(
             output_path,
             format="png",
             dpi=config.dpi,

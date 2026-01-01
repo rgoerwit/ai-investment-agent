@@ -148,7 +148,15 @@ class QuietModeReporter:
             return None
 
     def _generate_radar_chart(self, result: dict) -> Path | None:
-        """Generate thesis alignment radar chart.
+        """Generate thesis alignment radar chart with 6 axes.
+
+        Axes:
+        - Health: Financial health composite (D/E, ROA influence)
+        - Growth: Growth transition score
+        - Valuation: P/E and PEG-based value assessment
+        - Undiscovered: Low analyst coverage = higher score
+        - Regulatory: PFIC, VIE, CMIC, ADR risk factors
+        - Jurisdiction: Country/exchange stability
 
         Args:
             result: Dictionary containing analysis results
@@ -179,75 +187,125 @@ class QuietModeReporter:
                 logger.debug("Insufficient data for radar chart (no health score)")
                 return None
 
-            # --- Score Normalization Logic ---
+            # --- Score Normalization Logic (6 Axes) ---
 
-            # 1. Health (Direct)
+            # 1. Health (Composite: base score + D/E + ROA adjustments)
+            # Start with the analyst's health score, then adjust based on D/E and ROA
             health = raw.adjusted_health_score
 
-            # 2. Growth (Direct)
+            # D/E adjustment: Low D/E is good (thesis likes <0.8)
+            # If D/E available, adjust health score slightly
+            if raw.de_ratio is not None:
+                if raw.de_ratio < 0.5:
+                    health = min(100.0, health + 5)  # Very low leverage bonus
+                elif raw.de_ratio > 2.0:
+                    health = max(0.0, health - 10)  # High leverage penalty
+                elif raw.de_ratio > 1.0:
+                    health = max(0.0, health - 5)  # Moderate leverage penalty
+
+            # ROA adjustment: High ROA is good (thesis likes >7%)
+            if raw.roa is not None:
+                if raw.roa > 10.0:
+                    health = min(100.0, health + 5)  # Strong profitability bonus
+                elif raw.roa < 3.0:
+                    health = max(0.0, health - 5)  # Weak profitability penalty
+
+            health = max(0.0, min(100.0, health))
+
+            # 2. Growth (Direct from analyst score)
             growth = (
                 raw.adjusted_growth_score
                 if raw.adjusted_growth_score is not None
                 else 50.0
             )
+            growth = max(0.0, min(100.0, growth))
 
-            # 3. Valuation (Derived)
+            # 3. Valuation (Derived from P/E and PEG)
             # Preference: P/E -> PEG -> Neutral(50)
             if raw.pe_ratio_ttm and raw.pe_ratio_ttm > 0:
-                # Target: <15 is 100%, >25 is 0%
-                # Formula: (25 - PE) * 10
+                # Target: P/E <15 is 100%, P/E >25 is 0%
+                # Linear scale: score = (25 - PE) * 10, clamped to 0-100
                 val_score = (25.0 - raw.pe_ratio_ttm) * 10.0
             elif raw.peg_ratio and raw.peg_ratio > 0:
-                # Target: <1.0 is 100%, >2.0 is 0%
+                # Target: PEG <1.0 is 100%, PEG >2.0 is 0%
                 val_score = (2.0 - raw.peg_ratio) * 100.0
             else:
-                val_score = 50.0
+                val_score = 50.0  # Neutral if no data
             val_score = max(0.0, min(100.0, val_score))
 
             # 4. Undiscovered (Derived from Analyst Count)
-            # Target: <5 is 100%, >15 is 0%
+            # Target: <5 analysts is 100% (hidden gem), >15 is 0% (well-covered)
             coverage = raw.analyst_coverage if raw.analyst_coverage is not None else 10
             undiscovered = (15.0 - coverage) * 10.0
             undiscovered = max(0.0, min(100.0, undiscovered))
 
-            # 5. Safety (Composite Risk)
-            safety = 100.0
+            # 5. Regulatory Score (PFIC, VIE, CMIC, ADR risks)
+            # Start at 100 (no regulatory concerns), subtract for each risk
+            regulatory = 100.0
 
-            # PFIC Penalty
+            # PFIC Penalty (passive foreign investment company)
             if raw.pfic_risk:
-                if "HIGH" in raw.pfic_risk.upper():
-                    safety -= 30
-                elif "MEDIUM" in raw.pfic_risk.upper():
-                    safety -= 15
+                risk_upper = raw.pfic_risk.upper()
+                if "HIGH" in risk_upper:
+                    regulatory -= 40  # Major tax/reporting burden
+                elif "MEDIUM" in risk_upper:
+                    regulatory -= 20
 
-            # ADR Penalty (Sponsored = Discovered/Regulated = -10 from 'Perfect Hidden Gem' safety?
-            # Actually, Sponsored is SAFER but usually means less upside/more correlation.
-            # Thesis says: Sponsored is a "Risk Factor" for *undiscovered* thesis, but here we call axis "Safety".
-            # Let's map "Safety" to "Thesis Safety" - i.e., lack of Thesis-Breaking Risks.
-            # Sponsored ADR is a Thesis Risk (+0.33 penalty). So it lowers score.
-            if raw.adr_impact and "MODERATE_CONCERN" in raw.adr_impact.upper():
-                safety -= 10
+            # VIE Structure Penalty (Variable Interest Entity - China risk)
+            if raw.vie_structure is True:
+                regulatory -= 25  # Significant structural risk
 
-            # US Revenue Penalty
+            # CMIC Penalty (Chinese Military-Industrial Complex list)
+            if raw.cmic_flagged is True:
+                regulatory -= 35  # Investment restrictions risk
+
+            # ADR Thesis Impact Penalty (Sponsored ADR = more discovered)
+            if raw.adr_impact:
+                impact_upper = raw.adr_impact.upper()
+                if "MODERATE_CONCERN" in impact_upper:
+                    regulatory -= 10  # Minor thesis concern
+
+            regulatory = max(0.0, min(100.0, regulatory))
+
+            # 6. Jurisdiction Score (Country/Exchange stability)
+            # Start at 100, subtract for risky jurisdictions
+            jurisdiction = 100.0
+
+            # Infer jurisdiction risk from ticker suffix or explicit field
+            ticker_upper = self.ticker.upper()
+
+            # High-risk jurisdictions (authoritarian, sanctions risk)
+            if any(
+                suffix in ticker_upper
+                for suffix in [".SS", ".SZ", ".HK"]  # China mainland, HK
+            ):
+                jurisdiction -= 25
+            elif any(
+                suffix in ticker_upper
+                for suffix in [".KS", ".KQ"]  # Korea
+            ):
+                jurisdiction -= 10  # Moderate geopolitical risk
+
+            # Low-risk developed markets get no penalty
+            # (.T Japan, .L London, .AS Amsterdam, .DE Germany, etc.)
+
+            # US Revenue penalty (high US exposure = less diversification benefit)
             if raw.us_revenue_percent:
-                if "Not disclosed" in raw.us_revenue_percent:
-                    pass  # Neutral
-                else:
+                if "Not disclosed" not in raw.us_revenue_percent:
                     try:
-                        # Extract number
                         rev_match = re.search(r"([\d.]+)%", raw.us_revenue_percent)
                         if rev_match:
                             rev = float(rev_match.group(1))
                             if rev > 35.0:
-                                safety -= 50  # Hard fail territory
+                                jurisdiction -= 30  # Hard fail territory
                             elif rev > 25.0:
-                                safety -= 20
+                                jurisdiction -= 15
                     except Exception:
                         pass
 
-            safety = max(0.0, min(100.0, safety))
+            jurisdiction = max(0.0, min(100.0, jurisdiction))
 
-            # Create Data Object
+            # Create Data Object with 6 axes
             radar_data = RadarChartData(
                 ticker=self.ticker,
                 trade_date=self.trade_date,
@@ -255,12 +313,16 @@ class QuietModeReporter:
                 growth_score=growth,
                 valuation_score=val_score,
                 undiscovered_score=undiscovered,
-                safety_score=safety,
+                regulatory_score=regulatory,
+                jurisdiction_score=jurisdiction,
                 pe_ratio=raw.pe_ratio_ttm,
+                peg_ratio=raw.peg_ratio,
+                de_ratio=raw.de_ratio,
+                roa=raw.roa,
                 analyst_count=raw.analyst_coverage,
             )
 
-            # Generate
+            # Generate chart
             output_dir = self.image_dir if self.image_dir else config.images_dir
             chart_config = ChartConfig(
                 output_dir=output_dir,
