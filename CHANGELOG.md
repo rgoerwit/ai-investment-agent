@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0] - 2026-01-01
+
+### Added
+- **6-Axis Thesis Alignment Radar** - New visualizer showing Health, Growth, Value, Undiscovered status, Regulatory risks, and Jurisdiction stability.
+- **Structured Data Model (v7.4)** - Updated prompt schema and extractors to use deterministic fields for D/E ratios, ROA, and specific jurisdictional identifiers, eliminating fragile narrative parsing.
+- **Automatic Path Expansion** - Integrated `os.path.expanduser` into the configuration system to prevent the creation of literal `~` directories in the project root.
+- **Robust Bash Cleanup** - Added `trap` and `cleanup_temp_files` logic to `run_tickers.sh` to ensure workspace hygiene even after interrupted runs.
+
+### Changed
+- **Plotting Infrastructure** - Refactored all chart generators (`football_field.py`, `radar_chart.py`) to use the Matplotlib Object-Oriented API for improved thread-safety and state isolation.
+- **Theme-Agnostic Accessibility** - Charts now automatically adjust colors in `--transparent` mode to ensure legibility on both dark and light Markdown readers.
+
 ## [3.1.0] - 2025-12-18
 
 ### Added

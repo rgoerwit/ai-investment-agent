@@ -211,7 +211,16 @@ This saves ~60% of token costs (no debate needed for doomed stocks) and prevents
 
 ### The GARP Thesis: Disciplined Investing
 
-This system isn't a black box. It enforces a specific investment strategy: **GARP (Growth at a Reasonable Price)**.
+This system isn't a black box. It enforces a specific investment strategy: **GARP (Growth at a Reasonable Price)**. The alignment with this thesis is visualized via a **6-Axis Radar Chart**:
+
+1.  **Health** - Financial health composite (incorporating D/E and ROA).
+2.  **Growth** - Growth transition score alignment.
+3.  **Value** - Valuation metrics (P/E, PEG).
+4.  **Regulatory** - Compliance risks (PFIC, VIE, CMIC).
+5.  **Undiscovered** - Institutional/Analyst coverage gaps.
+6.  **Jurisdiction** - Geopolitical and exchange stability.
+
+**Designing for Reliability**: A common failure mode in LLM applications is "fragile parsing"—relying on regex to hunt through long narrative text for a single number. This system mitigates this by using a versioned **Structured DATA_BLOCK (v7.4)**. The LLM is forced to output critical metrics in a strict schema, which the Python plotting layer then extracts deterministically. This turns the LLM into a reliable data-producer for the visualization engine.
 
 **Hard requirements** (automatic SELL if violated):
 

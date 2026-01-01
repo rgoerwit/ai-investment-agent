@@ -28,6 +28,7 @@
 ✅ **Multi-Agent Debate Pattern** - Bull/Bear/Risk analysts argue, then a Portfolio Manager decides
 ✅ **International Coverage** - Handles HK, Japan, Taiwan, Korea with proper FX/exchange logic
 ✅ **Disciplined Risk Framework** - Hard-fail gatekeeping prevents emotional/hype-driven decisions
+✅ **Thesis Alignment Radar** - 6-axis visual showing Health, Growth, Value, Undiscovered, Regulatory, and Jurisdiction
 ✅ **Visual Valuation Charts** - "Football Field" charts showing price ranges, targets, and moving averages
 ✅ **Zero Marginal Cost** - Can run (amidst 429s and retries) on free-tier Gemini API, albeit slowly
 ✅ **Full Transparency** - Every decision explained with supporting data and reasoning
@@ -85,7 +86,7 @@ graph TB
 
     RiskTeam --> PortfolioManager
 
-    PortfolioManager --> Decision([BUY / SELL / HOLD<br/>+ Position Size<br/>+ Valuation Chart])
+    PortfolioManager --> Decision([BUY / SELL / HOLD<br/>+ Position Size<br/>+ Football Field Chart<br/>+ Thesis Alignment Radar])
 
     style Dispatcher fill:#ffeaa7,color:#333
     style MarketAnalyst fill:#e1f5ff,color:#333
@@ -140,9 +141,9 @@ graph TB
 
 9. **Risk Assessment** - Three risk analysts (Risky/Safe/Neutral) evaluate position sizing from different risk tolerances.
 
-10. **Executive Decision** - Portfolio Manager synthesizes all viewpoints, applies thesis criteria, and makes final BUY/SELL/HOLD decision.
+10. **Executive Decision** - Portfolio Manager synthesizes all viewpoints, applies thesis criteria, and makes final BUY/SELL/HOLD decision. The system then generates two primary visuals: the **Football Field** (valuation ranges) and the **6-Axis Radar Chart** (thesis alignment).
 
-**Why This Matters:** Single-LLM (and worse yet, single-prompt) systems are prone to confirmation bias. Multi-model + multi-agent debate forces the system as a whole to consider contradictory evidence, mimicking how institutional research teams actually work. The parallel fan-out/fan-in pattern provides speed without sacrificing data quality. The Junior/Senior/Foreign split uses multiple data pathways (APIs + native-language web sources) to reduce data gaps common when analyzing international stocks. The Financial Validator provides deterministic pre-screening to catch catastrophic risks before debate. The Valuation Calculator separates LLM judgment (method selection) from Python calculation (arithmetic), avoiding LLM math hallucinations while generating visual "Football Field" valuation charts. The optional External Consultant uses a different AI model (OpenAI) to catch groupthink.
+**Why This Matters:** Single-LLM (and worse yet, single-prompt) systems are prone to confirmation bias. Multi-model + multi-agent debate forces the system as a whole to consider contradictory evidence, mimicking how institutional research teams actually work. The parallel fan-out/fan-in pattern provides speed without sacrificing data quality. The Junior/Senior/Foreign split uses multiple data pathways (APIs + native-language web sources) to reduce data gaps common when analyzing international stocks. The Financial Validator provides deterministic pre-screening to catch catastrophic risks before debate. The Valuation Calculator separates LLM judgment (method selection) from Python calculation (arithmetic), avoiding LLM math hallucinations while generating visual valuation charts. The structured **DATA_BLOCK (v7.4)** provides a reliable schema for extracting complex metrics (D/E, ROA, Jurisdiction), ensuring the visualization layer remains accurate and thread-safe. The optional External Consultant uses a different AI model (OpenAI) to catch groupthink.
 
 ---
 
