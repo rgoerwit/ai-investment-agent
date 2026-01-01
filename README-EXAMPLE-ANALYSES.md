@@ -24,15 +24,18 @@ The Multi-Agent Trading System generates structured equity research reports for 
 Every analysis contains these sections:
 
 1. **Executive Summary** - Final decision (BUY/SELL/HOLD), thesis compliance status, position sizing, and high-level rationale
-2. **Technical Analysis** - Liquidity checks, price action, momentum indicators (RSI/MACD), volume analysis
-3. **Fundamental Analysis** - Detailed scoring of financial health and growth metrics with explicit point allocation
-4. **Market Sentiment** - US/international analyst coverage, social sentiment (StockTwits), "undiscovered" status assessment
-5. **Investment Recommendation** - Multi-round Bull/Bear debate synthesis with final recommendation
-6. **Trading Strategy** - Entry/exit levels, position sizing, stop-loss targets, risk/reward ratios
-7. **Risk Assessment** - Perspectives from Conservative/Neutral/Aggressive risk analysts
+2. **Thesis Alignment** - A 6-axis Radar Chart visualizing Health, Growth, Value, Undiscovered status, Regulatory, and Jurisdiction
+3. **Valuation Chart** - The "Football Field" showing price ranges, analyst targets, and our target vs. current price
+4. **Technical Analysis** - Liquidity checks, price action, momentum indicators (RSI/MACD), volume analysis
+5. **Fundamental Analysis** - Detailed scoring of financial health and growth metrics with explicit point allocation
+6. **Market Sentiment** - US/international analyst coverage, social sentiment (StockTwits), "undiscovered" status assessment
+7. **Investment Recommendation** - Multi-round Bull/Bear debate synthesis with final recommendation
+8. **Trading Strategy** - Entry/exit levels, position sizing, stop-loss targets, risk/reward ratios
+9. **Risk Assessment** - Perspectives from Conservative/Neutral/Aggressive risk analysts
 
 ### Strengths of the Format
 
+✅ **Visual Triage** - The Radar Chart acts as a "Polygon of Health"—a balanced, outward-reaching shape indicates a high-conviction buy at a glance.  
 ✅ **Transparency** - Every score is explicitly calculated with point-by-point breakdown  
 ✅ **Accountability** - Data sources are logged; N/A fields trigger adjusted scoring  
 ✅ **Multi-Perspective** - Bull/Bear/Risk agents debate to reduce confirmation bias  

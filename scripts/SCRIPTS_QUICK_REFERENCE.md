@@ -17,7 +17,7 @@
 | Script | Major Changes | Safety Level |
 |--------|---------------|--------------|
 | **run-analysis.sh** | Removed Docker option, better error handling | 🟢 SAFE |
-| **run_tickers.sh** | Kept macOS gRPC fix, auto-creates examples | 🟢 SAFE |
+| **run_tickers.sh** | Added **Safe Cleanup** (via `trap`), keeps macOS gRPC fix | 🟢 SAFE |
 | **check-environment.sh** | Validates API keys, checks Python/Poetry | 🟢 SAFE |
 | **setup-github-secrets.sh** | 71-line warning, dry-run mode | 🟡 SAFE w/warnings |
 | **setup-terraform-backend.sh** | 73-line warning, cost estimates | 🟡 SAFE w/warnings |
