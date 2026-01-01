@@ -147,6 +147,140 @@ class QuietModeReporter:
             logger.warning(f"Chart generation failed: {e}")
             return None
 
+    def _generate_radar_chart(self, result: dict) -> Path | None:
+        """Generate thesis alignment radar chart.
+
+        Args:
+            result: Dictionary containing analysis results
+
+        Returns:
+            Path to generated chart image, or None
+        """
+        # Skip if charts disabled or quick mode
+        if self.skip_charts or self.quick_mode:
+            return None
+
+        try:
+            from src.charts.base import ChartConfig, ChartFormat, RadarChartData
+            from src.charts.extractors.data_block import (
+                extract_chart_data_from_data_block,
+            )
+            from src.charts.generators.radar_chart import generate_radar_chart
+            from src.config import config
+
+            # Extract raw facts
+            fundamentals_report = self._normalize_string(
+                result.get("fundamentals_report", "")
+            )
+            raw = extract_chart_data_from_data_block(fundamentals_report)
+
+            # Need at least scores to chart
+            if raw.adjusted_health_score is None:
+                logger.debug("Insufficient data for radar chart (no health score)")
+                return None
+
+            # --- Score Normalization Logic ---
+
+            # 1. Health (Direct)
+            health = raw.adjusted_health_score
+
+            # 2. Growth (Direct)
+            growth = (
+                raw.adjusted_growth_score
+                if raw.adjusted_growth_score is not None
+                else 50.0
+            )
+
+            # 3. Valuation (Derived)
+            # Preference: P/E -> PEG -> Neutral(50)
+            if raw.pe_ratio_ttm and raw.pe_ratio_ttm > 0:
+                # Target: <15 is 100%, >25 is 0%
+                # Formula: (25 - PE) * 10
+                val_score = (25.0 - raw.pe_ratio_ttm) * 10.0
+            elif raw.peg_ratio and raw.peg_ratio > 0:
+                # Target: <1.0 is 100%, >2.0 is 0%
+                val_score = (2.0 - raw.peg_ratio) * 100.0
+            else:
+                val_score = 50.0
+            val_score = max(0.0, min(100.0, val_score))
+
+            # 4. Undiscovered (Derived from Analyst Count)
+            # Target: <5 is 100%, >15 is 0%
+            coverage = raw.analyst_coverage if raw.analyst_coverage is not None else 10
+            undiscovered = (15.0 - coverage) * 10.0
+            undiscovered = max(0.0, min(100.0, undiscovered))
+
+            # 5. Safety (Composite Risk)
+            safety = 100.0
+
+            # PFIC Penalty
+            if raw.pfic_risk:
+                if "HIGH" in raw.pfic_risk.upper():
+                    safety -= 30
+                elif "MEDIUM" in raw.pfic_risk.upper():
+                    safety -= 15
+
+            # ADR Penalty (Sponsored = Discovered/Regulated = -10 from 'Perfect Hidden Gem' safety?
+            # Actually, Sponsored is SAFER but usually means less upside/more correlation.
+            # Thesis says: Sponsored is a "Risk Factor" for *undiscovered* thesis, but here we call axis "Safety".
+            # Let's map "Safety" to "Thesis Safety" - i.e., lack of Thesis-Breaking Risks.
+            # Sponsored ADR is a Thesis Risk (+0.33 penalty). So it lowers score.
+            if raw.adr_impact and "MODERATE_CONCERN" in raw.adr_impact.upper():
+                safety -= 10
+
+            # US Revenue Penalty
+            if raw.us_revenue_percent:
+                if "Not disclosed" in raw.us_revenue_percent:
+                    pass  # Neutral
+                else:
+                    try:
+                        # Extract number
+                        rev_match = re.search(r"([\d.]+)%", raw.us_revenue_percent)
+                        if rev_match:
+                            rev = float(rev_match.group(1))
+                            if rev > 35.0:
+                                safety -= 50  # Hard fail territory
+                            elif rev > 25.0:
+                                safety -= 20
+                    except Exception:
+                        pass
+
+            safety = max(0.0, min(100.0, safety))
+
+            # Create Data Object
+            radar_data = RadarChartData(
+                ticker=self.ticker,
+                trade_date=self.trade_date,
+                health_score=health,
+                growth_score=growth,
+                valuation_score=val_score,
+                undiscovered_score=undiscovered,
+                safety_score=safety,
+                pe_ratio=raw.pe_ratio_ttm,
+                analyst_count=raw.analyst_coverage,
+            )
+
+            # Generate
+            output_dir = self.image_dir if self.image_dir else config.images_dir
+            chart_config = ChartConfig(
+                output_dir=output_dir,
+                format=ChartFormat.SVG
+                if self.chart_format == "svg"
+                else ChartFormat.PNG,
+                transparent=self.transparent_charts,
+            )
+
+            chart_path = generate_radar_chart(radar_data, chart_config)
+
+            if chart_path:
+                logger.info("Radar chart generated", path=str(chart_path))
+
+            return chart_path
+
+        except Exception as e:
+            logger.warning(f"Radar chart generation failed: {e}")
+            return None
+
     def _normalize_string(self, content: Any) -> str:
         """
         Safely convert content to string, handling lists from LangGraph state accumulation.
@@ -417,6 +551,24 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
                 report_parts.append(f"{thesis_visual}\n\n---\n")
         except ImportError:
             pass  # Visualizer not available, skip
+
+        # Thesis Alignment Radar Chart (New)
+        radar_path = self._generate_radar_chart(result)
+        if radar_path:
+            report_parts.append("## Thesis Alignment\n\n")
+
+            # Calculate link path
+            if self.report_dir:
+                try:
+                    radar_link = radar_path.resolve().relative_to(
+                        self.report_dir.resolve()
+                    )
+                except ValueError:
+                    radar_link = radar_path.resolve()
+            else:
+                radar_link = f"{radar_path.parent.name}/{radar_path.name}"
+
+            report_parts.append(f"![Thesis Alignment Radar]({radar_link})\n\n---\n")
 
         # Football Field Valuation Chart (skip in quick mode)
         chart_path = self._generate_chart(result)

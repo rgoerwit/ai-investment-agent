@@ -517,6 +517,15 @@ class Settings(BaseSettings):
         Since we removed load_dotenv(), we must export necessary settings here.
         This is intentional and targeted - we only export what SDKs need.
         """
+        # Expand user directories (handling ~)
+        self.results_dir = Path(os.path.expanduser(str(self.results_dir)))
+        self.data_cache_dir = Path(os.path.expanduser(str(self.data_cache_dir)))
+        self.chroma_persist_directory = os.path.expanduser(
+            self.chroma_persist_directory
+        )
+        self.images_dir = Path(os.path.expanduser(str(self.images_dir)))
+        self.prompts_dir = Path(os.path.expanduser(str(self.prompts_dir)))
+
         # Create required directories
         for directory in [
             self.results_dir,

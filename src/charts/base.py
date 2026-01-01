@@ -96,3 +96,27 @@ class FootballFieldData:
             and self.our_target_low > 0
             and self.our_target_high > 0
         )
+
+
+@dataclass
+class RadarChartData:
+    """Data required for thesis alignment radar chart.
+
+    Scores are normalized to 0-100 where 100 is best.
+    """
+
+    ticker: str
+    trade_date: str
+
+    # Core Dimensions (0-100)
+    health_score: float
+    growth_score: float
+    valuation_score: float
+    undiscovered_score: float
+    safety_score: float
+
+    # Raw values for labels
+    pe_ratio: float | None = None
+    peg_ratio: float | None = None
+    analyst_count: int | None = None
+    risk_tally: float | None = None
