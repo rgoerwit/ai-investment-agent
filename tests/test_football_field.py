@@ -171,6 +171,26 @@ class TestGenerateFootballField:
             assert result is not None
             assert result.exists()
 
+    def test_generate_transparent_svg_chart(self):
+        """Test generating an SVG chart with transparent background."""
+        data = FootballFieldData(
+            ticker="TEST",
+            trade_date="2025-01-01",
+            current_price=150.00,
+            fifty_two_week_high=180.00,
+            fifty_two_week_low=120.00,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ChartConfig(
+                output_dir=Path(tmpdir), format=ChartFormat.SVG, transparent=True
+            )
+            result = generate_football_field(data, config)
+
+            assert result is not None
+            assert result.exists()
+            assert result.suffix == ".svg"
+
     def test_generate_chart_with_all_data(self):
         """Test generating a chart with all optional data."""
         data = FootballFieldData(

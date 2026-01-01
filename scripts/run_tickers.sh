@@ -114,6 +114,20 @@ else
     IMAGE_DIR="${OUTPUT_DIR}/images"
 fi
 
+# Cleanup function for temp files on interrupt/exit
+cleanup_temp_files() {
+    local exit_code=$?
+    if [[ -n "${OUTPUT_DIR:-}" ]]; then
+        # Remove any leftover temp files
+        rm -f "${OUTPUT_DIR}"/.temp_analysis_*.md 2>/dev/null || true
+        rm -f "${OUTPUT_DIR}"/.temp_analysis_*.log 2>/dev/null || true
+    fi
+    exit $exit_code
+}
+
+# Set trap to cleanup on EXIT, INT (Ctrl+C), TERM (kill)
+trap cleanup_temp_files EXIT INT TERM
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'

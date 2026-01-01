@@ -94,6 +94,16 @@ def generate_football_field(
 
     fig, ax = plt.subplots(figsize=(config.width_inches, config.height_inches))
 
+    # Set colors based on transparency to ensure visibility on both dark/light themes
+    if config.transparent:
+        text_color = "#4A90D9"  # Mid Blue
+        tick_color = "#7F7F7F"  # Mid Grey
+        title_color = "#4A90D9"  # Mid Blue
+    else:
+        text_color = "black"
+        tick_color = "black"
+        title_color = "black"
+
     # Handle transparency
     if config.transparent:
         fig.patch.set_alpha(0)
@@ -158,6 +168,7 @@ def generate_football_field(
             ha="right",
             va="center",
             fontsize=8,
+            color=text_color,
         )
         ax.text(
             left + width + 0.02 * (data.fifty_two_week_high - data.fifty_two_week_low),
@@ -166,6 +177,7 @@ def generate_football_field(
             ha="left",
             va="center",
             fontsize=8,
+            color=text_color,
         )
 
     # Current price line (prominent) - contained within plot area
@@ -226,17 +238,37 @@ def generate_football_field(
 
     # Formatting
     ax.set_yticks(y_positions)
-    ax.set_yticklabels(labels)
-    ax.set_xlabel("Price")
-    ax.set_title(f"{data.ticker} Valuation Range ({data.trade_date})")
-    # Place legend below chart to avoid any overlap with data
-    ax.legend(
-        loc="upper center",
-        bbox_to_anchor=(0.5, -0.18),
-        ncol=2,  # Two columns for compact horizontal layout
-        fontsize=8,
-        framealpha=0.9,
+    ax.set_yticklabels(labels, color=text_color)
+    ax.set_xlabel("Price", color=text_color)
+    ax.set_title(
+        f"{data.ticker} Valuation Range ({data.trade_date})", color=title_color
     )
+
+    # Set tick label colors
+    ax.tick_params(axis="both", colors=tick_color)
+
+    # Place legend below chart to avoid any overlap with data
+    if config.transparent:
+        # Transparent mode: no background fill, but add border for clarity
+        legend = ax.legend(
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.18),
+            ncol=2,  # Two columns for compact horizontal layout
+            fontsize=8,
+            facecolor="none",  # Transparent background
+            edgecolor=text_color,  # Border for visibility
+        )
+        legend.get_frame().set_linewidth(1.0)
+        legend.get_frame().set_alpha(1.0)  # Keep border fully visible
+        plt.setp(legend.get_texts(), color=text_color)
+    else:
+        legend = ax.legend(
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.18),
+            ncol=2,  # Two columns for compact horizontal layout
+            fontsize=8,
+            framealpha=0.9,
+        )
 
     # Determine x-axis range with padding
     all_values = [data.fifty_two_week_low, data.fifty_two_week_high, data.current_price]
@@ -264,16 +296,17 @@ def generate_football_field(
     # Set y-axis limits with padding below for MA labels (two rows)
     ax.set_ylim(-1.0, len(bars) - 0.5)
 
-    plt.tight_layout()
+    # Use OO API for thread-safety (avoid plt global state)
+    fig.tight_layout()
 
     # Generate filename
     safe_ticker = data.ticker.replace(".", "_").replace("/", "_")
     filename = f"{safe_ticker}_{data.trade_date}_football_field"
 
-    # Save in requested format
+    # Save in requested format (use fig.savefig for OO API)
     if config.format == ChartFormat.SVG:
         output_path = config.output_dir / f"{filename}.svg"
-        plt.savefig(
+        fig.savefig(
             output_path,
             format="svg",
             dpi=config.dpi,
@@ -282,7 +315,7 @@ def generate_football_field(
         )
     else:
         output_path = config.output_dir / f"{filename}.png"
-        plt.savefig(
+        fig.savefig(
             output_path,
             format="png",
             dpi=config.dpi,

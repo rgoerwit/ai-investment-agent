@@ -148,6 +148,224 @@ class TestDataBlockExtractor:
         assert result.external_target_low == 155.00
 
 
+class TestExtendedDataExtraction:
+    """Tests for extended data extraction (D/E, ROA, VIE, CMIC, etc.)."""
+
+    def test_extract_de_ratio_from_data_block(self):
+        """Test D/E ratio extraction from DATA_BLOCK (v7.4+ format)."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        CURRENT_PRICE: 100.00
+        FIFTY_TWO_WEEK_HIGH: 120.00
+        FIFTY_TWO_WEEK_LOW: 80.00
+        DE_RATIO: 0.147
+        ### --- END DATA_BLOCK ---
+        """
+
+        result = extract_chart_data_from_data_block(report)
+        assert result.de_ratio == 0.147
+
+    def test_extract_de_ratio_with_na(self):
+        """Test D/E ratio is None when N/A in DATA_BLOCK."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        CURRENT_PRICE: 100.00
+        FIFTY_TWO_WEEK_HIGH: 120.00
+        FIFTY_TWO_WEEK_LOW: 80.00
+        DE_RATIO: N/A
+        ### --- END DATA_BLOCK ---
+        """
+
+        result = extract_chart_data_from_data_block(report)
+        assert result.de_ratio is None
+
+    def test_extract_roa_from_data_block(self):
+        """Test ROA extraction from DATA_BLOCK (v7.4+ format)."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        CURRENT_PRICE: 100.00
+        FIFTY_TWO_WEEK_HIGH: 120.00
+        FIFTY_TWO_WEEK_LOW: 80.00
+        ROA_PERCENT: 16.22
+        ### --- END DATA_BLOCK ---
+        """
+
+        result = extract_chart_data_from_data_block(report)
+        assert result.roa == 16.22
+
+    def test_extract_roa_not_found(self):
+        """Test ROA is None when not present in DATA_BLOCK."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        CURRENT_PRICE: 100.00
+        FIFTY_TWO_WEEK_HIGH: 120.00
+        FIFTY_TWO_WEEK_LOW: 80.00
+        ### --- END DATA_BLOCK ---
+        """
+
+        result = extract_chart_data_from_data_block(report)
+        assert result.roa is None
+
+    def test_extract_vie_structure_yes(self):
+        """Test VIE structure detection from DATA_BLOCK."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        CURRENT_PRICE: 100.00
+        FIFTY_TWO_WEEK_HIGH: 120.00
+        FIFTY_TWO_WEEK_LOW: 80.00
+        VIE_STRUCTURE: YES
+        ### --- END DATA_BLOCK ---
+        """
+
+        result = extract_chart_data_from_data_block(report)
+        assert result.vie_structure is True
+
+    def test_extract_vie_structure_no(self):
+        """Test VIE structure is False when NO in DATA_BLOCK."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        CURRENT_PRICE: 100.00
+        FIFTY_TWO_WEEK_HIGH: 120.00
+        FIFTY_TWO_WEEK_LOW: 80.00
+        VIE_STRUCTURE: NO
+        ### --- END DATA_BLOCK ---
+        """
+
+        result = extract_chart_data_from_data_block(report)
+        assert result.vie_structure is False
+
+    def test_extract_vie_structure_na(self):
+        """Test VIE is None when N/A in DATA_BLOCK."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        CURRENT_PRICE: 100.00
+        FIFTY_TWO_WEEK_HIGH: 120.00
+        FIFTY_TWO_WEEK_LOW: 80.00
+        VIE_STRUCTURE: N/A
+        ### --- END DATA_BLOCK ---
+        """
+
+        result = extract_chart_data_from_data_block(report)
+        assert result.vie_structure is None
+
+    def test_extract_cmic_flagged(self):
+        """Test CMIC flag detection from DATA_BLOCK."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        CURRENT_PRICE: 100.00
+        FIFTY_TWO_WEEK_HIGH: 120.00
+        FIFTY_TWO_WEEK_LOW: 80.00
+        CMIC_STATUS: FLAGGED
+        ### --- END DATA_BLOCK ---
+        """
+
+        result = extract_chart_data_from_data_block(report)
+        assert result.cmic_flagged is True
+
+    def test_extract_cmic_clear(self):
+        """Test CMIC is False when CLEAR in DATA_BLOCK."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        CURRENT_PRICE: 100.00
+        FIFTY_TWO_WEEK_HIGH: 120.00
+        FIFTY_TWO_WEEK_LOW: 80.00
+        CMIC_STATUS: CLEAR
+        ### --- END DATA_BLOCK ---
+        """
+
+        result = extract_chart_data_from_data_block(report)
+        assert result.cmic_flagged is False
+
+    def test_extract_jurisdiction(self):
+        """Test JURISDICTION extraction from DATA_BLOCK."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        CURRENT_PRICE: 100.00
+        FIFTY_TWO_WEEK_HIGH: 120.00
+        FIFTY_TWO_WEEK_LOW: 80.00
+        JURISDICTION: Japan.TSE
+        ### --- END DATA_BLOCK ---
+        """
+
+        result = extract_chart_data_from_data_block(report)
+        assert result.jurisdiction == "Japan.TSE"
+
+    def test_extract_jurisdiction_hong_kong(self):
+        """Test JURISDICTION extraction for Hong Kong (no space)."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        CURRENT_PRICE: 55.00
+        FIFTY_TWO_WEEK_HIGH: 65.00
+        FIFTY_TWO_WEEK_LOW: 45.00
+        JURISDICTION: HongKong.HKEX
+        ### --- END DATA_BLOCK ---
+        """
+
+        result = extract_chart_data_from_data_block(report)
+        assert result.jurisdiction == "HongKong.HKEX"
+
+    def test_extract_jurisdiction_with_space(self):
+        """Test JURISDICTION extraction handles spaces (e.g., 'Hong Kong')."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        CURRENT_PRICE: 55.00
+        FIFTY_TWO_WEEK_HIGH: 65.00
+        FIFTY_TWO_WEEK_LOW: 45.00
+        JURISDICTION: Hong Kong.HKEX
+        ### --- END DATA_BLOCK ---
+        """
+
+        result = extract_chart_data_from_data_block(report)
+        assert result.jurisdiction == "Hong Kong.HKEX"
+
+    def test_extract_pfic_risk_high(self):
+        """Test PFIC risk extraction."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        CURRENT_PRICE: 100.00
+        FIFTY_TWO_WEEK_HIGH: 120.00
+        FIFTY_TWO_WEEK_LOW: 80.00
+        PFIC_RISK: HIGH
+        ### --- END DATA_BLOCK ---
+        """
+
+        result = extract_chart_data_from_data_block(report)
+        assert result.pfic_risk == "HIGH"
+
+    def test_extract_adjusted_scores(self):
+        """Test extraction of adjusted health and growth scores."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        SECTOR: General/Diversified
+        RAW_HEALTH_SCORE: 10/12
+        ADJUSTED_HEALTH_SCORE: 83%
+        RAW_GROWTH_SCORE: 4/6
+        ADJUSTED_GROWTH_SCORE: 67%
+        CURRENT_PRICE: 100.00
+        FIFTY_TWO_WEEK_HIGH: 120.00
+        FIFTY_TWO_WEEK_LOW: 80.00
+        ### --- END DATA_BLOCK ---
+        """
+
+        result = extract_chart_data_from_data_block(report)
+        assert result.adjusted_health_score == 83.0
+        assert result.adjusted_growth_score == 67.0
+
+    def test_extract_analyst_coverage(self):
+        """Test analyst coverage extraction."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        ANALYST_COVERAGE_ENGLISH: 5
+        CURRENT_PRICE: 100.00
+        FIFTY_TWO_WEEK_HIGH: 120.00
+        FIFTY_TWO_WEEK_LOW: 80.00
+        ### --- END DATA_BLOCK ---
+        """
+
+        result = extract_chart_data_from_data_block(report)
+        assert result.analyst_coverage == 5
+
+
 class TestValuationParamsExtractor:
     """Tests for VALUATION_PARAMS extraction (Valuation Calculator output)."""
 
