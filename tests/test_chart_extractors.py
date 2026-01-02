@@ -365,6 +365,90 @@ class TestExtendedDataExtraction:
         result = extract_chart_data_from_data_block(report)
         assert result.analyst_coverage == 5
 
+    def test_extract_operating_cash_flow_usd(self):
+        """Test OPERATING_CASH_FLOW extraction with USD and B multiplier."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        CURRENT_PRICE: 100.00
+        FIFTY_TWO_WEEK_HIGH: 120.00
+        FIFTY_TWO_WEEK_LOW: 80.00
+        OPERATING_CASH_FLOW: $14.5B
+        ### --- END DATA_BLOCK ---
+        """
+
+        result = extract_chart_data_from_data_block(report)
+        assert result.operating_cash_flow == "$14.5B"
+
+    def test_extract_operating_cash_flow_yen(self):
+        """Test OPERATING_CASH_FLOW extraction with Japanese Yen."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        CURRENT_PRICE: 2500.00
+        FIFTY_TWO_WEEK_HIGH: 3000.00
+        FIFTY_TWO_WEEK_LOW: 2000.00
+        OPERATING_CASH_FLOW: ¥557.5B
+        ### --- END DATA_BLOCK ---
+        """
+
+        result = extract_chart_data_from_data_block(report)
+        assert result.operating_cash_flow == "¥557.5B"
+
+    def test_extract_operating_cash_flow_negative(self):
+        """Test OPERATING_CASH_FLOW extraction with negative value."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        CURRENT_PRICE: 50.00
+        FIFTY_TWO_WEEK_HIGH: 80.00
+        FIFTY_TWO_WEEK_LOW: 30.00
+        OPERATING_CASH_FLOW: -$2.3B
+        ### --- END DATA_BLOCK ---
+        """
+
+        result = extract_chart_data_from_data_block(report)
+        assert result.operating_cash_flow == "-$2.3B"
+
+    def test_extract_operating_cash_flow_na(self):
+        """Test OPERATING_CASH_FLOW returns None when N/A."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        CURRENT_PRICE: 100.00
+        FIFTY_TWO_WEEK_HIGH: 120.00
+        FIFTY_TWO_WEEK_LOW: 80.00
+        OPERATING_CASH_FLOW: N/A
+        ### --- END DATA_BLOCK ---
+        """
+
+        result = extract_chart_data_from_data_block(report)
+        # N/A is extracted as the string "N/A", which is valid pass-through
+        assert result.operating_cash_flow == "N/A"
+
+    def test_extract_operating_cash_flow_not_present(self):
+        """Test OPERATING_CASH_FLOW is None when field is missing."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        CURRENT_PRICE: 100.00
+        FIFTY_TWO_WEEK_HIGH: 120.00
+        FIFTY_TWO_WEEK_LOW: 80.00
+        ### --- END DATA_BLOCK ---
+        """
+
+        result = extract_chart_data_from_data_block(report)
+        assert result.operating_cash_flow is None
+
+    def test_extract_operating_cash_flow_with_full_text(self):
+        """Test OPERATING_CASH_FLOW handles descriptive format."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        CURRENT_PRICE: 100.00
+        FIFTY_TWO_WEEK_HIGH: 120.00
+        FIFTY_TWO_WEEK_LOW: 80.00
+        OPERATING_CASH_FLOW: $4.5 Billion
+        ### --- END DATA_BLOCK ---
+        """
+
+        result = extract_chart_data_from_data_block(report)
+        assert result.operating_cash_flow == "$4.5 Billion"
+
 
 class TestValuationParamsExtractor:
     """Tests for VALUATION_PARAMS extraction (Valuation Calculator output)."""

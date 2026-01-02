@@ -40,6 +40,9 @@ class ChartRawData:
     vie_structure: bool | None = None  # VIE structure present
     cmic_flagged: bool | None = None  # CMIC list concern
 
+    # Pass-through field (not used in calculations, available for downstream agents)
+    operating_cash_flow: str | None = None  # TTM OCF with currency (e.g., "$14.5B")
+
 
 def _extract_float(pattern: str, text: str) -> float | None:
     """Extract a float value using regex pattern.
@@ -175,6 +178,8 @@ def extract_chart_data_from_data_block(fundamentals_report: str) -> ChartRawData
         jurisdiction=_extract_str(r"JURISDICTION:\s*([^\n#]+)", data_block),
         vie_structure=_extract_vie_from_block(data_block),
         cmic_flagged=_extract_cmic_from_block(data_block),
+        # Pass-through: extract as string to preserve currency/multipliers (e.g., "$14.5B")
+        operating_cash_flow=_extract_str(r"OPERATING_CASH_FLOW:\s*(.+)", data_block),
     )
 
     logger.debug(
