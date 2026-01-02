@@ -36,11 +36,13 @@ class QuietModeReporter:
         skip_charts: bool = False,
         image_dir: Path | None = None,
         report_dir: Path | None = None,
+        report_stem: str | None = None,
     ):
         self.ticker = ticker.upper()
         self.company_name = company_name
         self.timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.trade_date = datetime.now().strftime("%Y-%m-%d")
+        self.report_stem = report_stem  # Base name for image files
         self.quick_mode = quick_mode
         self.chart_format = chart_format
         self.transparent_charts = transparent_charts
@@ -126,6 +128,7 @@ class QuietModeReporter:
                 if self.chart_format == "svg"
                 else ChartFormat.PNG,
                 transparent=self.transparent_charts,
+                filename_stem=self.report_stem,
             )
 
             # Generate chart
@@ -330,6 +333,7 @@ class QuietModeReporter:
                 if self.chart_format == "svg"
                 else ChartFormat.PNG,
                 transparent=self.transparent_charts,
+                filename_stem=self.report_stem,
             )
 
             chart_path = generate_radar_chart(radar_data, chart_config)

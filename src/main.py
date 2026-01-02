@@ -258,11 +258,11 @@ def resolve_article_path(args, ticker: str) -> Path | None:
     elif args.article is True:
         # --article with no value
         if args.output:
-            # Derive from --output path: add "-ARTICLE" before extension
+            # Derive from --output path: add "_article" suffix (consistent with image naming)
             output_path = Path(args.output)
             stem = output_path.stem  # e.g., "0005_HK_2026-01-01"
             suffix = output_path.suffix or ".md"  # e.g., ".md"
-            article_name = f"{stem}-ARTICLE{suffix}"
+            article_name = f"{stem}_article{suffix}"
             return output_path.parent / article_name
         else:
             # No --output: use default path in results dir
@@ -299,7 +299,9 @@ async def handle_article_generation(
         if not args.quiet and not args.brief:
             console.print("\n[cyan]Generating article...[/cyan]")
 
-        writer = ArticleWriter(use_github_urls=True)
+        # Default to local paths so markdown renders immediately in editors
+        # Users who want GitHub URLs can set GITHUB_RAW_BASE env var
+        writer = ArticleWriter(use_github_urls=False)
         article = writer.write(
             ticker=ticker,
             company_name=company_name,
@@ -816,14 +818,16 @@ async def main():
 
         config.images_dir = image_dir
 
-        # Handle stdout case: suppress charts and warn
-        if not output_file and not args.quiet and not args.brief:
-            if not args.no_charts:
-                # Only warn if user didn't explicitly ask for no charts
+        # Handle stdout case: suppress charts unless user explicitly requested imagedir
+        if not output_file and not args.no_charts and not args.imagedir:
+            # Disable charts when writing to stdout (no way to link them)
+            # Exception: if user specified --imagedir, they want images saved separately
+            if not args.quiet and not args.brief:
                 logger.warning(
-                    "Writing to stdout: Charts will be disabled. Use --output to enable charts."
+                    "Writing to stdout: Charts disabled (no way to link them). "
+                    "Use --output to enable charts, or --imagedir to save images separately."
                 )
-                args.no_charts = True
+            args.no_charts = True
 
         # Validate image directory relative to output directory (for linking)
         # Only relevant if we are generating charts
@@ -906,6 +910,7 @@ async def main():
                     skip_charts=args.no_charts,
                     image_dir=image_dir,
                     report_dir=output_dir,  # Pass output dir for relative link calculation
+                    report_stem=Path(args.output).stem if args.output else None,
                 )
                 report = reporter.generate_report(result, brief_mode=args.brief)
 
@@ -956,6 +961,13 @@ async def main():
 
             # Generate article if --article flag is set
             if args.article:
+                # Warn if article will lack images (stdout mode disables charts)
+                # Use stderr so warning is visible even in quiet mode
+                if args.no_charts and not output_file and not args.imagedir:
+                    print(
+                        "Warning: Article generated without images (stdout mode).",
+                        file=sys.stderr,
+                    )
                 # Get trade_date from result or current date
                 trade_date = result.get("trade_date") or datetime.now().strftime(
                     "%Y-%m-%d"
@@ -987,6 +999,7 @@ async def main():
                         skip_charts=args.no_charts,
                         image_dir=image_dir,
                         report_dir=output_dir,
+                        report_stem=Path(args.output).stem if args.output else None,
                     )
                     report = reporter.generate_report(result, brief_mode=False)
 

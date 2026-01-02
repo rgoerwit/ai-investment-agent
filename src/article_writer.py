@@ -6,6 +6,7 @@ while matching the author's distinctive voice from writing samples.
 """
 
 import json
+import os
 from pathlib import Path
 
 import structlog
@@ -45,8 +46,12 @@ DEFAULT_PROMPT_CONFIG = {
     "metadata": {"max_sample_chars": 5000},
 }
 
-# GitHub raw URL base for the repository
-GITHUB_RAW_BASE = "https://raw.githubusercontent.com/rgoerwit/ai-investment-agent/main"
+# GitHub raw URL base for the repository (configurable via env var)
+# Users who want GitHub-hosted image links can set this to their repo
+GITHUB_RAW_BASE = os.environ.get(
+    "GITHUB_RAW_BASE",
+    "https://raw.githubusercontent.com/rgoerwit/ai-investment-agent/main",
+)
 
 
 class ArticleWriter:
@@ -55,7 +60,7 @@ class ArticleWriter:
 
     Uses LLM to transform detailed research into engaging articles while:
     - Matching the author's voice from writing samples
-    - Embedding charts with GitHub raw URLs
+    - Embedding charts (local paths by default, or GitHub URLs if configured)
     - Following Medium formatting conventions
     """
 
@@ -64,7 +69,7 @@ class ArticleWriter:
         prompts_dir: Path | None = None,
         samples_dir: Path | None = None,
         images_dir: Path | None = None,
-        use_github_urls: bool = True,
+        use_github_urls: bool = False,
     ):
         """
         Initialize ArticleWriter.
@@ -74,6 +79,8 @@ class ArticleWriter:
             samples_dir: Directory containing writing samples (*.md, *.txt)
             images_dir: Directory containing generated chart images
             use_github_urls: If True, convert image paths to GitHub raw URLs
+                            (requires GITHUB_RAW_BASE env var for custom repos).
+                            Default False uses local relative paths.
         """
         self.prompts_dir = prompts_dir or config.prompts_dir
         self.samples_dir = samples_dir or self._find_samples_dir()

@@ -38,9 +38,9 @@ class TestArticleWriterInit:
         assert config["agent_key"] == "article_writer"
         assert "system_message" in config
         assert "user_template" in config
-        assert config["version"] == "1.1"
-        # Verify quick model with high thinking is configured
-        assert config["model_config"]["use_quick_model"] is True
+        assert config["version"] == "1.3"
+        # Verify deep model with high thinking is configured (changed from quick in v1.3)
+        assert config["model_config"]["use_quick_model"] is False
         assert config["model_config"]["thinking_level"] == "high"
 
     def test_fallback_when_prompt_missing(self):
@@ -226,7 +226,7 @@ class TestArticlePathResolution:
         path = resolve_article_path(args, "0005.HK")
 
         assert path is not None
-        assert path == Path("/path/to/0005_HK_2026-01-01-ARTICLE.md")
+        assert path == Path("/path/to/0005_HK_2026-01-01_article.md")
 
     def test_resolve_article_path_derives_preserves_extension(self):
         """Test that derived path preserves the output file extension."""
@@ -238,7 +238,7 @@ class TestArticlePathResolution:
 
         path = resolve_article_path(args, "AAPL")
 
-        assert path == Path("/results/report-ARTICLE.txt")
+        assert path == Path("/results/report_article.txt")
 
     def test_resolve_article_path_absolute(self):
         """Test absolute article path is used as-is."""

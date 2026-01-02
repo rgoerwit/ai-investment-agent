@@ -169,9 +169,12 @@ def generate_radar_chart(
     # Reserve top space for title (0.92 top limit)
     fig.tight_layout(rect=[0, 0, 1, 0.92])
 
-    # Generate filename
-    safe_ticker = data.ticker.replace(".", "_").replace("/", "_")
-    filename = f"{safe_ticker}_{data.trade_date}_radar"
+    # Generate filename - use config.filename_stem if provided, else ticker_date
+    if config.filename_stem:
+        filename = f"{config.filename_stem}_radar"
+    else:
+        safe_ticker = data.ticker.replace(".", "_").replace("/", "_")
+        filename = f"{safe_ticker}_{data.trade_date}_radar"
 
     # Save (use fig.savefig for OO API)
     if config.format == ChartFormat.SVG:

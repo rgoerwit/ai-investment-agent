@@ -24,6 +24,7 @@ class ChartConfig:
     dpi: int = 300
     width_inches: float = 6.0
     height_inches: float = 4.0
+    filename_stem: str | None = None  # If provided, use as base for image filename
 
     def __post_init__(self):
         """Ensure output_dir is a Path object."""
