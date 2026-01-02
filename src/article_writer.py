@@ -25,11 +25,6 @@ DEFAULT_PROMPT_CONFIG = {
     "agent_key": "article_writer",
     "agent_name": "Article Writer",
     "version": "1.0",
-    "model_config": {
-        "use_quick_model": False,
-        "temperature": 0.7,
-        "thinking_level": "high",
-    },
     "system_message": (
         "You are a senior financial editor who writes engaging, accessible "
         "investment articles. Transform the source report into a Medium-style "
@@ -37,13 +32,20 @@ DEFAULT_PROMPT_CONFIG = {
         "Include images where appropriate using ![desc](url) syntax. "
         "End with a References section."
     ),
-    "user_template": (
-        "WRITING SAMPLES:\n{voice_samples}\n\n"
-        "AVAILABLE CHARTS:\n{image_manifest}\n\n"
-        "Write an article about {ticker} ({company_name}).\n\n"
-        "SOURCE REPORT:\n{report_text}"
-    ),
-    "metadata": {"max_sample_chars": 5000},
+    "metadata": {
+        "max_sample_chars": 5000,
+        "model_config": {
+            "use_quick_model": False,
+            "temperature": 0.7,
+            "thinking_level": "high",
+        },
+        "user_template": (
+            "WRITING SAMPLES:\n{voice_samples}\n\n"
+            "AVAILABLE CHARTS:\n{image_manifest}\n\n"
+            "Write an article about {ticker} ({company_name}).\n\n"
+            "SOURCE REPORT:\n{report_text}"
+        ),
+    },
 }
 
 # GitHub raw URL base for the repository (configurable via env var)
@@ -138,7 +140,9 @@ class ArticleWriter:
 
     def _create_llm(self):
         """Create the LLM for article generation."""
-        model_config = self.prompt_config.get("model_config", {})
+        # model_config is nested in metadata for AgentPrompt compatibility
+        metadata = self.prompt_config.get("metadata", {})
+        model_config = metadata.get("model_config", {})
 
         # Use quick model or deep model based on config
         if model_config.get("use_quick_model", False):
@@ -429,8 +433,10 @@ class ArticleWriter:
         system_message = self.prompt_config.get(
             "system_message", DEFAULT_PROMPT_CONFIG["system_message"]
         )
-        user_template = self.prompt_config.get(
-            "user_template", DEFAULT_PROMPT_CONFIG["user_template"]
+        # user_template is nested in metadata for AgentPrompt compatibility
+        metadata = self.prompt_config.get("metadata", {})
+        user_template = metadata.get(
+            "user_template", DEFAULT_PROMPT_CONFIG["metadata"]["user_template"]
         )
 
         # Format user message

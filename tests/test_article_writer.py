@@ -37,11 +37,12 @@ class TestArticleWriterInit:
 
         assert config["agent_key"] == "article_writer"
         assert "system_message" in config
-        assert "user_template" in config
         assert config["version"] == "1.3"
-        # Verify deep model with high thinking is configured (changed from quick in v1.3)
-        assert config["model_config"]["use_quick_model"] is False
-        assert config["model_config"]["thinking_level"] == "high"
+        # user_template and model_config are nested in metadata for AgentPrompt compatibility
+        metadata = config["metadata"]
+        assert "user_template" in metadata
+        assert metadata["model_config"]["use_quick_model"] is False
+        assert metadata["model_config"]["thinking_level"] == "high"
 
     def test_fallback_when_prompt_missing(self):
         """Test fallback to default config when writer.json is missing."""
@@ -399,7 +400,8 @@ class TestPromptTemplate:
         with open(prompt_file) as f:
             config = json.load(f)
 
-        user_template = config["user_template"]
+        # user_template is nested in metadata for AgentPrompt compatibility
+        user_template = config["metadata"]["user_template"]
 
         # Check required placeholders
         assert "{voice_samples}" in user_template
