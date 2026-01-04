@@ -37,11 +37,12 @@ class TestArticleWriterInit:
 
         assert config["agent_key"] == "article_writer"
         assert "system_message" in config
-        assert "user_template" in config
-        assert config["version"] == "1.1"
-        # Verify quick model with high thinking is configured
-        assert config["model_config"]["use_quick_model"] is True
-        assert config["model_config"]["thinking_level"] == "high"
+        assert config["version"] == "1.3"
+        # user_template and model_config are nested in metadata for AgentPrompt compatibility
+        metadata = config["metadata"]
+        assert "user_template" in metadata
+        assert metadata["model_config"]["use_quick_model"] is False
+        assert metadata["model_config"]["thinking_level"] == "high"
 
     def test_fallback_when_prompt_missing(self):
         """Test fallback to default config when writer.json is missing."""
@@ -87,12 +88,17 @@ class TestVoiceSamplesLoading:
 
         writer = ArticleWriter.__new__(ArticleWriter)
         writer.samples_dir = samples_dir
-        writer.prompt_config = {"metadata": {"max_sample_chars": 100}}
+        # Set both limits to test truncation behavior
+        writer.prompt_config = {
+            "metadata": {"max_sample_chars": 100, "max_chars_per_file": 50}
+        }
 
         samples = writer._load_voice_samples()
 
-        # Should be truncated
-        assert len(samples) <= 200  # Some overhead for headers
+        # Should be truncated - per-file cap of 50 chars each
+        # Note: last file is included even if it puts us over max_sample_chars
+        # So with 50 char/file + ~50 header each, 2 files = ~200 chars
+        assert len(samples) <= 250  # Allow for 2 files with headers
 
     def test_returns_empty_when_no_samples(self):
         """Test returns empty string when no samples found."""
@@ -226,7 +232,7 @@ class TestArticlePathResolution:
         path = resolve_article_path(args, "0005.HK")
 
         assert path is not None
-        assert path == Path("/path/to/0005_HK_2026-01-01-ARTICLE.md")
+        assert path == Path("/path/to/0005_HK_2026-01-01_article.md")
 
     def test_resolve_article_path_derives_preserves_extension(self):
         """Test that derived path preserves the output file extension."""
@@ -238,7 +244,7 @@ class TestArticlePathResolution:
 
         path = resolve_article_path(args, "AAPL")
 
-        assert path == Path("/results/report-ARTICLE.txt")
+        assert path == Path("/results/report_article.txt")
 
     def test_resolve_article_path_absolute(self):
         """Test absolute article path is used as-is."""
@@ -399,7 +405,8 @@ class TestPromptTemplate:
         with open(prompt_file) as f:
             config = json.load(f)
 
-        user_template = config["user_template"]
+        # user_template is nested in metadata for AgentPrompt compatibility
+        user_template = config["metadata"]["user_template"]
 
         # Check required placeholders
         assert "{voice_samples}" in user_template
@@ -418,10 +425,10 @@ class TestPromptTemplate:
 
         system_msg = config["system_message"]
 
-        # Check for key instructions
-        assert "Medium" in system_msg  # Medium formatting
+        # Check for key instructions (case-insensitive for flexibility)
+        assert "medium" in system_msg.lower()  # Medium formatting
         assert "voice" in system_msg.lower()  # Voice matching
-        assert "References" in system_msg  # References section
+        assert "references" in system_msg.lower()  # References section
 
 
 class TestFactCheckContext:

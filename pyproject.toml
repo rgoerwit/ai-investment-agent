@@ -150,6 +150,7 @@ markers = [
     "memory: marks tests that require memory/ChromaDB",
     "llm: marks tests that require LLM connectivity",
     "api: marks tests that require external API access",
+    "asyncio: marks tests as asyncio",
 ]
 
 # Filter out warnings from third-party libraries

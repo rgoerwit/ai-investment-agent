@@ -6,6 +6,8 @@ while matching the author's distinctive voice from writing samples.
 """
 
 import json
+import os
+import random
 from pathlib import Path
 
 import structlog
@@ -24,11 +26,6 @@ DEFAULT_PROMPT_CONFIG = {
     "agent_key": "article_writer",
     "agent_name": "Article Writer",
     "version": "1.0",
-    "model_config": {
-        "use_quick_model": False,
-        "temperature": 0.7,
-        "thinking_level": "high",
-    },
     "system_message": (
         "You are a senior financial editor who writes engaging, accessible "
         "investment articles. Transform the source report into a Medium-style "
@@ -36,17 +33,29 @@ DEFAULT_PROMPT_CONFIG = {
         "Include images where appropriate using ![desc](url) syntax. "
         "End with a References section."
     ),
-    "user_template": (
-        "WRITING SAMPLES:\n{voice_samples}\n\n"
-        "AVAILABLE CHARTS:\n{image_manifest}\n\n"
-        "Write an article about {ticker} ({company_name}).\n\n"
-        "SOURCE REPORT:\n{report_text}"
-    ),
-    "metadata": {"max_sample_chars": 5000},
+    "metadata": {
+        "max_sample_chars": 25000,
+        "max_chars_per_file": 6000,
+        "model_config": {
+            "use_quick_model": False,
+            "temperature": 0.7,
+            "thinking_level": "high",
+        },
+        "user_template": (
+            "WRITING SAMPLES:\n{voice_samples}\n\n"
+            "AVAILABLE CHARTS:\n{image_manifest}\n\n"
+            "Write an article about {ticker} ({company_name}).\n\n"
+            "SOURCE REPORT:\n{report_text}"
+        ),
+    },
 }
 
-# GitHub raw URL base for the repository
-GITHUB_RAW_BASE = "https://raw.githubusercontent.com/rgoerwit/ai-investment-agent/main"
+# GitHub raw URL base for the repository (configurable via env var)
+# Users who want GitHub-hosted image links can set this to their repo
+GITHUB_RAW_BASE = os.environ.get(
+    "GITHUB_RAW_BASE",
+    "https://raw.githubusercontent.com/rgoerwit/ai-investment-agent/main",
+)
 
 
 class ArticleWriter:
@@ -55,7 +64,7 @@ class ArticleWriter:
 
     Uses LLM to transform detailed research into engaging articles while:
     - Matching the author's voice from writing samples
-    - Embedding charts with GitHub raw URLs
+    - Embedding charts (local paths by default, or GitHub URLs if configured)
     - Following Medium formatting conventions
     """
 
@@ -64,7 +73,7 @@ class ArticleWriter:
         prompts_dir: Path | None = None,
         samples_dir: Path | None = None,
         images_dir: Path | None = None,
-        use_github_urls: bool = True,
+        use_github_urls: bool = False,
     ):
         """
         Initialize ArticleWriter.
@@ -74,6 +83,8 @@ class ArticleWriter:
             samples_dir: Directory containing writing samples (*.md, *.txt)
             images_dir: Directory containing generated chart images
             use_github_urls: If True, convert image paths to GitHub raw URLs
+                            (requires GITHUB_RAW_BASE env var for custom repos).
+                            Default False uses local relative paths.
         """
         self.prompts_dir = prompts_dir or config.prompts_dir
         self.samples_dir = samples_dir or self._find_samples_dir()
@@ -131,7 +142,9 @@ class ArticleWriter:
 
     def _create_llm(self):
         """Create the LLM for article generation."""
-        model_config = self.prompt_config.get("model_config", {})
+        # model_config is nested in metadata for AgentPrompt compatibility
+        metadata = self.prompt_config.get("metadata", {})
+        model_config = metadata.get("model_config", {})
 
         # Use quick model or deep model based on config
         if model_config.get("use_quick_model", False):
@@ -171,10 +184,10 @@ class ArticleWriter:
         Returns:
             Concatenated samples as string, or empty string if none found
         """
+        metadata = self.prompt_config.get("metadata", {})
         if max_chars is None:
-            max_chars = self.prompt_config.get("metadata", {}).get(
-                "max_sample_chars", 5000
-            )
+            max_chars = metadata.get("max_sample_chars", 25000)
+        max_per_file = metadata.get("max_chars_per_file", 6000)
 
         if not self.samples_dir.exists():
             logger.warning(
@@ -185,28 +198,31 @@ class ArticleWriter:
         samples = []
         total_chars = 0
 
-        # Load .txt and .md files, sorted by name (newest first if dated)
-        sample_files = sorted(
-            list(self.samples_dir.glob("*.txt")) + list(self.samples_dir.glob("*.md")),
-            reverse=True,
+        # Load .txt and .md files, randomized for variety across runs
+        sample_files = list(self.samples_dir.glob("*.txt")) + list(
+            self.samples_dir.glob("*.md")
         )
+        random.shuffle(sample_files)
 
         if not sample_files:
             logger.warning("No writing samples found", path=str(self.samples_dir))
             return ""
 
         for sample_file in sample_files:
-            if total_chars >= max_chars:
-                break
-
             try:
                 content = sample_file.read_text(encoding="utf-8")
-                remaining = max_chars - total_chars
-                if len(content) > remaining:
-                    content = content[:remaining] + "\n[...truncated]"
+
+                # Cap each file to max_per_file chars
+                if len(content) > max_per_file:
+                    content = content[:max_per_file] + "\n[...truncated]"
 
                 samples.append(f"--- Sample: {sample_file.name} ---\n{content}")
                 total_chars += len(content)
+
+                # Check limit AFTER adding - ensures last file is included
+                if total_chars >= max_chars:
+                    break
+
             except Exception as e:
                 logger.warning(
                     "Failed to read sample", file=str(sample_file), error=str(e)
@@ -422,8 +438,10 @@ class ArticleWriter:
         system_message = self.prompt_config.get(
             "system_message", DEFAULT_PROMPT_CONFIG["system_message"]
         )
-        user_template = self.prompt_config.get(
-            "user_template", DEFAULT_PROMPT_CONFIG["user_template"]
+        # user_template is nested in metadata for AgentPrompt compatibility
+        metadata = self.prompt_config.get("metadata", {})
+        user_template = metadata.get(
+            "user_template", DEFAULT_PROMPT_CONFIG["metadata"]["user_template"]
         )
 
         # Format user message

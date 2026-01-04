@@ -157,6 +157,7 @@ credentials/
 outputs/
 results/
 reports/
+## Track images; some production runs leave artifacts we want on GitHub
 # images/
 
 # Local configuration overrides

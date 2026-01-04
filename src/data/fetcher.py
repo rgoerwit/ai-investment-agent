@@ -554,13 +554,26 @@ class SmartMarketDataFetcher(FinancialFetcher):
                 logger.warning("yfinance_no_price", symbol=symbol)
                 info = info or {}
 
-            # ALWAYS extract from statements
+            # ALWAYS extract from statements (for gap-filling and divergence detection)
             statement_data = self._extract_from_financial_statements(ticker, symbol)
+
+            # Flag significant TTM vs statement divergence for data quality awareness
+            fcf_ttm = info.get("freeCashflow")
+            fcf_stmt = statement_data.get("freeCashflow")
+            if fcf_ttm and fcf_stmt and fcf_ttm != 0 and fcf_stmt != 0:
+                ratio = abs(fcf_ttm / fcf_stmt)
+                if ratio > 1.5 or ratio < 0.67:
+                    info["fcf_data_note"] = (
+                        f"FCF DATA QUALITY UNCERTAIN: TTM ({fcf_ttm/1e9:.2f}B) vs "
+                        f"statement ({fcf_stmt/1e9:.2f}B) = {ratio:.1f}x divergence"
+                    )
 
             for key, value in statement_data.items():
                 if key.startswith("_"):
+                    # Always copy source tags
                     info[key] = value
                 elif key not in info or info.get(key) is None:
+                    # Only use statement data to fill gaps (TTM is more current)
                     if value is not None:
                         info[key] = value
 
@@ -1018,13 +1031,67 @@ class SmartMarketDataFetcher(FinancialFetcher):
         info = self._fix_currency_mismatch(info, symbol)
         info = self._fix_debt_equity_scaling(info, symbol)
 
-        # P/E Normalization
+        # P/E Normalization with sanity checks
+        # Only replace trailing with forward if BOTH values are reasonable
         trailing = info.get("trailingPE")
         forward = info.get("forwardPE")
+
         if trailing and forward and trailing > 0 and forward > 0:
-            if trailing > (forward * 1.4):
+            # Sanity thresholds based on realistic P/E distributions:
+            # - P/E < 5: Almost always suspect (distress, data error, stock split issue)
+            # - P/E > 50: Likely temporary (one-time charges depressing earnings)
+            # - Divergence > 3x: One value is almost certainly wrong
+            MIN_REASONABLE_PE = 5
+            MAX_DIVERGENCE_RATIO = 3.0
+            HIGH_PE_THRESHOLD = 50
+
+            trailing_reasonable = trailing >= MIN_REASONABLE_PE
+            forward_reasonable = forward >= MIN_REASONABLE_PE
+            divergence_ratio = max(trailing / forward, forward / trailing)
+            ratio_reasonable = divergence_ratio <= MAX_DIVERGENCE_RATIO
+
+            # Only replace trailing with forward if:
+            # 1. Trailing is unusually high (suggesting one-time earnings hit)
+            # 2. Forward is in a reasonable range (>= 5, not suspiciously low)
+            # 3. The divergence isn't extreme (which suggests data error, not real)
+            # 4. Trailing is significantly higher than forward (original condition)
+            if (
+                trailing > HIGH_PE_THRESHOLD
+                and forward_reasonable
+                and ratio_reasonable
+                and trailing > (forward * 1.4)
+            ):
+                logger.info(
+                    "pe_normalized",
+                    symbol=symbol,
+                    original_trailing=trailing,
+                    forward_used=forward,
+                    reason="trailing_inflated",
+                )
                 info["trailingPE"] = forward
                 info["_trailingPE_source"] = "normalized_forward_proxy"
+            elif not ratio_reasonable:
+                # Log suspicious divergence - don't replace, keep trailing
+                logger.warning(
+                    "pe_divergence_suspicious",
+                    symbol=symbol,
+                    trailing=trailing,
+                    forward=forward,
+                    ratio=f"{divergence_ratio:.1f}x",
+                    action="keeping_trailing_pe",
+                    hint="extreme divergence suggests stale/incorrect forward estimate",
+                )
+            elif not forward_reasonable and trailing_reasonable:
+                # Forward is too low to be trusted, keep trailing
+                logger.debug(
+                    "pe_forward_suspect",
+                    symbol=symbol,
+                    trailing=trailing,
+                    forward=forward,
+                    action="keeping_trailing_pe",
+                    hint="forward P/E < 5 suggests data error or stale estimate",
+                )
+
         return info
 
     def _validate_basics(self, data: dict, symbol: str) -> DataQuality:

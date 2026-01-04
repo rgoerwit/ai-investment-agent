@@ -301,9 +301,12 @@ def generate_football_field(
     # Use OO API for thread-safety (avoid plt global state)
     fig.tight_layout()
 
-    # Generate filename
-    safe_ticker = data.ticker.replace(".", "_").replace("/", "_")
-    filename = f"{safe_ticker}_{data.trade_date}_football_field"
+    # Generate filename - use config.filename_stem if provided, else ticker_date
+    if config.filename_stem:
+        filename = f"{config.filename_stem}_football_field"
+    else:
+        safe_ticker = data.ticker.replace(".", "_").replace("/", "_")
+        filename = f"{safe_ticker}_{data.trade_date}_football_field"
 
     # Save in requested format (use fig.savefig for OO API)
     if config.format == ChartFormat.SVG:

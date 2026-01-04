@@ -95,7 +95,7 @@ class RedFlagDetector:
             return Sector.GENERAL
 
     @staticmethod
-    def extract_metrics(fundamentals_report: str) -> dict[str, float | None]:
+    def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
         """
         Extract financial metrics from Fundamentals Analyst DATA_BLOCK.
 
@@ -122,13 +122,14 @@ class RedFlagDetector:
             PE_RATIO_TTM: 12.34
             ### --- END DATA_BLOCK ---
         """
-        metrics: dict[str, float | None] = {
+        metrics: dict[str, Any] = {
             "debt_to_equity": None,
             "net_income": None,
             "fcf": None,
             "interest_coverage": None,
             "pe_ratio": None,
             "adjusted_health_score": None,
+            "_raw_report": fundamentals_report,  # For downstream data quality checks
         }
 
         if not fundamentals_report:
@@ -399,6 +400,11 @@ class RedFlagDetector:
         net_income = metrics.get("net_income")
         fcf = metrics.get("fcf")
 
+        # Check if FCF data quality is flagged as uncertain in the report
+        fcf_data_uncertain = "FCF DATA QUALITY UNCERTAIN" in (
+            metrics.get("_raw_report", "") or ""
+        )
+
         if (
             net_income is not None
             and net_income > 0
@@ -406,22 +412,38 @@ class RedFlagDetector:
             and fcf < 0
             and abs(fcf) > (2 * net_income)
         ):
-            red_flags.append(
-                {
-                    "type": "EARNINGS_QUALITY",
-                    "severity": "CRITICAL",
-                    "detail": f"Positive net income (${net_income:,.0f}) but negative FCF (${fcf:,.0f}) >2x income",
-                    "action": "AUTO_REJECT",
-                    "rationale": "Earnings likely fabricated through accounting tricks - FCF disconnect",
-                }
-            )
-            logger.warning(
-                "red_flag_earnings_quality",
-                ticker=ticker,
-                net_income=net_income,
-                fcf=fcf,
-                disconnect_multiple=abs(fcf / net_income) if net_income != 0 else None,
-            )
+            disconnect_ratio = abs(fcf / net_income) if net_income != 0 else 0
+
+            # Downgrade to WARNING if FCF data quality uncertain or ratio extreme (>4x)
+            if fcf_data_uncertain or disconnect_ratio > 4.0:
+                red_flags.append(
+                    {
+                        "type": "EARNINGS_QUALITY_UNCERTAIN",
+                        "severity": "WARNING",
+                        "detail": f"NI ${net_income:,.0f} but FCF ${fcf:,.0f} ({disconnect_ratio:.1f}x) - data quality uncertain",
+                        "action": "RISK_PENALTY",
+                        "risk_penalty": 1.0,
+                        "rationale": "FCF/NI disconnect may reflect TTM data misalignment, not fraud",
+                    }
+                )
+            else:
+                # Standard earnings quality flag (2-4x is suspicious but plausible)
+                red_flags.append(
+                    {
+                        "type": "EARNINGS_QUALITY",
+                        "severity": "CRITICAL",
+                        "detail": f"Positive net income (${net_income:,.0f}) but negative FCF (${fcf:,.0f}) >2x income",
+                        "action": "AUTO_REJECT",
+                        "rationale": "Earnings likely fabricated through accounting tricks - FCF disconnect",
+                    }
+                )
+                logger.warning(
+                    "red_flag_earnings_quality",
+                    ticker=ticker,
+                    net_income=net_income,
+                    fcf=fcf,
+                    disconnect_multiple=disconnect_ratio,
+                )
 
         # --- RED FLAG 3: Interest Coverage Death Spiral (Sector-Aware) ---
         interest_coverage = metrics.get("interest_coverage")

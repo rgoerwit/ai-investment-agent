@@ -67,3 +67,22 @@ def mock_llm_response():
     mock = MagicMock()
     mock.ainvoke = AsyncMock(return_value=MagicMock(content="BUY"))
     return mock
+
+
+@pytest.fixture(autouse=True)
+def skip_chart_generation_in_tests(monkeypatch):
+    """Prevent chart generation from writing to ./images/ during tests.
+
+    QuietModeReporter generates charts by default, writing to ./images/.
+    This fixture patches the chart generation methods to no-op, preventing
+    leftover files from accumulating in the repo.
+
+    Tests that specifically need chart generation should use tmp_path
+    and explicitly set image_dir.
+    """
+    from src.report_generator import QuietModeReporter
+
+    monkeypatch.setattr(QuietModeReporter, "_generate_chart", lambda self, r: None)
+    monkeypatch.setattr(
+        QuietModeReporter, "_generate_radar_chart", lambda self, r: None
+    )
