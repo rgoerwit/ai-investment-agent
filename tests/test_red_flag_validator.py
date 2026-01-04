@@ -98,8 +98,9 @@ PE_RATIO_TTM: 14.50
 
         metrics = RedFlagDetector.extract_metrics(report)
 
-        # All metrics should be None
-        assert all(v is None for v in metrics.values())
+        # All numeric metrics should be None (excluding internal fields like _raw_report)
+        numeric_metrics = {k: v for k, v in metrics.items() if not k.startswith("_")}
+        assert all(v is None for v in numeric_metrics.values())
 
     def test_extract_debt_to_equity_conversion(self):
         """Test D/E ratio conversion from ratio to percentage."""

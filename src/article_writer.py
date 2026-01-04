@@ -7,6 +7,7 @@ while matching the author's distinctive voice from writing samples.
 
 import json
 import os
+import random
 from pathlib import Path
 
 import structlog
@@ -33,7 +34,8 @@ DEFAULT_PROMPT_CONFIG = {
         "End with a References section."
     ),
     "metadata": {
-        "max_sample_chars": 5000,
+        "max_sample_chars": 25000,
+        "max_chars_per_file": 6000,
         "model_config": {
             "use_quick_model": False,
             "temperature": 0.7,
@@ -182,10 +184,10 @@ class ArticleWriter:
         Returns:
             Concatenated samples as string, or empty string if none found
         """
+        metadata = self.prompt_config.get("metadata", {})
         if max_chars is None:
-            max_chars = self.prompt_config.get("metadata", {}).get(
-                "max_sample_chars", 5000
-            )
+            max_chars = metadata.get("max_sample_chars", 25000)
+        max_per_file = metadata.get("max_chars_per_file", 6000)
 
         if not self.samples_dir.exists():
             logger.warning(
@@ -196,28 +198,31 @@ class ArticleWriter:
         samples = []
         total_chars = 0
 
-        # Load .txt and .md files, sorted by name (newest first if dated)
-        sample_files = sorted(
-            list(self.samples_dir.glob("*.txt")) + list(self.samples_dir.glob("*.md")),
-            reverse=True,
+        # Load .txt and .md files, randomized for variety across runs
+        sample_files = list(self.samples_dir.glob("*.txt")) + list(
+            self.samples_dir.glob("*.md")
         )
+        random.shuffle(sample_files)
 
         if not sample_files:
             logger.warning("No writing samples found", path=str(self.samples_dir))
             return ""
 
         for sample_file in sample_files:
-            if total_chars >= max_chars:
-                break
-
             try:
                 content = sample_file.read_text(encoding="utf-8")
-                remaining = max_chars - total_chars
-                if len(content) > remaining:
-                    content = content[:remaining] + "\n[...truncated]"
+
+                # Cap each file to max_per_file chars
+                if len(content) > max_per_file:
+                    content = content[:max_per_file] + "\n[...truncated]"
 
                 samples.append(f"--- Sample: {sample_file.name} ---\n{content}")
                 total_chars += len(content)
+
+                # Check limit AFTER adding - ensures last file is included
+                if total_chars >= max_chars:
+                    break
+
             except Exception as e:
                 logger.warning(
                     "Failed to read sample", file=str(sample_file), error=str(e)
