@@ -72,7 +72,7 @@ class TradingContext:
 
 
 def should_continue_analyst(
-    state: AgentState, run_config: RunnableConfig
+    state: AgentState, config: RunnableConfig
 ) -> Literal["tools", "continue"]:
     """
     Determine if analyst should call tools or continue to next node.
@@ -136,7 +136,7 @@ def create_agent_tool_node(tools: list, agent_key: str):
     tool_node = ToolNode(tools)
     tool_names = {tool.name for tool in tools}
 
-    async def agent_tool_node(state: AgentState, run_config: RunnableConfig) -> dict:
+    async def agent_tool_node(state: AgentState, config: RunnableConfig) -> dict:
         """Execute tools for a specific agent by filtering messages."""
         messages = state.get("messages", [])
 
@@ -180,7 +180,7 @@ def create_agent_tool_node(tools: list, agent_key: str):
         )
 
         # Execute the tools using the filtered messages
-        result = await tool_node.ainvoke({"messages": filtered_messages}, run_config)
+        result = await tool_node.ainvoke({"messages": filtered_messages}, config)
 
         # CRITICAL: Tag ToolMessages with agent_key for parallel execution filtering
         # This allows the analyst to identify its own tool results
@@ -212,7 +212,7 @@ def _is_auditor_enabled() -> bool:
     return bool(config.get_openai_api_key())
 
 
-def fan_out_to_analysts(state: AgentState, run_config: RunnableConfig) -> list[str]:
+def fan_out_to_analysts(state: AgentState, config: RunnableConfig) -> list[str]:
     """
     Fan-out router that triggers all parallel analyst streams.
     Returns a list of destinations for parallel execution.
@@ -236,7 +236,7 @@ def fan_out_to_analysts(state: AgentState, run_config: RunnableConfig) -> list[s
 
 
 def fundamentals_sync_router(
-    state: AgentState, run_config: RunnableConfig
+    state: AgentState, config: RunnableConfig
 ) -> Literal["Fundamentals Analyst", "__end__"]:
     """
     Synchronization barrier for Junior Fundamentals, Foreign Language, and Legal Counsel.
@@ -274,7 +274,7 @@ def fundamentals_sync_router(
 
 
 def sync_check_router(
-    state: AgentState, run_config: RunnableConfig
+    state: AgentState, config: RunnableConfig
 ) -> Literal["Portfolio Manager", "__end__"] | list[str]:
     """
     Synchronization barrier for parallel analyst streams (fan-in pattern).
