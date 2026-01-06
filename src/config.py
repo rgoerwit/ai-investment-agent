@@ -325,6 +325,11 @@ class Settings(BaseSettings):
         validation_alias="CONSULTANT_QUICK_MODEL",
         description="OpenAI model for consultant in quick mode",
     )
+    auditor_model: str | None = Field(
+        default=None,
+        validation_alias="AUDITOR_MODEL",
+        description="Model for the auditor agent (optional)",
+    )
 
     # --- Trading Parameters ---
     max_position_size: float = Field(

@@ -345,6 +345,51 @@ def create_consultant_llm(
     return llm
 
 
+def create_auditor_llm(
+    callbacks: list[BaseCallbackHandler] | None = None,
+) -> BaseChatModel | None:
+    """
+    Create Auditor LLM with fallback logic.
+    Returns None if ENABLE_CONSULTANT is false.
+
+    Logic:
+    1. If ENABLE_CONSULTANT is False -> None
+    2. If AUDITOR_MODEL is set -> Use it
+    3. If CONSULTANT_MODEL is set -> Use it (Fallback)
+    4. Default -> gpt-4o
+    """
+    try:
+        from langchain_openai import ChatOpenAI
+    except ImportError as e:
+        logger.warning(f"langchain-openai not found: {e}")
+        return None
+
+    if not config.enable_consultant:
+        return None
+
+    # Get OpenAI API key via config
+    api_key = config.get_openai_api_key()
+    if not api_key:
+        logger.warning("OPENAI_API_KEY not found - Auditor will be disabled.")
+        return None
+
+    # Determine model: Specific -> Consultant -> Default
+    model_name = config.auditor_model or config.consultant_model or "gpt-4o"
+
+    logger.info(f"Initializing Auditor LLM: {model_name}")
+
+    return ChatOpenAI(
+        model=model_name,
+        temperature=0,  # Forensic work requires precision
+        timeout=120,
+        max_retries=3,
+        openai_api_key=api_key,
+        callbacks=callbacks or [],
+        max_tokens=4096,
+        streaming=False,
+    )
+
+
 # Initialize consultant LLM (lazy initialization to handle missing API key gracefully)
 _consultant_llm_instance = None
 
