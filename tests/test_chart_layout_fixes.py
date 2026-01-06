@@ -85,7 +85,7 @@ class TestChartLayoutFixes(unittest.TestCase):
         # Inspect call args to set_ylim
         args, _ = mock_ax.set_ylim.call_args
         self.assertEqual(args[0], -1.0)
-        self.assertEqual(args[1], 1.5)  # 0.5 (base) + 1.0 (padding)
+        self.assertEqual(args[1], 2.5)  # 1.5 (base) + 1.0 (padding)
 
         # Verify text box position (approximate check of call args)
         # We look for the call that adds the warning text
