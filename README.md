@@ -80,6 +80,7 @@ graph TB
     %% Post-Research Manager: Valuation Calculator and Consultant run in parallel
     ResearchManager --> ValuationCalc["Valuation Calculator<br/>(Chart Parameters)"]
     ResearchManager --> Consultant["External Consultant<br/>(Cross-Validation)<br/>Optional"]
+    Auditor -.->|auditor_report| Consultant
 
     ValuationCalc --> Trader["Trader<br/>(Trade Plan)"]
     Consultant -->|OpenAI Review| Trader
@@ -123,7 +124,7 @@ graph TB
    - Junior Fundamentals (API-based financial data)
    - Foreign Language Analyst (native-language sources, premium English fallback)
    - **Legal Counsel** (tax risks like PFIC, regulatory structures like VIE, withholding rates)
-   - **Forensic Auditor** (optional, OpenAI-powered independent validation of financial data)
+   - **Forensic Auditor** (optional, OpenAI-powered) - retrieves primary financial documents using multilingual search and flags accounting anomalies (earnings quality, DSO trends, zombie ratios, etc.). Output is consumed by External Consultant for cross-validation.
 
    Each branch has its own tool-calling loop. This parallel architecture reduces analysis time by ~60% compared to sequential execution.
 
@@ -139,7 +140,7 @@ graph TB
 
 7. **Post-Research Parallel Processing** - Two agents run in parallel after Research Manager:
    - **Valuation Calculator** - Extracts valuation parameters (P/E, PEG, sector) from DATA_BLOCK and selects the best valuation method. Python code then calculates price targets (avoiding LLM arithmetic errors). Outputs parameters for "Football Field" valuation chart generation.
-   - **External Consultant** (Optional) - Independent cross-validation using OpenAI ChatGPT to detect biases and validate Gemini's analysis.
+   - **External Consultant** (Optional) - Independent cross-validation using OpenAI ChatGPT. Receives all analyst reports plus the Forensic Auditor's anomaly findings to detect biases and validate Gemini's analysis.
 
 8. **Trade Planning** - Trader creates specific execution parameters based on the investment plan.
 
