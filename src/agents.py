@@ -314,6 +314,7 @@ class AgentState(MessagesState):
     ]  # Foreign Language Analyst output
     legal_report: Annotated[str, take_last]  # Legal Counsel output (PFIC/VIE JSON)
     fundamentals_report: Annotated[str, take_last]  # Senior Analyst analysis
+    auditor_report: Annotated[str, take_last]  # Independent forensic auditor report
     investment_debate_state: Annotated[InvestDebateState, merge_invest_debate_state]
     investment_plan: Annotated[str, take_last]
     valuation_params: Annotated[
@@ -1348,6 +1349,9 @@ FUNDAMENTALS ANALYST REPORT:
 
 Red Flags Detected: {state.get("red_flags", [])}
 Pre-Screening Result: {state.get("pre_screening_result", "UNKNOWN")}
+
+=== INDEPENDENT FORENSIC AUDIT ===
+{state.get("auditor_report", "N/A")}
 """
 
         prompt = f"""{agent_prompt.system_message}
@@ -1511,6 +1515,69 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
             }
 
     return legal_counsel_node
+
+
+def create_auditor_node(llm, tools: list) -> Callable:
+    """
+    Factory function creating the Global Forensic Auditor node.
+
+    This agent runs in parallel with other analysts but remains completely independent.
+    Its output is used ONLY by the Consultant agent for cross-validation.
+    """
+
+    async def auditor_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+        from src.prompts import get_prompt
+
+        agent_prompt = get_prompt("global_forensic_auditor")
+        if not agent_prompt:
+            logger.error("Missing prompt for global_forensic_auditor")
+            return {"auditor_report": "Error: Missing prompt"}
+
+        ticker = state.get("company_of_interest", "UNKNOWN")
+        company_name = state.get("company_name", ticker)
+
+        context = get_context_from_config(config)
+        current_date = (
+            context.trade_date if context else datetime.now().strftime("%Y-%m-%d")
+        )
+
+        # Only provide basic identity info to ensure independence
+        human_msg = f"""Analyze financial statements for:
+Ticker: {ticker}
+Company: {company_name}
+Date: {current_date}
+
+Perform a forensic audit using your tools."""
+
+        logger.info("auditor_start", ticker=ticker)
+
+        try:
+            # Create agent with tools
+            agent = create_react_agent(llm, tools)
+            result = await agent.ainvoke(
+                {
+                    "messages": [
+                        SystemMessage(content=agent_prompt.system_message),
+                        HumanMessage(content=human_msg),
+                    ]
+                }
+            )
+
+            response = result["messages"][-1].content
+            response_str = extract_string_content(response)
+
+            logger.info("auditor_complete", ticker=ticker, length=len(response_str))
+
+            return {"auditor_report": response_str, "sender": "global_forensic_auditor"}
+
+        except Exception as e:
+            logger.error("auditor_error", ticker=ticker, error=str(e))
+            return {
+                "auditor_report": f"Auditor Error: {str(e)}",
+                "sender": "global_forensic_auditor",
+            }
+
+    return auditor_node
 
 
 def _extract_sector_country(raw_data: str) -> tuple:

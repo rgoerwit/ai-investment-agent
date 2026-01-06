@@ -23,6 +23,7 @@ from langgraph.types import RunnableConfig
 from src.agents import (
     AgentState,
     create_analyst_node,
+    create_auditor_node,
     create_consultant_node,
     create_financial_health_validator_node,
     create_legal_counsel_node,
@@ -35,6 +36,7 @@ from src.agents import (
 )
 from src.config import config
 from src.llms import (
+    create_auditor_llm,
     create_deep_thinking_llm,
     create_quick_thinking_llm,
     get_consultant_llm,
@@ -70,7 +72,7 @@ class TradingContext:
 
 
 def should_continue_analyst(
-    state: AgentState, config: RunnableConfig
+    state: AgentState, run_config: RunnableConfig
 ) -> Literal["tools", "continue"]:
     """
     Determine if analyst should call tools or continue to next node.
@@ -105,6 +107,7 @@ def route_tools(state: AgentState) -> str:
         "junior_fundamentals_analyst": "Junior Fundamentals Analyst",
         "foreign_language_analyst": "Foreign Language Analyst",
         "legal_counsel": "Legal Counsel",
+        "global_forensic_auditor": "Auditor",
     }
 
     node_name = agent_map.get(sender, "Market Analyst")
@@ -133,7 +136,7 @@ def create_agent_tool_node(tools: list, agent_key: str):
     tool_node = ToolNode(tools)
     tool_names = {tool.name for tool in tools}
 
-    async def agent_tool_node(state: AgentState, config: RunnableConfig) -> dict:
+    async def agent_tool_node(state: AgentState, run_config: RunnableConfig) -> dict:
         """Execute tools for a specific agent by filtering messages."""
         messages = state.get("messages", [])
 
@@ -177,7 +180,7 @@ def create_agent_tool_node(tools: list, agent_key: str):
         )
 
         # Execute the tools using the filtered messages
-        result = await tool_node.ainvoke({"messages": filtered_messages}, config)
+        result = await tool_node.ainvoke({"messages": filtered_messages}, run_config)
 
         # CRITICAL: Tag ToolMessages with agent_key for parallel execution filtering
         # This allows the analyst to identify its own tool results
@@ -194,16 +197,32 @@ def create_agent_tool_node(tools: list, agent_key: str):
     return agent_tool_node
 
 
-def fan_out_to_analysts(state: AgentState, config: RunnableConfig) -> list[str]:
+def _is_auditor_enabled() -> bool:
     """
-    Fan-out router that triggers all 6 analyst streams in parallel.
+    Check if auditor node should be enabled.
+
+    Must match the logic in create_auditor_llm() to avoid graph/router mismatch.
+    Returns True only if:
+    - ENABLE_CONSULTANT is True
+    - OPENAI_API_KEY is available
+    """
+    if not config.enable_consultant:
+        return False
+    # Check if OpenAI API key exists (same check as create_auditor_llm)
+    return bool(config.get_openai_api_key())
+
+
+def fan_out_to_analysts(state: AgentState, run_config: RunnableConfig) -> list[str]:
+    """
+    Fan-out router that triggers all parallel analyst streams.
     Returns a list of destinations for parallel execution.
 
     Architecture:
     - Market, Sentiment, News → Sync Check (direct)
     - Junior Fundamentals, Foreign Language, Legal Counsel → Fundamentals Sync → Senior → Validator → Sync Check
+    - Auditor (if enabled) → Sync Check (independent forensic track)
     """
-    return [
+    destinations = [
         "Market Analyst",
         "Sentiment Analyst",
         "News Analyst",
@@ -211,10 +230,13 @@ def fan_out_to_analysts(state: AgentState, config: RunnableConfig) -> list[str]:
         "Foreign Language Analyst",
         "Legal Counsel",
     ]
+    if _is_auditor_enabled():
+        destinations.append("Auditor")
+    return destinations
 
 
 def fundamentals_sync_router(
-    state: AgentState, config: RunnableConfig
+    state: AgentState, run_config: RunnableConfig
 ) -> Literal["Fundamentals Analyst", "__end__"]:
     """
     Synchronization barrier for Junior Fundamentals, Foreign Language, and Legal Counsel.
@@ -252,7 +274,7 @@ def fundamentals_sync_router(
 
 
 def sync_check_router(
-    state: AgentState, config: RunnableConfig
+    state: AgentState, run_config: RunnableConfig
 ) -> Literal["Portfolio Manager", "__end__"] | list[str]:
     """
     Synchronization barrier for parallel analyst streams (fan-in pattern).
@@ -280,7 +302,15 @@ def sync_check_router(
     pre_screening = state.get("pre_screening_result")
     validator_done = pre_screening in ["PASS", "REJECT"]
 
-    all_done = all([market_done, sentiment_done, news_done, validator_done])
+    # Auditor check (if enabled)
+    # Uses same helper as fan_out_to_analysts for consistency
+    auditor_done = True
+    if _is_auditor_enabled():
+        auditor_done = bool(state.get("auditor_report"))
+
+    all_done = all(
+        [market_done, sentiment_done, news_done, validator_done, auditor_done]
+    )
 
     logger.info(
         "sync_check_status",
@@ -288,6 +318,7 @@ def sync_check_router(
         sentiment_done=sentiment_done,
         news_done=news_done,
         validator_done=validator_done,
+        auditor_done=auditor_done,
         pre_screening=pre_screening,
         all_done=all_done,
     )
@@ -510,6 +541,10 @@ def create_trading_graph(
         callbacks=[TokenTrackingCallback("Consultant", tracker)], quick_mode=quick_mode
     )
 
+    auditor_llm = create_auditor_llm(
+        callbacks=[TokenTrackingCallback("Global Forensic Auditor", tracker)]
+    )
+
     # --- Node Creation ---
 
     # Data gathering analysts (parallel)
@@ -556,6 +591,23 @@ def create_trading_graph(
         callbacks=[TokenTrackingCallback("Legal Counsel", tracker)]
     )
     legal_counsel = create_legal_counsel_node(legal_llm, toolkit.get_legal_tools())
+
+    # Auditor (Independent Forensic Track)
+    # Runs parallel to other analysts, provides independent forensic validation
+    # Output is consumed by Consultant for cross-validation
+    auditor = None
+    auditor_tools = None
+    if auditor_llm:
+        # Auditor uses: foreign sources (native filings), financial metrics, and news
+        # These are the same tools other analysts use, but auditor works independently
+        _aud_tools = (
+            toolkit.get_foreign_language_tools()
+            + toolkit.get_junior_fundamental_tools()
+            + toolkit.get_news_tools()
+        )
+        auditor = create_auditor_node(auditor_llm, _aud_tools)
+        auditor_tools = create_agent_tool_node(_aud_tools, "global_forensic_auditor")
+        logger.info("auditor_node_enabled", ticker=ticker)
 
     # Fundamentals chain (Junior + Foreign → Senior → Validator)
     # Junior uses retry logic (data gathering agent with quick thinking)
@@ -770,6 +822,10 @@ BEAR RESEARCHER:
     workflow.add_node("foreign_tools", foreign_tools)
     workflow.add_node("legal_tools", legal_tools)
 
+    if auditor is not None:
+        workflow.add_node("Auditor", auditor)
+        workflow.add_node("auditor_tools", auditor_tools)
+
     # Add research nodes (separate nodes for each round enables parallel execution)
     workflow.add_node("Bull Researcher R1", bull_r1)
     workflow.add_node("Bear Researcher R1", bear_r1)
@@ -792,18 +848,24 @@ BEAR RESEARCHER:
     # Entry point
     workflow.set_entry_point("Dispatcher")
 
-    # Fan-out from Dispatcher to all 6 parallel analyst streams
+    # Fan-out from Dispatcher to all parallel analyst streams
+    # Note: fan_out_to_analysts dynamically includes "Auditor" if enabled
+    # Path map must match what fan_out_to_analysts can return
+    fan_out_destinations = [
+        "Market Analyst",
+        "Sentiment Analyst",
+        "News Analyst",
+        "Junior Fundamentals Analyst",
+        "Foreign Language Analyst",
+        "Legal Counsel",
+    ]
+    if auditor is not None:
+        fan_out_destinations.append("Auditor")
+
     workflow.add_conditional_edges(
         "Dispatcher",
         fan_out_to_analysts,
-        [
-            "Market Analyst",
-            "Sentiment Analyst",
-            "News Analyst",
-            "Junior Fundamentals Analyst",
-            "Foreign Language Analyst",
-            "Legal Counsel",
-        ],
+        fan_out_destinations,
     )
 
     # Market, Sentiment, News: tools loop → Sync Check
@@ -853,6 +915,15 @@ BEAR RESEARCHER:
         {"tools": "legal_tools", "continue": "Fundamentals Sync Check"},
     )
     workflow.add_edge("legal_tools", "Legal Counsel")
+
+    # Auditor flow: tools loop → Sync Check
+    if auditor is not None:
+        workflow.add_conditional_edges(
+            "Auditor",
+            should_continue_analyst,
+            {"tools": "auditor_tools", "continue": "Sync Check"},
+        )
+        workflow.add_edge("auditor_tools", "Auditor")
 
     # Fundamentals Sync Check: wait for Junior + Foreign + Legal, then route to Senior
     workflow.add_conditional_edges(

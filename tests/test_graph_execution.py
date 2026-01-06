@@ -61,6 +61,7 @@ class TestGraphRouting:
 class TestDebateRouter:
     """Test debate routing logic."""
 
+    @patch("src.graph.create_agent_tool_node")
     @patch("src.graph.create_analyst_node")
     @patch("src.graph.create_researcher_node")
     @patch("src.graph.create_research_manager_node")
@@ -77,6 +78,7 @@ class TestDebateRouter:
         mock_res_mgr,
         mock_researcher,
         mock_analyst,
+        mock_tool_node,
     ):
         """Test debate router alternates correctly."""
         from src.graph import create_trading_graph
@@ -88,6 +90,7 @@ class TestDebateRouter:
         mock_trader.return_value = lambda s, c: {}
         mock_risk.return_value = lambda s, c: {}
         mock_pm.return_value = lambda s, c: {}
+        mock_tool_node.return_value = lambda s, c: {}
         mock_toolkit.get_all_tools.return_value = []
 
         graph = create_trading_graph(max_debate_rounds=2)
@@ -99,9 +102,12 @@ class TestDebateRouter:
 class TestSyncCheckRouter:
     """Test sync_check_router for parallel debate fan-out."""
 
-    def test_sync_check_returns_end_when_incomplete(self):
+    @patch("src.graph.config")
+    def test_sync_check_returns_end_when_incomplete(self, mock_config):
         """Test router returns __end__ when not all analysts complete."""
         from src.graph import sync_check_router
+
+        mock_config.enable_consultant = False
 
         state = {
             "market_report": "done",
@@ -114,9 +120,12 @@ class TestSyncCheckRouter:
         result = sync_check_router(state, config)
         assert result == "__end__"
 
-    def test_sync_check_returns_pm_on_reject(self):
+    @patch("src.graph.config")
+    def test_sync_check_returns_pm_on_reject(self, mock_config):
         """Test router returns Portfolio Manager on REJECT."""
         from src.graph import sync_check_router
+
+        mock_config.enable_consultant = False
 
         state = {
             "market_report": "done",
@@ -129,9 +138,12 @@ class TestSyncCheckRouter:
         result = sync_check_router(state, config)
         assert result == "Portfolio Manager"
 
-    def test_sync_check_returns_list_for_parallel_r1(self):
+    @patch("src.graph.config")
+    def test_sync_check_returns_list_for_parallel_r1(self, mock_config):
         """Test router returns list for parallel Bull/Bear R1 on PASS."""
         from src.graph import sync_check_router
+
+        mock_config.enable_consultant = False
 
         state = {
             "market_report": "done",
@@ -146,6 +158,108 @@ class TestSyncCheckRouter:
         assert "Bull Researcher R1" in result
         assert "Bear Researcher R1" in result
         assert len(result) == 2
+
+
+class TestAuditorIntegration:
+    """Test auditor node integration with graph routing."""
+
+    @patch("src.graph.config")
+    def test_is_auditor_enabled_when_consultant_disabled(self, mock_config):
+        """Test _is_auditor_enabled returns False when consultant disabled."""
+        from src.graph import _is_auditor_enabled
+
+        mock_config.enable_consultant = False
+        mock_config.get_openai_api_key.return_value = "test-key"
+
+        assert _is_auditor_enabled() is False
+
+    @patch("src.graph.config")
+    def test_is_auditor_enabled_when_no_api_key(self, mock_config):
+        """Test _is_auditor_enabled returns False when API key missing."""
+        from src.graph import _is_auditor_enabled
+
+        mock_config.enable_consultant = True
+        mock_config.get_openai_api_key.return_value = None
+
+        assert _is_auditor_enabled() is False
+
+    @patch("src.graph.config")
+    def test_is_auditor_enabled_when_all_conditions_met(self, mock_config):
+        """Test _is_auditor_enabled returns True when all conditions met."""
+        from src.graph import _is_auditor_enabled
+
+        mock_config.enable_consultant = True
+        mock_config.get_openai_api_key.return_value = "test-key"
+
+        assert _is_auditor_enabled() is True
+
+    @patch("src.graph._is_auditor_enabled")
+    def test_fan_out_includes_auditor_when_enabled(self, mock_auditor_enabled):
+        """Test fan_out_to_analysts includes Auditor when enabled."""
+        from src.graph import fan_out_to_analysts
+
+        mock_auditor_enabled.return_value = True
+
+        result = fan_out_to_analysts({}, {})
+        assert "Auditor" in result
+        assert len(result) == 7  # 6 analysts + Auditor
+
+    @patch("src.graph._is_auditor_enabled")
+    def test_fan_out_excludes_auditor_when_disabled(self, mock_auditor_enabled):
+        """Test fan_out_to_analysts excludes Auditor when disabled."""
+        from src.graph import fan_out_to_analysts
+
+        mock_auditor_enabled.return_value = False
+
+        result = fan_out_to_analysts({}, {})
+        assert "Auditor" not in result
+        assert len(result) == 6
+
+    @patch("src.graph._is_auditor_enabled")
+    def test_sync_check_waits_for_auditor_when_enabled(self, mock_auditor_enabled):
+        """Test sync_check_router waits for auditor_report when enabled."""
+        from src.graph import sync_check_router
+
+        mock_auditor_enabled.return_value = True
+
+        # All reports present except auditor_report
+        state = {
+            "market_report": "done",
+            "sentiment_report": "done",
+            "news_report": "done",
+            "pre_screening_result": "PASS",
+            "auditor_report": "",  # Empty = not done
+        }
+
+        result = sync_check_router(state, {})
+        assert result == "__end__"  # Should wait
+
+    @patch("src.graph._is_auditor_enabled")
+    def test_sync_check_proceeds_when_auditor_complete(self, mock_auditor_enabled):
+        """Test sync_check_router proceeds when auditor_report complete."""
+        from src.graph import sync_check_router
+
+        mock_auditor_enabled.return_value = True
+
+        state = {
+            "market_report": "done",
+            "sentiment_report": "done",
+            "news_report": "done",
+            "pre_screening_result": "PASS",
+            "auditor_report": "Forensic audit complete",
+        }
+
+        result = sync_check_router(state, {})
+        assert isinstance(result, list)
+        assert "Bull Researcher R1" in result
+
+    def test_route_tools_for_auditor(self):
+        """Test route_tools returns correct node for auditor."""
+        from src.graph import route_tools
+
+        state = {"sender": "global_forensic_auditor"}
+        result = route_tools(state)
+        assert result == "Auditor"
 
 
 class TestTradingContext:
@@ -182,11 +296,12 @@ class TestTradingContext:
 class TestGraphCompilation:
     """Test graph compilation."""
 
+    @patch("src.graph.create_agent_tool_node")
     @patch("src.graph.create_quick_thinking_llm")
     @patch("src.graph.create_deep_thinking_llm")
     @patch("src.graph.toolkit")
     def test_create_trading_graph(
-        self, mock_toolkit, mock_deep_llm_func, mock_quick_llm_func
+        self, mock_toolkit, mock_deep_llm_func, mock_quick_llm_func, mock_tool_node
     ):
         """Test trading graph creation."""
         from src.graph import create_trading_graph
@@ -202,6 +317,9 @@ class TestGraphCompilation:
         mock_toolkit.get_news_tools.return_value = []
         mock_toolkit.get_fundamental_tools.return_value = []
         mock_toolkit.get_all_tools.return_value = []
+
+        # Mock create_agent_tool_node to return a dummy function
+        mock_tool_node.return_value = lambda s, c: {}
 
         graph = create_trading_graph(
             max_debate_rounds=2, max_risk_discuss_rounds=1, enable_memory=True
