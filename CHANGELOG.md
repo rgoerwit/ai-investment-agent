@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.0] - 2026-01-05
+
+### Added
+- **Global Forensic Auditor** - Optional independent agent that runs in parallel with other analysts to validate financial data
+  - Uses OpenAI (same as Consultant) for cross-model verification
+  - Searches foreign sources, financial metrics, and news independently
+  - Output feeds into Consultant for comprehensive cross-validation
+  - Enabled automatically when `ENABLE_CONSULTANT=true` and `OPENAI_API_KEY` is set
+  - Configurable model via `AUDITOR_MODEL` (defaults to `CONSULTANT_MODEL`)
+
+### Fixed
+- Fixed graph compilation failure when Auditor conditionally disabled
+- Fixed toolkit attribute access error in auditor node creation
+- Fixed router/graph mismatch for auditor enable state
+
+### Changed
+- Updated mermaid architecture diagram to show Forensic Auditor
+- Added `_is_auditor_enabled()` helper for consistent enable-state checking across routers
+
 ## [3.2.0] - 2026-01-01
 
 ### Added

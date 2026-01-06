@@ -50,11 +50,13 @@ graph TB
     Dispatcher --> JuniorFund["Junior Fundamentals<br/>(API Data)"]
     Dispatcher --> ForeignLang["Foreign Language<br/>(Native Sources)"]
     Dispatcher --> LegalCounsel["Legal Counsel<br/>(Tax & Regulatory)"]
+    Dispatcher -.-> Auditor["Forensic Auditor<br/>(Independent Check)<br/>Optional"]
 
     %% Market/Sentiment/News go directly to main Sync Check
     MarketAnalyst --> SyncCheck["Sync Check<br/>(Fan-In Barrier)"]
     SentimentAnalyst --> SyncCheck
     NewsAnalyst --> SyncCheck
+    Auditor -.-> SyncCheck
 
     %% Fundamentals sub-graph: Junior + Foreign + Legal sync first
     JuniorFund --> FundSync["Fundamentals<br/>Sync"]
@@ -104,6 +106,7 @@ graph TB
     style BearResearcher fill:#f8d7da,color:#333
     style ValuationCalc fill:#e6f3ff,color:#333
     style Consultant fill:#e8daff,color:#333
+    style Auditor fill:#e8daff,color:#333
     style Trader fill:#ffe4e1,color:#333
     style RiskTeam fill:#fff3cd,color:#333
     style PortfolioManager fill:#d1ecf1,color:#333
@@ -113,13 +116,14 @@ graph TB
 
 ### How Agents Collaborate
 
-1. **Parallel Data Gathering (Fan-Out)** - Six analyst branches run **simultaneously** to maximize speed:
+1. **Parallel Data Gathering (Fan-Out)** - Six analyst branches (plus optional Auditor) run **simultaneously** to maximize speed:
    - Market Analyst (technical indicators, liquidity)
    - Sentiment Analyst (social media signals)
    - News Analyst (recent events, catalysts)
    - Junior Fundamentals (API-based financial data)
    - Foreign Language Analyst (native-language sources, premium English fallback)
    - **Legal Counsel** (tax risks like PFIC, regulatory structures like VIE, withholding rates)
+   - **Forensic Auditor** (optional, OpenAI-powered independent validation of financial data)
 
    Each branch has its own tool-calling loop. This parallel architecture reduces analysis time by ~60% compared to sequential execution.
 
