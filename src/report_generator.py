@@ -102,6 +102,22 @@ class QuietModeReporter:
                 return None
 
             # Combine into FootballFieldData
+            quality_warnings = []
+            red_flags = result.get("red_flags", [])
+
+            for flag in red_flags:
+                # Only show CRITICAL or WARNING severity on the chart to reduce noise
+                severity = str(flag.get("severity", "")).upper()
+                if severity in ["CRITICAL", "WARNING"]:
+                    detail = str(flag.get("detail", ""))
+                    # Truncate to keep chart clean
+                    quality_warnings.append(
+                        detail[:50] + "..." if len(detail) > 50 else detail
+                    )
+
+            # Limit to 2 warnings to prevent visual occlusion
+            quality_warnings = quality_warnings[:2]
+
             football_data = FootballFieldData(
                 ticker=self.ticker,
                 trade_date=self.trade_date,
@@ -117,6 +133,10 @@ class QuietModeReporter:
                 our_target_high=targets.high,
                 target_methodology=targets.methodology,
                 target_confidence=targets.confidence,
+                quality_warnings=quality_warnings if quality_warnings else None,
+                footnote="Targets based on P/E normalization"
+                if targets.methodology
+                else None,
             )
 
             # Configure chart generation
@@ -224,16 +244,27 @@ class QuietModeReporter:
             growth = max(0.0, min(100.0, growth))
 
             # 3. Valuation (Derived from P/E and PEG)
-            # Preference: P/E -> PEG -> Neutral(50)
+            # Weighted blend: Favor PEG (60%) for GARP thesis
+            pe_score = None
+            peg_score = None
+
             if raw.pe_ratio_ttm and raw.pe_ratio_ttm > 0:
-                # Target: P/E <15 is 100%, P/E >25 is 0%
-                # Linear scale: score = (25 - PE) * 10, clamped to 0-100
-                val_score = (25.0 - raw.pe_ratio_ttm) * 10.0
-            elif raw.peg_ratio and raw.peg_ratio > 0:
-                # Target: PEG <1.0 is 100%, PEG >2.0 is 0%
-                val_score = (2.0 - raw.peg_ratio) * 100.0
+                # P/E Score: 25->0, 15->100
+                pe_score = max(0.0, min(100.0, (25.0 - raw.pe_ratio_ttm) * 10.0))
+
+            if raw.peg_ratio and raw.peg_ratio > 0:
+                # PEG Score: 2.0->0, 1.0->100
+                peg_score = max(0.0, min(100.0, (2.0 - raw.peg_ratio) * 100.0))
+
+            if pe_score is not None and peg_score is not None:
+                val_score = (pe_score * 0.4) + (peg_score * 0.6)
+            elif pe_score is not None:
+                val_score = pe_score
+            elif peg_score is not None:
+                val_score = peg_score
             else:
                 val_score = 50.0  # Neutral if no data
+
             val_score = max(0.0, min(100.0, val_score))
 
             # 4. Undiscovered (Derived from Analyst Count)
@@ -308,6 +339,30 @@ class QuietModeReporter:
 
             jurisdiction = max(0.0, min(100.0, jurisdiction))
 
+            # --- Data Quality Warnings ---
+            axis_warnings = {}
+            footnote_parts = []
+            red_flags = result.get("red_flags", [])
+
+            # Check flags for specific warnings
+            for flag in red_flags:
+                flag_type = str(flag.get("type", "")).upper()
+                if "EARNINGS" in flag_type or "CASH" in flag_type or "FCF" in flag_type:
+                    axis_warnings["health"] = True
+                if "PFIC" in flag_type or "VIE" in flag_type or "ADR" in flag_type:
+                    axis_warnings["regulatory"] = True
+
+            # Check Fundamentals Report for specific data quality strings
+            raw_report = str(result.get("fundamentals_report", "")).upper()
+            if "DATA QUALITY UNCERTAIN" in raw_report:
+                axis_warnings["health"] = True
+
+            # Add footnote if we have warnings
+            if axis_warnings:
+                footnote_parts.append("* Data quality/risk flag detected")
+
+            footnote = " | ".join(footnote_parts) if footnote_parts else None
+
             # Create Data Object with 6 axes
             radar_data = RadarChartData(
                 ticker=self.ticker,
@@ -323,6 +378,8 @@ class QuietModeReporter:
                 de_ratio=raw.de_ratio,
                 roa=raw.roa,
                 analyst_count=raw.analyst_coverage,
+                axis_warnings=axis_warnings,
+                footnote=footnote,
             )
 
             # Generate chart

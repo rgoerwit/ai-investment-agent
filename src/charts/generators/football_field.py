@@ -153,6 +153,12 @@ def generate_football_field(
             if data.target_confidence:
                 label += f" ({data.target_confidence})"
             labels.append(label)
+    elif data.quality_warnings:
+        # If targets are missing due to quality warnings (skipped valuation), show placeholder
+        # Use a dummy range centered on current price to place the label
+        bars.append((data.current_price * 0.95, data.current_price * 0.10))
+        colors.append("#95A5A6")  # Grey
+        labels.append("Valuation Suspended (See Discussion)")
 
     # Draw horizontal bars
     y_positions = list(range(len(bars)))
@@ -161,21 +167,22 @@ def generate_football_field(
     ):
         ax.barh(i, width, left=left, height=0.6, color=color, alpha=0.7, label=label)
         # Add range labels at ends of bars
+        label_y = i + 0.05
         ax.text(
             left - 0.02 * (data.fifty_two_week_high - data.fifty_two_week_low),
-            i,
+            label_y,
             f"${left:.2f}",
             ha="right",
-            va="center",
+            va="bottom",
             fontsize=8,
             color=text_color,
         )
         ax.text(
             left + width + 0.02 * (data.fifty_two_week_high - data.fifty_two_week_low),
-            i,
+            label_y,
             f"${left + width:.2f}",
             ha="left",
-            va="center",
+            va="bottom",
             fontsize=8,
             color=text_color,
         )
@@ -234,6 +241,39 @@ def generate_football_field(
             va="top",
             color="#9B59B6",
             fontweight="bold",
+        )
+
+    # Warning Box (if warnings exist)
+    if data.quality_warnings:
+        warning_text = "[!] DATA QUALITY WARNING\n" + "\n".join(data.quality_warnings)
+        ax.text(
+            0.98,
+            0.97,  # Top right
+            warning_text,
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            bbox={
+                "boxstyle": "round,pad=0.4",
+                "facecolor": "#fff3cd",
+                "edgecolor": "#856404",
+                "alpha": 0.9,
+            },
+            fontsize=6,
+            color="#856404",
+            zorder=20,  # Ensure on top
+        )
+
+    # Methodology Footnote
+    if data.footnote:
+        fig.text(
+            0.5,
+            0.01,
+            data.footnote,
+            ha="center",
+            fontsize=7,
+            color=text_color,
+            style="italic",
         )
 
     # Formatting
@@ -296,7 +336,12 @@ def generate_football_field(
     ax.set_xlim(max(0, min_val - padding), max_val + padding)
 
     # Set y-axis limits with padding below for MA labels (two rows)
-    ax.set_ylim(-1.0, len(bars) - 0.5)
+    # If warnings exist, add extra space at top for the warning box
+    top_limit = len(bars) - 0.5
+    if data.quality_warnings:
+        top_limit += 1.0
+
+    ax.set_ylim(-1.0, top_limit)
 
     # Use OO API for thread-safety (avoid plt global state)
     fig.tight_layout()
