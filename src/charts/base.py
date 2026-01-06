@@ -64,6 +64,12 @@ class FootballFieldData:
     target_methodology: str | None = None
     target_confidence: str | None = None
 
+    # Data quality warnings to display on chart
+    quality_warnings: list[str] | None = None
+
+    # Methodology footnote
+    footnote: str | None = None
+
     def has_minimum_data(self) -> bool:
         """Check if we have enough data to generate chart.
 
@@ -123,6 +129,13 @@ class RadarChartData:
     undiscovered_score: float
     regulatory_score: float  # Split from old "safety" - PFIC/VIE/CMIC/ADR risks
     jurisdiction_score: float  # Split from old "safety" - country/exchange risk
+
+    # Uncertainty markers (asterisk displayed on affected axes)
+    axis_warnings: dict[str, bool] = field(default_factory=dict)
+    # Keys: "health", "growth", "valuation", "regulatory", "undiscovered", "jurisdiction"
+
+    # Methodology/caveat footnote (always shown if set)
+    footnote: str | None = None
 
     # Raw values for labels and tooltips
     pe_ratio: float | None = None

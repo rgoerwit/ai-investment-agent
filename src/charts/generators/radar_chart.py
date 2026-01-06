@@ -102,21 +102,36 @@ def generate_radar_chart(
     # Draw axis labels (categories) with abbreviations for long names
     # Use shorter labels to prevent overlap with 6 axes
     display_labels = [
-        "Health",
+        "Financial Health",
         "Growth",
-        "Value",  # Shortened from "Valuation"
-        "Reg",  # Shortened from "Regulatory"
-        "Undiscov",  # Shortened from "Undiscovered"
-        "Jurisd",  # Shortened from "Jurisdiction"
+        "Valuation",
+        "Regulatory",
+        "Undiscovered",
+        "Jurisdiction",
     ]
+
+    # Apply warning markers
+    AXIS_KEYS = [
+        "health",
+        "growth",
+        "valuation",
+        "regulatory",
+        "undiscovered",
+        "jurisdiction",
+    ]
+    if data.axis_warnings:
+        display_labels = [
+            label + ("*" if data.axis_warnings.get(key) else "")
+            for label, key in zip(display_labels, AXIS_KEYS, strict=True)
+        ]
 
     # Use OO API for thread-safety (avoid plt global state)
     ax.set_xticks(angles)
-    ax.set_xticklabels(display_labels, color=axis_label_color, size=9)
+    ax.set_xticklabels(display_labels, color=axis_label_color, size=8)
 
     # Push the axis labels (categories) further out to avoid overlapping with data labels
     # Reduced pad from 30 to 25 for 6-axis (labels are shorter, so less pad needed)
-    ax.tick_params(axis="x", pad=25)
+    ax.tick_params(axis="x", pad=32)
 
     # Draw ylabels - positioned at 30 degrees to avoid overlap with top axis
     ax.set_rlabel_position(30)
@@ -161,13 +176,25 @@ def generate_radar_chart(
             color=data_label_color,
         )
 
+    # Render Footnote
+    if data.footnote:
+        fig.text(
+            0.5,
+            0.02,
+            data.footnote,
+            ha="center",
+            fontsize=7,
+            color=tick_label_color,
+            style="italic",
+        )
+
     # Title - use fig.suptitle (OO API) to keep it fixed at top, avoiding axis label overlap
     title_text = f"{data.ticker} Thesis Alignment ({data.trade_date})"
 
     fig.suptitle(title_text, size=10, y=0.98, fontweight="bold", color=title_color)
 
-    # Reserve top space for title (0.92 top limit)
-    fig.tight_layout(rect=[0, 0, 1, 0.92])
+    # Reserve top space for title (0.92 top limit) and bottom for footnotes
+    fig.tight_layout(rect=[0, 0.08, 1, 0.92])
 
     # Generate filename - use config.filename_stem if provided, else ticker_date
     if config.filename_stem:
