@@ -1366,6 +1366,12 @@ Flag *any* deviation from historical trends or healthy thresholds. Sample metric
 | **Stretching Payables** (Rising DPO) | BS + IS | $(Accts Pay / COGS) * 365$ | Spiking = Liquidity crisis; using suppliers as a bank. |
 | **Volatile Depreciation** | IS + BS | $Deprec Exp / Gross PP&E$ | Sudden Drop = Useful life manipulation to boost EPS. |
 | **The Trash Bin** (China: 其他应收款) | BS (资产负债表) | $Other Receivables / Assets$ | High % (>5%) = Hidden related-party loans or embezzlement. |
+| **Non-Operating Distortion** | IS | $|(Net Income - Operating Inc) / Net Income|$ | High % = Profit driven by one-time events (sales, write-offs), not operations. |
+| **Prepaid Expense Surge** | BS + IS | $Prepaid Expenses / Revenue$ | Spiking = Hiding current operating costs on the Balance Sheet to boost EPS. |
+| **The Taxman's Truth** | CF + IS | $Cash Taxes Paid / Pre-tax Income$ | < 5% (while profitable) = Earnings likely exaggerated; tax authority doesn't see the profit. |
+| **Ghost Cash Yield** | IS + BS | $Interest Income / Cash & Equiv$ | Significantly < Risk-Free Rate = Cash is restricted, non-existent, or trapped offshore. |
+| **The Rotting Plant** (Underinvestment) | CF + IS | $Capex / (Depreciation + Amortization)$ | < 1.0 consistently = Boosting FCF by neglecting assets; future margin crush imminent. |
+| **Hope as an Asset** (DTA Bloat) | BS | $Deferred Tax Assets / Total Equity$ | High % (>10%) = Equity value is phantom; reliant on future profits to exist. |
 
 ## OUTPUT REQUIREMENTS
 1. **Data Source**: List documents used, filing dates, and currency.
