@@ -175,6 +175,21 @@ def extract_news_highlights(news_report: str, max_chars: int = 25000) -> str:
     return result if result.strip() else news_report[:max_chars]
 
 
+def _format_date_with_fy_hint(current_date: str) -> str:
+    """Format date with fiscal year hint to prevent future-dated searches.
+
+    LLMs may otherwise search for "FY2026 annual report" in Jan 2026 when
+    FY2025 is the most recent available.
+
+    Example: "2026-01-08 (latest annual reports: FY2025)"
+    """
+    try:
+        year = int(current_date[:4])
+        return f"{current_date} (latest annual reports: FY{year - 1})"
+    except (ValueError, IndexError):
+        return current_date
+
+
 # --- State Definitions ---
 class InvestDebateState(TypedDict):
     """
@@ -315,6 +330,9 @@ class AgentState(MessagesState):
     legal_report: Annotated[str, take_last]  # Legal Counsel output (PFIC/VIE JSON)
     fundamentals_report: Annotated[str, take_last]  # Senior Analyst analysis
     auditor_report: Annotated[str, take_last]  # Independent forensic auditor report
+    value_trap_report: Annotated[
+        str, take_last
+    ]  # Value Trap Detector governance analysis
     investment_debate_state: Annotated[InvestDebateState, merge_invest_debate_state]
     investment_plan: Annotated[str, take_last]
     valuation_params: Annotated[
@@ -702,7 +720,7 @@ def create_analyst_node(
                     )
 
             # CRITICAL FIX: Include verified company name to prevent hallucination
-            full_system_instruction = f"{agent_prompt.system_message}\n\nDate: {current_date}\nTicker: {ticker}\nCompany: {company_name}\n{get_analysis_context(ticker)}{extra_context}"
+            full_system_instruction = f"{agent_prompt.system_message}\n\nDate: {_format_date_with_fy_hint(current_date)}\nTicker: {ticker}\nCompany: {company_name}\n{get_analysis_context(ticker)}{extra_context}"
             invocation_messages = [
                 SystemMessage(content=full_system_instruction)
             ] + filtered_messages
@@ -1085,7 +1103,8 @@ def create_research_manager_node(llm, memory: Any | None) -> Callable:
         if not agent_prompt:
             return {"investment_plan": "Error: Missing prompt"}
         debate = state.get("investment_debate_state", {})
-        all_reports = f"""MARKET ANALYST REPORT:\n{state.get("market_report", "N/A")}\n\nSENTIMENT ANALYST REPORT:\n{state.get("sentiment_report", "N/A")}\n\nNEWS ANALYST REPORT:\n{state.get("news_report", "N/A")}\n\nFUNDAMENTALS ANALYST REPORT:\n{state.get("fundamentals_report", "N/A")}\n\nBULL RESEARCHER:\n{debate.get("bull_history", "N/A")}\n\nBEAR RESEARCHER:\n{debate.get("bear_history", "N/A")}"""
+        value_trap = state.get("value_trap_report", "N/A")
+        all_reports = f"""MARKET ANALYST REPORT:\n{state.get("market_report", "N/A")}\n\nSENTIMENT ANALYST REPORT:\n{state.get("sentiment_report", "N/A")}\n\nNEWS ANALYST REPORT:\n{state.get("news_report", "N/A")}\n\nFUNDAMENTALS ANALYST REPORT:\n{state.get("fundamentals_report", "N/A")}\n\nVALUE TRAP ANALYSIS:\n{value_trap}\n\nBULL RESEARCHER:\n{debate.get("bull_history", "N/A")}\n\nBEAR RESEARCHER:\n{debate.get("bear_history", "N/A")}"""
         prompt = f"""{agent_prompt.system_message}\n\n{all_reports}\n\nProvide Investment Plan."""
         try:
             response = await invoke_with_rate_limit_handling(
@@ -1206,6 +1225,7 @@ def create_portfolio_manager_node(llm, memory: Any | None) -> Callable:
         sentiment = state.get("sentiment_report", "")
         news = state.get("news_report", "")
         fundamentals = state.get("fundamentals_report", "")
+        value_trap = state.get("value_trap_report", "")
         inv_plan = state.get("investment_plan", "")
         consultant = state.get("consultant_review", "")
         trader = state.get("trader_investment_plan", "")
@@ -1224,7 +1244,27 @@ NEUTRAL ANALYST (Balanced):\n{neutral_view if neutral_view else "N/A"}"""
 
         # Red-flag pre-screening results
         pre_screening_result = state.get("pre_screening_result", "N/A")
-        red_flags = state.get("red_flags", [])
+        red_flags = list(state.get("red_flags", []))  # Copy to avoid mutating state
+
+        # --- Value Trap Flag Detection ---
+        # Value Trap Detector runs in parallel, so flags are detected here at PM stage
+        # These are WARNING flags (risk penalty) not AUTO_REJECT flags
+        if value_trap:
+            from src.validators.red_flag_detector import RedFlagDetector
+
+            value_trap_warnings = RedFlagDetector.detect_value_trap_flags(
+                value_trap, state.get("company_of_interest", "UNKNOWN")
+            )
+            if value_trap_warnings:
+                red_flags.extend(value_trap_warnings)
+                logger.info(
+                    "value_trap_warnings_detected",
+                    ticker=state.get("company_of_interest", "UNKNOWN"),
+                    warning_types=[w["type"] for w in value_trap_warnings],
+                    total_risk_penalty=sum(
+                        w.get("risk_penalty", 0) for w in value_trap_warnings
+                    ),
+                )
 
         logger.info(
             "pm_inputs",
@@ -1232,9 +1272,11 @@ NEUTRAL ANALYST (Balanced):\n{neutral_view if neutral_view else "N/A"}"""
             has_sentiment=bool(sentiment),
             has_news=bool(news),
             has_fundamentals=bool(fundamentals),
+            has_value_trap=bool(value_trap),
             has_consultant=bool(consultant),
             has_datablock="DATA_BLOCK" in fundamentals if fundamentals else False,
             fund_len=len(fundamentals) if fundamentals else 0,
+            value_trap_len=len(value_trap) if value_trap else 0,
             red_flags_count=len(red_flags),
         )
 
@@ -1254,7 +1296,7 @@ NEUTRAL ANALYST (Balanced):\n{neutral_view if neutral_view else "N/A"}"""
         else:
             red_flag_section += "\nRed Flags Detected: None"
 
-        all_context = f"""MARKET ANALYST REPORT:\n{market if market else "N/A"}\n\nSENTIMENT ANALYST REPORT:\n{sentiment if sentiment else "N/A"}\n\nNEWS ANALYST REPORT:\n{news if news else "N/A"}\n\nFUNDAMENTALS ANALYST REPORT:\n{fundamentals if fundamentals else "N/A"}{red_flag_section}\n\nRESEARCH MANAGER RECOMMENDATION:\n{inv_plan if inv_plan else "N/A"}{consultant_section}\n\nTRADER PROPOSAL:\n{trader if trader else "N/A"}\n\nRISK TEAM DEBATE:\n{risk if risk else "N/A"}"""
+        all_context = f"""MARKET ANALYST REPORT:\n{market if market else "N/A"}\n\nSENTIMENT ANALYST REPORT:\n{sentiment if sentiment else "N/A"}\n\nNEWS ANALYST REPORT:\n{news if news else "N/A"}\n\nFUNDAMENTALS ANALYST REPORT:\n{fundamentals if fundamentals else "N/A"}\n\nVALUE TRAP ANALYSIS:\n{value_trap if value_trap else "N/A"}{red_flag_section}\n\nRESEARCH MANAGER RECOMMENDATION:\n{inv_plan if inv_plan else "N/A"}{consultant_section}\n\nTRADER PROPOSAL:\n{trader if trader else "N/A"}\n\nRISK TEAM DEBATE:\n{risk if risk else "N/A"}"""
         prompt = f"""{agent_prompt.system_message}\n\n{all_context}\n\nMake Portfolio Manager Verdict."""
         try:
             response = await invoke_with_rate_limit_handling(
@@ -1356,7 +1398,7 @@ Pre-Screening Result: {state.get("pre_screening_result", "UNKNOWN")}
 
         prompt = f"""{agent_prompt.system_message}
 
-ANALYSIS DATE: {current_date}
+ANALYSIS DATE: {_format_date_with_fy_hint(current_date)}
 TICKER: {ticker}
 COMPANY: {company_name}
 
@@ -1437,7 +1479,7 @@ Ticker: {ticker}
 Company: {company_name}
 Sector: {sector}
 Country: {country}
-Date: {current_date}
+Date: {_format_date_with_fy_hint(current_date)}
 
 Call the search_legal_tax_disclosures tool with these parameters, then provide your JSON assessment."""
 
@@ -1545,7 +1587,7 @@ def create_auditor_node(llm, tools: list) -> Callable:
         human_msg = f"""Analyze financial statements for:
 Ticker: {ticker}
 Company: {company_name}
-Date: {current_date}
+Date: {_format_date_with_fy_hint(current_date)}
 
 Perform a forensic audit using your tools."""
 

@@ -745,6 +745,9 @@ async def run_analysis(ticker: str, quick_mode: bool) -> dict | None:
             prompts_used={},
             red_flags=[],
             pre_screening_result="",
+            legal_report="",
+            auditor_report="",
+            value_trap_report="",
         )
 
         context = TradingContext(

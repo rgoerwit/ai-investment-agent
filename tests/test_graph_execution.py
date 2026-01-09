@@ -131,6 +131,7 @@ class TestSyncCheckRouter:
             "market_report": "done",
             "sentiment_report": "done",
             "news_report": "done",
+            "value_trap_report": "done",
             "pre_screening_result": "REJECT",
         }
         config = {}
@@ -149,6 +150,7 @@ class TestSyncCheckRouter:
             "market_report": "done",
             "sentiment_report": "done",
             "news_report": "done",
+            "value_trap_report": "done",
             "pre_screening_result": "PASS",
         }
         config = {}
@@ -202,7 +204,8 @@ class TestAuditorIntegration:
 
         result = fan_out_to_analysts({}, {})
         assert "Auditor" in result
-        assert len(result) == 7  # 6 analysts + Auditor
+        assert "Value Trap Detector" in result
+        assert len(result) == 8  # 7 analysts + Auditor
 
     @patch("src.graph._is_auditor_enabled")
     def test_fan_out_excludes_auditor_when_disabled(self, mock_auditor_enabled):
@@ -213,7 +216,8 @@ class TestAuditorIntegration:
 
         result = fan_out_to_analysts({}, {})
         assert "Auditor" not in result
-        assert len(result) == 6
+        assert "Value Trap Detector" in result
+        assert len(result) == 7
 
     @patch("src.graph._is_auditor_enabled")
     def test_sync_check_waits_for_auditor_when_enabled(self, mock_auditor_enabled):
@@ -245,6 +249,7 @@ class TestAuditorIntegration:
             "market_report": "done",
             "sentiment_report": "done",
             "news_report": "done",
+            "value_trap_report": "done",
             "pre_screening_result": "PASS",
             "auditor_report": "Forensic audit complete",
         }

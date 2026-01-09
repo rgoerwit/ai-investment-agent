@@ -108,6 +108,7 @@ def route_tools(state: AgentState) -> str:
         "foreign_language_analyst": "Foreign Language Analyst",
         "legal_counsel": "Legal Counsel",
         "global_forensic_auditor": "Auditor",
+        "value_trap_detector": "Value Trap Detector",
     }
 
     node_name = agent_map.get(sender, "Market Analyst")
@@ -220,6 +221,7 @@ def fan_out_to_analysts(state: AgentState, config: RunnableConfig) -> list[str]:
     Architecture:
     - Market, Sentiment, News → Sync Check (direct)
     - Junior Fundamentals, Foreign Language, Legal Counsel → Fundamentals Sync → Senior → Validator → Sync Check
+    - Value Trap Detector → Sync Check (governance analysis)
     - Auditor (if enabled) → Sync Check (independent forensic track)
     """
     destinations = [
@@ -229,6 +231,7 @@ def fan_out_to_analysts(state: AgentState, config: RunnableConfig) -> list[str]:
         "Junior Fundamentals Analyst",
         "Foreign Language Analyst",
         "Legal Counsel",
+        "Value Trap Detector",
     ]
     if _is_auditor_enabled():
         destinations.append("Auditor")
@@ -279,11 +282,12 @@ def sync_check_router(
     """
     Synchronization barrier for parallel analyst streams (fan-in pattern).
 
-    All 4 parallel branches converge here. Each branch calls sync_check
+    All parallel branches converge here. Each branch calls sync_check
     when it completes. The router checks if ALL required reports are present:
     - market_report (from Market Analyst)
     - sentiment_report (from Sentiment Analyst)
     - news_report (from News Analyst)
+    - value_trap_report (from Value Trap Detector)
     - pre_screening_result (from Validator in Fundamentals chain)
 
     Routing behavior:
@@ -297,6 +301,7 @@ def sync_check_router(
     market_done = bool(state.get("market_report"))
     sentiment_done = bool(state.get("sentiment_report"))
     news_done = bool(state.get("news_report"))
+    value_trap_done = bool(state.get("value_trap_report"))
 
     # Validator completion check
     pre_screening = state.get("pre_screening_result")
@@ -309,7 +314,14 @@ def sync_check_router(
         auditor_done = bool(state.get("auditor_report"))
 
     all_done = all(
-        [market_done, sentiment_done, news_done, validator_done, auditor_done]
+        [
+            market_done,
+            sentiment_done,
+            news_done,
+            value_trap_done,
+            validator_done,
+            auditor_done,
+        ]
     )
 
     logger.info(
@@ -317,6 +329,7 @@ def sync_check_router(
         market_done=market_done,
         sentiment_done=sentiment_done,
         news_done=news_done,
+        value_trap_done=value_trap_done,
         validator_done=validator_done,
         auditor_done=auditor_done,
         pre_screening=pre_screening,
@@ -592,6 +605,19 @@ def create_trading_graph(
     )
     legal_counsel = create_legal_counsel_node(legal_llm, toolkit.get_legal_tools())
 
+    # Value Trap Detector (parallel governance analysis)
+    value_trap_llm = create_quick_thinking_llm(
+        callbacks=[TokenTrackingCallback("Value Trap Detector", tracker)]
+    )
+    value_trap_detector = create_analyst_node(
+        value_trap_llm,
+        "value_trap_detector",
+        toolkit.get_value_trap_tools(),
+        "value_trap_report",
+        retry_llm=retry_llm,
+        allow_retry=allow_retry,
+    )
+
     # Auditor (Independent Forensic Track)
     # Runs parallel to other analysts, provides independent forensic validation
     # Output is consumed by Consultant for cross-validation
@@ -643,6 +669,9 @@ def create_trading_graph(
         toolkit.get_foreign_language_tools(), "foreign_language_analyst"
     )
     legal_tools = create_agent_tool_node(toolkit.get_legal_tools(), "legal_counsel")
+    value_trap_tools = create_agent_tool_node(
+        toolkit.get_value_trap_tools(), "value_trap_detector"
+    )
 
     # Research & Decision nodes
     # Create separate nodes for each debate round (enables parallel execution)
@@ -812,6 +841,7 @@ BEAR RESEARCHER:
     workflow.add_node("Junior Fundamentals Analyst", junior_fund)
     workflow.add_node("Foreign Language Analyst", foreign_analyst)
     workflow.add_node("Legal Counsel", legal_counsel)
+    workflow.add_node("Value Trap Detector", value_trap_detector)
     workflow.add_node("Fundamentals Analyst", senior_fund)
     workflow.add_node("Financial Validator", validator)
     # Separate tool nodes for parallel execution (avoids sender race condition)
@@ -821,6 +851,7 @@ BEAR RESEARCHER:
     workflow.add_node("junior_fund_tools", junior_fund_tools)
     workflow.add_node("foreign_tools", foreign_tools)
     workflow.add_node("legal_tools", legal_tools)
+    workflow.add_node("value_trap_tools", value_trap_tools)
 
     if auditor is not None:
         workflow.add_node("Auditor", auditor)
@@ -858,6 +889,7 @@ BEAR RESEARCHER:
         "Junior Fundamentals Analyst",
         "Foreign Language Analyst",
         "Legal Counsel",
+        "Value Trap Detector",
     ]
     if auditor is not None:
         fan_out_destinations.append("Auditor")
@@ -915,6 +947,14 @@ BEAR RESEARCHER:
         {"tools": "legal_tools", "continue": "Fundamentals Sync Check"},
     )
     workflow.add_edge("legal_tools", "Legal Counsel")
+
+    # Value Trap Detector flow: tools loop → Sync Check (independent governance stream)
+    workflow.add_conditional_edges(
+        "Value Trap Detector",
+        should_continue_analyst,
+        {"tools": "value_trap_tools", "continue": "Sync Check"},
+    )
+    workflow.add_edge("value_trap_tools", "Value Trap Detector")
 
     # Auditor flow: tools loop → Sync Check
     if auditor is not None:
@@ -1017,6 +1057,7 @@ BEAR RESEARCHER:
             "Junior Fundamentals",
             "Foreign Language",
             "Legal Counsel",
+            "Value Trap Detector",
         ],
         fundamentals_sync="Junior + Foreign + Legal → Senior → Validator",
         debate_parallel=[

@@ -260,7 +260,10 @@ class TestGraphStructure:
         destinations = fan_out_to_analysts({}, {})
 
         assert "Foreign Language Analyst" in destinations
-        assert len(destinations) == 6  # Market, Sentiment, News, Junior, Foreign, Legal
+        assert "Value Trap Detector" in destinations
+        assert (
+            len(destinations) == 7
+        )  # Market, Sentiment, News, Junior, Foreign, Legal, Value Trap
 
     def test_route_tools_includes_foreign_analyst(self):
         """Test that route_tools handles foreign_language_analyst sender."""

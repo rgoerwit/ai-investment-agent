@@ -703,6 +703,180 @@ async def search_legal_tax_disclosures(
         )
 
 
+@tool
+async def get_ownership_structure(
+    ticker: Annotated[str, "Stock ticker symbol (e.g., '7203.T', '0005.HK')"],
+) -> str:
+    """
+    Get institutional holders, insider transactions, and major shareholders.
+
+    Returns structured ownership data for governance and value trap analysis.
+    Includes: top institutional holders, recent insider transactions,
+    and major holder concentration.
+
+    Args:
+        ticker: Stock ticker symbol with exchange suffix
+
+    Returns:
+        JSON string with ownership data or error message
+    """
+    normalized = normalize_ticker(ticker)
+    logger.info("ownership_structure_lookup", ticker=normalized)
+
+    result = {
+        "ticker": normalized,
+        "institutional_holders": [],
+        "institutional_holders_status": "PENDING",  # FOUND, EMPTY, DATA_UNAVAILABLE
+        "insider_transactions": [],
+        "insider_transactions_status": "PENDING",  # FOUND, EMPTY, DATA_UNAVAILABLE
+        "major_holders": {},
+        "major_holders_status": "PENDING",  # FOUND, EMPTY, DATA_UNAVAILABLE
+        "ownership_concentration": None,
+        "insider_trend": "UNKNOWN",
+        "data_quality": "COMPLETE",
+    }
+
+    try:
+        yf_ticker = yf.Ticker(normalized)
+
+        # Top institutional holders
+        try:
+            inst = yf_ticker.institutional_holders
+            if inst is None:
+                # API returned None - data unavailable (different from zero holders)
+                result["institutional_holders_status"] = "DATA_UNAVAILABLE"
+                result["data_quality"] = "PARTIAL"
+            elif inst.empty:
+                # DataFrame exists but is empty - genuinely no institutional holders
+                result["institutional_holders_status"] = "EMPTY"
+            else:
+                # Convert to list of dicts, handle NaN values
+                inst_records = inst.head(10).to_dict("records")
+                # Sanitize for JSON
+                for record in inst_records:
+                    for key, value in record.items():
+                        if pd.isna(value):
+                            record[key] = None
+                        elif hasattr(value, "isoformat"):  # Handle Timestamp
+                            record[key] = value.isoformat()
+                result["institutional_holders"] = inst_records
+                result["institutional_holders_status"] = "FOUND"
+        except Exception as e:
+            logger.debug("institutional_holders_error", ticker=normalized, error=str(e))
+            result["institutional_holders_status"] = "DATA_UNAVAILABLE"
+            result["data_quality"] = "PARTIAL"
+
+        # Recent insider transactions
+        try:
+            insider = yf_ticker.insider_transactions
+            if insider is None:
+                # API returned None - data unavailable
+                result["insider_transactions_status"] = "DATA_UNAVAILABLE"
+                result["data_quality"] = "PARTIAL"
+            elif insider.empty:
+                # DataFrame exists but is empty - genuinely no insider transactions
+                result["insider_transactions_status"] = "EMPTY"
+            else:
+                insider_records = insider.head(15).to_dict("records")
+                # Sanitize for JSON
+                for record in insider_records:
+                    for key, value in record.items():
+                        if pd.isna(value):
+                            record[key] = None
+                        elif hasattr(value, "isoformat"):
+                            record[key] = value.isoformat()
+                result["insider_transactions"] = insider_records
+                result["insider_transactions_status"] = "FOUND"
+
+                # Calculate insider trend (net buyer/seller)
+                buy_count = 0
+                sell_count = 0
+                for txn in insider_records:
+                    txn_type = str(txn.get("Text", "")).lower()
+                    if "buy" in txn_type or "purchase" in txn_type:
+                        buy_count += 1
+                    elif "sell" in txn_type or "sale" in txn_type:
+                        sell_count += 1
+
+                if buy_count > sell_count * 1.5:
+                    result["insider_trend"] = "NET_BUYER"
+                elif sell_count > buy_count * 1.5:
+                    result["insider_trend"] = "NET_SELLER"
+                else:
+                    result["insider_trend"] = "NEUTRAL"
+        except Exception as e:
+            logger.debug("insider_transactions_error", ticker=normalized, error=str(e))
+            result["insider_transactions_status"] = "DATA_UNAVAILABLE"
+            result["data_quality"] = "PARTIAL"
+
+        # Major holders summary
+        try:
+            major = yf_ticker.major_holders
+            if major is None:
+                # API returned None - data unavailable
+                result["major_holders_status"] = "DATA_UNAVAILABLE"
+                result["data_quality"] = "PARTIAL"
+            elif major.empty:
+                # DataFrame exists but is empty - genuinely no major holder data
+                result["major_holders_status"] = "EMPTY"
+            else:
+                # Convert to dict, handling various formats
+                major_dict = {}
+                for idx, row in major.iterrows():
+                    if len(row) >= 2:
+                        key = str(row.iloc[1]) if pd.notna(row.iloc[1]) else str(idx)
+                        value = row.iloc[0]
+                        if pd.notna(value):
+                            # Convert percentage strings
+                            if isinstance(value, str) and "%" in value:
+                                major_dict[key] = value
+                            else:
+                                major_dict[key] = (
+                                    float(value)
+                                    if isinstance(value, int | float)
+                                    else str(value)
+                                )
+                result["major_holders"] = major_dict
+                result["major_holders_status"] = "FOUND"
+
+                # Calculate ownership concentration (top 5 institutional)
+                if result["institutional_holders"]:
+                    top5_pct = sum(
+                        float(h.get("pctHeld", 0) or 0) * 100
+                        for h in result["institutional_holders"][:5]
+                    )
+                    result["ownership_concentration"] = round(top5_pct, 2)
+        except Exception as e:
+            logger.debug("major_holders_error", ticker=normalized, error=str(e))
+            result["major_holders_status"] = "DATA_UNAVAILABLE"
+            result["data_quality"] = "PARTIAL"
+
+        logger.info(
+            "ownership_structure_complete",
+            ticker=normalized,
+            institutional_count=len(result["institutional_holders"]),
+            insider_txn_count=len(result["insider_transactions"]),
+            insider_trend=result["insider_trend"],
+            data_quality=result["data_quality"],
+        )
+
+        return json.dumps(result, indent=2, default=str)
+
+    except Exception as e:
+        logger.error("ownership_structure_error", ticker=normalized, error=str(e))
+        return json.dumps(
+            {
+                "ticker": normalized,
+                "error": str(e),
+                "institutional_holders": [],
+                "insider_transactions": [],
+                "major_holders": {},
+                "data_quality": "ERROR",
+            },
+            indent=2,
+        )
+
+
 class Toolkit:
     def __init__(self):
         self.market_data_fetcher = market_data_fetcher
@@ -747,6 +921,14 @@ class Toolkit:
         """Tools for Legal Counsel (PFIC/VIE detection for US investors)."""
         return [search_legal_tax_disclosures]
 
+    def get_value_trap_tools(self):
+        """Tools for Value Trap Detector (governance & capital allocation analysis)."""
+        return [
+            get_ownership_structure,  # yfinance: institutional holders, insider transactions
+            get_news,  # Tavily: activist campaigns, buyback announcements
+            search_foreign_sources,  # Native governance searches (Mochiai, Chaebol, etc.)
+        ]
+
     def get_all_tools(self):
         return [
             get_yfinance_data,
@@ -760,6 +942,7 @@ class Toolkit:
             get_fundamental_analysis,
             search_foreign_sources,
             search_legal_tax_disclosures,
+            get_ownership_structure,
         ]
 
 
