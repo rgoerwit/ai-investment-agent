@@ -155,12 +155,15 @@ class ThesisVisualizer:
 
         # Liquidity: $86.9M Daily Avg - PASS
         liquidity_match = re.search(
-            r"\*?\*?Liquidity\*?\*?[:\s]*\$?([\d.]+)\s*([MBK])?.*?(PASS|FAIL|MARGINAL)",
+            r"\*?\*?Liquidity\*?\*?[:\s]*\$?(\d+(?:\.\d+)?)\s*([MBK])?.*?(PASS|FAIL|MARGINAL)",
             self.text,
             re.IGNORECASE,
         )
         if liquidity_match:
-            value = float(liquidity_match.group(1))
+            try:
+                value = float(liquidity_match.group(1))
+            except ValueError:
+                value = 0.0  # Fallback for malformed data
             unit = (liquidity_match.group(2) or "").upper()
             # Format value: show as int if whole number, else float
             value_str = str(int(value)) if value == int(value) else str(value)
