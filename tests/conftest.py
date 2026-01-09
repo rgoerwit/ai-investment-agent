@@ -33,7 +33,21 @@ def setup_test_env():
         "TAVILY_API_KEY": "test-key",
         "FINNHUB_API_KEY": "test-key",
     }
+
+    # 1. Patch os.environ
     with patch.dict(os.environ, test_env, clear=False):
+        # 2. Update the global config singleton IN-PLACE
+        # We import here so the import happens AFTER os.environ is patched
+        from src.config import Settings, config
+
+        # Create a new Settings object which reads the NOW-PATCHED os.environ
+        # (and ignores any local .env file because it's already loaded)
+        new_settings = Settings()
+
+        # Update the existing global singleton's state to match the new settings
+        # This fixes the "import time" problem because we modify the object everyone is holding
+        config.__dict__.update(new_settings.__dict__)
+
         yield
 
 
