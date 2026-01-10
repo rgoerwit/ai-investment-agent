@@ -30,10 +30,14 @@ def mock_fetcher():
 
 @pytest.fixture
 def mock_tavily():
-    """Mock the global tavily_tool."""
-    with patch("src.toolkit.tavily_tool") as mock:
-        # Setup the mock to support ainvoke
-        mock.ainvoke = AsyncMock()
+    """Mock the tavily search wrapper function.
+
+    Note: toolkit.py now uses _tavily_search_with_timeout (imported from tavily_utils.py)
+    which wraps the tavily_tool with timeout protection. We mock this wrapper directly.
+    """
+    with patch(
+        "src.toolkit._tavily_search_with_timeout", new_callable=AsyncMock
+    ) as mock:
         yield mock
 
 
@@ -204,7 +208,7 @@ class TestGetNews:
                 else:  # General query pattern
                     return "General News: Toyota expands manufacturing in US markets."
 
-            mock_tavily.ainvoke.side_effect = side_effect
+            mock_tavily.side_effect = side_effect
 
             # Use a ticker that triggers local logic (.T for Japan)
             result = await toolkit.get_news.ainvoke({"ticker": "7203.T"})
@@ -221,7 +225,7 @@ class TestGetNews:
             "src.toolkit.extract_company_name_async", new_callable=AsyncMock
         ) as mock_name:
             mock_name.return_value = "Ghost Corp"
-            mock_tavily.ainvoke.return_value = None  # No results
+            mock_tavily.return_value = None  # No results
 
             result = await toolkit.get_news.ainvoke({"ticker": "GHST"})
 
@@ -241,7 +245,7 @@ class TestGetNews:
                 else:
                     return "Apple announces new iPhone model with improved camera."
 
-            mock_tavily.ainvoke.side_effect = side_effect
+            mock_tavily.side_effect = side_effect
 
             result = await toolkit.get_news.ainvoke({"ticker": "AAPL"})
 
@@ -256,14 +260,12 @@ class TestGetNews:
             "src.toolkit.extract_company_name_async", new_callable=AsyncMock
         ) as mock_name:
             mock_name.return_value = "FailCorp"
-            mock_tavily.ainvoke.side_effect = Exception(
-                "Tavily API Error: Rate limit exceeded"
-            )
+            mock_tavily.side_effect = Exception("Tavily API Error: Rate limit exceeded")
 
             result = await toolkit.get_news.ainvoke({"ticker": "FAIL"})
 
-            # Code handles error gracefully by catching and returning "No news found"
-            assert "No news found" in result or "FailCorp" in result
+            # Code handles error gracefully by returning an error message
+            assert "Error fetching news" in result or "Rate limit" in result
 
     async def test_news_ticker_normalization(self, mock_tavily):
         """Test that tickers are properly normalized before searching."""
@@ -273,7 +275,7 @@ class TestGetNews:
             with patch("src.toolkit.normalize_ticker") as mock_normalize:
                 mock_normalize.return_value = "AAPL"
                 mock_name.return_value = "Apple Inc."
-                mock_tavily.ainvoke.return_value = "Apple news content"
+                mock_tavily.return_value = "Apple news content"
 
                 await toolkit.get_news.ainvoke({"ticker": "AAPL.US"})
 
@@ -404,7 +406,7 @@ class TestFundamentalAnalysis:
                 "consumer electronics, and mobile devices with substantial global "
                 "market presence and competitive positioning in the technology sector."
             )
-            mock_tavily.ainvoke.return_value = long_result
+            mock_tavily.return_value = long_result
 
             result = await toolkit.get_fundamental_analysis.ainvoke("005930.KS")
 
@@ -448,7 +450,7 @@ class TestFundamentalAnalysis:
 
                 return "No data"
 
-            mock_tavily.ainvoke.side_effect = side_effect
+            mock_tavily.side_effect = side_effect
 
             result = await toolkit.get_fundamental_analysis.ainvoke("005930.KS")
 
@@ -481,7 +483,7 @@ class TestFundamentalAnalysis:
                     )
                 return "No data"
 
-            mock_tavily.ainvoke.side_effect = side_effect
+            mock_tavily.side_effect = side_effect
 
             result = await toolkit.get_fundamental_analysis.ainvoke("0005.HK")
 
@@ -500,13 +502,13 @@ class TestFundamentalAnalysis:
             mock_name.return_value = "Unknown Corp"
 
             # All searches return empty/None
-            mock_tavily.ainvoke.return_value = None
+            mock_tavily.return_value = None
 
             result = await toolkit.get_fundamental_analysis.ainvoke("UNKN.XX")
 
-            # Code still formats output, showing "None" in the content
-            assert "Unknown Corp" in result
-            assert "None" in result or "No information" in result
+            # Code returns formatted output with ticker and Limited Data indicator
+            assert "UNKN.XX" in result
+            assert "Limited Data" in result or "Fundamental Search Results" in result
 
     async def test_adr_detection_nyse(self, mock_tavily):
         """Test detection of NYSE-listed ADRs (most common type)."""
@@ -523,7 +525,7 @@ class TestFundamentalAnalysis:
                 "Major institutional investors hold significant positions. "
                 "The company faces regulatory scrutiny but maintains strong fundamentals."
             )
-            mock_tavily.ainvoke.return_value = long_result
+            mock_tavily.return_value = long_result
 
             result = await toolkit.get_fundamental_analysis.ainvoke("9988.HK")
 
@@ -545,7 +547,7 @@ class TestFundamentalAnalysis:
                 "Sony also maintains a primary listing on the Tokyo Stock Exchange. "
                 "The company operates in entertainment, gaming, and electronics sectors."
             )
-            mock_tavily.ainvoke.return_value = long_result
+            mock_tavily.return_value = long_result
 
             result = await toolkit.get_fundamental_analysis.ainvoke("6758.T")
 
@@ -564,7 +566,7 @@ class TestFundamentalAnalysis:
                 + "It has ADRs on NYSE. "
                 + "Analysts cover it extensively. " * 100
             )
-            mock_tavily.ainvoke.return_value = long_result
+            mock_tavily.return_value = long_result
 
             result = await toolkit.get_fundamental_analysis.ainvoke("MEGA.XX")
 
@@ -719,7 +721,7 @@ class TestIntegration:
             "src.toolkit.extract_company_name_async", new_callable=AsyncMock
         ) as mock_name:
             mock_name.return_value = "Samsung"
-            mock_tavily.ainvoke.return_value = "Samsung reports strong Q4 results."
+            mock_tavily.return_value = "Samsung reports strong Q4 results."
 
             # Setup fundamental research
             long_result = (
@@ -753,7 +755,7 @@ class TestIntegration:
             assert "Samsung" in news_result
 
             # For fundamental analysis, need to adjust mock for this call
-            mock_tavily.ainvoke.return_value = long_result
+            mock_tavily.return_value = long_result
             fundamental_result = await toolkit.get_fundamental_analysis.ainvoke(ticker)
             assert "ADR" in fundamental_result
 
@@ -771,7 +773,7 @@ class TestIntegration:
         mock_fetcher.get_financial_metrics = AsyncMock(
             return_value={"error": "API down"}
         )
-        mock_tavily.ainvoke.side_effect = Exception("Network error")
+        mock_tavily.side_effect = Exception("Network error")
         mock_stocktwits.get_sentiment = AsyncMock(
             return_value={"error": "Rate limited"}
         )
@@ -789,8 +791,10 @@ class TestIntegration:
             )
 
             news_result = await toolkit.get_news.ainvoke({"ticker": "TEST"})
-            # News tool catches errors and returns "No news found"
-            assert "No news found" in news_result or "TestCorp" in news_result
+            # News tool catches errors and returns error message
+            assert (
+                "Error fetching news" in news_result or "error" in news_result.lower()
+            )
 
             sentiment_result = await toolkit.get_social_media_sentiment.ainvoke("TEST")
             assert (

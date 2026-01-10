@@ -43,19 +43,21 @@ This isn't a single prompt to an LLM. It's a **stateful orchestration** of speci
 graph TB
     Start([User: Analyze TICKER]) --> Dispatcher{Parallel<br/>Dispatch}
 
-    %% Parallel Fan-Out: 6 branches run simultaneously
+    %% Parallel Fan-Out: 7 branches run simultaneously (+ optional Auditor)
     Dispatcher --> MarketAnalyst["Market Analyst<br/>(Technical Analysis)"]
     Dispatcher --> SentimentAnalyst["Sentiment Analyst<br/>(Social Media)"]
     Dispatcher --> NewsAnalyst["News Analyst<br/>(Recent Events)"]
     Dispatcher --> JuniorFund["Junior Fundamentals<br/>(API Data)"]
     Dispatcher --> ForeignLang["Foreign Language<br/>(Native Sources)"]
     Dispatcher --> LegalCounsel["Legal Counsel<br/>(Tax & Regulatory)"]
+    Dispatcher --> ValueTrap["Value Trap Detector<br/>(Governance)"]
     Dispatcher -.-> Auditor["Forensic Auditor<br/>(Independent Check)<br/>Optional"]
 
-    %% Market/Sentiment/News go directly to main Sync Check
+    %% Market/Sentiment/News/ValueTrap go directly to main Sync Check
     MarketAnalyst --> SyncCheck["Sync Check<br/>(Fan-In Barrier)"]
     SentimentAnalyst --> SyncCheck
     NewsAnalyst --> SyncCheck
+    ValueTrap --> SyncCheck
     Auditor -.-> SyncCheck
 
     %% Fundamentals sub-graph: Junior + Foreign + Legal sync first
@@ -108,6 +110,7 @@ graph TB
     style ValuationCalc fill:#e6f3ff,color:#333
     style Consultant fill:#e8daff,color:#333
     style Auditor fill:#e8daff,color:#333
+    style ValueTrap fill:#fff0f5,color:#333
     style Trader fill:#ffe4e1,color:#333
     style RiskTeam fill:#fff3cd,color:#333
     style PortfolioManager fill:#d1ecf1,color:#333
@@ -117,13 +120,14 @@ graph TB
 
 ### How Agents Collaborate
 
-1. **Parallel Data Gathering (Fan-Out)** - Six analyst branches (plus optional Auditor) run **simultaneously** to maximize speed:
+1. **Parallel Data Gathering (Fan-Out)** - Seven analyst branches (plus optional Auditor) run **simultaneously** to maximize speed:
    - Market Analyst (technical indicators, liquidity)
    - Sentiment Analyst (social media signals)
    - News Analyst (recent events, catalysts)
    - Junior Fundamentals (API-based financial data)
    - Foreign Language Analyst (native-language sources, premium English fallback)
    - **Legal Counsel** (tax risks like PFIC, regulatory structures like VIE, withholding rates)
+   - **Value Trap Detector** - identifies stocks that appear cheap but won't reward shareholders due to poor governance, capital hoarding, or no catalyst. Uses native terminology (持ち合い, 재벌, etc.) for jurisdiction-specific searches.
    - **Forensic Auditor** (optional, OpenAI-powered) - retrieves primary financial documents using multilingual search and flags accounting anomalies (earnings quality, DSO trends, zombie ratios, etc.). Output is consumed by External Consultant for cross-validation.
 
    Each branch has its own tool-calling loop. This parallel architecture reduces analysis time by ~60% compared to sequential execution.

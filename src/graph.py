@@ -7,7 +7,9 @@ Architecture:
 2. Market, Sentiment, News analysts run independently → Sync Check
 3. Junior Fundamentals, Foreign Language, Legal Counsel run in parallel → Fundamentals Sync Check
 4. Fundamentals Sync waits for all 3, then Senior Fund → Validator → Sync Check
-5. Sync Check waits for all streams, then routes to Research Manager (PASS) or Portfolio Manager (REJECT)
+5. Sync Check waits for all streams, then routes to:
+   - PASS: Bull/Bear Researcher R1 (parallel debate)
+   - REJECT: PM Fast-Fail (separate node to avoid edge conflict with normal PM)
 6. Bull/Bear debate → Consultant → Trader → Risk Team → Portfolio Manager
 """
 
@@ -134,7 +136,7 @@ def create_agent_tool_node(tools: list, agent_key: str):
     Returns:
         An async function that executes tools for the specific agent
     """
-    tool_node = ToolNode(tools)
+    tool_node = ToolNode(tools, handle_tool_errors=True)
     tool_names = {tool.name for tool in tools}
 
     async def agent_tool_node(state: AgentState, config: RunnableConfig) -> dict:
@@ -142,6 +144,8 @@ def create_agent_tool_node(tools: list, agent_key: str):
         messages = state.get("messages", [])
 
         # Find the AIMessage from THIS agent (has tool_calls for our tools)
+        # CRITICAL FIX: Also check msg.name == agent_key to avoid picking up
+        # tool_calls from a different agent that happens to use the same tool
         target_message = None
         for msg in reversed(messages):
             if (
@@ -149,6 +153,11 @@ def create_agent_tool_node(tools: list, agent_key: str):
                 and hasattr(msg, "tool_calls")
                 and msg.tool_calls
             ):
+                # CRITICAL: Check that this AIMessage is from THIS agent
+                # Multiple agents may call the same tool (e.g., get_news)
+                if getattr(msg, "name", None) != agent_key:
+                    continue
+
                 # Check if any tool_call is for one of our tools
                 msg_tool_names = {
                     tc.get("name", tc.get("function", {}).get("name", ""))
@@ -177,6 +186,7 @@ def create_agent_tool_node(tools: list, agent_key: str):
             "agent_tool_node_executing",
             agent_key=agent_key,
             tool_calls=[tc.get("name") for tc in target_message.tool_calls],
+            tool_call_count=len(target_message.tool_calls),
             total_messages=len(messages),
         )
 
@@ -185,6 +195,29 @@ def create_agent_tool_node(tools: list, agent_key: str):
 
         # CRITICAL: Tag ToolMessages with agent_key for parallel execution filtering
         # This allows the analyst to identify its own tool results
+        result_msg_count = len(result.get("messages", []))
+        expected_count = len(target_message.tool_calls)
+        logger.debug(
+            "agent_tool_node_results",
+            agent_key=agent_key,
+            result_message_count=result_msg_count,
+            tool_call_count=expected_count,
+        )
+
+        # Graceful error recovery: Log error if tool call count doesn't match results
+        # This can happen if a tool fails to execute or returns no result
+        if result_msg_count != expected_count:
+            logger.error(
+                "agent_tool_node_message_mismatch",
+                agent_key=agent_key,
+                expected_tool_calls=expected_count,
+                received_results=result_msg_count,
+                tool_calls_requested=[
+                    tc.get("name") for tc in target_message.tool_calls
+                ],
+                message="Not all tool calls resulted in ToolMessages. Agent may receive incomplete data.",
+            )
+
         if "messages" in result:
             for msg in result["messages"]:
                 if isinstance(msg, ToolMessage):
@@ -278,7 +311,7 @@ def fundamentals_sync_router(
 
 def sync_check_router(
     state: AgentState, config: RunnableConfig
-) -> Literal["Portfolio Manager", "__end__"] | list[str]:
+) -> Literal["PM Fast-Fail", "__end__"] | list[str]:
     """
     Synchronization barrier for parallel analyst streams (fan-in pattern).
 
@@ -293,7 +326,7 @@ def sync_check_router(
     Routing behavior:
     - If NOT all reports present: Return __end__ to terminate THIS branch
       (other branches continue running and will hit sync_check later)
-    - If all present AND pre_screening=REJECT: Route to Portfolio Manager (fast-fail)
+    - If all present AND pre_screening=REJECT: Route to PM Fast-Fail (separate node to avoid edge conflicts)
     - If all present AND pre_screening=PASS: Fan-out to Bull/Bear Researcher R1 (parallel)
 
     The LAST branch to complete will see all reports and proceed to the next phase.
@@ -344,10 +377,12 @@ def sync_check_router(
     # All streams complete - route based on validator result
     if pre_screening == "REJECT":
         logger.info(
-            "sync_routing_to_pm",
-            message="Red flags detected - skipping debate, routing to Portfolio Manager",
+            "sync_routing_to_pm_reject",
+            message="Red flags detected - skipping debate, routing to PM Fast-Fail",
         )
-        return "Portfolio Manager"
+        # CRITICAL: Use separate "PM Fast-Fail" node to avoid edge conflict
+        # with the normal path (Risk Team → Portfolio Manager)
+        return "PM Fast-Fail"
 
     logger.info(
         "sync_routing_to_debate",
@@ -976,12 +1011,20 @@ BEAR RESEARCHER:
     workflow.add_edge("Fundamentals Analyst", "Financial Validator")
     workflow.add_edge("Financial Validator", "Sync Check")
 
+    # PM Fast-Fail node: separate from main Portfolio Manager to avoid edge conflict
+    # This node runs when pre_screening == "REJECT" (fast-fail path)
+    # Using the same PM implementation but as a distinct graph node
+    pm_fast_fail = create_portfolio_manager_node(pm_llm, risk_manager_memory)
+    workflow.add_node("PM Fast-Fail", pm_fast_fail)
+    workflow.add_edge("PM Fast-Fail", END)
+
     # Sync Check: wait for all streams, then route
     # Uses list-style destinations to support fan-out (router returns list for parallel R1)
+    # CRITICAL: PM Fast-Fail is separate from Portfolio Manager to avoid edge conflicts
     workflow.add_conditional_edges(
         "Sync Check",
         sync_check_router,
-        ["__end__", "Portfolio Manager", "Bull Researcher R1", "Bear Researcher R1"],
+        ["__end__", "PM Fast-Fail", "Bull Researcher R1", "Bear Researcher R1"],
     )
 
     # === PARALLEL BULL/BEAR DEBATE ===

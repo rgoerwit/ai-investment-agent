@@ -21,6 +21,11 @@ export GRPC_VERBOSITY=ERROR
 DEFAULT_INPUT_FILE="scratch/sample_tickers.txt"
 DEFAULT_OUTPUT_FILE="scratch/ticker_analysis_results.md"
 
+# Cooldown between tickers (seconds). Configurable via environment variable.
+# - Free tier (15 RPM): 60 seconds recommended (default)
+# - Paid tier (360 RPM): 5-10 seconds sufficient
+COOLDOWN_SECONDS="${COOLDOWN_SECONDS:-60}"
+
 # Parse flags
 LOUD_MODE=false
 QUICK_MODE=false
@@ -81,10 +86,20 @@ EXAMPLES:
     # Custom files with quick mode
     ./scripts/run_tickers.sh --quick my_tickers.txt my_results.md
 
+    # Paid tier with shorter cooldown (360 RPM)
+    COOLDOWN_SECONDS=10 ./scripts/run_tickers.sh --quick
+
+ENVIRONMENT VARIABLES:
+    COOLDOWN_SECONDS    Seconds to wait between tickers (default: 60)
+                        Free tier (15 RPM): use 60 (default)
+                        Paid tier (360 RPM): use 5-10
+
 NOTES:
     - Images are auto-saved to {OUTPUT_DIR}/images/ based on OUTPUT_FILE path
     - In loud mode, logs go to stderr (can redirect with 2>)
     - Options can be combined: --loud --quick
+    - Failed analyses save debug files to {OUTPUT_DIR}/debug_failures/
+    - "Soft failures" (PM failed but Python exit 0) are also captured
 
 EOF
             exit 0
@@ -115,12 +130,26 @@ else
 fi
 
 # Cleanup function for temp files on interrupt/exit
+# IMPORTANT: Only cleans up on success (exit 0) or interrupt
+# On failure, temp files are preserved for debugging
 cleanup_temp_files() {
     local exit_code=$?
     if [[ -n "${OUTPUT_DIR:-}" ]]; then
-        # Remove any leftover temp files
-        rm -f "${OUTPUT_DIR}"/.temp_analysis_*.md 2>/dev/null || true
-        rm -f "${OUTPUT_DIR}"/.temp_analysis_*.log 2>/dev/null || true
+        if [[ $exit_code -eq 0 ]]; then
+            # Success: remove temp files
+            rm -f "${OUTPUT_DIR}"/.temp_analysis_*.md 2>/dev/null || true
+            rm -f "${OUTPUT_DIR}"/.temp_analysis_*.log 2>/dev/null || true
+        else
+            # Failure: preserve temp files for debugging
+            # Move to debug directory instead of deleting
+            local debug_dir="${OUTPUT_DIR}/debug_$(date +%Y%m%d_%H%M%S)"
+            if ls "${OUTPUT_DIR}"/.temp_analysis_*.{md,log} >/dev/null 2>&1; then
+                mkdir -p "$debug_dir"
+                mv "${OUTPUT_DIR}"/.temp_analysis_*.md "$debug_dir/" 2>/dev/null || true
+                mv "${OUTPUT_DIR}"/.temp_analysis_*.log "$debug_dir/" 2>/dev/null || true
+                echo -e "${YELLOW}[DEBUG]${NC} Temp files preserved in: $debug_dir"
+            fi
+        fi
     fi
     exit $exit_code
 }
@@ -285,7 +314,23 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     fi
 
     if $SUCCESS; then
-        print_success "Completed: $ticker"
+        # Check if report contains Portfolio Manager failure (soft failure detection)
+        # Python exits 0 but report shows PM didn't produce output
+        if [ -f "$TEMP_REPORT" ] && grep -q "Portfolio Manager failed to produce final decision" "$TEMP_REPORT"; then
+            print_error "Soft failure: $ticker (Portfolio Manager failed)"
+            failed=$((failed + 1))
+
+            # Treat as failure for debugging purposes
+            local debug_dir="${OUTPUT_DIR}/debug_failures"
+            mkdir -p "$debug_dir"
+            cp "$TEMP_REPORT" "$debug_dir/${ticker}_report.md" 2>/dev/null || true
+            if ! $LOUD_MODE && [ -f "$TEMP_LOG" ]; then
+                cp "$TEMP_LOG" "$debug_dir/${ticker}_debug.log" 2>/dev/null || true
+            fi
+            print_info "Debug files saved to: $debug_dir"
+        else
+            print_success "Completed: $ticker"
+        fi
 
         # Append report to main output file
         if [ -f "$TEMP_REPORT" ]; then
@@ -302,16 +347,25 @@ while IFS= read -r line || [[ -n "$line" ]]; do
         print_error "Failed: $ticker (check logs and $OUTPUT_FILE for details)"
         failed=$((failed + 1))
 
-        # Even on failure, append what we have
+        # On failure: preserve temp files for debugging, then append to output
+        local debug_dir="${OUTPUT_DIR}/debug_failures"
+        mkdir -p "$debug_dir"
+
         if [ -f "$TEMP_REPORT" ]; then
+            # Copy to debug dir before appending (preserve for analysis)
+            cp "$TEMP_REPORT" "$debug_dir/${ticker}_report.md" 2>/dev/null || true
             cat "$TEMP_REPORT" >> "$OUTPUT_FILE"
             rm "$TEMP_REPORT"
         fi
 
         if ! $LOUD_MODE && [ -f "$TEMP_LOG" ]; then
+            # Copy to debug dir before appending
+            cp "$TEMP_LOG" "$debug_dir/${ticker}_debug.log" 2>/dev/null || true
             cat "$TEMP_LOG" >> "$OUTPUT_FILE"
             rm "$TEMP_LOG"
         fi
+
+        print_info "Debug files saved to: $debug_dir"
     fi
 
     # Add separator to output file
@@ -319,8 +373,11 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     echo "---" >> "$OUTPUT_FILE"
     echo "" >> "$OUTPUT_FILE"
 
-    # Small delay to allow connections to close cleanly
-    sleep 2
+    # Delay to allow API rate limits (RPM) to reset before the next ticker
+    # A single ticker can trigger ~30 LLM calls in parallel.
+    # Configurable via COOLDOWN_SECONDS env var (default: 60)
+    print_info "Cooling down for ${COOLDOWN_SECONDS} seconds to reset API rate limits..."
+    sleep "$COOLDOWN_SECONDS"
 
 done < "$INPUT_FILE"
 

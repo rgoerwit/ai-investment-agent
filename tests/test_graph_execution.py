@@ -121,8 +121,8 @@ class TestSyncCheckRouter:
         assert result == "__end__"
 
     @patch("src.graph.config")
-    def test_sync_check_returns_pm_on_reject(self, mock_config):
-        """Test router returns Portfolio Manager on REJECT."""
+    def test_sync_check_returns_pm_fast_fail_on_reject(self, mock_config):
+        """Test router returns PM Fast-Fail on REJECT (separate node to avoid edge conflicts)."""
         from src.graph import sync_check_router
 
         mock_config.enable_consultant = False
@@ -137,7 +137,7 @@ class TestSyncCheckRouter:
         config = {}
 
         result = sync_check_router(state, config)
-        assert result == "Portfolio Manager"
+        assert result == "PM Fast-Fail"
 
     @patch("src.graph.config")
     def test_sync_check_returns_list_for_parallel_r1(self, mock_config):

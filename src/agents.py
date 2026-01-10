@@ -11,6 +11,7 @@ FIXED: Corrected memory query parameter name to 'metadata_filter'.
 
 import asyncio
 import json
+import random
 import re
 from collections.abc import Callable
 from datetime import datetime
@@ -80,8 +81,10 @@ async def invoke_with_rate_limit_handling(
             )
 
             if is_rate_limit and attempt < max_attempts - 1:
-                # Extended exponential backoff: 60s, 120s, 180s
-                wait_time = 60 * (attempt + 1)
+                # Extended exponential backoff: 60s, 120s, 180s + random jitter
+                # Jitter prevents "thundering herd" when parallel agents retry at exact same time
+                jitter = random.uniform(1, 10)
+                wait_time = (60 * (attempt + 1)) + jitter
 
                 # Log unless in quiet mode
                 if not quiet_mode:
@@ -90,7 +93,7 @@ async def invoke_with_rate_limit_handling(
                         context=context,
                         attempt=attempt + 1,
                         max_attempts=max_attempts,
-                        wait_seconds=wait_time,
+                        wait_seconds=f"{wait_time:.1f}",
                         error_type=error_type,
                         error_message=str(e)[:200],  # Truncate long errors
                     )
@@ -419,6 +422,23 @@ def filter_messages_by_agent(
     if not messages:
         return []
 
+    # Trace ToolMessages and their agent tags (visible with --verbose flag)
+    tool_msg_agents = []
+    for msg in messages:
+        if isinstance(msg, ToolMessage):
+            tag = (
+                msg.additional_kwargs.get("agent_key")
+                if msg.additional_kwargs
+                else None
+            )
+            tool_msg_agents.append(tag)
+    logger.debug(
+        "filter_messages_tool_tags",
+        agent_key=agent_key,
+        total_tool_messages=len(tool_msg_agents),
+        tool_message_tags=tool_msg_agents,
+    )
+
     filtered = []
     for msg in messages:
         # Always include HumanMessages (initial instructions)
@@ -615,6 +635,21 @@ def create_analyst_node(
             filtered_messages = filter_messages_for_gemini(
                 state.get("messages", []), agent_key=agent_key
             )
+            # Trace message types being sent to LLM (visible with --verbose flag)
+            msg_types = [type(m).__name__ for m in filtered_messages]
+            msg_has_tool_calls = [
+                bool(getattr(m, "tool_calls", None))
+                for m in filtered_messages
+                if hasattr(m, "tool_calls")
+            ]
+            logger.debug(
+                "analyst_filtered_messages",
+                agent_key=agent_key,
+                total_state_messages=len(state.get("messages", [])),
+                filtered_count=len(filtered_messages),
+                message_types=msg_types,
+                has_tool_calls_list=msg_has_tool_calls,
+            )
             context = get_context_from_config(config)
             current_date = (
                 context.trade_date if context else datetime.now().strftime("%Y-%m-%d")
@@ -750,6 +785,17 @@ def create_analyst_node(
                         isinstance(response.tool_calls, list)
                         and len(response.tool_calls) > 0
                     )
+                # DEBUG: Log response details
+                logger.info(
+                    "analyst_response_details",
+                    agent_key=agent_key,
+                    content_type=type(response.content).__name__,
+                    content_len=len(response.content) if response.content else 0,
+                    tool_calls_count=len(response.tool_calls)
+                    if response.tool_calls
+                    else 0,
+                    has_tool_calls=has_tool_calls,
+                )
             except (AttributeError, TypeError):
                 pass
 

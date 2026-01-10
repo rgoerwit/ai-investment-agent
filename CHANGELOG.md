@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.0] - 2026-01-09
+
+### Added
+- **Value Trap Detector** - Agent for identifying value traps via ownership structure analysis
+- **XML Security Boundaries** - Tavily search results now wrapped in `<search_results>` tags with `data_type="external_web_content"` attribute for prompt injection mitigation
+- **Configurable Batch Cooldown** - `COOLDOWN_SECONDS` environment variable for `run_tickers.sh` (default 60s for free tier, 10s for paid)
+- **FY Hint in Date Injection** - Agents now receive fiscal year context to prevent future-dated annual report searches
+
+### Changed
+- **Rate Limit Handling** - Added random jitter (1-10s) to exponential backoff to prevent thundering herd on parallel agent retries
+- **Tavily Truncation** - Now cuts at `</result>` boundaries to preserve valid XML structure instead of arbitrary character positions
+
+### Fixed
+- Fixed undefined function reference in news formatting (`_truncate_tavily_result` → `_format_and_truncate_tavily_result`)
+- Fixed module-level import for `random` in rate limit handling
+- Removed unnecessary `html.escape` that broke Markdown formatting in search results
+
 ## [3.3.0] - 2026-01-05
 
 ### Added
