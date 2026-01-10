@@ -956,3 +956,243 @@ class RedFlagDetector:
             )
 
         return flags
+
+    @staticmethod
+    def extract_moat_signals(fundamentals_report: str) -> dict[str, Any]:
+        """
+        Extract moat signal metrics from Fundamentals Analyst DATA_BLOCK.
+
+        Moat signals are calculated by the fetcher and passed through Junior/Senior
+        Fundamentals. This method extracts the categorical signals (HIGH/STRONG)
+        which are used for threshold logic, plus numeric values for logging.
+
+        IMPORTANT: Threshold decisions use categorical signals only, not numeric
+        values. This avoids ratio/percentage parsing ambiguity (e.g., CFO/NI can
+        legitimately exceed 1.0).
+
+        Args:
+            fundamentals_report: Full fundamentals analyst report text
+
+        Returns:
+            Dict with extracted moat metrics:
+            - margin_stability: HIGH/MEDIUM/LOW or None (used for thresholds)
+            - margin_cv: Coefficient of Variation (float) or None (for logging)
+            - cash_conversion: STRONG/ADEQUATE/WEAK or None (used for thresholds)
+            - cfo_ni_avg: Average CFO/NI ratio (float) or None (for logging)
+        """
+        metrics: dict[str, Any] = {
+            "margin_stability": None,
+            "margin_cv": None,
+            "margin_avg": None,
+            "cash_conversion": None,
+            "cfo_ni_avg": None,
+        }
+
+        if not fundamentals_report:
+            return metrics
+
+        # Handle non-string input gracefully
+        if not isinstance(fundamentals_report, str):
+            try:
+                fundamentals_report = str(fundamentals_report)
+            except Exception:
+                return metrics
+
+        # Extract the LAST DATA_BLOCK (agent self-correction pattern)
+        data_block_pattern = (
+            r"### --- START DATA_BLOCK ---(.+?)### --- END DATA_BLOCK ---"
+        )
+        blocks = list(re.finditer(data_block_pattern, fundamentals_report, re.DOTALL))
+
+        if not blocks:
+            return metrics
+
+        data_block = blocks[-1].group(1)
+
+        # --- CATEGORICAL SIGNALS (Primary - used for threshold logic) ---
+
+        # Extract MOAT_MARGIN_STABILITY
+        stability_match = re.search(
+            r"MOAT_MARGIN_STABILITY:\s*(HIGH|MEDIUM|LOW)", data_block, re.IGNORECASE
+        )
+        if stability_match:
+            metrics["margin_stability"] = stability_match.group(1).upper()
+
+        # Extract MOAT_CASH_CONVERSION
+        cash_match = re.search(
+            r"MOAT_CASH_CONVERSION:\s*(STRONG|ADEQUATE|WEAK)", data_block, re.IGNORECASE
+        )
+        if cash_match:
+            metrics["cash_conversion"] = cash_match.group(1).upper()
+
+        # --- NUMERIC VALUES (Secondary - for logging/detail only) ---
+        # These are NOT used for threshold decisions to avoid parsing ambiguity
+
+        # Extract MOAT_MARGIN_CV (handles trailing punctuation)
+        cv_match = re.search(r"MOAT_MARGIN_CV:\s*([0-9]+\.?[0-9]*)", data_block)
+        if cv_match:
+            try:
+                metrics["margin_cv"] = float(cv_match.group(1))
+            except ValueError:
+                pass  # Non-fatal: we have categorical signal
+
+        # Extract MOAT_GROSS_MARGIN_AVG (handles % suffix and trailing punctuation)
+        avg_match = re.search(
+            r"MOAT_GROSS_MARGIN_AVG:\s*([0-9]+\.?[0-9]*)%?", data_block
+        )
+        if avg_match:
+            try:
+                value = float(avg_match.group(1))
+                # Margin is always 0-100% or 0.0-1.0
+                # If > 1, assume percentage format (e.g., "35.2%")
+                metrics["margin_avg"] = value / 100 if value > 1 else value
+            except ValueError:
+                pass
+
+        # Extract MOAT_CFO_NI_AVG (NO percentage normalization - ratio can exceed 1.0)
+        cfo_match = re.search(r"MOAT_CFO_NI_AVG:\s*([0-9]+\.?[0-9]*)", data_block)
+        if cfo_match:
+            try:
+                # Store raw value - CFO/NI can legitimately be > 1.0
+                # Do NOT apply percentage normalization here
+                metrics["cfo_ni_avg"] = float(cfo_match.group(1))
+            except ValueError:
+                pass  # Non-fatal: we have categorical signal
+
+        logger.debug(
+            "moat_signals_extracted",
+            margin_stability=metrics["margin_stability"],
+            cash_conversion=metrics["cash_conversion"],
+        )
+
+        return metrics
+
+    @staticmethod
+    def detect_moat_flags(
+        fundamentals_report: str, ticker: str = "UNKNOWN"
+    ) -> list[dict]:
+        """
+        Detect economic moat indicators and create BONUS flags (negative risk penalty).
+
+        Unlike red flags (which add risk), moat flags REDUCE the risk tally when
+        strong competitive advantages are detected. Based on S&P Global quantitative
+        moat framework.
+
+        IMPORTANT: Threshold logic uses categorical signals (HIGH/STRONG) only,
+        not numeric values. This avoids parsing ambiguity and makes the system
+        robust to LLM formatting variations.
+
+        Flag types (all are BONUS - negative penalty):
+        - MOAT_DURABLE_ADVANTAGE: Both margin stability HIGH + cash conversion STRONG (-1.0)
+        - MOAT_PRICING_POWER: Margin stability HIGH alone (-0.5)
+        - MOAT_EARNINGS_QUALITY: Cash conversion STRONG alone (-0.5)
+
+        Args:
+            fundamentals_report: Full fundamentals analyst report text
+            ticker: Ticker symbol for logging
+
+        Returns:
+            List of moat flag dicts with negative risk_penalty values (bonuses).
+            Empty list if no moat signals detected or signals are weak/medium.
+        """
+        flags = []
+
+        metrics = RedFlagDetector.extract_moat_signals(fundamentals_report)
+
+        # Use categorical signals for all threshold decisions
+        margin_stability = metrics.get("margin_stability")
+        cash_conversion = metrics.get("cash_conversion")
+
+        # Numeric values for detail/logging only (not used in threshold logic)
+        margin_cv = metrics.get("margin_cv")
+        cfo_ni_avg = metrics.get("cfo_ni_avg")
+
+        # --- BONUS 1: Durable Advantage (Both signals strong) ---
+        if margin_stability == "HIGH" and cash_conversion == "STRONG":
+            detail_parts = []
+            if margin_cv is not None:
+                detail_parts.append(f"Margin CV: {margin_cv:.3f}")
+            if cfo_ni_avg is not None:
+                detail_parts.append(f"CFO/NI: {cfo_ni_avg:.2f}")
+            detail = (
+                "; ".join(detail_parts) if detail_parts else "Multiple moat signals"
+            )
+
+            flags.append(
+                {
+                    "type": "MOAT_DURABLE_ADVANTAGE",
+                    "severity": "POSITIVE",
+                    "detail": f"Pricing power + earnings quality confirmed. {detail}",
+                    "action": "RISK_BONUS",
+                    "risk_penalty": -1.0,
+                    "rationale": (
+                        "Company exhibits both stable gross margins (CV < 8%) and high "
+                        "cash conversion (CFO/NI > 90%) over multiple years. This combination "
+                        "suggests a durable competitive advantage with pricing power."
+                    ),
+                }
+            )
+            logger.info(
+                "moat_flag_durable_advantage",
+                ticker=ticker,
+                margin_stability=margin_stability,
+                cash_conversion=cash_conversion,
+            )
+            # Return early - don't stack individual bonuses on top of combined
+            return flags
+
+        # --- BONUS 2: Pricing Power (Margin stability alone) ---
+        if margin_stability == "HIGH":
+            detail = (
+                f"Gross margin CV: {margin_cv:.3f}"
+                if margin_cv is not None
+                else "CV < 8%"
+            )
+            flags.append(
+                {
+                    "type": "MOAT_PRICING_POWER",
+                    "severity": "POSITIVE",
+                    "detail": f"Stable gross margins over 5 years. {detail}",
+                    "action": "RISK_BONUS",
+                    "risk_penalty": -0.5,
+                    "rationale": (
+                        "Low gross margin volatility (CV < 8%) over 5 years suggests "
+                        "pricing power. Company can maintain margins without aggressive "
+                        "discounting, indicating competitive advantage."
+                    ),
+                }
+            )
+            logger.info(
+                "moat_flag_pricing_power",
+                ticker=ticker,
+                margin_cv=margin_cv,
+            )
+
+        # --- BONUS 3: Earnings Quality (Cash conversion alone) ---
+        if cash_conversion == "STRONG":
+            detail = (
+                f"3Y avg CFO/NI: {cfo_ni_avg:.2f}"
+                if cfo_ni_avg is not None
+                else "> 0.90"
+            )
+            flags.append(
+                {
+                    "type": "MOAT_EARNINGS_QUALITY",
+                    "severity": "POSITIVE",
+                    "detail": f"High cash conversion ratio. {detail}",
+                    "action": "RISK_BONUS",
+                    "risk_penalty": -0.5,
+                    "rationale": (
+                        "CFO/Net Income ratio averaging > 90% over 3 years indicates "
+                        "reported earnings are converting to actual cash flow. Not "
+                        "relying on accounting accruals or channel stuffing."
+                    ),
+                }
+            )
+            logger.info(
+                "moat_flag_earnings_quality",
+                ticker=ticker,
+                cfo_ni_avg=cfo_ni_avg,
+            )
+
+        return flags

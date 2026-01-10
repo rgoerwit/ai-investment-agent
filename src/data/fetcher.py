@@ -13,6 +13,7 @@ Strategy:
 
 import asyncio
 import re
+import statistics
 from collections import namedtuple
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -520,7 +521,158 @@ class SmartMarketDataFetcher(FinancialFetcher):
         except Exception as e:
             logger.debug("statement_extraction_failed", symbol=symbol, error=str(e))
 
+        # --- MOAT SIGNALS ---
+        # Calculate multi-year moat indicators from statements
+        moat_signals = self._calculate_moat_signals(financials, cashflow, symbol)
+        for key, value in moat_signals.items():
+            extracted[key] = value
+            extracted[f"_{key}_source"] = "calculated_from_statements"
+
         return extracted
+
+    def _calculate_moat_signals(
+        self, financials: "pd.DataFrame", cashflow: "pd.DataFrame", symbol: str
+    ) -> dict[str, Any]:
+        """
+        Calculate economic moat signal metrics from multi-year financial statements.
+
+        Uses Coefficient of Variation (CV) for stability measurement - statistically
+        superior to raw standard deviation as it's scale-independent.
+
+        Metrics calculated:
+        1. Gross Margin CV (5-year): Low CV (<8%) indicates pricing power
+        2. CFO/Net Income Ratio (3-year avg): High ratio (>90%) indicates quality earnings
+
+        Args:
+            financials: yfinance financials DataFrame (columns are years, newest first)
+            cashflow: yfinance cashflow DataFrame (columns are years, newest first)
+            symbol: Ticker symbol for logging
+
+        Returns:
+            Dict with moat signal metrics and human-readable assessments.
+            Empty dict if insufficient data.
+
+        Note:
+            Uses sample standard deviation (N-1) via statistics.stdev() for proper
+            small-sample statistics (3-5 data points).
+        """
+        signals: dict[str, Any] = {}
+
+        # Require minimum 3 years of data for meaningful statistics
+        if financials.empty or len(financials.columns) < 3:
+            logger.debug("moat_signals_insufficient_data", symbol=symbol, years=0)
+            return signals
+
+        # --- 1. GROSS MARGIN STABILITY (5-year CV) ---
+        try:
+            if (
+                "Gross Profit" in financials.index
+                and "Total Revenue" in financials.index
+            ):
+                margins = []
+                years_available = min(5, len(financials.columns))
+
+                for i in range(years_available):
+                    try:
+                        gross_profit = financials.loc["Gross Profit"].iloc[i]
+                        revenue = financials.loc["Total Revenue"].iloc[i]
+
+                        # Skip if either is None, NaN, or zero
+                        if (
+                            pd.notna(gross_profit)
+                            and pd.notna(revenue)
+                            and revenue != 0
+                        ):
+                            margin = float(gross_profit) / float(revenue)
+                            # Sanity check: margin should be between -0.5 and 1.0
+                            if -0.5 < margin < 1.0:
+                                margins.append(margin)
+                    except (ValueError, TypeError, KeyError):
+                        continue
+
+                # Require minimum 3 valid data points for meaningful statistics
+                if len(margins) >= 3:
+                    mean_margin = statistics.mean(margins)
+
+                    # CV = StdDev / Mean (only valid if mean > 0)
+                    # Using sample stdev (N-1) for small-sample correctness
+                    if mean_margin > 0.05:  # Require minimum 5% margin
+                        std_margin = statistics.stdev(margins)  # N-1 denominator
+                        cv = std_margin / mean_margin
+
+                        signals["moat_grossMarginCV"] = round(cv, 4)
+                        signals["moat_grossMarginAvg"] = round(mean_margin, 4)
+                        signals["moat_grossMarginYears"] = len(margins)
+
+                        # Human-readable signal (used for threshold logic downstream)
+                        if cv < 0.08:
+                            signals["moat_marginStability"] = "HIGH"
+                        elif cv < 0.15:
+                            signals["moat_marginStability"] = "MEDIUM"
+                        else:
+                            signals["moat_marginStability"] = "LOW"
+
+                        logger.debug(
+                            "moat_margin_calculated",
+                            symbol=symbol,
+                            cv=cv,
+                            avg=mean_margin,
+                            years=len(margins),
+                            signal=signals.get("moat_marginStability"),
+                        )
+        except Exception as e:
+            logger.debug("moat_margin_calc_failed", symbol=symbol, error=str(e))
+
+        # --- 2. CASH CONVERSION QUALITY (3-year CFO/NI ratio) ---
+        try:
+            if (
+                not cashflow.empty
+                and "Operating Cash Flow" in cashflow.index
+                and "Net Income" in financials.index
+            ):
+                ratios = []
+                years_available = min(3, len(financials.columns), len(cashflow.columns))
+
+                for i in range(years_available):
+                    try:
+                        ocf = cashflow.loc["Operating Cash Flow"].iloc[i]
+                        ni = financials.loc["Net Income"].iloc[i]
+
+                        # Only calculate for profitable years (NI > 0)
+                        if pd.notna(ocf) and pd.notna(ni) and float(ni) > 0:
+                            ratio = float(ocf) / float(ni)
+                            # Sanity check: ratio typically 0.3 to 2.5
+                            # (can exceed 1.0 when D&A high relative to capex)
+                            if 0.1 < ratio < 3.0:
+                                ratios.append(ratio)
+                    except (ValueError, TypeError, KeyError):
+                        continue
+
+                if len(ratios) >= 2:
+                    avg_ratio = statistics.mean(ratios)
+                    signals["moat_cfoToNiAvg"] = round(avg_ratio, 4)
+                    signals["moat_cfoToNiYears"] = len(ratios)
+
+                    # Human-readable signal (used for threshold logic downstream)
+                    # Note: ratio > 1.0 is valid (strong cash generation)
+                    if avg_ratio > 0.90:
+                        signals["moat_cashConversion"] = "STRONG"
+                    elif avg_ratio > 0.70:
+                        signals["moat_cashConversion"] = "ADEQUATE"
+                    else:
+                        signals["moat_cashConversion"] = "WEAK"
+
+                    logger.debug(
+                        "moat_cash_conversion_calculated",
+                        symbol=symbol,
+                        avg_ratio=avg_ratio,
+                        years=len(ratios),
+                        signal=signals.get("moat_cashConversion"),
+                    )
+        except Exception as e:
+            logger.debug("moat_cash_conversion_failed", symbol=symbol, error=str(e))
+
+        return signals
 
     async def _fetch_yfinance_enhanced(self, symbol: str) -> dict | None:
         """Fetch yfinance data including statement calculation."""

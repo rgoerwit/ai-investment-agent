@@ -1292,12 +1292,12 @@ NEUTRAL ANALYST (Balanced):\n{neutral_view if neutral_view else "N/A"}"""
         pre_screening_result = state.get("pre_screening_result", "N/A")
         red_flags = list(state.get("red_flags", []))  # Copy to avoid mutating state
 
+        # --- Flag Detection (Risk Bonuses & Penalties) ---
+        from src.validators.red_flag_detector import RedFlagDetector
+
         # --- Value Trap Flag Detection ---
         # Value Trap Detector runs in parallel, so flags are detected here at PM stage
-        # These are WARNING flags (risk penalty) not AUTO_REJECT flags
         if value_trap:
-            from src.validators.red_flag_detector import RedFlagDetector
-
             value_trap_warnings = RedFlagDetector.detect_value_trap_flags(
                 value_trap, state.get("company_of_interest", "UNKNOWN")
             )
@@ -1309,6 +1309,23 @@ NEUTRAL ANALYST (Balanced):\n{neutral_view if neutral_view else "N/A"}"""
                     warning_types=[w["type"] for w in value_trap_warnings],
                     total_risk_penalty=sum(
                         w.get("risk_penalty", 0) for w in value_trap_warnings
+                    ),
+                )
+
+        # --- Moat Signal Detection (Risk Bonuses) ---
+        # Moat signals from fundamentals provide risk bonuses (negative penalties)
+        if fundamentals:
+            moat_bonuses = RedFlagDetector.detect_moat_flags(
+                fundamentals, state.get("company_of_interest", "UNKNOWN")
+            )
+            if moat_bonuses:
+                red_flags.extend(moat_bonuses)
+                logger.info(
+                    "moat_bonuses_detected",
+                    ticker=state.get("company_of_interest", "UNKNOWN"),
+                    bonus_types=[b["type"] for b in moat_bonuses],
+                    total_risk_bonus=sum(
+                        b.get("risk_penalty", 0) for b in moat_bonuses
                     ),
                 )
 
