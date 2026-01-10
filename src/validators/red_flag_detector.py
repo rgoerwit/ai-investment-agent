@@ -746,3 +746,213 @@ class RedFlagDetector:
             )
 
         return warnings
+
+    @staticmethod
+    def extract_value_trap_score(value_trap_report: str) -> dict[str, Any]:
+        """
+        Extract key metrics from Value Trap Detector's VALUE_TRAP_BLOCK output.
+
+        Args:
+            value_trap_report: Full Value Trap Detector report text
+
+        Returns:
+            Dict with extracted metrics:
+            - score: 0-100 score (None if not found)
+            - verdict: TRAP|CAUTIOUS|WATCHABLE|ALIGNED (None if not found)
+            - trap_risk: HIGH|MEDIUM|LOW (None if not found)
+            - activist_present: YES|NO|RUMORED (None if not found)
+            - insider_trend: NET_BUYER|NET_SELLER|NEUTRAL (None if not found)
+        """
+        metrics: dict[str, Any] = {
+            "score": None,
+            "verdict": None,
+            "trap_risk": None,
+            "activist_present": None,
+            "insider_trend": None,
+            "has_catalyst": False,
+        }
+
+        if not value_trap_report:
+            return metrics
+
+        # Handle non-string input (LangGraph can pass list/dict from state pollution)
+        if not isinstance(value_trap_report, str):
+            try:
+                # Try to convert to string
+                value_trap_report = str(value_trap_report)
+            except Exception:
+                return metrics
+
+        # Extract SCORE (case-insensitive, handles "SCORE: 35", "SCORE: 35/100", "SCORE: 35%")
+        score_match = re.search(
+            r"SCORE:\s*(\d+)(?:/100|%)?", value_trap_report, re.IGNORECASE
+        )
+        if score_match:
+            score = int(score_match.group(1))
+            # Clamp to valid range (0-100) to handle LLM hallucinations
+            metrics["score"] = max(0, min(100, score))
+
+        # Extract VERDICT
+        verdict_match = re.search(
+            r"VERDICT:\s*(TRAP|CAUTIOUS|WATCHABLE|ALIGNED)",
+            value_trap_report,
+            re.IGNORECASE,
+        )
+        if verdict_match:
+            metrics["verdict"] = verdict_match.group(1).upper()
+
+        # Extract TRAP_RISK
+        risk_match = re.search(
+            r"TRAP_RISK:\s*(HIGH|MEDIUM|LOW)", value_trap_report, re.IGNORECASE
+        )
+        if risk_match:
+            metrics["trap_risk"] = risk_match.group(1).upper()
+
+        # Extract ACTIVIST_PRESENT
+        activist_match = re.search(
+            r"ACTIVIST_PRESENT:\s*(YES|NO|RUMORED)", value_trap_report, re.IGNORECASE
+        )
+        if activist_match:
+            metrics["activist_present"] = activist_match.group(1).upper()
+
+        # Extract INSIDER_TREND
+        insider_match = re.search(
+            r"INSIDER_TREND:\s*(NET_BUYER|NET_SELLER|NEUTRAL|UNKNOWN)",
+            value_trap_report,
+            re.IGNORECASE,
+        )
+        if insider_match:
+            metrics["insider_trend"] = insider_match.group(1).upper()
+
+        # Check for catalysts (any non-NONE value in CATALYSTS section)
+        catalysts_section = re.search(
+            r"CATALYSTS:(.+?)(?:KEY_RISKS:|$)", value_trap_report, re.DOTALL
+        )
+        if catalysts_section:
+            catalyst_text = catalysts_section.group(1)
+            # Check if any catalyst field has a value other than NONE
+            if re.search(
+                r"(?:INDEX_CANDIDATE|ACTIVIST_RUMOR|RESTRUCTURING|MID_TERM_PLAN):\s*(?!NONE)[A-Za-z]",
+                catalyst_text,
+            ):
+                metrics["has_catalyst"] = True
+
+        logger.debug(
+            "value_trap_metrics_extracted",
+            score=metrics["score"],
+            verdict=metrics["verdict"],
+            trap_risk=metrics["trap_risk"],
+        )
+
+        return metrics
+
+    @staticmethod
+    def detect_value_trap_flags(
+        value_trap_report: str, ticker: str = "UNKNOWN"
+    ) -> list[dict]:
+        """
+        Parse VALUE_TRAP_BLOCK for deterministic warning flags.
+
+        These are WARNINGs, not AUTO_REJECT. Governance issues don't kill companies,
+        they just trap value. The Portfolio Manager should weigh these in final decision.
+
+        Flag types:
+        - VALUE_TRAP_HIGH_RISK: Score < 40 (probable trap)
+        - VALUE_TRAP_MODERATE_RISK: Score 40-60 (cautious)
+        - VALUE_TRAP_VERDICT: Explicit TRAP verdict from agent
+        - NO_CATALYST_DETECTED: No activist, no index candidacy, no restructuring
+
+        Args:
+            value_trap_report: Full Value Trap Detector report text
+            ticker: Ticker symbol for logging
+
+        Returns:
+            List of warning flag dicts with risk_penalty values
+        """
+        flags = []
+
+        metrics = RedFlagDetector.extract_value_trap_score(value_trap_report)
+        score = metrics.get("score")
+        verdict = metrics.get("verdict")
+        has_catalyst = metrics.get("has_catalyst", False)
+        activist_present = metrics.get("activist_present")
+
+        # --- WARNING 1: High Risk Value Trap (Score < 40) ---
+        if score is not None and score < 40:
+            flags.append(
+                {
+                    "type": "VALUE_TRAP_HIGH_RISK",
+                    "severity": "WARNING",
+                    "detail": f"Value Trap Score {score}/100 (< 40 threshold indicates probable trap)",
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 1.0,
+                    "rationale": "Low governance score suggests entrenched ownership, "
+                    "poor capital allocation, or no catalyst for re-rating.",
+                }
+            )
+            logger.warning(
+                "value_trap_flag_high_risk",
+                ticker=ticker,
+                score=score,
+                verdict=verdict,
+            )
+
+        # --- WARNING 2: Moderate Risk Value Trap (Score 40-60) ---
+        elif score is not None and score < 60:
+            flags.append(
+                {
+                    "type": "VALUE_TRAP_MODERATE_RISK",
+                    "severity": "WARNING",
+                    "detail": f"Value Trap Score {score}/100 (40-60 range indicates mixed signals)",
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 0.5,
+                    "rationale": "Moderate governance concerns. Some trap characteristics "
+                    "present but not conclusive. Monitor for catalyst development.",
+                }
+            )
+            logger.info(
+                "value_trap_flag_moderate_risk",
+                ticker=ticker,
+                score=score,
+                verdict=verdict,
+            )
+
+        # --- WARNING 3: Explicit TRAP Verdict ---
+        if verdict == "TRAP":
+            # Only add if we haven't already flagged for low score
+            if not any(f["type"] == "VALUE_TRAP_HIGH_RISK" for f in flags):
+                flags.append(
+                    {
+                        "type": "VALUE_TRAP_VERDICT",
+                        "severity": "WARNING",
+                        "detail": "Value Trap Detector verdict: TRAP",
+                        "action": "RISK_PENALTY",
+                        "risk_penalty": 1.0,
+                        "rationale": "Agent assessment indicates high probability of value trap. "
+                        "Stock may remain cheap indefinitely without catalyst.",
+                    }
+                )
+                logger.warning(
+                    "value_trap_flag_verdict", ticker=ticker, verdict=verdict
+                )
+
+        # --- WARNING 4: No Catalyst Detected ---
+        if not has_catalyst and activist_present == "NO":
+            flags.append(
+                {
+                    "type": "NO_CATALYST_DETECTED",
+                    "severity": "WARNING",
+                    "detail": "No activist presence, no index candidacy, no restructuring signals",
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 0.5,
+                    "rationale": "Without a catalyst, cheap stocks can remain cheap. "
+                    "Value realization depends on external pressure or internal change.",
+                }
+            )
+            logger.info(
+                "value_trap_flag_no_catalyst",
+                ticker=ticker,
+                activist_present=activist_present,
+            )
+
+        return flags

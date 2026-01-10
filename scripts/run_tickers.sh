@@ -20,6 +20,12 @@ export GRPC_VERBOSITY=ERROR
 # Configuration defaults
 DEFAULT_INPUT_FILE="scratch/sample_tickers.txt"
 DEFAULT_OUTPUT_FILE="scratch/ticker_analysis_results.md"
+DEFAULT_LOG_FILE="scratch/ticker_analysis_info.txt"
+
+# Cooldown between tickers (seconds). Configurable via environment variable.
+# - Free tier (15 RPM): 60 seconds recommended (default)
+# - Paid tier (360 RPM): 5-10 seconds sufficient
+COOLDOWN_SECONDS="${COOLDOWN_SECONDS:-60}"
 
 # Parse flags
 LOUD_MODE=false
@@ -71,9 +77,8 @@ EXAMPLES:
     # Quick mode (faster analysis)
     ./scripts/run_tickers.sh --quick
 
-    # Loud mode with real-time log monitoring
-    ./scripts/run_tickers.sh --loud 2>scratch/ticker_analysis_info.txt &
-    tail -f scratch/ticker_analysis_info.txt
+    # Loud mode (logs to console and scratch/ticker_analysis_info.txt)
+    ./scripts/run_tickers.sh --loud
 
     # Verbose mode (detailed reports, quiet logs)
     ./scripts/run_tickers.sh --verbose
@@ -81,10 +86,21 @@ EXAMPLES:
     # Custom files with quick mode
     ./scripts/run_tickers.sh --quick my_tickers.txt my_results.md
 
+    # Paid tier with shorter cooldown (360 RPM)
+    COOLDOWN_SECONDS=10 ./scripts/run_tickers.sh --quick
+
+ENVIRONMENT VARIABLES:
+    COOLDOWN_SECONDS    Seconds to wait between tickers (default: 60)
+                        Free tier (15 RPM): use 60 (default)
+                        Paid tier (360 RPM): use 5-10
+
 NOTES:
     - Images are auto-saved to {OUTPUT_DIR}/images/ based on OUTPUT_FILE path
-    - In loud mode, logs go to stderr (can redirect with 2>)
+    - Logs (stdout/stderr) are preserved in scratch/ticker_analysis_info.txt
+    - In loud mode, logs also go to stderr
     - Options can be combined: --loud --quick
+    - Failed analyses save debug files to {OUTPUT_DIR}/debug_failures/
+    - "Soft failures" (PM failed but Python exit 0) are also captured
 
 EOF
             exit 0
@@ -104,6 +120,7 @@ done
 # Restore positional arguments
 INPUT_FILE="${POSITIONAL_ARGS[0]:-$DEFAULT_INPUT_FILE}"
 OUTPUT_FILE="${POSITIONAL_ARGS[1]:-$DEFAULT_OUTPUT_FILE}"
+LOG_FILE="$DEFAULT_LOG_FILE"
 
 # Auto-detect imagedir from OUTPUT_FILE path
 # Extract the directory part of OUTPUT_FILE and append /images
@@ -115,12 +132,26 @@ else
 fi
 
 # Cleanup function for temp files on interrupt/exit
+# IMPORTANT: Only cleans up on success (exit 0) or interrupt
+# On failure, temp files are preserved for debugging
 cleanup_temp_files() {
     local exit_code=$?
     if [[ -n "${OUTPUT_DIR:-}" ]]; then
-        # Remove any leftover temp files
-        rm -f "${OUTPUT_DIR}"/.temp_analysis_*.md 2>/dev/null || true
-        rm -f "${OUTPUT_DIR}"/.temp_analysis_*.log 2>/dev/null || true
+        if [[ $exit_code -eq 0 ]]; then
+            # Success: remove temp files
+            rm -f "${OUTPUT_DIR}"/.temp_analysis_*.md 2>/dev/null || true
+            rm -f "${OUTPUT_DIR}"/.temp_analysis_*.log 2>/dev/null || true
+        else
+            # Failure: preserve temp files for debugging
+            # Move to debug directory instead of deleting
+            local debug_dir="${OUTPUT_DIR}/debug_$(date +%Y%m%d_%H%M%S)"
+            if ls "${OUTPUT_DIR}"/.temp_analysis_*.{md,log} >/dev/null 2>&1; then
+                mkdir -p "$debug_dir"
+                mv "${OUTPUT_DIR}"/.temp_analysis_*.md "$debug_dir/" 2>/dev/null || true
+                mv "${OUTPUT_DIR}"/.temp_analysis_*.log "$debug_dir/" 2>/dev/null || true
+                echo -e "${YELLOW}[DEBUG]${NC} Temp files preserved in: $debug_dir"
+            fi
+        fi
     fi
     exit $exit_code
 }
@@ -147,11 +178,10 @@ print_success() {
     echo -e "${GREEN}[SUCCESS]${NC} $1"
 }
 
-# Ensure output directory exists
+# Ensure output directories exist
 mkdir -p "$(dirname "$OUTPUT_FILE")"
-
-# Ensure image directory exists
 mkdir -p "$IMAGE_DIR"
+mkdir -p "$(dirname "$LOG_FILE")"
 
 # Check if input file exists
 if [[ ! -f "$INPUT_FILE" ]]; then
@@ -195,6 +225,16 @@ Total tickers: $ticker_count
 
 EOF
 
+# Initialize log file with header
+cat > "$LOG_FILE" << EOF
+========================================
+Batch Analysis Run
+Date: $(date)
+Input: $INPUT_FILE
+Output: $OUTPUT_FILE
+========================================
+EOF
+
 # Build mode description for logging
 MODE_DESC="default"
 if $LOUD_MODE && $QUICK_MODE; then
@@ -213,6 +253,7 @@ print_info "Starting batch analysis..."
 print_info "Mode: $MODE_DESC"
 print_info "Input: $INPUT_FILE ($ticker_count tickers)"
 print_info "Output: $OUTPUT_FILE"
+print_info "Logs:  $LOG_FILE"
 print_info "Images: $IMAGE_DIR"
 echo ""
 
@@ -270,22 +311,48 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     fi
 
     # Run analysis
-    # In loud mode: logs to terminal (stderr/stdout)
-    # In other modes: logs captured to temp log
     SUCCESS=false
 
+    # Log start of ticker in master log
+    echo "" >> "$LOG_FILE"
+    echo "--- Analyzing $ticker [$(date)] ---" >> "$LOG_FILE"
+
     if $LOUD_MODE; then
-        if $PYTHON_CMD; then
+        # In loud mode: logs to terminal AND master log file
+        # pipefail is set, so if python fails, this returns failure
+        if $PYTHON_CMD 2>&1 | tee -a "$LOG_FILE"; then
             SUCCESS=true
         fi
     else
+        # In quiet mode: logs capture to temp log
         if $PYTHON_CMD > "$TEMP_LOG" 2>&1; then
             SUCCESS=true
+        fi
+
+        # Append temp log to master log immediately
+        if [ -f "$TEMP_LOG" ]; then
+            cat "$TEMP_LOG" >> "$LOG_FILE"
         fi
     fi
 
     if $SUCCESS; then
-        print_success "Completed: $ticker"
+        # Check if report contains Portfolio Manager failure (soft failure detection)
+        # Python exits 0 but report shows PM didn't produce output
+        if [ -f "$TEMP_REPORT" ] && grep -q "Portfolio Manager failed to produce final decision" "$TEMP_REPORT"; then
+            print_error "Soft failure: $ticker (Portfolio Manager failed)"
+            failed=$((failed + 1))
+
+            # Treat as failure for debugging purposes
+            local debug_dir="${OUTPUT_DIR}/debug_failures"
+            mkdir -p "$debug_dir"
+            cp "$TEMP_REPORT" "$debug_dir/${ticker}_report.md" 2>/dev/null || true
+            if ! $LOUD_MODE && [ -f "$TEMP_LOG" ]; then
+                cp "$TEMP_LOG" "$debug_dir/${ticker}_debug.log" 2>/dev/null || true
+            fi
+            print_info "Debug files saved to: $debug_dir"
+        else
+            print_success "Completed: $ticker"
+        fi
 
         # Append report to main output file
         if [ -f "$TEMP_REPORT" ]; then
@@ -293,8 +360,22 @@ while IFS= read -r line || [[ -n "$line" ]]; do
             rm "$TEMP_REPORT"
         fi
 
-        # In non-loud mode, append logs if they exist (usually empty with --quiet)
+        # In non-loud mode, we have already appended logs to master log.
+        # We also remove the temp log.
         if ! $LOUD_MODE && [ -f "$TEMP_LOG" ]; then
+            # The original script appended logs to OUTPUT_FILE here.
+            # We will KEEP that behavior for OUTPUT_FILE to maintain the "report" completeness if desired,
+            # or maybe the user wants logs separated?
+            # The prompt said "preserve stderr... default log file should be ticker_analysis_info.txt"
+            # It didn't explicitly say "remove logs from the markdown report".
+            # However, typically if you separate logs, you don't want them cluttering the report.
+            # But the original script had:
+            # cat "$TEMP_LOG" >> "$OUTPUT_FILE"
+            # I will preserve this behavior to be safe, unless it conflicts with the goal.
+            # But "preserve stderr" was the goal. I've done that in LOG_FILE.
+            # I'll stick to the existing behavior of appending to OUTPUT_FILE as well,
+            # to ensure I don't break the existing report format.
+
             cat "$TEMP_LOG" >> "$OUTPUT_FILE"
             rm "$TEMP_LOG"
         fi
@@ -302,16 +383,25 @@ while IFS= read -r line || [[ -n "$line" ]]; do
         print_error "Failed: $ticker (check logs and $OUTPUT_FILE for details)"
         failed=$((failed + 1))
 
-        # Even on failure, append what we have
+        # On failure: preserve temp files for debugging, then append to output
+        local debug_dir="${OUTPUT_DIR}/debug_failures"
+        mkdir -p "$debug_dir"
+
         if [ -f "$TEMP_REPORT" ]; then
+            # Copy to debug dir before appending (preserve for analysis)
+            cp "$TEMP_REPORT" "$debug_dir/${ticker}_report.md" 2>/dev/null || true
             cat "$TEMP_REPORT" >> "$OUTPUT_FILE"
             rm "$TEMP_REPORT"
         fi
 
         if ! $LOUD_MODE && [ -f "$TEMP_LOG" ]; then
+            # Copy to debug dir before appending
+            cp "$TEMP_LOG" "$debug_dir/${ticker}_debug.log" 2>/dev/null || true
             cat "$TEMP_LOG" >> "$OUTPUT_FILE"
             rm "$TEMP_LOG"
         fi
+
+        print_info "Debug files saved to: $debug_dir"
     fi
 
     # Add separator to output file
@@ -319,8 +409,11 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     echo "---" >> "$OUTPUT_FILE"
     echo "" >> "$OUTPUT_FILE"
 
-    # Small delay to allow connections to close cleanly
-    sleep 2
+    # Delay to allow API rate limits (RPM) to reset before the next ticker
+    # A single ticker can trigger ~30 LLM calls in parallel.
+    # Configurable via COOLDOWN_SECONDS env var (default: 60)
+    print_info "Cooling down for ${COOLDOWN_SECONDS} seconds to reset API rate limits..."
+    sleep "$COOLDOWN_SECONDS"
 
 done < "$INPUT_FILE"
 
@@ -332,4 +425,5 @@ echo "Total processed: $processed"
 echo "Successful: $((processed - failed))"
 echo "Failed: $failed"
 echo "Results saved to: $OUTPUT_FILE"
-echo "Images saved to: $IMAGE_DIR"
+echo "Logs saved to:    $LOG_FILE"
+echo "Images saved to:  $IMAGE_DIR"

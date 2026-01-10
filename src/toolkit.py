@@ -5,7 +5,6 @@ Updated for LangChain/LangGraph Fall 2025 standards.
 """
 
 import asyncio
-import html
 import math
 from typing import Annotated, Any
 
@@ -63,11 +62,50 @@ if _tavily_api_key:
 else:
     logger.warning("TAVILY_API_KEY not set. Tavily tools disabled.")
 
+# Register tavily_tool with the shared utility module (breaks circular import)
+from src.tavily_utils import set_tavily_tool, tavily_search_with_timeout
 
-def _truncate_tavily_result(result: Any, max_chars: int | None = None) -> str:
+if tavily_tool:
+    set_tavily_tool(tavily_tool)
+
+# Alias for backward compatibility within this module
+_tavily_search_with_timeout = tavily_search_with_timeout
+
+
+# XML wrapper constants for Tavily results
+# Used to create security boundaries around untrusted web content
+_TAVILY_XML_HEADER = '<search_results source="tavily" data_type="external_web_content">'
+_TAVILY_XML_FOOTER = "</search_results>"
+_TAVILY_TRUNCATION_SUFFIX = "\n[...truncated]\n</search_results>"
+# Reserve space for truncation suffix + safety margin
+_TAVILY_TRUNCATION_RESERVE = len(_TAVILY_TRUNCATION_SUFFIX) + 10
+
+
+def _sanitize_for_xml_wrapper(text: str) -> str:
+    """Remove sequences that could break out of our XML wrapper.
+
+    We only sanitize the specific closing tag that could break our wrapper,
+    not full XML escaping, since LLMs handle semantic boundaries robustly.
     """
-    Truncate Tavily search result to prevent token bloat.
+    return text.replace("</search_results>", "[removed]")
 
+
+def _format_and_truncate_tavily_result(
+    result: Any, max_chars: int | None = None
+) -> str:
+    """
+    Format and truncate Tavily search result with security boundaries.
+
+    Security: Wraps external web content in XML tags to mitigate prompt injection.
+    The <search_results> boundary signals to the LLM that enclosed content is
+    untrusted external data, not instructions.
+
+    Data Fidelity: Preserves Tavily metadata (relevance score, published_date)
+    that agents use for quality/recency filtering.
+
+    Truncation: Cuts at </result> boundaries to preserve valid structure.
+
+    Note: max_chars includes ~80 chars of XML wrapper overhead.
     Uses TAVILY_MAX_CHARS from config (default 7000 chars ~1750 tokens).
     """
     from src.config import config
@@ -75,10 +113,77 @@ def _truncate_tavily_result(result: Any, max_chars: int | None = None) -> str:
     if max_chars is None:
         max_chars = config.tavily_max_chars
 
-    result_str = str(result)
-    if len(result_str) > max_chars:
-        return result_str[:max_chars] + "\n[...truncated for efficiency]"
-    return result_str
+    formatted_str = ""
+
+    # Handle list of results (standard Tavily format)
+    if isinstance(result, list):
+        formatted_items = []
+        for item in result:
+            if isinstance(item, dict):
+                # Extract and sanitize content to prevent XML wrapper breakout
+                title = _sanitize_for_xml_wrapper(str(item.get("title", "No Title")))
+                content = _sanitize_for_xml_wrapper(
+                    str(item.get("content", "No Content"))
+                )
+                url = _sanitize_for_xml_wrapper(str(item.get("url", "No URL")))
+
+                # Preserve Tavily metadata for agent quality/recency filtering
+                score = item.get("score")
+                published = item.get("published_date")
+
+                # Build result with available metadata
+                relevance_attr = (
+                    f' relevance="{score:.2f}"' if score is not None else ""
+                )
+                published_attr = f' published="{published}"' if published else ""
+
+                formatted_items.append(
+                    f"<result{relevance_attr}{published_attr}>\n"
+                    f"<title>{title}</title>\n"
+                    f"<url>{url}</url>\n"
+                    f"<summary>{content}</summary>\n"
+                    f"</result>"
+                )
+            else:
+                # Non-dict items: sanitize and wrap
+                sanitized = _sanitize_for_xml_wrapper(str(item))
+                formatted_items.append(f"<result><raw>{sanitized}</raw></result>")
+        formatted_str = "\n".join(formatted_items)
+
+    # Handle dict wrapper (sometimes Tavily returns {'results': [...]})
+    elif (
+        isinstance(result, dict)
+        and "results" in result
+        and isinstance(result["results"], list)
+    ):
+        # Recursively format the inner list
+        return _format_and_truncate_tavily_result(result["results"], max_chars)
+
+    # Fallback for strings or other types
+    else:
+        sanitized = _sanitize_for_xml_wrapper(str(result))
+        formatted_str = f"<result><raw>{sanitized}</raw></result>"
+
+    # Wrap in security boundary tags
+    wrapped = f"{_TAVILY_XML_HEADER}\n{formatted_str}\n{_TAVILY_XML_FOOTER}"
+
+    # Truncate at result boundaries to preserve valid XML structure
+    if len(wrapped) > max_chars:
+        search_limit = max_chars - _TAVILY_TRUNCATION_RESERVE
+        last_complete_result = wrapped.rfind("</result>", 0, search_limit)
+
+        if last_complete_result > 0:
+            # Cut after the last complete result
+            cut_point = last_complete_result + len("</result>")
+            return wrapped[:cut_point] + _TAVILY_TRUNCATION_SUFFIX
+        else:
+            # Single result exceeds limit - truncate with warning
+            return (
+                wrapped[:search_limit]
+                + "\n[...truncated mid-result]\n</search_results>"
+            )
+
+    return wrapped
 
 
 async def fetch_with_timeout(coroutine, timeout_seconds=10, error_msg="Timeout"):
@@ -267,30 +372,24 @@ async def get_news(
             if search_query
             else f'"{company_name}" (earnings OR merger OR acquisition OR regulatory)'
         )
-        try:
-            general_result = await tavily_tool.ainvoke({"query": general_query})
-            if general_result:
-                # Sanitize and truncate using global limit
-                sanitized = html.escape(_truncate_tavily_result(general_result))
-                results.append(f"=== GENERAL NEWS ===\n{sanitized}\n")
-        except Exception as e:
-            logger.warning(f"General news search failed: {e}")
+        general_result = await _tavily_search_with_timeout({"query": general_query})
+        if general_result:
+            formatted = _format_and_truncate_tavily_result(general_result)
+            if formatted.strip():
+                results.append(f"=== GENERAL NEWS ===\n{formatted}\n")
 
         # 2. Local Search - Use Clean Name
         if local_hint and not search_query:
             local_query = (
                 f'"{company_name}" {local_hint} (earnings OR guidance OR strategy)'
             )
-            try:
-                local_result = await tavily_tool.ainvoke({"query": local_query})
-                if local_result:
-                    # Sanitize and truncate using global limit
-                    sanitized_local = html.escape(_truncate_tavily_result(local_result))
+            local_result = await _tavily_search_with_timeout({"query": local_query})
+            if local_result:
+                formatted_local = _format_and_truncate_tavily_result(local_result)
+                if formatted_local.strip():
                     results.append(
-                        f"=== LOCAL/REGIONAL NEWS SOURCES ===\n{sanitized_local}\n"
+                        f"=== LOCAL/REGIONAL NEWS SOURCES ===\n{formatted_local}\n"
                     )
-            except Exception as e:
-                logger.warning(f"Local news search failed: {e}")
 
         if not results:
             return f"No news found for {company_name}."
@@ -359,7 +458,29 @@ async def get_social_media_sentiment(ticker: str) -> str:
     try:
         # Try to resolve company name for better context if needed later
         data = await stocktwits_api.get_sentiment(ticker)
-        return str(data)
+
+        # Check for errors
+        if "error" in data:
+            return f"StockTwits Sentiment Error: {data.get('error')}"
+
+        # Format as readable text
+        summary = (
+            f"StockTwits Sentiment for {data.get('ticker')}:\n"
+            f"- Bullish: {data.get('bullish_pct')}% ({data.get('bullish_count')} msgs)\n"
+            f"- Bearish: {data.get('bearish_pct')}% ({data.get('bearish_count')} msgs)\n"
+            f"- Total Volume (last 30): {data.get('total_messages_last_30')}\n\n"
+            "Sample Messages:\n"
+        )
+
+        messages = data.get("messages", [])
+        if messages:
+            for msg in messages:
+                summary += f"- {msg}\n"
+        else:
+            summary += "- No recent messages found.\n"
+
+        return summary
+
     except Exception as e:
         return f"Error getting sentiment: {str(e)}"
 
@@ -369,8 +490,12 @@ async def get_macroeconomic_news(trade_date: str) -> str:
     """Get macroeconomic news context for a specific date."""
     if not tavily_tool:
         return "Tool unavailable"
-    result = await tavily_tool.ainvoke({"query": f"macroeconomic news {trade_date}"})
-    return _truncate_tavily_result(result)
+    result = await _tavily_search_with_timeout(
+        {"query": f"macroeconomic news {trade_date}"}
+    )
+    if not result:
+        return "Macroeconomic news search timed out or failed."
+    return _format_and_truncate_tavily_result(result)
 
 
 @tool
@@ -397,8 +522,10 @@ async def get_fundamental_analysis(
         # 1. Primary Search: Ticker-based (Most specific to the listing)
         # Use strict quoting for the ticker name if we have it, otherwise just ticker
         ticker_query = f"{ticker} stock analyst coverage count consensus rating American Depositary Receipt exchange listing ADR status"
-        ticker_results = await tavily_tool.ainvoke({"query": ticker_query})
-        ticker_results_str = str(ticker_results)
+        ticker_results = await _tavily_search_with_timeout({"query": ticker_query})
+        ticker_results_str = (
+            _format_and_truncate_tavily_result(ticker_results) if ticker_results else ""
+        )
 
         # Check result quality
         # If results are empty or very short (< 200 chars), the ticker search essentially failed.
@@ -409,13 +536,14 @@ async def get_fundamental_analysis(
             if company_name and company_name != ticker:
                 # Use quoted company name for strictness
                 name_query = f'"{company_name}" stock analyst coverage count consensus rating American Depositary Receipt ADR status'
-                name_results = await tavily_tool.ainvoke({"query": name_query})
-                return (
-                    f"Fundamental Search Results for {company_name} ({ticker}) [Source: Fallback Name Search]:\n"
-                    f"{_truncate_tavily_result(name_results)}\n\n"
-                    f"(Note: Primary ticker search yielded insufficient data, switched to company name search)"
-                )
-            return f"Fundamental Search Results for {ticker} (Limited Data):\n{_truncate_tavily_result(ticker_results)}"
+                name_results = await _tavily_search_with_timeout({"query": name_query})
+                if name_results:
+                    return (
+                        f"Fundamental Search Results for {company_name} ({ticker}) [Source: Fallback Name Search]:\n"
+                        f"{_format_and_truncate_tavily_result(name_results)}\n\n"
+                        f"(Note: Primary ticker search yielded insufficient data, switched to company name search)"
+                    )
+            return f"Fundamental Search Results for {ticker} (Limited Data):\n{ticker_results_str}"
 
         # CASE B: SUCCESS BUT POTENTIAL ADR MISS -> Surgical Append
         # Check if the ticker results actually mention ADR/Depositary keywords
@@ -438,22 +566,24 @@ async def get_fundamental_analysis(
             adr_query = (
                 f'"{company_name}" American Depositary Receipt ADR ticker status'
             )
-            adr_results = await tavily_tool.ainvoke({"query": adr_query})
-            adr_results_str = str(adr_results)
+            adr_results = await _tavily_search_with_timeout({"query": adr_query})
+            adr_results_str = (
+                _format_and_truncate_tavily_result(adr_results) if adr_results else ""
+            )
 
             # Only append if the surgical search actually found something relevant to avoid noise
             if any(kw.lower() in adr_results_str.lower() for kw in adr_keywords):
                 combined_results = (
                     f"Fundamental Search Results for {ticker} [Primary Source]:\n"
-                    f"{_truncate_tavily_result(ticker_results)}\n\n"
+                    f"{ticker_results_str}\n\n"
                     f"=== SUPPLEMENTAL ADR SEARCH ===\n"
                     f"(Primary ticker search missed ADR info, found via name search for '{company_name}')\n"
-                    f"{_truncate_tavily_result(adr_results)}"
+                    f"{adr_results_str}"
                 )
                 return combined_results
 
         # Case C: Success and ADR info found (or no name available to double check)
-        return f"Fundamental Search Results for {ticker}:\n{_truncate_tavily_result(ticker_results)}"
+        return f"Fundamental Search Results for {ticker}:\n{ticker_results_str}"
 
     except Exception as e:
         return f"Error searching for fundamentals: {e}"
@@ -492,13 +622,14 @@ async def search_foreign_sources(
             query=full_query[:100],  # Truncate for logging
         )
 
-        results = await tavily_tool.ainvoke({"query": full_query})
+        results = await _tavily_search_with_timeout({"query": full_query})
 
         if not results:
             return f"No results found for foreign source search: {search_query}"
 
         # Format results for agent consumption (with truncation)
-        results_str = _truncate_tavily_result(results)
+        # Use shared formatter instead of raw str() dump
+        results_str = _format_and_truncate_tavily_result(results)
 
         # Add context header
         output = f"""### Foreign Source Search Results
@@ -666,40 +797,214 @@ async def search_legal_tax_disclosures(
         query_length=len(query),
     )
 
-    try:
-        results = await tavily_tool.ainvoke({"query": query})
-        results_str = _truncate_tavily_result(results, max_chars=2500)
+    results = await _tavily_search_with_timeout({"query": query})
 
-        searches = []
-        if is_pfic_risk:
-            searches.append("PFIC")
-        if is_china_connected:
-            searches.append("VIE")
+    searches = []
+    if is_pfic_risk:
+        searches.append("PFIC")
+    if is_china_connected:
+        searches.append("VIE")
 
+    if not results:
         return json.dumps(
             {
+                "error": "Search timed out or failed",
                 "searches_performed": searches,
                 "pfic_relevant": is_pfic_risk,
                 "vie_relevant": is_china_connected,
                 "withholding_rate": withholding_rate,
                 "country": country,
                 "sector": sector,
-                "results": results_str,
             }
         )
 
+    # Use shared formatter
+    results_str = _format_and_truncate_tavily_result(results, max_chars=2500)
+
+    return json.dumps(
+        {
+            "searches_performed": searches,
+            "pfic_relevant": is_pfic_risk,
+            "vie_relevant": is_china_connected,
+            "withholding_rate": withholding_rate,
+            "country": country,
+            "sector": sector,
+            "results": results_str,
+        }
+    )
+
+
+@tool
+async def get_ownership_structure(
+    ticker: Annotated[str, "Stock ticker symbol (e.g., '7203.T', '0005.HK')"],
+) -> str:
+    """
+    Get institutional holders, insider transactions, and major shareholders.
+
+    Returns structured ownership data for governance and value trap analysis.
+    Includes: top institutional holders, recent insider transactions,
+    and major holder concentration.
+
+    Args:
+        ticker: Stock ticker symbol with exchange suffix
+
+    Returns:
+        JSON string with ownership data or error message
+    """
+    normalized = normalize_ticker(ticker)
+    logger.info("ownership_structure_lookup", ticker=normalized)
+
+    result = {
+        "ticker": normalized,
+        "institutional_holders": [],
+        "institutional_holders_status": "PENDING",  # FOUND, EMPTY, DATA_UNAVAILABLE
+        "insider_transactions": [],
+        "insider_transactions_status": "PENDING",  # FOUND, EMPTY, DATA_UNAVAILABLE
+        "major_holders": {},
+        "major_holders_status": "PENDING",  # FOUND, EMPTY, DATA_UNAVAILABLE
+        "ownership_concentration": None,
+        "insider_trend": "UNKNOWN",
+        "data_quality": "COMPLETE",
+    }
+
+    try:
+        yf_ticker = yf.Ticker(normalized)
+
+        # Top institutional holders
+        try:
+            inst = yf_ticker.institutional_holders
+            if inst is None:
+                # API returned None - data unavailable (different from zero holders)
+                result["institutional_holders_status"] = "DATA_UNAVAILABLE"
+                result["data_quality"] = "PARTIAL"
+            elif inst.empty:
+                # DataFrame exists but is empty - genuinely no institutional holders
+                result["institutional_holders_status"] = "EMPTY"
+            else:
+                # Convert to list of dicts, handle NaN values
+                inst_records = inst.head(10).to_dict("records")
+                # Sanitize for JSON
+                for record in inst_records:
+                    for key, value in record.items():
+                        if pd.isna(value):
+                            record[key] = None
+                        elif hasattr(value, "isoformat"):  # Handle Timestamp
+                            record[key] = value.isoformat()
+                result["institutional_holders"] = inst_records
+                result["institutional_holders_status"] = "FOUND"
+        except Exception as e:
+            logger.debug("institutional_holders_error", ticker=normalized, error=str(e))
+            result["institutional_holders_status"] = "DATA_UNAVAILABLE"
+            result["data_quality"] = "PARTIAL"
+
+        # Recent insider transactions
+        try:
+            insider = yf_ticker.insider_transactions
+            if insider is None:
+                # API returned None - data unavailable
+                result["insider_transactions_status"] = "DATA_UNAVAILABLE"
+                result["data_quality"] = "PARTIAL"
+            elif insider.empty:
+                # DataFrame exists but is empty - genuinely no insider transactions
+                result["insider_transactions_status"] = "EMPTY"
+            else:
+                insider_records = insider.head(15).to_dict("records")
+                # Sanitize for JSON
+                for record in insider_records:
+                    for key, value in record.items():
+                        if pd.isna(value):
+                            record[key] = None
+                        elif hasattr(value, "isoformat"):
+                            record[key] = value.isoformat()
+                result["insider_transactions"] = insider_records
+                result["insider_transactions_status"] = "FOUND"
+
+                # Calculate insider trend (net buyer/seller)
+                buy_count = 0
+                sell_count = 0
+                for txn in insider_records:
+                    txn_type = str(txn.get("Text", "")).lower()
+                    if "buy" in txn_type or "purchase" in txn_type:
+                        buy_count += 1
+                    elif "sell" in txn_type or "sale" in txn_type:
+                        sell_count += 1
+
+                if buy_count > sell_count * 1.5:
+                    result["insider_trend"] = "NET_BUYER"
+                elif sell_count > buy_count * 1.5:
+                    result["insider_trend"] = "NET_SELLER"
+                else:
+                    result["insider_trend"] = "NEUTRAL"
+        except Exception as e:
+            logger.debug("insider_transactions_error", ticker=normalized, error=str(e))
+            result["insider_transactions_status"] = "DATA_UNAVAILABLE"
+            result["data_quality"] = "PARTIAL"
+
+        # Major holders summary
+        try:
+            major = yf_ticker.major_holders
+            if major is None:
+                # API returned None - data unavailable
+                result["major_holders_status"] = "DATA_UNAVAILABLE"
+                result["data_quality"] = "PARTIAL"
+            elif major.empty:
+                # DataFrame exists but is empty - genuinely no major holder data
+                result["major_holders_status"] = "EMPTY"
+            else:
+                # Convert to dict, handling various formats
+                major_dict = {}
+                for idx, row in major.iterrows():
+                    if len(row) >= 2:
+                        key = str(row.iloc[1]) if pd.notna(row.iloc[1]) else str(idx)
+                        value = row.iloc[0]
+                        if pd.notna(value):
+                            # Convert percentage strings
+                            if isinstance(value, str) and "%" in value:
+                                major_dict[key] = value
+                            else:
+                                major_dict[key] = (
+                                    float(value)
+                                    if isinstance(value, int | float)
+                                    else str(value)
+                                )
+                result["major_holders"] = major_dict
+                result["major_holders_status"] = "FOUND"
+
+                # Calculate ownership concentration (top 5 institutional)
+                if result["institutional_holders"]:
+                    top5_pct = sum(
+                        float(h.get("pctHeld", 0) or 0) * 100
+                        for h in result["institutional_holders"][:5]
+                    )
+                    result["ownership_concentration"] = round(top5_pct, 2)
+        except Exception as e:
+            logger.debug("major_holders_error", ticker=normalized, error=str(e))
+            result["major_holders_status"] = "DATA_UNAVAILABLE"
+            result["data_quality"] = "PARTIAL"
+
+        logger.info(
+            "ownership_structure_complete",
+            ticker=normalized,
+            institutional_count=len(result["institutional_holders"]),
+            insider_txn_count=len(result["insider_transactions"]),
+            insider_trend=result["insider_trend"],
+            data_quality=result["data_quality"],
+        )
+
+        return json.dumps(result, indent=2, default=str)
+
     except Exception as e:
-        logger.error("legal_tax_search_error", ticker=ticker, error=str(e))
+        logger.error("ownership_structure_error", ticker=normalized, error=str(e))
         return json.dumps(
             {
+                "ticker": normalized,
                 "error": str(e),
-                "searches_performed": [],
-                "pfic_relevant": is_pfic_risk,
-                "vie_relevant": is_china_connected,
-                "withholding_rate": withholding_rate,
-                "country": country,
-                "sector": sector,
-            }
+                "institutional_holders": [],
+                "insider_transactions": [],
+                "major_holders": {},
+                "data_quality": "ERROR",
+            },
+            indent=2,
         )
 
 
@@ -747,6 +1052,14 @@ class Toolkit:
         """Tools for Legal Counsel (PFIC/VIE detection for US investors)."""
         return [search_legal_tax_disclosures]
 
+    def get_value_trap_tools(self):
+        """Tools for Value Trap Detector (governance & capital allocation analysis)."""
+        return [
+            get_ownership_structure,  # yfinance: institutional holders, insider transactions
+            get_news,  # Tavily: activist campaigns, buyback announcements
+            search_foreign_sources,  # Native governance searches (Mochiai, Chaebol, etc.)
+        ]
+
     def get_all_tools(self):
         return [
             get_yfinance_data,
@@ -760,6 +1073,7 @@ class Toolkit:
             get_fundamental_analysis,
             search_foreign_sources,
             search_legal_tax_disclosures,
+            get_ownership_structure,
         ]
 
 

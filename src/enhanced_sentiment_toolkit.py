@@ -15,6 +15,8 @@ from typing import Annotated
 import structlog
 from langchain_core.tools import tool
 
+from src.tavily_utils import tavily_search_with_timeout as _tavily_search_with_timeout
+
 logger = structlog.get_logger(__name__)
 
 # Company name translations for common markets
@@ -174,13 +176,12 @@ def detect_market_region(ticker: str) -> str:
 async def get_multilingual_sentiment_search(
     ticker: Annotated[str, "Stock ticker symbol"],
     company_name: Annotated[str, "Company name in English"],
-    tavily_tool: Annotated[object, "Tavily search tool instance"],
 ) -> str:
     """
     Multi-tier sentiment search using accessible platforms and multilingual queries.
 
     Provides "vague sentiment" signal without requiring paid APIs or deep scraping.
-    Uses Tavily web search with smart query construction.
+    Uses Tavily web search with smart query construction and timeout protection.
     """
 
     output = f"""
@@ -213,14 +214,14 @@ platforms. Results are directional indicators, not comprehensive sentiment.
     # ===== TIER 1: ACCESSIBLE PLATFORM SEARCHES =====
     output += "\n### Tier 1: Accessible Platform Searches\n\n"
 
-    try:
-        # Search TradingView (has international stocks)
-        tradingview_query = f'site:tradingview.com {ticker} OR "{company_name}" sentiment OR bullish OR bearish'
-        tv_result = await tavily_tool.ainvoke({"query": tradingview_query})
+    # Search TradingView (has international stocks)
+    tradingview_query = f'site:tradingview.com {ticker} OR "{company_name}" sentiment OR bullish OR bearish'
+    tv_result = await _tavily_search_with_timeout({"query": tradingview_query})
 
-        output += "**TradingView Search**:\n"
-        output += f"Query: `{tradingview_query}`\n"
+    output += "**TradingView Search**:\n"
+    output += f"Query: `{tradingview_query}`\n"
 
+    if tv_result:
         # Parse results for sentiment keywords
         tv_text = str(tv_result).lower()
         bullish_count = (
@@ -247,20 +248,19 @@ platforms. Results are directional indicators, not comprehensive sentiment.
             output += f"Sentiment Keywords: Bullish={bullish_count}, Bearish={bearish_count}\n"
         else:
             output += "No clear sentiment signals found.\n"
+    else:
+        output += "Search timed out or failed.\n"
 
-        output += "\n"
-
-    except Exception as e:
-        output += f"TradingView search failed: {str(e)}\n\n"
+    output += "\n"
 
     # Search Investing.com (has comments for international stocks)
-    try:
-        investing_query = f"site:investing.com {ticker} comments OR sentiment"
-        inv_result = await tavily_tool.ainvoke({"query": investing_query})
+    investing_query = f"site:investing.com {ticker} comments OR sentiment"
+    inv_result = await _tavily_search_with_timeout({"query": investing_query})
 
-        output += "**Investing.com Search**:\n"
-        output += f"Query: `{investing_query}`\n"
+    output += "**Investing.com Search**:\n"
+    output += f"Query: `{investing_query}`\n"
 
+    if inv_result:
         inv_text = str(inv_result).lower()
         bullish_count = (
             inv_text.count("buy")
@@ -286,11 +286,10 @@ platforms. Results are directional indicators, not comprehensive sentiment.
             output += f"Sentiment Keywords: Bullish={bullish_count}, Bearish={bearish_count}\n"
         else:
             output += "No clear sentiment signals found.\n"
+    else:
+        output += "Search timed out or failed.\n"
 
-        output += "\n"
-
-    except Exception as e:
-        output += f"Investing.com search failed: {str(e)}\n\n"
+    output += "\n"
 
     # ===== TIER 2: MULTILINGUAL SEARCHES =====
     output += "\n### Tier 2: Multilingual Searches\n\n"
@@ -298,83 +297,83 @@ platforms. Results are directional indicators, not comprehensive sentiment.
     native_name = translations.get("native", "")
 
     if native_name and native_name != company_name:
-        try:
-            # Search using native language company name
-            multilang_query = f'"{native_name}" {ticker} 股票 OR stock OR sentiment'
-            ml_result = await tavily_tool.ainvoke({"query": multilang_query})
+        # Search using native language company name
+        multilang_query = f'"{native_name}" {ticker} 股票 OR stock OR sentiment'
+        ml_result = await _tavily_search_with_timeout({"query": multilang_query})
 
-            output += "**Native Language Search**:\n"
-            output += f"Query: `{multilang_query}`\n"
+        output += "**Native Language Search**:\n"
+        output += f"Query: `{multilang_query}`\n"
 
-            # Check if we got any results
-            if ml_result and len(str(ml_result)) > 100:
-                output += f"Found {len(str(ml_result))} characters of content.\n"
-                output += "Note: Results may be in local language. Manual review recommended.\n"
+        # Check if we got any results
+        if ml_result and len(str(ml_result)) > 100:
+            output += f"Found {len(str(ml_result))} characters of content.\n"
+            output += (
+                "Note: Results may be in local language. Manual review recommended.\n"
+            )
 
-                # Try to detect sentiment even in non-English
-                # Common sentiment words across languages
-                positive_indicators = [
-                    "good",
-                    "positive",
-                    "bullish",
-                    "buy",
-                    "strong",
-                    "growth",
-                    "买入",
-                    "긍정",
-                    "ポジティブ",
-                    "kaufen",
-                    "acheter",
-                    "comprar",
-                    "compra",
-                    "ดี",
-                    "bagus",
-                    "tốt",
-                    "dobry",
-                    "god",
-                ]
-                negative_indicators = [
-                    "bad",
-                    "negative",
-                    "bearish",
-                    "sell",
-                    "weak",
-                    "decline",
-                    "卖出",
-                    "부정",
-                    "ネガティブ",
-                    "verkaufen",
-                    "vendre",
-                    "vender",
-                    "venta",
-                    "แย่",
-                    "buruk",
-                    "xấu",
-                    "zły",
-                    "dårlig",
-                ]
+            # Try to detect sentiment even in non-English
+            # Common sentiment words across languages
+            positive_indicators = [
+                "good",
+                "positive",
+                "bullish",
+                "buy",
+                "strong",
+                "growth",
+                "买入",
+                "긍정",
+                "ポジティブ",
+                "kaufen",
+                "acheter",
+                "comprar",
+                "compra",
+                "ดี",
+                "bagus",
+                "tốt",
+                "dobry",
+                "god",
+            ]
+            negative_indicators = [
+                "bad",
+                "negative",
+                "bearish",
+                "sell",
+                "weak",
+                "decline",
+                "卖出",
+                "부정",
+                "ネガティブ",
+                "verkaufen",
+                "vendre",
+                "vender",
+                "venta",
+                "แย่",
+                "buruk",
+                "xấu",
+                "zły",
+                "dårlig",
+            ]
 
-                ml_text = str(ml_result).lower()
-                pos_count = sum(ml_text.count(word) for word in positive_indicators)
-                neg_count = sum(ml_text.count(word) for word in negative_indicators)
+            ml_text = str(ml_result).lower()
+            pos_count = sum(ml_text.count(word) for word in positive_indicators)
+            neg_count = sum(ml_text.count(word) for word in negative_indicators)
 
-                if pos_count + neg_count > 0:
-                    output += f"Sentiment Indicators: Positive={pos_count}, Negative={neg_count}\n"
-                    sentiment_signals.append(
-                        {
-                            "source": "Multilingual Search",
-                            "bullish": pos_count,
-                            "bearish": neg_count,
-                            "ratio": pos_count / (pos_count + neg_count),
-                        }
-                    )
-            else:
-                output += "Limited results found.\n"
+            if pos_count + neg_count > 0:
+                output += f"Sentiment Indicators: Positive={pos_count}, Negative={neg_count}\n"
+                sentiment_signals.append(
+                    {
+                        "source": "Multilingual Search",
+                        "bullish": pos_count,
+                        "bearish": neg_count,
+                        "ratio": pos_count / (pos_count + neg_count),
+                    }
+                )
+        elif ml_result:
+            output += "Limited results found.\n"
+        else:
+            output += "Search timed out or failed.\n"
 
-            output += "\n"
-
-        except Exception as e:
-            output += f"Multilingual search failed: {str(e)}\n\n"
+        output += "\n"
     else:
         output += "No native language translation available for enhanced search.\n\n"
 
@@ -388,58 +387,52 @@ platforms. Results are directional indicators, not comprehensive sentiment.
         region_sites = " OR ".join([f"site:{site}" for site in platforms[:3]])
         region_query = f'({region_sites}) "{company_name}" OR {ticker}'
 
-        try:
-            region_result = await tavily_tool.ainvoke({"query": region_query})
+        region_result = await _tavily_search_with_timeout({"query": region_query})
 
-            output += (
-                f"**Regional News Search** ({region.replace('_', ' ').title()}):\n"
-            )
-            output += f"Query: `{region_query}`\n"
+        output += f"**Regional News Search** ({region.replace('_', ' ').title()}):\n"
+        output += f"Query: `{region_query}`\n"
 
-            if region_result and len(str(region_result)) > 100:
-                output += (
-                    f"Found {len(str(region_result))} characters of regional news.\n"
+        if region_result and len(str(region_result)) > 100:
+            output += f"Found {len(str(region_result))} characters of regional news.\n"
+
+            # Analyze tone
+            region_text = str(region_result).lower()
+            positive_words = [
+                "growth",
+                "profit",
+                "strong",
+                "beat",
+                "rally",
+                "upgrade",
+            ]
+            negative_words = [
+                "decline",
+                "loss",
+                "weak",
+                "miss",
+                "fall",
+                "downgrade",
+            ]
+
+            pos_score = sum(region_text.count(word) for word in positive_words)
+            neg_score = sum(region_text.count(word) for word in negative_words)
+
+            if pos_score + neg_score > 0:
+                output += f"News Tone: Positive={pos_score}, Negative={neg_score}\n"
+                sentiment_signals.append(
+                    {
+                        "source": "Regional News",
+                        "bullish": pos_score,
+                        "bearish": neg_score,
+                        "ratio": pos_score / (pos_score + neg_score),
+                    }
                 )
+        elif region_result:
+            output += "Limited regional news found.\n"
+        else:
+            output += "Search timed out or failed.\n"
 
-                # Analyze tone
-                region_text = str(region_result).lower()
-                positive_words = [
-                    "growth",
-                    "profit",
-                    "strong",
-                    "beat",
-                    "rally",
-                    "upgrade",
-                ]
-                negative_words = [
-                    "decline",
-                    "loss",
-                    "weak",
-                    "miss",
-                    "fall",
-                    "downgrade",
-                ]
-
-                pos_score = sum(region_text.count(word) for word in positive_words)
-                neg_score = sum(region_text.count(word) for word in negative_words)
-
-                if pos_score + neg_score > 0:
-                    output += f"News Tone: Positive={pos_score}, Negative={neg_score}\n"
-                    sentiment_signals.append(
-                        {
-                            "source": "Regional News",
-                            "bullish": pos_score,
-                            "bearish": neg_score,
-                            "ratio": pos_score / (pos_score + neg_score),
-                        }
-                    )
-            else:
-                output += "Limited regional news found.\n"
-
-            output += "\n"
-
-        except Exception as e:
-            output += f"Regional news search failed: {str(e)}\n\n"
+        output += "\n"
 
     # ===== AGGREGATE SENTIMENT SIGNAL =====
     output += "\n### Aggregated Sentiment Signal\n\n"

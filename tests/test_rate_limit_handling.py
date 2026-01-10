@@ -13,6 +13,9 @@ from langchain_core.messages import AIMessage
 
 from src.agents import invoke_with_rate_limit_handling
 
+# Fixed jitter value for deterministic tests
+FIXED_JITTER = 5.0
+
 
 class Test429Detection:
     """Test detection of various rate limit error formats."""
@@ -29,12 +32,13 @@ class Test429Detection:
         )
 
         with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-            result = await invoke_with_rate_limit_handling(
-                runnable, {"input": "test"}, max_attempts=2
-            )
+            with patch("src.agents.random.uniform", return_value=FIXED_JITTER):
+                result = await invoke_with_rate_limit_handling(
+                    runnable, {"input": "test"}, max_attempts=2
+                )
 
-        # Should have slept 60 seconds before retry
-        mock_sleep.assert_called_once_with(60)
+        # Should have slept 60 + jitter seconds before retry
+        mock_sleep.assert_called_once_with(60 + FIXED_JITTER)
         assert result.content == "Success after retry"
 
     @pytest.mark.asyncio
@@ -49,11 +53,12 @@ class Test429Detection:
         )
 
         with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-            result = await invoke_with_rate_limit_handling(
-                runnable, {"input": "test"}, max_attempts=2
-            )
+            with patch("src.agents.random.uniform", return_value=FIXED_JITTER):
+                result = await invoke_with_rate_limit_handling(
+                    runnable, {"input": "test"}, max_attempts=2
+                )
 
-        mock_sleep.assert_called_once_with(60)
+        mock_sleep.assert_called_once_with(60 + FIXED_JITTER)
         assert result.content == "Success"
 
     @pytest.mark.asyncio
@@ -116,7 +121,7 @@ class TestExponentialBackoff:
 
     @pytest.mark.asyncio
     async def test_backoff_progression_60_120(self):
-        """Test that backoff times progress correctly (60s, 120s).
+        """Test that backoff times progress correctly (60s, 120s) + jitter.
 
         Reduced from 3 attempts to 2 for faster test execution.
         """
@@ -130,14 +135,15 @@ class TestExponentialBackoff:
         )
 
         with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-            result = await invoke_with_rate_limit_handling(
-                runnable, {"input": "test"}, max_attempts=3
-            )
+            with patch("src.agents.random.uniform", return_value=FIXED_JITTER):
+                result = await invoke_with_rate_limit_handling(
+                    runnable, {"input": "test"}, max_attempts=3
+                )
 
-        # Check sleep was called with 60, 120
+        # Check sleep was called with 60+jitter, 120+jitter
         assert mock_sleep.call_count == 2
         call_args = [call[0][0] for call in mock_sleep.call_args_list]
-        assert call_args == [60, 120]
+        assert call_args == [60 + FIXED_JITTER, 120 + FIXED_JITTER]
 
     @pytest.mark.asyncio
     @pytest.mark.skip(
@@ -231,21 +237,23 @@ class TestQuietMode:
         )
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
-            with patch("src.agents.settings_config") as mock_config:
-                mock_config.quiet_mode = False
-                with patch("src.agents.logger") as mock_logger:
-                    result = await invoke_with_rate_limit_handling(
-                        runnable,
-                        {"input": "test"},
-                        max_attempts=2,
-                        context="Test Agent",
-                    )
+            with patch("src.agents.random.uniform", return_value=FIXED_JITTER):
+                with patch("src.agents.settings_config") as mock_config:
+                    mock_config.quiet_mode = False
+                    with patch("src.agents.logger") as mock_logger:
+                        result = await invoke_with_rate_limit_handling(
+                            runnable,
+                            {"input": "test"},
+                            max_attempts=2,
+                            context="Test Agent",
+                        )
 
-                    # Should log in normal mode
-                    mock_logger.warning.assert_called_once()
-                    call_args = mock_logger.warning.call_args[1]
-                    assert call_args["context"] == "Test Agent"
-                    assert call_args["wait_seconds"] == 60
+                        # Should log in normal mode
+                        mock_logger.warning.assert_called_once()
+                        call_args = mock_logger.warning.call_args[1]
+                        assert call_args["context"] == "Test Agent"
+                        # wait_seconds is now a formatted string with jitter
+                        assert call_args["wait_seconds"] == f"{60 + FIXED_JITTER:.1f}"
 
 
 class TestContextLogging:
@@ -350,11 +358,12 @@ class TestEdgeCases:
         )
 
         with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-            result = await invoke_with_rate_limit_handling(
-                runnable, {"input": "test"}, max_attempts=2
-            )
+            with patch("src.agents.random.uniform", return_value=FIXED_JITTER):
+                result = await invoke_with_rate_limit_handling(
+                    runnable, {"input": "test"}, max_attempts=2
+                )
 
-        mock_sleep.assert_called_once_with(60)
+        mock_sleep.assert_called_once_with(60 + FIXED_JITTER)
 
     @pytest.mark.asyncio
     async def test_error_message_truncation(self):

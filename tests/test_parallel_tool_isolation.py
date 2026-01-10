@@ -686,10 +686,12 @@ class TestActualCreateAgentToolNode:
 
             tool_node_fn = create_agent_tool_node(MARKET_TOOLS, "market_analyst")
 
-            # Create mixed messages
+            # Create mixed messages - one from wrong agent, one from correct agent
+            # Note: create_agent_tool_node filters by msg.name == agent_key
             messages = [
                 AIMessage(
                     content="",
+                    name="sentiment_analyst",  # Wrong agent
                     tool_calls=[
                         {
                             "name": "get_sentiment",
@@ -701,6 +703,7 @@ class TestActualCreateAgentToolNode:
                 ),
                 AIMessage(
                     content="",
+                    name="market_analyst",  # Correct agent - matches agent_key
                     tool_calls=[
                         {
                             "name": "get_technical_indicators",
