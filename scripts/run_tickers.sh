@@ -363,19 +363,6 @@ while IFS= read -r line || [[ -n "$line" ]]; do
         # In non-loud mode, we have already appended logs to master log.
         # We also remove the temp log.
         if ! $LOUD_MODE && [ -f "$TEMP_LOG" ]; then
-            # The original script appended logs to OUTPUT_FILE here.
-            # We will KEEP that behavior for OUTPUT_FILE to maintain the "report" completeness if desired,
-            # or maybe the user wants logs separated?
-            # The prompt said "preserve stderr... default log file should be ticker_analysis_info.txt"
-            # It didn't explicitly say "remove logs from the markdown report".
-            # However, typically if you separate logs, you don't want them cluttering the report.
-            # But the original script had:
-            # cat "$TEMP_LOG" >> "$OUTPUT_FILE"
-            # I will preserve this behavior to be safe, unless it conflicts with the goal.
-            # But "preserve stderr" was the goal. I've done that in LOG_FILE.
-            # I'll stick to the existing behavior of appending to OUTPUT_FILE as well,
-            # to ensure I don't break the existing report format.
-
             cat "$TEMP_LOG" >> "$OUTPUT_FILE"
             rm "$TEMP_LOG"
         fi

@@ -5,9 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.4.0] - 2026-01-09
+## [3.5.0] - 2026-01-11
 
 ### Added
+- **FORENSIC_DATA_BLOCK Structured Output** - Forensic Auditor now produces standardized accounting data block
+  - Includes META (report date, currency, auditor opinion), EARNINGS_QUALITY, CASH_CYCLE, SOFT_ASSETS, SOLVENCY, CASH_INTEGRITY metrics
+  - Multilingual terminology guide for international financial statements (Japanese, Chinese, Korean, German)
+  - Calculation formulas for NI_TO_OCF, Paper Profit, DSO/DIO/DPO, Zombie Ratio, Altman Z-Score, Ghost Yield, Trash Bin ratios
+  - Date validation to prevent stale data usage (>18 months triggers penalty)
+  - Consultant validates forensic findings against Senior Fundamentals for cross-model verification
+  - Portfolio Manager applies forensic penalties (+0.5 to +2.0 risk points) based on auditor opinions, RED_FLAGs, and data age
+  - All forensic findings are advisory (no hard fails) - contribute to risk scoring only
+  - See `tests/test_forensic_data_block.py` for 27 comprehensive tests
+- **Moat Detection** - Red-flag validator now detects durable competitive advantages
+  - Identifies pricing power, switching costs, network effects, regulatory barriers
+  - Applies negative risk penalties (-0.5 to -1.0) to offset qualitative risks when moats detected
+  - Flags appear in pre-screening results as MOAT_DURABLE_ADVANTAGE, MOAT_PRICING_POWER, etc.
+- **Capital Efficiency Analysis** - Pre-screening now calculates ROIC and detects leverage engineering
+  - Flags value destruction (negative ROIC), engineered returns (D/E >200% + ROIC>ROE), suspect returns (D/E 100-200%)
+  - Applies risk penalties (+0.5 to +1.5) for capital structure concerns
+  - Bonus for genuinely capital-efficient companies (-0.5 when ROIC >12% + conservative)
+  - See `tests/test_capital_efficiency.py` for calculation logic
+
+### Changed
+- **Auditor Prompt (v2.1 → v2.2)** - Added FORENSIC_DATA_BLOCK template with international terminology and thresholds
+- **Consultant Prompt (v1.0 → v1.1)** - Added forensic validation section for cross-checking accounting flags
+- **Portfolio Manager Prompt (v7.1 → v7.2, Thesis v7.3 → v7.4)** - Added forensic penalties and capital efficiency flags to risk scoring
+
+### Added (internal 3.4.0 version never released)
 - **Value Trap Detector** - Agent for identifying value traps via ownership structure analysis
 - **XML Security Boundaries** - Tavily search results now wrapped in `<search_results>` tags with `data_type="external_web_content"` attribute for prompt injection mitigation
 - **Configurable Batch Cooldown** - `COOLDOWN_SECONDS` environment variable for `run_tickers.sh` (default 60s for free tier, 10s for paid)
