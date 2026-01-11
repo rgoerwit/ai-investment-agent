@@ -128,7 +128,6 @@ minversion = "8.0"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
-asyncio_mode = "auto"
 
 # Comprehensive options moved from pytest.ini
 addopts = """

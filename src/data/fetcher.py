@@ -528,6 +528,14 @@ class SmartMarketDataFetcher(FinancialFetcher):
             extracted[key] = value
             extracted[f"_{key}_source"] = "calculated_from_statements"
 
+        # --- CAPITAL EFFICIENCY SIGNALS ---
+        # Calculate ROIC and leverage quality from statements
+        capital_signals = self._calculate_capital_efficiency_signals(
+            financials, balance_sheet, extracted, symbol
+        )
+        for key, value in capital_signals.items():
+            extracted[key] = value
+
         return extracted
 
     def _calculate_moat_signals(
@@ -671,6 +679,134 @@ class SmartMarketDataFetcher(FinancialFetcher):
                     )
         except Exception as e:
             logger.debug("moat_cash_conversion_failed", symbol=symbol, error=str(e))
+
+        return signals
+
+    def _calculate_capital_efficiency_signals(
+        self,
+        income_stmt: "pd.DataFrame",
+        balance_sheet: "pd.DataFrame",
+        info: dict[str, Any],
+        symbol: str,
+    ) -> dict[str, Any]:
+        """
+        Calculate capital efficiency metrics: ROIC and leverage quality.
+
+        Detects value destruction (ROIC < 0 with positive ROE) and financial
+        engineering (ROE >> ROIC). Uses hurdle rate as WACC proxy to avoid
+        precision theater of CAPM calculations.
+
+        Args:
+            income_stmt: yfinance income statement DataFrame
+            balance_sheet: yfinance balance sheet DataFrame
+            info: Extracted data dict (contains ROA, ROE from info)
+            symbol: Ticker symbol for logging
+
+        Returns:
+            Dict with capital efficiency signals. Empty dict if insufficient data.
+        """
+        from src.config import config
+
+        signals: dict[str, Any] = {}
+
+        try:
+            # --- Extract components ---
+            ebit: float | None = None
+            tax_rate: float | None = None
+            invested_capital: float | None = None
+
+            if not income_stmt.empty and len(income_stmt.columns) > 0:
+                if "EBIT" in income_stmt.index:
+                    val = income_stmt.loc["EBIT"].iloc[0]
+                    if pd.notna(val):
+                        ebit = float(val)
+
+                if "Tax Rate For Calcs" in income_stmt.index:
+                    val = income_stmt.loc["Tax Rate For Calcs"].iloc[0]
+                    if pd.notna(val):
+                        tax_rate = float(val)
+
+            if not balance_sheet.empty and len(balance_sheet.columns) > 0:
+                if "Invested Capital" in balance_sheet.index:
+                    val = balance_sheet.loc["Invested Capital"].iloc[0]
+                    if pd.notna(val) and val > 0:
+                        invested_capital = float(val)
+
+            # ROA and ROE from info dict
+            # roa = info.get("returnOnAssets")
+            roe = info.get("returnOnEquity")
+
+            # --- Calculate ROIC ---
+            roic: float | None = None
+            if (
+                ebit is not None
+                and invested_capital is not None
+                and invested_capital > 0
+            ):
+                # Default tax rate to 21% if not available
+                effective_tax = tax_rate if tax_rate is not None else 0.21
+                # Clamp tax rate to reasonable range
+                effective_tax = max(0.0, min(0.5, effective_tax))
+                nopat = ebit * (1 - effective_tax)
+                roic = nopat / invested_capital
+
+                signals["capital_roic"] = round(roic, 4)
+                signals["capital_roic_source"] = "calculated"
+
+                # --- ROIC Quality Classification ---
+                hurdle = config.roic_hurdle_rate
+                strong = config.roic_strong_threshold
+
+                if roic < 0:
+                    signals["capital_roicQuality"] = "DESTRUCTIVE"
+                elif roic < hurdle:
+                    signals["capital_roicQuality"] = "WEAK"
+                elif roic < strong:
+                    signals["capital_roicQuality"] = "ADEQUATE"
+                else:
+                    signals["capital_roicQuality"] = "STRONG"
+
+                # Spread vs hurdle rate (proxy for ROIC - WACC)
+                signals["capital_hurdleSpread"] = round(roic - hurdle, 4)
+
+            # --- Leverage Quality (ROE/ROIC relationship) ---
+            if roic is not None and roe is not None:
+                # Handle edge cases
+                if roic <= 0 and roe > 0:
+                    # Value destruction: negative operating returns, positive equity returns
+                    signals["capital_leverageQuality"] = "VALUE_DESTRUCTION"
+                elif roic > 0:
+                    ratio = roe / roic
+                    signals["capital_roeRoicRatio"] = round(ratio, 2)
+
+                    suspect = config.leverage_suspect_ratio
+                    engineered = config.leverage_engineered_ratio
+
+                    if ratio > engineered:
+                        signals["capital_leverageQuality"] = "ENGINEERED"
+                    elif ratio > suspect:
+                        signals["capital_leverageQuality"] = "SUSPECT"
+                    elif ratio < 1.0:
+                        # ROIC > ROE: under-leveraged or conservative
+                        signals["capital_leverageQuality"] = "CONSERVATIVE"
+                    else:
+                        signals["capital_leverageQuality"] = "GENUINE"
+
+            if signals:
+                logger.debug(
+                    "capital_efficiency_calculated",
+                    symbol=symbol,
+                    roic=signals.get("capital_roic"),
+                    roic_quality=signals.get("capital_roicQuality"),
+                    leverage_quality=signals.get("capital_leverageQuality"),
+                )
+
+        except Exception as e:
+            logger.debug(
+                "capital_efficiency_calculation_failed",
+                symbol=symbol,
+                error=str(e),
+            )
 
         return signals
 

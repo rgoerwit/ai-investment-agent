@@ -1329,6 +1329,23 @@ NEUTRAL ANALYST (Balanced):\n{neutral_view if neutral_view else "N/A"}"""
                     ),
                 )
 
+        # --- Capital Efficiency Detection (Leverage Quality) ---
+        # Separate from moat signals - detects value destruction and leverage engineering
+        if fundamentals:
+            capital_flags = RedFlagDetector.detect_capital_efficiency_flags(
+                fundamentals, state.get("company_of_interest", "UNKNOWN")
+            )
+            if capital_flags:
+                red_flags.extend(capital_flags)
+                logger.info(
+                    "capital_efficiency_flags_detected",
+                    ticker=state.get("company_of_interest", "UNKNOWN"),
+                    flag_types=[f["type"] for f in capital_flags],
+                    total_risk_adjustment=sum(
+                        f.get("risk_penalty", 0) for f in capital_flags
+                    ),
+                )
+
         logger.info(
             "pm_inputs",
             has_market=bool(market),

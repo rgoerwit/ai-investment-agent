@@ -1196,3 +1196,244 @@ class RedFlagDetector:
             )
 
         return flags
+
+    @staticmethod
+    def extract_capital_efficiency_signals(fundamentals_report: str) -> dict[str, Any]:
+        """
+        Extract capital efficiency signals from fundamentals report DATA_BLOCK.
+
+        Parses ROIC, leverage quality, and related metrics for flag detection.
+        Uses categorical signals for threshold decisions, numeric for logging.
+
+        Args:
+            fundamentals_report: Full fundamentals analyst report text
+
+        Returns:
+            Dict with extracted signals. Empty dict if DATA_BLOCK not found.
+        """
+        if not fundamentals_report or not isinstance(fundamentals_report, str):
+            return {}
+
+        signals: dict[str, Any] = {}
+
+        # Find last DATA_BLOCK (in case of multiple)
+        blocks = fundamentals_report.split("--- START DATA_BLOCK ---")
+        if len(blocks) < 2:
+            return {}
+
+        data_block = blocks[-1].split("--- END DATA_BLOCK ---")[0]
+
+        # Extract ROIC_QUALITY (categorical)
+        roic_quality_match = re.search(
+            r"ROIC_QUALITY:\s*(STRONG|ADEQUATE|WEAK|DESTRUCTIVE|N/A)",
+            data_block,
+            re.IGNORECASE,
+        )
+        if roic_quality_match:
+            val = roic_quality_match.group(1).upper()
+            if val != "N/A":
+                signals["roic_quality"] = val
+
+        # Extract LEVERAGE_QUALITY (categorical)
+        leverage_quality_match = re.search(
+            r"LEVERAGE_QUALITY:\s*(GENUINE|CONSERVATIVE|SUSPECT|ENGINEERED|VALUE_DESTRUCTION|N/A)",
+            data_block,
+            re.IGNORECASE,
+        )
+        if leverage_quality_match:
+            val = leverage_quality_match.group(1).upper()
+            if val != "N/A":
+                signals["leverage_quality"] = val
+
+        # Extract ROIC_PERCENT (numeric, for logging)
+        roic_match = re.search(
+            r"ROIC_PERCENT:\s*(-?[\d.]+)([%]?)",
+            data_block,
+            re.IGNORECASE,
+        )
+        if roic_match:
+            try:
+                val = float(roic_match.group(1))
+                has_percent = bool(roic_match.group(2))
+
+                # If explicit %, always divide by 100
+                if has_percent:
+                    val = val / 100
+                # If no %, heuristic: if >= 2.0, assume it was meant as percentage
+                # e.g. 15.0 -> 0.15, but 1.5 -> 1.5 (150%)
+                elif abs(val) >= 2.0:
+                    val = val / 100
+
+                signals["roic"] = val
+            except ValueError:
+                pass
+
+        # Extract ROE_ROIC_RATIO (numeric, for logging)
+        ratio_match = re.search(
+            r"ROE_ROIC_RATIO:\s*([\d.]+)",
+            data_block,
+            re.IGNORECASE,
+        )
+        if ratio_match:
+            try:
+                signals["roe_roic_ratio"] = float(ratio_match.group(1))
+            except ValueError:
+                pass
+
+        return signals
+
+    @staticmethod
+    def detect_capital_efficiency_flags(
+        fundamentals_report: str, ticker: str = "UNKNOWN"
+    ) -> list[dict]:
+        """
+        Detect capital efficiency red flags and bonuses.
+
+        Flags problematic patterns:
+        - Value destruction (negative ROIC with positive ROE)
+        - Leverage-engineered returns (ROE >> ROIC)
+        - Below-hurdle ROIC (likely destroying value)
+
+        Bonuses for:
+        - Strong genuine returns (high ROIC with low leverage boost)
+
+        Args:
+            fundamentals_report: Full fundamentals analyst report text
+            ticker: Ticker symbol for logging
+
+        Returns:
+            List of flag dicts with risk_penalty values (positive = risk, negative = bonus).
+        """
+        flags: list[dict] = []
+
+        metrics = RedFlagDetector.extract_capital_efficiency_signals(
+            fundamentals_report
+        )
+
+        if not metrics:
+            return flags
+
+        roic_quality = metrics.get("roic_quality")
+        leverage_quality = metrics.get("leverage_quality")
+        roic = metrics.get("roic")
+        roe_roic_ratio = metrics.get("roe_roic_ratio")
+
+        # --- FLAG 1: Value Destruction (most severe) ---
+        if leverage_quality == "VALUE_DESTRUCTION":
+            detail = f"ROIC: {roic:.1%}" if roic is not None else "Negative ROIC"
+            flags.append(
+                {
+                    "type": "CAPITAL_VALUE_DESTRUCTION",
+                    "severity": "CRITICAL",
+                    "detail": f"Negative operating returns masked by leverage. {detail}",
+                    "action": "REJECT_REVIEW",
+                    "risk_penalty": 1.5,
+                    "rationale": (
+                        "Company has negative ROIC but positive ROE. This means the core "
+                        "business is destroying value while financial leverage creates the "
+                        "illusion of shareholder returns. Classic value trap pattern."
+                    ),
+                }
+            )
+            logger.info(
+                "capital_flag_value_destruction",
+                ticker=ticker,
+                roic=roic,
+                leverage_quality=leverage_quality,
+            )
+            # Don't stack other flags if value destruction detected
+            return flags
+
+        # --- FLAG 2: Leverage-Engineered Returns ---
+        if leverage_quality == "ENGINEERED":
+            ratio_str = f"ROE/ROIC: {roe_roic_ratio:.1f}x" if roe_roic_ratio else ""
+            flags.append(
+                {
+                    "type": "CAPITAL_ENGINEERED_RETURNS",
+                    "severity": "HIGH",
+                    "detail": f"Returns primarily from financial engineering. {ratio_str}",
+                    "action": "RISK_ADJUST",
+                    "risk_penalty": 1.0,
+                    "rationale": (
+                        "ROE significantly exceeds ROIC (ratio > 3x), indicating shareholder "
+                        "returns come from leverage, buybacks, or capital structure rather "
+                        "than underlying business quality."
+                    ),
+                }
+            )
+            logger.info(
+                "capital_flag_engineered_returns",
+                ticker=ticker,
+                roe_roic_ratio=roe_roic_ratio,
+            )
+
+        # --- FLAG 3: Suspect Leverage ---
+        elif leverage_quality == "SUSPECT":
+            ratio_str = f"ROE/ROIC: {roe_roic_ratio:.1f}x" if roe_roic_ratio else ""
+            flags.append(
+                {
+                    "type": "CAPITAL_SUSPECT_RETURNS",
+                    "severity": "MEDIUM",
+                    "detail": f"Moderate leverage amplification detected. {ratio_str}",
+                    "action": "RISK_ADJUST",
+                    "risk_penalty": 0.5,
+                    "rationale": (
+                        "ROE moderately exceeds ROIC (ratio 2-3x). Returns partially "
+                        "driven by leverage rather than operational excellence."
+                    ),
+                }
+            )
+            logger.info(
+                "capital_flag_suspect_returns",
+                ticker=ticker,
+                roe_roic_ratio=roe_roic_ratio,
+            )
+
+        # --- FLAG 4: Below Hurdle ROIC ---
+        if roic_quality == "WEAK":
+            roic_str = f"ROIC: {roic:.1%}" if roic is not None else ""
+            flags.append(
+                {
+                    "type": "CAPITAL_BELOW_HURDLE",
+                    "severity": "MEDIUM",
+                    "detail": f"Returns below cost of capital proxy. {roic_str}",
+                    "action": "RISK_ADJUST",
+                    "risk_penalty": 0.5,
+                    "rationale": (
+                        "ROIC below 8% hurdle rate suggests the company may be destroying "
+                        "value on a risk-adjusted basis. Acceptable only with clear "
+                        "turnaround thesis and improving trajectory."
+                    ),
+                }
+            )
+            logger.info(
+                "capital_flag_below_hurdle",
+                ticker=ticker,
+                roic=roic,
+            )
+
+        # --- BONUS: Capital Efficient (genuine high returns) ---
+        if roic_quality == "STRONG" and leverage_quality in ("GENUINE", "CONSERVATIVE"):
+            roic_str = f"ROIC: {roic:.1%}" if roic is not None else ""
+            flags.append(
+                {
+                    "type": "CAPITAL_EFFICIENT",
+                    "severity": "POSITIVE",
+                    "detail": f"Strong genuine capital efficiency. {roic_str}",
+                    "action": "RISK_BONUS",
+                    "risk_penalty": -0.5,
+                    "rationale": (
+                        "High ROIC (>15%) with ROE/ROIC ratio below 2x indicates returns "
+                        "driven by operational excellence rather than financial leverage. "
+                        "Suggests sustainable competitive advantage."
+                    ),
+                }
+            )
+            logger.info(
+                "capital_flag_efficient",
+                ticker=ticker,
+                roic=roic,
+                leverage_quality=leverage_quality,
+            )
+
+        return flags

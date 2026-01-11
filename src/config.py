@@ -357,6 +357,35 @@ class Settings(BaseSettings):
         description="Default ticker symbol for analysis",
     )
 
+    # --- Capital Efficiency Thresholds ---
+    # Used by fetcher and red_flag_detector for ROIC/leverage quality checks
+    roic_hurdle_rate: float = Field(
+        default=0.08,
+        ge=0.0,
+        le=1.0,
+        validation_alias="ROIC_HURDLE_RATE",
+        description="Minimum acceptable ROIC (proxy for WACC). Default 8%.",
+    )
+    roic_strong_threshold: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=1.0,
+        validation_alias="ROIC_STRONG_THRESHOLD",
+        description="ROIC threshold for 'strong' capital efficiency. Default 15%.",
+    )
+    leverage_suspect_ratio: float = Field(
+        default=2.0,
+        ge=1.0,
+        validation_alias="LEVERAGE_SUSPECT_RATIO",
+        description="ROE/ROIC ratio above which returns are suspect. Default 2.0.",
+    )
+    leverage_engineered_ratio: float = Field(
+        default=3.0,
+        ge=1.0,
+        validation_alias="LEVERAGE_ENGINEERED_RATIO",
+        description="ROE/ROIC ratio above which returns are likely engineered. Default 3.0.",
+    )
+
     # --- Logging ---
     log_level: str = Field(
         default="INFO",
