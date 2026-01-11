@@ -956,3 +956,484 @@ class RedFlagDetector:
             )
 
         return flags
+
+    @staticmethod
+    def extract_moat_signals(fundamentals_report: str) -> dict[str, Any]:
+        """
+        Extract moat signal metrics from Fundamentals Analyst DATA_BLOCK.
+
+        Moat signals are calculated by the fetcher and passed through Junior/Senior
+        Fundamentals. This method extracts the categorical signals (HIGH/STRONG)
+        which are used for threshold logic, plus numeric values for logging.
+
+        IMPORTANT: Threshold decisions use categorical signals only, not numeric
+        values. This avoids ratio/percentage parsing ambiguity (e.g., CFO/NI can
+        legitimately exceed 1.0).
+
+        Args:
+            fundamentals_report: Full fundamentals analyst report text
+
+        Returns:
+            Dict with extracted moat metrics:
+            - margin_stability: HIGH/MEDIUM/LOW or None (used for thresholds)
+            - margin_cv: Coefficient of Variation (float) or None (for logging)
+            - cash_conversion: STRONG/ADEQUATE/WEAK or None (used for thresholds)
+            - cfo_ni_avg: Average CFO/NI ratio (float) or None (for logging)
+        """
+        metrics: dict[str, Any] = {
+            "margin_stability": None,
+            "margin_cv": None,
+            "margin_avg": None,
+            "cash_conversion": None,
+            "cfo_ni_avg": None,
+        }
+
+        if not fundamentals_report:
+            return metrics
+
+        # Handle non-string input gracefully
+        if not isinstance(fundamentals_report, str):
+            try:
+                fundamentals_report = str(fundamentals_report)
+            except Exception:
+                return metrics
+
+        # Extract the LAST DATA_BLOCK (agent self-correction pattern)
+        data_block_pattern = (
+            r"### --- START DATA_BLOCK ---(.+?)### --- END DATA_BLOCK ---"
+        )
+        blocks = list(re.finditer(data_block_pattern, fundamentals_report, re.DOTALL))
+
+        if not blocks:
+            return metrics
+
+        data_block = blocks[-1].group(1)
+
+        # --- CATEGORICAL SIGNALS (Primary - used for threshold logic) ---
+
+        # Extract MOAT_MARGIN_STABILITY
+        stability_match = re.search(
+            r"MOAT_MARGIN_STABILITY:\s*(HIGH|MEDIUM|LOW)", data_block, re.IGNORECASE
+        )
+        if stability_match:
+            metrics["margin_stability"] = stability_match.group(1).upper()
+
+        # Extract MOAT_CASH_CONVERSION
+        cash_match = re.search(
+            r"MOAT_CASH_CONVERSION:\s*(STRONG|ADEQUATE|WEAK)", data_block, re.IGNORECASE
+        )
+        if cash_match:
+            metrics["cash_conversion"] = cash_match.group(1).upper()
+
+        # --- NUMERIC VALUES (Secondary - for logging/detail only) ---
+        # These are NOT used for threshold decisions to avoid parsing ambiguity
+
+        # Extract MOAT_MARGIN_CV (handles trailing punctuation)
+        cv_match = re.search(r"MOAT_MARGIN_CV:\s*([0-9]+\.?[0-9]*)", data_block)
+        if cv_match:
+            try:
+                metrics["margin_cv"] = float(cv_match.group(1))
+            except ValueError:
+                pass  # Non-fatal: we have categorical signal
+
+        # Extract MOAT_GROSS_MARGIN_AVG (handles % suffix and trailing punctuation)
+        avg_match = re.search(
+            r"MOAT_GROSS_MARGIN_AVG:\s*([0-9]+\.?[0-9]*)%?", data_block
+        )
+        if avg_match:
+            try:
+                value = float(avg_match.group(1))
+                # Margin is always 0-100% or 0.0-1.0
+                # If > 1, assume percentage format (e.g., "35.2%")
+                metrics["margin_avg"] = value / 100 if value > 1 else value
+            except ValueError:
+                pass
+
+        # Extract MOAT_CFO_NI_AVG (NO percentage normalization - ratio can exceed 1.0)
+        cfo_match = re.search(r"MOAT_CFO_NI_AVG:\s*([0-9]+\.?[0-9]*)", data_block)
+        if cfo_match:
+            try:
+                # Store raw value - CFO/NI can legitimately be > 1.0
+                # Do NOT apply percentage normalization here
+                metrics["cfo_ni_avg"] = float(cfo_match.group(1))
+            except ValueError:
+                pass  # Non-fatal: we have categorical signal
+
+        logger.debug(
+            "moat_signals_extracted",
+            margin_stability=metrics["margin_stability"],
+            cash_conversion=metrics["cash_conversion"],
+        )
+
+        return metrics
+
+    @staticmethod
+    def detect_moat_flags(
+        fundamentals_report: str, ticker: str = "UNKNOWN"
+    ) -> list[dict]:
+        """
+        Detect economic moat indicators and create BONUS flags (negative risk penalty).
+
+        Unlike red flags (which add risk), moat flags REDUCE the risk tally when
+        strong competitive advantages are detected. Based on S&P Global quantitative
+        moat framework.
+
+        IMPORTANT: Threshold logic uses categorical signals (HIGH/STRONG) only,
+        not numeric values. This avoids parsing ambiguity and makes the system
+        robust to LLM formatting variations.
+
+        Flag types (all are BONUS - negative penalty):
+        - MOAT_DURABLE_ADVANTAGE: Both margin stability HIGH + cash conversion STRONG (-1.0)
+        - MOAT_PRICING_POWER: Margin stability HIGH alone (-0.5)
+        - MOAT_EARNINGS_QUALITY: Cash conversion STRONG alone (-0.5)
+
+        Args:
+            fundamentals_report: Full fundamentals analyst report text
+            ticker: Ticker symbol for logging
+
+        Returns:
+            List of moat flag dicts with negative risk_penalty values (bonuses).
+            Empty list if no moat signals detected or signals are weak/medium.
+        """
+        flags = []
+
+        metrics = RedFlagDetector.extract_moat_signals(fundamentals_report)
+
+        # Use categorical signals for all threshold decisions
+        margin_stability = metrics.get("margin_stability")
+        cash_conversion = metrics.get("cash_conversion")
+
+        # Numeric values for detail/logging only (not used in threshold logic)
+        margin_cv = metrics.get("margin_cv")
+        cfo_ni_avg = metrics.get("cfo_ni_avg")
+
+        # --- BONUS 1: Durable Advantage (Both signals strong) ---
+        if margin_stability == "HIGH" and cash_conversion == "STRONG":
+            detail_parts = []
+            if margin_cv is not None:
+                detail_parts.append(f"Margin CV: {margin_cv:.3f}")
+            if cfo_ni_avg is not None:
+                detail_parts.append(f"CFO/NI: {cfo_ni_avg:.2f}")
+            detail = (
+                "; ".join(detail_parts) if detail_parts else "Multiple moat signals"
+            )
+
+            flags.append(
+                {
+                    "type": "MOAT_DURABLE_ADVANTAGE",
+                    "severity": "POSITIVE",
+                    "detail": f"Pricing power + earnings quality confirmed. {detail}",
+                    "action": "RISK_BONUS",
+                    "risk_penalty": -1.0,
+                    "rationale": (
+                        "Company exhibits both stable gross margins (CV < 8%) and high "
+                        "cash conversion (CFO/NI > 90%) over multiple years. This combination "
+                        "suggests a durable competitive advantage with pricing power."
+                    ),
+                }
+            )
+            logger.info(
+                "moat_flag_durable_advantage",
+                ticker=ticker,
+                margin_stability=margin_stability,
+                cash_conversion=cash_conversion,
+            )
+            # Return early - don't stack individual bonuses on top of combined
+            return flags
+
+        # --- BONUS 2: Pricing Power (Margin stability alone) ---
+        if margin_stability == "HIGH":
+            detail = (
+                f"Gross margin CV: {margin_cv:.3f}"
+                if margin_cv is not None
+                else "CV < 8%"
+            )
+            flags.append(
+                {
+                    "type": "MOAT_PRICING_POWER",
+                    "severity": "POSITIVE",
+                    "detail": f"Stable gross margins over 5 years. {detail}",
+                    "action": "RISK_BONUS",
+                    "risk_penalty": -0.5,
+                    "rationale": (
+                        "Low gross margin volatility (CV < 8%) over 5 years suggests "
+                        "pricing power. Company can maintain margins without aggressive "
+                        "discounting, indicating competitive advantage."
+                    ),
+                }
+            )
+            logger.info(
+                "moat_flag_pricing_power",
+                ticker=ticker,
+                margin_cv=margin_cv,
+            )
+
+        # --- BONUS 3: Earnings Quality (Cash conversion alone) ---
+        if cash_conversion == "STRONG":
+            detail = (
+                f"3Y avg CFO/NI: {cfo_ni_avg:.2f}"
+                if cfo_ni_avg is not None
+                else "> 0.90"
+            )
+            flags.append(
+                {
+                    "type": "MOAT_EARNINGS_QUALITY",
+                    "severity": "POSITIVE",
+                    "detail": f"High cash conversion ratio. {detail}",
+                    "action": "RISK_BONUS",
+                    "risk_penalty": -0.5,
+                    "rationale": (
+                        "CFO/Net Income ratio averaging > 90% over 3 years indicates "
+                        "reported earnings are converting to actual cash flow. Not "
+                        "relying on accounting accruals or channel stuffing."
+                    ),
+                }
+            )
+            logger.info(
+                "moat_flag_earnings_quality",
+                ticker=ticker,
+                cfo_ni_avg=cfo_ni_avg,
+            )
+
+        return flags
+
+    @staticmethod
+    def extract_capital_efficiency_signals(fundamentals_report: str) -> dict[str, Any]:
+        """
+        Extract capital efficiency signals from fundamentals report DATA_BLOCK.
+
+        Parses ROIC, leverage quality, and related metrics for flag detection.
+        Uses categorical signals for threshold decisions, numeric for logging.
+
+        Args:
+            fundamentals_report: Full fundamentals analyst report text
+
+        Returns:
+            Dict with extracted signals. Empty dict if DATA_BLOCK not found.
+        """
+        if not fundamentals_report or not isinstance(fundamentals_report, str):
+            return {}
+
+        signals: dict[str, Any] = {}
+
+        # Find last DATA_BLOCK (in case of multiple)
+        blocks = fundamentals_report.split("--- START DATA_BLOCK ---")
+        if len(blocks) < 2:
+            return {}
+
+        data_block = blocks[-1].split("--- END DATA_BLOCK ---")[0]
+
+        # Extract ROIC_QUALITY (categorical)
+        roic_quality_match = re.search(
+            r"ROIC_QUALITY:\s*(STRONG|ADEQUATE|WEAK|DESTRUCTIVE|N/A)",
+            data_block,
+            re.IGNORECASE,
+        )
+        if roic_quality_match:
+            val = roic_quality_match.group(1).upper()
+            if val != "N/A":
+                signals["roic_quality"] = val
+
+        # Extract LEVERAGE_QUALITY (categorical)
+        leverage_quality_match = re.search(
+            r"LEVERAGE_QUALITY:\s*(GENUINE|CONSERVATIVE|SUSPECT|ENGINEERED|VALUE_DESTRUCTION|N/A)",
+            data_block,
+            re.IGNORECASE,
+        )
+        if leverage_quality_match:
+            val = leverage_quality_match.group(1).upper()
+            if val != "N/A":
+                signals["leverage_quality"] = val
+
+        # Extract ROIC_PERCENT (numeric, for logging)
+        roic_match = re.search(
+            r"ROIC_PERCENT:\s*(-?[\d.]+)([%]?)",
+            data_block,
+            re.IGNORECASE,
+        )
+        if roic_match:
+            try:
+                val = float(roic_match.group(1))
+                has_percent = bool(roic_match.group(2))
+
+                # If explicit %, always divide by 100
+                if has_percent:
+                    val = val / 100
+                # If no %, heuristic: if >= 2.0, assume it was meant as percentage
+                # e.g. 15.0 -> 0.15, but 1.5 -> 1.5 (150%)
+                elif abs(val) >= 2.0:
+                    val = val / 100
+
+                signals["roic"] = val
+            except ValueError:
+                pass
+
+        # Extract ROE_ROIC_RATIO (numeric, for logging)
+        ratio_match = re.search(
+            r"ROE_ROIC_RATIO:\s*([\d.]+)",
+            data_block,
+            re.IGNORECASE,
+        )
+        if ratio_match:
+            try:
+                signals["roe_roic_ratio"] = float(ratio_match.group(1))
+            except ValueError:
+                pass
+
+        return signals
+
+    @staticmethod
+    def detect_capital_efficiency_flags(
+        fundamentals_report: str, ticker: str = "UNKNOWN"
+    ) -> list[dict]:
+        """
+        Detect capital efficiency red flags and bonuses.
+
+        Flags problematic patterns:
+        - Value destruction (negative ROIC with positive ROE)
+        - Leverage-engineered returns (ROE >> ROIC)
+        - Below-hurdle ROIC (likely destroying value)
+
+        Bonuses for:
+        - Strong genuine returns (high ROIC with low leverage boost)
+
+        Args:
+            fundamentals_report: Full fundamentals analyst report text
+            ticker: Ticker symbol for logging
+
+        Returns:
+            List of flag dicts with risk_penalty values (positive = risk, negative = bonus).
+        """
+        flags: list[dict] = []
+
+        metrics = RedFlagDetector.extract_capital_efficiency_signals(
+            fundamentals_report
+        )
+
+        if not metrics:
+            return flags
+
+        roic_quality = metrics.get("roic_quality")
+        leverage_quality = metrics.get("leverage_quality")
+        roic = metrics.get("roic")
+        roe_roic_ratio = metrics.get("roe_roic_ratio")
+
+        # --- FLAG 1: Value Destruction (most severe) ---
+        if leverage_quality == "VALUE_DESTRUCTION":
+            detail = f"ROIC: {roic:.1%}" if roic is not None else "Negative ROIC"
+            flags.append(
+                {
+                    "type": "CAPITAL_VALUE_DESTRUCTION",
+                    "severity": "CRITICAL",
+                    "detail": f"Negative operating returns masked by leverage. {detail}",
+                    "action": "REJECT_REVIEW",
+                    "risk_penalty": 1.5,
+                    "rationale": (
+                        "Company has negative ROIC but positive ROE. This means the core "
+                        "business is destroying value while financial leverage creates the "
+                        "illusion of shareholder returns. Classic value trap pattern."
+                    ),
+                }
+            )
+            logger.info(
+                "capital_flag_value_destruction",
+                ticker=ticker,
+                roic=roic,
+                leverage_quality=leverage_quality,
+            )
+            # Don't stack other flags if value destruction detected
+            return flags
+
+        # --- FLAG 2: Leverage-Engineered Returns ---
+        if leverage_quality == "ENGINEERED":
+            ratio_str = f"ROE/ROIC: {roe_roic_ratio:.1f}x" if roe_roic_ratio else ""
+            flags.append(
+                {
+                    "type": "CAPITAL_ENGINEERED_RETURNS",
+                    "severity": "HIGH",
+                    "detail": f"Returns primarily from financial engineering. {ratio_str}",
+                    "action": "RISK_ADJUST",
+                    "risk_penalty": 1.0,
+                    "rationale": (
+                        "ROE significantly exceeds ROIC (ratio > 3x), indicating shareholder "
+                        "returns come from leverage, buybacks, or capital structure rather "
+                        "than underlying business quality."
+                    ),
+                }
+            )
+            logger.info(
+                "capital_flag_engineered_returns",
+                ticker=ticker,
+                roe_roic_ratio=roe_roic_ratio,
+            )
+
+        # --- FLAG 3: Suspect Leverage ---
+        elif leverage_quality == "SUSPECT":
+            ratio_str = f"ROE/ROIC: {roe_roic_ratio:.1f}x" if roe_roic_ratio else ""
+            flags.append(
+                {
+                    "type": "CAPITAL_SUSPECT_RETURNS",
+                    "severity": "MEDIUM",
+                    "detail": f"Moderate leverage amplification detected. {ratio_str}",
+                    "action": "RISK_ADJUST",
+                    "risk_penalty": 0.5,
+                    "rationale": (
+                        "ROE moderately exceeds ROIC (ratio 2-3x). Returns partially "
+                        "driven by leverage rather than operational excellence."
+                    ),
+                }
+            )
+            logger.info(
+                "capital_flag_suspect_returns",
+                ticker=ticker,
+                roe_roic_ratio=roe_roic_ratio,
+            )
+
+        # --- FLAG 4: Below Hurdle ROIC ---
+        if roic_quality == "WEAK":
+            roic_str = f"ROIC: {roic:.1%}" if roic is not None else ""
+            flags.append(
+                {
+                    "type": "CAPITAL_BELOW_HURDLE",
+                    "severity": "MEDIUM",
+                    "detail": f"Returns below cost of capital proxy. {roic_str}",
+                    "action": "RISK_ADJUST",
+                    "risk_penalty": 0.5,
+                    "rationale": (
+                        "ROIC below 8% hurdle rate suggests the company may be destroying "
+                        "value on a risk-adjusted basis. Acceptable only with clear "
+                        "turnaround thesis and improving trajectory."
+                    ),
+                }
+            )
+            logger.info(
+                "capital_flag_below_hurdle",
+                ticker=ticker,
+                roic=roic,
+            )
+
+        # --- BONUS: Capital Efficient (genuine high returns) ---
+        if roic_quality == "STRONG" and leverage_quality in ("GENUINE", "CONSERVATIVE"):
+            roic_str = f"ROIC: {roic:.1%}" if roic is not None else ""
+            flags.append(
+                {
+                    "type": "CAPITAL_EFFICIENT",
+                    "severity": "POSITIVE",
+                    "detail": f"Strong genuine capital efficiency. {roic_str}",
+                    "action": "RISK_BONUS",
+                    "risk_penalty": -0.5,
+                    "rationale": (
+                        "High ROIC (>15%) with ROE/ROIC ratio below 2x indicates returns "
+                        "driven by operational excellence rather than financial leverage. "
+                        "Suggests sustainable competitive advantage."
+                    ),
+                }
+            )
+            logger.info(
+                "capital_flag_efficient",
+                ticker=ticker,
+                roic=roic,
+                leverage_quality=leverage_quality,
+            )
+
+        return flags
