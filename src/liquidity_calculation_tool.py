@@ -110,6 +110,14 @@ Avg Daily Turnover (USD): N/A
         avg_volume = hist["Volume"].mean()
         avg_close = hist["Close"].mean()
 
+        # --- HEARTBEAT CHECK (Trap A: Liquidity Distortion) ---
+        # Detect irregular trading patterns that create stale/manipulated pricing
+        total_days = len(hist)
+        zero_vol_days = (hist["Volume"] == 0).sum()
+        flat_days = (hist["Close"] == hist["Close"].shift(1)).sum()
+        pct_zero = (zero_vol_days / total_days) * 100 if total_days > 0 else 0
+        pct_flat = (flat_days / total_days) * 100 if total_days > 0 else 0
+
         # Calculate local turnover
         # NOTE: For UK stocks (.L), prices are in Pence, so we must divide by 100
         # to get Pounds before converting to USD.
@@ -161,14 +169,22 @@ Avg Daily Turnover (USD): N/A
 
         # Threshold: $500k USD daily turnover is a reasonable floor
         threshold_usd = 500_000
-        status = "PASS" if avg_turnover_usd > threshold_usd else "FAIL"
+
+        # Apply both turnover threshold AND heartbeat check
+        if pct_zero > 15.0 or pct_flat > 30.0:
+            status = "FAIL (Irregular Trading)"
+        elif avg_turnover_usd <= threshold_usd:
+            status = "FAIL"
+        else:
+            status = "PASS"
 
         return f"""Liquidity Analysis for {ticker}:
 Status: {status}
 Avg Daily Volume (3mo): {int(avg_volume):,}
 Avg Daily Turnover (USD): ${int(avg_turnover_usd):,}
+Trading Regularity: {pct_zero:.0f}% zero-volume days, {pct_flat:.0f}% flat-price days (last 3mo)
 Details: {currency} turnover converted at FX rate {fx_rate:.6f} (source: {fx_source})
-Threshold: $500,000 USD daily
+Threshold: $500,000 USD daily, <15% zero-volume days, <30% flat-price days
 """
 
     except Exception as e:
