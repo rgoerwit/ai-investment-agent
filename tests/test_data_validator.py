@@ -243,9 +243,9 @@ class TestComprehensiveValidation:
 
         validation = validator.validate_comprehensive(data, "AAPL")
 
-        assert validation.categories_total == 5
+        assert validation.categories_total == 7  # Added triangle and staleness
         assert validation.basics_ok is True
-        assert len(validation.results) == 5
+        assert len(validation.results) == 7
 
         # Check each category result exists
         categories = [r.category for r in validation.results]
@@ -254,6 +254,8 @@ class TestComprehensiveValidation:
         assert "profitability" in categories
         assert "financial_health" in categories
         assert "growth" in categories
+        assert "triangle" in categories  # NEW
+        assert "staleness" in categories  # NEW
 
     def test_validation_summary(self):
         """Test validation summary generation."""

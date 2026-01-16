@@ -167,24 +167,49 @@ Avg Daily Turnover (USD): N/A
 
         avg_turnover_usd = avg_turnover_local * fx_rate
 
-        # Threshold: $500k USD daily turnover is a reasonable floor
-        threshold_usd = 500_000
+        # Thresholds (Aligned with Portfolio Manager Prompt)
+        THRESHOLD_PASS = 500_000
+        THRESHOLD_MARGINAL = 100_000
 
-        # Apply both turnover threshold AND heartbeat check
-        if pct_zero > 15.0 or pct_flat > 30.0:
+        # Failure Conditions
+        fails_zero_vol = pct_zero > 15.0
+        fails_flat_price = pct_flat > 30.0
+
+        # Determine status with priority: heartbeat issues > insufficient liquidity > marginal > pass
+        status = "PASS"
+        reasons = []
+
+        if fails_zero_vol or fails_flat_price:
             status = "FAIL (Irregular Trading)"
-        elif avg_turnover_usd <= threshold_usd:
-            status = "FAIL"
-        else:
-            status = "PASS"
+            if fails_zero_vol:
+                reasons.append(f"{int(pct_zero)}% zero-volume days")
+            if fails_flat_price:
+                reasons.append(f"{int(pct_flat)}% flat-price days")
+
+        elif avg_turnover_usd < THRESHOLD_MARGINAL:
+            status = "FAIL (Insufficient Liquidity)"
+            reasons.append(
+                f"${int(avg_turnover_usd):,} < ${THRESHOLD_MARGINAL:,} minimum"
+            )
+
+        elif avg_turnover_usd < THRESHOLD_PASS:
+            status = "MARGINAL"
+            reasons.append(f"Low liquidity (${int(avg_turnover_usd):,})")
+
+        # else: status remains "PASS"
+
+        # Build status line with reasons if applicable
+        status_line = status
+        if reasons:
+            status_line = f"{status} - {'; '.join(reasons)}"
 
         return f"""Liquidity Analysis for {ticker}:
-Status: {status}
+Status: {status_line}
 Avg Daily Volume (3mo): {int(avg_volume):,}
 Avg Daily Turnover (USD): ${int(avg_turnover_usd):,}
 Trading Regularity: {pct_zero:.0f}% zero-volume days, {pct_flat:.0f}% flat-price days (last 3mo)
 Details: {currency} turnover converted at FX rate {fx_rate:.6f} (source: {fx_source})
-Threshold: $500,000 USD daily, <15% zero-volume days, <30% flat-price days
+Thresholds: $100,000 USD minimum (MARGINAL), $500,000 USD recommended (PASS), <15% zero-volume days, <30% flat-price days
 """
 
     except Exception as e:
