@@ -37,7 +37,7 @@ class TestArticleWriterInit:
 
         assert config["agent_key"] == "article_writer"
         assert "system_message" in config
-        assert config["version"] == "1.3"
+        assert config["version"] == "1.4"
         # user_template and model_config are nested in metadata for AgentPrompt compatibility
         metadata = config["metadata"]
         assert "user_template" in metadata
@@ -414,6 +414,9 @@ class TestPromptTemplate:
         assert "{ticker}" in user_template
         assert "{company_name}" in user_template
         assert "{report_text}" in user_template
+        assert (
+            "{valuation_context}" in user_template
+        )  # Added for chart/decision reconciliation
 
     def test_system_message_has_key_instructions(self):
         """Test that system message contains key instructions."""

@@ -278,6 +278,7 @@ async def handle_article_generation(
     company_name: str,
     report_text: str,
     trade_date: str,
+    valuation_context: str | None = None,
 ) -> None:
     """
     Generate article if --article flag is set.
@@ -288,6 +289,7 @@ async def handle_article_generation(
         company_name: Full company name
         report_text: The full analysis report
         trade_date: Date of the analysis
+        valuation_context: Optional context about chart valuation vs decision
     """
     article_path = resolve_article_path(args, ticker)
     if not article_path:
@@ -308,6 +310,7 @@ async def handle_article_generation(
             report_text=report_text,
             trade_date=trade_date,
             output_path=article_path,
+            valuation_context=valuation_context,
         )
 
         if not args.quiet and not args.brief:
@@ -1012,6 +1015,7 @@ async def main():
                     company_name=company_name or args.ticker,
                     report_text=report,
                     trade_date=trade_date,
+                    valuation_context=reporter.get_valuation_context(),
                 )
 
             sys.exit(0)

@@ -1468,6 +1468,47 @@ class SmartMarketDataFetcher(FinancialFetcher):
 
             merged = self._normalize_data_integrity(merged, ticker)
 
+            # --- DATA HYGIENE PIPELINE ---
+            # Run comprehensive validation including new integrity checks
+            from src.data.validator import validator as data_validator
+
+            validation = data_validator.validate_comprehensive(merged, ticker)
+
+            # If triangle validation failed and EODHD available, arbitrate
+            triangle_result = next(
+                (r for r in validation.results if r.category == "triangle"), None
+            )
+
+            if triangle_result and not triangle_result.passed:
+                logger.warning(
+                    "triangle_validation_failed",
+                    ticker=ticker,
+                    issues=triangle_result.issues,
+                )
+
+                # Only call EODHD if we haven't already used it in primary fetch
+                sources_used = merge_metadata.get("sources_used", [])
+                if self.eodhd_fetcher and "eodhd" not in sources_used:
+                    logger.info("attempting_eodhd_arbitration", ticker=ticker)
+
+                    anchor_data = await self.eodhd_fetcher.verify_anchor_metrics(ticker)
+
+                    if anchor_data:
+                        # EODHD succeeded - patch the data
+                        merged["marketCap"] = anchor_data.get(
+                            "marketCap"
+                        ) or merged.get("marketCap")
+                        merged["trailingPE"] = anchor_data.get(
+                            "trailingPE"
+                        ) or merged.get("trailingPE")
+                        merged["_eodhd_arbitration"] = "success"
+                        logger.info("eodhd_arbitration_success", ticker=ticker)
+                    else:
+                        # EODHD failed (402/error) - flag data as suspect
+                        merged["_data_quality_flag"] = "SUSPECT_VALUATION"
+                        logger.warning("eodhd_arbitration_failed", ticker=ticker)
+
+            # Continue with existing validation flow
             # Validate
             quality = self._validate_basics(merged, ticker)
             if quality.basics_ok:

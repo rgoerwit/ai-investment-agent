@@ -1,4 +1,4 @@
-# 🌐 Multi-Agent International Equity Analysis System
+# Multi-Agent International Equity Analysis System
 
 > **An open-source agentic AI system that democratizes sophisticated equity research for international markets**
 
@@ -12,7 +12,7 @@
 
 ---
 
-## 🎯 What Makes This Different
+## What Makes This Different
 
 **Most "AI trading bots" are simple scripts.** This is a **thesis-driven fundamental analysis engine** with institutional-grade architecture.  (I spent hours and hours working my *ss off to get this right.)
 
@@ -35,7 +35,7 @@
 
 ---
 
-## 🏗️ Architecture: Agentic AI at Work
+## Architecture: Agentic AI at Work
 
 This isn't a single prompt to an LLM. It's a **stateful orchestration** of specialized AI agents, each with distinct roles, debating and synthesizing information through a directed graph workflow.
 
@@ -156,7 +156,7 @@ graph TB
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -428,7 +428,7 @@ caffeinate -i ./scripts/run_tickers.sh
 **Note**: Small-cap/illiquid stocks may still show data gaps, but this *usually* reflects
 genuine data unavailability from financial APIs, not system failures.
 
-**💡 Pro tip for macOS users:**
+**Pro tip for macOS users:**
 The `caffeinate -i` command prevents your Mac from sleeping because it think it's inactive.
 (It may sleep for other reasons even with caffeinate.)
 
@@ -530,7 +530,7 @@ poetry install
 
 ---
 
-## 💡 Investment Thesis (Built-In)
+## Investment Thesis (Built-In)
 
 The system enforces a **value-to-growth transition** strategy focused on:
 
@@ -543,16 +543,16 @@ The system enforces a **value-to-growth transition** strategy focused on:
 
 ### Soft Factors (Risk Scoring)
 
-- 📊 Valuation (P/E ≤ 18, PEG ≤ 1.2, P/B ≤ 1.4)
-- 🌍 US Revenue exposure (prefer less exposure here)
-- 🏢 ADR availability (sponsored means equity is well "discovered")
-- ⚠️ Qualitative risks (geopolitical, industry headwinds, management issues)
+- Valuation (P/E ≤ 18, PEG ≤ 1.2, P/B ≤ 1.4)
+- US Revenue exposure (prefer less exposure here)
+- ADR availability (sponsored means equity is well "discovered")
+- Qualitative risks (geopolitical, industry headwinds, management issues)
 
 **Philosophy:** Find mid-cap stocks in international markets that are transitioning from value (undervalued) to growth (expansion phase), before too many US analysts discover them.  One of the few ways retail can generate alpha, competing against major funds, hedgies, etc.
 
 ---
 
-## 🛠️ Technical Highlights
+## Technical Highlights
 
 ### Robust Data Pipeline
 
@@ -614,7 +614,7 @@ Prompts enforce **algorithms via natural language** (e.g., "IF US Revenue > 35%:
 
 ---
 
-## 📊 Performance & Accuracy
+## Performance & Accuracy
 
 ### Third-Party Validation (Grok/Gemini Analysis)
 
@@ -660,7 +660,7 @@ One future enhancement would be to include building the pre-search for hundreds 
 
 ---
 
-## 🎓 Learning Agentic AI
+## Learning Agentic AI
 
 This repository is an educational resource for understanding **production-grade agentic systems**:
 
@@ -700,7 +700,7 @@ src/
 
 ---
 
-## 🌍 Democratizing Finance
+## Democratizing Finance
 
 ### The Vision
 
@@ -730,7 +730,7 @@ src/
 
 ---
 
-## 🧪 Testing & Quality
+## Testing & Quality
 
 ### Comprehensive Test Suite
 
@@ -760,7 +760,7 @@ poetry run pytest --cov=src tests/
 
 ---
 
-## 🚢 Deployment (Educational Reference)
+## Deployment (Educational Reference)
 
 ### Docker Support (Modernized Dec 2025)
 
@@ -803,7 +803,7 @@ terraform apply  # Only after validating plan
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions welcome! Areas for improvement:
 
@@ -843,7 +843,7 @@ This ensures the directory exists for scripts like `run_tickers.sh` while keepin
 
 ---
 
-## ⚖️ License & Disclaimer
+## License & Disclaimer
 
 **License:** MIT - Free for commercial and personal use
 
@@ -858,7 +858,7 @@ This ensures the directory exists for scripts like `run_tickers.sh` while keepin
 
 ---
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 **Built With:**
 
@@ -877,13 +877,13 @@ This ensures the directory exists for scripts like `run_tickers.sh` while keepin
 
 ---
 
-## 📬 Questions or Feedback?
+## Questions or Feedback?
 
 - **Issues:** [GitHub Issues](https://github.com/rgoerwit/ai-investment-agent/issues)
 - **LinkedIn:** [Your Profile](https://www.linkedin.com/in/goerwitz)
 
 ---
 
-**⭐ If you found this useful, please star the repo!** It helps others discover the project.
+If you found this useful, please star the repo - it helps others discover the project.
 
-**🔀 Fork it, improve it, share it.** Let's democratize sophisticated financial analysis together.
+Fork it, improve it, share it. Let's democratize sophisticated financial analysis together.

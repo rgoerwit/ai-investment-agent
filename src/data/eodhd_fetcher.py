@@ -138,6 +138,76 @@ class EODHDFetcher(FinancialFetcher):
             logger.debug(f"EODHD request failed: {e}")
             return None
 
+    async def verify_anchor_metrics(self, symbol: str) -> dict | None:
+        """
+        Lightweight spot-check for 'anchor' metrics (Cap, P/E, Yield).
+        Called ONLY when free sources fail validation.
+
+        Uses filter=Highlights to minimize payload (~1kb vs ~50kb).
+        Handles 402 Payment Required gracefully for restricted licenses.
+        """
+        if not self.is_available():
+            return None
+
+        if not self._session:
+            self._session = aiohttp.ClientSession()
+
+        eod_symbol = self._normalize_ticker(symbol)
+        url = f"{self.base_url}/fundamentals/{eod_symbol}"
+
+        # 2026 optimization: fetch ONLY the Highlights block
+        params = {"api_token": self.api_key, "fmt": "json", "filter": "Highlights"}
+
+        try:
+            async with self._session.get(url, params=params, timeout=5) as response:
+                # CASE 1: Success
+                if response.status == 200:
+                    try:
+                        data = await response.json()
+                    except (ValueError, aiohttp.ContentTypeError) as e:
+                        logger.debug(
+                            f"EODHD anchor malformed JSON for {eod_symbol}: {e}"
+                        )
+                        return None
+
+                    return {
+                        "marketCap": self._safe_float(data.get("MarketCapitalization")),
+                        "trailingPE": self._safe_float(data.get("PERatio")),
+                        "dividendYield": self._safe_float(data.get("DividendYield")),
+                        "_source": "EODHD_anchor",
+                    }
+
+                # CASE 2: Unpaid/Restricted License (402)
+                # Common for international data on free/low-tier plans
+                elif response.status == 402:
+                    logger.info(f"EODHD Paywall (402) for {eod_symbol}. Cannot verify.")
+                    return None
+
+                # CASE 3: Rate limit (429) - disable future calls
+                elif response.status == 429:
+                    logger.error(
+                        "EODHD API Limit (429). Disabling EODHD anchor checks."
+                    )
+                    self._is_exhausted = True
+                    return None
+
+                # CASE 4: Auth Error (401/403)
+                elif response.status in [401, 403]:
+                    logger.warning(f"EODHD Auth Error ({response.status}). Disabling.")
+                    self._is_exhausted = True
+                    return None
+
+                # CASE 5: Not found
+                elif response.status == 404:
+                    logger.debug(f"EODHD anchor data not found for {eod_symbol}")
+                    return None
+
+                return None
+
+        except Exception as e:
+            logger.debug(f"EODHD anchor check failed: {e}")
+            return None
+
     def _parse_fundamentals(self, data: dict) -> dict[str, float | None]:
         """Map EODHD JSON structure to internal schema."""
         output = {

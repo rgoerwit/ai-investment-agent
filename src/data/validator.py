@@ -392,6 +392,124 @@ class FineGrainedValidator:
         result.passed = len(result.issues) == 0
         return result
 
+    def _validate_triangle(self, data: dict, symbol: str) -> ValidationResult:
+        """
+        Triangle Check: Price × Shares ≈ Market Cap
+
+        Catches:
+        - Unit confusion (Pence vs Pounds: 100x error)
+        - Stale shares outstanding
+        - Market cap calculation errors
+        """
+        result = ValidationResult(category="triangle", passed=True)
+
+        price = self._safe_float(
+            data.get("currentPrice") or data.get("regularMarketPrice")
+        )
+        shares = self._safe_float(data.get("sharesOutstanding"))
+        reported_cap = self._safe_float(data.get("marketCap"))
+
+        if not all([price, shares, reported_cap]) or reported_cap == 0:
+            result.missing_fields.append("price/shares/marketCap")
+            return result
+
+        calc_cap = price * shares
+        ratio = calc_cap / reported_cap
+
+        # Allow 15% drift for intraday timing
+        if 0.85 < ratio < 1.15:
+            result.validated_fields.append("market_cap_triangle")
+            return result
+
+        # Specific trap: UK stocks in Pence (100x error)
+        if 90 < ratio < 110:
+            result.issues.append(
+                f"Unit mismatch (100x): Price likely in Pence/Cents. "
+                f"Calc {calc_cap:,.0f} vs Reported {reported_cap:,.0f}"
+            )
+        else:
+            result.warnings.append(
+                f"Triangle break: Price×Shares ({calc_cap:,.0f}) != Cap ({reported_cap:,.0f}). "
+                f"Ratio: {ratio:.2f}"
+            )
+
+        result.passed = len(result.issues) == 0
+        return result
+
+    def _validate_staleness(self, data: dict, symbol: str) -> ValidationResult:
+        """
+        Staleness Check: Flag data older than 18 months
+
+        Uses: lastFiscalYearEnd, earningsTimestampEnd, or compensationAsOfEpochDate
+        """
+        result = ValidationResult(category="staleness", passed=True)
+
+        import time
+
+        current_time = time.time()
+        max_age_seconds = 18 * 30.44 * 24 * 60 * 60  # 18 months
+
+        # Try multiple timestamp fields (in order of preference)
+        timestamp_fields = [
+            "lastFiscalYearEnd",
+            "earningsTimestampEnd",
+            "compensationAsOfEpochDate",
+        ]
+
+        timestamp = None
+        source_field = None
+        for ts_field in timestamp_fields:
+            ts = data.get(ts_field)
+            if ts:
+                timestamp = ts
+                source_field = ts_field
+                break
+
+        if not timestamp:
+            result.warnings.append("No timestamp available to check staleness")
+            return result
+
+        age_seconds = current_time - timestamp
+
+        if age_seconds > max_age_seconds:
+            age_months = int(age_seconds / (30.44 * 24 * 60 * 60))
+            result.warnings.append(
+                f"Data may be stale: {age_months} months old (from {source_field})"
+            )
+
+        result.validated_fields.append(f"staleness_check_{source_field}")
+        return result
+
+    def _validate_outlier_ratios(self, data: dict, symbol: str) -> dict:
+        """
+        Outlier Ratio Caps: Auto-nullify impossible values
+
+        Modifies data dict in-place. Returns dict with notes.
+        """
+        notes = []
+
+        # Gross margin > 100% (accounting error or bank complexity)
+        gm = self._safe_float(data.get("grossMargins"))
+        if gm and gm > 1.0:
+            notes.append(f"Capped gross margin {gm:.1%} to null (>100% impossible)")
+            data["grossMargins"] = None
+            data["_gross_margin_capped"] = True
+
+        # Dividend yield > 20% (likely error or imminent cut)
+        dy = self._safe_float(data.get("dividendYield"))
+        if dy and dy > 0.20:
+            notes.append(f"Flagged dividend yield {dy:.1%} as suspect (>20%)")
+            data["_dividend_yield_suspect"] = True
+
+        # P/E > 1000 (should be treated as N/A, not real number)
+        pe = self._safe_float(data.get("trailingPE"))
+        if pe and pe > 1000:
+            notes.append(f"Capped P/E {pe:.0f} to null (earnings near-zero)")
+            data["trailingPE"] = None
+            data["_pe_capped"] = True
+
+        return {"notes": notes, "data": data}
+
     def _is_financial_company(self, data: dict) -> bool:
         """Check if company is in financial sector (banks have different metrics)."""
         industry = str(data.get("industry", "")).lower()
@@ -416,6 +534,11 @@ class FineGrainedValidator:
         financial_health = self._validate_financial_health(data, symbol)
         growth = self._validate_growth(data, symbol)
 
+        # NEW: Additional integrity checks
+        triangle = self._validate_triangle(data, symbol)
+        staleness = self._validate_staleness(data, symbol)
+        outlier_result = self._validate_outlier_ratios(data, symbol)
+
         # Set flags
         overall.basics_ok = basics.passed
         overall.valuation_ok = valuation.passed
@@ -423,14 +546,20 @@ class FineGrainedValidator:
         overall.financial_health_ok = financial_health.passed
         overall.growth_ok = growth.passed
 
-        # Store results
+        # Store results (including new validation checks)
         overall.results = [
             basics,
             valuation,
             profitability,
             financial_health,
             growth,
+            triangle,
+            staleness,
         ]
+
+        # Add outlier notes to data quality metadata
+        if outlier_result["notes"]:
+            data["_data_quality_notes"] = outlier_result["notes"]
 
         # Log summary
         logger.info(

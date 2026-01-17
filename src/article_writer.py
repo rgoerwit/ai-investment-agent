@@ -252,15 +252,22 @@ class ArticleWriter:
             logger.warning("Images directory not found", path=str(self.images_dir))
             return "No charts available."
 
-        # Normalize ticker for filename matching (dots become underscores)
-        safe_ticker = ticker.replace(".", "_").replace("/", "_")
+        # Normalize ticker for filename matching (dots become underscores or dashes)
+        safe_ticker_underscore = ticker.replace(".", "_").replace("/", "_")
+        safe_ticker_dash = ticker.replace(".", "-").replace("/", "-")
 
-        # Find matching images
+        # Find matching images - try multiple naming conventions
         patterns = [
-            f"{safe_ticker}_{trade_date}_football_field.*",
-            f"{safe_ticker}_{trade_date}_radar.*",
-            f"{safe_ticker}_*_football_field.*",  # Fallback without date
-            f"{safe_ticker}_*_radar.*",
+            # Standard pattern: TICKER_DATE_charttype
+            f"{safe_ticker_underscore}_{trade_date}_football_field.*",
+            f"{safe_ticker_underscore}_{trade_date}_radar.*",
+            f"{safe_ticker_underscore}_*_football_field.*",  # Fallback without date
+            f"{safe_ticker_underscore}_*_radar.*",
+            # Output-based pattern: *TICKER*_charttype (from --output flag)
+            f"*{safe_ticker_underscore}*_football_field.*",
+            f"*{safe_ticker_underscore}*_radar.*",
+            f"*{safe_ticker_dash}*_football_field.*",
+            f"*{safe_ticker_dash}*_radar.*",
         ]
 
         found_images = []
@@ -405,6 +412,7 @@ class ArticleWriter:
         report_text: str,
         trade_date: str,
         output_path: Path | None = None,
+        valuation_context: str | None = None,
     ) -> str:
         """
         Generate an article from the analysis report.
@@ -415,6 +423,7 @@ class ArticleWriter:
             report_text: The full analysis report to transform
             trade_date: Date of the analysis
             output_path: Optional path to save the article
+            valuation_context: Optional context about chart valuation vs decision
 
         Returns:
             Generated article as Markdown string
@@ -445,11 +454,14 @@ class ArticleWriter:
         )
 
         # Format user message
+        # Use provided valuation_context or default message
+        val_context = valuation_context or "VALUATION DATA: Not available."
         user_message = user_template.format(
             voice_samples=voice_samples,
             image_manifest=image_manifest,
             ticker=ticker,
             company_name=company_name,
+            valuation_context=val_context,
             report_text=report_text,
         )
 
@@ -514,6 +526,7 @@ def generate_article(
     trade_date: str,
     output_path: Path | str | None = None,
     use_github_urls: bool = True,
+    valuation_context: str | None = None,
 ) -> str:
     """
     Convenience function to generate an article.
@@ -525,6 +538,7 @@ def generate_article(
         trade_date: Date of the analysis
         output_path: Optional path to save the article
         use_github_urls: Convert image paths to GitHub URLs
+        valuation_context: Optional context about chart valuation vs decision
 
     Returns:
         Generated article as Markdown string
@@ -536,4 +550,5 @@ def generate_article(
         report_text=report_text,
         trade_date=trade_date,
         output_path=Path(output_path) if output_path else None,
+        valuation_context=valuation_context,
     )
