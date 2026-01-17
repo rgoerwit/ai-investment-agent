@@ -49,6 +49,64 @@ class QuietModeReporter:
         self.skip_charts = skip_charts
         self.image_dir = image_dir  # Custom image directory (relative path)
         self.report_dir = report_dir  # Directory where report is being written
+        self.valuation_context: str | None = None  # Stored for article writer
+
+    def _store_valuation_context(
+        self,
+        current_price: float | None,
+        target_low: float | None,
+        target_high: float | None,
+        methodology: str | None,
+        confidence: str | None,
+    ) -> None:
+        """Store valuation context for article writer to use.
+
+        This enables the article writer to address discrepancies between
+        the football field chart visuals and the investment decision.
+        """
+        if not current_price or not target_low or not target_high:
+            self.valuation_context = (
+                "VALUATION DATA: Insufficient data for target calculation."
+            )
+            return
+
+        # Calculate fair value (midpoint) and position in range
+        fair_value = (target_low + target_high) / 2
+        range_size = target_high - target_low
+        position_in_range = (
+            ((current_price - target_low) / range_size * 100) if range_size > 0 else 50
+        )
+
+        # Determine price position description
+        if current_price > target_high:
+            position_desc = "ABOVE target range (overvalued by chart methodology)"
+        elif current_price > fair_value:
+            position_desc = (
+                f"ABOVE fair value midpoint ({position_in_range:.0f}% of range)"
+            )
+        elif current_price < target_low:
+            position_desc = "BELOW target range (undervalued by chart methodology)"
+        else:
+            position_desc = (
+                f"BELOW fair value midpoint ({position_in_range:.0f}% of range)"
+            )
+
+        self.valuation_context = f"""VALUATION DATA (from Football Field Chart):
+- Methodology: {methodology or 'P/E Normalization'}
+- Target Range: ${target_low:.2f} - ${target_high:.2f}
+- Fair Value (midpoint): ${fair_value:.2f}
+- Current Price: ${current_price:.2f}
+- Price Position: {position_desc}
+- Confidence: {confidence or 'N/A'}
+
+NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain why in the Valuation section."""
+
+    def get_valuation_context(self) -> str:
+        """Return stored valuation context for article writer."""
+        return (
+            self.valuation_context
+            or "VALUATION DATA: Not available (charts skipped or insufficient data)."
+        )
 
     def _generate_chart(self, result: dict) -> Path | None:
         """Generate football field chart from analysis results.
@@ -137,6 +195,15 @@ class QuietModeReporter:
                 footnote="Targets based on P/E normalization"
                 if targets.methodology
                 else None,
+            )
+
+            # Store valuation context for article writer (D1 implementation)
+            self._store_valuation_context(
+                current_price=chart_data.current_price,
+                target_low=targets.low,
+                target_high=targets.high,
+                methodology=targets.methodology,
+                confidence=targets.confidence,
             )
 
             # Configure chart generation

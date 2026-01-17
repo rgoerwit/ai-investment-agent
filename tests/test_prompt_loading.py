@@ -245,6 +245,110 @@ class TestSpecificPromptFiles:
             "Financial Health" in system_message or "HEALTH" in system_message
         ), "portfolio_manager should reference Financial Health criteria"
 
+    def test_writer_json_has_valuation_reconciliation_section(self):
+        """Verify writer.json has VALUATION-DECISION RECONCILIATION section."""
+        prompt_file = Path("prompts/writer.json")
+        if not prompt_file.exists():
+            pytest.skip("writer.json not found")
+
+        with open(prompt_file) as f:
+            data = json.load(f)
+
+        system_message = data.get("system_message", "")
+        # Check for the reconciliation section
+        assert (
+            "VALUATION-DECISION RECONCILIATION" in system_message
+        ), "writer.json should have VALUATION-DECISION RECONCILIATION section"
+        # Check for key instructions within that section
+        assert (
+            "narrative tension" in system_message.lower()
+        ), "writer.json should mention 'narrative tension' in reconciliation section"
+        assert (
+            "above" in system_message.lower() and "fair value" in system_message.lower()
+        ), "writer.json should describe handling price above fair value"
+
+    def test_writer_json_has_valuation_context_placeholder(self):
+        """Verify writer.json user_template includes valuation_context placeholder."""
+        prompt_file = Path("prompts/writer.json")
+        if not prompt_file.exists():
+            pytest.skip("writer.json not found")
+
+        with open(prompt_file) as f:
+            data = json.load(f)
+
+        user_template = data.get("metadata", {}).get("user_template", "")
+        assert (
+            "{valuation_context}" in user_template
+        ), "writer.json user_template should include {valuation_context} placeholder"
+        # Check that context section exists
+        assert (
+            "VALUATION CONTEXT" in user_template
+        ), "writer.json user_template should have VALUATION CONTEXT section"
+
+    def test_value_trap_detector_has_insider_concentration_thresholds(self):
+        """Verify value_trap_detector.json has explicit insider concentration thresholds."""
+        prompt_file = Path("prompts/value_trap_detector.json")
+        if not prompt_file.exists():
+            pytest.skip("value_trap_detector.json not found")
+
+        with open(prompt_file) as f:
+            data = json.load(f)
+
+        system_message = data.get("system_message", "")
+        # Check for INSIDER_CONCENTRATION section
+        assert (
+            "INSIDER/FAMILY CONCENTRATION" in system_message
+        ), "value_trap_detector should have INSIDER/FAMILY CONCENTRATION section"
+        # Check for explicit thresholds
+        assert (
+            ">50%" in system_message and "HIGH" in system_message
+        ), "value_trap_detector should have >50% HIGH threshold"
+        assert "30-50%" in system_message or (
+            "30" in system_message and "MODERATE" in system_message
+        ), "value_trap_detector should have 30-50% MODERATE threshold"
+        # Check for key insight about family control
+        assert (
+            "does NOT equal alignment" in system_message
+        ), "value_trap_detector should clarify family control != minority alignment"
+
+    def test_value_trap_detector_has_latin_america_terminology(self):
+        """Verify value_trap_detector.json has Latin America terminology section."""
+        prompt_file = Path("prompts/value_trap_detector.json")
+        if not prompt_file.exists():
+            pytest.skip("value_trap_detector.json not found")
+
+        with open(prompt_file) as f:
+            data = json.load(f)
+
+        system_message = data.get("system_message", "")
+        # Check for LATIN AMERICA section
+        assert (
+            "LATIN AMERICA" in system_message
+        ), "value_trap_detector should have LATIN AMERICA terminology section"
+        # Check for key Spanish terms
+        assert (
+            "Empresa familiar" in system_message
+        ), "value_trap_detector should include 'Empresa familiar' term"
+        assert (
+            "Accionista mayoritario" in system_message
+            or "controlador" in system_message
+        ), "value_trap_detector should include majority shareholder terms"
+
+    def test_value_trap_detector_output_format_has_insider_concentration(self):
+        """Verify value_trap_detector output format includes INSIDER_CONCENTRATION field."""
+        prompt_file = Path("prompts/value_trap_detector.json")
+        if not prompt_file.exists():
+            pytest.skip("value_trap_detector.json not found")
+
+        with open(prompt_file) as f:
+            data = json.load(f)
+
+        system_message = data.get("system_message", "")
+        # Check output format includes the new field
+        assert (
+            "INSIDER_CONCENTRATION: [HIGH | MODERATE | LOW]" in system_message
+        ), "value_trap_detector output format should include INSIDER_CONCENTRATION field"
+
 
 class TestAgentPromptDataclass:
     """Test the AgentPrompt dataclass structure."""
