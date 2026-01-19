@@ -1272,7 +1272,20 @@ def create_research_manager_node(llm, memory: Any | None) -> Callable:
             return {"investment_plan": "Error: Missing prompt"}
         debate = state.get("investment_debate_state", {})
         value_trap = state.get("value_trap_report", "N/A")
-        all_reports = f"""MARKET ANALYST REPORT:\n{state.get("market_report", "N/A")}\n\nSENTIMENT ANALYST REPORT:\n{state.get("sentiment_report", "N/A")}\n\nNEWS ANALYST REPORT:\n{state.get("news_report", "N/A")}\n\nFUNDAMENTALS ANALYST REPORT:\n{state.get("fundamentals_report", "N/A")}\n\nVALUE TRAP ANALYSIS:\n{value_trap}\n\nBULL RESEARCHER:\n{debate.get("bull_history", "N/A")}\n\nBEAR RESEARCHER:\n{debate.get("bear_history", "N/A")}"""
+
+        # JIT extraction for period/provenance awareness
+        field_sources = extract_field_sources_from_messages(state.get("messages", []))
+        attribution_note = ""
+        if field_sources:
+            sources_used = sorted(set(field_sources.values()))
+            attribution_note = (
+                f"\n\n### DATA PROVENANCE NOTE\n"
+                f"Fundamentals sourced from: {', '.join(sources_used)}. "
+                f"News may reflect more recent periods (e.g., Q3 headlines vs TTM API data). "
+                f"When Bull/Bear cite conflicting figures, check if they reference different time periods."
+            )
+
+        all_reports = f"""MARKET ANALYST REPORT:\n{state.get("market_report", "N/A")}\n\nSENTIMENT ANALYST REPORT:\n{state.get("sentiment_report", "N/A")}\n\nNEWS ANALYST REPORT:\n{state.get("news_report", "N/A")}\n\nFUNDAMENTALS ANALYST REPORT:\n{state.get("fundamentals_report", "N/A")}{attribution_note}\n\nVALUE TRAP ANALYSIS:\n{value_trap}\n\nBULL RESEARCHER:\n{debate.get("bull_history", "N/A")}\n\nBEAR RESEARCHER:\n{debate.get("bear_history", "N/A")}"""
         prompt = f"""{agent_prompt.system_message}\n\n{all_reports}\n\nProvide Investment Plan."""
         try:
             response = await invoke_with_rate_limit_handling(
@@ -1298,6 +1311,12 @@ def create_trader_node(llm, memory: Any | None) -> Callable:
         consultant = state.get("consultant_review", "")
         consultant_section = f"""\n\nEXTERNAL CONSULTANT REVIEW (Cross-Validation):\n{consultant if consultant else "N/A (consultant disabled or unavailable)"}"""
 
+        # Include valuation parameters if available (from Valuation Calculator)
+        valuation = state.get("valuation_params", "")
+        valuation_section = (
+            f"""\n\nVALUATION PARAMETERS:\n{valuation}""" if valuation else ""
+        )
+
         # Include all 4 analyst reports for comprehensive trading context
         all_input = f"""MARKET ANALYST REPORT:
 {state.get("market_report", "N/A")}
@@ -1312,7 +1331,7 @@ FUNDAMENTALS ANALYST REPORT:
 {state.get("fundamentals_report", "N/A")}
 
 RESEARCH MANAGER PLAN:
-{state.get("investment_plan", "N/A")}{consultant_section}"""
+{state.get("investment_plan", "N/A")}{consultant_section}{valuation_section}"""
         prompt = (
             f"""{agent_prompt.system_message}\n\n{all_input}\n\nCreate Trading Plan."""
         )
