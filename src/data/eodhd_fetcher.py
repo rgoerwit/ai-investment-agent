@@ -52,7 +52,7 @@ class EODHDFetcher(FinancialFetcher):
 
     def is_available(self) -> bool:
         """Check if configured and not rate-limited."""
-        return self.api_key is not None and not self._is_exhausted
+        return bool(self.api_key) and not self._is_exhausted
 
     def _normalize_ticker(self, ticker: str) -> str:
         """

@@ -70,7 +70,7 @@ class FMPFetcher(FinancialFetcher):
 
     def is_available(self) -> bool:
         """Check if FMP is configured (API key present)."""
-        return self.api_key is not None
+        return bool(self.api_key)
 
     async def _get(self, endpoint: str, params: dict) -> Any | None:
         """
