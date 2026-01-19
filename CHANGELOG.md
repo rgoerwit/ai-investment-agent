@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.6.0] - 2026-01-18
+
+### Added
+- **Universal Data Attribution** - System now tracks the exact source (API) of every financial metric throughout the pipeline
+  - `SmartMarketDataFetcher` attaches `_field_sources` metadata to all metrics
+  - New `DATA SOURCE ATTRIBUTION` table injected into Consultant, Research Manager, and Portfolio Manager contexts
+  - Enables "Glass Box" reasoning: Agents can now distinguish between primary exchange data (e.g., "eodhd") and fallback estimates (e.g., "yfinance")
+  - Consultant now explicitly verifies "Provenance" in the Hierarchy of Truth check
+- **Robust Parallel Execution** - Fixed information flow for agents running in parallel
+  - **Value Trap Detector (v1.3)**: Now correctly marked as parallel-independent; no longer attempts to read `DATA_BLOCK` from Fundamentals (which isn't ready yet). Uses qualitative signals for capital allocation rating instead.
+  - **Sentiment Analyst (v5.2)**: Removed dependency on `fundamentals_report` for "Undiscovered" status check to ensure safe parallel execution.
+  - **Research Manager (v4.6)**: Removed direct dependency on `auditor_report` (now adjudicated solely by Consultant) to streamline graph flow.
+
+### Changed
+- **Trader Prompt** - Now receives Valuation Parameters chart data context
+- **Research Manager Prompt** - Now receives a "Data Provenance Note" to help resolve Bull/Bear conflicts based on data source quality and timeliness
+- **Test Suite** - Added extensive tests for attribution extraction (`tests/test_attribution.py`) and fixed integration tests for parallel node execution (`tests/test_quantitative_validation_integration.py`)
+
 ## [3.5.0] - 2026-01-11
 
 ### Added
