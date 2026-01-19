@@ -1522,6 +1522,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
                     "_coverage_pct": coverage,
                     "_data_source": merge_metadata["composite_source"],
                     "_sources_used": merge_metadata["sources_used"],
+                    "_field_sources": merge_metadata.get("field_sources", {}),
                     "_gaps_filled": merge_metadata["gaps_filled"],
                     "_quality": {
                         "basics_ok": quality.basics_ok,

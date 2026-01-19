@@ -122,16 +122,17 @@ class TestFundamentalsAnalystOCFPriority:
 
 
 class TestValueTrapROICIntegration:
-    """Test that Value Trap Detector integrates ROIC from DATA_BLOCK."""
+    """Test that Value Trap Detector handles ROIC correctly (parallel execution)."""
 
-    def test_roic_extraction_instruction_exists(self):
-        """Should have instruction to extract ROIC from DATA_BLOCK."""
+    def test_parallel_execution_note_exists(self):
+        """Should document that Value Trap runs in parallel and cannot see DATA_BLOCK."""
         prompt = get_prompt("value_trap_detector")
         msg = prompt.system_message
 
-        assert "EXTRACT CAPITAL EFFICIENCY METRICS" in msg
-        assert "ROIC_QUALITY from Fundamentals Analyst DATA_BLOCK" in msg
-        assert "STRONG/ADEQUATE/WEAK/DESTRUCTIVE/N/A" in msg
+        # v1.3 fix: Value Trap runs in parallel with Fundamentals Analyst
+        assert "PARALLEL with Fundamentals Analyst" in msg
+        assert "cannot see DATA_BLOCK" in msg
+        assert "Mark ROIC_QUALITY and ROIC_PERCENT as N/A" in msg
 
     def test_capital_allocation_has_roic_fields(self):
         """CAPITAL_ALLOCATION block should have ROIC fields."""
@@ -155,8 +156,8 @@ class TestValueTrapROICIntegration:
         rating_pos = capital_alloc_text.index("RATING:")
         assert roic_pos < rating_pos
 
-    def test_rating_uses_roic_quality(self):
-        """RATING logic should reference ROIC_QUALITY."""
+    def test_rating_uses_qualitative_evidence(self):
+        """RATING logic should use qualitative evidence (not ROIC_QUALITY enum)."""
         prompt = get_prompt("value_trap_detector")
         msg = prompt.system_message
 
@@ -168,10 +169,12 @@ class TestValueTrapROICIntegration:
 
         capital_alloc_text = capital_alloc_match.group(1)
 
-        # Should have ROIC-based logic
-        assert "POOR if: ROIC_QUALITY = DESTRUCTIVE or WEAK" in capital_alloc_text
-        assert "POOR if: Net buybacks executed while ROIC <10%" in capital_alloc_text
-        assert "GOOD if: ROIC_QUALITY = STRONG" in capital_alloc_text
+        # v1.3 fix: Uses qualitative evidence since ROIC unavailable at runtime
+        assert "POOR if: Evidence of value-destructive M&A" in capital_alloc_text
+        assert "GOOD if: Rising dividends, well-timed buybacks" in capital_alloc_text
+        # ROIC fields should be N/A with explanation
+        assert "ROIC_QUALITY: N/A" in capital_alloc_text
+        assert "ROIC_PERCENT: N/A" in capital_alloc_text
 
     def test_preserves_qualitative_context(self):
         """Should preserve M&A and buyback context fields."""

@@ -3,9 +3,11 @@ Integration tests for ticker-specific memory isolation - REAL ChromaDB.
 """
 
 import os
+from functools import wraps
 from unittest.mock import patch
 
 import pytest
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 try:
     from tests.conftest import _REAL_GOOGLE_API_KEY
@@ -13,6 +15,47 @@ except ImportError:
     _REAL_GOOGLE_API_KEY = None
 
 pytestmark = pytest.mark.integration
+
+
+def is_rate_limit_error(exc: BaseException) -> bool:
+    """Check if exception is a rate limit error worth retrying."""
+    if isinstance(exc, AssertionError):
+        return False  # Never retry test assertion failures
+    error_str = str(exc).lower()
+    rate_limit_indicators = [
+        "429",
+        "rate",
+        "quota",
+        "resource exhausted",
+        "resourceexhausted",
+    ]
+    return any(indicator in error_str for indicator in rate_limit_indicators)
+
+
+def with_rate_limit_retry(func):
+    """Decorator to retry async tests on rate limit errors.
+
+    Uses exponential backoff: 2s, 4s, 8s (max 3 attempts, ~14s worst case).
+    Only triggers on rate-limit-like errors, not on test assertion failures.
+    """
+
+    @retry(
+        retry=lambda retry_state: (
+            retry_state.outcome.failed
+            and is_rate_limit_error(retry_state.outcome.exception())
+        ),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=8),
+        before_sleep=lambda retry_state: print(
+            f"Rate limit hit, retrying in {retry_state.next_action.sleep}s..."
+        ),
+        reraise=True,
+    )
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        return await func(*args, **kwargs)
+
+    return wrapper
 
 
 @pytest.fixture
@@ -31,6 +74,7 @@ class TestRealTickerIsolation:
     """Verifies ticker-specific memory isolation with real ChromaDB."""
 
     @pytest.mark.asyncio
+    @with_rate_limit_retry
     async def test_different_tickers_use_different_collections(self, restore_real_env):
         from src.memory import cleanup_all_memories, create_memory_instances
 
@@ -53,6 +97,7 @@ class TestRealTickerIsolation:
             cleanup_all_memories(days=0, ticker=t2)
 
     @pytest.mark.asyncio
+    @with_rate_limit_retry
     async def test_memory_persistence_across_instances(self, restore_real_env):
         from src.memory import cleanup_all_memories, create_memory_instances
 
@@ -76,6 +121,7 @@ class TestRealMemoryOperations:
     """Test actual memory operations with real ChromaDB."""
 
     @pytest.mark.asyncio
+    @with_rate_limit_retry
     async def test_add_and_query_with_real_embeddings(self, restore_real_env):
         from src.memory import cleanup_all_memories, create_memory_instances
 
@@ -91,6 +137,7 @@ class TestRealMemoryOperations:
             cleanup_all_memories(days=0, ticker=t)
 
     @pytest.mark.asyncio
+    @with_rate_limit_retry
     async def test_cleanup_respects_time_filter(self, restore_real_env):
         from src.memory import cleanup_all_memories, create_memory_instances
 

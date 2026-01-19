@@ -193,6 +193,128 @@ def _format_date_with_fy_hint(current_date: str) -> str:
         return current_date
 
 
+# --- Attribution Helpers ---
+
+
+def extract_field_sources_from_messages(messages: list) -> dict[str, str]:
+    """
+    Extract _field_sources from ToolMessage content in message history.
+
+    Searches for get_financial_metrics tool output which contains per-field
+    source attribution. This is the authoritative source since tool outputs
+    are not modified by LLM summarization.
+
+    Args:
+        messages: List of messages from state["messages"]
+
+    Returns:
+        Dict mapping field names to source names, or empty dict if not found.
+    """
+    from langchain_core.messages import ToolMessage
+
+    if not messages:
+        return {}
+
+    # Search in reverse order (most recent first) for efficiency
+    for msg in reversed(messages):
+        if not isinstance(msg, ToolMessage):
+            continue
+
+        try:
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            if '"_field_sources"' not in content:
+                continue
+
+            data = json.loads(content)
+            if isinstance(data, dict) and "_field_sources" in data:
+                field_sources = data["_field_sources"]
+                if isinstance(field_sources, dict) and field_sources:
+                    return field_sources
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            continue
+
+    return {}
+
+
+def extract_field_sources(raw_data: str | None) -> dict[str, str]:
+    """
+    Extract _field_sources from raw JSON data (JIT extraction).
+
+    Parses raw_fundamentals_data to retrieve per-field source attribution.
+    This avoids relying on LLMs to preserve metadata through summarization.
+
+    Note: This function is a fallback. Prefer extract_field_sources_from_messages()
+    which accesses the actual tool output rather than the LLM's summary.
+
+    Args:
+        raw_data: JSON string from Junior Fundamentals tool output
+
+    Returns:
+        Dict mapping field names to source names, or empty dict on failure.
+    """
+    if not raw_data or not isinstance(raw_data, str) or "{" not in raw_data:
+        return {}
+
+    try:
+        # Try parsing entire string as JSON first (most common case)
+        data = json.loads(raw_data)
+        if isinstance(data, dict):
+            return data.get("_field_sources", {})
+    except json.JSONDecodeError:
+        pass
+
+    # Fallback: extract JSON object if embedded in LLM response text
+    try:
+        match = re.search(r"\{.*\}", raw_data, re.DOTALL)
+        if match:
+            data = json.loads(match.group(0))
+            if isinstance(data, dict):
+                return data.get("_field_sources", {})
+    except (json.JSONDecodeError, AttributeError):
+        pass
+
+    return {}
+
+
+def format_attribution_table(field_sources: dict[str, str] | None) -> str:
+    """
+    Format source attribution as a compact table for prompt injection.
+
+    Filters to priority fields to minimize token overhead (~60 tokens).
+    Only injected into Consultant and PM prompts where adjudication occurs.
+
+    Args:
+        field_sources: Dict from extract_field_sources()
+
+    Returns:
+        Formatted attribution table, or empty string if no sources.
+    """
+    if not field_sources:
+        return ""
+
+    # Priority fields for adjudication (financial health, valuation, growth)
+    PRIORITY_FIELDS = [
+        "marketCap",
+        "netIncome",
+        "totalRevenue",
+        "trailingPE",
+        "debtToEquity",
+        "freeCashflow",
+        "roe",
+        "currentPrice",
+    ]
+
+    lines = []
+    for field in PRIORITY_FIELDS:
+        if field in field_sources:
+            lines.append(f"- {field}: {field_sources[field]}")
+
+    if not lines:
+        return ""
+
+    return "\n### DATA SOURCE ATTRIBUTION\n" + "\n".join(lines) + "\n"
+
+
 # --- State Definitions ---
 class InvestDebateState(TypedDict):
     """
@@ -1150,7 +1272,20 @@ def create_research_manager_node(llm, memory: Any | None) -> Callable:
             return {"investment_plan": "Error: Missing prompt"}
         debate = state.get("investment_debate_state", {})
         value_trap = state.get("value_trap_report", "N/A")
-        all_reports = f"""MARKET ANALYST REPORT:\n{state.get("market_report", "N/A")}\n\nSENTIMENT ANALYST REPORT:\n{state.get("sentiment_report", "N/A")}\n\nNEWS ANALYST REPORT:\n{state.get("news_report", "N/A")}\n\nFUNDAMENTALS ANALYST REPORT:\n{state.get("fundamentals_report", "N/A")}\n\nVALUE TRAP ANALYSIS:\n{value_trap}\n\nBULL RESEARCHER:\n{debate.get("bull_history", "N/A")}\n\nBEAR RESEARCHER:\n{debate.get("bear_history", "N/A")}"""
+
+        # JIT extraction for period/provenance awareness
+        field_sources = extract_field_sources_from_messages(state.get("messages", []))
+        attribution_note = ""
+        if field_sources:
+            sources_used = sorted(set(field_sources.values()))
+            attribution_note = (
+                f"\n\n### DATA PROVENANCE NOTE\n"
+                f"Fundamentals sourced from: {', '.join(sources_used)}. "
+                f"News may reflect more recent periods (e.g., Q3 headlines vs TTM API data). "
+                f"When Bull/Bear cite conflicting figures, check if they reference different time periods."
+            )
+
+        all_reports = f"""MARKET ANALYST REPORT:\n{state.get("market_report", "N/A")}\n\nSENTIMENT ANALYST REPORT:\n{state.get("sentiment_report", "N/A")}\n\nNEWS ANALYST REPORT:\n{state.get("news_report", "N/A")}\n\nFUNDAMENTALS ANALYST REPORT:\n{state.get("fundamentals_report", "N/A")}{attribution_note}\n\nVALUE TRAP ANALYSIS:\n{value_trap}\n\nBULL RESEARCHER:\n{debate.get("bull_history", "N/A")}\n\nBEAR RESEARCHER:\n{debate.get("bear_history", "N/A")}"""
         prompt = f"""{agent_prompt.system_message}\n\n{all_reports}\n\nProvide Investment Plan."""
         try:
             response = await invoke_with_rate_limit_handling(
@@ -1176,6 +1311,12 @@ def create_trader_node(llm, memory: Any | None) -> Callable:
         consultant = state.get("consultant_review", "")
         consultant_section = f"""\n\nEXTERNAL CONSULTANT REVIEW (Cross-Validation):\n{consultant if consultant else "N/A (consultant disabled or unavailable)"}"""
 
+        # Include valuation parameters if available (from Valuation Calculator)
+        valuation = state.get("valuation_params", "")
+        valuation_section = (
+            f"""\n\nVALUATION PARAMETERS:\n{valuation}""" if valuation else ""
+        )
+
         # Include all 4 analyst reports for comprehensive trading context
         all_input = f"""MARKET ANALYST REPORT:
 {state.get("market_report", "N/A")}
@@ -1190,7 +1331,7 @@ FUNDAMENTALS ANALYST REPORT:
 {state.get("fundamentals_report", "N/A")}
 
 RESEARCH MANAGER PLAN:
-{state.get("investment_plan", "N/A")}{consultant_section}"""
+{state.get("investment_plan", "N/A")}{consultant_section}{valuation_section}"""
         prompt = (
             f"""{agent_prompt.system_message}\n\n{all_input}\n\nCreate Trading Plan."""
         )
@@ -1360,6 +1501,10 @@ NEUTRAL ANALYST (Balanced):\n{neutral_view if neutral_view else "N/A"}"""
             red_flags_count=len(red_flags),
         )
 
+        # JIT extraction of source attribution for adjudication
+        field_sources = extract_field_sources_from_messages(state.get("messages", []))
+        attribution_table = format_attribution_table(field_sources)
+
         # Include consultant review in context (if available)
         consultant_section = f"""\n\nEXTERNAL CONSULTANT REVIEW (Cross-Validation):\n{consultant if consultant else "N/A (consultant disabled or unavailable)"}"""
 
@@ -1376,7 +1521,7 @@ NEUTRAL ANALYST (Balanced):\n{neutral_view if neutral_view else "N/A"}"""
         else:
             red_flag_section += "\nRed Flags Detected: None"
 
-        all_context = f"""MARKET ANALYST REPORT:\n{market if market else "N/A"}\n\nSENTIMENT ANALYST REPORT:\n{sentiment if sentiment else "N/A"}\n\nNEWS ANALYST REPORT:\n{news if news else "N/A"}\n\nFUNDAMENTALS ANALYST REPORT:\n{fundamentals if fundamentals else "N/A"}\n\nVALUE TRAP ANALYSIS:\n{value_trap if value_trap else "N/A"}{red_flag_section}\n\nRESEARCH MANAGER RECOMMENDATION:\n{inv_plan if inv_plan else "N/A"}{consultant_section}\n\nTRADER PROPOSAL:\n{trader if trader else "N/A"}\n\nRISK TEAM DEBATE:\n{risk if risk else "N/A"}"""
+        all_context = f"""MARKET ANALYST REPORT:\n{market if market else "N/A"}\n\nSENTIMENT ANALYST REPORT:\n{sentiment if sentiment else "N/A"}\n\nNEWS ANALYST REPORT:\n{news if news else "N/A"}\n\nFUNDAMENTALS ANALYST REPORT:\n{fundamentals if fundamentals else "N/A"}{attribution_table}\n\nVALUE TRAP ANALYSIS:\n{value_trap if value_trap else "N/A"}{red_flag_section}\n\nRESEARCH MANAGER RECOMMENDATION:\n{inv_plan if inv_plan else "N/A"}{consultant_section}\n\nTRADER PROPOSAL:\n{trader if trader else "N/A"}\n\nRISK TEAM DEBATE:\n{risk if risk else "N/A"}"""
         prompt = f"""{agent_prompt.system_message}\n\n{all_context}\n\nMake Portfolio Manager Verdict."""
         try:
             response = await invoke_with_rate_limit_handling(
@@ -1444,6 +1589,10 @@ def create_consultant_node(llm, agent_key: str = "consultant") -> Callable:
             )
             debate_history = "[SYSTEM DIAGNOSTIC: Debate state unexpectedly None. This may indicate the debate was skipped (fast-fail path) or a state propagation issue. Consultant cross-validation may be limited without debate context.]"
 
+        # JIT extraction of source attribution for adjudication
+        field_sources = extract_field_sources_from_messages(state.get("messages", []))
+        attribution_table = format_attribution_table(field_sources)
+
         all_context = f"""
 === ANALYST REPORTS (SOURCE DATA) ===
 
@@ -1458,7 +1607,7 @@ NEWS ANALYST REPORT:
 
 FUNDAMENTALS ANALYST REPORT:
 {state.get("fundamentals_report", "N/A")}
-
+{attribution_table}
 === BULL/BEAR DEBATE HISTORY ===
 
 {debate_history}
