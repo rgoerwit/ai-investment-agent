@@ -536,6 +536,12 @@ class SmartMarketDataFetcher(FinancialFetcher):
         for key, value in capital_signals.items():
             extracted[key] = value
 
+        # --- HISTORICAL RETURN TRENDS ---
+        # Calculate 5Y average ROA/ROE for sustainability assessment
+        return_trends = self._calculate_return_trends(financials, balance_sheet, symbol)
+        for key, value in return_trends.items():
+            extracted[key] = value
+
         return extracted
 
     def _calculate_moat_signals(
@@ -807,6 +813,169 @@ class SmartMarketDataFetcher(FinancialFetcher):
                 symbol=symbol,
                 error=str(e),
             )
+
+        return signals
+
+    @staticmethod
+    def _compute_trend_regression(values: list[float], mean_val: float) -> str:
+        """
+        Determine trend using linear regression slope and coefficient of variation.
+
+        Args:
+            values: Time series (oldest first, newest last)
+            mean_val: Pre-computed mean for CV calculation
+
+        Returns:
+            UNSTABLE: CV > 0.40 (high variance masks any trend)
+            IMPROVING: Slope > 0.5% of mean per year
+            DECLINING: Slope < -0.5% of mean per year
+            STABLE: Slope within ±0.5% of mean per year
+        """
+        n = len(values)
+        if n < 3 or mean_val == 0:
+            return "N/A"
+
+        # Coefficient of variation (CV) - measures volatility
+        try:
+            stdev = statistics.stdev(values)
+            cv = abs(stdev / mean_val) if mean_val != 0 else 0
+        except statistics.StatisticsError:
+            cv = 0
+
+        # High variance = UNSTABLE (cyclical or erratic)
+        if cv > 0.40:
+            return "UNSTABLE"
+
+        # Linear regression: slope = Σ(x-x̄)(y-ȳ) / Σ(x-x̄)²
+        x_mean = (n - 1) / 2.0
+        numerator = sum((i - x_mean) * (v - mean_val) for i, v in enumerate(values))
+        denominator = sum((i - x_mean) ** 2 for i in range(n))
+
+        if denominator == 0:
+            return "STABLE"
+
+        slope = numerator / denominator
+
+        # Normalize slope as % of mean per year
+        slope_pct = (slope / abs(mean_val)) if mean_val != 0 else 0
+
+        # Thresholds: ±0.5% annual change relative to mean
+        if slope_pct > 0.005:
+            return "IMPROVING"
+        elif slope_pct < -0.005:
+            return "DECLINING"
+        else:
+            return "STABLE"
+
+    def _calculate_return_trends(
+        self,
+        financials: "pd.DataFrame",
+        balance_sheet: "pd.DataFrame",
+        symbol: str,
+    ) -> dict[str, Any]:
+        """
+        Calculate 5-year historical average ROA/ROE and trend direction.
+
+        Used to detect cyclical peaks vs structural quality improvement.
+        Requires minimum 3 years of data; uses up to 5 years if available.
+
+        Args:
+            financials: yfinance financials DataFrame (columns are years, newest first)
+            balance_sheet: yfinance balance sheet DataFrame
+            symbol: Ticker symbol for logging
+
+        Returns:
+            Dict with roa_5y_avg, roe_5y_avg, and profitability_trend.
+            Empty dict if insufficient data.
+        """
+        signals: dict[str, Any] = {}
+
+        if financials.empty or balance_sheet.empty:
+            return signals
+
+        years_available = min(len(financials.columns), len(balance_sheet.columns), 5)
+        if years_available < 3:
+            logger.debug(
+                "return_trends_insufficient_data", symbol=symbol, years=years_available
+            )
+            return signals
+
+        # --- ROA: Net Income / Total Assets ---
+        try:
+            if (
+                "Net Income" in financials.index
+                and "Total Assets" in balance_sheet.index
+            ):
+                roas = []
+                for i in range(years_available):
+                    try:
+                        ni = financials.loc["Net Income"].iloc[i]
+                        assets = balance_sheet.loc["Total Assets"].iloc[i]
+                        if pd.notna(ni) and pd.notna(assets) and float(assets) > 0:
+                            roa = float(ni) / float(assets)
+                            # Sanity: exclude extreme outliers
+                            if -0.50 < roa < 0.50:
+                                roas.append(roa)
+                    except (ValueError, TypeError, IndexError):
+                        continue
+
+                if len(roas) >= 3:
+                    avg_roa = statistics.mean(roas)
+                    signals["roa_5y_avg"] = round(avg_roa * 100, 2)
+                    signals["_roa_5y_years"] = len(roas)
+
+                    # Trend via regression + variance analysis
+                    # roas[0] = newest, roas[-1] = oldest; invert for time series
+                    signals["profitability_trend"] = self._compute_trend_regression(
+                        list(reversed(roas)), avg_roa
+                    )
+
+                    logger.debug(
+                        "roa_trend_calculated",
+                        symbol=symbol,
+                        roa_5y_avg=signals.get("roa_5y_avg"),
+                        trend=signals.get("profitability_trend"),
+                        years=len(roas),
+                    )
+        except Exception as e:
+            logger.debug("roa_trend_calc_failed", symbol=symbol, error=str(e))
+
+        # --- ROE: Net Income / Stockholders Equity ---
+        try:
+            equity_key = (
+                "Stockholders Equity"
+                if "Stockholders Equity" in balance_sheet.index
+                else "Total Stockholder Equity"
+                if "Total Stockholder Equity" in balance_sheet.index
+                else None
+            )
+
+            if "Net Income" in financials.index and equity_key:
+                roes = []
+                for i in range(years_available):
+                    try:
+                        ni = financials.loc["Net Income"].iloc[i]
+                        equity = balance_sheet.loc[equity_key].iloc[i]
+                        # Require positive equity (negative = insolvent, skip)
+                        if pd.notna(ni) and pd.notna(equity) and float(equity) > 0:
+                            roe = float(ni) / float(equity)
+                            if -1.0 < roe < 1.0:
+                                roes.append(roe)
+                    except (ValueError, TypeError, IndexError):
+                        continue
+
+                if len(roes) >= 3:
+                    signals["roe_5y_avg"] = round(statistics.mean(roes) * 100, 2)
+                    signals["_roe_5y_years"] = len(roes)
+
+                    logger.debug(
+                        "roe_trend_calculated",
+                        symbol=symbol,
+                        roe_5y_avg=signals.get("roe_5y_avg"),
+                        years=len(roes),
+                    )
+        except Exception as e:
+            logger.debug("roe_trend_calc_failed", symbol=symbol, error=str(e))
 
         return signals
 
