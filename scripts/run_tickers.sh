@@ -371,7 +371,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
         failed=$((failed + 1))
 
         # On failure: preserve temp files for debugging, then append to output
-        local debug_dir="${OUTPUT_DIR}/debug_failures"
+        debug_dir="${OUTPUT_DIR}/debug_failures"
         mkdir -p "$debug_dir"
 
         if [ -f "$TEMP_REPORT" ]; then

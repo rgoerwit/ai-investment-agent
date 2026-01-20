@@ -47,10 +47,13 @@ class RedFlagDetector:
     1. Extreme Leverage: D/E > 500% (bankruptcy risk)
     2. Earnings Quality: Positive income but negative FCF >2x (fraud indicator)
     3. Refinancing Risk: Interest coverage <2.0x AND D/E >100% (default risk)
+    4. Unsustainable Distribution: Payout >100% + uncovered dividend + weak ROIC + not improving
+       (structural value destruction - dividend funded by debt with no recovery path)
 
     WARNING FLAGS (RISK_PENALTY - tax/legal, not viability):
-    4. PFIC Probable: Company likely classified as PFIC (US tax reporting burden)
-    5. VIE Structure: China stock uses contractual VIE structure (ownership risk)
+    5. PFIC Probable: Company likely classified as PFIC (US tax reporting burden)
+    6. VIE Structure: China stock uses contractual VIE structure (ownership risk)
+    7. Unsustainable Distribution (recoverable): Payout >100% + uncovered but ROIC okay or improving
     """
 
     @staticmethod
@@ -129,6 +132,10 @@ class RedFlagDetector:
             "interest_coverage": None,
             "pe_ratio": None,
             "adjusted_health_score": None,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "roic_quality": None,
+            "profitability_trend": None,
             "_raw_report": fundamentals_report,  # For downstream data quality checks
         }
 
@@ -159,6 +166,46 @@ class RedFlagDetector:
         pe_match = re.search(r"PE_RATIO_TTM:\s*([0-9.]+)", data_block)
         if pe_match:
             metrics["pe_ratio"] = float(pe_match.group(1))
+
+        # Extract PAYOUT_RATIO (percentage)
+        payout_match = re.search(
+            r"PAYOUT_RATIO:\s*(\d+(?:\.\d+)?)%", data_block, re.IGNORECASE
+        )
+        if payout_match:
+            metrics["payout_ratio"] = float(payout_match.group(1))
+
+        # Extract DIVIDEND_COVERAGE (categorical)
+        coverage_match = re.search(
+            r"DIVIDEND_COVERAGE:\s*(COVERED|PARTIAL|UNCOVERED|N/A)",
+            data_block,
+            re.IGNORECASE,
+        )
+        if coverage_match:
+            val = coverage_match.group(1).upper()
+            if val != "N/A":
+                metrics["dividend_coverage"] = val
+
+        # Extract ROIC_QUALITY (categorical - for compound checks)
+        roic_quality_match = re.search(
+            r"ROIC_QUALITY:\s*(STRONG|ADEQUATE|WEAK|DESTRUCTIVE|N/A)",
+            data_block,
+            re.IGNORECASE,
+        )
+        if roic_quality_match:
+            val = roic_quality_match.group(1).upper()
+            if val != "N/A":
+                metrics["roic_quality"] = val
+
+        # Extract PROFITABILITY_TREND (categorical - for compound checks)
+        trend_match = re.search(
+            r"PROFITABILITY_TREND:\s*(IMPROVING|STABLE|DECLINING|UNSTABLE|N/A)",
+            data_block,
+            re.IGNORECASE,
+        )
+        if trend_match:
+            val = trend_match.group(1).upper()
+            if val != "N/A":
+                metrics["profitability_trend"] = val
 
         # Now extract from detailed sections (below DATA_BLOCK)
         metrics["debt_to_equity"] = RedFlagDetector._extract_debt_to_equity(
@@ -475,6 +522,64 @@ class RedFlagDetector:
                 de_threshold=coverage_de_threshold,
                 sector=sector.value,
             )
+
+        # --- RED FLAG 4: Unsustainable Distribution ---
+        # Dividend exceeds earnings AND FCF can't cover it = structural problem
+        payout_ratio = metrics.get("payout_ratio")
+        dividend_coverage = metrics.get("dividend_coverage")
+        roic_quality = metrics.get("roic_quality")
+        profitability_trend = metrics.get("profitability_trend")
+
+        if (
+            payout_ratio is not None
+            and payout_ratio > 100
+            and dividend_coverage == "UNCOVERED"
+        ):
+            # Check if also value-destroying (ROIC weak/destructive AND not improving)
+            is_value_destroying = roic_quality in ("WEAK", "DESTRUCTIVE")
+            is_recovering = profitability_trend == "IMPROVING"
+
+            if is_value_destroying and not is_recovering:
+                # Hard fail: can't distribute >earnings while destroying value with no recovery
+                red_flags.append(
+                    {
+                        "type": "UNSUSTAINABLE_DISTRIBUTION",
+                        "severity": "CRITICAL",
+                        "detail": f"Payout {payout_ratio:.0f}% + uncovered dividend + ROIC {roic_quality} + trend {profitability_trend}",
+                        "action": "AUTO_REJECT",
+                        "rationale": "Dividend exceeds earnings, FCF doesn't cover it, ROIC below hurdle, "
+                        "and no improving trend. Mathematically unsustainable value destruction.",
+                    }
+                )
+                logger.warning(
+                    "red_flag_unsustainable_distribution_critical",
+                    ticker=ticker,
+                    payout_ratio=payout_ratio,
+                    dividend_coverage=dividend_coverage,
+                    roic_quality=roic_quality,
+                    profitability_trend=profitability_trend,
+                )
+            else:
+                # Warning: distribution is stretched but may be fixable (company can cut dividend,
+                # or is in cyclical recovery)
+                red_flags.append(
+                    {
+                        "type": "UNSUSTAINABLE_DISTRIBUTION",
+                        "severity": "WARNING",
+                        "detail": f"Payout {payout_ratio:.0f}% with {dividend_coverage} dividend coverage",
+                        "action": "RISK_PENALTY",
+                        "risk_penalty": 1.5,
+                        "rationale": "Dividend funded by debt/reserves. Watch for dividend cut or "
+                        "verify cyclical recovery thesis if ROIC improving.",
+                    }
+                )
+                logger.info(
+                    "red_flag_unsustainable_distribution_warning",
+                    ticker=ticker,
+                    payout_ratio=payout_ratio,
+                    dividend_coverage=dividend_coverage,
+                    roic_quality=roic_quality,
+                )
 
         # Determine result
         has_auto_reject = any(flag["action"] == "AUTO_REJECT" for flag in red_flags)
