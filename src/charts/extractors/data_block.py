@@ -25,6 +25,7 @@ class ChartRawData:
 
     # Extended metrics for Radar Chart
     pe_ratio_ttm: float | None = None
+    pb_ratio: float | None = None
     peg_ratio: float | None = None
     adjusted_health_score: float | None = None
     adjusted_growth_score: float | None = None
@@ -157,6 +158,7 @@ def extract_chart_data_from_data_block(fundamentals_report: str) -> ChartRawData
         ),
         # Extended metrics
         pe_ratio_ttm=_extract_float(rf"PE_RATIO_TTM:\s*{num_pattern}", data_block),
+        pb_ratio=_extract_float(rf"PB_RATIO:\s*{num_pattern}", data_block),
         peg_ratio=_extract_float(rf"PEG_RATIO:\s*{num_pattern}", data_block),
         adjusted_health_score=_extract_float(
             rf"ADJUSTED_HEALTH_SCORE:\s*{num_pattern}", data_block

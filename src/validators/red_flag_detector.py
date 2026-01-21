@@ -131,9 +131,11 @@ class RedFlagDetector:
             "fcf": None,
             "interest_coverage": None,
             "pe_ratio": None,
+            "pb_ratio": None,
             "adjusted_health_score": None,
             "payout_ratio": None,
             "dividend_coverage": None,
+            "net_margin": None,
             "roic_quality": None,
             "profitability_trend": None,
             "_raw_report": fundamentals_report,  # For downstream data quality checks
@@ -167,6 +169,11 @@ class RedFlagDetector:
         if pe_match:
             metrics["pe_ratio"] = float(pe_match.group(1))
 
+        # Extract PB_RATIO
+        pb_match = re.search(r"PB_RATIO:\s*([0-9.]+)", data_block)
+        if pb_match:
+            metrics["pb_ratio"] = float(pb_match.group(1))
+
         # Extract PAYOUT_RATIO (percentage)
         payout_match = re.search(
             r"PAYOUT_RATIO:\s*(\d+(?:\.\d+)?)%", data_block, re.IGNORECASE
@@ -184,6 +191,11 @@ class RedFlagDetector:
             val = coverage_match.group(1).upper()
             if val != "N/A":
                 metrics["dividend_coverage"] = val
+
+        # Extract NET_MARGIN (percentage)
+        margin_match = re.search(r"NET_MARGIN:\s*(\d+(?:\.\d+)?)%", data_block)
+        if margin_match:
+            metrics["net_margin"] = float(margin_match.group(1))
 
         # Extract ROIC_QUALITY (categorical - for compound checks)
         roic_quality_match = re.search(
@@ -241,6 +253,7 @@ class RedFlagDetector:
             r"(?:^|\n)\s*-?\s*Debt-to-Equity:\s*([0-9.]+)",
             r"D/E:\s*([0-9.]+)",
             r"Debt/Equity:\s*([0-9.]+)",
+            r"DE_RATIO:\s*([0-9.]+)",
         ]
         for pattern in patterns:
             match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
@@ -580,6 +593,40 @@ class RedFlagDetector:
                     dividend_coverage=dividend_coverage,
                     roic_quality=roic_quality,
                 )
+
+        # --- RED FLAG 5: Fragile Valuation (The "Construction Trap") ---
+        # Catch companies with razor-thin margins priced like software stocks
+        net_margin = metrics.get("net_margin")
+        pb_ratio = metrics.get("pb_ratio")
+        debt_to_equity = metrics.get("debt_to_equity")
+
+        if (
+            net_margin is not None
+            and net_margin < 5.0  # Razor thin (<5%)
+            and pb_ratio is not None
+            and pb_ratio > 4.0  # Tech valuation (>4x Book)
+            and debt_to_equity is not None
+            and debt_to_equity > 80  # Leveraged (>80%)
+        ):
+            red_flags.append(
+                {
+                    "type": "FRAGILE_VALUATION",
+                    "severity": "CRITICAL",
+                    "detail": f"P/B {pb_ratio:.1f}x with {net_margin:.1f}% margins and {debt_to_equity:.0f}% leverage",
+                    "action": "AUTO_REJECT",
+                    "rationale": (
+                        "Valuation mismatch: Paying high-growth multiples for a low-margin, "
+                        "capital-intensive business. No margin of safety against execution risk."
+                    ),
+                }
+            )
+            logger.warning(
+                "red_flag_fragile_valuation",
+                ticker=ticker,
+                net_margin=net_margin,
+                pb_ratio=pb_ratio,
+                debt_to_equity=debt_to_equity,
+            )
 
         # Determine result
         has_auto_reject = any(flag["action"] == "AUTO_REJECT" for flag in red_flags)
