@@ -613,7 +613,7 @@ class RedFlagDetector:
                     "type": "FRAGILE_VALUATION",
                     "severity": "CRITICAL",
                     "detail": f"P/B {pb_ratio:.1f}x with {net_margin:.1f}% margins and {debt_to_equity:.0f}% leverage",
-                    "action": "AUTO_REJECT",
+                    "action": "CRITICAL_WARNING",
                     "rationale": (
                         "Valuation mismatch: Paying high-growth multiples for a low-margin, "
                         "capital-intensive business. No margin of safety against execution risk."
