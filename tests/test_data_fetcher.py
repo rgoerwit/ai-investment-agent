@@ -119,11 +119,13 @@ class TestTavilyGapFilling:
 
     @pytest.mark.asyncio
     async def test_tavily_skipped_high_coverage(self, fetcher):
-        # Mock high coverage data
+        # Mock high coverage data (includes sector/industry added to IMPORTANT_FIELDS Jan 2026)
         full_data = {
             "symbol": "TEST",
             "currentPrice": 100,
             "currency": "USD",
+            "sector": "Technology",  # Added to IMPORTANT_FIELDS Jan 2026
+            "industry": "Software",  # Added to IMPORTANT_FIELDS Jan 2026
             "trailingPE": 15,
             "marketCap": 100,
             "priceToBook": 2,
@@ -279,8 +281,9 @@ class TestCalculatedMetrics:
         # ROE = ROA * (1 + D/E) = 0.10 * 2 = 0.20
         assert derived["returnOnEquity"] == 0.20
 
-        # PEG = PE / (Growth * 100) = 20 / 20 = 1.0
-        assert derived["pegRatio"] == 1.0
+        # PEG calculation is DISABLED (Jan 2026) - time horizon mismatch
+        # between quarterly earningsGrowth and TTM P/E produces unreliable ratios
+        assert "pegRatio" not in derived, "PEG fallback calculation should be disabled"
 
         # Market Cap
         assert derived["marketCap"] == 100000000.0

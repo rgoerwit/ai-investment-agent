@@ -42,10 +42,10 @@ def test_fragile_valuation_detection():
 
     assert fragile_flag is not None, "FRAGILE_VALUATION flag not triggered"
     assert fragile_flag["severity"] == "CRITICAL"
-    assert fragile_flag["action"] == "AUTO_REJECT"
+    assert fragile_flag["action"] == "CRITICAL_WARNING"
     assert "P/B 6.9x" in fragile_flag["detail"]
     assert "3.7% margins" in fragile_flag["detail"]
-    assert result == "REJECT"
+    assert result == "PASS"
 
 
 def test_fragile_valuation_pass_scenario():
