@@ -277,6 +277,8 @@ class SmartMarketDataFetcher(FinancialFetcher):
     REQUIRED_BASICS = ["symbol", "currentPrice", "currency"]
 
     IMPORTANT_FIELDS = [
+        "sector",  # Prevents sector hallucination (e.g., industrial classified as tech)
+        "industry",  # Sub-classification for sector-specific thresholds
         "marketCap",
         "trailingPE",
         "priceToBook",
@@ -1427,12 +1429,17 @@ class SmartMarketDataFetcher(FinancialFetcher):
                     calculated["returnOnEquity"] = roa * (1 + de)
                     calculated["_returnOnEquity_source"] = "calculated_from_roa_de"
 
-            if data.get("pegRatio") is None:
-                pe = data.get("trailingPE")
-                growth = data.get("earningsGrowth")
-                if pe and growth and growth > 0:
-                    calculated["pegRatio"] = pe / (growth * 100)
-                    calculated["_pegRatio_source"] = "calculated_from_pe_growth"
+            # PEG fallback calculation DISABLED (Jan 2026)
+            # Reason: earningsGrowth (quarterly YoY) mismatches TTM P/E time horizon,
+            # producing unreliable ratios (e.g., SKL.NZ showed 0.81 vs actual ~0.95).
+            # Missing PEG is more honest than a misleading calculated value.
+            # Downstream prompts handle N/A via adaptive scoring (remove from denominator).
+            # if data.get("pegRatio") is None:
+            #     pe = data.get("trailingPE")
+            #     growth = data.get("earningsGrowth")
+            #     if pe and growth and growth > 0:
+            #         calculated["pegRatio"] = pe / (growth * 100)
+            #         calculated["_pegRatio_source"] = "calculated_from_pe_growth"
 
             # FIX: Ensure marketCap is calculated if missing
             if data.get("marketCap") is None:

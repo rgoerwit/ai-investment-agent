@@ -8,6 +8,7 @@ Red-flag criteria tested:
 1. Extreme Leverage: D/E ratio > 500%
 2. Earnings Quality Disconnect: Positive income but negative FCF >2x income
 3. Refinancing Risk: Interest coverage <2.0x with D/E >100%
+4. Unsustainable Distribution: Payout >100% + uncovered dividend + weak ROIC + not improving
 
 Run with: pytest tests/test_red_flag_validator.py -v
 """
@@ -1418,3 +1419,327 @@ PE_RATIO_TTM: 3.2 (distressed valuation)
         flag_types = [flag["type"] for flag in result["red_flags"]]
         assert "EXTREME_LEVERAGE" in flag_types  # 620% > 500% standard threshold
         assert "REFINANCING_RISK" in flag_types  # Coverage 0.8x < 2.0x + D/E > 100%
+
+
+class TestUnsustainableDistribution:
+    """
+    Tests for the unsustainable distribution red flag (payout >100% + uncovered dividend).
+
+    This catches companies paying out more than they earn with dividends not covered by FCF,
+    particularly when combined with weak ROIC (value destruction pattern).
+
+    Flag behavior:
+    - CRITICAL (AUTO_REJECT): Payout >100% + UNCOVERED + ROIC WEAK/DESTRUCTIVE + not IMPROVING
+    - WARNING (RISK_PENALTY): Payout >100% + UNCOVERED but ROIC adequate or trend improving
+    - PASS: Payout <=100% OR dividend COVERED by FCF
+    """
+
+    @pytest.fixture
+    def validator_node(self):
+        """Create validator node fixture."""
+        return create_financial_health_validator_node()
+
+    @pytest.mark.asyncio
+    async def test_unsustainable_distribution_critical_reject(self, validator_node):
+        """
+        REJECT: Payout 136% + UNCOVERED + ROIC WEAK + DECLINING trend.
+
+        This is the exact pattern that motivated this red flag - a yield trap
+        where the dividend is funded by debt with deteriorating fundamentals.
+        """
+        state = {
+            "company_of_interest": "TRAP.HK",
+            "company_name": "Dividend Trap Corp",
+            "fundamentals_report": """
+### --- START DATA_BLOCK ---
+SECTOR: General/Diversified
+ADJUSTED_HEALTH_SCORE: 45%
+PE_RATIO_TTM: 8.5
+PAYOUT_RATIO: 136%
+DIVIDEND_COVERAGE: UNCOVERED
+ROIC_PERCENT: 5.6%
+ROIC_QUALITY: WEAK
+PROFITABILITY_TREND: DECLINING
+### --- END DATA_BLOCK ---
+
+**Cash Generation**:
+- EPS: $0.26
+- Dividend per share: $0.36
+- Free Cash Flow per share: $0.12 (FCF covers only 33% of dividend)
+- Net Income: $500M
+- Free Cash Flow: $230M
+
+**Leverage**:
+- D/E: 85 (OK)
+- Interest Coverage: 4.2x (OK)
+- Debt Growth YoY: +18% (funding the dividend shortfall!)
+
+**Profitability**:
+- ROIC: 5.6% (below 8% hurdle rate - value destruction)
+- ROE: 8.2% (leverage-boosted)
+- EPS Growth 5Y: 0% (flat)
+""",
+            "messages": [],
+        }
+
+        result = await validator_node(state, {})
+
+        # Should trigger AUTO_REJECT
+        assert result["pre_screening_result"] == "REJECT"
+        assert len(result["red_flags"]) >= 1
+
+        flag_types = [flag["type"] for flag in result["red_flags"]]
+        assert "UNSUSTAINABLE_DISTRIBUTION" in flag_types
+
+        # Verify the flag is CRITICAL with AUTO_REJECT
+        distrib_flag = next(
+            f for f in result["red_flags"] if f["type"] == "UNSUSTAINABLE_DISTRIBUTION"
+        )
+        assert distrib_flag["severity"] == "CRITICAL"
+        assert distrib_flag["action"] == "AUTO_REJECT"
+        assert "136" in distrib_flag["detail"]  # Payout ratio in detail
+        assert "WEAK" in distrib_flag["detail"]  # ROIC quality in detail
+
+    @pytest.mark.asyncio
+    async def test_unsustainable_distribution_warning_improving_trend(
+        self, validator_node
+    ):
+        """
+        WARNING: Payout 120% + UNCOVERED but trend is IMPROVING.
+
+        Cyclical recovery scenario - company may be coming out of trough.
+        Should warn but not auto-reject (dividend cut likely or recovery in progress).
+        """
+        state = {
+            "company_of_interest": "CYCLE.HK",
+            "company_name": "Cyclical Recovery Corp",
+            "fundamentals_report": """
+### --- START DATA_BLOCK ---
+SECTOR: Shipping & Cyclical Commodities
+ADJUSTED_HEALTH_SCORE: 52%
+PE_RATIO_TTM: 12.0
+PAYOUT_RATIO: 120%
+DIVIDEND_COVERAGE: UNCOVERED
+ROIC_PERCENT: 6.5%
+ROIC_QUALITY: WEAK
+PROFITABILITY_TREND: IMPROVING
+### --- END DATA_BLOCK ---
+
+**Cash Generation**:
+- EPS: $0.50
+- Dividend per share: $0.60
+- Free Cash Flow per share: $0.15
+
+**Context**:
+- At cycle trough, earnings depressed
+- Freight rates recovering +40% YTD
+- Company chose to maintain dividend anticipating recovery
+""",
+            "messages": [],
+        }
+
+        result = await validator_node(state, {})
+
+        # Should be WARNING, not REJECT (improving trend gives benefit of doubt)
+        assert result["pre_screening_result"] == "PASS"  # No AUTO_REJECT
+
+        flag_types = [flag["type"] for flag in result["red_flags"]]
+        assert "UNSUSTAINABLE_DISTRIBUTION" in flag_types
+
+        # Verify the flag is WARNING with RISK_PENALTY
+        distrib_flag = next(
+            f for f in result["red_flags"] if f["type"] == "UNSUSTAINABLE_DISTRIBUTION"
+        )
+        assert distrib_flag["severity"] == "WARNING"
+        assert distrib_flag["action"] == "RISK_PENALTY"
+        assert distrib_flag["risk_penalty"] == 1.5
+
+    @pytest.mark.asyncio
+    async def test_unsustainable_distribution_warning_adequate_roic(
+        self, validator_node
+    ):
+        """
+        WARNING: Payout 110% + UNCOVERED but ROIC is ADEQUATE.
+
+        Company has decent returns but is stretching to maintain dividend.
+        Should warn but not auto-reject (may cut dividend to fix).
+        """
+        state = {
+            "company_of_interest": "STRCH.HK",
+            "company_name": "Stretched Dividend Corp",
+            "fundamentals_report": """
+### --- START DATA_BLOCK ---
+SECTOR: General/Diversified
+ADJUSTED_HEALTH_SCORE: 58%
+PE_RATIO_TTM: 10.5
+PAYOUT_RATIO: 110%
+DIVIDEND_COVERAGE: UNCOVERED
+ROIC_PERCENT: 10.2%
+ROIC_QUALITY: ADEQUATE
+PROFITABILITY_TREND: STABLE
+### --- END DATA_BLOCK ---
+
+**Cash Generation**:
+- Payout ratio slightly above 100% due to one-time charge
+- ROIC healthy at 10.2%
+- Company announced dividend review upcoming
+""",
+            "messages": [],
+        }
+
+        result = await validator_node(state, {})
+
+        # Should be WARNING, not REJECT (ROIC adequate)
+        assert result["pre_screening_result"] == "PASS"
+
+        flag_types = [flag["type"] for flag in result["red_flags"]]
+        assert "UNSUSTAINABLE_DISTRIBUTION" in flag_types
+
+        distrib_flag = next(
+            f for f in result["red_flags"] if f["type"] == "UNSUSTAINABLE_DISTRIBUTION"
+        )
+        assert distrib_flag["severity"] == "WARNING"
+
+    @pytest.mark.asyncio
+    async def test_no_flag_when_dividend_covered(self, validator_node):
+        """
+        PASS: Payout 95% but dividend COVERED by FCF.
+
+        High payout but sustainable - FCF covers the dividend.
+        """
+        state = {
+            "company_of_interest": "SAFE.HK",
+            "company_name": "Sustainable Dividend Corp",
+            "fundamentals_report": """
+### --- START DATA_BLOCK ---
+SECTOR: Utilities
+ADJUSTED_HEALTH_SCORE: 65%
+PE_RATIO_TTM: 14.0
+PAYOUT_RATIO: 95%
+DIVIDEND_COVERAGE: COVERED
+ROIC_PERCENT: 8.5%
+ROIC_QUALITY: ADEQUATE
+PROFITABILITY_TREND: STABLE
+### --- END DATA_BLOCK ---
+
+**Cash Generation**:
+- High payout ratio but FCF comfortably covers dividend
+- Stable utility with predictable cash flows
+""",
+            "messages": [],
+        }
+
+        result = await validator_node(state, {})
+
+        # Should PASS - dividend covered
+        assert result["pre_screening_result"] == "PASS"
+        flag_types = [flag["type"] for flag in result["red_flags"]]
+        assert "UNSUSTAINABLE_DISTRIBUTION" not in flag_types
+
+    @pytest.mark.asyncio
+    async def test_no_flag_when_payout_below_100(self, validator_node):
+        """
+        PASS: Payout 85% even if coverage is PARTIAL.
+
+        Payout below 100% is sustainable by definition.
+        """
+        state = {
+            "company_of_interest": "OK.HK",
+            "company_name": "Acceptable Dividend Corp",
+            "fundamentals_report": """
+### --- START DATA_BLOCK ---
+SECTOR: General/Diversified
+ADJUSTED_HEALTH_SCORE: 60%
+PE_RATIO_TTM: 11.0
+PAYOUT_RATIO: 85%
+DIVIDEND_COVERAGE: PARTIAL
+ROIC_PERCENT: 7.0%
+ROIC_QUALITY: WEAK
+PROFITABILITY_TREND: STABLE
+### --- END DATA_BLOCK ---
+""",
+            "messages": [],
+        }
+
+        result = await validator_node(state, {})
+
+        # Should PASS - payout below 100%
+        assert result["pre_screening_result"] == "PASS"
+        flag_types = [flag["type"] for flag in result["red_flags"]]
+        assert "UNSUSTAINABLE_DISTRIBUTION" not in flag_types
+
+    @pytest.mark.asyncio
+    async def test_no_flag_when_no_dividend_data(self, validator_node):
+        """
+        PASS: No dividend data (N/A) should not trigger flag.
+        """
+        state = {
+            "company_of_interest": "NODIV.HK",
+            "company_name": "No Dividend Corp",
+            "fundamentals_report": """
+### --- START DATA_BLOCK ---
+SECTOR: Technology & Software
+ADJUSTED_HEALTH_SCORE: 70%
+PE_RATIO_TTM: 25.0
+PAYOUT_RATIO: N/A
+DIVIDEND_COVERAGE: N/A
+ROIC_PERCENT: 15.0%
+ROIC_QUALITY: STRONG
+### --- END DATA_BLOCK ---
+""",
+            "messages": [],
+        }
+
+        result = await validator_node(state, {})
+
+        # Should PASS - no dividend data
+        assert result["pre_screening_result"] == "PASS"
+        flag_types = [flag["type"] for flag in result["red_flags"]]
+        assert "UNSUSTAINABLE_DISTRIBUTION" not in flag_types
+
+    def test_extract_payout_ratio_and_coverage(self):
+        """Test extraction of payout ratio and dividend coverage from DATA_BLOCK."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 50%
+PAYOUT_RATIO: 136.5%
+DIVIDEND_COVERAGE: UNCOVERED
+ROIC_QUALITY: WEAK
+PROFITABILITY_TREND: DECLINING
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+
+        assert metrics["payout_ratio"] == 136.5
+        assert metrics["dividend_coverage"] == "UNCOVERED"
+        assert metrics["roic_quality"] == "WEAK"
+        assert metrics["profitability_trend"] == "DECLINING"
+
+    def test_extract_dividend_coverage_variations(self):
+        """Test extraction of different dividend coverage values."""
+        # COVERED
+        report_covered = """
+### --- START DATA_BLOCK ---
+DIVIDEND_COVERAGE: COVERED
+### --- END DATA_BLOCK ---
+"""
+        metrics_covered = RedFlagDetector.extract_metrics(report_covered)
+        assert metrics_covered["dividend_coverage"] == "COVERED"
+
+        # PARTIAL
+        report_partial = """
+### --- START DATA_BLOCK ---
+DIVIDEND_COVERAGE: PARTIAL
+### --- END DATA_BLOCK ---
+"""
+        metrics_partial = RedFlagDetector.extract_metrics(report_partial)
+        assert metrics_partial["dividend_coverage"] == "PARTIAL"
+
+        # N/A (should be None)
+        report_na = """
+### --- START DATA_BLOCK ---
+DIVIDEND_COVERAGE: N/A
+### --- END DATA_BLOCK ---
+"""
+        metrics_na = RedFlagDetector.extract_metrics(report_na)
+        assert metrics_na["dividend_coverage"] is None

@@ -9,7 +9,7 @@
 # Variables
 PYTHON := python3
 POETRY := poetry
-DOCKER := docker
+DOCKER ?= docker
 TICKER ?= AAPL
 
 # Colors for output

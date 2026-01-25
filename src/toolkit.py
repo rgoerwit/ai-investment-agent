@@ -429,10 +429,20 @@ async def get_technical_indicators(symbol: str) -> str:
 
         stock = stockstats_wrap(hist)
         latest = hist.iloc[-1]
+        data_points = len(hist)
 
-        # Explicitly calculate MAs
-        sma_50 = _safe_float(stock["close_50_sma"].iloc[-1])
-        sma_200 = _safe_float(stock["close_200_sma"].iloc[-1])
+        # Only calculate indicators if we have enough data points
+        # Return None (formats to N/A) if insufficient data
+        sma_50 = (
+            _safe_float(stock["close_50_sma"].iloc[-1]) if data_points >= 50 else None
+        )
+        sma_200 = (
+            _safe_float(stock["close_200_sma"].iloc[-1]) if data_points >= 200 else None
+        )
+        rsi_14 = _safe_float(stock["rsi_14"].iloc[-1]) if data_points >= 14 else None
+        macd = _safe_float(stock["macd"].iloc[-1]) if data_points >= 26 else None
+        boll_ub = _safe_float(stock["boll_ub"].iloc[-1]) if data_points >= 20 else None
+        boll_lb = _safe_float(stock["boll_lb"].iloc[-1]) if data_points >= 20 else None
 
         # Format with safety checks
         def fmt(val):
@@ -441,12 +451,12 @@ async def get_technical_indicators(symbol: str) -> str:
         return (
             f"Technical Indicators for {symbol}:\n"
             f"Current Price: {fmt(latest['Close'])}\n"
-            f"RSI (14): {fmt(stock['rsi_14'].iloc[-1])}\n"
-            f"MACD: {fmt(stock['macd'].iloc[-1])}\n"
+            f"RSI (14): {fmt(rsi_14)}\n"
+            f"MACD: {fmt(macd)}\n"
             f"SMA 50: {fmt(sma_50)}\n"
             f"SMA 200: {fmt(sma_200)}\n"
-            f"Bollinger Upper: {fmt(stock['boll_ub'].iloc[-1])}\n"
-            f"Bollinger Lower: {fmt(stock['boll_lb'].iloc[-1])}"
+            f"Bollinger Upper: {fmt(boll_ub)}\n"
+            f"Bollinger Lower: {fmt(boll_lb)}"
         )
     except Exception as e:
         return f"Error: {e}"
