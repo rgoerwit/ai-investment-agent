@@ -41,7 +41,7 @@ This isn't a single prompt to an LLM. It's a **stateful orchestration** of speci
 
 ```mermaid
 graph TB
-    Start([User: Analyze TICKER]) --> Dispatcher{Parallel<br/>Dispatch}
+    Start(["User: Analyze TICKER"]) --> Dispatcher{"Parallel<br/>Dispatch"}
 
     %% Parallel Fan-Out: 7 branches run simultaneously (+ optional Auditor)
     Dispatcher --> MarketAnalyst["Market Analyst<br/>(Technical Analysis)"]
@@ -68,31 +68,50 @@ graph TB
     SeniorFund --> Validator["Financial Validator<br/>(Red-Flag Detection)"]
     Validator --> SyncCheck
 
-    %% After all branches complete
-    SyncCheck -->|REJECT| PortfolioManager["Portfolio Manager<br/>(Final Decision)"]
-    SyncCheck -->|PASS| BullResearcher["Bull Researcher<br/>(Upside Case)"]
+    %% After all branches complete - routing based on pre-screening
+    SyncCheck -->|"REJECT"| PMFastFail["PM Fast-Fail<br/>(Skip Debate)"]
+    SyncCheck -->|"PASS"| DebateR1{"Parallel<br/>Debate R1"}
 
-    BullResearcher --> Debate{Multi-Round<br/>Debate}
-    BearResearcher["Bear Researcher<br/>(Downside Risk)"] --> Debate
+    %% Bull/Bear Debate - Round 1 (parallel)
+    DebateR1 --> BullR1["Bull Researcher<br/>Round 1"]
+    DebateR1 --> BearR1["Bear Researcher<br/>Round 1"]
+    BullR1 --> DebateSyncR1["Debate Sync R1"]
+    BearR1 --> DebateSyncR1
 
-    Debate -->|Round 1-2| BullResearcher
-    Debate -->|Round 1-2| BearResearcher
-    Debate -->|Converged| ResearchManager["Research Manager<br/>(Synthesize All Data)"]
+    %% Round 2 (if normal mode) or skip to final
+    DebateSyncR1 -->|"Normal Mode"| DebateR2{"Parallel<br/>Debate R2"}
+    DebateSyncR1 -->|"Quick Mode"| DebateSyncFinal["Debate Sync Final"]
 
-    %% Post-Research Manager: Valuation Calculator and Consultant run in parallel
-    ResearchManager --> ValuationCalc["Valuation Calculator<br/>(Chart Parameters)"]
-    ResearchManager --> Consultant["External Consultant<br/>(Cross-Validation)<br/>Optional"]
-    Auditor -.->|auditor_report| Consultant
+    DebateR2 --> BullR2["Bull Researcher<br/>Round 2"]
+    DebateR2 --> BearR2["Bear Researcher<br/>Round 2"]
+    BullR2 --> DebateSyncFinal
+    BearR2 --> DebateSyncFinal
+
+    DebateSyncFinal --> ResearchManager["Research Manager<br/>(Synthesize All Data)"]
+
+    %% Post-Research Manager: ValCalc and Consultant run in parallel, BOTH go to Trader
+    ResearchManager --> ValuationCalc["Valuation Calculator<br/>(Parameter Extraction)"]
+    ResearchManager -.-> Consultant["External Consultant<br/>(Cross-Validation)<br/>Optional"]
 
     ValuationCalc --> Trader["Trader<br/>(Trade Plan)"]
-    Consultant -->|OpenAI Review| Trader
+    Consultant -.-> Trader
 
-    Trader --> RiskTeam["Risk Assessment Team<br/>(Risky → Safe → Neutral)"]
+    %% Risk Team (parallel fan-out, converge to PM)
+    Trader --> RiskyAnalyst["Risky Analyst"]
+    Trader --> SafeAnalyst["Safe Analyst"]
+    Trader --> NeutralAnalyst["Neutral Analyst"]
 
-    RiskTeam --> PortfolioManager
+    RiskyAnalyst --> PortfolioManager["Portfolio Manager<br/>(Final Decision)"]
+    SafeAnalyst --> PortfolioManager
+    NeutralAnalyst --> PortfolioManager
 
-    PortfolioManager --> Decision([BUY / SELL / HOLD<br/>+ Position Size<br/>+ Football Field Chart<br/>+ Thesis Alignment Radar])
+    %% Fast-fail path also goes through Chart Generator
+    PMFastFail --> ChartGen["Chart Generator<br/>(Post-Verdict Visuals)"]
+    PortfolioManager --> ChartGen
 
+    ChartGen --> Decision(["BUY / SELL / HOLD<br/>+ Position Size<br/>+ Charts"])
+
+    %% Styling
     style Dispatcher fill:#ffeaa7,color:#333
     style MarketAnalyst fill:#e1f5ff,color:#333
     style NewsAnalyst fill:#e1f5ff,color:#333
@@ -104,17 +123,26 @@ graph TB
     style SeniorFund fill:#e1f5ff,color:#333
     style Validator fill:#ffcccc,color:#333
     style SyncCheck fill:#e0e0e0,color:#333
+    style DebateR1 fill:#ffeaa7,color:#333
+    style DebateR2 fill:#ffeaa7,color:#333
+    style DebateSyncR1 fill:#e0e0e0,color:#333
+    style DebateSyncFinal fill:#e0e0e0,color:#333
     style ResearchManager fill:#fff4e1,color:#333
-    style BullResearcher fill:#d4edda,color:#333
-    style BearResearcher fill:#f8d7da,color:#333
+    style BullR1 fill:#d4edda,color:#333
+    style BearR1 fill:#f8d7da,color:#333
+    style BullR2 fill:#d4edda,color:#333
+    style BearR2 fill:#f8d7da,color:#333
     style ValuationCalc fill:#e6f3ff,color:#333
     style Consultant fill:#e8daff,color:#333
     style Auditor fill:#e8daff,color:#333
     style ValueTrap fill:#fff0f5,color:#333
     style Trader fill:#ffe4e1,color:#333
-    style RiskTeam fill:#fff3cd,color:#333
+    style RiskyAnalyst fill:#fff3cd,color:#333
+    style SafeAnalyst fill:#fff3cd,color:#333
+    style NeutralAnalyst fill:#fff3cd,color:#333
     style PortfolioManager fill:#d1ecf1,color:#333
-    style Debate fill:#ffeaa7,color:#333
+    style PMFastFail fill:#ffcccc,color:#333
+    style ChartGen fill:#e6f3ff,color:#333
     style Decision fill:#55efc4,color:#333
 ```
 
@@ -128,31 +156,42 @@ graph TB
    - Foreign Language Analyst (native-language sources, premium English fallback)
    - **Legal Counsel** (tax risks like PFIC, regulatory structures like VIE, withholding rates)
    - **Value Trap Detector** - identifies stocks that appear cheap but won't reward shareholders due to poor governance, capital hoarding, or no catalyst. Uses native terminology (持ち合い, 재벌, etc.) for jurisdiction-specific searches.
-   - **Forensic Auditor** (optional, OpenAI-powered) - retrieves primary financial documents using multilingual search and flags accounting anomalies (earnings quality, DSO trends, zombie ratios, etc.). Output is consumed by External Consultant for cross-validation.
+   - **Forensic Auditor** (optional, OpenAI-powered) - retrieves primary financial documents using multilingual search and flags accounting anomalies (earnings quality, DSO trends, zombie ratios, etc.). Output is available to External Consultant via shared state.
 
    Each branch has its own tool-calling loop. This parallel architecture reduces analysis time by ~60% compared to sequential execution.
 
-2. **Sync Check (Fan-In Barrier)** - All branches converge at synchronization points. The Fundamentals Sync waits for **Junior + Foreign Language + Legal Counsel** analysts before Senior processes their combined data. The main Sync Check waits for all reports before proceeding to debate.
+2. **Sync Check (Fan-In Barrier)** - All branches converge at synchronization points. The Fundamentals Sync waits for **Junior + Foreign Language + Legal Counsel** analysts before Senior processes their combined data. The main Sync Check waits for all reports before proceeding.
 
 3. **Junior/Senior/Foreign/Legal Fundamentals Split** - The Junior Fundamentals Analyst calls data tools (get_financial_metrics, get_fundamental_analysis) and returns raw API data. The Foreign Language Analyst searches native-language sources (IR pages, exchange filings). The **Legal Counsel** identifies specific jurisdictional risks (e.g., PFIC status for US taxpayers, VIE structure risks in China). The Senior Fundamentals Analyst receives all three data streams and produces scored analysis with a structured DATA_BLOCK.
 
-4. **Red-Flag Pre-Screening** - Financial Validator parses the DATA_BLOCK for catastrophic risks (extreme leverage >500% D/E, earnings quality issues, refinancing risk). REJECT routes directly to Portfolio Manager; PASS continues to debate.
+4. **Red-Flag Pre-Screening** - Financial Validator parses the DATA_BLOCK for catastrophic risks (extreme leverage >500% D/E, earnings quality issues, refinancing risk). **REJECT** routes directly to PM Fast-Fail (skipping debate); **PASS** continues to adversarial debate.
 
-5. **Adversarial Debate** - Bull and Bear researchers argue opposite perspectives for 1-2 rounds, receiving ALL analyst reports (Market, Sentiment, News, Fundamentals) plus debate history.
+5. **Adversarial Debate (Parallel Rounds)** - Bull and Bear researchers argue opposite perspectives in parallel rounds:
+   - **Round 1**: Bull R1 and Bear R1 run simultaneously, then sync
+   - **Round 2** (normal mode only): Bull R2 and Bear R2 run simultaneously with R1 context
+   - Quick mode (`--quick`) skips Round 2 for faster execution
 
-6. **Research Synthesis** - After debate converges, the Research Manager combines all analyst reports with debate history to create an investment plan.
+6. **Research Synthesis** - After debate converges at Debate Sync Final, the Research Manager combines all analyst reports with full debate history to create an investment plan.
 
-7. **Post-Research Parallel Processing** - Two agents run in parallel after Research Manager:
-   - **Valuation Calculator** - Extracts valuation parameters (P/E, PEG, sector) from DATA_BLOCK and selects the best valuation method. Python code then calculates price targets (avoiding LLM arithmetic errors). Outputs parameters for "Football Field" valuation chart generation.
-   - **External Consultant** (Optional) - Independent cross-validation using OpenAI ChatGPT. Receives all analyst reports plus the Forensic Auditor's anomaly findings to detect biases and validate Gemini's analysis.
+7. **Post-Research Parallel Processing** - Two agents run in parallel after Research Manager, both converging on Trader:
+   - **Valuation Calculator** - Extracts valuation parameters (P/E, PEG, sector) from DATA_BLOCK and selects the best valuation method. Python code then calculates price targets (avoiding LLM arithmetic errors).
+   - **External Consultant** (Optional) - Independent cross-validation using OpenAI ChatGPT. Reads all analyst reports plus the Forensic Auditor's anomaly findings from shared state to detect biases and validate Gemini's analysis.
 
-8. **Trade Planning** - Trader creates specific execution parameters based on the investment plan.
+8. **Trade Planning** - Trader creates specific execution parameters based on the investment plan, receiving both Valuation Calculator and Consultant outputs.
 
-9. **Risk Assessment** - Three risk analysts (Risky/Safe/Neutral) evaluate position sizing from different risk tolerances.
+9. **Risk Assessment (Parallel)** - Three risk analysts run in parallel from Trader, all converging on Portfolio Manager:
+   - **Risky Analyst** - Aggressive risk tolerance
+   - **Safe Analyst** - Conservative risk tolerance
+   - **Neutral Analyst** - Balanced risk tolerance
 
-10. **Executive Decision** - Portfolio Manager synthesizes all viewpoints, applies thesis criteria, and makes final BUY/SELL/HOLD decision. The system then generates two primary visuals: the **Football Field** (valuation ranges) and the **6-Axis Radar Chart** (thesis alignment).
+10. **Executive Decision** - Portfolio Manager synthesizes all viewpoints, applies thesis criteria, and makes final BUY/SELL/HOLD decision with a structured PM_BLOCK output.
 
-**Why This Matters:** Single-LLM (and worse yet, single-prompt) systems are prone to confirmation bias. Multi-model + multi-agent debate forces the system as a whole to consider contradictory evidence, mimicking how institutional research teams actually work. The parallel fan-out/fan-in pattern provides speed without sacrificing data quality. The Junior/Senior/Foreign split uses multiple data pathways (APIs + native-language web sources) to reduce data gaps common when analyzing international stocks. The Financial Validator provides deterministic pre-screening to catch catastrophic risks before debate. The Valuation Calculator separates LLM judgment (method selection) from Python calculation (arithmetic), avoiding LLM math hallucinations while generating visual valuation charts. The structured **DATA_BLOCK (v7.4)** provides a reliable schema for extracting complex metrics (D/E, ROA, Jurisdiction), ensuring the visualization layer remains accurate and thread-safe. The optional External Consultant uses a different AI model (OpenAI) to catch groupthink.
+11. **Chart Generation (Post-Verdict)** - After Portfolio Manager decides, the Chart Generator creates visualizations that reflect the PM's risk-adjusted view:
+    - **Football Field Chart** - Valuation ranges (suppressed for SELL/DO_NOT_INITIATE verdicts)
+    - **6-Axis Radar Chart** - Thesis alignment with PM-adjusted scores
+    - Both fast-fail and normal paths route through Chart Generator before completing
+
+**Why This Matters:** Single-LLM (and worse yet, single-prompt) systems are prone to confirmation bias. Multi-model + multi-agent debate forces the system as a whole to consider contradictory evidence, mimicking how institutional research teams actually work. The parallel fan-out/fan-in pattern provides speed without sacrificing data quality. The Junior/Senior/Foreign split uses multiple data pathways (APIs + native-language web sources) to reduce data gaps common when analyzing international stocks. The Financial Validator provides deterministic pre-screening to catch catastrophic risks before debate. The Valuation Calculator separates LLM judgment (method selection) from Python calculation (arithmetic), avoiding LLM math hallucinations. The structured **DATA_BLOCK** and **PM_BLOCK** provide reliable schemas for extracting complex metrics, ensuring the visualization layer remains accurate. The optional External Consultant uses a different AI model (OpenAI) to catch groupthink.
 
 ---
 

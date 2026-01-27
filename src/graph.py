@@ -11,7 +11,7 @@ Architecture:
    - PASS: Bull/Bear Researcher R1 (parallel debate)
    - REJECT: PM Fast-Fail (separate node to avoid edge conflict with normal PM)
 6. Bull/Bear debate → Consultant → Trader → Risk Team → Portfolio Manager
-7. Portfolio Manager → Chart Generator → END (charts reflect PM verdict)
+7. Portfolio Manager → Chart Generator → END (Charts reflect risk-adjusted targets)
 """
 
 from dataclasses import dataclass

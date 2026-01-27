@@ -653,8 +653,8 @@ def extract_string_content(content: Any) -> str:
             if isinstance(parts, list):
                 text_parts = [extract_string_content(p) for p in parts]
                 return "\n".join(filter(None, text_parts))
-        # Fallback: convert dict to readable string
-        logger.warning("response_content_is_dict", keys=list(content.keys()))
+        # Fallback: convert dict to readable string (expected for some API response formats)
+        logger.debug("response_content_is_dict", keys=list(content.keys()))
         return str(content)
 
     if isinstance(content, list):
@@ -1799,7 +1799,57 @@ def create_auditor_node(llm, tools: list) -> Callable:
 
     This agent runs in parallel with other analysts but remains completely independent.
     Its output is used ONLY by the Consultant agent for cross-validation.
+
+    Includes tool output truncation to prevent context overflow with OpenAI's 128k limit.
+    The truncation preserves head + tail of large outputs to maintain JSON structure.
     """
+    # Max chars per tool output (~7.5k tokens at 4 chars/token, leaving headroom)
+    MAX_TOOL_OUTPUT_CHARS = 30000
+
+    def truncate_tool_outputs_hook(state: dict) -> dict:
+        """
+        Pre-model hook that truncates large tool outputs before LLM invocation.
+        Called before each LLM call within the ReAct loop.
+
+        Returns llm_input_messages (not messages) to avoid modifying state history.
+        Preserves head + tail to maintain JSON structure validity.
+        """
+        from langchain_core.messages import ToolMessage
+
+        messages = state.get("messages", [])
+        modified = []
+        for msg in messages:
+            if isinstance(msg, ToolMessage):
+                content = (
+                    msg.content if isinstance(msg.content, str) else str(msg.content)
+                )
+                if len(content) > MAX_TOOL_OUTPUT_CHARS:
+                    # Keep head (structure/main data) + tail (recent/closing data)
+                    head_size = MAX_TOOL_OUTPUT_CHARS - 2000
+                    tail_size = 1500
+                    truncated = (
+                        content[:head_size]
+                        + f"\n\n[...TRUNCATED {len(content) - head_size - tail_size:,} chars for context limits...]\n\n"
+                        + content[-tail_size:]
+                    )
+                    modified.append(
+                        ToolMessage(
+                            content=truncated,
+                            tool_call_id=msg.tool_call_id,
+                            name=getattr(msg, "name", None),
+                        )
+                    )
+                    logger.debug(
+                        "auditor_tool_output_truncated",
+                        original_len=len(content),
+                        truncated_len=len(truncated),
+                    )
+                else:
+                    modified.append(msg)
+            else:
+                modified.append(msg)
+        # Return llm_input_messages to avoid updating state history
+        return {"llm_input_messages": modified}
 
     async def auditor_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         from src.prompts import get_prompt
@@ -1828,15 +1878,22 @@ Perform a forensic audit using your tools."""
         logger.info("auditor_start", ticker=ticker)
 
         try:
-            # Create agent with tools
-            agent = create_react_agent(llm, tools)
+            # Create agent with pre_model_hook for proactive truncation
+            # This prevents context overflow by truncating large tool outputs
+            # before they're sent back to the LLM on each ReAct iteration
+            agent = create_react_agent(
+                llm,
+                tools,
+                pre_model_hook=truncate_tool_outputs_hook,
+            )
             result = await agent.ainvoke(
                 {
                     "messages": [
                         SystemMessage(content=agent_prompt.system_message),
                         HumanMessage(content=human_msg),
                     ]
-                }
+                },
+                config={"recursion_limit": 25},  # Safety limit on tool iterations
             )
 
             response = result["messages"][-1].content
@@ -1847,9 +1904,37 @@ Perform a forensic audit using your tools."""
             return {"auditor_report": response_str, "sender": "global_forensic_auditor"}
 
         except Exception as e:
-            logger.error("auditor_error", ticker=ticker, error=str(e))
+            error_str = str(e)
+            logger.error("auditor_error", ticker=ticker, error=error_str)
+
+            # Fallback for edge cases where truncation wasn't enough
+            if (
+                "context_length_exceeded" in error_str
+                or "maximum context length" in error_str
+            ):
+                graceful_msg = f"""## FORENSIC AUDITOR REPORT
+
+**STATUS**: CONTEXT_LIMIT_EXCEEDED
+
+**Reason**: Tool results exceeded capacity even after truncation.
+
+**Recommendation**:
+Downstream agents should rely on Fundamentals Analyst DATA_BLOCK (structured APIs: yfinance, FMP, EODHD) as primary source. Independent forensic audit unavailable for {ticker}.
+
+---
+FORENSIC_DATA_BLOCK:
+STATUS: UNAVAILABLE
+META: CONTEXT_LIMIT_EXCEEDED
+REASON: Data volume exceeded 128k token limit
+VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
+"""
+                return {
+                    "auditor_report": graceful_msg,
+                    "sender": "global_forensic_auditor",
+                }
+
             return {
-                "auditor_report": f"Auditor Error: {str(e)}",
+                "auditor_report": f"Auditor Error: {error_str}",
                 "sender": "global_forensic_auditor",
             }
 

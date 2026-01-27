@@ -10,6 +10,13 @@ Key Features:
 - Falls back to DATA_BLOCK when PM_BLOCK is missing
 - Conditionally suppresses charts for SELL/DO_NOT_INITIATE verdicts
 - Applies valuation discount to target ranges based on risk zone
+
+Data Flow:
+1. Inputs:
+   - state["valuation_params"]: Raw math inputs from Valuation Agent (The 'Ingredients')
+   - state["final_trade_decision"]: Verdict and PM_BLOCK from PM (The 'Recipe')
+2. Output:
+   - state["chart_paths"]: Filesystem paths to the rendered images.
 """
 
 import re

@@ -1187,7 +1187,8 @@ class SmartMarketDataFetcher(FinancialFetcher):
                         f"{source_name}_success", symbol=symbol, fields=len(result)
                     )
                 else:
-                    logger.warning(f"{source_name}_returned_none", symbol=symbol)
+                    # Expected when API key not configured - use debug, not warning
+                    logger.debug(f"{source_name}_returned_none", symbol=symbol)
             except asyncio.TimeoutError:
                 logger.warning(f"{source_name}_timeout", symbol=symbol)
                 results[source_name] = None
