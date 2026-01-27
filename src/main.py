@@ -654,8 +654,24 @@ def save_results_to_file(result: dict, ticker: str) -> Path:
     return filepath
 
 
-async def run_analysis(ticker: str, quick_mode: bool) -> dict | None:
-    """Run the multi-agent analysis workflow."""
+async def run_analysis(
+    ticker: str,
+    quick_mode: bool,
+    chart_format: str = "png",
+    transparent_charts: bool = False,
+    image_dir: Path | None = None,
+    skip_charts: bool = False,
+) -> dict | None:
+    """Run the multi-agent analysis workflow.
+
+    Args:
+        ticker: Stock ticker symbol
+        quick_mode: If True, use faster/cheaper models and skip some steps
+        chart_format: Chart output format ('png' or 'svg')
+        transparent_charts: Whether to use transparent chart backgrounds
+        image_dir: Directory for chart output (None = use config default)
+        skip_charts: If True, skip chart generation entirely
+    """
     try:
         from langchain_core.messages import HumanMessage
 
@@ -704,6 +720,11 @@ async def run_analysis(ticker: str, quick_mode: bool) -> dict | None:
             enable_memory=config.enable_memory,
             recursion_limit=100,
             quick_mode=quick_mode,  # Pass quick_mode for consultant LLM selection
+            # Chart generation (post-PM)
+            chart_format=chart_format,
+            transparent_charts=transparent_charts,
+            image_dir=image_dir,
+            skip_charts=skip_charts,
         )
 
         initial_state = AgentState(
@@ -884,7 +905,14 @@ async def main():
                 f"Starting analysis for {args.ticker} (output to {output_file})"
             )
 
-        result = await run_analysis(args.ticker, args.quick)
+        result = await run_analysis(
+            args.ticker,
+            args.quick,
+            chart_format="svg" if args.svg else "png",
+            transparent_charts=args.transparent,
+            image_dir=image_dir,
+            skip_charts=args.no_charts,
+        )
 
         if result:
             # Auto-detect non-TTY stdout (e.g., output redirected to file)

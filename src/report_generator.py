@@ -742,8 +742,17 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         except ImportError:
             pass  # Visualizer not available, skip
 
-        # Thesis Alignment Radar Chart (New)
-        radar_path = self._generate_radar_chart(result)
+        # Thesis Alignment Radar Chart
+        # Use chart_paths from graph state if available (post-PM generation)
+        # Fall back to generating charts here for backward compatibility
+        chart_paths = result.get("chart_paths", {})
+        radar_path = None
+        if chart_paths.get("radar"):
+            radar_path = Path(chart_paths["radar"])
+        elif not chart_paths:
+            # Fallback: generate chart here if graph didn't produce it
+            radar_path = self._generate_radar_chart(result)
+
         if radar_path:
             report_parts.append("## Thesis Alignment\n\n")
 
@@ -760,8 +769,15 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
 
             report_parts.append(f"![Thesis Alignment Radar]({radar_link})\n\n---\n")
 
-        # Football Field Valuation Chart (skip in quick mode)
-        chart_path = self._generate_chart(result)
+        # Football Field Valuation Chart
+        # Use chart_paths from graph state if available (post-PM generation)
+        chart_path = None
+        if chart_paths.get("football_field"):
+            chart_path = Path(chart_paths["football_field"])
+        elif not chart_paths:
+            # Fallback: generate chart here if graph didn't produce it
+            chart_path = self._generate_chart(result)
+
         if chart_path:
             report_parts.append("## Valuation Chart\n\n")
 

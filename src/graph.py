@@ -11,9 +11,11 @@ Architecture:
    - PASS: Bull/Bear Researcher R1 (parallel debate)
    - REJECT: PM Fast-Fail (separate node to avoid edge conflict with normal PM)
 6. Bull/Bear debate → Consultant → Trader → Risk Team → Portfolio Manager
+7. Portfolio Manager → Chart Generator → END (charts reflect PM verdict)
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 import structlog
@@ -36,6 +38,7 @@ from src.agents import (
     create_trader_node,
     create_valuation_calculator_node,
 )
+from src.charts.chart_node import create_chart_generator_node
 from src.config import config
 from src.llms import (
     create_auditor_llm,
@@ -403,6 +406,11 @@ def create_trading_graph(
     ticker: str | None = None,
     cleanup_previous: bool = False,
     quick_mode: bool = False,
+    # Chart generation parameters (post-PM)
+    chart_format: str = "png",
+    transparent_charts: bool = False,
+    image_dir: Path | None = None,
+    skip_charts: bool = False,
 ):
     """
     Create the multi-agent trading analysis graph with parallel analyst execution.
@@ -413,6 +421,7 @@ def create_trading_graph(
     3. Sync Check waits for all streams to complete
     4. Routes to Research Manager (PASS) or Portfolio Manager (REJECT)
     5. Bull/Bear debate → Consultant → Trader → Risk → Portfolio Manager
+    6. Portfolio Manager → Chart Generator → END (charts reflect PM verdict)
 
     Args:
         ticker: Stock ticker symbol (e.g., "0005.HK")
@@ -422,6 +431,10 @@ def create_trading_graph(
         enable_memory: Whether to enable agent memory
         recursion_limit: Max recursion depth
         quick_mode: If True, use faster/cheaper models
+        chart_format: Chart output format ('png' or 'svg')
+        transparent_charts: Whether to use transparent chart backgrounds
+        image_dir: Directory for chart output (None = use config default)
+        skip_charts: If True, skip chart generation entirely
 
     Returns:
         Compiled LangGraph StateGraph
@@ -742,6 +755,14 @@ def create_trading_graph(
     # Valuation Calculator node (extracts params for chart generation)
     valuation_calc = create_valuation_calculator_node(valuation_llm)
 
+    # Chart Generator node (runs after PM, reflects verdict in visuals)
+    chart_generator = create_chart_generator_node(
+        chart_format=chart_format,
+        transparent=transparent_charts,
+        image_dir=image_dir,
+        skip_charts=skip_charts or quick_mode,  # Skip charts in quick mode
+    )
+
     # --- Graph Construction ---
     workflow = StateGraph(AgentState)
 
@@ -908,6 +929,7 @@ BEAR RESEARCHER:
     workflow.add_node("Safe Analyst", safe)
     workflow.add_node("Neutral Analyst", neutral)
     workflow.add_node("Portfolio Manager", pm)
+    workflow.add_node("Chart Generator", chart_generator)
 
     # --- Edge Configuration ---
 
@@ -1016,7 +1038,9 @@ BEAR RESEARCHER:
     # Using the same PM implementation but as a distinct graph node
     pm_fast_fail = create_portfolio_manager_node(pm_llm, risk_manager_memory)
     workflow.add_node("PM Fast-Fail", pm_fast_fail)
-    workflow.add_edge("PM Fast-Fail", END)
+    workflow.add_edge(
+        "PM Fast-Fail", "Chart Generator"
+    )  # Charts still generated (verdict suppresses football field)
 
     # Sync Check: wait for all streams, then route
     # Uses list-style destinations to support fan-out (router returns list for parallel R1)
@@ -1087,7 +1111,9 @@ BEAR RESEARCHER:
     workflow.add_edge("Risky Analyst", "Portfolio Manager")
     workflow.add_edge("Safe Analyst", "Portfolio Manager")
     workflow.add_edge("Neutral Analyst", "Portfolio Manager")
-    workflow.add_edge("Portfolio Manager", END)
+    # PM → Chart Generator → END (charts generated post-verdict)
+    workflow.add_edge("Portfolio Manager", "Chart Generator")
+    workflow.add_edge("Chart Generator", END)
 
     logger.info(
         "trading_graph_created",
@@ -1115,6 +1141,8 @@ BEAR RESEARCHER:
             else "Valuation Calculator"
         ),
         risk_team_parallel=["Risky Analyst", "Safe Analyst", "Neutral Analyst"],
+        post_pm="Chart Generator (verdict-aligned visuals)",
+        chart_generation=not (skip_charts or quick_mode),
         quick_mode=quick_mode,
     )
 

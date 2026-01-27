@@ -474,6 +474,11 @@ class AgentState(MessagesState):
     red_flags: Annotated[list[dict[str, Any]], take_last]
     pre_screening_result: Annotated[str, take_last]  # "PASS" or "REJECT"
 
+    # Chart generation (post-PM)
+    chart_paths: Annotated[
+        dict[str, str], take_last
+    ]  # {"football_field": path, "radar": path}
+
 
 # --- Helper Functions ---
 
