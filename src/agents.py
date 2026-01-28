@@ -80,6 +80,20 @@ async def invoke_with_rate_limit_handling(
                 ]
             )
 
+            # Detect transient errors (connection issues, timeouts, service blips)
+            is_transient = any(
+                [
+                    "connection" in error_str,
+                    "timeout" in error_str,
+                    "timed out" in error_str,
+                    "unavailable" in error_str,
+                    "503" in error_str,
+                    "502" in error_str,
+                    "reset" in error_str,
+                    error_str == "",  # Empty error = unknown transient failure
+                ]
+            )
+
             if is_rate_limit and attempt < max_attempts - 1:
                 # Extended exponential backoff: 60s, 120s, 180s + random jitter
                 # Jitter prevents "thundering herd" when parallel agents retry at exact same time
@@ -101,7 +115,22 @@ async def invoke_with_rate_limit_handling(
                 await asyncio.sleep(wait_time)
                 continue  # Retry
 
-            # Not a rate limit error, or final attempt - re-raise
+            # Transient errors get shorter backoff (5s, 10s, 15s)
+            if is_transient and attempt < max_attempts - 1:
+                wait_time = 5 * (attempt + 1) + random.uniform(1, 3)
+                if not quiet_mode:
+                    logger.warning(
+                        "transient_error_retry",
+                        context=context,
+                        attempt=attempt + 1,
+                        max_attempts=max_attempts,
+                        wait_seconds=f"{wait_time:.1f}",
+                        error_type=error_type,
+                    )
+                await asyncio.sleep(wait_time)
+                continue  # Retry
+
+            # Not a retriable error, or final attempt - re-raise
             raise
 
 
@@ -1803,8 +1832,8 @@ def create_auditor_node(llm, tools: list) -> Callable:
     Includes tool output truncation to prevent context overflow with OpenAI's 128k limit.
     The truncation preserves head + tail of large outputs to maintain JSON structure.
     """
-    # Max chars per tool output (~7.5k tokens at 4 chars/token, leaving headroom)
-    MAX_TOOL_OUTPUT_CHARS = 30000
+    # Max chars per tool output (~11k tokens at 4 chars/token, safe with 3-5 calls)
+    MAX_TOOL_OUTPUT_CHARS = 45000
 
     def truncate_tool_outputs_hook(state: dict) -> dict:
         """
