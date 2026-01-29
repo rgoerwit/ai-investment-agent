@@ -1832,8 +1832,9 @@ def create_auditor_node(llm, tools: list) -> Callable:
     Includes tool output truncation to prevent context overflow with OpenAI's 128k limit.
     The truncation preserves head + tail of large outputs to maintain JSON structure.
     """
-    # Max chars per tool output (~11k tokens at 4 chars/token, safe with 3-5 calls)
-    MAX_TOOL_OUTPUT_CHARS = 45000
+    # Max chars per tool output (~16k tokens at 4 chars/token, safe with 3-5 calls)
+    # 63.5k chars × 5 calls = 317.5k chars ≈ 80k tokens; still under OpenAI's 128k limit
+    MAX_TOOL_OUTPUT_CHARS = 63500
 
     def truncate_tool_outputs_hook(state: dict) -> dict:
         """
@@ -1853,12 +1854,16 @@ def create_auditor_node(llm, tools: list) -> Callable:
                     msg.content if isinstance(msg.content, str) else str(msg.content)
                 )
                 if len(content) > MAX_TOOL_OUTPUT_CHARS:
-                    # Keep head (structure/main data) + tail (recent/closing data)
-                    head_size = MAX_TOOL_OUTPUT_CHARS - 2000
-                    tail_size = 1500
+                    # Keep head (structure/main data) + tail (summaries/totals)
+                    # Preserve more tail as financial reports often have key summaries at end
+                    head_size = 58000
+                    tail_size = 5500
+                    truncated_chars = len(content) - head_size - tail_size
                     truncated = (
                         content[:head_size]
-                        + f"\n\n[...TRUNCATED {len(content) - head_size - tail_size:,} chars for context limits...]\n\n"
+                        + f"\n\n[...TRUNCATED {truncated_chars:,} chars...]\n"
+                        + "[NOTE: Data truncated due to size limits. Partial analysis may still be useful. "
+                        + "Key financial metrics may appear in head or tail sections above/below.]\n\n"
                         + content[-tail_size:]
                     )
                     modified.append(
@@ -1922,7 +1927,9 @@ Perform a forensic audit using your tools."""
                         HumanMessage(content=human_msg),
                     ]
                 },
-                config={"recursion_limit": 25},  # Safety limit on tool iterations
+                config={
+                    "recursion_limit": 12
+                },  # Reduced from 25 - fail faster on retry loops
             )
 
             response = result["messages"][-1].content

@@ -1,6 +1,6 @@
 """
 Long-term Memory System for Multi-Agent Trading System
-Updated for LangChain 1.x and Google Gemini Embeddings (text-embedding-004).
+Updated for LangChain 1.x and Google Gemini Embeddings (gemini-embedding-001).
 
 UPDATED: Added ticker-specific memory isolation to prevent cross-contamination.
 FIXED: ChromaDB v0.6.0 compatibility (list_collections returns strings).
@@ -33,7 +33,7 @@ logger = structlog.get_logger(__name__)
 class FinancialSituationMemory:
     """
     Vector memory storage for financial agent debate history.
-    Uses Google's text-embedding-004 model with ChromaDB backend.
+    Uses Google's gemini-embedding-001 model with ChromaDB backend.
 
     Features:
     - Async embedding generation
@@ -66,9 +66,10 @@ class FinancialSituationMemory:
         # Initialize Google embeddings
         try:
             self.embeddings = GoogleGenerativeAIEmbeddings(
-                model="models/text-embedding-004",
+                model="models/gemini-embedding-001",
                 google_api_key=api_key,
                 task_type="retrieval_document",  # Optimized for semantic search
+                output_dimensionality=768,  # Match existing ChromaDB collections
             )
 
             # Validate embeddings work with a test query (Sync call for init)
@@ -81,7 +82,7 @@ class FinancialSituationMemory:
                 # Don't fail completely, might be transient
 
             logger.info(
-                "embeddings_initialized", model="text-embedding-004", collection=name
+                "embeddings_initialized", model="gemini-embedding-001", collection=name
             )
 
         except Exception as e:
@@ -95,18 +96,41 @@ class FinancialSituationMemory:
             import chromadb
             from chromadb.config import Settings
 
+            CURRENT_EMBEDDING_MODEL = "gemini-embedding-001"
+
             # Initialize persistent client with telemetry explicitly disabled
             self.chroma_client = chromadb.PersistentClient(
                 path=str(config.chroma_persist_directory),
                 settings=Settings(anonymized_telemetry=False, allow_reset=True),
             )
 
+            # Check if collection exists with stale embedding model
+            existing_collections = self.chroma_client.list_collections()
+            collection_names = [
+                c.name if hasattr(c, "name") else c for c in existing_collections
+            ]
+
+            if self.name in collection_names:
+                existing = self.chroma_client.get_collection(name=self.name)
+                existing_model = existing.metadata.get("embedding_model", "unknown")
+
+                if existing_model != CURRENT_EMBEDDING_MODEL:
+                    # Model mismatch - delete and recreate to avoid incompatible embeddings
+                    logger.warning(
+                        "stale_embedding_model_detected",
+                        collection=self.name,
+                        old_model=existing_model,
+                        new_model=CURRENT_EMBEDDING_MODEL,
+                        action="recreating_collection",
+                    )
+                    self.chroma_client.delete_collection(name=self.name)
+
             # Create or get collection
             self.situation_collection = self.chroma_client.get_or_create_collection(
                 name=self.name,
                 metadata={
                     "description": f"Financial debate memory for {name}",
-                    "embedding_model": "text-embedding-004",
+                    "embedding_model": CURRENT_EMBEDDING_MODEL,
                     "embedding_dimension": 768,
                     "created_at": datetime.now().isoformat(),
                     "version": "2.0",

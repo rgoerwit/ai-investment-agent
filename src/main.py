@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -83,6 +84,9 @@ Examples:
   # Custom models
   python -m src.main --ticker TSLA --quick-model gemini-2.5-flash --deep-model gemini-3-pro-preview
 
+  # Enable Langfuse tracing for this run
+  python -m src.main --ticker 0005.HK --trace-langfuse
+
   # With Poetry
   poetry run python -m src.main --ticker MSFT --quick
         """,
@@ -149,6 +153,15 @@ Examples:
         "--no-charts",
         action="store_true",
         help="Skip chart generation entirely",
+    )
+
+    parser.add_argument(
+        "--trace-langfuse",
+        action="store_true",
+        help=(
+            "Enable Langfuse tracing for this run (overrides LANGFUSE_ENABLED in .env). "
+            "Requires LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY in .env."
+        ),
     )
 
     parser.add_argument(
@@ -342,6 +355,10 @@ def get_welcome_banner(ticker: str, quick_mode: bool) -> str:
     banner.append(
         f"**LangSmith Tracing:** "
         f"{'Enabled' if config.langsmith_tracing_enabled else 'Disabled'}  "
+    )
+    banner.append(
+        f"**Langfuse Tracing:** "
+        f"{'Enabled' if config.langfuse_enabled else 'Disabled'}  "
     )
     banner.append("")
     return "\n".join(banner)
@@ -785,10 +802,34 @@ async def run_analysis(
 
         logger.info(f"Starting multi-agent analysis for {ticker} on {real_date}")
 
+        # Get observability callbacks (Langfuse if enabled)
+        from src.observability import flush_traces, get_tracing_callbacks
+
+        session_id = f"{ticker}-{real_date}-{uuid.uuid4().hex[:8]}"
+        tags = [
+            "quick" if quick_mode else "normal",
+            f"quick-model:{config.quick_think_llm}",
+            f"deep-model:{config.deep_think_llm}",
+            f"memory:{'on' if config.enable_memory else 'off'}",
+        ]
+        tracing_callbacks, tracing_metadata = get_tracing_callbacks(
+            ticker=ticker,
+            session_id=session_id,
+            tags=tags,
+        )
+
         result = await graph.ainvoke(
             initial_state,
-            config={"recursion_limit": 100, "configurable": {"context": context}},
+            config={
+                "recursion_limit": 100,
+                "configurable": {"context": context},
+                "callbacks": tracing_callbacks,
+                "metadata": tracing_metadata,
+            },
         )
+
+        # Flush traces before returning
+        flush_traces()
 
         logger.info(f"Analysis completed for {ticker}")
 
@@ -838,6 +879,9 @@ async def main():
 
         if args.no_memory:
             config.enable_memory = False
+
+        if args.trace_langfuse:
+            config.langfuse_enabled = True
 
         # --- Output and Image Directory Logic ---
         output_file, image_dir = resolve_output_paths(args)

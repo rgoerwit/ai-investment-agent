@@ -304,6 +304,35 @@ batch analysis of tickers, paid tiers can reduce runtime substantially.  The sys
 complex and expensive, though, when you're running even at tier 1 ($50-100 for a normal
 batch of 300 tickers).
 
+### Observability with Langfuse (Optional)
+
+Trace multi-agent analysis runs using [Langfuse](https://langfuse.com) (open-source LLM observability):
+
+1. Set your keys in `.env`:
+   ```bash
+   LANGFUSE_PUBLIC_KEY=pk-lf-...
+   LANGFUSE_SECRET_KEY=sk-lf-...
+   LANGFUSE_BASE_URL=https://us.cloud.langfuse.com  # or EU: https://cloud.langfuse.com
+   ```
+
+2. Enable tracing per-run via CLI flag:
+   ```bash
+   poetry run python -m src.main --ticker 0005.HK --trace-langfuse
+   ```
+
+   Or enable globally in `.env`:
+   ```bash
+   LANGFUSE_ENABLED=true
+   ```
+
+**Precedence:** CLI flags (`--trace-langfuse`) override `.env` settings, which override
+code defaults. This applies to all CLI flags (e.g., `--quick-model` overrides `QUICK_MODEL`
+in `.env`).
+
+Each analysis creates a Langfuse session (e.g., `0005.HK-2026-01-28-a3f7b2c1`) with tags
+for mode, models, and memory status. Both Langfuse and LangSmith can be enabled simultaneously
+-- they use independent tracing mechanisms.
+
 ### AI Model Configuration and Thinking Levels (IMPORTANT - Dec 2025)
 
 The system uses a **two-tier thinking level architecture** optimized for both performance and reasoning depth. Understanding this is crucial for reliable operation, especially with
