@@ -2310,7 +2310,7 @@ def create_financial_health_validator_node() -> Callable:
 
         # Log results
         if pre_screening_result == "REJECT":
-            logger.warning(
+            logger.info(
                 "pre_screening_rejected",
                 ticker=ticker,
                 company_name=company_name,
