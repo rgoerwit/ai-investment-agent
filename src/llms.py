@@ -336,8 +336,8 @@ def create_consultant_llm(
         max_retries=max_retries,
         openai_api_key=api_key,
         callbacks=callbacks or [],
-        # Match Gemini's max output for consistency
-        max_tokens=4096,  # OpenAI default, sufficient for consultant reports
+        # Increased from 4096 - consultant reviews need room for tiered flags + forensic analysis
+        max_tokens=16384,
         # Enable streaming for better UX (optional)
         streaming=False,
     )
@@ -385,7 +385,7 @@ def create_auditor_llm(
         max_retries=3,
         openai_api_key=api_key,
         callbacks=callbacks or [],
-        max_tokens=4096,
+        max_tokens=16384,  # Increased from 4096 - auditor needs room for forensic analysis
         streaming=False,
     )
 

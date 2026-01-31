@@ -197,3 +197,108 @@ def clean_duplicate_data_blocks(report: str) -> str:
         cleaned_report = cleaned_report.replace(block.group(0), replacement, 1)
 
     return cleaned_report
+
+
+def detect_truncation(text: str) -> dict:
+    """
+    Detect if text appears truncated and identify the truncation source.
+
+    Truncation can occur from:
+    1. Code-level limits (tool outputs, search results) - HIGH confidence
+    2. LLM output limits (model stops mid-generation) - MEDIUM confidence
+
+    Args:
+        text: The text to analyze for truncation
+
+    Returns:
+        dict with keys:
+        - truncated: bool - whether truncation was detected
+        - source: str | None - "code" or "llm" or None
+        - marker: str | None - the truncation marker or indicator found
+        - confidence: str - "high", "medium", or "low"
+
+    Example:
+        >>> detect_truncation("Some content\\n[...TRUNCATED 5000 chars...]\\nMore")
+        {'truncated': True, 'source': 'code', 'marker': '[...TRUNCATED', 'confidence': 'high'}
+
+        >>> detect_truncation("The company's revenue grew by 15% driven by")
+        {'truncated': True, 'source': 'llm', 'marker': "ends with: '...'", 'confidence': 'medium'}
+    """
+    if not text or not isinstance(text, str) or not text.strip():
+        return {
+            "truncated": False,
+            "source": None,
+            "marker": None,
+            "confidence": "high",
+        }
+
+    text = text.strip()
+
+    # Code-level truncation markers (HIGH confidence)
+    code_markers = [
+        "[...TRUNCATED",
+        "[...truncated",
+        "[... truncated",
+        "...truncated for efficiency]",
+        "...truncated for display",
+        "[NOTE: Data truncated",
+    ]
+    for marker in code_markers:
+        if marker in text:
+            return {
+                "truncated": True,
+                "source": "code",
+                "marker": marker,
+                "confidence": "high",
+            }
+
+    # Check for incomplete structured blocks FIRST (MEDIUM confidence)
+    # These blocks should have both start and required fields
+    block_completeness = [
+        ("PM_BLOCK:", ["VERDICT:", "RISK_ZONE:"]),  # PM output needs verdict
+        (
+            "DATA_BLOCK:",
+            ["HEALTH_SCORE:", "GROWTH_SCORE:"],
+        ),  # Fundamentals needs scores
+        ("FORENSIC_DATA_BLOCK:", ["VERDICT:", "STATUS:"]),  # Auditor needs verdict
+        ("VALUE_TRAP_BLOCK:", ["SCORE:", "VERDICT:"]),  # Value trap needs score
+    ]
+
+    has_complete_block = False
+    for block_start, required_fields in block_completeness:
+        if block_start in text:
+            # Block started - check if any required field is present
+            has_required = any(field in text for field in required_fields)
+            if not has_required:
+                return {
+                    "truncated": True,
+                    "source": "llm",
+                    "marker": f"incomplete {block_start} block (missing {required_fields})",
+                    "confidence": "medium",
+                }
+            else:
+                has_complete_block = True
+
+    # If we have complete structured blocks, consider output complete
+    if has_complete_block:
+        return {
+            "truncated": False,
+            "source": None,
+            "marker": None,
+            "confidence": "high",
+        }
+
+    # LLM truncation heuristics (MEDIUM confidence)
+    # Check if ends mid-sentence (not with valid ending punctuation)
+    # Only apply if no structured blocks were found
+    valid_endings = ".!?)]}>`*|\"'\n"
+    stripped = text.rstrip()
+    if stripped and stripped[-1] not in valid_endings:
+        return {
+            "truncated": True,
+            "source": "llm",
+            "marker": f"ends with: '{stripped[-30:]}'",
+            "confidence": "medium",
+        }
+
+    return {"truncated": False, "source": None, "marker": None, "confidence": "high"}

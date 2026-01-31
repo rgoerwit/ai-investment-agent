@@ -484,6 +484,45 @@ class Settings(BaseSettings):
         description="LangSmith API endpoint",
     )
 
+    # --- Langfuse (Alternative open-source observability) ---
+    langfuse_enabled: bool = Field(
+        default=False,
+        validation_alias="LANGFUSE_ENABLED",
+        description="Enable Langfuse tracing (alternative to LangSmith)",
+    )
+    langfuse_public_key: SecretStr = Field(
+        default=SecretStr(""),
+        validation_alias="LANGFUSE_PUBLIC_KEY",
+        description="Langfuse public API key",
+    )
+    langfuse_secret_key: SecretStr = Field(
+        default=SecretStr(""),
+        validation_alias="LANGFUSE_SECRET_KEY",
+        description="Langfuse secret API key",
+    )
+    langfuse_host: str = Field(
+        default="https://cloud.langfuse.com",
+        validation_alias="LANGFUSE_BASE_URL",
+        description="Langfuse base URL (EU default, US: https://us.cloud.langfuse.com)",
+    )
+    langfuse_sample_rate: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        validation_alias="LANGFUSE_SAMPLE_RATE",
+        description="Trace sample rate (0.0-1.0) for cost control",
+    )
+    langfuse_debug: bool = Field(
+        default=False,
+        validation_alias="LANGFUSE_DEBUG",
+        description="Enable Langfuse debug logging",
+    )
+    langfuse_environment: str = Field(
+        default="development",
+        validation_alias="LANGFUSE_TRACING_ENVIRONMENT",
+        description="Environment tag for filtering in Langfuse dashboard",
+    )
+
     # --- API Keys (SecretStr prevents accidental logging) ---
     # These are optional at Settings instantiation but required for actual use.
     # The validate_environment_variables() function checks for required keys.
@@ -589,6 +628,18 @@ class Settings(BaseSettings):
         if self.langsmith_tracing_enabled and "LANGSMITH_TRACING" not in os.environ:
             os.environ["LANGSMITH_TRACING"] = "true"
 
+        # Export Langfuse settings to os.environ for SDK v3 auto-detection.
+        # The Langfuse SDK v3 reads LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY,
+        # and LANGFUSE_BASE_URL directly from os.environ (no constructor args).
+        langfuse_public = self.langfuse_public_key.get_secret_value()
+        langfuse_secret = self.langfuse_secret_key.get_secret_value()
+        if langfuse_public and "LANGFUSE_PUBLIC_KEY" not in os.environ:
+            os.environ["LANGFUSE_PUBLIC_KEY"] = langfuse_public
+        if langfuse_secret and "LANGFUSE_SECRET_KEY" not in os.environ:
+            os.environ["LANGFUSE_SECRET_KEY"] = langfuse_secret
+        if self.langfuse_host and "LANGFUSE_BASE_URL" not in os.environ:
+            os.environ["LANGFUSE_BASE_URL"] = self.langfuse_host
+
         # Export telemetry/system settings for third-party libraries.
         # ChromaDB and gRPC read directly from os.environ.
         if self.disable_chroma_telemetry:
@@ -641,6 +692,14 @@ class Settings(BaseSettings):
     def get_alpha_vantage_api_key(self) -> str:
         """Get Alpha Vantage API key securely from SecretStr field."""
         return self.alpha_vantage_api_key.get_secret_value()
+
+    def get_langfuse_public_key(self) -> str:
+        """Get Langfuse public key securely from SecretStr field."""
+        return self.langfuse_public_key.get_secret_value()
+
+    def get_langfuse_secret_key(self) -> str:
+        """Get Langfuse secret key securely from SecretStr field."""
+        return self.langfuse_secret_key.get_secret_value()
 
 
 # --- Backwards Compatibility Alias ---

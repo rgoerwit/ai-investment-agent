@@ -262,10 +262,12 @@ class TestPortfolioManagerForensicPenalties:
     def test_pm_version_updated(self):
         """Verify PM version was incremented."""
         pm = get_prompt("portfolio_manager")
-        # Version should be 7.2 or higher
+        # Version should be 7.2 or higher (major.minor comparison)
         version_parts = pm.version.split(".")
-        assert int(version_parts[0]) >= 7, "Major version should be at least 7"
-        assert int(version_parts[1]) >= 2, "Minor version should be at least 2"
+        major = int(version_parts[0])
+        minor = int(version_parts[1]) if len(version_parts) > 1 else 0
+        version_num = major + minor / 10  # e.g., 8.0 -> 8.0, 7.2 -> 7.2
+        assert version_num >= 7.2, f"Version {pm.version} should be at least 7.2"
 
 
 class TestForensicDataBlockIntegration:

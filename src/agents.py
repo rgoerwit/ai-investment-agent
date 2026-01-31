@@ -80,6 +80,20 @@ async def invoke_with_rate_limit_handling(
                 ]
             )
 
+            # Detect transient errors (connection issues, timeouts, service blips)
+            is_transient = any(
+                [
+                    "connection" in error_str,
+                    "timeout" in error_str,
+                    "timed out" in error_str,
+                    "unavailable" in error_str,
+                    "503" in error_str,
+                    "502" in error_str,
+                    "reset" in error_str,
+                    error_str == "",  # Empty error = unknown transient failure
+                ]
+            )
+
             if is_rate_limit and attempt < max_attempts - 1:
                 # Extended exponential backoff: 60s, 120s, 180s + random jitter
                 # Jitter prevents "thundering herd" when parallel agents retry at exact same time
@@ -101,7 +115,22 @@ async def invoke_with_rate_limit_handling(
                 await asyncio.sleep(wait_time)
                 continue  # Retry
 
-            # Not a rate limit error, or final attempt - re-raise
+            # Transient errors get shorter backoff (5s, 10s, 15s)
+            if is_transient and attempt < max_attempts - 1:
+                wait_time = 5 * (attempt + 1) + random.uniform(1, 3)
+                if not quiet_mode:
+                    logger.warning(
+                        "transient_error_retry",
+                        context=context,
+                        attempt=attempt + 1,
+                        max_attempts=max_attempts,
+                        wait_seconds=f"{wait_time:.1f}",
+                        error_type=error_type,
+                    )
+                await asyncio.sleep(wait_time)
+                continue  # Retry
+
+            # Not a retriable error, or final attempt - re-raise
             raise
 
 
@@ -176,6 +205,76 @@ def extract_news_highlights(news_report: str, max_chars: int = 25000) -> str:
         result = result[:max_chars] + "\n[...truncated for efficiency]"
 
     return result if result.strip() else news_report[:max_chars]
+
+
+# --- PM Input Summarization ---
+
+
+def summarize_for_pm(report: str, report_type: str, max_chars: int = 3000) -> str:
+    """
+    Extract key information from agent reports for PM consumption.
+
+    Preserves structured blocks (DATA_BLOCK, PM_BLOCK, etc.) but summarizes
+    narrative content to reduce PM's input context size.
+
+    Args:
+        report: Full agent report text
+        report_type: One of "market", "sentiment", "news", "fundamentals",
+                     "value_trap", "consultant", "trader", "risk"
+        max_chars: Maximum output characters
+
+    Returns:
+        Summarized report with critical data preserved
+    """
+    if not report or not isinstance(report, str):
+        return report or ""
+
+    if len(report) <= max_chars:
+        return report
+
+    import re
+
+    # Structured blocks to preserve in full (these contain critical data)
+    blocks_to_preserve = []
+    block_patterns = [
+        r"(DATA_BLOCK:.*?)(?=\n\n[A-Z]|\Z)",
+        r"(### --- START DATA_BLOCK ---.*?### --- END DATA_BLOCK ---)",
+        r"(PM_BLOCK:.*?)(?=\n\n[A-Z]|\Z)",
+        r"(FORENSIC_DATA_BLOCK:.*?)(?=\n\n[A-Z]|\Z)",
+        r"(VALUE_TRAP_BLOCK:.*?)(?=\n\n[A-Z]|\Z)",
+        r"(\*\*VERDICT\*\*:.*?)(?=\n\n|\Z)",
+        r"(RECOMMENDATION:.*?)(?=\n\n|\Z)",
+        r"(SCORE:\s*\d+.*?)(?=\n\n|\Z)",
+    ]
+
+    for pattern in block_patterns:
+        matches = re.findall(pattern, report, re.DOTALL | re.IGNORECASE)
+        blocks_to_preserve.extend(matches)
+
+    preserved = "\n\n".join(blocks_to_preserve)
+
+    # If preserved blocks fit, add context from the beginning
+    remaining_chars = max_chars - len(preserved) - 100  # Leave buffer
+
+    if remaining_chars > 300:
+        # Extract first paragraph (usually contains key thesis/summary)
+        first_section = report[:remaining_chars]
+        # Try to cut at a paragraph boundary
+        last_para = first_section.rfind("\n\n")
+        if last_para > 200:
+            first_section = first_section[:last_para]
+
+        if preserved:
+            return f"{first_section}\n\n[...summarized...]\n\n{preserved}"
+        else:
+            return first_section + "\n\n[...summarized...]"
+
+    # If blocks alone exceed limit, truncate blocks
+    if preserved:
+        return preserved[:max_chars]
+
+    # Fallback: just truncate
+    return report[:max_chars] + "\n[...summarized...]"
 
 
 def _format_date_with_fy_hint(current_date: str) -> str:
@@ -474,6 +573,11 @@ class AgentState(MessagesState):
     red_flags: Annotated[list[dict[str, Any]], take_last]
     pre_screening_result: Annotated[str, take_last]  # "PASS" or "REJECT"
 
+    # Chart generation (post-PM)
+    chart_paths: Annotated[
+        dict[str, str], take_last
+    ]  # {"football_field": path, "radar": path}
+
 
 # --- Helper Functions ---
 
@@ -648,8 +752,8 @@ def extract_string_content(content: Any) -> str:
             if isinstance(parts, list):
                 text_parts = [extract_string_content(p) for p in parts]
                 return "\n".join(filter(None, text_parts))
-        # Fallback: convert dict to readable string
-        logger.warning("response_content_is_dict", keys=list(content.keys()))
+        # Fallback: convert dict to readable string (expected for some API response formats)
+        logger.debug("response_content_is_dict", keys=list(content.keys()))
         return str(content)
 
     if isinstance(content, list):
@@ -1292,7 +1396,24 @@ def create_research_manager_node(llm, memory: Any | None) -> Callable:
                 llm, [HumanMessage(content=prompt)], context=agent_prompt.agent_name
             )
             # CRITICAL FIX: Normalize response.content to string
-            return {"investment_plan": extract_string_content(response.content)}
+            content_str = extract_string_content(response.content)
+
+            # Truncation detection and logging
+            from src.utils import detect_truncation
+
+            trunc_info = detect_truncation(content_str)
+            if trunc_info["truncated"]:
+                logger.warning(
+                    "agent_output_truncated",
+                    agent="research_manager",
+                    ticker=state.get("company_of_interest", "UNKNOWN"),
+                    source=trunc_info["source"],
+                    marker=trunc_info["marker"],
+                    confidence=trunc_info["confidence"],
+                    output_len=len(content_str),
+                )
+
+            return {"investment_plan": content_str}
         except Exception as e:
             return {"investment_plan": f"Error: {str(e)}"}
 
@@ -1521,14 +1642,55 @@ NEUTRAL ANALYST (Balanced):\n{neutral_view if neutral_view else "N/A"}"""
         else:
             red_flag_section += "\nRed Flags Detected: None"
 
-        all_context = f"""MARKET ANALYST REPORT:\n{market if market else "N/A"}\n\nSENTIMENT ANALYST REPORT:\n{sentiment if sentiment else "N/A"}\n\nNEWS ANALYST REPORT:\n{news if news else "N/A"}\n\nFUNDAMENTALS ANALYST REPORT:\n{fundamentals if fundamentals else "N/A"}{attribution_table}\n\nVALUE TRAP ANALYSIS:\n{value_trap if value_trap else "N/A"}{red_flag_section}\n\nRESEARCH MANAGER RECOMMENDATION:\n{inv_plan if inv_plan else "N/A"}{consultant_section}\n\nTRADER PROPOSAL:\n{trader if trader else "N/A"}\n\nRISK TEAM DEBATE:\n{risk if risk else "N/A"}"""
+        # Summarize verbose reports to reduce PM input context
+        # This improves output completeness by leaving more "attention budget"
+        all_context = f"""MARKET ANALYST REPORT:
+{summarize_for_pm(market, "market", 2500) if market else "N/A"}
+
+SENTIMENT ANALYST REPORT:
+{summarize_for_pm(sentiment, "sentiment", 1500) if sentiment else "N/A"}
+
+NEWS ANALYST REPORT:
+{summarize_for_pm(news, "news", 2000) if news else "N/A"}
+
+FUNDAMENTALS ANALYST REPORT:
+{summarize_for_pm(fundamentals, "fundamentals", 6000) if fundamentals else "N/A"}{attribution_table}
+
+VALUE TRAP ANALYSIS:
+{summarize_for_pm(value_trap, "value_trap", 2500) if value_trap else "N/A"}{red_flag_section}
+
+RESEARCH MANAGER RECOMMENDATION:
+{summarize_for_pm(inv_plan, "research", 3000) if inv_plan else "N/A"}{consultant_section}
+
+TRADER PROPOSAL:
+{summarize_for_pm(trader, "trader", 2000) if trader else "N/A"}
+
+RISK TEAM DEBATE:
+{risk if risk else "N/A"}"""
         prompt = f"""{agent_prompt.system_message}\n\n{all_context}\n\nMake Portfolio Manager Verdict."""
         try:
             response = await invoke_with_rate_limit_handling(
                 llm, [HumanMessage(content=prompt)], context=agent_prompt.agent_name
             )
             # CRITICAL FIX: Normalize response.content to string
-            return {"final_trade_decision": extract_string_content(response.content)}
+            content_str = extract_string_content(response.content)
+
+            # Truncation detection and logging
+            from src.utils import detect_truncation
+
+            trunc_info = detect_truncation(content_str)
+            if trunc_info["truncated"]:
+                logger.warning(
+                    "agent_output_truncated",
+                    agent="portfolio_manager",
+                    ticker=state.get("company_of_interest", "UNKNOWN"),
+                    source=trunc_info["source"],
+                    marker=trunc_info["marker"],
+                    confidence=trunc_info["confidence"],
+                    output_len=len(content_str),
+                )
+
+            return {"final_trade_decision": content_str}
         except Exception as e:
             logger.error(f"PM error: {str(e)}")
             return {"final_trade_decision": f"Error: {str(e)}"}
@@ -1593,28 +1755,36 @@ def create_consultant_node(llm, agent_key: str = "consultant") -> Callable:
         field_sources = extract_field_sources_from_messages(state.get("messages", []))
         attribution_table = format_attribution_table(field_sources)
 
+        # Phase 2.2: Summarize inputs to reduce context size and prevent truncation
+        market = state.get("market_report", "N/A")
+        sentiment = state.get("sentiment_report", "N/A")
+        news = state.get("news_report", "N/A")
+        fundamentals = state.get("fundamentals_report", "N/A")
+        investment_plan = state.get("investment_plan", "N/A")
+        auditor = state.get("auditor_report", "N/A")
+
         all_context = f"""
 === ANALYST REPORTS (SOURCE DATA) ===
 
 MARKET ANALYST REPORT:
-{state.get("market_report", "N/A")}
+{summarize_for_pm(market, "market", 2000) if market != "N/A" else "N/A"}
 
 SENTIMENT ANALYST REPORT:
-{state.get("sentiment_report", "N/A")}
+{summarize_for_pm(sentiment, "sentiment", 1500) if sentiment != "N/A" else "N/A"}
 
 NEWS ANALYST REPORT:
-{state.get("news_report", "N/A")}
+{summarize_for_pm(news, "news", 2000) if news != "N/A" else "N/A"}
 
 FUNDAMENTALS ANALYST REPORT:
-{state.get("fundamentals_report", "N/A")}
+{summarize_for_pm(fundamentals, "fundamentals", 5000) if fundamentals != "N/A" else "N/A"}
 {attribution_table}
 === BULL/BEAR DEBATE HISTORY ===
 
-{debate_history}
+{summarize_for_pm(debate_history, "debate", 4000) if debate_history != "N/A" else "N/A"}
 
 === RESEARCH MANAGER SYNTHESIS ===
 
-{state.get("investment_plan", "N/A")}
+{summarize_for_pm(investment_plan, "research", 4000) if investment_plan != "N/A" else "N/A"}
 
 === RED FLAGS (Pre-Screening Results) ===
 
@@ -1622,7 +1792,7 @@ Red Flags Detected: {state.get("red_flags", [])}
 Pre-Screening Result: {state.get("pre_screening_result", "UNKNOWN")}
 
 === INDEPENDENT FORENSIC AUDIT ===
-{state.get("auditor_report", "N/A")}
+{summarize_for_pm(auditor, "auditor", 3000) if auditor != "N/A" else "N/A"}
 """
 
         prompt = f"""{agent_prompt.system_message}
@@ -1644,12 +1814,28 @@ Provide your independent consultant review."""
             # CRITICAL FIX: Normalize response.content to string
             content_str = extract_string_content(response.content)
 
+            # Truncation detection and logging
+            from src.utils import detect_truncation
+
+            trunc_info = detect_truncation(content_str)
+            if trunc_info["truncated"]:
+                logger.warning(
+                    "agent_output_truncated",
+                    agent="consultant",
+                    ticker=ticker,
+                    source=trunc_info["source"],
+                    marker=trunc_info["marker"],
+                    confidence=trunc_info["confidence"],
+                    output_len=len(content_str),
+                )
+
             logger.info(
                 "consultant_review_complete",
                 ticker=ticker,
                 review_length=len(content_str),
                 has_errors="ERROR" in content_str.upper()
                 or "FAIL" in content_str.upper(),
+                truncated=trunc_info["truncated"],
             )
 
             return {"consultant_review": content_str}
@@ -1794,7 +1980,62 @@ def create_auditor_node(llm, tools: list) -> Callable:
 
     This agent runs in parallel with other analysts but remains completely independent.
     Its output is used ONLY by the Consultant agent for cross-validation.
+
+    Includes tool output truncation to prevent context overflow with OpenAI's 128k limit.
+    The truncation preserves head + tail of large outputs to maintain JSON structure.
     """
+    # Max chars per tool output (~16k tokens at 4 chars/token, safe with 3-5 calls)
+    # 63.5k chars × 5 calls = 317.5k chars ≈ 80k tokens; still under OpenAI's 128k limit
+    MAX_TOOL_OUTPUT_CHARS = 63500
+
+    def truncate_tool_outputs_hook(state: dict) -> dict:
+        """
+        Pre-model hook that truncates large tool outputs before LLM invocation.
+        Called before each LLM call within the ReAct loop.
+
+        Returns llm_input_messages (not messages) to avoid modifying state history.
+        Preserves head + tail to maintain JSON structure validity.
+        """
+        from langchain_core.messages import ToolMessage
+
+        messages = state.get("messages", [])
+        modified = []
+        for msg in messages:
+            if isinstance(msg, ToolMessage):
+                content = (
+                    msg.content if isinstance(msg.content, str) else str(msg.content)
+                )
+                if len(content) > MAX_TOOL_OUTPUT_CHARS:
+                    # Keep head (structure/main data) + tail (summaries/totals)
+                    # Preserve more tail as financial reports often have key summaries at end
+                    head_size = 58000
+                    tail_size = 5500
+                    truncated_chars = len(content) - head_size - tail_size
+                    truncated = (
+                        content[:head_size]
+                        + f"\n\n[...TRUNCATED {truncated_chars:,} chars...]\n"
+                        + "[NOTE: Data truncated due to size limits. Partial analysis may still be useful. "
+                        + "Key financial metrics may appear in head or tail sections above/below.]\n\n"
+                        + content[-tail_size:]
+                    )
+                    modified.append(
+                        ToolMessage(
+                            content=truncated,
+                            tool_call_id=msg.tool_call_id,
+                            name=getattr(msg, "name", None),
+                        )
+                    )
+                    logger.debug(
+                        "auditor_tool_output_truncated",
+                        original_len=len(content),
+                        truncated_len=len(truncated),
+                    )
+                else:
+                    modified.append(msg)
+            else:
+                modified.append(msg)
+        # Return llm_input_messages to avoid updating state history
+        return {"llm_input_messages": modified}
 
     async def auditor_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         from src.prompts import get_prompt
@@ -1823,15 +2064,24 @@ Perform a forensic audit using your tools."""
         logger.info("auditor_start", ticker=ticker)
 
         try:
-            # Create agent with tools
-            agent = create_react_agent(llm, tools)
+            # Create agent with pre_model_hook for proactive truncation
+            # This prevents context overflow by truncating large tool outputs
+            # before they're sent back to the LLM on each ReAct iteration
+            agent = create_react_agent(
+                llm,
+                tools,
+                pre_model_hook=truncate_tool_outputs_hook,
+            )
             result = await agent.ainvoke(
                 {
                     "messages": [
                         SystemMessage(content=agent_prompt.system_message),
                         HumanMessage(content=human_msg),
                     ]
-                }
+                },
+                config={
+                    "recursion_limit": 12
+                },  # Reduced from 25 - fail faster on retry loops
             )
 
             response = result["messages"][-1].content
@@ -1842,9 +2092,37 @@ Perform a forensic audit using your tools."""
             return {"auditor_report": response_str, "sender": "global_forensic_auditor"}
 
         except Exception as e:
-            logger.error("auditor_error", ticker=ticker, error=str(e))
+            error_str = str(e)
+            logger.error("auditor_error", ticker=ticker, error=error_str)
+
+            # Fallback for edge cases where truncation wasn't enough
+            if (
+                "context_length_exceeded" in error_str
+                or "maximum context length" in error_str
+            ):
+                graceful_msg = f"""## FORENSIC AUDITOR REPORT
+
+**STATUS**: CONTEXT_LIMIT_EXCEEDED
+
+**Reason**: Tool results exceeded capacity even after truncation.
+
+**Recommendation**:
+Downstream agents should rely on Fundamentals Analyst DATA_BLOCK (structured APIs: yfinance, FMP, EODHD) as primary source. Independent forensic audit unavailable for {ticker}.
+
+---
+FORENSIC_DATA_BLOCK:
+STATUS: UNAVAILABLE
+META: CONTEXT_LIMIT_EXCEEDED
+REASON: Data volume exceeded 128k token limit
+VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
+"""
+                return {
+                    "auditor_report": graceful_msg,
+                    "sender": "global_forensic_auditor",
+                }
+
             return {
-                "auditor_report": f"Auditor Error: {str(e)}",
+                "auditor_report": f"Auditor Error: {error_str}",
                 "sender": "global_forensic_auditor",
             }
 
@@ -2032,7 +2310,7 @@ def create_financial_health_validator_node() -> Callable:
 
         # Log results
         if pre_screening_result == "REJECT":
-            logger.warning(
+            logger.info(
                 "pre_screening_rejected",
                 ticker=ticker,
                 company_name=company_name,

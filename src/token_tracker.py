@@ -315,21 +315,23 @@ class TokenTrackingCallback(BaseCallbackHandler):
                     usage_metadata = first_generation.message.usage_metadata or {}
 
                 # Get model name from generation_info or response_metadata
-                if hasattr(first_generation, "generation_info"):
-                    model_name = first_generation.generation_info.get(
-                        "model_name", "unknown"
-                    )
-                if model_name == "unknown" and hasattr(first_generation, "message"):
-                    if hasattr(first_generation.message, "response_metadata"):
-                        model_name = first_generation.message.response_metadata.get(
-                            "model_name", "unknown"
-                        )
+                # CRITICAL: Check for None before calling .get() - hasattr returns True for None values
+                gen_info = getattr(first_generation, "generation_info", None)
+                if gen_info is not None:
+                    model_name = gen_info.get("model_name", "unknown")
 
-        # Fallback to llm_output (for other LLM providers)
+                if model_name == "unknown" and hasattr(first_generation, "message"):
+                    resp_meta = getattr(
+                        first_generation.message, "response_metadata", None
+                    )
+                    if resp_meta is not None:
+                        model_name = resp_meta.get("model_name", "unknown")
+
+        # Fallback to llm_output (for other LLM providers like OpenAI)
         if not usage_metadata and response.llm_output:
             usage_metadata = response.llm_output.get("usage_metadata", {})
             if not usage_metadata:
-                # Fallback to deprecated token_usage field
+                # OpenAI uses "token_usage" key
                 usage_metadata = response.llm_output.get("token_usage", {})
             if model_name == "unknown":
                 model_name = response.llm_output.get("model_name", "unknown")

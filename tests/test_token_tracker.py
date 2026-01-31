@@ -675,6 +675,47 @@ class TestTokenTrackingCallback:
         assert stats.total_completion_tokens == 800
         assert stats.total_tokens == 2300
 
+    def test_on_llm_end_with_none_generation_info(self):
+        """Test callback handles None generation_info without AttributeError.
+
+        This tests the edge case where hasattr(obj, 'generation_info') returns True
+        but obj.generation_info is None (common with OpenAI responses).
+        """
+        tracker = TokenTracker()
+        tracker.reset()
+
+        callback = TokenTrackingCallback(agent_name="consultant", tracker=tracker)
+
+        # Create a generation with generation_info=None (like OpenAI returns)
+        message = AIMessage(
+            content="Test response from OpenAI",
+            # Don't include usage_metadata - OpenAI doesn't populate this
+            response_metadata={},  # Empty dict (required by pydantic)
+        )
+
+        generation = ChatGeneration(
+            message=message,
+            generation_info=None,  # This is the key: None, not missing
+        )
+
+        llm_result = LLMResult(
+            generations=[[generation]],
+            llm_output={
+                "model_name": "gpt-4o",
+                "token_usage": {"prompt_tokens": 5000, "completion_tokens": 2000},
+            },
+        )
+
+        # This should NOT raise AttributeError
+        callback.on_llm_end(llm_result)
+
+        # Verify usage was recorded from llm_output fallback
+        stats = tracker.get_agent_stats("consultant")
+        assert stats is not None
+        assert stats.total_calls == 1
+        assert stats.total_prompt_tokens == 5000
+        assert stats.total_completion_tokens == 2000
+
 
 class TestCostAccuracy:
     """Test that cost calculations match expected paid tier rates."""

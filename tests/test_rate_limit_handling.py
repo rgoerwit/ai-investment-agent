@@ -183,18 +183,47 @@ class TestNonRateLimitErrors:
         mock_sleep.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_network_error_raised_immediately(self):
-        """Test that network errors are not treated as rate limits."""
+    async def test_non_retriable_error_raised_immediately(self):
+        """Test that non-retriable errors (not rate limit, not transient) raise immediately."""
         runnable = AsyncMock()
-        runnable.ainvoke = AsyncMock(side_effect=ConnectionError("Network timeout"))
+        # Use an error that's neither rate limit nor transient
+        runnable.ainvoke = AsyncMock(side_effect=ValueError("Invalid input format"))
 
         with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-            with pytest.raises(ConnectionError):
+            with pytest.raises(ValueError):
                 await invoke_with_rate_limit_handling(
                     runnable, {"input": "test"}, max_attempts=3
                 )
 
         mock_sleep.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_transient_error_retried_with_short_backoff(self):
+        """Test that transient errors (timeout, connection) are retried with short backoff."""
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(
+            side_effect=[
+                ConnectionError("Connection timeout"),
+                ConnectionError("Connection timeout"),
+                "success",  # Third attempt succeeds
+            ]
+        )
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            result = await invoke_with_rate_limit_handling(
+                runnable, {"input": "test"}, max_attempts=3
+            )
+
+        assert result == "success"
+        assert mock_sleep.call_count == 2  # Two retries before success
+        # Verify short backoff (5s base, not 60s like rate limits)
+        # First retry: ~5-8s, Second retry: ~10-13s
+        first_wait = mock_sleep.call_args_list[0][0][0]
+        second_wait = mock_sleep.call_args_list[1][0][0]
+        assert 5 <= first_wait <= 10, f"First wait {first_wait} not in expected range"
+        assert (
+            10 <= second_wait <= 15
+        ), f"Second wait {second_wait} not in expected range"
 
 
 class TestQuietMode:

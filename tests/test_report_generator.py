@@ -94,59 +94,71 @@ class TestNormalizeString:
 
 
 class TestExtractDecision:
-    """Test extract_decision() with various input formats."""
+    """Test extract_decision() with various input formats.
 
-    def test_extract_action_field(self):
-        """Test extraction from Action: field."""
+    NOTE: extract_decision() only trusts PM patterns (PORTFOLIO MANAGER VERDICT:
+    and PM_BLOCK VERDICT:) to prevent leakage from subordinate agents.
+    """
+
+    def test_extract_pm_verdict(self):
+        """Test extraction from PORTFOLIO MANAGER VERDICT: field."""
         reporter = QuietModeReporter("AAPL")
-        text = "### FINAL EXECUTION PARAMETERS\nAction: BUY\nPosition: 5%"
+        text = "#### PORTFOLIO MANAGER VERDICT: BUY\nPosition: 5%"
         assert reporter.extract_decision(text) == "BUY"
 
-    def test_extract_final_decision_field(self):
-        """Test extraction from FINAL DECISION: field."""
+    def test_extract_pm_block_verdict(self):
+        """Test extraction from PM_BLOCK VERDICT: field."""
         reporter = QuietModeReporter("AAPL")
-        text = "### FINAL DECISION: SELL\nRationale: Too risky"
+        text = "#### --- START PM_BLOCK ---\nVERDICT: SELL\n#### --- END PM_BLOCK ---"
         assert reporter.extract_decision(text) == "SELL"
 
-    def test_extract_decision_field(self):
-        """Test extraction from Decision: field."""
+    def test_non_pm_action_field_ignored(self):
+        """Non-PM Action: field should be ignored (prevents Trader leakage)."""
         reporter = QuietModeReporter("AAPL")
-        text = "Decision: HOLD\nWaiting for clarity"
+        text = "### FINAL EXECUTION PARAMETERS\nAction: BUY\nPosition: 5%"
+        # Without PM verdict, defaults to HOLD (safe)
         assert reporter.extract_decision(text) == "HOLD"
 
-    def test_extract_generic_keyword(self):
-        """Test generic keyword extraction as fallback."""
+    def test_non_pm_final_decision_ignored(self):
+        """Non-PM FINAL DECISION: should be ignored (prevents Research Manager leakage)."""
+        reporter = QuietModeReporter("AAPL")
+        text = "### FINAL DECISION: SELL\nRationale: Too risky"
+        assert reporter.extract_decision(text) == "HOLD"
+
+    def test_generic_keyword_ignored(self):
+        """Generic keywords should be ignored (prevents subordinate agent leakage)."""
         reporter = QuietModeReporter("AAPL")
         text = "I recommend to BUY this stock"
-        assert reporter.extract_decision(text) == "BUY"
+        # No PM verdict, so defaults to HOLD
+        assert reporter.extract_decision(text) == "HOLD"
 
     def test_extract_bold_markdown(self):
-        """Test extraction with markdown bold."""
+        """Test extraction with markdown bold in PM verdict."""
         reporter = QuietModeReporter("AAPL")
-        text = "Action: **SELL**"
+        text = "#### PORTFOLIO MANAGER VERDICT: **SELL**"
         assert reporter.extract_decision(text) == "SELL"
 
     def test_extract_lowercase(self):
         """Test extraction converts to uppercase."""
         reporter = QuietModeReporter("AAPL")
-        text = "Action: buy"
+        text = "#### Portfolio Manager Verdict: buy"
         assert reporter.extract_decision(text) == "BUY"
 
     def test_extract_with_extra_whitespace(self):
         """Test extraction handles extra whitespace."""
         reporter = QuietModeReporter("AAPL")
-        text = "Action:    HOLD   "
+        text = "#### PORTFOLIO MANAGER VERDICT:    HOLD   "
         assert reporter.extract_decision(text) == "HOLD"
 
-    def test_extract_multiple_decisions_priority(self):
-        """Test priority order when multiple decisions present."""
+    def test_pm_block_takes_priority(self):
+        """PM_BLOCK VERDICT takes priority over prose verdict."""
         reporter = QuietModeReporter("AAPL")
-        # Action: should take priority over FINAL DECISION:
-        text = "FINAL DECISION: SELL\n\nAction: BUY"
+        text = "#### PORTFOLIO MANAGER VERDICT: SELL\n\nVERDICT: BUY"
+        # PM_BLOCK VERDICT (line start) should win
         assert reporter.extract_decision(text) == "BUY"
 
     def test_extract_default_hold(self):
-        """Test defaults to HOLD when no decision found."""
+        """Test defaults to HOLD when no PM verdict found."""
         reporter = QuietModeReporter("AAPL")
         text = "No clear decision in this text"
         assert reporter.extract_decision(text) == "HOLD"
@@ -154,13 +166,13 @@ class TestExtractDecision:
     def test_extract_invalid_decision(self):
         """Test invalid decision word ignored."""
         reporter = QuietModeReporter("AAPL")
-        text = "Action: MAYBE"
+        text = "#### PORTFOLIO MANAGER VERDICT: MAYBE"
         assert reporter.extract_decision(text) == "HOLD"
 
     def test_extract_from_list(self):
         """Test extraction when input is a list (LangGraph accumulation)."""
         reporter = QuietModeReporter("AAPL")
-        text_list = ["Some preamble", "Action: SELL"]
+        text_list = ["Some preamble", "#### PORTFOLIO MANAGER VERDICT: SELL"]
         assert reporter.extract_decision(text_list) == "SELL"
 
     def test_extract_none_input(self):
@@ -796,20 +808,21 @@ class TestEdgeCases:
         assert "HOLD" in report
         assert "Brief Mode" in report
 
-    def test_malformed_decision_format(self):
-        """Test various malformed decision formats."""
+    def test_malformed_pm_verdict_formats(self):
+        """Test various PM verdict format variations."""
         reporter = QuietModeReporter("CSCO")
 
         test_cases = [
-            "Action:BUY",  # No space
-            "Action : BUY",  # Extra space
-            "ACTION: buy",  # All caps label, lowercase value
-            "action: BUY",  # Lowercase label
-            "  Action:  BUY  ",  # Extra whitespace
+            ("PORTFOLIO MANAGER VERDICT:BUY", "BUY"),  # No space
+            ("PORTFOLIO MANAGER VERDICT : BUY", "BUY"),  # Extra space
+            ("portfolio manager verdict: buy", "BUY"),  # Lowercase
+            ("  PORTFOLIO MANAGER VERDICT:  SELL  ", "SELL"),  # Extra whitespace
+            ("VERDICT: HOLD", "HOLD"),  # PM_BLOCK style
+            ("VERDICT:DO_NOT_INITIATE", "DO NOT INITIATE"),  # No space, underscored
         ]
 
-        for text in test_cases:
-            assert reporter.extract_decision(text) == "BUY"
+        for text, expected in test_cases:
+            assert reporter.extract_decision(text) == expected, f"Failed for: {text}"
 
 
 class TestInitialization:
