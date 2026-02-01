@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.0] - 2026-02-01
+
+### Added
+- **International Currency Symbols** - Football field charts now display correct local currency (¥, £, €, ₩, HK$, etc.) based on exchange suffix
+  - Supports 40+ exchanges including suffix currencies (Polish zł, Swedish kr, Czech Kč)
+  - `CurrencyFormat` class handles both prefix ($100) and suffix (100 zł) conventions
+- **PFIC Quantitative Asset Test** - Fundamentals Analyst now calculates cash/market-cap ratio
+  - R ≥ 50%: Flags as HIGH PFIC risk
+  - R ≥ 45%: Flags as MEDIUM PFIC risk
+  - 35% price decline would trigger 50%: Flags as PFIC_CASH_TRAP latent risk
+- **Agent Output Constraints** - Added word limits and anti-bloat rules to all 13 agent prompts to reduce truncation risk
+
+### Changed
+- **Log Levels** - Investment detection messages (red flags, legal flags, value trap flags) changed from WARNING to INFO since they indicate the system working correctly, not errors
+
 ## [3.6.0] - 2026-01-18
 
 ### Added
