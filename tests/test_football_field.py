@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from src.charts.base import ChartConfig, ChartFormat, FootballFieldData
+from src.charts.base import ChartConfig, ChartFormat, CurrencyFormat, FootballFieldData
+from src.charts.chart_node import _get_currency_format
 from src.charts.generators.football_field import generate_football_field
 
 
@@ -425,3 +426,216 @@ class TestGenerateFootballField:
             ), "Edgecolor blue mismatch"
 
             plt.close(fig)
+
+
+class TestCurrencyFormat:
+    """Tests for CurrencyFormat class and currency detection."""
+
+    def test_format_price_prefix_no_space(self):
+        """Test prefix currency without space (e.g., $100.00)."""
+        fmt = CurrencyFormat("$", "prefix")
+        assert fmt.format_price(100.00) == "$100.00"
+        assert fmt.format_price(65.50) == "$65.50"
+
+    def test_format_price_prefix_with_space(self):
+        """Test prefix currency with space (e.g., CHF 100.00)."""
+        fmt = CurrencyFormat("CHF", "prefix", space=True)
+        assert fmt.format_price(100.00) == "CHF 100.00"
+
+    def test_format_price_suffix_with_space(self):
+        """Test suffix currency with space (e.g., 100.00 zł)."""
+        fmt = CurrencyFormat("zł", "suffix", space=True)
+        assert fmt.format_price(42.50) == "42.50 zł"
+
+    def test_format_price_suffix_no_space(self):
+        """Test suffix currency without space."""
+        fmt = CurrencyFormat("kr", "suffix", space=False)
+        assert fmt.format_price(285.00) == "285.00kr"
+
+    def test_format_price_japanese_yen(self):
+        """Test Japanese Yen formatting."""
+        fmt = CurrencyFormat("¥", "prefix")
+        assert fmt.format_price(2850.00) == "¥2850.00"
+
+    def test_format_price_korean_won(self):
+        """Test Korean Won formatting."""
+        fmt = CurrencyFormat("₩", "prefix")
+        assert fmt.format_price(75000.00) == "₩75000.00"
+
+
+class TestGetCurrencyFormat:
+    """Tests for _get_currency_format ticker-to-currency mapping."""
+
+    def test_hong_kong_dollar(self):
+        """Test Hong Kong stocks use HK$."""
+        fmt = _get_currency_format("0005.HK")
+        assert fmt.symbol == "HK$"
+        assert fmt.position == "prefix"
+        assert fmt.format_price(65.50) == "HK$65.50"
+
+    def test_japanese_yen(self):
+        """Test Japanese stocks use ¥."""
+        fmt = _get_currency_format("7203.T")
+        assert fmt.symbol == "¥"
+        assert fmt.format_price(2850.00) == "¥2850.00"
+
+    def test_korean_won(self):
+        """Test Korean KOSPI stocks use ₩."""
+        fmt = _get_currency_format("005930.KS")
+        assert fmt.symbol == "₩"
+        assert fmt.format_price(75000.00) == "₩75000.00"
+
+    def test_korean_won_kosdaq(self):
+        """Test Korean KOSDAQ stocks use ₩."""
+        fmt = _get_currency_format("035720.KQ")
+        assert fmt.symbol == "₩"
+
+    def test_taiwan_dollar(self):
+        """Test Taiwan stocks use NT$."""
+        fmt = _get_currency_format("2330.TW")
+        assert fmt.symbol == "NT$"
+        assert fmt.format_price(580.00) == "NT$580.00"
+
+    def test_chinese_yuan_shanghai(self):
+        """Test Shanghai stocks use CN¥."""
+        fmt = _get_currency_format("600519.SS")
+        assert fmt.symbol == "CN¥"
+
+    def test_chinese_yuan_shenzhen(self):
+        """Test Shenzhen stocks use CN¥."""
+        fmt = _get_currency_format("000858.SZ")
+        assert fmt.symbol == "CN¥"
+
+    def test_british_pound(self):
+        """Test London stocks use £."""
+        fmt = _get_currency_format("HSBA.L")
+        assert fmt.symbol == "£"
+        assert fmt.format_price(650.00) == "£650.00"
+
+    def test_euro_amsterdam(self):
+        """Test Amsterdam stocks use €."""
+        fmt = _get_currency_format("ASML.AS")
+        assert fmt.symbol == "€"
+
+    def test_euro_frankfurt(self):
+        """Test Frankfurt stocks use €."""
+        fmt = _get_currency_format("SAP.DE")
+        assert fmt.symbol == "€"
+
+    def test_swiss_franc(self):
+        """Test Swiss stocks use CHF with space."""
+        fmt = _get_currency_format("NESN.SW")
+        assert fmt.symbol == "CHF"
+        assert fmt.space is True
+        assert fmt.format_price(100.00) == "CHF 100.00"
+
+    def test_swedish_krona_suffix(self):
+        """Test Swedish stocks use kr suffix."""
+        fmt = _get_currency_format("VOLV-B.ST")
+        assert fmt.symbol == "kr"
+        assert fmt.position == "suffix"
+        assert fmt.format_price(285.00) == "285.00 kr"
+
+    def test_polish_zloty_suffix(self):
+        """Test Polish stocks use zł suffix."""
+        fmt = _get_currency_format("PKN.WA")
+        assert fmt.symbol == "zł"
+        assert fmt.position == "suffix"
+        assert fmt.format_price(42.50) == "42.50 zł"
+
+    def test_danish_krone_suffix(self):
+        """Test Danish stocks use kr suffix."""
+        fmt = _get_currency_format("NOVO-B.CO")
+        assert fmt.symbol == "kr"
+        assert fmt.position == "suffix"
+
+    def test_norwegian_krone_suffix(self):
+        """Test Norwegian stocks use kr suffix."""
+        fmt = _get_currency_format("EQNR.OL")
+        assert fmt.symbol == "kr"
+        assert fmt.position == "suffix"
+
+    def test_czech_koruna_suffix(self):
+        """Test Czech stocks use Kč suffix."""
+        fmt = _get_currency_format("CEZ.PR")
+        assert fmt.symbol == "Kč"
+        assert fmt.position == "suffix"
+
+    def test_us_stock_default(self):
+        """Test US stocks default to $."""
+        fmt = _get_currency_format("AAPL")
+        assert fmt.symbol == "$"
+        assert fmt.position == "prefix"
+        assert fmt.format_price(150.00) == "$150.00"
+
+    def test_unknown_suffix_default(self):
+        """Test unknown suffixes default to $."""
+        fmt = _get_currency_format("UNKNOWN.XX")
+        assert fmt.symbol == "$"
+
+    def test_case_insensitive(self):
+        """Test ticker suffix matching is case-insensitive."""
+        fmt1 = _get_currency_format("0005.hk")
+        fmt2 = _get_currency_format("0005.HK")
+        assert fmt1.symbol == fmt2.symbol == "HK$"
+
+
+class TestFootballFieldCurrencyIntegration:
+    """Integration tests for currency formatting in charts."""
+
+    def test_chart_with_hong_kong_currency(self):
+        """Test chart generation with Hong Kong Dollar currency."""
+        currency = _get_currency_format("0005.HK")
+        data = FootballFieldData(
+            ticker="0005.HK",
+            trade_date="2025-01-01",
+            current_price=65.50,
+            fifty_two_week_high=75.00,
+            fifty_two_week_low=55.00,
+            currency_format=currency,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ChartConfig(output_dir=Path(tmpdir))
+            result = generate_football_field(data, config)
+
+            assert result is not None
+            assert result.exists()
+            # Verify currency is set correctly
+            assert data.currency_format.symbol == "HK$"
+
+    def test_chart_with_polish_zloty_suffix_currency(self):
+        """Test chart generation with Polish Złoty (suffix currency)."""
+        currency = _get_currency_format("PKN.WA")
+        data = FootballFieldData(
+            ticker="PKN.WA",
+            trade_date="2025-01-01",
+            current_price=42.50,
+            fifty_two_week_high=55.00,
+            fifty_two_week_low=35.00,
+            currency_format=currency,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ChartConfig(output_dir=Path(tmpdir))
+            result = generate_football_field(data, config)
+
+            assert result is not None
+            assert result.exists()
+            # Verify suffix currency is set correctly
+            assert data.currency_format.symbol == "zł"
+            assert data.currency_format.position == "suffix"
+
+    def test_default_currency_when_not_specified(self):
+        """Test that FootballFieldData defaults to USD when currency not specified."""
+        data = FootballFieldData(
+            ticker="AAPL",
+            trade_date="2025-01-01",
+            current_price=150.00,
+            fifty_two_week_high=180.00,
+            fifty_two_week_low=120.00,
+            # currency_format not specified - should default to USD
+        )
+
+        assert data.currency_format.symbol == "$"
+        assert data.currency_format.position == "prefix"

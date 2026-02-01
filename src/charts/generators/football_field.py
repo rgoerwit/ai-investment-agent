@@ -162,6 +162,7 @@ def generate_football_field(
 
     # Draw horizontal bars
     y_positions = list(range(len(bars)))
+    fmt = data.currency_format.format_price  # Currency formatter shorthand
     for i, ((left, width), color, label) in enumerate(
         zip(bars, colors, labels, strict=True)
     ):
@@ -171,7 +172,7 @@ def generate_football_field(
         ax.text(
             left - 0.02 * (data.fifty_two_week_high - data.fifty_two_week_low),
             label_y,
-            f"${left:.2f}",
+            fmt(left),
             ha="right",
             va="bottom",
             fontsize=8,
@@ -180,7 +181,7 @@ def generate_football_field(
         ax.text(
             left + width + 0.02 * (data.fifty_two_week_high - data.fifty_two_week_low),
             label_y,
-            f"${left + width:.2f}",
+            fmt(left + width),
             ha="left",
             va="bottom",
             fontsize=8,
@@ -193,7 +194,7 @@ def generate_football_field(
         color="#E74C3C",
         linewidth=2.5,
         linestyle="--",
-        label=f"Current: ${data.current_price:.2f}",
+        label=f"Current: {fmt(data.current_price)}",
         ymin=0,
         ymax=0.95,  # Stop before title
         zorder=10,

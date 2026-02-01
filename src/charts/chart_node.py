@@ -28,7 +28,91 @@ from typing import Any
 import structlog
 from langgraph.types import RunnableConfig
 
+from src.charts.base import CurrencyFormat
+
 logger = structlog.get_logger(__name__)
+
+
+# Exchange suffix to currency format mapping
+# Handles both prefix currencies ($100) and suffix currencies (100 zł)
+CURRENCY_MAP: dict[str, CurrencyFormat] = {
+    # Asia-Pacific - Prefix currencies
+    ".HK": CurrencyFormat("HK$", "prefix"),  # Hong Kong Dollar
+    ".T": CurrencyFormat("¥", "prefix"),  # Japanese Yen
+    ".TW": CurrencyFormat("NT$", "prefix"),  # Taiwan Dollar
+    ".TWO": CurrencyFormat("NT$", "prefix"),  # Taiwan OTC
+    ".KS": CurrencyFormat("₩", "prefix"),  # Korean Won (KOSPI)
+    ".KQ": CurrencyFormat("₩", "prefix"),  # Korean Won (KOSDAQ)
+    ".SS": CurrencyFormat("CN¥", "prefix"),  # Chinese Yuan (Shanghai)
+    ".SZ": CurrencyFormat("CN¥", "prefix"),  # Chinese Yuan (Shenzhen)
+    ".AX": CurrencyFormat("A$", "prefix"),  # Australian Dollar
+    ".SI": CurrencyFormat("S$", "prefix"),  # Singapore Dollar
+    ".BK": CurrencyFormat("฿", "prefix"),  # Thai Baht
+    ".JK": CurrencyFormat("Rp", "prefix", space=True),  # Indonesian Rupiah
+    ".KL": CurrencyFormat("RM", "prefix", space=True),  # Malaysian Ringgit
+    ".NS": CurrencyFormat("₹", "prefix"),  # Indian Rupee (NSE)
+    ".BO": CurrencyFormat("₹", "prefix"),  # Indian Rupee (BSE)
+    # Europe - Prefix currencies
+    ".L": CurrencyFormat("£", "prefix"),  # British Pound
+    ".AS": CurrencyFormat("€", "prefix"),  # Euro (Amsterdam)
+    ".PA": CurrencyFormat("€", "prefix"),  # Euro (Paris)
+    ".DE": CurrencyFormat("€", "prefix"),  # Euro (Frankfurt/Xetra)
+    ".F": CurrencyFormat("€", "prefix"),  # Euro (Frankfurt)
+    ".MI": CurrencyFormat("€", "prefix"),  # Euro (Milan)
+    ".MC": CurrencyFormat("€", "prefix"),  # Euro (Madrid)
+    ".BR": CurrencyFormat("€", "prefix"),  # Euro (Brussels)
+    ".LS": CurrencyFormat("€", "prefix"),  # Euro (Lisbon)
+    ".VI": CurrencyFormat("€", "prefix"),  # Euro (Vienna)
+    ".HE": CurrencyFormat("€", "prefix"),  # Euro (Helsinki)
+    ".IR": CurrencyFormat("€", "prefix"),  # Euro (Dublin)
+    ".AT": CurrencyFormat("€", "prefix"),  # Euro (Athens)
+    ".SW": CurrencyFormat("CHF", "prefix", space=True),  # Swiss Franc
+    # Europe - Suffix currencies
+    ".ST": CurrencyFormat("kr", "suffix", space=True),  # Swedish Krona
+    ".CO": CurrencyFormat("kr", "suffix", space=True),  # Danish Krone
+    ".OL": CurrencyFormat("kr", "suffix", space=True),  # Norwegian Krone
+    ".IC": CurrencyFormat("kr", "suffix", space=True),  # Icelandic Króna
+    ".WA": CurrencyFormat("zł", "suffix", space=True),  # Polish Złoty
+    ".PR": CurrencyFormat("Kč", "suffix", space=True),  # Czech Koruna
+    ".BD": CurrencyFormat("Ft", "suffix", space=True),  # Hungarian Forint
+    ".RO": CurrencyFormat("lei", "suffix", space=True),  # Romanian Leu
+    # Americas
+    ".TO": CurrencyFormat("C$", "prefix"),  # Canadian Dollar (Toronto)
+    ".V": CurrencyFormat("C$", "prefix"),  # Canadian Dollar (TSX Venture)
+    ".SA": CurrencyFormat("R$", "prefix", space=True),  # Brazilian Real
+    ".MX": CurrencyFormat("MX$", "prefix"),  # Mexican Peso
+    # Middle East & Africa
+    ".TA": CurrencyFormat("₪", "prefix"),  # Israeli Shekel
+    ".JO": CurrencyFormat("R", "prefix", space=True),  # South African Rand
+}
+
+
+def _get_currency_format(ticker: str) -> CurrencyFormat:
+    """Derive currency format from ticker exchange suffix.
+
+    Args:
+        ticker: Stock ticker symbol (e.g., "0005.HK", "7203.T")
+
+    Returns:
+        CurrencyFormat for the exchange, defaults to USD ($) for
+        US exchanges and unknown suffixes.
+
+    Examples:
+        >>> _get_currency_format("0005.HK").format_price(65.50)
+        'HK$65.50'
+        >>> _get_currency_format("7203.T").format_price(2850)
+        '¥2850.00'
+        >>> _get_currency_format("PKN.WA").format_price(42.50)
+        '42.50 zł'
+    """
+    ticker_upper = ticker.upper()
+
+    for suffix, currency in CURRENCY_MAP.items():
+        if ticker_upper.endswith(suffix):
+            return currency
+
+    # Default to USD for US exchanges and ADRs
+    return CurrencyFormat("$", "prefix")
 
 
 def create_chart_generator_node(
@@ -261,12 +345,16 @@ def _generate_football_field(
             f"Risk-adjusted ({pm_block.zone or 'N/A'} zone, {pm_block.valuation_discount:.0%} discount)"
         )
 
+    # Get currency format from ticker exchange suffix
+    currency_format = _get_currency_format(ticker)
+
     football_data = FootballFieldData(
         ticker=ticker,
         trade_date=trade_date,
         current_price=data_block.current_price,
         fifty_two_week_high=data_block.fifty_two_week_high,
         fifty_two_week_low=data_block.fifty_two_week_low,
+        currency_format=currency_format,
         moving_avg_50=data_block.moving_avg_50,
         moving_avg_200=data_block.moving_avg_200,
         external_target_high=data_block.external_target_high,
