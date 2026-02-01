@@ -74,7 +74,8 @@ except ImportError:
 # Constants
 MIN_INFO_FIELDS = 3
 ROE_PERCENTAGE_THRESHOLD = 1.0
-DEBT_EQUITY_PERCENTAGE_THRESHOLD = 100.0
+# D/E > 10 (1000%) is extremely rare; values like 14.77 are percentages (14.77%)
+DEBT_EQUITY_PERCENTAGE_THRESHOLD = 10.0
 PRICE_TO_BOOK_CURRENCY_MISMATCH_THRESHOLD = 5.0
 FX_CACHE_TTL_SECONDS = 3600
 PER_SOURCE_TIMEOUT = 15
@@ -544,6 +545,12 @@ class SmartMarketDataFetcher(FinancialFetcher):
         for key, value in return_trends.items():
             extracted[key] = value
 
+        # --- GRAHAM CONSECUTIVE EARNINGS TEST ---
+        # Benjamin Graham's quality filter: consecutive years of positive earnings
+        graham_signals = self._calculate_graham_earnings_test(financials, symbol)
+        for key, value in graham_signals.items():
+            extracted[key] = value
+
         return extracted
 
     def _calculate_moat_signals(
@@ -981,6 +988,80 @@ class SmartMarketDataFetcher(FinancialFetcher):
 
         return signals
 
+    def _calculate_graham_earnings_test(
+        self,
+        financials: "pd.DataFrame",
+        symbol: str,
+    ) -> dict[str, Any]:
+        """
+        Graham's consecutive positive earnings test.
+
+        Benjamin Graham required 10 years of uninterrupted positive earnings
+        as a quality filter. We adapt this to available data (typically 4-5 years
+        from yfinance annual statements).
+
+        Returns:
+            Dict with graham_consecutive_positive_years and graham_test fields.
+        """
+        signals: dict[str, Any] = {}
+
+        try:
+            if financials.empty or len(financials.columns) == 0:
+                signals["graham_consecutive_positive_years"] = None
+                signals["graham_test"] = "INSUFFICIENT_DATA"
+                return signals
+
+            # Extract Net Income row (yfinance uses "Net Income")
+            if "Net Income" not in financials.index:
+                signals["graham_consecutive_positive_years"] = None
+                signals["graham_test"] = "INSUFFICIENT_DATA"
+                return signals
+
+            net_incomes = financials.loc["Net Income"]
+
+            # Count consecutive positive years from most recent
+            # financials columns are newest first (index 0 = most recent)
+            consecutive_positive = 0
+            for ni in net_incomes:
+                if pd.notna(ni) and float(ni) > 0:
+                    consecutive_positive += 1
+                else:
+                    break  # Stop at first non-positive year
+
+            years_available = len(net_incomes.dropna())
+            signals["graham_consecutive_positive_years"] = consecutive_positive
+            signals["_graham_years_available"] = years_available
+
+            # Graham test: Pass if all available years positive (scaled threshold)
+            # Full Graham requires 10yr; we use what's available
+            if years_available >= 5 and consecutive_positive >= years_available:
+                signals["graham_test"] = "PASS"
+            elif consecutive_positive >= 4:
+                signals["graham_test"] = "PASS"
+            elif years_available >= 3 and consecutive_positive < years_available:
+                signals["graham_test"] = "FAIL"
+            else:
+                signals["graham_test"] = "INSUFFICIENT_DATA"
+
+            logger.debug(
+                "graham_test_calculated",
+                symbol=symbol,
+                consecutive_positive=consecutive_positive,
+                years_available=years_available,
+                result=signals["graham_test"],
+            )
+
+        except Exception as e:
+            logger.warning(
+                "graham_test_error",
+                symbol=symbol,
+                error=str(e),
+            )
+            signals["graham_consecutive_positive_years"] = None
+            signals["graham_test"] = "ERROR"
+
+        return signals
+
     async def _fetch_yfinance_enhanced(self, symbol: str) -> dict | None:
         """Fetch yfinance data including statement calculation."""
         try:
@@ -1187,7 +1268,8 @@ class SmartMarketDataFetcher(FinancialFetcher):
                         f"{source_name}_success", symbol=symbol, fields=len(result)
                     )
                 else:
-                    logger.warning(f"{source_name}_returned_none", symbol=symbol)
+                    # Expected when API key not configured - use debug, not warning
+                    logger.debug(f"{source_name}_returned_none", symbol=symbol)
             except asyncio.TimeoutError:
                 logger.warning(f"{source_name}_timeout", symbol=symbol)
                 results[source_name] = None

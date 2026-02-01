@@ -448,7 +448,7 @@ class RedFlagDetector:
                     "rationale": f"Leverage exceeds sector-appropriate threshold - bankruptcy risk (sector: {sector.value})",
                 }
             )
-            logger.warning(
+            logger.info(
                 "red_flag_extreme_leverage",
                 ticker=ticker,
                 debt_to_equity=debt_to_equity,
@@ -497,7 +497,7 @@ class RedFlagDetector:
                         "rationale": "Earnings likely fabricated through accounting tricks - FCF disconnect",
                     }
                 )
-                logger.warning(
+                logger.info(
                     "red_flag_earnings_quality",
                     ticker=ticker,
                     net_income=net_income,
@@ -526,7 +526,7 @@ class RedFlagDetector:
                     "rationale": f"Cannot comfortably service debt - refinancing/default risk (sector: {sector.value})",
                 }
             )
-            logger.warning(
+            logger.info(
                 "red_flag_refinancing_risk",
                 ticker=ticker,
                 interest_coverage=interest_coverage,
@@ -564,7 +564,7 @@ class RedFlagDetector:
                         "and no improving trend. Mathematically unsustainable value destruction.",
                     }
                 )
-                logger.warning(
+                logger.info(
                     "red_flag_unsustainable_distribution_critical",
                     ticker=ticker,
                     payout_ratio=payout_ratio,
@@ -620,7 +620,7 @@ class RedFlagDetector:
                     ),
                 }
             )
-            logger.warning(
+            logger.info(
                 "red_flag_fragile_valuation",
                 ticker=ticker,
                 net_margin=net_margin,
@@ -784,7 +784,7 @@ class RedFlagDetector:
                     "but increases compliance burden for US investors.",
                 }
             )
-            logger.warning(
+            logger.info(
                 "legal_flag_pfic_probable", ticker=ticker, evidence=pfic_evidence[:50]
             )
 
@@ -821,7 +821,7 @@ class RedFlagDetector:
                     "Common for China tech/education stocks but adds legal uncertainty.",
                 }
             )
-            logger.warning(
+            logger.info(
                 "legal_flag_vie_structure", ticker=ticker, evidence=vie_evidence[:50]
             )
 
@@ -844,7 +844,7 @@ class RedFlagDetector:
                     "Restrictions may be modified by future executive orders.",
                 }
             )
-            logger.warning(
+            logger.info(
                 "legal_flag_cmic_flagged", ticker=ticker, evidence=cmic_evidence[:50]
             )
 
@@ -1042,7 +1042,7 @@ class RedFlagDetector:
                     "poor capital allocation, or no catalyst for re-rating.",
                 }
             )
-            logger.warning(
+            logger.info(
                 "value_trap_flag_high_risk",
                 ticker=ticker,
                 score=score,
@@ -1084,9 +1084,7 @@ class RedFlagDetector:
                         "Stock may remain cheap indefinitely without catalyst.",
                     }
                 )
-                logger.warning(
-                    "value_trap_flag_verdict", ticker=ticker, verdict=verdict
-                )
+                logger.info("value_trap_flag_verdict", ticker=ticker, verdict=verdict)
 
         # --- WARNING 4: No Catalyst Detected ---
         if not has_catalyst and activist_present == "NO":

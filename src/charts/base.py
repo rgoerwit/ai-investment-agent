@@ -15,6 +15,44 @@ class ChartFormat(Enum):
 
 
 @dataclass
+class CurrencyFormat:
+    """Currency display format for international stocks.
+
+    Handles both prefix currencies (e.g., $100, £100, ¥100) and
+    suffix currencies (e.g., 100 zł, 100 kr, 100 Kč).
+    """
+
+    symbol: str
+    position: str = "prefix"  # "prefix" or "suffix"
+    space: bool = False  # Whether to add space between symbol and number
+
+    def format_price(self, value: float) -> str:
+        """Format a price value with correct currency placement.
+
+        Args:
+            value: The numeric price value
+
+        Returns:
+            Formatted string with currency symbol in correct position
+
+        Examples:
+            >>> CurrencyFormat("$", "prefix").format_price(65.50)
+            '$65.50'
+            >>> CurrencyFormat("zł", "suffix", space=True).format_price(42.50)
+            '42.50 zł'
+        """
+        sep = " " if self.space else ""
+        if self.position == "prefix":
+            return f"{self.symbol}{sep}{value:.2f}"
+        else:  # suffix
+            return f"{value:.2f}{sep}{self.symbol}"
+
+
+# Default USD format
+DEFAULT_CURRENCY = CurrencyFormat("$", "prefix")
+
+
+@dataclass
 class ChartConfig:
     """Configuration for chart generation."""
 
@@ -48,6 +86,9 @@ class FootballFieldData:
     current_price: float
     fifty_two_week_high: float
     fifty_two_week_low: float
+
+    # Currency formatting (derived from ticker exchange suffix)
+    currency_format: CurrencyFormat = field(default_factory=lambda: DEFAULT_CURRENCY)
 
     # Raw facts (from DATA_BLOCK - optional)
     moving_avg_50: float | None = None

@@ -66,6 +66,7 @@ opentelemetry-sdk = {version = ">=1.28.0,<2.0.0", optional = true}
 urllib3 = "^2.6.2"
 matplotlib = "^3.10.8"
 seaborn = "^0.13.2"
+langfuse = "^3.12.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.0.2"
