@@ -330,6 +330,23 @@ class Settings(BaseSettings):
         validation_alias="AUDITOR_MODEL",
         description="Model for the auditor agent (optional)",
     )
+    editor_model: str | None = Field(
+        default=None,
+        validation_alias="EDITOR_MODEL",
+        description="OpenAI model for Editor-in-Chief article revision (optional)",
+    )
+
+    # --- Writer Configuration (Anthropic/Claude) ---
+    claude_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias="CLAUDE_KEY",
+        description="Anthropic API key for article writer (optional, falls back to Gemini)",
+    )
+    writer_model: str = Field(
+        default="claude-opus-4-6",
+        validation_alias="WRITER_MODEL",
+        description="Claude model for article writing",
+    )
 
     # --- Trading Parameters ---
     max_position_size: float = Field(
@@ -692,6 +709,10 @@ class Settings(BaseSettings):
     def get_alpha_vantage_api_key(self) -> str:
         """Get Alpha Vantage API key securely from SecretStr field."""
         return self.alpha_vantage_api_key.get_secret_value()
+
+    def get_claude_api_key(self) -> str | None:
+        """Get Anthropic API key, or None if not configured."""
+        return self.claude_api_key.get_secret_value() if self.claude_api_key else None
 
     def get_langfuse_public_key(self) -> str:
         """Get Langfuse public key securely from SecretStr field."""

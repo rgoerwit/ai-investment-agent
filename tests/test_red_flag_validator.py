@@ -103,6 +103,29 @@ PE_RATIO_TTM: 14.50
         numeric_metrics = {k: v for k, v in metrics.items() if not k.startswith("_")}
         assert all(v is None for v in numeric_metrics.values())
 
+    def test_extract_with_descriptive_marker(self):
+        """Test extraction when DATA_BLOCK marker contains descriptive text (v8.6+)."""
+        report = """
+### --- START DATA_BLOCK (INTERNAL SCORING — NOT THIRD-PARTY RATINGS) ---
+SECTOR: General/Diversified
+RAW_HEALTH_SCORE: 10/12
+ADJUSTED_HEALTH_SCORE: 87.5% (10/12 available)
+PE_RATIO_TTM: 6.19
+PEG_RATIO: 0.07
+### --- END DATA_BLOCK ---
+
+D/E: 16
+Interest Coverage: 25.0x
+Free Cash Flow: ¥13.39B
+Net Income: ¥15.0B
+"""
+
+        metrics = RedFlagDetector.extract_metrics(report)
+
+        assert metrics["adjusted_health_score"] == 87.5
+        assert metrics["pe_ratio"] == 6.19
+        assert metrics["debt_to_equity"] == 16.0
+
     def test_extract_debt_to_equity_conversion(self):
         """Test D/E ratio conversion from ratio to percentage."""
         # Case 1: Already percentage (>10)
@@ -1743,3 +1766,180 @@ DIVIDEND_COVERAGE: N/A
 """
         metrics_na = RedFlagDetector.extract_metrics(report_na)
         assert metrics_na["dividend_coverage"] is None
+
+
+class TestDataBlockMarkerVariants:
+    """Regression tests ensuring DATA_BLOCK parsing tolerates marker variations.
+
+    Guards against the v8.6 regression where adding descriptive text to the
+    START marker broke the regex and silently bypassed all code-driven checks.
+    """
+
+    def test_plain_marker(self):
+        """Original plain marker format."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 70%
+PE_RATIO_TTM: 15.0
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["adjusted_health_score"] == 70.0
+        assert metrics["pe_ratio"] == 15.0
+
+    def test_marker_with_parenthetical_description(self):
+        """v8.6+ format with descriptive text in parentheses."""
+        report = """
+### --- START DATA_BLOCK (INTERNAL SCORING — NOT THIRD-PARTY RATINGS) ---
+ADJUSTED_HEALTH_SCORE: 87.5%
+PE_RATIO_TTM: 6.19
+PEG_RATIO: 0.07
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["adjusted_health_score"] == 87.5
+        assert metrics["pe_ratio"] == 6.19
+        assert metrics["peg_ratio"] == 0.07
+
+    def test_marker_with_arbitrary_annotation(self):
+        """Future-proof: any text between DATA_BLOCK and closing ---."""
+        report = """
+### --- START DATA_BLOCK v9.0 REVISED ---
+ADJUSTED_HEALTH_SCORE: 55%
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["adjusted_health_score"] == 55.0
+
+    def test_marker_with_hyphenated_text(self):
+        """Text containing hyphens (like THIRD-PARTY) must not break parsing."""
+        report = """
+### --- START DATA_BLOCK (THIRD-PARTY ADJUSTED) ---
+ADJUSTED_HEALTH_SCORE: 60%
+ROA_PERCENT: 8.5%
+ROA_5Y_AVG: 5.2%
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["adjusted_health_score"] == 60.0
+        assert metrics["roa_current"] == 8.5
+        assert metrics["roa_5y_avg"] == 5.2
+
+    def test_multiple_blocks_with_descriptive_marker_uses_last(self):
+        """Self-correction pattern: uses last block even with annotated markers."""
+        report = """
+### --- START DATA_BLOCK (INTERNAL SCORING) ---
+ADJUSTED_HEALTH_SCORE: 30%
+### --- END DATA_BLOCK ---
+
+Note: Correcting above scores.
+
+### --- START DATA_BLOCK (INTERNAL SCORING — CORRECTED) ---
+ADJUSTED_HEALTH_SCORE: 80%
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["adjusted_health_score"] == 80.0
+
+
+class TestCyclicalPeakDetection:
+    """Test cyclical peak warning detection."""
+
+    def test_cyclical_peak_roa_above_5y_avg(self):
+        """ROA 2x above 5-year average with UNSTABLE trend triggers warning."""
+        metrics = {
+            "roa_current": 16.0,
+            "roa_5y_avg": 8.0,  # 2x ratio
+            "roe_5y_avg": 18.0,
+            "peg_ratio": 0.07,
+            "profitability_trend": "UNSTABLE",
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": 6.0,
+            "pb_ratio": None,
+            "adjusted_health_score": 87.5,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+        }
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "2767.T")
+        cyclical_flags = [f for f in flags if f["type"] == "CYCLICAL_PEAK_WARNING"]
+        assert len(cyclical_flags) == 1
+        assert cyclical_flags[0]["risk_penalty"] == 1.0
+        assert result == "PASS"  # Warning, not reject
+
+    def test_no_cyclical_peak_when_stable(self):
+        """No warning when profitability is STABLE even if ROA above average."""
+        metrics = {
+            "roa_current": 16.0,
+            "roa_5y_avg": 8.0,
+            "roe_5y_avg": 18.0,
+            "peg_ratio": 0.07,
+            "profitability_trend": "STABLE",
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": 6.0,
+            "pb_ratio": None,
+            "adjusted_health_score": 87.5,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+        }
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        cyclical_flags = [f for f in flags if f["type"] == "CYCLICAL_PEAK_WARNING"]
+        assert len(cyclical_flags) == 0
+
+    def test_cyclical_peak_peg_only(self):
+        """Ultra-low PEG with UNSTABLE trend triggers even without ROA data."""
+        metrics = {
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": 0.05,
+            "profitability_trend": "UNSTABLE",
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": 5.0,
+            "pb_ratio": None,
+            "adjusted_health_score": None,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+        }
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        cyclical_flags = [f for f in flags if f["type"] == "CYCLICAL_PEAK_WARNING"]
+        assert len(cyclical_flags) == 1
+        assert "PEG" in cyclical_flags[0]["detail"]
+
+    def test_no_cyclical_peak_normal_roa(self):
+        """ROA only slightly above average does not trigger."""
+        metrics = {
+            "roa_current": 9.0,
+            "roa_5y_avg": 8.0,  # 1.125x — below 1.5x threshold
+            "roe_5y_avg": 15.0,
+            "peg_ratio": 0.8,
+            "profitability_trend": "UNSTABLE",
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": 12.0,
+            "pb_ratio": None,
+            "adjusted_health_score": None,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+        }
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        cyclical_flags = [f for f in flags if f["type"] == "CYCLICAL_PEAK_WARNING"]
+        assert len(cyclical_flags) == 0

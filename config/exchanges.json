@@ -1,0 +1,200 @@
+{
+  "meta": {
+    "version": "2.7",
+    "description": "Stable Recipe: NZX Fixed via StockAnalysis"
+  },
+  "exchanges": [
+    {
+      "country": "United States",
+      "exchange_name": "NYSE/NASDAQ/AMEX",
+      "method": "download_csv",
+      "source_url": "http://www.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt",
+      "yahoo_suffix": "",
+      "params": {
+        "delimiter": "|",
+        "ticker_col": "Symbol",
+        "name_col": "Security Name",
+        "filter": {
+          "Test Issue": "N"
+        }
+      }
+    },
+    {
+      "country": "Canada",
+      "exchange_name": "Toronto Stock Exchange",
+      "method": "scrape_html",
+      "source_url": "https://stockanalysis.com/list/toronto-stock-exchange/",
+      "yahoo_suffix": ".TO",
+      "params": {
+        "ticker_col": "Symbol",
+        "name_col": "Company Name"
+      }
+    },
+    {
+      "country": "Canada",
+      "exchange_name": "TSX Venture",
+      "method": "scrape_html",
+      "source_url": "https://stockanalysis.com/list/tsx-venture-exchange/",
+      "yahoo_suffix": ".V",
+      "params": {
+        "ticker_col": "Symbol",
+        "name_col": "Company Name"
+      }
+    },
+    {
+      "country": "United Kingdom",
+      "exchange_name": "FTSE 100",
+      "method": "scrape_html",
+      "source_url": "https://en.wikipedia.org/wiki/FTSE_100_Index",
+      "yahoo_suffix": ".L",
+      "params": {
+        "table_index": 4,
+        "ticker_col": "Ticker",
+        "name_col": "Company"
+      }
+    },
+    {
+      "country": "United Kingdom",
+      "exchange_name": "FTSE 250",
+      "method": "scrape_html",
+      "source_url": "https://en.wikipedia.org/wiki/FTSE_250_Index",
+      "yahoo_suffix": ".L",
+      "params": {
+        "table_index": 0,
+        "ticker_col": "Ticker",
+        "name_col": "Company"
+      }
+    },
+    {
+      "country": "Germany",
+      "exchange_name": "DAX",
+      "method": "scrape_html",
+      "source_url": "https://en.wikipedia.org/wiki/DAX",
+      "yahoo_suffix": ".DE",
+      "params": {
+        "table_index": 3,
+        "ticker_col": "Ticker",
+        "name_col": "Company"
+      }
+    },
+    {
+      "country": "France",
+      "exchange_name": "CAC 40",
+      "method": "scrape_html",
+      "source_url": "https://en.wikipedia.org/wiki/CAC_40",
+      "yahoo_suffix": ".PA",
+      "params": {
+        "table_index": 3,
+        "ticker_col": "Ticker",
+        "name_col": "Company"
+      }
+    },
+    {
+      "country": "Netherlands",
+      "exchange_name": "AEX",
+      "method": "scrape_html",
+      "source_url": "https://en.wikipedia.org/wiki/AEX_index",
+      "yahoo_suffix": ".AS",
+      "params": {
+        "table_index": 1,
+        "ticker_col": "Ticker",
+        "name_col": "Company"
+      }
+    },
+    {
+      "country": "Switzerland",
+      "exchange_name": "SMI",
+      "method": "scrape_html",
+      "source_url": "https://en.wikipedia.org/wiki/Swiss_Market_Index",
+      "yahoo_suffix": ".SW",
+      "params": {
+        "table_index": 1,
+        "ticker_col": "Ticker",
+        "name_col": "Company"
+      }
+    },
+    {
+      "country": "Sweden",
+      "exchange_name": "OMX Stockholm 30",
+      "method": "scrape_html",
+      "source_url": "https://en.wikipedia.org/wiki/OMX_Stockholm_30",
+      "yahoo_suffix": ".ST",
+      "params": {
+        "table_index": 2,
+        "ticker_col": "Ticker",
+        "name_col": "Company"
+      }
+    },
+    {
+      "country": "Italy",
+      "exchange_name": "FTSE MIB",
+      "method": "scrape_html",
+      "source_url": "https://en.wikipedia.org/wiki/FTSE_MIB",
+      "yahoo_suffix": ".MI",
+      "params": {
+        "table_index": 1,
+        "ticker_col": "Ticker",
+        "name_col": "Company"
+      }
+    },
+    {
+      "country": "Spain",
+      "exchange_name": "IBEX 35",
+      "method": "scrape_html",
+      "source_url": "https://en.wikipedia.org/wiki/IBEX_35",
+      "yahoo_suffix": ".MC",
+      "params": {
+        "table_index": 1,
+        "ticker_col": "Ticker",
+        "name_col": "Company"
+      }
+    },
+    {
+      "country": "Japan",
+      "exchange_name": "Tokyo Stock Exchange",
+      "method": "download_excel",
+      "source_url": "https://www.jpx.co.jp/english/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_e.xls",
+      "yahoo_suffix": ".T",
+      "params": {
+        "ticker_col": "Local Code",
+        "name_col": "Name (English)"
+      }
+    },
+    {
+      "country": "Hong Kong",
+      "exchange_name": "HKEX",
+      "method": "download_excel",
+      "source_url": "https://www.hkex.com.hk/eng/services/trading/securities/securitieslists/ListOfSecurities.xlsx",
+      "yahoo_suffix": ".HK",
+      "params": {
+        "skip_rows": 2,
+        "ticker_col": "Stock Code",
+        "name_col": "Name of Listed Entity",
+        "clean_rule": "pad_4_digits"
+      }
+    },
+    {
+      "country": "Australia",
+      "exchange_name": "ASX",
+      "method": "download_csv",
+      "source_url": "https://www.asx.com.au/asx/research/ASXListedCompanies.csv",
+      "yahoo_suffix": ".AX",
+      "params": {
+        "skip_rows": 1,
+        "ticker_col": "ASX code",
+        "name_col": "Company name"
+      }
+    },
+    {
+      "country": "New Zealand",
+      "exchange_name": "NZX",
+      "method": "scrape_html",
+      "source_url": "https://stockanalysis.com/list/new-zealand-stock-exchange/",
+      "yahoo_suffix": ".NZ",
+      "params": {
+        "ticker_col": "Symbol",
+        "name_col": "Company Name"
+      }
+    }
+  ]
+}

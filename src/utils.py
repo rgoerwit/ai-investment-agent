@@ -175,8 +175,8 @@ def clean_duplicate_data_blocks(report: str) -> str:
     if not report or not isinstance(report, str):
         return report
 
-    # Pattern to match DATA_BLOCK sections
-    pattern = r"### --- START DATA_BLOCK ---.*?### --- END DATA_BLOCK ---"
+    # Pattern to match DATA_BLOCK sections (tolerates optional descriptive text after "DATA_BLOCK")
+    pattern = r"### --- START DATA_BLOCK[^\n]*---.*?### --- END DATA_BLOCK ---"
 
     # Find all occurrences
     blocks = list(re.finditer(pattern, report, re.DOTALL))

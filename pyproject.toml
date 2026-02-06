@@ -22,6 +22,8 @@ google-genai = ">=1.0.0,<2.0.0"
 # OPTIONAL: OpenAI for consultant node (cross-validation)
 # The consultant node uses OpenAI to provide independent review of Gemini analysis
 langchain-openai = ">=1.0.0,<2.0.0"
+# Writer LLM: Anthropic Claude (falls back to Gemini if CLAUDE_KEY not set)
+langchain-anthropic = ">=0.3.0,<1.0.0"
 langgraph = ">=1.0.0,<2.0.0"
 langgraph-checkpoint = ">=3.0.0,<4.0.0"
 
@@ -67,6 +69,9 @@ urllib3 = "^2.6.2"
 matplotlib = "^3.10.8"
 seaborn = "^0.13.2"
 langfuse = "^3.12.1"
+openpyxl = "^3.1.5"
+xlrd = "^2.0.2"
+lxml = "^6.0.2"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.0.2"
@@ -83,6 +88,7 @@ pytest-env = "^1.2.0"
 [tool.poetry.extras]
 observability = ["opentelemetry-api", "opentelemetry-sdk"]
 consultant = ["langchain-openai"]  # Enable external consultant for cross-validation
+writer = ["langchain-anthropic"]  # Claude-based article writer
 
 [build-system]
 requires = ["poetry-core"]

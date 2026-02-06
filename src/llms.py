@@ -390,6 +390,153 @@ def create_auditor_llm(
     )
 
 
+def create_writer_llm(
+    temperature: float = 0.7,
+    timeout: int | None = None,
+    max_retries: int = 3,
+    callbacks: list[BaseCallbackHandler] | None = None,
+) -> BaseChatModel:
+    """
+    Create the LLM for article writing.
+
+    Prefers Claude (Anthropic) when CLAUDE_KEY is configured.
+    Falls back gracefully to Gemini deep thinking LLM when not.
+
+    Args:
+        temperature: Sampling temperature. NOTE: Overridden to 1.0
+                     when Claude adaptive thinking is active (API constraint).
+        timeout: Request timeout in seconds (default from config)
+        max_retries: Max retry attempts
+        callbacks: Optional callback handlers
+
+    Returns:
+        ChatAnthropic or ChatGoogleGenerativeAI instance
+    """
+    api_key = config.get_claude_api_key()
+
+    if not api_key:
+        logger.warning(
+            "CLAUDE_KEY not found — falling back to Gemini for article writer. "
+            "To use Claude, add CLAUDE_KEY=sk-ant-... to your .env file."
+        )
+        return create_deep_thinking_llm(
+            temperature=temperature,
+            callbacks=callbacks,
+        )
+
+    # --- Claude path ---
+    try:
+        from langchain_anthropic import ChatAnthropic
+    except ImportError:
+        logger.warning(
+            "langchain-anthropic not installed — falling back to Gemini. "
+            "Install with: poetry add langchain-anthropic"
+        )
+        return create_deep_thinking_llm(
+            temperature=temperature,
+            callbacks=callbacks,
+        )
+
+    model_name = config.writer_model
+    final_timeout = float(timeout if timeout is not None else config.api_timeout)
+
+    # Build kwargs — base configuration
+    kwargs: dict = {
+        "model": model_name,
+        "max_tokens": 16384,
+        "max_retries": max_retries,
+        "timeout": final_timeout,
+        "callbacks": callbacks or [],
+        "anthropic_api_key": api_key,
+    }
+
+    # Thinking configuration — model-dependent
+    if "opus-4-6" in model_name:
+        # Opus 4.6: adaptive thinking (Claude decides when/how much to think)
+        kwargs["thinking"] = {"type": "adaptive"}
+        kwargs["effort"] = "high"
+        # CRITICAL: Anthropic returns 400 if temperature != 1.0 with thinking.
+        # Omit temperature entirely — SDK defaults to 1.0.
+        logger.info(
+            f"Writer LLM ({model_name}): adaptive thinking, effort=high, "
+            f"temperature=1.0 (Anthropic constraint, requested {temperature} ignored)"
+        )
+    elif "sonnet" in model_name or "opus" in model_name:
+        # Other Claude 4.x models: manual extended thinking
+        kwargs["thinking"] = {"type": "enabled", "budget_tokens": 8192}
+        # Same temperature constraint applies
+        logger.info(f"Writer LLM ({model_name}): extended thinking, budget=8192 tokens")
+    else:
+        # Haiku or unknown models: no thinking, use requested temperature
+        kwargs["temperature"] = temperature
+        logger.info(
+            f"Writer LLM ({model_name}): no thinking, temperature={temperature}"
+        )
+
+    llm = ChatAnthropic(**kwargs)
+
+    # Track instance for cleanup (consistent with Gemini tracking)
+    global _llm_instance_counter
+    _llm_instance_counter += 1
+    instance_name = f"claude_{model_name}_{_llm_instance_counter}"
+    _llm_instances[instance_name] = llm
+
+    logger.info(
+        f"Initialized Writer LLM (Claude): {model_name} "
+        f"(timeout={final_timeout}s, max_tokens=16384)"
+    )
+
+    return llm
+
+
+def create_editor_llm(
+    callbacks: list[BaseCallbackHandler] | None = None,
+) -> BaseChatModel | None:
+    """
+    Create Editor-in-Chief LLM for article revision and fact-checking.
+
+    Returns None if ENABLE_CONSULTANT is false or OPENAI_API_KEY missing.
+
+    Fallback chain: EDITOR_MODEL -> CONSULTANT_MODEL -> "gpt-4o"
+
+    Args:
+        callbacks: Optional callback handlers for token tracking
+
+    Returns:
+        ChatOpenAI instance or None if editor unavailable
+    """
+    try:
+        from langchain_openai import ChatOpenAI
+    except ImportError as e:
+        logger.warning(f"langchain-openai not found: {e}")
+        return None
+
+    if not config.enable_consultant:
+        logger.info("Editor LLM disabled (ENABLE_CONSULTANT=false)")
+        return None
+
+    api_key = config.get_openai_api_key()
+    if not api_key:
+        logger.warning("OPENAI_API_KEY not found - Editor will be disabled.")
+        return None
+
+    # Fallback chain: EDITOR_MODEL -> CONSULTANT_MODEL -> gpt-4o
+    model_name = config.editor_model or config.consultant_model or "gpt-4o"
+
+    logger.info(f"Initializing Editor LLM: {model_name}")
+
+    return ChatOpenAI(
+        model=model_name,
+        temperature=0.3,  # Slightly creative for style suggestions
+        timeout=120,
+        max_retries=3,
+        openai_api_key=api_key,
+        callbacks=callbacks or [],
+        max_tokens=8192,  # Editor feedback is concise JSON
+        streaming=False,
+    )
+
+
 # Initialize consultant LLM (lazy initialization to handle missing API key gracefully)
 _consultant_llm_instance = None
 

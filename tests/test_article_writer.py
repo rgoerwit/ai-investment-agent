@@ -1,5 +1,6 @@
 """Tests for Article Writer module."""
 
+import re
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -37,12 +38,16 @@ class TestArticleWriterInit:
 
         assert config["agent_key"] == "article_writer"
         assert "system_message" in config
-        assert config["version"] == "1.4"
+        # Version should be a valid numeric string (e.g., "1.5", "2.0")
+        assert re.match(
+            r"^\d+\.\d+$", config["version"]
+        ), f"Invalid version: {config['version']}"
         # user_template and model_config are nested in metadata for AgentPrompt compatibility
         metadata = config["metadata"]
         assert "user_template" in metadata
         assert metadata["model_config"]["use_quick_model"] is False
-        assert metadata["model_config"]["thinking_level"] == "high"
+        # thinking_level removed in v1.5 (Claude migration — thinking is configured in create_writer_llm)
+        assert "thinking_level" not in metadata["model_config"]
 
     def test_fallback_when_prompt_missing(self):
         """Test fallback to default config when writer.json is missing."""
@@ -310,7 +315,7 @@ class TestArticlePathResolution:
 class TestArticleGeneration:
     """Tests for article generation (mocked LLM)."""
 
-    @patch("src.article_writer.create_gemini_model")
+    @patch("src.article_writer.create_writer_llm")
     def test_generates_article_with_all_components(self, mock_create_llm):
         """Test that article generation includes voice samples and images."""
         from src.article_writer import ArticleWriter
@@ -358,7 +363,7 @@ class TestArticleGeneration:
             # Verify article was returned
             assert "Test Article" in article
 
-    @patch("src.article_writer.create_gemini_model")
+    @patch("src.article_writer.create_writer_llm")
     def test_saves_article_to_file(self, mock_create_llm):
         """Test that article is saved to specified output path."""
         from src.article_writer import ArticleWriter

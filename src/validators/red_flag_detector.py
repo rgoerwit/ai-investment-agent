@@ -138,6 +138,10 @@ class RedFlagDetector:
             "net_margin": None,
             "roic_quality": None,
             "profitability_trend": None,
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": None,
             "_raw_report": fundamentals_report,  # For downstream data quality checks
         }
 
@@ -145,8 +149,10 @@ class RedFlagDetector:
             return metrics
 
         # Extract the LAST DATA_BLOCK (agent self-correction pattern)
+        # Tolerate optional descriptive text after "DATA_BLOCK" (e.g., prompt v8.6+
+        # adds "(INTERNAL SCORING — NOT THIRD-PARTY RATINGS)" before closing ---)
         data_block_pattern = (
-            r"### --- START DATA_BLOCK ---(.+?)### --- END DATA_BLOCK ---"
+            r"### --- START DATA_BLOCK[^\n]*---(.+?)### --- END DATA_BLOCK ---"
         )
         blocks = list(re.finditer(data_block_pattern, fundamentals_report, re.DOTALL))
 
@@ -218,6 +224,26 @@ class RedFlagDetector:
             val = trend_match.group(1).upper()
             if val != "N/A":
                 metrics["profitability_trend"] = val
+
+        # Extract ROA_PERCENT (current)
+        roa_match = re.search(r"ROA_PERCENT:\s*(\d+(?:\.\d+)?)%?", data_block)
+        if roa_match:
+            metrics["roa_current"] = float(roa_match.group(1))
+
+        # Extract ROA_5Y_AVG
+        roa_avg_match = re.search(r"ROA_5Y_AVG:\s*(\d+(?:\.\d+)?)%?", data_block)
+        if roa_avg_match:
+            metrics["roa_5y_avg"] = float(roa_avg_match.group(1))
+
+        # Extract ROE_5Y_AVG
+        roe_avg_match = re.search(r"ROE_5Y_AVG:\s*(\d+(?:\.\d+)?)%?", data_block)
+        if roe_avg_match:
+            metrics["roe_5y_avg"] = float(roe_avg_match.group(1))
+
+        # Extract PEG_RATIO
+        peg_match = re.search(r"PEG_RATIO:\s*([0-9.]+)", data_block)
+        if peg_match:
+            metrics["peg_ratio"] = float(peg_match.group(1))
 
         # Now extract from detailed sections (below DATA_BLOCK)
         metrics["debt_to_equity"] = RedFlagDetector._extract_debt_to_equity(
@@ -626,6 +652,59 @@ class RedFlagDetector:
                 net_margin=net_margin,
                 pb_ratio=pb_ratio,
                 debt_to_equity=debt_to_equity,
+            )
+
+        # --- RED FLAG 6: Cyclical Peak Warning ---
+        # When current profitability far exceeds historical averages with UNSTABLE trend,
+        # valuation metrics (P/E, PEG) become analytically misleading.
+        roa_current = metrics.get("roa_current")
+        roa_5y_avg = metrics.get("roa_5y_avg")
+        peg_ratio = metrics.get("peg_ratio")
+        profitability_trend = metrics.get("profitability_trend")
+
+        # Detect when current ROA is significantly above 5-year average
+        peak_signals = []
+        if (
+            roa_current is not None
+            and roa_5y_avg is not None
+            and roa_5y_avg > 0
+            and roa_current / roa_5y_avg > 1.5
+        ):
+            peak_signals.append(
+                f"ROA {roa_current:.1f}% vs 5Y avg {roa_5y_avg:.1f}% ({roa_current/roa_5y_avg:.1f}x)"
+            )
+
+        # PEG < 0.2 with UNSTABLE trend is a classic cyclical peak signature
+        if (
+            peg_ratio is not None
+            and peg_ratio < 0.2
+            and profitability_trend == "UNSTABLE"
+        ):
+            peak_signals.append(
+                f"PEG {peg_ratio:.2f} with UNSTABLE profitability (cyclical earnings peak)"
+            )
+
+        if peak_signals and profitability_trend in ("UNSTABLE", "DECLINING"):
+            red_flags.append(
+                {
+                    "type": "CYCLICAL_PEAK_WARNING",
+                    "severity": "WARNING",
+                    "detail": "; ".join(peak_signals),
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 1.0,
+                    "rationale": (
+                        "Current metrics significantly exceed historical averages with "
+                        "unstable profitability. P/E and PEG are calculated on peak "
+                        "earnings and may revert. Normalize valuations using 5-year "
+                        "averages before deciding."
+                    ),
+                }
+            )
+            logger.info(
+                "red_flag_cyclical_peak_warning",
+                ticker=ticker,
+                signals=peak_signals,
+                profitability_trend=profitability_trend,
             )
 
         # Determine result
@@ -1150,7 +1229,7 @@ class RedFlagDetector:
 
         # Extract the LAST DATA_BLOCK (agent self-correction pattern)
         data_block_pattern = (
-            r"### --- START DATA_BLOCK ---(.+?)### --- END DATA_BLOCK ---"
+            r"### --- START DATA_BLOCK[^\n]*---(.+?)### --- END DATA_BLOCK ---"
         )
         blocks = list(re.finditer(data_block_pattern, fundamentals_report, re.DOTALL))
 
@@ -1367,7 +1446,8 @@ class RedFlagDetector:
         signals: dict[str, Any] = {}
 
         # Find last DATA_BLOCK (in case of multiple)
-        blocks = fundamentals_report.split("--- START DATA_BLOCK ---")
+        # Use regex split to tolerate optional descriptive text after "DATA_BLOCK"
+        blocks = re.split(r"--- START DATA_BLOCK[^\n]*---", fundamentals_report)
         if len(blocks) < 2:
             return {}
 

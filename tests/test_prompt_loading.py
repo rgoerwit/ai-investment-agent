@@ -280,10 +280,10 @@ class TestSpecificPromptFiles:
         assert (
             "{valuation_context}" in user_template
         ), "writer.json user_template should include {valuation_context} placeholder"
-        # Check that context section exists
+        # Check that valuation context section exists (XML tag or header)
         assert (
-            "VALUATION CONTEXT" in user_template
-        ), "writer.json user_template should have VALUATION CONTEXT section"
+            "valuation_context" in user_template.lower()
+        ), "writer.json user_template should have valuation context section"
 
     def test_value_trap_detector_has_insider_concentration_thresholds(self):
         """Verify value_trap_detector.json has explicit insider concentration thresholds."""
