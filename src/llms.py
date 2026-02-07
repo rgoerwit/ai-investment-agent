@@ -454,7 +454,7 @@ def create_writer_llm(
     if "opus-4-6" in model_name:
         # Opus 4.6: adaptive thinking (Claude decides when/how much to think)
         kwargs["thinking"] = {"type": "adaptive"}
-        kwargs["effort"] = "high"
+        kwargs["model_kwargs"] = {"effort": "high"}
         # CRITICAL: Anthropic returns 400 if temperature != 1.0 with thinking.
         # Omit temperature entirely — SDK defaults to 1.0.
         logger.info(

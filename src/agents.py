@@ -332,46 +332,15 @@ def extract_field_sources_from_messages(messages: list) -> dict[str, str]:
         except (json.JSONDecodeError, TypeError, AttributeError):
             continue
 
-    return {}
-
-
-def extract_field_sources(raw_data: str | None) -> dict[str, str]:
-    """
-    Extract _field_sources from raw JSON data (JIT extraction).
-
-    Parses raw_fundamentals_data to retrieve per-field source attribution.
-    This avoids relying on LLMs to preserve metadata through summarization.
-
-    Note: This function is a fallback. Prefer extract_field_sources_from_messages()
-    which accesses the actual tool output rather than the LLM's summary.
-
-    Args:
-        raw_data: JSON string from Junior Fundamentals tool output
-
-    Returns:
-        Dict mapping field names to source names, or empty dict on failure.
-    """
-    if not raw_data or not isinstance(raw_data, str) or "{" not in raw_data:
-        return {}
-
-    try:
-        # Try parsing entire string as JSON first (most common case)
-        data = json.loads(raw_data)
-        if isinstance(data, dict):
-            return data.get("_field_sources", {})
-    except json.JSONDecodeError:
-        pass
-
-    # Fallback: extract JSON object if embedded in LLM response text
-    try:
-        match = re.search(r"\{.*\}", raw_data, re.DOTALL)
-        if match:
-            data = json.loads(match.group(0))
-            if isinstance(data, dict):
-                return data.get("_field_sources", {})
-    except (json.JSONDecodeError, AttributeError):
-        pass
-
+    logger.debug(
+        "field_sources_not_found",
+        message="No _field_sources found in message history",
+        tool_messages_checked=sum(
+            1
+            for m in messages
+            if hasattr(m, "type") and getattr(m, "type", None) == "tool"
+        ),
+    )
     return {}
 
 
@@ -383,7 +352,7 @@ def format_attribution_table(field_sources: dict[str, str] | None) -> str:
     Only injected into Consultant and PM prompts where adjudication occurs.
 
     Args:
-        field_sources: Dict from extract_field_sources()
+        field_sources: Dict from extract_field_sources_from_messages()
 
     Returns:
         Formatted attribution table, or empty string if no sources.
@@ -1069,9 +1038,9 @@ def create_analyst_node(
                     agent_key=agent_key,
                     content_type=type(response.content).__name__,
                     content_len=len(response.content) if response.content else 0,
-                    tool_calls_count=len(response.tool_calls)
-                    if response.tool_calls
-                    else 0,
+                    tool_calls_count=(
+                        len(response.tool_calls) if response.tool_calls else 0
+                    ),
                     has_tool_calls=has_tool_calls,
                 )
             except (AttributeError, TypeError):
@@ -1155,9 +1124,11 @@ def create_analyst_node(
                         ticker=ticker,
                         original_length=len(content_str),
                         retry_length=len(retry_content_str),
-                        retry_has_datablock="DATA_BLOCK" in retry_content_str
-                        if retry_content_str
-                        else False,
+                        retry_has_datablock=(
+                            "DATA_BLOCK" in retry_content_str
+                            if retry_content_str
+                            else False
+                        ),
                         retry_improved=len(retry_content_str) > len(content_str),
                     )
                     content_str = retry_content_str
@@ -1390,7 +1361,14 @@ def create_valuation_calculator_node(llm) -> Callable:
             r"### --- START DATA_BLOCK[^\n]*---(.+?)### --- END DATA_BLOCK ---"
         )
         blocks = list(re.finditer(data_block_pattern, fundamentals_report, re.DOTALL))
-        data_block = blocks[-1].group(0) if blocks else fundamentals_report
+        if not blocks:
+            logger.warning(
+                "valuation_calculator_datablock_regex_failed",
+                ticker=ticker,
+                message="DATA_BLOCK text present but regex extraction failed — skipping",
+            )
+            return {"valuation_params": ""}
+        data_block = blocks[-1].group(0)
 
         prompt = f"""{agent_prompt.system_message}
 
@@ -1664,6 +1642,30 @@ NEUTRAL ANALYST (Balanced):\n{neutral_view if neutral_view else "N/A"}"""
                     flag_types=[f["type"] for f in capital_flags],
                     total_risk_adjustment=sum(
                         f.get("risk_penalty", 0) for f in capital_flags
+                    ),
+                )
+
+        # --- Consultant Condition Enforcement ---
+        # Parse consultant verdict and enforce conditions as risk penalties
+        consultant_review = state.get("consultant_review", "")
+        if consultant_review:
+            if not isinstance(consultant_review, str):
+                consultant_review = extract_string_content(consultant_review)
+            consultant_conditions = RedFlagDetector.parse_consultant_conditions(
+                consultant_review
+            )
+            consultant_flags = RedFlagDetector.detect_consultant_flags(
+                consultant_conditions,
+                state.get("company_of_interest", "UNKNOWN"),
+            )
+            if consultant_flags:
+                red_flags.extend(consultant_flags)
+                logger.info(
+                    "consultant_flags_detected",
+                    ticker=state.get("company_of_interest", "UNKNOWN"),
+                    flag_types=[f["type"] for f in consultant_flags],
+                    total_risk_penalty=sum(
+                        f.get("risk_penalty", 0) for f in consultant_flags
                     ),
                 )
 
@@ -2401,6 +2403,40 @@ def create_financial_health_validator_node() -> Callable:
 
             # Extract metrics from DATA_BLOCK
             metrics = RedFlagDetector.extract_metrics(fundamentals_report)
+
+            # --- DATA QUALITY CHECK ---
+            # If DATA_BLOCK is missing or completely unparseable, all metrics
+            # will be None. This means every threshold check in detect_red_flags
+            # is silently skipped, producing a false PASS. Flag this explicitly.
+            has_data_block = "### --- START DATA_BLOCK" in fundamentals_report
+            core_metrics = [
+                metrics.get("debt_to_equity"),
+                metrics.get("net_income"),
+                metrics.get("fcf"),
+                metrics.get("adjusted_health_score"),
+            ]
+            if not has_data_block or all(m is None for m in core_metrics):
+                logger.warning(
+                    "validator_no_usable_metrics",
+                    ticker=ticker,
+                    has_data_block=has_data_block,
+                    message="DATA_BLOCK missing or unparseable — cannot validate financial health",
+                )
+                return {
+                    "red_flags": [
+                        {
+                            "type": "DATA_QUALITY_WARNING",
+                            "severity": "WARNING",
+                            "detail": "DATA_BLOCK missing or unparseable in fundamentals report; "
+                            "financial health checks could not be performed",
+                            "action": "RISK_PENALTY",
+                            "risk_penalty": 1.0,
+                            "rationale": "Pre-screening was unable to verify financial health "
+                            "due to missing structured data. Proceeding with caution.",
+                        }
+                    ],
+                    "pre_screening_result": "PASS",
+                }
 
             # Log extracted metrics (unless in quiet mode)
             if not quiet_mode:

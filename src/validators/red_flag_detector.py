@@ -142,6 +142,7 @@ class RedFlagDetector:
             "roa_5y_avg": None,
             "roe_5y_avg": None,
             "peg_ratio": None,
+            "ocf": None,
             "_raw_report": fundamentals_report,  # For downstream data quality checks
         }
 
@@ -245,6 +246,27 @@ class RedFlagDetector:
         if peg_match:
             metrics["peg_ratio"] = float(peg_match.group(1))
 
+        # Extract OPERATING_CASH_FLOW from DATA_BLOCK (if present)
+        ocf_match = re.search(
+            r"OPERATING_CASH_FLOW:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
+            data_block,
+            re.IGNORECASE,
+        )
+        if ocf_match:
+            sign = ocf_match.group(1)
+            value = float(ocf_match.group(2).replace(",", ""))
+            if sign == "-":
+                value = -value
+            multiplier = ocf_match.group(3)
+            if multiplier:
+                if multiplier.upper() == "B":
+                    value *= 1_000_000_000
+                elif multiplier.upper() == "M":
+                    value *= 1_000_000
+                elif multiplier.upper() == "K":
+                    value *= 1_000
+            metrics["ocf"] = value
+
         # Now extract from detailed sections (below DATA_BLOCK)
         metrics["debt_to_equity"] = RedFlagDetector._extract_debt_to_equity(
             fundamentals_report
@@ -254,6 +276,12 @@ class RedFlagDetector:
         )
         metrics["fcf"] = RedFlagDetector._extract_free_cash_flow(fundamentals_report)
         metrics["net_income"] = RedFlagDetector._extract_net_income(fundamentals_report)
+
+        # Extract OCF from report body as fallback (if not found in DATA_BLOCK)
+        if metrics["ocf"] is None:
+            metrics["ocf"] = RedFlagDetector._extract_operating_cash_flow(
+                fundamentals_report
+            )
 
         return metrics
 
@@ -387,6 +415,49 @@ class RedFlagDetector:
             r"\*\*Net Income\*\*:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
             r"(?:^|\n)\s*Net Income:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
             r"Net Income:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
+            if match:
+                groups = match.groups()
+                sign = groups[0]  # '+' or '-' or ''
+                value = float(groups[1].replace(",", ""))
+                if sign == "-":
+                    value = -value
+                multiplier = groups[2] if len(groups) > 2 else None
+
+                # Handle B/M/K multipliers
+                if multiplier:
+                    if multiplier.upper() == "B":
+                        value *= 1_000_000_000
+                    elif multiplier.upper() == "M":
+                        value *= 1_000_000
+                    elif multiplier.upper() == "K":
+                        value *= 1_000
+                return value
+        return None
+
+    @staticmethod
+    def _extract_operating_cash_flow(report: str) -> float | None:
+        """
+        Extract operating cash flow with support for negative values and B/M/K multipliers.
+
+        Handles various formats:
+        - "Operating Cash Flow: $1.5B" → 1,500,000,000
+        - "OCF: -¥978.6B" → -978,600,000,000
+
+        Args:
+            report: Full fundamentals report text
+
+        Returns:
+            OCF in currency units (e.g., 1_500_000_000), or None if not found
+        """
+        patterns = [
+            # Support multiple currencies: $, ¥, €, £ or none
+            r"\*\*Operating Cash Flow\*\*:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
+            r"(?:^|\n)\s*Operating Cash Flow:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
+            r"(?:^|\n)\s*OCF:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
+            r"(?:Operating Cash Flow|OCF):\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
         ]
         for pattern in patterns:
             match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
@@ -705,6 +776,99 @@ class RedFlagDetector:
                 ticker=ticker,
                 signals=peak_signals,
                 profitability_trend=profitability_trend,
+            )
+
+        # --- RED FLAG 7: Suspicious OCF/NI Ratio (Data Quality Check) ---
+        # OCF significantly exceeding net income suggests data error or period mismatch.
+        # Banking sector exempt (deposit flows naturally inflate OCF/NI).
+        ocf = metrics.get("ocf")
+        ni_for_ocf = metrics.get("net_income")
+
+        if (
+            sector != Sector.BANKING
+            and ocf is not None
+            and ni_for_ocf is not None
+            and ocf > 0
+            and ni_for_ocf > 0
+        ):
+            ocf_ni_ratio = ocf / ni_for_ocf
+            if ocf_ni_ratio > 5.0:
+                red_flags.append(
+                    {
+                        "type": "SUSPICIOUS_OCF_NI_RATIO",
+                        "severity": "WARNING",
+                        "detail": f"OCF {ocf_ni_ratio:.1f}x net income — likely data error or period mismatch",
+                        "action": "RISK_PENALTY",
+                        "risk_penalty": 1.5,
+                        "rationale": (
+                            "Operating cash flow exceeding net income by >5x is extremely "
+                            "unusual and typically indicates a data source error (wrong "
+                            "currency, wrong period) or period mismatch between OCF and NI. "
+                            "Cross-validate with an independent data source before trusting."
+                        ),
+                    }
+                )
+                logger.info(
+                    "red_flag_suspicious_ocf_ni_ratio",
+                    ticker=ticker,
+                    ocf=ocf,
+                    net_income=ni_for_ocf,
+                    ratio=ocf_ni_ratio,
+                )
+            elif ocf_ni_ratio > 3.0:
+                red_flags.append(
+                    {
+                        "type": "SUSPICIOUS_OCF_NI_RATIO",
+                        "severity": "WARNING",
+                        "detail": f"OCF {ocf_ni_ratio:.1f}x net income — unusual, verify data source",
+                        "action": "RISK_PENALTY",
+                        "risk_penalty": 1.0,
+                        "rationale": (
+                            "Operating cash flow exceeding net income by >3x is unusual. "
+                            "While some scenarios (large depreciation, working capital release) "
+                            "can explain this, it warrants verification against an independent "
+                            "data source."
+                        ),
+                    }
+                )
+                logger.info(
+                    "red_flag_elevated_ocf_ni_ratio",
+                    ticker=ticker,
+                    ocf=ocf,
+                    net_income=ni_for_ocf,
+                    ratio=ocf_ni_ratio,
+                )
+
+        # --- RED FLAG 8: Unreliable PEG (Implausible Valuation) ---
+        # PEG < 0.05 implies >20x expected growth — mathematically implausible for any
+        # real company. Treat all valuation metrics as unreliable when PEG is this low.
+        peg_for_floor = metrics.get("peg_ratio")
+        if peg_for_floor is not None and peg_for_floor > 0 and peg_for_floor < 0.05:
+            implied_growth = 1 / peg_for_floor
+            red_flags.append(
+                {
+                    "type": "UNRELIABLE_PEG",
+                    "severity": "WARNING",
+                    "detail": (
+                        f"PEG {peg_for_floor:.3f} implies {implied_growth:.0f}x expected "
+                        f"growth — mathematically implausible, treat valuation metrics as unreliable"
+                    ),
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 1.0,
+                    "rationale": (
+                        "A PEG ratio below 0.05 implies the market expects enormous "
+                        "earnings growth that no real company can sustain. This typically "
+                        "means the growth rate input is stale, cyclical peak earnings are "
+                        "being projected forward, or the data source has an error. All "
+                        "PEG-derived conclusions should be discounted."
+                    ),
+                }
+            )
+            logger.info(
+                "red_flag_unreliable_peg",
+                ticker=ticker,
+                peg=peg_for_floor,
+                implied_growth=implied_growth,
             )
 
         # Determine result
@@ -1664,6 +1828,208 @@ class RedFlagDetector:
                 ticker=ticker,
                 roic=roic,
                 leverage_quality=leverage_quality,
+            )
+
+        return flags
+
+    @staticmethod
+    def parse_consultant_conditions(consultant_review: str) -> dict[str, Any]:
+        """
+        Parse consultant output for verdict and material concerns.
+
+        Extracts structured information from the consultant's review to enable
+        deterministic enforcement of conditions that the PM must address.
+
+        Args:
+            consultant_review: Full consultant review text
+
+        Returns:
+            Dict with:
+            - verdict: APPROVED | CONDITIONAL_APPROVAL | MAJOR_CONCERNS | UNKNOWN
+            - has_mandate_breach: bool
+            - has_hard_stop: bool
+            - concern_count: int (number of material concerns/conditions)
+            - spot_check_discrepancies: list[str] (any DISCREPANCY lines)
+        """
+        result: dict[str, Any] = {
+            "verdict": "UNKNOWN",
+            "has_mandate_breach": False,
+            "has_hard_stop": False,
+            "concern_count": 0,
+            "spot_check_discrepancies": [],
+        }
+
+        if not consultant_review:
+            return result
+
+        if not isinstance(consultant_review, str):
+            try:
+                consultant_review = str(consultant_review)
+            except Exception:
+                return result
+
+        # Parse verdict (check most specific first)
+        upper_review = consultant_review.upper()
+        if "MAJOR CONCERNS" in upper_review or "MAJOR_CONCERNS" in upper_review:
+            result["verdict"] = "MAJOR_CONCERNS"
+        elif (
+            "CONDITIONAL APPROVAL" in upper_review
+            or "CONDITIONAL_APPROVAL" in upper_review
+        ):
+            result["verdict"] = "CONDITIONAL_APPROVAL"
+        elif "APPROVED" in upper_review:
+            result["verdict"] = "APPROVED"
+
+        # Detect mandate breach and hard stop
+        if "MANDATE BREACH" in upper_review or "MANDATE_BREACH" in upper_review:
+            result["has_mandate_breach"] = True
+        if "HARD STOP" in upper_review or "HARD_STOP" in upper_review:
+            result["has_hard_stop"] = True
+
+        # Count spot-check discrepancies
+        discrepancy_matches = re.findall(
+            r"SPOT_CHECK.*?→\s*DISCREPANCY.*",
+            consultant_review,
+            re.IGNORECASE,
+        )
+        result["spot_check_discrepancies"] = discrepancy_matches
+
+        # Count material concerns (bullet points or numbered items in conditions section)
+        # Look for patterns like "- Material error..." or "1. Issue..."
+        concern_patterns = re.findall(
+            r"(?:^|\n)\s*(?:\d+\.|[-•])\s+(?:Material|Critical|Significant|Concern|Error|Discrepancy)",
+            consultant_review,
+            re.IGNORECASE,
+        )
+        result["concern_count"] = len(concern_patterns)
+
+        logger.debug(
+            "consultant_conditions_parsed",
+            verdict=result["verdict"],
+            has_mandate_breach=result["has_mandate_breach"],
+            has_hard_stop=result["has_hard_stop"],
+            discrepancy_count=len(result["spot_check_discrepancies"]),
+        )
+
+        return result
+
+    @staticmethod
+    def detect_consultant_flags(
+        conditions: dict[str, Any], ticker: str = "UNKNOWN"
+    ) -> list[dict]:
+        """
+        Generate risk flags from parsed consultant conditions.
+
+        Enforces consultant conditions that the PM must address. Without this,
+        the PM can ignore CONDITIONAL_APPROVAL conditions entirely.
+
+        Args:
+            conditions: Output from parse_consultant_conditions()
+            ticker: Ticker symbol for logging
+
+        Returns:
+            List of warning flag dicts with risk_penalty values
+        """
+        flags = []
+
+        verdict = conditions.get("verdict", "UNKNOWN")
+        discrepancies = conditions.get("spot_check_discrepancies", [])
+
+        # --- HARD STOP: Consultant issued hard stop (e.g., CMIC restricted) ---
+        if conditions.get("has_hard_stop"):
+            flags.append(
+                {
+                    "type": "CONSULTANT_HARD_STOP",
+                    "severity": "CRITICAL",
+                    "detail": "Consultant issued HARD STOP — restricted security",
+                    "action": "AUTO_REJECT",
+                    "risk_penalty": 3.0,
+                    "rationale": (
+                        "External consultant flagged a hard stop condition "
+                        "(e.g., CMIC restricted list). Position must not be initiated."
+                    ),
+                }
+            )
+            logger.info("consultant_flag_hard_stop", ticker=ticker)
+            return flags  # Hard stop overrides everything
+
+        # --- MANDATE BREACH: Consultant flagged mandate violation ---
+        if conditions.get("has_mandate_breach"):
+            flags.append(
+                {
+                    "type": "CONSULTANT_MANDATE_BREACH",
+                    "severity": "HIGH",
+                    "detail": "Consultant flagged MANDATE BREACH",
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 2.0,
+                    "rationale": (
+                        "External consultant identified a mandate compliance issue "
+                        "(e.g., PFIC threshold, jurisdiction risk). PM must explicitly "
+                        "address this before proceeding."
+                    ),
+                }
+            )
+            logger.info("consultant_flag_mandate_breach", ticker=ticker)
+
+        # --- MAJOR CONCERNS: Consultant raised major issues ---
+        if verdict == "MAJOR_CONCERNS":
+            flags.append(
+                {
+                    "type": "CONSULTANT_MAJOR_CONCERNS",
+                    "severity": "HIGH",
+                    "detail": "Consultant raised MAJOR CONCERNS — PM must address each",
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 1.5,
+                    "rationale": (
+                        "External consultant found material issues with the analysis. "
+                        "These could be factual errors, severe biases, or fundamentally "
+                        "flawed synthesis. PM decision should reflect these concerns."
+                    ),
+                }
+            )
+            logger.info("consultant_flag_major_concerns", ticker=ticker)
+
+        # --- CONDITIONAL APPROVAL: Conditions that must be met ---
+        elif verdict == "CONDITIONAL_APPROVAL":
+            flags.append(
+                {
+                    "type": "CONSULTANT_CONDITIONAL",
+                    "severity": "WARNING",
+                    "detail": "Consultant gave CONDITIONAL APPROVAL — conditions must be met",
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 0.5,
+                    "rationale": (
+                        "External consultant approved with conditions. PM should verify "
+                        "conditions are addressed in the final decision rationale."
+                    ),
+                }
+            )
+            logger.info("consultant_flag_conditional", ticker=ticker)
+
+        # --- SPOT-CHECK DISCREPANCIES: Additional penalty per discrepancy ---
+        if discrepancies:
+            # Cap total discrepancy penalty at 1.5
+            disc_penalty = min(len(discrepancies) * 0.5, 1.5)
+            disc_details = "; ".join(d.strip() for d in discrepancies[:3])
+            flags.append(
+                {
+                    "type": "CONSULTANT_DATA_DISCREPANCY",
+                    "severity": "WARNING",
+                    "detail": f"{len(discrepancies)} spot-check discrepancies: {disc_details}",
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": disc_penalty,
+                    "rationale": (
+                        "Consultant's independent spot-checks found discrepancies between "
+                        "DATA_BLOCK values and direct API queries. This suggests potential "
+                        "data quality issues that should be investigated."
+                    ),
+                }
+            )
+            logger.info(
+                "consultant_flag_discrepancies",
+                ticker=ticker,
+                count=len(discrepancies),
+                penalty=disc_penalty,
             )
 
         return flags
