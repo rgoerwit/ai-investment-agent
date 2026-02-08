@@ -24,6 +24,10 @@ from src.data.interfaces import FinancialFetcher
 
 logger = logging.getLogger(__name__)
 
+# Default timeout for HTTP requests (session-level safety net + per-request)
+_TIMEOUT = aiohttp.ClientTimeout(total=10)
+_ANCHOR_TIMEOUT = aiohttp.ClientTimeout(total=5)
+
 
 class EODHDFetcher(FinancialFetcher):
     """
@@ -34,21 +38,7 @@ class EODHDFetcher(FinancialFetcher):
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key or config.get_eodhd_api_key()
         self.base_url = "https://eodhd.com/api"
-        self._session = None
         self._is_exhausted = False  # Circuit breaker for rate limits
-
-    async def __aenter__(self):
-        self._session = aiohttp.ClientSession()
-        return self
-
-    async def __aexit__(self, *args):
-        await self.close()
-
-    async def close(self):
-        """Close the aiohttp session. Safe to call multiple times."""
-        if self._session and not self._session.closed:
-            await self._session.close()
-            self._session = None
 
     def is_available(self) -> bool:
         """Check if configured and not rate-limited."""
@@ -92,47 +82,47 @@ class EODHDFetcher(FinancialFetcher):
         if not self.is_available():
             return None
 
-        if not self._session:
-            self._session = aiohttp.ClientSession()
-
         eod_symbol = self._normalize_ticker(symbol)
         url = f"{self.base_url}/fundamentals/{eod_symbol}"
         params = {"api_token": self.api_key, "fmt": "json"}
 
         try:
-            async with self._session.get(url, params=params, timeout=10) as response:
-                # --- Error Handling & Circuit Breaking ---
-                if response.status == 200:
-                    try:
-                        data = await response.json()
-                    except (ValueError, aiohttp.ContentTypeError) as e:
-                        logger.debug(f"EODHD malformed JSON for {eod_symbol}: {e}")
+            async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
+                async with session.get(
+                    url, params=params, timeout=_TIMEOUT
+                ) as response:
+                    # --- Error Handling & Circuit Breaking ---
+                    if response.status == 200:
+                        try:
+                            data = await response.json()
+                        except (ValueError, aiohttp.ContentTypeError) as e:
+                            logger.debug(f"EODHD malformed JSON for {eod_symbol}: {e}")
+                            return None
+                        return self._parse_fundamentals(data)
+
+                    elif response.status == 429:
+                        logger.error(
+                            "EODHD API Limit Exceeded (429). Disabling EODHD for this session."
+                        )
+                        self._is_exhausted = True
                         return None
-                    return self._parse_fundamentals(data)
 
-                elif response.status == 429:
-                    logger.error(
-                        "EODHD API Limit Exceeded (429). Disabling EODHD for this session."
-                    )
-                    self._is_exhausted = True
-                    return None
+                    elif response.status == 402:
+                        logger.warning(
+                            f"EODHD Payment Required (402). Access restricted for {eod_symbol}."
+                        )
+                        # Don't disable globally, might just be this specific exchange
+                        return None
 
-                elif response.status == 402:
-                    logger.warning(
-                        f"EODHD Payment Required (402). Access restricted for {eod_symbol}."
-                    )
-                    # Don't disable globally, might just be this specific exchange
-                    return None
+                    elif response.status == 404:
+                        logger.debug(f"EODHD data not found for {eod_symbol}")
+                        return None
 
-                elif response.status == 404:
-                    logger.debug(f"EODHD data not found for {eod_symbol}")
-                    return None
-
-                else:
-                    logger.warning(
-                        f"EODHD API error {response.status} for {eod_symbol}"
-                    )
-                    return None
+                    else:
+                        logger.warning(
+                            f"EODHD API error {response.status} for {eod_symbol}"
+                        )
+                        return None
 
         except Exception as e:
             logger.debug(f"EODHD request failed: {e}")
@@ -149,9 +139,6 @@ class EODHDFetcher(FinancialFetcher):
         if not self.is_available():
             return None
 
-        if not self._session:
-            self._session = aiohttp.ClientSession()
-
         eod_symbol = self._normalize_ticker(symbol)
         url = f"{self.base_url}/fundamentals/{eod_symbol}"
 
@@ -159,50 +146,61 @@ class EODHDFetcher(FinancialFetcher):
         params = {"api_token": self.api_key, "fmt": "json", "filter": "Highlights"}
 
         try:
-            async with self._session.get(url, params=params, timeout=5) as response:
-                # CASE 1: Success
-                if response.status == 200:
-                    try:
-                        data = await response.json()
-                    except (ValueError, aiohttp.ContentTypeError) as e:
-                        logger.debug(
-                            f"EODHD anchor malformed JSON for {eod_symbol}: {e}"
+            async with aiohttp.ClientSession(timeout=_ANCHOR_TIMEOUT) as session:
+                async with session.get(
+                    url, params=params, timeout=_ANCHOR_TIMEOUT
+                ) as response:
+                    # CASE 1: Success
+                    if response.status == 200:
+                        try:
+                            data = await response.json()
+                        except (ValueError, aiohttp.ContentTypeError) as e:
+                            logger.debug(
+                                f"EODHD anchor malformed JSON for {eod_symbol}: {e}"
+                            )
+                            return None
+
+                        return {
+                            "marketCap": self._safe_float(
+                                data.get("MarketCapitalization")
+                            ),
+                            "trailingPE": self._safe_float(data.get("PERatio")),
+                            "dividendYield": self._safe_float(
+                                data.get("DividendYield")
+                            ),
+                            "_source": "EODHD_anchor",
+                        }
+
+                    # CASE 2: Unpaid/Restricted License (402)
+                    # Common for international data on free/low-tier plans
+                    elif response.status == 402:
+                        logger.info(
+                            f"EODHD Paywall (402) for {eod_symbol}. Cannot verify."
                         )
                         return None
 
-                    return {
-                        "marketCap": self._safe_float(data.get("MarketCapitalization")),
-                        "trailingPE": self._safe_float(data.get("PERatio")),
-                        "dividendYield": self._safe_float(data.get("DividendYield")),
-                        "_source": "EODHD_anchor",
-                    }
+                    # CASE 3: Rate limit (429) - disable future calls
+                    elif response.status == 429:
+                        logger.error(
+                            "EODHD API Limit (429). Disabling EODHD anchor checks."
+                        )
+                        self._is_exhausted = True
+                        return None
 
-                # CASE 2: Unpaid/Restricted License (402)
-                # Common for international data on free/low-tier plans
-                elif response.status == 402:
-                    logger.info(f"EODHD Paywall (402) for {eod_symbol}. Cannot verify.")
+                    # CASE 4: Auth Error (401/403)
+                    elif response.status in [401, 403]:
+                        logger.warning(
+                            f"EODHD Auth Error ({response.status}). Disabling."
+                        )
+                        self._is_exhausted = True
+                        return None
+
+                    # CASE 5: Not found
+                    elif response.status == 404:
+                        logger.debug(f"EODHD anchor data not found for {eod_symbol}")
+                        return None
+
                     return None
-
-                # CASE 3: Rate limit (429) - disable future calls
-                elif response.status == 429:
-                    logger.error(
-                        "EODHD API Limit (429). Disabling EODHD anchor checks."
-                    )
-                    self._is_exhausted = True
-                    return None
-
-                # CASE 4: Auth Error (401/403)
-                elif response.status in [401, 403]:
-                    logger.warning(f"EODHD Auth Error ({response.status}). Disabling.")
-                    self._is_exhausted = True
-                    return None
-
-                # CASE 5: Not found
-                elif response.status == 404:
-                    logger.debug(f"EODHD anchor data not found for {eod_symbol}")
-                    return None
-
-                return None
 
         except Exception as e:
             logger.debug(f"EODHD anchor check failed: {e}")

@@ -2,7 +2,7 @@
 Tests for EODHD Integration and Smart Merging Logic
 """
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -89,21 +89,25 @@ class TestEODHDIntegration:
         mock_response = MagicMock()
         mock_response.status = 429
 
-        mock_cm = AsyncMock()
-        mock_cm.__aenter__ = AsyncMock(return_value=mock_response)
-        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        # Create proper async context manager mock for response
+        mock_response_cm = AsyncMock()
+        mock_response_cm.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response_cm.__aexit__ = AsyncMock(return_value=None)
 
+        # Create proper async context manager mock for session
         mock_session = MagicMock()
-        mock_session.get = MagicMock(return_value=mock_cm)
-        fetcher._session = mock_session
+        mock_session.get = MagicMock(return_value=mock_response_cm)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
 
-        # First call hits limit
-        result = await fetcher.get_financial_metrics("TEST")
-        assert result is None
-        assert fetcher._is_exhausted is True  # Circuit breaker tripped
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            # First call hits limit
+            result = await fetcher.get_financial_metrics("TEST")
+            assert result is None
+            assert fetcher._is_exhausted is True  # Circuit breaker tripped
 
-        # Second call should return None immediately without network request
-        fetcher._session.get.reset_mock()
-        result2 = await fetcher.get_financial_metrics("TEST2")
-        assert result2 is None
-        fetcher._session.get.assert_not_called()
+            # Second call should return None immediately without network request
+            mock_session.get.reset_mock()
+            result2 = await fetcher.get_financial_metrics("TEST2")
+            assert result2 is None
+            mock_session.get.assert_not_called()

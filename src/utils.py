@@ -5,6 +5,7 @@ reflect on their performance for continuous learning.
 """
 
 import re
+import unicodedata
 from collections.abc import Callable
 
 import structlog
@@ -175,8 +176,8 @@ def clean_duplicate_data_blocks(report: str) -> str:
     if not report or not isinstance(report, str):
         return report
 
-    # Pattern to match DATA_BLOCK sections
-    pattern = r"### --- START DATA_BLOCK ---.*?### --- END DATA_BLOCK ---"
+    # Pattern to match DATA_BLOCK sections (tolerates optional descriptive text after "DATA_BLOCK")
+    pattern = r"### --- START DATA_BLOCK[^\n]*---.*?### --- END DATA_BLOCK ---"
 
     # Find all occurrences
     blocks = list(re.finditer(pattern, report, re.DOTALL))
@@ -199,7 +200,7 @@ def clean_duplicate_data_blocks(report: str) -> str:
     return cleaned_report
 
 
-def detect_truncation(text: str) -> dict:
+def detect_truncation(text: str, agent: str | None = None) -> dict:
     """
     Detect if text appears truncated and identify the truncation source.
 
@@ -209,6 +210,9 @@ def detect_truncation(text: str) -> dict:
 
     Args:
         text: The text to analyze for truncation
+        agent: Agent key (e.g. "portfolio_manager"). When set, structured-block
+               checks only fire for the agent that produces that block type,
+               preventing false positives when other agents merely reference it.
 
     Returns:
         dict with keys:
@@ -254,18 +258,18 @@ def detect_truncation(text: str) -> dict:
 
     # Check for incomplete structured blocks FIRST (MEDIUM confidence)
     # These blocks should have both start and required fields
+    # (block_marker, required_fields, producing_agent)
     block_completeness = [
-        ("PM_BLOCK:", ["VERDICT:", "RISK_ZONE:"]),  # PM output needs verdict
-        (
-            "DATA_BLOCK:",
-            ["HEALTH_SCORE:", "GROWTH_SCORE:"],
-        ),  # Fundamentals needs scores
-        ("FORENSIC_DATA_BLOCK:", ["VERDICT:", "STATUS:"]),  # Auditor needs verdict
-        ("VALUE_TRAP_BLOCK:", ["SCORE:", "VERDICT:"]),  # Value trap needs score
+        ("PM_BLOCK:", ["VERDICT:", "RISK_ZONE:"], "portfolio_manager"),
+        ("DATA_BLOCK:", ["HEALTH_SCORE:", "GROWTH_SCORE:"], "fundamentals_analyst"),
+        ("FORENSIC_DATA_BLOCK:", ["VERDICT:", "STATUS:"], "global_forensic_auditor"),
+        ("VALUE_TRAP_BLOCK:", ["SCORE:", "VERDICT:"], "value_trap_detector"),
     ]
 
     has_complete_block = False
-    for block_start, required_fields in block_completeness:
+    for block_start, required_fields, owner in block_completeness:
+        if agent and agent != owner:
+            continue
         if block_start in text:
             # Block started - check if any required field is present
             has_required = any(field in text for field in required_fields)
@@ -291,14 +295,23 @@ def detect_truncation(text: str) -> dict:
     # LLM truncation heuristics (MEDIUM confidence)
     # Check if ends mid-sentence (not with valid ending punctuation)
     # Only apply if no structured blocks were found
-    valid_endings = ".!?)]}>`*|\"'\n"
+    # Use Unicode categories instead of a character whitelist so that smart
+    # quotes (GPT), CJK periods/brackets (JP/KR/CN), and other international
+    # punctuation are recognised as valid endings.
+    _non_punct_valid = frozenset(
+        ">`|\n"
+    )  # Markdown/table chars that aren't Unicode punctuation
     stripped = text.rstrip()
-    if stripped and stripped[-1] not in valid_endings:
-        return {
-            "truncated": True,
-            "source": "llm",
-            "marker": f"ends with: '{stripped[-30:]}'",
-            "confidence": "medium",
-        }
+    if stripped:
+        last = stripped[-1]
+        cat = unicodedata.category(last)
+        # Pe=close bracket, Pf=final quote, Po=period/exclamation/etc.
+        if last not in _non_punct_valid and cat not in ("Pe", "Pf", "Po"):
+            return {
+                "truncated": True,
+                "source": "llm",
+                "marker": f"ends with: '{stripped[-30:]}'",
+                "confidence": "medium",
+            }
 
     return {"truncated": False, "source": None, "marker": None, "confidence": "high"}

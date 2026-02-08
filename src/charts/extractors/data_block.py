@@ -122,7 +122,10 @@ def extract_chart_data_from_data_block(fundamentals_report: str) -> ChartRawData
         return ChartRawData()
 
     # Find the DATA_BLOCK section (take last one for self-correction pattern)
-    data_block_pattern = r"### --- START DATA_BLOCK ---(.+?)### --- END DATA_BLOCK ---"
+    # Tolerates optional descriptive text after "DATA_BLOCK" (e.g., prompt v8.6+)
+    data_block_pattern = (
+        r"### --- START DATA_BLOCK[^\n]*---(.+?)### --- END DATA_BLOCK ---"
+    )
     blocks = list(re.finditer(data_block_pattern, fundamentals_report, re.DOTALL))
 
     if not blocks:

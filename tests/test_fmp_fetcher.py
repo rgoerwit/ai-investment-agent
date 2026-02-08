@@ -26,7 +26,6 @@ class TestFMPFetcherInit:
 
         assert fetcher.api_key == "test-key"
         assert fetcher.base_url == "https://financialmodelingprep.com/stable"
-        assert fetcher._session is None
         assert fetcher._key_validated is False
 
     def test_init_from_environment(self):
@@ -63,30 +62,6 @@ class TestFMPFetcherInit:
         assert fetcher.is_available() is False
 
 
-class TestFMPFetcherContextManager:
-    """Test async context manager functionality."""
-
-    @pytest.mark.asyncio
-    async def test_context_manager_creates_session(self):
-        """Test that entering context creates a session."""
-        fetcher = FMPFetcher(api_key="test-key")
-
-        async with fetcher:
-            assert fetcher._session is not None
-            assert isinstance(fetcher._session, aiohttp.ClientSession)
-
-    @pytest.mark.asyncio
-    async def test_context_manager_closes_session(self):
-        """Test that exiting context closes the session."""
-        fetcher = FMPFetcher(api_key="test-key")
-
-        async with fetcher:
-            session = fetcher._session
-
-        # Session should be closed after exiting context
-        assert session.closed
-
-
 class TestFMPGet:
     """Test the internal _get method."""
 
@@ -100,17 +75,19 @@ class TestFMPGet:
         mock_response.status = 200
         mock_response.json = AsyncMock(return_value=mock_data)
 
-        # Create proper async context manager mock
-        mock_cm = AsyncMock()
-        mock_cm.__aenter__ = AsyncMock(return_value=mock_response)
-        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        # Create proper async context manager mock for response
+        mock_response_cm = AsyncMock()
+        mock_response_cm.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response_cm.__aexit__ = AsyncMock(return_value=None)
 
+        # Create proper async context manager mock for session
         mock_session = MagicMock()
-        mock_session.get = MagicMock(return_value=mock_cm)
+        mock_session.get = MagicMock(return_value=mock_response_cm)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
 
-        fetcher._session = mock_session
-
-        result = await fetcher._get("ratios", {"symbol": "AAPL", "limit": 1})
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            result = await fetcher._get("ratios", {"symbol": "AAPL", "limit": 1})
 
         assert result == mock_data
         assert fetcher._key_validated is True
@@ -136,18 +113,20 @@ class TestFMPGet:
         mock_response = MagicMock()
         mock_response.status = 403
 
-        # Create proper async context manager mock
-        mock_cm = AsyncMock()
-        mock_cm.__aenter__ = AsyncMock(return_value=mock_response)
-        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        # Create proper async context manager mock for response
+        mock_response_cm = AsyncMock()
+        mock_response_cm.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response_cm.__aexit__ = AsyncMock(return_value=None)
 
+        # Create proper async context manager mock for session
         mock_session = MagicMock()
-        mock_session.get = MagicMock(return_value=mock_cm)
+        mock_session.get = MagicMock(return_value=mock_response_cm)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
 
-        fetcher._session = mock_session
-
-        with pytest.raises(ValueError, match="FMP_API_KEY is invalid"):
-            await fetcher._get("ratios", {"symbol": "AAPL"})
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            with pytest.raises(ValueError, match="FMP_API_KEY is invalid"):
+                await fetcher._get("ratios", {"symbol": "AAPL"})
 
     @pytest.mark.asyncio
     async def test_get_403_rate_limit_after_validation(self):
@@ -158,19 +137,21 @@ class TestFMPGet:
         mock_response = MagicMock()
         mock_response.status = 403
 
-        # Create proper async context manager mock
-        mock_cm = AsyncMock()
-        mock_cm.__aenter__ = AsyncMock(return_value=mock_response)
-        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        # Create proper async context manager mock for response
+        mock_response_cm = AsyncMock()
+        mock_response_cm.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response_cm.__aexit__ = AsyncMock(return_value=None)
 
+        # Create proper async context manager mock for session
         mock_session = MagicMock()
-        mock_session.get = MagicMock(return_value=mock_cm)
+        mock_session.get = MagicMock(return_value=mock_response_cm)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
 
-        fetcher._session = mock_session
-
-        # Should return None instead of raising
-        result = await fetcher._get("ratios", {"symbol": "AAPL"})
-        assert result is None
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            # Should return None instead of raising
+            result = await fetcher._get("ratios", {"symbol": "AAPL"})
+            assert result is None
 
     @pytest.mark.asyncio
     async def test_get_404_not_found(self):
@@ -180,36 +161,35 @@ class TestFMPGet:
         mock_response = MagicMock()
         mock_response.status = 404
 
-        # Create proper async context manager mock
-        mock_cm = AsyncMock()
-        mock_cm.__aenter__ = AsyncMock(return_value=mock_response)
-        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        # Create proper async context manager mock for response
+        mock_response_cm = AsyncMock()
+        mock_response_cm.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response_cm.__aexit__ = AsyncMock(return_value=None)
 
+        # Create proper async context manager mock for session
         mock_session = MagicMock()
-        mock_session.get = MagicMock(return_value=mock_cm)
+        mock_session.get = MagicMock(return_value=mock_response_cm)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
 
-        fetcher._session = mock_session
-
-        result = await fetcher._get("ratios", {"symbol": "INVALID"})
-        assert result is None
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            result = await fetcher._get("ratios", {"symbol": "INVALID"})
+            assert result is None
 
     @pytest.mark.asyncio
     async def test_get_network_error(self):
         """Test handling of network errors."""
         fetcher = FMPFetcher(api_key="test-key")
 
-        mock_cm = MagicMock()
-        mock_cm.__aenter__ = AsyncMock(
+        # Create session mock that raises error when entering context
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(
             side_effect=aiohttp.ClientError("Network failed")
         )
 
-        mock_session = MagicMock()
-        mock_session.get = MagicMock(return_value=mock_cm)
-
-        fetcher._session = mock_session
-
-        result = await fetcher._get("ratios", {"symbol": "AAPL"})
-        assert result is None
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            result = await fetcher._get("ratios", {"symbol": "AAPL"})
+            assert result is None
 
     @pytest.mark.asyncio
     async def test_get_adds_api_key_to_params(self):
@@ -220,22 +200,24 @@ class TestFMPGet:
         mock_response.status = 200
         mock_response.json = AsyncMock(return_value=[])
 
-        # Create proper async context manager mock
-        mock_cm = AsyncMock()
-        mock_cm.__aenter__ = AsyncMock(return_value=mock_response)
-        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        # Create proper async context manager mock for response
+        mock_response_cm = AsyncMock()
+        mock_response_cm.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response_cm.__aexit__ = AsyncMock(return_value=None)
 
+        # Create proper async context manager mock for session
         mock_session = MagicMock()
-        mock_session.get = MagicMock(return_value=mock_cm)
+        mock_session.get = MagicMock(return_value=mock_response_cm)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
 
-        fetcher._session = mock_session
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            await fetcher._get("ratios", {"symbol": "AAPL"})
 
-        await fetcher._get("ratios", {"symbol": "AAPL"})
-
-        # Verify API key was added to params
-        call_args = mock_session.get.call_args
-        params = call_args[1]["params"]
-        assert params["apikey"] == "test-key"
+            # Verify API key was added to params
+            call_args = mock_session.get.call_args
+            params = call_args[1]["params"]
+            assert params["apikey"] == "test-key"
 
 
 class TestGetFinancialMetrics:
@@ -393,8 +375,6 @@ class TestConvenienceFunction:
         mock_fetcher.get_financial_metrics = AsyncMock(
             return_value={"trailingPE": 15.0, "_source": "fmp"}
         )
-        mock_fetcher.__aenter__ = AsyncMock(return_value=mock_fetcher)
-        mock_fetcher.__aexit__ = AsyncMock(return_value=None)
 
         mock_get_fetcher.return_value = mock_fetcher
 
@@ -434,19 +414,21 @@ class TestErrorScenarios:
         mock_response.status = 200
         mock_response.json = AsyncMock(side_effect=ValueError("Invalid JSON"))
 
-        # Create proper async context manager mock
-        mock_cm = AsyncMock()
-        mock_cm.__aenter__ = AsyncMock(return_value=mock_response)
-        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        # Create proper async context manager mock for response
+        mock_response_cm = AsyncMock()
+        mock_response_cm.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response_cm.__aexit__ = AsyncMock(return_value=None)
 
+        # Create proper async context manager mock for session
         mock_session = MagicMock()
-        mock_session.get = MagicMock(return_value=mock_cm)
+        mock_session.get = MagicMock(return_value=mock_response_cm)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
 
-        fetcher._session = mock_session
-
-        # Updated: With malformed JSON handling, it should return None gracefully
-        result = await fetcher._get("ratios", {"symbol": "AAPL"})
-        assert result is None
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            # Updated: With malformed JSON handling, it should return None gracefully
+            result = await fetcher._get("ratios", {"symbol": "AAPL"})
+            assert result is None
 
     @pytest.mark.asyncio
     async def test_unexpected_response_structure(self):

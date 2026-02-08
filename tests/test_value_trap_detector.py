@@ -510,11 +510,12 @@ class TestGraphIntegration:
         toolkit = Toolkit()
         tools = toolkit.get_value_trap_tools()
 
-        assert len(tools) == 3
+        assert len(tools) == 4
         tool_names = [t.name for t in tools]
         assert "get_ownership_structure" in tool_names
         assert "get_news" in tool_names
         assert "search_foreign_sources" in tool_names
+        assert "get_official_filings" in tool_names
 
 
 class TestPortfolioManagerIntegration:

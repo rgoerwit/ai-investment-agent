@@ -72,7 +72,9 @@ class TestConsultantNodeCreation:
                 call_kwargs = mock_chatgpt.call_args[1]
                 assert call_kwargs["model"] == "gpt-4o"
                 assert call_kwargs["openai_api_key"] == "test-key"
-                assert call_kwargs["temperature"] == 0.3
+                # Temperature is intentionally omitted — many OpenAI model
+                # families (o-series, gpt-5.x) reject non-default temperature.
+                assert "temperature" not in call_kwargs
 
     def test_consultant_node_creation(self):
         """Test that consultant node factory creates valid node function."""

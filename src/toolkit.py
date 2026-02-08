@@ -599,6 +599,64 @@ async def get_fundamental_analysis(
         return f"Error searching for fundamentals: {e}"
 
 
+async def _ddg_search(query: str, max_results: int = 5) -> list[dict]:
+    """DuckDuckGo fallback search. Returns list of {title, href, body}."""
+    try:
+        from ddgs import DDGS
+
+        def _sync_search():
+            return DDGS().text(query, max_results=max_results)
+
+        results = await asyncio.to_thread(_sync_search)
+        return results if results else []
+    except ImportError:
+        logger.debug("ddgs_not_installed")
+        return []
+    except Exception as e:
+        logger.debug("ddg_search_error", error=str(e))
+        return []
+
+
+def _merge_search_results(tavily_results, ddg_results) -> list[dict]:
+    """Merge Tavily and DDG results, deduplicating by URL."""
+    merged = []
+    seen_urls = set()
+
+    # Tavily results are primary
+    if isinstance(tavily_results, list):
+        for item in tavily_results:
+            if isinstance(item, dict):
+                url = item.get("url", "")
+                if url:
+                    seen_urls.add(url.rstrip("/"))
+                merged.append(item)
+    elif isinstance(tavily_results, dict) and "results" in tavily_results:
+        for item in tavily_results.get("results", []):
+            if isinstance(item, dict):
+                url = item.get("url", "")
+                if url:
+                    seen_urls.add(url.rstrip("/"))
+                merged.append(item)
+
+    # DDG supplements with unique URLs
+    if isinstance(ddg_results, list):
+        for item in ddg_results:
+            if isinstance(item, dict):
+                url = item.get("href", item.get("url", ""))
+                if url and url.rstrip("/") not in seen_urls:
+                    seen_urls.add(url.rstrip("/"))
+                    # Normalize DDG format to match Tavily format
+                    merged.append(
+                        {
+                            "title": item.get("title", ""),
+                            "url": url,
+                            "content": item.get("body", item.get("content", "")),
+                        }
+                    )
+
+    return merged
+
+
 @tool
 async def search_foreign_sources(
     ticker: Annotated[str, "Stock ticker symbol"],
@@ -615,9 +673,6 @@ async def search_foreign_sources(
     - Include site: operator for targeting specific sources
     - Include year/date for recent data
     """
-    if not tavily_tool:
-        return "Foreign source search unavailable (Tavily not configured)"
-
     try:
         normalized_symbol = normalize_ticker(ticker)
         ticker_obj = yf.Ticker(normalized_symbol)
@@ -632,19 +687,51 @@ async def search_foreign_sources(
             query=full_query[:100],  # Truncate for logging
         )
 
-        results = await _tavily_search_with_timeout({"query": full_query})
+        # Run Tavily and DDG in parallel (different indexes = better coverage)
+        async def _noop():
+            return None
 
-        if not results:
+        tavily_coro = (
+            _tavily_search_with_timeout({"query": full_query})
+            if tavily_tool
+            else _noop()
+        )
+        ddg_coro = _ddg_search(full_query, max_results=5)
+
+        tavily_results, ddg_results = await asyncio.gather(
+            tavily_coro, ddg_coro, return_exceptions=True
+        )
+
+        # Handle exceptions from gather
+        if isinstance(tavily_results, Exception):
+            logger.warning("tavily_gather_error", error=str(tavily_results))
+            tavily_results = None
+        if isinstance(ddg_results, Exception):
+            logger.debug("ddg_gather_error", error=str(ddg_results))
+            ddg_results = []
+
+        # Merge results from both sources
+        merged = _merge_search_results(tavily_results, ddg_results)
+
+        if not merged:
             return f"No results found for foreign source search: {search_query}"
 
-        # Format results for agent consumption (with truncation)
-        # Use shared formatter instead of raw str() dump
-        results_str = _format_and_truncate_tavily_result(results)
+        # Format merged results for agent consumption
+        results_str = _format_and_truncate_tavily_result(merged)
+
+        # Identify sources used
+        sources_used = []
+        if tavily_results and not isinstance(tavily_results, Exception):
+            sources_used.append("Tavily")
+        if ddg_results and isinstance(ddg_results, list) and len(ddg_results) > 0:
+            sources_used.append("DuckDuckGo")
+        source_note = f"Sources: {', '.join(sources_used)}" if sources_used else ""
 
         # Add context header
         output = f"""### Foreign Source Search Results
 Query: {search_query}
 Ticker: {ticker} ({company_name})
+{source_note}
 
 {results_str}
 
@@ -655,6 +742,38 @@ Note: Verify dates and currencies in the source data."""
     except Exception as e:
         logger.error(f"Foreign source search error: {e}")
         return f"Error searching foreign sources: {e}"
+
+
+# --- Official Filing API Tool ---
+
+
+@tool
+async def get_official_filings(
+    ticker: Annotated[str, "Stock ticker symbol (e.g., 2767.T, 005930.KS)"],
+) -> str:
+    """
+    Fetch structured data from official filing APIs (EDINET for Japan,
+    DART for Korea, Companies House for UK, etc.).
+
+    Returns: major shareholders, segment breakdowns, and filing-level
+    cash flow from official regulatory filings. This data is more reliable
+    than web search for ownership structure and segment details.
+
+    Availability depends on market — returns 'not available' message for
+    markets without a configured filing API.
+    """
+    from src.data.filings import registry
+
+    normalized = normalize_ticker(ticker)
+    logger.info("official_filings_lookup", ticker=normalized)
+
+    result = await registry.fetch(normalized)
+    if result is None:
+        return (
+            f"No official filing API available for {normalized}. "
+            "Use search_foreign_sources instead."
+        )
+    return result.to_report_string()
 
 
 # --- Legal/Tax Disclosure Tool ---
@@ -1056,7 +1175,7 @@ class Toolkit:
 
     def get_foreign_language_tools(self):
         """Tools for Foreign Language Analyst (supplemental data from native sources)."""
-        return [search_foreign_sources]
+        return [search_foreign_sources, get_official_filings]
 
     def get_legal_tools(self):
         """Tools for Legal Counsel (PFIC/VIE detection for US investors)."""
@@ -1068,6 +1187,7 @@ class Toolkit:
             get_ownership_structure,  # yfinance: institutional holders, insider transactions
             get_news,  # Tavily: activist campaigns, buyback announcements
             search_foreign_sources,  # Native governance searches (Mochiai, Chaebol, etc.)
+            get_official_filings,  # EDINET/DART: official shareholder lists
         ]
 
     def get_all_tools(self):
@@ -1084,6 +1204,7 @@ class Toolkit:
             search_foreign_sources,
             search_legal_tax_disclosures,
             get_ownership_structure,
+            get_official_filings,
         ]
 
 

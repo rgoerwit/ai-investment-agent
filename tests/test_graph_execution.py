@@ -267,6 +267,103 @@ class TestAuditorIntegration:
         assert result == "Auditor"
 
 
+class TestAuditorLLMConfiguration:
+    """Tests for create_auditor_llm() parameter safety.
+
+    Validates that the auditor LLM never sets temperature (which various
+    OpenAI model families reject), and handles enable/disable correctly.
+    Tests are model-agnostic — the user configures models via .env.
+    """
+
+    @patch("src.llms.config")
+    def test_auditor_llm_never_sets_temperature(self, mock_config):
+        """Auditor LLM should never set temperature (any model can reject it)."""
+        from src.llms import create_auditor_llm
+
+        mock_config.enable_consultant = True
+        mock_config.get_openai_api_key.return_value = "fake-key"
+        mock_config.auditor_model = "any-model-name"
+        mock_config.consultant_model = "fallback-model"
+
+        llm = create_auditor_llm()
+        assert llm is not None
+        # LangChain ChatOpenAI defaults temperature to 0.7 unless explicitly set.
+        # We want the SDK default (1.0 for reasoning models, 0.7 for others)
+        # — NOT 0.0 which breaks many model families.
+        assert llm.temperature != 0.0
+
+    @patch("src.llms.config")
+    def test_auditor_llm_disabled_without_consultant(self, mock_config):
+        """Should return None when ENABLE_CONSULTANT is false."""
+        from src.llms import create_auditor_llm
+
+        mock_config.enable_consultant = False
+
+        llm = create_auditor_llm()
+        assert llm is None
+
+    @patch("src.llms.config")
+    def test_auditor_llm_disabled_without_api_key(self, mock_config):
+        """Should return None when OPENAI_API_KEY is missing."""
+        from src.llms import create_auditor_llm
+
+        mock_config.enable_consultant = True
+        mock_config.get_openai_api_key.return_value = None
+
+        llm = create_auditor_llm()
+        assert llm is None
+
+    @patch("src.llms.config")
+    def test_auditor_llm_falls_back_to_consultant_model(self, mock_config):
+        """Should use consultant_model when auditor_model is not set."""
+        from src.llms import create_auditor_llm
+
+        mock_config.enable_consultant = True
+        mock_config.get_openai_api_key.return_value = "fake-key"
+        mock_config.auditor_model = None
+        mock_config.consultant_model = "some-consultant-model"
+
+        llm = create_auditor_llm()
+        assert llm is not None
+
+    @patch("src.llms.config")
+    def test_auditor_llm_prefers_auditor_model(self, mock_config):
+        """Should use auditor_model over consultant_model when set."""
+        from src.llms import create_auditor_llm
+
+        mock_config.enable_consultant = True
+        mock_config.get_openai_api_key.return_value = "fake-key"
+        mock_config.auditor_model = "specific-auditor-model"
+        mock_config.consultant_model = "some-consultant-model"
+
+        llm = create_auditor_llm()
+        assert llm is not None
+        # The model set should be the auditor-specific one
+        assert "auditor" in llm.model_name
+
+    @patch("src.llms.config")
+    def test_consultant_llm_never_sets_temperature(self, mock_config):
+        """Consultant LLM should never set temperature (model-agnostic)."""
+        import src.llms
+        from src.llms import get_consultant_llm
+
+        # Reset the singleton so our mock config is used
+        src.llms._consultant_llm_instance = None
+
+        mock_config.enable_consultant = True
+        mock_config.get_openai_api_key.return_value = "fake-key"
+        mock_config.consultant_model = "any-model-name"
+        mock_config.consultant_quick_model = "any-quick-model"
+
+        try:
+            llm = get_consultant_llm()
+            assert llm is not None
+            assert llm.temperature != 0.0
+        finally:
+            # Clean up singleton for other tests
+            src.llms._consultant_llm_instance = None
+
+
 class TestTradingContext:
     """Test TradingContext dataclass."""
 

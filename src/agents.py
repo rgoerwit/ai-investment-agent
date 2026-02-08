@@ -207,6 +207,162 @@ def extract_news_highlights(news_report: str, max_chars: int = 25000) -> str:
     return result if result.strip() else news_report[:max_chars]
 
 
+def compute_data_conflicts(raw_data: str, foreign_data: str) -> str:
+    """
+    Deterministically compare Junior (aggregator) vs FLA (filing) data.
+
+    Returns a structured conflict report for injection into Senior's context.
+    This replaces asking the LLM to discover discrepancies — the code finds
+    them and presents them as facts the LLM cannot rationalize away.
+    """
+    if not raw_data:
+        return ""
+
+    conflicts: list[str] = []
+
+    # --- Parse Junior's raw JSON for key metrics ---
+    junior_ocf = None
+    junior_analysts = None
+    junior_peg = None
+    junior_mcap = None
+
+    # Junior output is tool-call JSON; extract from the text
+    def _extract_json_number(text: str, key: str) -> float | None:
+        """Find a JSON key-value pair and extract the number."""
+        for pattern in [
+            rf'"{key}"\s*:\s*(-?[\d.eE+]+)',
+            rf"'{key}'\s*:\s*(-?[\d.eE+]+)",
+        ]:
+            m = re.search(pattern, text)
+            if m:
+                try:
+                    return float(m.group(1))
+                except (ValueError, OverflowError):
+                    return None
+        return None
+
+    junior_ocf = _extract_json_number(raw_data, "operatingCashflow")
+    junior_analysts = _extract_json_number(raw_data, "numberOfAnalystOpinions")
+    junior_peg = _extract_json_number(raw_data, "pegRatio")
+    junior_mcap = _extract_json_number(raw_data, "marketCap")
+
+    # --- Parse FLA report for filing data ---
+    filing_ocf = None
+    filing_ocf_period = None
+    parent_company = None
+
+    if foreign_data:
+        # Filing OCF: look for "Operating Cash Flow (Filing): ¥10.91B" etc.
+        ocf_match = re.search(
+            r"Operating Cash Flow\s*\(?Filing\)?[:\s]*([¥$€£₩]?[\d,.]+)\s*(B|M|T|billion|million|trillion)?",
+            foreign_data,
+            re.IGNORECASE,
+        )
+        if ocf_match:
+            try:
+                val_str = ocf_match.group(1).replace(",", "").lstrip("¥$€£₩")
+                filing_ocf = float(val_str)
+                suffix = (ocf_match.group(2) or "").upper()
+                if suffix in ("B", "BILLION"):
+                    filing_ocf *= 1e9
+                elif suffix in ("M", "MILLION"):
+                    filing_ocf *= 1e6
+                elif suffix in ("T", "TRILLION"):
+                    filing_ocf *= 1e12
+            except (ValueError, OverflowError):
+                filing_ocf = None
+
+        period_match = re.search(
+            r"Period[:\s]*(FY\d{4}|H[12]\s*\d{4}|Q[1-4]\s*\d{4}|\d{4})",
+            foreign_data,
+            re.IGNORECASE,
+        )
+        if period_match:
+            filing_ocf_period = period_match.group(1).strip()
+
+        # Parent company
+        parent_match = re.search(
+            r"(?:Parent Company|Controlling Shareholder)[:\s]*(.+?)(?:\n|$)",
+            foreign_data,
+            re.IGNORECASE,
+        )
+        if parent_match:
+            parent_val = parent_match.group(1).strip()
+            if parent_val.upper() not in ("NONE", "N/A", "NOT FOUND", ""):
+                parent_company = parent_val
+
+    # --- Generate conflict report ---
+
+    # 1. OCF conflict
+    if junior_ocf is not None and filing_ocf is not None and junior_ocf != 0:
+        # Normalize to same scale if possible
+        j_abs = abs(junior_ocf)
+        f_abs = abs(filing_ocf)
+        # Only compare if both are in similar magnitude (both raw or both scaled)
+        if j_abs > 0 and f_abs > 0:
+            ratio = max(j_abs, f_abs) / min(j_abs, f_abs)
+            if ratio > 1.3:
+                period_note = f" ({filing_ocf_period})" if filing_ocf_period else ""
+                conflicts.append(
+                    f"- OCF: Junior={junior_ocf:,.0f} [yfinance] vs "
+                    f"Filing={filing_ocf:,.0f}{period_note} [FLA] — "
+                    f"{ratio:.1f}x difference. "
+                    f"{'PERIOD MISMATCH — cannot directly compare' if filing_ocf_period and 'H' in filing_ocf_period.upper() else 'INVESTIGATE: same metric, material divergence'}"
+                )
+
+    # 2. Analyst count anomaly
+    if junior_analysts is not None:
+        analysts_int = int(junior_analysts)
+        if analysts_int < 5 and junior_mcap is not None and junior_mcap > 500_000_000:
+            conflicts.append(
+                f"- ANALYST_COUNT: {analysts_int} [yfinance] for "
+                f"${junior_mcap / 1e9:.1f}B market cap — "
+                f"ANOMALY: likely data gap, not genuinely uncovered. "
+                f"Verify independently before relying on 'undiscovered' thesis."
+            )
+
+    # 3. PEG anomaly
+    if junior_peg is not None and 0 <= junior_peg < 0.05:
+        detail = (
+            "growth denominator zero/missing/infinite"
+            if junior_peg == 0
+            else f"implies {1/junior_peg:.0f}x expected growth"
+        )
+        conflicts.append(
+            f"- PEG: {junior_peg:.2f} [yfinance] — UNRELIABLE ({detail}). "
+            f"Do not use PEG to justify valuation."
+        )
+
+    # 4. Ownership gap
+    if foreign_data and parent_company:
+        conflicts.append(
+            f"- PARENT/CONTROLLER: {parent_company} [FLA] — "
+            f"yfinance does not provide parent-subsidiary data. "
+            f"If controlling holder >40%, minority influence is limited."
+        )
+    elif foreign_data and not parent_company:
+        # FLA searched but didn't find — note the gap
+        if "OWNERSHIP STRUCTURE" in foreign_data.upper() and (
+            "NONE" in foreign_data.upper() or "NOT FOUND" in foreign_data.upper()
+        ):
+            conflicts.append(
+                "- PARENT/CONTROLLER: Not found by FLA search. "
+                "yfinance only provides institutional holders, not parent companies. "
+                "Ownership structure is UNVERIFIED for this ticker."
+            )
+
+    if not conflicts:
+        return ""
+
+    header = (
+        "\n\n### AUTOMATED CONFLICT CHECK (system-generated, not agent output)\n"
+        "The following discrepancies were detected by comparing Junior (aggregator) "
+        "data against Foreign Language Analyst (filing/search) data. These are FACTS, "
+        "not suggestions. Address each in your CROSS-CHECK FLAGS.\n"
+    )
+    return header + "\n".join(conflicts) + "\n"
+
+
 # --- PM Input Summarization ---
 
 
@@ -238,7 +394,7 @@ def summarize_for_pm(report: str, report_type: str, max_chars: int = 3000) -> st
     blocks_to_preserve = []
     block_patterns = [
         r"(DATA_BLOCK:.*?)(?=\n\n[A-Z]|\Z)",
-        r"(### --- START DATA_BLOCK ---.*?### --- END DATA_BLOCK ---)",
+        r"(### --- START DATA_BLOCK[^\n]*---.*?### --- END DATA_BLOCK ---)",
         r"(PM_BLOCK:.*?)(?=\n\n[A-Z]|\Z)",
         r"(FORENSIC_DATA_BLOCK:.*?)(?=\n\n[A-Z]|\Z)",
         r"(VALUE_TRAP_BLOCK:.*?)(?=\n\n[A-Z]|\Z)",
@@ -332,46 +488,15 @@ def extract_field_sources_from_messages(messages: list) -> dict[str, str]:
         except (json.JSONDecodeError, TypeError, AttributeError):
             continue
 
-    return {}
-
-
-def extract_field_sources(raw_data: str | None) -> dict[str, str]:
-    """
-    Extract _field_sources from raw JSON data (JIT extraction).
-
-    Parses raw_fundamentals_data to retrieve per-field source attribution.
-    This avoids relying on LLMs to preserve metadata through summarization.
-
-    Note: This function is a fallback. Prefer extract_field_sources_from_messages()
-    which accesses the actual tool output rather than the LLM's summary.
-
-    Args:
-        raw_data: JSON string from Junior Fundamentals tool output
-
-    Returns:
-        Dict mapping field names to source names, or empty dict on failure.
-    """
-    if not raw_data or not isinstance(raw_data, str) or "{" not in raw_data:
-        return {}
-
-    try:
-        # Try parsing entire string as JSON first (most common case)
-        data = json.loads(raw_data)
-        if isinstance(data, dict):
-            return data.get("_field_sources", {})
-    except json.JSONDecodeError:
-        pass
-
-    # Fallback: extract JSON object if embedded in LLM response text
-    try:
-        match = re.search(r"\{.*\}", raw_data, re.DOTALL)
-        if match:
-            data = json.loads(match.group(0))
-            if isinstance(data, dict):
-                return data.get("_field_sources", {})
-    except (json.JSONDecodeError, AttributeError):
-        pass
-
+    logger.debug(
+        "field_sources_not_found",
+        message="No _field_sources found in message history",
+        tool_messages_checked=sum(
+            1
+            for m in messages
+            if hasattr(m, "type") and getattr(m, "type", None) == "tool"
+        ),
+    )
     return {}
 
 
@@ -383,7 +508,7 @@ def format_attribution_table(field_sources: dict[str, str] | None) -> str:
     Only injected into Consultant and PM prompts where adjudication occurs.
 
     Args:
-        field_sources: Dict from extract_field_sources()
+        field_sources: Dict from extract_field_sources_from_messages()
 
     Returns:
         Formatted attribution table, or empty string if no sources.
@@ -412,6 +537,58 @@ def format_attribution_table(field_sources: dict[str, str] | None) -> str:
         return ""
 
     return "\n### DATA SOURCE ATTRIBUTION\n" + "\n".join(lines) + "\n"
+
+
+def extract_source_conflicts_from_messages(messages: list) -> dict[str, Any]:
+    """
+    Extract _source_conflicts from ToolMessage content in message history.
+
+    Searches for get_financial_metrics tool output which contains per-field
+    source conflict records (when multiple data sources disagreed >20%).
+
+    Returns:
+        Dict mapping field names to conflict details, or empty dict.
+    """
+    from langchain_core.messages import ToolMessage
+
+    if not messages:
+        return {}
+
+    for msg in reversed(messages):
+        if not isinstance(msg, ToolMessage):
+            continue
+        try:
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            if '"_source_conflicts"' not in content:
+                continue
+            data = json.loads(content)
+            if isinstance(data, dict) and "_source_conflicts" in data:
+                conflicts = data["_source_conflicts"]
+                if isinstance(conflicts, dict) and conflicts:
+                    return conflicts
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            continue
+    return {}
+
+
+def format_conflict_table(messages: list) -> str:
+    """
+    Format source conflicts for Consultant/PM adjudication. ~30-60 tokens when populated.
+
+    Only injected when conflicts exist — zero tokens otherwise.
+    """
+    conflicts = extract_source_conflicts_from_messages(messages)
+    if not conflicts:
+        return ""
+
+    lines = ["\n### DATA SOURCE CONFLICTS (>20% variance between providers)"]
+    for field, c in conflicts.items():
+        lines.append(
+            f"  - {field}: {c.get('old_source', '?')}={c.get('old', '?')}"
+            f", {c.get('new_source', '?')}={c.get('new', '?')}"
+            f" (Δ{c.get('variance_pct', '?')}%)"
+        )
+    return "\n".join(lines) + "\n"
 
 
 # --- State Definitions ---
@@ -958,6 +1135,16 @@ def create_analyst_node(
                         message="News report not yet available (parallel execution) - proceeding without news context",
                     )
 
+                # Pre-computed conflict check (deterministic, not LLM)
+                conflict_report = compute_data_conflicts(raw_data, foreign_data)
+                if conflict_report:
+                    extra_context += conflict_report
+                    logger.info(
+                        "senior_fundamentals_conflicts_detected",
+                        ticker=ticker,
+                        conflict_count=conflict_report.count("\n- "),
+                    )
+
                 # Legal Counsel data for PFIC/VIE reconciliation
                 legal_report = state.get("legal_report", "")
                 if legal_report:
@@ -1017,9 +1204,9 @@ def create_analyst_node(
                     agent_key=agent_key,
                     content_type=type(response.content).__name__,
                     content_len=len(response.content) if response.content else 0,
-                    tool_calls_count=len(response.tool_calls)
-                    if response.tool_calls
-                    else 0,
+                    tool_calls_count=(
+                        len(response.tool_calls) if response.tool_calls else 0
+                    ),
                     has_tool_calls=has_tool_calls,
                 )
             except (AttributeError, TypeError):
@@ -1103,9 +1290,11 @@ def create_analyst_node(
                         ticker=ticker,
                         original_length=len(content_str),
                         retry_length=len(retry_content_str),
-                        retry_has_datablock="DATA_BLOCK" in retry_content_str
-                        if retry_content_str
-                        else False,
+                        retry_has_datablock=(
+                            "DATA_BLOCK" in retry_content_str
+                            if retry_content_str
+                            else False
+                        ),
                         retry_improved=len(retry_content_str) > len(content_str),
                     )
                     content_str = retry_content_str
@@ -1281,7 +1470,14 @@ Only use data explicitly related to {ticker} ({company_name}).
             }
         except Exception as e:
             logger.error(f"Researcher error {agent_key} R{round_num}: {str(e)}")
-            return {"investment_debate_state": {}}
+            # Write error to the specific round field so debate sync doesn't
+            # see an empty field and Research Manager gets diagnostic context.
+            field_name = f"{researcher_type}_round{round_num}"
+            return {
+                "investment_debate_state": {
+                    field_name: f"[SYSTEM ERROR]: {agent_key} R{round_num} failed - {str(e)}",
+                }
+            }
 
     return researcher_node
 
@@ -1328,10 +1524,17 @@ def create_valuation_calculator_node(llm) -> Callable:
 
         # Extract just the DATA_BLOCK for the prompt (reduce token usage)
         data_block_pattern = (
-            r"### --- START DATA_BLOCK ---(.+?)### --- END DATA_BLOCK ---"
+            r"### --- START DATA_BLOCK[^\n]*---(.+?)### --- END DATA_BLOCK ---"
         )
         blocks = list(re.finditer(data_block_pattern, fundamentals_report, re.DOTALL))
-        data_block = blocks[-1].group(0) if blocks else fundamentals_report
+        if not blocks:
+            logger.warning(
+                "valuation_calculator_datablock_regex_failed",
+                ticker=ticker,
+                message="DATA_BLOCK text present but regex extraction failed — skipping",
+            )
+            return {"valuation_params": ""}
+        data_block = blocks[-1].group(0)
 
         prompt = f"""{agent_prompt.system_message}
 
@@ -1401,7 +1604,7 @@ def create_research_manager_node(llm, memory: Any | None) -> Callable:
             # Truncation detection and logging
             from src.utils import detect_truncation
 
-            trunc_info = detect_truncation(content_str)
+            trunc_info = detect_truncation(content_str, agent="research_manager")
             if trunc_info["truncated"]:
                 logger.warning(
                     "agent_output_truncated",
@@ -1608,6 +1811,30 @@ NEUTRAL ANALYST (Balanced):\n{neutral_view if neutral_view else "N/A"}"""
                     ),
                 )
 
+        # --- Consultant Condition Enforcement ---
+        # Parse consultant verdict and enforce conditions as risk penalties
+        consultant_review = state.get("consultant_review", "")
+        if consultant_review:
+            if not isinstance(consultant_review, str):
+                consultant_review = extract_string_content(consultant_review)
+            consultant_conditions = RedFlagDetector.parse_consultant_conditions(
+                consultant_review
+            )
+            consultant_flags = RedFlagDetector.detect_consultant_flags(
+                consultant_conditions,
+                state.get("company_of_interest", "UNKNOWN"),
+            )
+            if consultant_flags:
+                red_flags.extend(consultant_flags)
+                logger.info(
+                    "consultant_flags_detected",
+                    ticker=state.get("company_of_interest", "UNKNOWN"),
+                    flag_types=[f["type"] for f in consultant_flags],
+                    total_risk_penalty=sum(
+                        f.get("risk_penalty", 0) for f in consultant_flags
+                    ),
+                )
+
         logger.info(
             "pm_inputs",
             has_market=bool(market),
@@ -1622,9 +1849,10 @@ NEUTRAL ANALYST (Balanced):\n{neutral_view if neutral_view else "N/A"}"""
             red_flags_count=len(red_flags),
         )
 
-        # JIT extraction of source attribution for adjudication
+        # JIT extraction of source attribution and conflicts for adjudication
         field_sources = extract_field_sources_from_messages(state.get("messages", []))
         attribution_table = format_attribution_table(field_sources)
+        conflict_table = format_conflict_table(state.get("messages", []))
 
         # Include consultant review in context (if available)
         consultant_section = f"""\n\nEXTERNAL CONSULTANT REVIEW (Cross-Validation):\n{consultant if consultant else "N/A (consultant disabled or unavailable)"}"""
@@ -1654,7 +1882,7 @@ NEWS ANALYST REPORT:
 {summarize_for_pm(news, "news", 2000) if news else "N/A"}
 
 FUNDAMENTALS ANALYST REPORT:
-{summarize_for_pm(fundamentals, "fundamentals", 6000) if fundamentals else "N/A"}{attribution_table}
+{summarize_for_pm(fundamentals, "fundamentals", 6000) if fundamentals else "N/A"}{attribution_table}{conflict_table}
 
 VALUE TRAP ANALYSIS:
 {summarize_for_pm(value_trap, "value_trap", 2500) if value_trap else "N/A"}{red_flag_section}
@@ -1678,7 +1906,7 @@ RISK TEAM DEBATE:
             # Truncation detection and logging
             from src.utils import detect_truncation
 
-            trunc_info = detect_truncation(content_str)
+            trunc_info = detect_truncation(content_str, agent="portfolio_manager")
             if trunc_info["truncated"]:
                 logger.warning(
                     "agent_output_truncated",
@@ -1698,20 +1926,32 @@ RISK TEAM DEBATE:
     return pm_node
 
 
-def create_consultant_node(llm, agent_key: str = "consultant") -> Callable:
+def create_consultant_node(
+    llm, agent_key: str = "consultant", tools: list | None = None
+) -> Callable:
     """
     Factory function creating external consultant node for cross-validation.
 
     Uses a different LLM (OpenAI) to review Gemini's analysis outputs and detect
     biases, groupthink, and factual errors that internal agents may miss.
 
+    Supports optional tools (e.g., spot_check_metric) with a bounded tool loop
+    to break the circular dependency where all agents rely on the same data pipeline.
+
     Args:
         llm: LLM instance (typically OpenAI ChatGPT for cross-validation)
         agent_key: Agent key for prompt lookup (default: "consultant")
+        tools: Optional list of verification tools for independent data checks
 
     Returns:
         Async function compatible with LangGraph StateGraph.add_node()
     """
+    MAX_TOOL_ITERATIONS = 3
+    MAX_TOOL_CALLS_PER_TURN = 4
+
+    # Pre-bind tools if available
+    tools_by_name = {t.name: t for t in tools} if tools else {}
+    llm_with_tools = llm.bind_tools(tools) if tools else None
 
     async def consultant_node(
         state: AgentState, config: RunnableConfig
@@ -1751,9 +1991,10 @@ def create_consultant_node(llm, agent_key: str = "consultant") -> Callable:
             )
             debate_history = "[SYSTEM DIAGNOSTIC: Debate state unexpectedly None. This may indicate the debate was skipped (fast-fail path) or a state propagation issue. Consultant cross-validation may be limited without debate context.]"
 
-        # JIT extraction of source attribution for adjudication
+        # JIT extraction of source attribution and conflicts for adjudication
         field_sources = extract_field_sources_from_messages(state.get("messages", []))
         attribution_table = format_attribution_table(field_sources)
+        conflict_table = format_conflict_table(state.get("messages", []))
 
         # Phase 2.2: Summarize inputs to reduce context size and prevent truncation
         market = state.get("market_report", "N/A")
@@ -1777,7 +2018,7 @@ NEWS ANALYST REPORT:
 
 FUNDAMENTALS ANALYST REPORT:
 {summarize_for_pm(fundamentals, "fundamentals", 5000) if fundamentals != "N/A" else "N/A"}
-{attribution_table}
+{attribution_table}{conflict_table}
 === BULL/BEAR DEBATE HISTORY ===
 
 {summarize_for_pm(debate_history, "debate", 4000) if debate_history != "N/A" else "N/A"}
@@ -1806,18 +2047,79 @@ COMPANY: {company_name}
 Provide your independent consultant review."""
 
         try:
-            # Use rate limit handling wrapper for robustness
-            response = await invoke_with_rate_limit_handling(
-                llm, [HumanMessage(content=prompt)], context=agent_prompt.agent_name
-            )
+            # Bounded tool loop for independent verification
+            from langchain_core.messages import ToolMessage as TM
 
-            # CRITICAL FIX: Normalize response.content to string
-            content_str = extract_string_content(response.content)
+            messages = [HumanMessage(content=prompt)]
+            active_llm = llm_with_tools or llm
+            content_str = ""
+
+            for iteration in range(MAX_TOOL_ITERATIONS + 1):
+                response = await invoke_with_rate_limit_handling(
+                    active_llm, messages, context=agent_prompt.agent_name
+                )
+
+                tool_calls = getattr(response, "tool_calls", None)
+                # Ensure tool_calls is a real list (not a Mock or other truthy object)
+                if (
+                    not isinstance(tool_calls, list)
+                    or not tool_calls
+                    or iteration == MAX_TOOL_ITERATIONS
+                ):
+                    # Final response — no more tool calls (or cap reached)
+                    content_str = extract_string_content(response.content)
+                    break
+
+                # Execute tool calls (capped per turn)
+                messages.append(response)
+                capped = tool_calls[:MAX_TOOL_CALLS_PER_TURN]
+                if len(tool_calls) > MAX_TOOL_CALLS_PER_TURN:
+                    logger.warning(
+                        "consultant_tool_calls_capped",
+                        ticker=ticker,
+                        requested=len(tool_calls),
+                        cap=MAX_TOOL_CALLS_PER_TURN,
+                    )
+
+                for tc in capped:
+                    tool_fn = tools_by_name.get(tc["name"])
+                    if tool_fn:
+                        try:
+                            result = await tool_fn.ainvoke(tc["args"])
+                        except Exception as tool_err:
+                            result = f"TOOL_ERROR: {str(tool_err)}"
+                    else:
+                        result = f"Unknown tool: {tc['name']}"
+                    messages.append(TM(content=str(result), tool_call_id=tc["id"]))
+
+                # Append SKIPPED messages for overflow tool calls
+                for tc in tool_calls[MAX_TOOL_CALLS_PER_TURN:]:
+                    skip_id = tc.get("id", f"skip_{tc['name']}")
+                    messages.append(
+                        TM(
+                            content="SKIPPED: Too many tool calls in one turn.",
+                            tool_call_id=skip_id,
+                        )
+                    )
+
+                logger.info(
+                    "consultant_tool_iteration",
+                    ticker=ticker,
+                    iteration=iteration + 1,
+                    tools_called=[tc["name"] for tc in capped],
+                )
+
+            if not content_str:
+                # Safety valve: invoke without tools to force text response
+                response = await invoke_with_rate_limit_handling(
+                    llm, messages, context=agent_prompt.agent_name
+                )
+                content_str = extract_string_content(response.content)
 
             # Truncation detection and logging
             from src.utils import detect_truncation
 
-            trunc_info = detect_truncation(content_str)
+            trunc_info = detect_truncation(content_str, agent="consultant")
             if trunc_info["truncated"]:
                 logger.warning(
                     "agent_output_truncated",
@@ -2095,11 +2397,18 @@ Perform a forensic audit using your tools."""
             error_str = str(e)
             logger.error("auditor_error", ticker=ticker, error=error_str)
 
-            # Fallback for edge cases where truncation wasn't enough
-            if (
+            # Classify the error for appropriate recovery
+            is_context_error = (
                 "context_length_exceeded" in error_str
                 or "maximum context length" in error_str
-            ):
+            )
+            is_param_error = (
+                "does not support" in error_str
+                or "Unsupported value" in error_str
+                or "invalid_request_error" in error_str
+            )
+
+            if is_context_error:
                 graceful_msg = f"""## FORENSIC AUDITOR REPORT
 
 **STATUS**: CONTEXT_LIMIT_EXCEEDED
@@ -2120,6 +2429,56 @@ VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
                     "auditor_report": graceful_msg,
                     "sender": "global_forensic_auditor",
                 }
+
+            if is_param_error:
+                # Model rejected a parameter (temperature, max_tokens, etc.)
+                # Retry with a safe fallback configuration
+                logger.warning(
+                    "auditor_param_error_retry",
+                    ticker=ticker,
+                    error=error_str,
+                )
+                try:
+                    from langchain_openai import ChatOpenAI
+
+                    fallback_llm = ChatOpenAI(
+                        model=llm.model_name,
+                        timeout=120,
+                        max_retries=3,
+                        streaming=False,
+                        # Omit temperature and max_tokens — use model defaults
+                    )
+                    agent = create_react_agent(
+                        fallback_llm,
+                        tools,
+                        pre_model_hook=truncate_tool_outputs_hook,
+                    )
+                    result = await agent.ainvoke(
+                        {
+                            "messages": [
+                                SystemMessage(content=agent_prompt.system_message),
+                                HumanMessage(content=human_msg),
+                            ]
+                        },
+                        config={"recursion_limit": 12},
+                    )
+                    response = result["messages"][-1].content
+                    response_str = extract_string_content(response)
+                    logger.info(
+                        "auditor_complete_after_retry",
+                        ticker=ticker,
+                        length=len(response_str),
+                    )
+                    return {
+                        "auditor_report": response_str,
+                        "sender": "global_forensic_auditor",
+                    }
+                except Exception as retry_e:
+                    logger.error(
+                        "auditor_retry_failed",
+                        ticker=ticker,
+                        error=str(retry_e),
+                    )
 
             return {
                 "auditor_report": f"Auditor Error: {error_str}",
@@ -2236,103 +2595,153 @@ def create_financial_health_validator_node() -> Callable:
             - red_flags: List of detected red flags (severity, type, detail, action)
             - pre_screening_result: "REJECT" if any AUTO_REJECT flags, else "PASS"
         """
-        from src.validators.red_flag_detector import RedFlagDetector
-
-        fundamentals_report = state.get("fundamentals_report", "")
-
-        # --- FIX: DEFENSIVE HANDLING FOR NON-STRING STATE VALUES ---
-        # LangGraph can sometimes pass accumulated list of state updates,
-        # or Gemini may return dict/structured content instead of string.
-        # Normalize to string using the helper function.
-        if not isinstance(fundamentals_report, str):
-            fundamentals_report = extract_string_content(fundamentals_report)
-
         ticker = state.get("company_of_interest", "UNKNOWN")
         company_name = state.get("company_name", ticker)
 
-        quiet_mode = settings_config.quiet_mode
+        try:
+            from src.validators.red_flag_detector import RedFlagDetector
 
-        # Graceful handling of missing fundamentals
-        if not fundamentals_report:
-            logger.warning(
-                "validator_no_fundamentals",
-                ticker=ticker,
-                message="No fundamentals report available - skipping pre-screening",
-            )
-            return {"red_flags": [], "pre_screening_result": "PASS"}
+            fundamentals_report = state.get("fundamentals_report", "")
 
-        # Extract sector classification from fundamentals report
-        sector = RedFlagDetector.detect_sector(fundamentals_report)
+            # --- FIX: DEFENSIVE HANDLING FOR NON-STRING STATE VALUES ---
+            # LangGraph can sometimes pass accumulated list of state updates,
+            # or Gemini may return dict/structured content instead of string.
+            # Normalize to string using the helper function.
+            if not isinstance(fundamentals_report, str):
+                fundamentals_report = extract_string_content(fundamentals_report)
 
-        # Extract metrics from DATA_BLOCK
-        metrics = RedFlagDetector.extract_metrics(fundamentals_report)
+            quiet_mode = settings_config.quiet_mode
 
-        # Log extracted metrics (unless in quiet mode)
-        if not quiet_mode:
-            logger.info(
-                "validator_extracted_metrics",
-                ticker=ticker,
-                sector=sector.value,
-                debt_to_equity=metrics.get("debt_to_equity"),
-                fcf=metrics.get("fcf"),
-                net_income=metrics.get("net_income"),
-                interest_coverage=metrics.get("interest_coverage"),
-                adjusted_health_score=metrics.get("adjusted_health_score"),
-            )
+            # Graceful handling of missing fundamentals
+            if not fundamentals_report:
+                logger.warning(
+                    "validator_no_fundamentals",
+                    ticker=ticker,
+                    message="No fundamentals report available - skipping pre-screening",
+                )
+                return {"red_flags": [], "pre_screening_result": "PASS"}
 
-        # Apply sector-aware red-flag detection logic
-        red_flags, pre_screening_result = RedFlagDetector.detect_red_flags(
-            metrics, ticker, sector
-        )
+            # Extract sector classification from fundamentals report
+            sector = RedFlagDetector.detect_sector(fundamentals_report)
 
-        # --- Legal/Tax Flag Detection ---
-        # Extract and process legal_report for PFIC/VIE warnings
-        # These are WARNING flags (risk penalty) not AUTO_REJECT flags
-        legal_report = state.get("legal_report", "")
-        if legal_report:
-            if not isinstance(legal_report, str):
-                legal_report = extract_string_content(legal_report)
+            # Extract metrics from DATA_BLOCK
+            metrics = RedFlagDetector.extract_metrics(fundamentals_report)
 
-            legal_risks = RedFlagDetector.extract_legal_risks(legal_report)
-            legal_warnings = RedFlagDetector.detect_legal_flags(legal_risks, ticker)
+            # --- DATA QUALITY CHECK ---
+            # If DATA_BLOCK is missing or completely unparseable, all metrics
+            # will be None. This means every threshold check in detect_red_flags
+            # is silently skipped, producing a false PASS. Flag this explicitly.
+            has_data_block = "### --- START DATA_BLOCK" in fundamentals_report
+            core_metrics = [
+                metrics.get("debt_to_equity"),
+                metrics.get("net_income"),
+                metrics.get("fcf"),
+                metrics.get("adjusted_health_score"),
+            ]
+            if not has_data_block or all(m is None for m in core_metrics):
+                logger.warning(
+                    "validator_no_usable_metrics",
+                    ticker=ticker,
+                    has_data_block=has_data_block,
+                    message="DATA_BLOCK missing or unparseable — cannot validate financial health",
+                )
+                return {
+                    "red_flags": [
+                        {
+                            "type": "DATA_QUALITY_WARNING",
+                            "severity": "WARNING",
+                            "detail": "DATA_BLOCK missing or unparseable in fundamentals report; "
+                            "financial health checks could not be performed",
+                            "action": "RISK_PENALTY",
+                            "risk_penalty": 1.0,
+                            "rationale": "Pre-screening was unable to verify financial health "
+                            "due to missing structured data. Proceeding with caution.",
+                        }
+                    ],
+                    "pre_screening_result": "PASS",
+                }
 
-            if legal_warnings:
-                red_flags.extend(legal_warnings)
-                if not quiet_mode:
-                    logger.info(
-                        "legal_warnings_detected",
-                        ticker=ticker,
-                        warning_types=[w["type"] for w in legal_warnings],
-                        total_risk_penalty=sum(
-                            w.get("risk_penalty", 0) for w in legal_warnings
-                        ),
-                    )
-
-        # Log results
-        if pre_screening_result == "REJECT":
-            logger.info(
-                "pre_screening_rejected",
-                ticker=ticker,
-                company_name=company_name,
-                red_flags_count=len(red_flags),
-                flag_types=[f["type"] for f in red_flags],
-                message=f"REJECTED: {ticker} ({company_name}) failed pre-screening due to {len(red_flags)} critical red flag(s)",
-            )
-        elif red_flags:
-            logger.info(
-                "pre_screening_warnings",
-                ticker=ticker,
-                warnings_count=len(red_flags),
-                message=f"{ticker} has {len(red_flags)} warning(s) but passed pre-screening",
-            )
-        else:
+            # Log extracted metrics (unless in quiet mode)
             if not quiet_mode:
                 logger.info(
-                    "pre_screening_passed",
+                    "validator_extracted_metrics",
                     ticker=ticker,
-                    message=f"{ticker} passed pre-screening validation",
+                    sector=sector.value,
+                    debt_to_equity=metrics.get("debt_to_equity"),
+                    fcf=metrics.get("fcf"),
+                    net_income=metrics.get("net_income"),
+                    interest_coverage=metrics.get("interest_coverage"),
+                    adjusted_health_score=metrics.get("adjusted_health_score"),
                 )
 
-        return {"red_flags": red_flags, "pre_screening_result": pre_screening_result}
+            # Apply sector-aware red-flag detection logic
+            red_flags, pre_screening_result = RedFlagDetector.detect_red_flags(
+                metrics, ticker, sector
+            )
+
+            # --- Legal/Tax Flag Detection ---
+            # Extract and process legal_report for PFIC/VIE warnings
+            # These are WARNING flags (risk penalty) not AUTO_REJECT flags
+            legal_report = state.get("legal_report", "")
+            if legal_report:
+                if not isinstance(legal_report, str):
+                    legal_report = extract_string_content(legal_report)
+
+                legal_risks = RedFlagDetector.extract_legal_risks(legal_report)
+                legal_warnings = RedFlagDetector.detect_legal_flags(legal_risks, ticker)
+
+                if legal_warnings:
+                    red_flags.extend(legal_warnings)
+                    if not quiet_mode:
+                        logger.info(
+                            "legal_warnings_detected",
+                            ticker=ticker,
+                            warning_types=[w["type"] for w in legal_warnings],
+                            total_risk_penalty=sum(
+                                w.get("risk_penalty", 0) for w in legal_warnings
+                            ),
+                        )
+
+            # Log results
+            if pre_screening_result == "REJECT":
+                logger.info(
+                    "pre_screening_rejected",
+                    ticker=ticker,
+                    company_name=company_name,
+                    red_flags_count=len(red_flags),
+                    flag_types=[f["type"] for f in red_flags],
+                    message=f"REJECTED: {ticker} ({company_name}) failed pre-screening due to {len(red_flags)} critical red flag(s)",
+                )
+            elif red_flags:
+                logger.info(
+                    "pre_screening_warnings",
+                    ticker=ticker,
+                    warnings_count=len(red_flags),
+                    message=f"{ticker} has {len(red_flags)} warning(s) but passed pre-screening",
+                )
+            else:
+                if not quiet_mode:
+                    logger.info(
+                        "pre_screening_passed",
+                        ticker=ticker,
+                        message=f"{ticker} passed pre-screening validation",
+                    )
+
+            return {
+                "red_flags": red_flags,
+                "pre_screening_result": pre_screening_result,
+            }
+
+        except Exception as e:
+            # CRITICAL: Always write pre_screening_result so sync_check_router
+            # doesn't hang waiting for it. Default to PASS on error to allow
+            # the debate phase to proceed (better than blocking the graph).
+            logger.error(
+                "validator_crashed",
+                ticker=ticker,
+                error=str(e),
+                message="Validator failed - defaulting to PASS to avoid blocking graph",
+            )
+            return {"red_flags": [], "pre_screening_result": "PASS"}
 
     return financial_health_validator_node

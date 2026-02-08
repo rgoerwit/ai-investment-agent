@@ -106,6 +106,36 @@ class TestCompleteOutput:
         result = detect_truncation(text)
         assert result["truncated"] is False
 
+    def test_ends_with_smart_double_quote(self):
+        """GPT-style smart right double quote should not be flagged."""
+        text = "I would not stake my reputation on without fixes.\u201d"
+        result = detect_truncation(text)
+        assert result["truncated"] is False
+
+    def test_ends_with_smart_single_quote(self):
+        """Smart right single quote should not be flagged."""
+        text = "The CEO\u2019s outlook is positive.\u2019"
+        result = detect_truncation(text)
+        assert result["truncated"] is False
+
+    def test_ends_with_cjk_period(self):
+        """CJK period (Japanese/Chinese) should not be flagged."""
+        text = "分析が完了しました\u3002"
+        result = detect_truncation(text)
+        assert result["truncated"] is False
+
+    def test_ends_with_cjk_bracket(self):
+        """CJK right corner bracket should not be flagged."""
+        text = "\u300c分析完了\u300d"
+        result = detect_truncation(text)
+        assert result["truncated"] is False
+
+    def test_ends_with_ellipsis_char(self):
+        """Unicode horizontal ellipsis should not be flagged."""
+        text = "The outlook remains uncertain\u2026"
+        result = detect_truncation(text)
+        assert result["truncated"] is False
+
 
 class TestEdgeCases:
     """Test edge cases and boundary conditions."""
@@ -134,3 +164,30 @@ class TestEdgeCases:
         """Non-string input should not crash."""
         result = detect_truncation(12345)
         assert result["truncated"] is False
+
+
+class TestAgentScoping:
+    """Test that block checks are scoped to the producing agent."""
+
+    def test_consultant_mentioning_data_block_not_flagged(self):
+        """Consultant referencing DATA_BLOCK in prose should not trigger false positive."""
+        text = (
+            "CONSULTANT REVIEW: CONDITIONAL APPROVAL\n"
+            "The DATA_BLOCK: shows P/E of 10.3 which is consistent with filings.\n"
+            "Overall analysis is sound."
+        )
+        result = detect_truncation(text, agent="consultant")
+        assert result["truncated"] is False
+
+    def test_fundamentals_analyst_incomplete_data_block_flagged(self):
+        """Fundamentals analyst with incomplete DATA_BLOCK should still be caught."""
+        text = "DATA_BLOCK:\nTICKER: TEST.X\nSECTOR: Technology"
+        result = detect_truncation(text, agent="fundamentals_analyst")
+        assert result["truncated"] is True
+        assert "DATA_BLOCK" in result["marker"]
+
+    def test_no_agent_checks_all_blocks(self):
+        """Without agent param, all block checks apply (backward compat)."""
+        text = "DATA_BLOCK:\nTICKER: TEST.X\nSECTOR: Technology"
+        result = detect_truncation(text)
+        assert result["truncated"] is True

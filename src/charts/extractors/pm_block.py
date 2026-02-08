@@ -103,11 +103,15 @@ def extract_pm_block(pm_output: str) -> PMBlockData:
         return PMBlockData()
 
     # Find the PM_BLOCK section (take last one for self-correction pattern)
-    pm_block_pattern = r"### --- START PM_BLOCK ---(.+?)### --- END PM_BLOCK ---"
+    # Tolerates optional descriptive text after "PM_BLOCK" (future-proofing)
+    pm_block_pattern = r"### --- START PM_BLOCK[^\n]*---(.+?)### --- END PM_BLOCK ---"
     blocks = list(re.finditer(pm_block_pattern, pm_output, re.DOTALL))
 
     if not blocks:
-        logger.debug("No PM_BLOCK found in Portfolio Manager output")
+        logger.warning(
+            "no_pm_block_found",
+            message="No PM_BLOCK found in Portfolio Manager output — charts will use fallback defaults",
+        )
         return PMBlockData()
 
     # Use the last (most corrected) block
@@ -119,7 +123,7 @@ def extract_pm_block(pm_output: str) -> PMBlockData:
     if verdict_raw:
         verdict = verdict_raw.upper().replace(" ", "_").replace("-", "_")
         # Normalize common variations
-        if verdict == "DO_NOT_INITIATE" or verdict == "DONOTINITATE":
+        if verdict in ("DO_NOT_INITIATE", "DONOTINITATE", "DONOTINITIATE"):
             verdict = "DO_NOT_INITIATE"
 
     # Determine show_valuation_chart based on verdict

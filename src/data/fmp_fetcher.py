@@ -32,6 +32,9 @@ from src.data.interfaces import FinancialFetcher
 
 logger = logging.getLogger(__name__)
 
+# Default timeout for HTTP requests (session-level safety net + per-request)
+_TIMEOUT = aiohttp.ClientTimeout(total=10)
+
 
 class FMPFetcher(FinancialFetcher):
     """
@@ -50,23 +53,7 @@ class FMPFetcher(FinancialFetcher):
         """
         self.api_key = api_key or config.get_fmp_api_key()
         self.base_url = "https://financialmodelingprep.com/stable"
-        self._session = None
         self._key_validated = False
-
-    async def __aenter__(self):
-        """Async context manager entry."""
-        self._session = aiohttp.ClientSession()
-        return self
-
-    async def __aexit__(self, *args):
-        """Async context manager exit."""
-        await self.close()
-
-    async def close(self):
-        """Close the aiohttp session. Safe to call multiple times."""
-        if self._session and not self._session.closed:
-            await self._session.close()
-            self._session = None
 
     def is_available(self) -> bool:
         """Check if FMP is configured (API key present)."""
@@ -89,41 +76,43 @@ class FMPFetcher(FinancialFetcher):
         if not self.is_available():
             return None
 
-        if not self._session:
-            self._session = aiohttp.ClientSession()
-
         url = f"{self.base_url}/{endpoint}"
         params["apikey"] = self.api_key
 
         try:
-            async with self._session.get(url, params=params, timeout=10) as response:
-                if response.status == 200:
-                    try:
-                        data = await response.json()
-                    except (ValueError, aiohttp.ContentTypeError) as e:
-                        logger.debug(f"FMP malformed JSON for {endpoint}: {e}")
-                        return None
-                    self._key_validated = True
-                    return data
+            async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
+                async with session.get(
+                    url, params=params, timeout=_TIMEOUT
+                ) as response:
+                    if response.status == 200:
+                        try:
+                            data = await response.json()
+                        except (ValueError, aiohttp.ContentTypeError) as e:
+                            logger.debug(f"FMP malformed JSON for {endpoint}: {e}")
+                            return None
+                        self._key_validated = True
+                        return data
 
-                elif response.status == 403:
-                    if not self._key_validated:
-                        # Key is invalid - this is a configuration error
-                        logger.error("FMP API key is invalid (403 Forbidden)")
-                        raise ValueError(
-                            "FMP_API_KEY is invalid or expired. Check your configuration."
-                        )
+                    elif response.status == 403:
+                        if not self._key_validated:
+                            # Key is invalid - this is a configuration error
+                            logger.error("FMP API key is invalid (403 Forbidden)")
+                            raise ValueError(
+                                "FMP_API_KEY is invalid or expired. Check your configuration."
+                            )
+                        else:
+                            # Key was valid before, might be rate limit
+                            logger.warning(
+                                f"FMP 403 error for {endpoint} (possible rate limit)"
+                            )
+                            return None
+
                     else:
-                        # Key was valid before, might be rate limit
-                        logger.warning(
-                            f"FMP 403 error for {endpoint} (possible rate limit)"
+                        # Other HTTP errors - log at debug level
+                        logger.debug(
+                            f"FMP API returned {response.status} for {endpoint}"
                         )
                         return None
-
-                else:
-                    # Other HTTP errors - log at debug level
-                    logger.debug(f"FMP API returned {response.status} for {endpoint}")
-                    return None
 
         except ValueError:
             # Re-raise API key validation errors
@@ -235,5 +224,4 @@ async def fetch_fmp_metrics(symbol: str) -> dict[str, float | None] | None:
     if not fmp.is_available():
         return None
 
-    async with fmp:
-        return await fmp.get_financial_metrics(symbol)
+    return await fmp.get_financial_metrics(symbol)

@@ -292,9 +292,10 @@ async def handle_article_generation(
     report_text: str,
     trade_date: str,
     valuation_context: str | None = None,
+    analysis_result: dict | None = None,
 ) -> None:
     """
-    Generate article if --article flag is set.
+    Generate article if --article flag is set, then run Editor-in-Chief review.
 
     Args:
         args: Parsed arguments namespace
@@ -303,13 +304,14 @@ async def handle_article_generation(
         report_text: The full analysis report
         trade_date: Date of the analysis
         valuation_context: Optional context about chart valuation vs decision
+        analysis_result: Raw result dictionary containing DATA_BLOCK/PM_BLOCK
     """
     article_path = resolve_article_path(args, ticker)
     if not article_path:
         return
 
     try:
-        from src.article_writer import ArticleWriter
+        from src.article_writer import ArticleEditor, ArticleWriter
 
         if not args.quiet and not args.brief:
             console.print("\n[cyan]Generating article...[/cyan]")
@@ -317,7 +319,7 @@ async def handle_article_generation(
         # Default to local paths so markdown renders immediately in editors
         # Users who want GitHub URLs can set GITHUB_RAW_BASE env var
         writer = ArticleWriter(use_github_urls=False)
-        article = writer.write(
+        draft_article = writer.write(
             ticker=ticker,
             company_name=company_name,
             report_text=report_text,
@@ -326,12 +328,74 @@ async def handle_article_generation(
             valuation_context=valuation_context,
         )
 
+        # Run Editor-in-Chief review loop
+        editor = ArticleEditor()
+        final_article = draft_article  # Default to draft if editor unavailable or fails
+
+        if editor.is_available():
+            if not args.quiet and not args.brief:
+                console.print("[cyan]Running Editor-in-Chief review...[/cyan]")
+
+            # Extract ground truth from analysis result
+            data_block = ""
+            pm_block = ""
+            valuation_params = ""
+            if analysis_result:
+                data_block = analysis_result.get("fundamentals_report", "")
+                pm_block = analysis_result.get("final_trade_decision", "")
+                valuation_params = analysis_result.get("valuation_params", "")
+
+            try:
+                final_article, feedback = await editor.edit(
+                    writer=writer,
+                    article_draft=draft_article,
+                    ticker=ticker,
+                    company_name=company_name,
+                    data_block=data_block,
+                    pm_block=pm_block,
+                    valuation_params=valuation_params,
+                )
+
+                # Log editor outcome
+                if feedback.get("skipped"):
+                    logger.info("Editor skipped (not available)")
+                elif feedback.get("verdict") == "APPROVED":
+                    logger.info(
+                        "Article approved by editor",
+                        confidence=feedback.get("confidence"),
+                    )
+                else:
+                    logger.info(
+                        "Article revised by editor",
+                        revisions=feedback.get("revisions", 0),
+                    )
+
+                # Save the final (possibly edited) article
+                if final_article != draft_article:
+                    with open(article_path, "w") as f:
+                        f.write(final_article)
+                    if not args.quiet and not args.brief:
+                        console.print("[green]Article revised and saved.[/green]")
+
+            except Exception as e:
+                # Safety net: if editor fails, preserve the draft
+                logger.warning(
+                    f"Editor revision failed, preserving original draft: {e}"
+                )
+                final_article = draft_article
+                if not args.quiet and not args.brief:
+                    console.print(
+                        "[yellow]Editor revision failed, using original draft.[/yellow]"
+                    )
+
         if not args.quiet and not args.brief:
             console.print(
                 f"[green]Article saved to:[/green] [cyan]{article_path}[/cyan]"
             )
             # Defensive: ensure article is a string before counting words
-            word_count = len(article.split()) if isinstance(article, str) else 0
+            word_count = (
+                len(final_article.split()) if isinstance(final_article, str) else 0
+            )
             console.print(f"[dim]Word count: {word_count} words[/dim]")
 
     except Exception as e:
@@ -1088,6 +1152,7 @@ async def main():
                     report_text=report,
                     trade_date=trade_date,
                     valuation_context=reporter.get_valuation_context(),
+                    analysis_result=result,
                 )
 
             sys.exit(0)

@@ -88,10 +88,11 @@ class TestSearchForeignSourcesTool:
         from src.toolkit import toolkit
 
         foreign_tools = toolkit.get_foreign_language_tools()
-        assert len(foreign_tools) == 1
+        assert len(foreign_tools) == 2
 
-        tool = foreign_tools[0]
-        assert tool.name == "search_foreign_sources"
+        tool_names = [t.name for t in foreign_tools]
+        assert "search_foreign_sources" in tool_names
+        assert "get_official_filings" in tool_names
 
     def test_tool_in_all_tools(self):
         """Verify tool is included in get_all_tools."""
@@ -113,16 +114,17 @@ class TestSearchForeignSourcesTool:
 
     @pytest.mark.asyncio
     async def test_tool_handles_no_tavily(self):
-        """Test graceful handling when Tavily is not configured."""
+        """Test graceful handling when Tavily is not configured and DDG also empty."""
         from src.toolkit import search_foreign_sources
 
-        # Mock tavily_tool as None
+        # Mock tavily_tool as None AND DDG returning empty
         with patch("src.toolkit.tavily_tool", None):
-            result = await search_foreign_sources.ainvoke(
-                {"ticker": "7203.T", "search_query": "Toyota 決算短信"}
-            )
+            with patch("src.toolkit._ddg_search", return_value=[]):
+                result = await search_foreign_sources.ainvoke(
+                    {"ticker": "7203.T", "search_query": "Toyota 決算短信"}
+                )
 
-            assert "unavailable" in result.lower() or "not configured" in result.lower()
+                assert "no results" in result.lower()
 
 
 class TestAgentStateField:
@@ -319,6 +321,121 @@ class TestSeniorFundamentalsContextInjection:
 
         # The node function exists and is callable
         assert callable(node_func)
+
+
+class TestComputeDataConflicts:
+    """Tests for the pre-Senior conflict detection function."""
+
+    def test_ocf_discrepancy_flagged(self):
+        """OCF mismatch >30% between Junior and FLA produces a conflict."""
+        from src.agents import compute_data_conflicts
+
+        junior = '{"operatingCashflow": 19950000000, "marketCap": 130000000000}'
+        fla = (
+            "**FILING CASH FLOW**\n"
+            "- Operating Cash Flow (Filing): ¥10.91B\n"
+            "- Period: H1 2025\n"
+        )
+        result = compute_data_conflicts(junior, fla)
+        assert "OCF" in result
+        assert "PERIOD MISMATCH" in result
+        assert "yfinance" in result
+
+    def test_ocf_no_conflict_when_close(self):
+        """OCF values within 30% produce no conflict."""
+        from src.agents import compute_data_conflicts
+
+        junior = '{"operatingCashflow": 10000000000}'
+        fla = (
+            "**FILING CASH FLOW**\n"
+            "- Operating Cash Flow (Filing): ¥11.5B\n"
+            "- Period: FY2024\n"
+        )
+        result = compute_data_conflicts(junior, fla)
+        assert "OCF" not in result
+
+    def test_peg_zero_flagged(self):
+        """PEG 0.00 produces an UNRELIABLE flag."""
+        from src.agents import compute_data_conflicts
+
+        junior = '{"pegRatio": 0.0}'
+        result = compute_data_conflicts(junior, "")
+        assert "PEG" in result
+        assert "UNRELIABLE" in result
+
+    def test_peg_near_zero_flagged(self):
+        """PEG 0.02 produces an UNRELIABLE flag with implied growth."""
+        from src.agents import compute_data_conflicts
+
+        junior = '{"pegRatio": 0.02}'
+        result = compute_data_conflicts(junior, "")
+        assert "PEG" in result
+        assert "UNRELIABLE" in result
+        assert "50x" in result
+
+    def test_peg_normal_no_flag(self):
+        """PEG 0.8 produces no flag."""
+        from src.agents import compute_data_conflicts
+
+        junior = '{"pegRatio": 0.8}'
+        result = compute_data_conflicts(junior, "")
+        assert "PEG" not in result
+
+    def test_low_analyst_count_for_large_cap(self):
+        """Analyst count < 5 for >$500M market cap flags as anomaly."""
+        from src.agents import compute_data_conflicts
+
+        junior = '{"numberOfAnalystOpinions": 2, "marketCap": 1300000000}'
+        result = compute_data_conflicts(junior, "")
+        assert "ANALYST_COUNT" in result
+        assert "ANOMALY" in result
+
+    def test_low_analyst_count_small_cap_ok(self):
+        """Analyst count < 5 for small cap ($200M) is not anomalous."""
+        from src.agents import compute_data_conflicts
+
+        junior = '{"numberOfAnalystOpinions": 2, "marketCap": 200000000}'
+        result = compute_data_conflicts(junior, "")
+        assert "ANALYST_COUNT" not in result
+
+    def test_parent_company_found(self):
+        """FLA finding a parent company flags the ownership gap."""
+        from src.agents import compute_data_conflicts
+
+        junior = '{"operatingCashflow": 5000000000}'
+        fla = (
+            "**OWNERSHIP STRUCTURE**\n"
+            "- Controlling Shareholder: Bandai Namco Holdings (49.12%)\n"
+        )
+        result = compute_data_conflicts(junior, fla)
+        assert "PARENT" in result
+        assert "Bandai Namco" in result
+
+    def test_empty_junior_returns_nothing(self):
+        """No Junior data → empty result."""
+        from src.agents import compute_data_conflicts
+
+        result = compute_data_conflicts("", "some FLA data")
+        assert result == ""
+
+    def test_no_conflicts_returns_empty(self):
+        """Clean data with no issues → empty result."""
+        from src.agents import compute_data_conflicts
+
+        junior = (
+            '{"pegRatio": 1.2, "numberOfAnalystOpinions": 8, "marketCap": 500000000}'
+        )
+        result = compute_data_conflicts(junior, "")
+        assert result == ""
+
+    def test_header_present_when_conflicts_exist(self):
+        """Conflict report starts with AUTOMATED CONFLICT CHECK header."""
+        from src.agents import compute_data_conflicts
+
+        junior = '{"pegRatio": 0.0}'
+        result = compute_data_conflicts(junior, "")
+        assert "AUTOMATED CONFLICT CHECK" in result
+        assert "system-generated" in result
 
 
 class TestPromptLoading:

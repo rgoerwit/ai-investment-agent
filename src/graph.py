@@ -116,7 +116,18 @@ def route_tools(state: AgentState) -> str:
         "value_trap_detector": "Value Trap Detector",
     }
 
-    node_name = agent_map.get(sender, "Market Analyst")
+    node_name = agent_map.get(sender)
+
+    if node_name is None:
+        logger.warning(
+            "tool_routing_unknown_sender",
+            sender=sender,
+            fallback="Market Analyst",
+            known_agents=list(agent_map.keys()),
+            message="Unknown sender in route_tools - defaulting to Market Analyst. "
+            "If a new agent was added, update agent_map in route_tools().",
+        )
+        node_name = "Market Analyst"
 
     logger.debug("tool_routing", sender=sender, routing_to=node_name)
 
@@ -744,10 +755,15 @@ def create_trading_graph(
     neutral = create_risk_debater_node(neutral_llm, "neutral_analyst")
     pm = create_portfolio_manager_node(pm_llm, risk_manager_memory)
 
-    # Consultant node (optional)
+    # Consultant node (optional, with independent verification tools)
     consultant = None
     if consultant_llm is not None:
-        consultant = create_consultant_node(consultant_llm, "consultant")
+        from src.consultant_tools import get_consultant_tools
+
+        consultant_tools = get_consultant_tools()
+        consultant = create_consultant_node(
+            consultant_llm, "consultant", tools=consultant_tools
+        )
         logger.info("consultant_node_enabled", ticker=ticker)
     else:
         logger.info("consultant_node_disabled", ticker=ticker)

@@ -103,6 +103,29 @@ PE_RATIO_TTM: 14.50
         numeric_metrics = {k: v for k, v in metrics.items() if not k.startswith("_")}
         assert all(v is None for v in numeric_metrics.values())
 
+    def test_extract_with_descriptive_marker(self):
+        """Test extraction when DATA_BLOCK marker contains descriptive text (v8.6+)."""
+        report = """
+### --- START DATA_BLOCK (INTERNAL SCORING — NOT THIRD-PARTY RATINGS) ---
+SECTOR: General/Diversified
+RAW_HEALTH_SCORE: 10/12
+ADJUSTED_HEALTH_SCORE: 87.5% (10/12 available)
+PE_RATIO_TTM: 6.19
+PEG_RATIO: 0.07
+### --- END DATA_BLOCK ---
+
+D/E: 16
+Interest Coverage: 25.0x
+Free Cash Flow: ¥13.39B
+Net Income: ¥15.0B
+"""
+
+        metrics = RedFlagDetector.extract_metrics(report)
+
+        assert metrics["adjusted_health_score"] == 87.5
+        assert metrics["pe_ratio"] == 6.19
+        assert metrics["debt_to_equity"] == 16.0
+
     def test_extract_debt_to_equity_conversion(self):
         """Test D/E ratio conversion from ratio to percentage."""
         # Case 1: Already percentage (>10)
@@ -490,8 +513,20 @@ class TestRedFlagIntegration:
             assert "rationale" in flag
 
             # Verify value constraints
-            assert flag["severity"] in ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
-            assert flag["action"] in ["AUTO_REJECT", "WARNING"]
+            assert flag["severity"] in [
+                "CRITICAL",
+                "HIGH",
+                "MEDIUM",
+                "LOW",
+                "WARNING",
+                "POSITIVE",
+            ]
+            assert flag["action"] in [
+                "AUTO_REJECT",
+                "WARNING",
+                "RISK_PENALTY",
+                "RISK_BONUS",
+            ]
 
 
 class TestRealWorldEdgeCases:
@@ -1743,3 +1778,916 @@ DIVIDEND_COVERAGE: N/A
 """
         metrics_na = RedFlagDetector.extract_metrics(report_na)
         assert metrics_na["dividend_coverage"] is None
+
+
+class TestDataBlockMarkerVariants:
+    """Regression tests ensuring DATA_BLOCK parsing tolerates marker variations.
+
+    Guards against the v8.6 regression where adding descriptive text to the
+    START marker broke the regex and silently bypassed all code-driven checks.
+    """
+
+    def test_plain_marker(self):
+        """Original plain marker format."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 70%
+PE_RATIO_TTM: 15.0
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["adjusted_health_score"] == 70.0
+        assert metrics["pe_ratio"] == 15.0
+
+    def test_marker_with_parenthetical_description(self):
+        """v8.6+ format with descriptive text in parentheses."""
+        report = """
+### --- START DATA_BLOCK (INTERNAL SCORING — NOT THIRD-PARTY RATINGS) ---
+ADJUSTED_HEALTH_SCORE: 87.5%
+PE_RATIO_TTM: 6.19
+PEG_RATIO: 0.07
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["adjusted_health_score"] == 87.5
+        assert metrics["pe_ratio"] == 6.19
+        assert metrics["peg_ratio"] == 0.07
+
+    def test_marker_with_arbitrary_annotation(self):
+        """Future-proof: any text between DATA_BLOCK and closing ---."""
+        report = """
+### --- START DATA_BLOCK v9.0 REVISED ---
+ADJUSTED_HEALTH_SCORE: 55%
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["adjusted_health_score"] == 55.0
+
+    def test_marker_with_hyphenated_text(self):
+        """Text containing hyphens (like THIRD-PARTY) must not break parsing."""
+        report = """
+### --- START DATA_BLOCK (THIRD-PARTY ADJUSTED) ---
+ADJUSTED_HEALTH_SCORE: 60%
+ROA_PERCENT: 8.5%
+ROA_5Y_AVG: 5.2%
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["adjusted_health_score"] == 60.0
+        assert metrics["roa_current"] == 8.5
+        assert metrics["roa_5y_avg"] == 5.2
+
+    def test_multiple_blocks_with_descriptive_marker_uses_last(self):
+        """Self-correction pattern: uses last block even with annotated markers."""
+        report = """
+### --- START DATA_BLOCK (INTERNAL SCORING) ---
+ADJUSTED_HEALTH_SCORE: 30%
+### --- END DATA_BLOCK ---
+
+Note: Correcting above scores.
+
+### --- START DATA_BLOCK (INTERNAL SCORING — CORRECTED) ---
+ADJUSTED_HEALTH_SCORE: 80%
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["adjusted_health_score"] == 80.0
+
+
+class TestCyclicalPeakDetection:
+    """Test cyclical peak warning detection."""
+
+    def test_cyclical_peak_roa_above_5y_avg(self):
+        """ROA 2x above 5-year average with UNSTABLE trend triggers warning."""
+        metrics = {
+            "roa_current": 16.0,
+            "roa_5y_avg": 8.0,  # 2x ratio
+            "roe_5y_avg": 18.0,
+            "peg_ratio": 0.07,
+            "profitability_trend": "UNSTABLE",
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": 6.0,
+            "pb_ratio": None,
+            "adjusted_health_score": 87.5,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+        }
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "2767.T")
+        cyclical_flags = [f for f in flags if f["type"] == "CYCLICAL_PEAK_WARNING"]
+        assert len(cyclical_flags) == 1
+        assert cyclical_flags[0]["risk_penalty"] == 1.0
+        assert result == "PASS"  # Warning, not reject
+
+    def test_no_cyclical_peak_when_stable(self):
+        """No warning when profitability is STABLE even if ROA above average."""
+        metrics = {
+            "roa_current": 16.0,
+            "roa_5y_avg": 8.0,
+            "roe_5y_avg": 18.0,
+            "peg_ratio": 0.07,
+            "profitability_trend": "STABLE",
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": 6.0,
+            "pb_ratio": None,
+            "adjusted_health_score": 87.5,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+        }
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        cyclical_flags = [f for f in flags if f["type"] == "CYCLICAL_PEAK_WARNING"]
+        assert len(cyclical_flags) == 0
+
+    def test_cyclical_peak_peg_only(self):
+        """Ultra-low PEG with UNSTABLE trend triggers even without ROA data."""
+        metrics = {
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": 0.05,
+            "profitability_trend": "UNSTABLE",
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": 5.0,
+            "pb_ratio": None,
+            "adjusted_health_score": None,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+        }
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        cyclical_flags = [f for f in flags if f["type"] == "CYCLICAL_PEAK_WARNING"]
+        assert len(cyclical_flags) == 1
+        assert "PEG" in cyclical_flags[0]["detail"]
+
+    def test_no_cyclical_peak_normal_roa(self):
+        """ROA only slightly above average does not trigger."""
+        metrics = {
+            "roa_current": 9.0,
+            "roa_5y_avg": 8.0,  # 1.125x — below 1.5x threshold
+            "roe_5y_avg": 15.0,
+            "peg_ratio": 0.8,
+            "profitability_trend": "UNSTABLE",
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": 12.0,
+            "pb_ratio": None,
+            "adjusted_health_score": None,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+            "ocf": None,
+        }
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        cyclical_flags = [f for f in flags if f["type"] == "CYCLICAL_PEAK_WARNING"]
+        assert len(cyclical_flags) == 0
+
+
+class TestOCFNIRatioCheck:
+    """Tests for RED FLAG 7: Suspicious OCF/NI Ratio."""
+
+    def _make_metrics(self, ocf=None, net_income=None, **overrides):
+        """Helper to create metrics dict with OCF and NI values."""
+        base = {
+            "debt_to_equity": None,
+            "net_income": net_income,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": 10.0,
+            "pb_ratio": None,
+            "adjusted_health_score": 60.0,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+            "profitability_trend": None,
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": None,
+            "ocf": ocf,
+            "_raw_report": "",
+        }
+        base.update(overrides)
+        return base
+
+    def test_ocf_4x_ni_triggers_warning(self):
+        """OCF 4x NI → triggers +1.0 WARNING."""
+        metrics = self._make_metrics(ocf=4_000, net_income=1_000)
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        ocf_flags = [f for f in flags if f["type"] == "SUSPICIOUS_OCF_NI_RATIO"]
+        assert len(ocf_flags) == 1
+        assert ocf_flags[0]["risk_penalty"] == 1.0
+        assert result == "PASS"
+
+    def test_ocf_6x_ni_triggers_higher_warning(self):
+        """OCF 6x NI → triggers +1.5 WARNING."""
+        metrics = self._make_metrics(ocf=6_000, net_income=1_000)
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        ocf_flags = [f for f in flags if f["type"] == "SUSPICIOUS_OCF_NI_RATIO"]
+        assert len(ocf_flags) == 1
+        assert ocf_flags[0]["risk_penalty"] == 1.5
+        assert result == "PASS"
+
+    def test_ocf_2x_ni_no_flag(self):
+        """OCF 2x NI → no flag (within normal range)."""
+        metrics = self._make_metrics(ocf=2_000, net_income=1_000)
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        ocf_flags = [f for f in flags if f["type"] == "SUSPICIOUS_OCF_NI_RATIO"]
+        assert len(ocf_flags) == 0
+
+    def test_banking_sector_ocf_exempt(self):
+        """Banking with OCF 5x NI → no flag (sector exempt)."""
+        from src.validators.red_flag_detector import Sector
+
+        metrics = self._make_metrics(ocf=5_000, net_income=1_000)
+        flags, _ = RedFlagDetector.detect_red_flags(
+            metrics, "BANK.HK", sector=Sector.BANKING
+        )
+        ocf_flags = [f for f in flags if f["type"] == "SUSPICIOUS_OCF_NI_RATIO"]
+        assert len(ocf_flags) == 0
+
+    def test_ocf_none_no_flag(self):
+        """OCF is None → no flag (graceful skip)."""
+        metrics = self._make_metrics(ocf=None, net_income=1_000)
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        ocf_flags = [f for f in flags if f["type"] == "SUSPICIOUS_OCF_NI_RATIO"]
+        assert len(ocf_flags) == 0
+
+    def test_ni_none_no_flag(self):
+        """NI is None → no flag (graceful skip)."""
+        metrics = self._make_metrics(ocf=5_000, net_income=None)
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        ocf_flags = [f for f in flags if f["type"] == "SUSPICIOUS_OCF_NI_RATIO"]
+        assert len(ocf_flags) == 0
+
+    def test_negative_ocf_no_flag(self):
+        """Negative OCF → no flag (only checks when both positive)."""
+        metrics = self._make_metrics(ocf=-5_000, net_income=1_000)
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        ocf_flags = [f for f in flags if f["type"] == "SUSPICIOUS_OCF_NI_RATIO"]
+        assert len(ocf_flags) == 0
+
+    def test_negative_ni_no_flag(self):
+        """Negative NI → no flag (only checks when both positive)."""
+        metrics = self._make_metrics(ocf=5_000, net_income=-1_000)
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        ocf_flags = [f for f in flags if f["type"] == "SUSPICIOUS_OCF_NI_RATIO"]
+        assert len(ocf_flags) == 0
+
+    def test_ocf_extraction_from_data_block(self):
+        """Test OCF extraction from OPERATING_CASH_FLOW field in DATA_BLOCK."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 87.5%
+OPERATING_CASH_FLOW: ¥19.95B
+PE_RATIO_TTM: 6.19
+### --- END DATA_BLOCK ---
+
+Net Income: ¥7.8B
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["ocf"] == 19_950_000_000
+        assert metrics["net_income"] == 7_800_000_000
+
+    def test_ocf_extraction_from_report_body(self):
+        """Test OCF extraction from report body when not in DATA_BLOCK."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 60%
+### --- END DATA_BLOCK ---
+
+Operating Cash Flow: $450M
+Net Income: $150M
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["ocf"] == 450_000_000
+        assert metrics["net_income"] == 150_000_000
+
+
+class TestUnreliablePEG:
+    """Tests for RED FLAG 8: Unreliable PEG (PEG < 0.05)."""
+
+    def _make_metrics(self, peg_ratio=None, **overrides):
+        """Helper to create metrics dict with PEG value."""
+        base = {
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": 10.0,
+            "pb_ratio": None,
+            "adjusted_health_score": 60.0,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+            "profitability_trend": None,
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": peg_ratio,
+            "ocf": None,
+            "_raw_report": "",
+        }
+        base.update(overrides)
+        return base
+
+    def test_peg_002_triggers_warning(self):
+        """PEG 0.02 → triggers WARNING (+1.0)."""
+        metrics = self._make_metrics(peg_ratio=0.02)
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "2767.T")
+        peg_flags = [f for f in flags if f["type"] == "UNRELIABLE_PEG"]
+        assert len(peg_flags) == 1
+        assert peg_flags[0]["risk_penalty"] == 1.0
+        assert "50x" in peg_flags[0]["detail"]  # 1/0.02 = 50
+        assert result == "PASS"
+
+    def test_peg_004_triggers_warning(self):
+        """PEG 0.04 → triggers WARNING (+1.0)."""
+        metrics = self._make_metrics(peg_ratio=0.04)
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        peg_flags = [f for f in flags if f["type"] == "UNRELIABLE_PEG"]
+        assert len(peg_flags) == 1
+        assert peg_flags[0]["risk_penalty"] == 1.0
+
+    def test_peg_005_no_flag(self):
+        """PEG 0.05 → no flag (at threshold, not below)."""
+        metrics = self._make_metrics(peg_ratio=0.05)
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        peg_flags = [f for f in flags if f["type"] == "UNRELIABLE_PEG"]
+        assert len(peg_flags) == 0
+
+    def test_peg_08_no_flag(self):
+        """PEG 0.8 → no flag."""
+        metrics = self._make_metrics(peg_ratio=0.8)
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        peg_flags = [f for f in flags if f["type"] == "UNRELIABLE_PEG"]
+        assert len(peg_flags) == 0
+
+    def test_peg_none_no_flag(self):
+        """PEG None → no flag."""
+        metrics = self._make_metrics(peg_ratio=None)
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        peg_flags = [f for f in flags if f["type"] == "UNRELIABLE_PEG"]
+        assert len(peg_flags) == 0
+
+    def test_peg_zero_triggers_warning(self):
+        """PEG 0.00 → UNRELIABLE_PEG flag (mathematically undefined)."""
+        metrics = self._make_metrics(peg_ratio=0.0)
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        peg_flags = [f for f in flags if f["type"] == "UNRELIABLE_PEG"]
+        assert len(peg_flags) == 1
+        assert peg_flags[0]["risk_penalty"] == 1.0
+        assert "mathematically undefined" in peg_flags[0]["detail"]
+        assert result == "PASS"  # WARNING, not REJECT
+
+    def test_peg_and_cyclical_peak_both_fire(self):
+        """PEG 0.02 WITH existing cyclical peak → both flags fire (independent)."""
+        metrics = self._make_metrics(
+            peg_ratio=0.02,
+            roa_current=16.0,
+            roa_5y_avg=8.0,
+            profitability_trend="UNSTABLE",
+        )
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "2767.T")
+        peg_flags = [f for f in flags if f["type"] == "UNRELIABLE_PEG"]
+        cyclical_flags = [f for f in flags if f["type"] == "CYCLICAL_PEAK_WARNING"]
+        assert len(peg_flags) == 1
+        assert len(cyclical_flags) == 1
+        assert result == "PASS"
+
+
+class TestConsultantConditionEnforcement:
+    """Tests for Mitigation 4: Consultant condition parsing and enforcement."""
+
+    def test_approved_verdict_no_flags(self):
+        """APPROVED verdict → no flags."""
+        review = """
+### CONSULTANT REVIEW: APPROVED
+
+**Status**: ✓ FACTS VERIFIED
+**Overall Assessment**: APPROVED
+"""
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["verdict"] == "APPROVED"
+        flags = RedFlagDetector.detect_consultant_flags(conditions, "TEST.T")
+        assert len(flags) == 0
+
+    def test_conditional_approval_flag(self):
+        """CONDITIONAL APPROVAL → +0.5 risk."""
+        review = """
+### CONSULTANT REVIEW: CONDITIONAL APPROVAL
+
+Conditions:
+- OCF data needs verification
+- Segment breakdown missing
+
+**Overall Assessment**: CONDITIONAL APPROVAL
+"""
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["verdict"] == "CONDITIONAL_APPROVAL"
+        flags = RedFlagDetector.detect_consultant_flags(conditions, "TEST.T")
+        assert len(flags) >= 1
+        cond_flags = [f for f in flags if f["type"] == "CONSULTANT_CONDITIONAL"]
+        assert len(cond_flags) == 1
+        assert cond_flags[0]["risk_penalty"] == 0.5
+
+    def test_major_concerns_flag(self):
+        """MAJOR CONCERNS → +1.5 risk."""
+        review = """
+### CONSULTANT REVIEW: MAJOR CONCERNS
+
+The analysis has fundamental issues.
+
+**Overall Assessment**: MAJOR CONCERNS
+"""
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["verdict"] == "MAJOR_CONCERNS"
+        flags = RedFlagDetector.detect_consultant_flags(conditions, "TEST.T")
+        concern_flags = [f for f in flags if f["type"] == "CONSULTANT_MAJOR_CONCERNS"]
+        assert len(concern_flags) == 1
+        assert concern_flags[0]["risk_penalty"] == 1.5
+
+    def test_major_concerns_with_discrepancies(self):
+        """MAJOR CONCERNS + 2 discrepancies → +1.5 + 1.0 = +2.5 risk."""
+        review = """
+### CONSULTANT REVIEW: MAJOR CONCERNS
+
+SPOT_CHECK operatingCashflow: DATA_BLOCK=19.95B, yfinance_direct=7.8B → DISCREPANCY (156%)
+SPOT_CHECK freeCashflow: DATA_BLOCK=13.39B, yfinance_direct=5.2B → DISCREPANCY (157%)
+
+**Overall Assessment**: MAJOR CONCERNS
+"""
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["verdict"] == "MAJOR_CONCERNS"
+        assert len(conditions["spot_check_discrepancies"]) == 2
+        flags = RedFlagDetector.detect_consultant_flags(conditions, "TEST.T")
+        total_penalty = sum(f.get("risk_penalty", 0) for f in flags)
+        assert total_penalty == 2.5  # 1.5 (major) + 1.0 (2 * 0.5 discrepancies)
+
+    def test_mandate_breach_flag(self):
+        """MANDATE BREACH → +2.0 risk."""
+        review = """
+### CONSULTANT REVIEW: CONDITIONAL APPROVAL
+
+MANDATE BREACH: PFIC — company classified as PFIC.
+
+**Overall Assessment**: CONDITIONAL APPROVAL
+"""
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["has_mandate_breach"] is True
+        flags = RedFlagDetector.detect_consultant_flags(conditions, "TEST.T")
+        breach_flags = [f for f in flags if f["type"] == "CONSULTANT_MANDATE_BREACH"]
+        assert len(breach_flags) == 1
+        assert breach_flags[0]["risk_penalty"] == 2.0
+
+    def test_hard_stop_auto_reject(self):
+        """HARD STOP → AUTO_REJECT."""
+        review = """
+### CONSULTANT REVIEW: MAJOR CONCERNS
+
+HARD STOP: RESTRICTED — NS-CMIC listed entity.
+
+**Overall Assessment**: MAJOR CONCERNS
+"""
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["has_hard_stop"] is True
+        flags = RedFlagDetector.detect_consultant_flags(conditions, "TEST.T")
+        assert len(flags) == 1  # Hard stop short-circuits
+        assert flags[0]["type"] == "CONSULTANT_HARD_STOP"
+        assert flags[0]["action"] == "AUTO_REJECT"
+        assert flags[0]["risk_penalty"] == 3.0
+
+    def test_empty_consultant_review_no_flags(self):
+        """Empty/missing consultant review → no flags."""
+        conditions = RedFlagDetector.parse_consultant_conditions("")
+        assert conditions["verdict"] == "UNKNOWN"
+        flags = RedFlagDetector.detect_consultant_flags(conditions, "TEST.T")
+        assert len(flags) == 0
+
+    def test_verdict_not_found_no_flags(self):
+        """Unrecognized text → UNKNOWN verdict → no flags."""
+        conditions = RedFlagDetector.parse_consultant_conditions(
+            "Random text with no verdict"
+        )
+        assert conditions["verdict"] == "UNKNOWN"
+        flags = RedFlagDetector.detect_consultant_flags(conditions, "TEST.T")
+        assert len(flags) == 0
+
+    def test_discrepancy_penalty_capped(self):
+        """4 discrepancies → penalty capped at 1.5 (not 2.0)."""
+        review = """
+SPOT_CHECK a: X → DISCREPANCY
+SPOT_CHECK b: X → DISCREPANCY
+SPOT_CHECK c: X → DISCREPANCY
+SPOT_CHECK d: X → DISCREPANCY
+
+APPROVED
+"""
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert len(conditions["spot_check_discrepancies"]) == 4
+        flags = RedFlagDetector.detect_consultant_flags(conditions, "TEST.T")
+        disc_flags = [f for f in flags if f["type"] == "CONSULTANT_DATA_DISCREPANCY"]
+        assert len(disc_flags) == 1
+        assert disc_flags[0]["risk_penalty"] == 1.5  # Capped
+
+
+class TestSegmentOwnershipOCFFields:
+    """Tests for new DATA_BLOCK fields: SEGMENT_FLAG, PARENT_COMPANY, OPERATING_CASH_FLOW_SOURCE."""
+
+    def test_extract_segment_flag_deteriorating(self):
+        """Test SEGMENT_FLAG extraction when DETERIORATING."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 60%
+OPERATING_CASH_FLOW: ¥7.8B
+OPERATING_CASH_FLOW_SOURCE: FILING
+SEGMENT_COUNT: 2
+SEGMENT_DOMINANT: Pachinko/Pachislot (65% of revenue)
+SEGMENT_FLAG: DETERIORATING
+PARENT_COMPANY: Bandai Namco Holdings (49.2%)
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["segment_flag"] == "DETERIORATING"
+
+    def test_extract_segment_flag_stable(self):
+        """Test SEGMENT_FLAG extraction when STABLE."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 70%
+SEGMENT_FLAG: STABLE
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["segment_flag"] == "STABLE"
+
+    def test_extract_segment_flag_na(self):
+        """Test SEGMENT_FLAG N/A is treated as None."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 70%
+SEGMENT_FLAG: N/A
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["segment_flag"] is None
+
+    def test_extract_segment_flag_absent(self):
+        """Test missing SEGMENT_FLAG defaults to None."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 70%
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["segment_flag"] is None
+
+    def test_extract_parent_company(self):
+        """Test PARENT_COMPANY extraction with name and percentage."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 60%
+PARENT_COMPANY: Bandai Namco Holdings (49.2%)
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["parent_company"] == "Bandai Namco Holdings (49.2%)"
+
+    def test_extract_parent_company_none(self):
+        """Test PARENT_COMPANY NONE is treated as None."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 70%
+PARENT_COMPANY: NONE
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["parent_company"] is None
+
+    def test_extract_parent_company_na(self):
+        """Test PARENT_COMPANY N/A is treated as None."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 70%
+PARENT_COMPANY: N/A
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["parent_company"] is None
+
+    def test_extract_parent_company_absent(self):
+        """Test missing PARENT_COMPANY defaults to None."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 70%
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["parent_company"] is None
+
+    def test_extract_ocf_source_filing(self):
+        """Test OPERATING_CASH_FLOW_SOURCE extraction when FILING."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 60%
+OPERATING_CASH_FLOW_SOURCE: FILING
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["ocf_source"] == "FILING"
+
+    def test_extract_ocf_source_junior(self):
+        """Test OPERATING_CASH_FLOW_SOURCE extraction when JUNIOR."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 70%
+OPERATING_CASH_FLOW_SOURCE: JUNIOR
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["ocf_source"] == "JUNIOR"
+
+    def test_extract_ocf_source_na(self):
+        """Test OPERATING_CASH_FLOW_SOURCE N/A is treated as None."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 70%
+OPERATING_CASH_FLOW_SOURCE: N/A
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["ocf_source"] is None
+
+    def test_extract_ocf_source_absent(self):
+        """Test missing OPERATING_CASH_FLOW_SOURCE defaults to None."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 70%
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["ocf_source"] is None
+
+    def test_segment_deterioration_warning_fires(self):
+        """SEGMENT_FLAG=DETERIORATING triggers WARNING with 0.5 penalty."""
+        metrics = {
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": 10.0,
+            "pb_ratio": None,
+            "adjusted_health_score": 60.0,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+            "profitability_trend": None,
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": None,
+            "ocf": None,
+            "ocf_source": None,
+            "segment_flag": "DETERIORATING",
+            "parent_company": None,
+            "_raw_report": "",
+        }
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "2767.T")
+        seg_flags = [f for f in flags if f["type"] == "SEGMENT_DETERIORATION"]
+        assert len(seg_flags) == 1
+        assert seg_flags[0]["severity"] == "WARNING"
+        assert seg_flags[0]["risk_penalty"] == 0.5
+        assert result == "PASS"  # Warning, not reject
+
+    def test_segment_stable_no_flag(self):
+        """SEGMENT_FLAG=STABLE does not trigger warning."""
+        metrics = {
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": 10.0,
+            "pb_ratio": None,
+            "adjusted_health_score": 60.0,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+            "profitability_trend": None,
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": None,
+            "ocf": None,
+            "ocf_source": None,
+            "segment_flag": "STABLE",
+            "parent_company": None,
+            "_raw_report": "",
+        }
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        seg_flags = [f for f in flags if f["type"] == "SEGMENT_DETERIORATION"]
+        assert len(seg_flags) == 0
+
+    def test_segment_none_no_flag(self):
+        """SEGMENT_FLAG=None does not trigger warning."""
+        metrics = {
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": 10.0,
+            "pb_ratio": None,
+            "adjusted_health_score": 60.0,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+            "profitability_trend": None,
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": None,
+            "ocf": None,
+            "ocf_source": None,
+            "segment_flag": None,
+            "parent_company": None,
+            "_raw_report": "",
+        }
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        seg_flags = [f for f in flags if f["type"] == "SEGMENT_DETERIORATION"]
+        assert len(seg_flags) == 0
+
+    def test_ocf_source_discrepancy_warning_fires(self):
+        """OCF_SOURCE=FILING triggers WARNING with 0.5 penalty."""
+        metrics = {
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": 10.0,
+            "pb_ratio": None,
+            "adjusted_health_score": 60.0,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+            "profitability_trend": None,
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": None,
+            "ocf": None,
+            "ocf_source": "FILING",
+            "segment_flag": None,
+            "parent_company": None,
+            "_raw_report": "",
+        }
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "2767.T")
+        ocf_flags = [f for f in flags if f["type"] == "OCF_SOURCE_DISCREPANCY"]
+        assert len(ocf_flags) == 1
+        assert ocf_flags[0]["severity"] == "WARNING"
+        assert ocf_flags[0]["risk_penalty"] == 0.5
+        assert result == "PASS"  # Warning, not reject
+
+    def test_ocf_source_junior_no_flag(self):
+        """OCF_SOURCE=JUNIOR does not trigger warning (no discrepancy)."""
+        metrics = {
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": 10.0,
+            "pb_ratio": None,
+            "adjusted_health_score": 60.0,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+            "profitability_trend": None,
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": None,
+            "ocf": None,
+            "ocf_source": "JUNIOR",
+            "segment_flag": None,
+            "parent_company": None,
+            "_raw_report": "",
+        }
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        ocf_flags = [f for f in flags if f["type"] == "OCF_SOURCE_DISCREPANCY"]
+        assert len(ocf_flags) == 0
+
+    def test_ocf_source_none_no_flag(self):
+        """OCF_SOURCE=None does not trigger warning."""
+        metrics = {
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": 10.0,
+            "pb_ratio": None,
+            "adjusted_health_score": 60.0,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+            "profitability_trend": None,
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": None,
+            "ocf": None,
+            "ocf_source": None,
+            "segment_flag": None,
+            "parent_company": None,
+            "_raw_report": "",
+        }
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        ocf_flags = [f for f in flags if f["type"] == "OCF_SOURCE_DISCREPANCY"]
+        assert len(ocf_flags) == 0
+
+    def test_full_data_block_extraction_all_new_fields(self):
+        """Test extraction of all new fields from a complete DATA_BLOCK (2767.T-style)."""
+        report = """
+### --- START DATA_BLOCK (INTERNAL SCORING — NOT THIRD-PARTY RATINGS) ---
+SECTOR: General/Diversified
+RAW_HEALTH_SCORE: 8/12
+ADJUSTED_HEALTH_SCORE: 67%
+PE_RATIO_TTM: 12.5
+PEG_RATIO: 0.45
+OPERATING_CASH_FLOW: ¥7.8B
+OPERATING_CASH_FLOW_SOURCE: FILING
+SEGMENT_COUNT: 2
+SEGMENT_DOMINANT: Pachinko/Pachislot (65% of revenue)
+SEGMENT_FLAG: DETERIORATING
+PARENT_COMPANY: Bandai Namco Holdings (49.2%)
+VIE_STRUCTURE: NO
+### --- END DATA_BLOCK ---
+
+### CROSS-CHECK FLAGS
+[OCF DISCREPANCY] Junior OCF ¥19.95B vs Filing OCF ¥7.8B (156% difference) — using filing value
+[SEGMENT DETERIORATION] Content segment op. profit -34% YoY
+
+**Interest Coverage**: 8.5x
+**Free Cash Flow**: ¥5.2B
+**Net Income**: ¥7.0B
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+
+        assert metrics["ocf_source"] == "FILING"
+        assert metrics["segment_flag"] == "DETERIORATING"
+        assert metrics["parent_company"] == "Bandai Namco Holdings (49.2%)"
+        assert metrics["ocf"] == 7_800_000_000
+        assert metrics["adjusted_health_score"] == 67.0
+
+    def test_both_new_warnings_fire_together(self):
+        """SEGMENT_DETERIORATION and OCF_SOURCE_DISCREPANCY can fire together."""
+        metrics = {
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": 10.0,
+            "pb_ratio": None,
+            "adjusted_health_score": 60.0,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+            "profitability_trend": None,
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": None,
+            "ocf": None,
+            "ocf_source": "FILING",
+            "segment_flag": "DETERIORATING",
+            "parent_company": "Bandai Namco (49%)",
+            "_raw_report": "",
+        }
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "2767.T")
+        flag_types = [f["type"] for f in flags]
+        assert "SEGMENT_DETERIORATION" in flag_types
+        assert "OCF_SOURCE_DISCREPANCY" in flag_types
+        total_penalty = sum(f.get("risk_penalty", 0) for f in flags)
+        assert total_penalty == 1.0  # 0.5 + 0.5
+        assert result == "PASS"  # Warnings only, not reject

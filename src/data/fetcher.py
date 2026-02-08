@@ -1289,6 +1289,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         merged = {}
         field_sources = {}
         field_quality = {}
+        source_conflicts = {}
         sources_used = set()
         gaps_filled = 0
 
@@ -1343,6 +1344,41 @@ class SmartMarketDataFetcher(FinancialFetcher):
                         )
 
                 if should_use:
+                    # Record source conflicts when replacing with >20% variance
+                    # Normalize decimal-vs-percentage fields before comparison
+                    _PCT_FIELDS = frozenset(
+                        {
+                            "dividendYield",
+                            "trailingAnnualDividendYield",
+                            "fiveYearAvgDividendYield",
+                        }
+                    )
+                    if key in merged and merged[key] is not None and value is not None:
+                        try:
+                            old_val = float(merged[key])
+                            new_val = float(value)
+                            # Normalize: if one looks like decimal (<1) and
+                            # the other like percentage (>1), scale up
+                            if key in _PCT_FIELDS:
+                                if old_val < 1 and new_val > 1:
+                                    old_val *= 100
+                                elif new_val < 1 and old_val > 1:
+                                    new_val *= 100
+                            if (
+                                old_val != 0
+                                and abs(new_val - old_val) / abs(old_val) > 0.20
+                            ):
+                                source_conflicts[key] = {
+                                    "old": round(old_val, 4),
+                                    "old_source": field_sources.get(key, "unknown"),
+                                    "new": round(new_val, 4),
+                                    "new_source": source_name,
+                                    "variance_pct": round(
+                                        abs(new_val - old_val) / abs(old_val) * 100, 1
+                                    ),
+                                }
+                        except (ValueError, TypeError):
+                            pass  # Non-numeric fields — skip
                     merged[key] = value
                     field_sources[key] = source_name
                     field_quality[key] = quality
@@ -1353,7 +1389,18 @@ class SmartMarketDataFetcher(FinancialFetcher):
             "gaps_filled": gaps_filled,
             "field_sources": field_sources,
             "field_quality": field_quality,
+            "source_conflicts": source_conflicts,
         }
+
+        if source_conflicts:
+            logger.warning(
+                "source_data_conflicts",
+                symbol=symbol,
+                conflicts={
+                    k: f"{v['old_source']}={v['old']} vs {v['new_source']}={v['new']} (Δ{v['variance_pct']}%)"
+                    for k, v in source_conflicts.items()
+                },
+            )
 
         logger.info(
             "smart_merge_complete",
@@ -1781,6 +1828,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
                     "_data_source": merge_metadata["composite_source"],
                     "_sources_used": merge_metadata["sources_used"],
                     "_field_sources": merge_metadata.get("field_sources", {}),
+                    "_source_conflicts": merge_metadata.get("source_conflicts", {}),
                     "_gaps_filled": merge_metadata["gaps_filled"],
                     "_quality": {
                         "basics_ok": quality.basics_ok,
