@@ -33,7 +33,7 @@ jobs:
 
     - name: Install dependencies
       run: |
-        poetry install --no-interaction
+        poetry install --no-interaction --extras filings
 
     - name: Run tests
       run: |
