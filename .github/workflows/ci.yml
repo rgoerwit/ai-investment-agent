@@ -42,6 +42,8 @@ jobs:
         # Provide dummy keys for tests that need them
         GOOGLE_API_KEY: "test-key-for-ci"
         TAVILY_API_KEY: "test-key-for-ci"
+        OPENAI_API_KEY: "sk-test-key-for-ci-placeholder-only"
+        CLAUDE_KEY: "sk-ant-test-key-for-ci-placeholder-only"
 
     - name: Validate prompt JSON files
       run: |
