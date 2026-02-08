@@ -487,14 +487,49 @@ def _generate_radar_chart(
             pass
     jurisdiction = max(0.0, min(100.0, jurisdiction))
 
-    # Data quality warnings
+    # Data quality warnings — map red flag types to affected radar axes
     axis_warnings = {}
     red_flags = state.get("red_flags", [])
     for flag in red_flags:
         flag_type = str(flag.get("type", "")).upper()
-        if any(x in flag_type for x in ["EARNINGS", "CASH", "FCF"]):
+        # Health axis: earnings quality, cash flow, leverage, consultant flags
+        if any(
+            x in flag_type
+            for x in [
+                "EARNINGS",
+                "CASH",
+                "FCF",
+                "OCF",
+                "SUSPICIOUS",
+                "CONSULTANT",
+                "LEVERAGE",
+                "REFINANCING",
+                "UNSUSTAINABLE",
+            ]
+        ):
             axis_warnings["health"] = True
-        if any(x in flag_type for x in ["PFIC", "VIE", "ADR"]):
+        # Growth axis: segment deterioration, value traps, no catalyst
+        if any(
+            x in flag_type
+            for x in [
+                "SEGMENT",
+                "VALUE_TRAP",
+                "CATALYST",
+            ]
+        ):
+            axis_warnings["growth"] = True
+        # Valuation axis: cyclical peaks, unreliable ratios
+        if any(
+            x in flag_type
+            for x in [
+                "CYCLICAL",
+                "PEG",
+                "FRAGILE_VALUATION",
+            ]
+        ):
+            axis_warnings["valuation"] = True
+        # Regulatory axis: PFIC, VIE, CMIC, ADR flags
+        if any(x in flag_type for x in ["PFIC", "VIE", "ADR", "CMIC"]):
             axis_warnings["regulatory"] = True
 
     # Add PM verdict to footnote

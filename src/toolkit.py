@@ -602,16 +602,15 @@ async def get_fundamental_analysis(
 async def _ddg_search(query: str, max_results: int = 5) -> list[dict]:
     """DuckDuckGo fallback search. Returns list of {title, href, body}."""
     try:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
 
         def _sync_search():
-            with DDGS() as ddgs:
-                return list(ddgs.text(query, max_results=max_results))
+            return DDGS().text(query, max_results=max_results)
 
         results = await asyncio.to_thread(_sync_search)
         return results if results else []
     except ImportError:
-        logger.debug("duckduckgo_search_not_installed")
+        logger.debug("ddgs_not_installed")
         return []
     except Exception as e:
         logger.debug("ddg_search_error", error=str(e))

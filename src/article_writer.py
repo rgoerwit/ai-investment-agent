@@ -301,6 +301,9 @@ class ArticleWriter:
 
         # Find matching images - try multiple naming conventions
         patterns = [
+            # Raw ticker pattern: chart_node uses ticker directly as filename_stem
+            f"{ticker}_football_field.*",
+            f"{ticker}_radar.*",
             # Standard pattern: TICKER_DATE_charttype
             f"{safe_ticker_underscore}_{trade_date}_football_field.*",
             f"{safe_ticker_underscore}_{trade_date}_radar.*",

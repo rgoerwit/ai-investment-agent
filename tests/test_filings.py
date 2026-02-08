@@ -541,14 +541,11 @@ class TestDdgSearch:
 
     @pytest.mark.asyncio
     async def test_ddg_search_import_failure(self):
-        """Should return empty list if duckduckgo-search not installed."""
+        """Should return empty list if ddgs not installed."""
         from src.toolkit import _ddg_search
 
-        with patch.dict("sys.modules", {"duckduckgo_search": None}):
-            # Import will raise for the nested import
+        with patch.dict("sys.modules", {"ddgs": None}):
             result = await _ddg_search("test query")
-            # If the module IS installed (which it is), this won't trigger
-            # So we test via mocking the AsyncDDGS class instead
             assert isinstance(result, list)
 
     @pytest.mark.asyncio
@@ -562,10 +559,8 @@ class TestDdgSearch:
 
         mock_ddgs = MagicMock()
         mock_ddgs.text.return_value = mock_results
-        mock_ddgs.__enter__ = MagicMock(return_value=mock_ddgs)
-        mock_ddgs.__exit__ = MagicMock(return_value=False)
 
-        with patch("duckduckgo_search.DDGS", return_value=mock_ddgs):
+        with patch("ddgs.DDGS", return_value=mock_ddgs):
             result = await _ddg_search("test query")
             assert len(result) == 1
             assert result[0]["title"] == "Test"

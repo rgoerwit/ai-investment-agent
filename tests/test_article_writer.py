@@ -196,6 +196,25 @@ class TestImageManifest:
 
             assert "Football Field" in manifest or "No charts available" in manifest
 
+    def test_handles_raw_ticker_filename(self):
+        """Test that charts saved with raw ticker (e.g., 2767.T_radar.png) are found."""
+        from src.article_writer import ArticleWriter
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            images_dir = Path(tmpdir)
+            # Chart generator uses raw ticker as filename_stem
+            (images_dir / "2767.T_football_field.png").touch()
+            (images_dir / "2767.T_radar.png").touch()
+
+            writer = ArticleWriter.__new__(ArticleWriter)
+            writer.images_dir = images_dir
+            writer.use_github_urls = False
+
+            manifest = writer._format_image_manifest("2767.T", "2026-02-07")
+
+            assert "Football Field" in manifest
+            assert "Radar" in manifest
+
     def test_returns_no_charts_message(self):
         """Test returns appropriate message when no charts found."""
         from src.article_writer import ArticleWriter
