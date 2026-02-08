@@ -5,6 +5,7 @@ reflect on their performance for continuous learning.
 """
 
 import re
+import unicodedata
 from collections.abc import Callable
 
 import structlog
@@ -294,14 +295,23 @@ def detect_truncation(text: str, agent: str | None = None) -> dict:
     # LLM truncation heuristics (MEDIUM confidence)
     # Check if ends mid-sentence (not with valid ending punctuation)
     # Only apply if no structured blocks were found
-    valid_endings = ".!?)]}>`*|\"'\n"
+    # Use Unicode categories instead of a character whitelist so that smart
+    # quotes (GPT), CJK periods/brackets (JP/KR/CN), and other international
+    # punctuation are recognised as valid endings.
+    _non_punct_valid = frozenset(
+        ">`|\n"
+    )  # Markdown/table chars that aren't Unicode punctuation
     stripped = text.rstrip()
-    if stripped and stripped[-1] not in valid_endings:
-        return {
-            "truncated": True,
-            "source": "llm",
-            "marker": f"ends with: '{stripped[-30:]}'",
-            "confidence": "medium",
-        }
+    if stripped:
+        last = stripped[-1]
+        cat = unicodedata.category(last)
+        # Pe=close bracket, Pf=final quote, Po=period/exclamation/etc.
+        if last not in _non_punct_valid and cat not in ("Pe", "Pf", "Po"):
+            return {
+                "truncated": True,
+                "source": "llm",
+                "marker": f"ends with: '{stripped[-30:]}'",
+                "confidence": "medium",
+            }
 
     return {"truncated": False, "source": None, "marker": None, "confidence": "high"}

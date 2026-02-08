@@ -106,6 +106,36 @@ class TestCompleteOutput:
         result = detect_truncation(text)
         assert result["truncated"] is False
 
+    def test_ends_with_smart_double_quote(self):
+        """GPT-style smart right double quote should not be flagged."""
+        text = "I would not stake my reputation on without fixes.\u201d"
+        result = detect_truncation(text)
+        assert result["truncated"] is False
+
+    def test_ends_with_smart_single_quote(self):
+        """Smart right single quote should not be flagged."""
+        text = "The CEO\u2019s outlook is positive.\u2019"
+        result = detect_truncation(text)
+        assert result["truncated"] is False
+
+    def test_ends_with_cjk_period(self):
+        """CJK period (Japanese/Chinese) should not be flagged."""
+        text = "分析が完了しました\u3002"
+        result = detect_truncation(text)
+        assert result["truncated"] is False
+
+    def test_ends_with_cjk_bracket(self):
+        """CJK right corner bracket should not be flagged."""
+        text = "\u300c分析完了\u300d"
+        result = detect_truncation(text)
+        assert result["truncated"] is False
+
+    def test_ends_with_ellipsis_char(self):
+        """Unicode horizontal ellipsis should not be flagged."""
+        text = "The outlook remains uncertain\u2026"
+        result = detect_truncation(text)
+        assert result["truncated"] is False
+
 
 class TestEdgeCases:
     """Test edge cases and boundary conditions."""
