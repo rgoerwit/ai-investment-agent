@@ -1009,10 +1009,22 @@ class ArticleEditor:
                 requested=len(tool_calls),
                 cap=self.MAX_TOOL_CALLS_PER_TURN,
             )
+        url_cache = getattr(self, "_url_cache", {})
+
         for tc in capped_calls:
             tool_name = tc["name"]
             tool_args = tc.get("args", {})
             tool_id = tc.get("id", tool_name)
+
+            # Serve cached response for URL fetches (avoids re-hitting paywalls)
+            if tool_name == "fetch_reference_content":
+                cache_key = tool_args.get("url", "")
+                if cache_key in url_cache:
+                    logger.info("Editor URL cache hit", url=cache_key[:80])
+                    results.append(
+                        ToolMessage(content=url_cache[cache_key], tool_call_id=tool_id)
+                    )
+                    continue
 
             tool_fn = self._tools_by_name.get(tool_name)
             if not tool_fn:
@@ -1032,12 +1044,22 @@ class ArticleEditor:
                     args_preview=str(tool_args)[:100],
                 )
                 result = await tool_fn.ainvoke(tool_args)
-                results.append(ToolMessage(content=str(result), tool_call_id=tool_id))
+                content = str(result)
+
+                # Cache URL fetch results for this editorial session
+                if tool_name == "fetch_reference_content":
+                    url_cache[tool_args.get("url", "")] = content
+
+                results.append(ToolMessage(content=content, tool_call_id=tool_id))
             except Exception as e:
                 logger.warning("Tool execution failed", tool=tool_name, error=str(e))
-                results.append(
-                    ToolMessage(content=f"TOOL_ERROR: {e}", tool_call_id=tool_id)
-                )
+                error_content = f"TOOL_ERROR: {e}"
+
+                # Cache errors too — no point retrying a broken URL
+                if tool_name == "fetch_reference_content":
+                    url_cache[tool_args.get("url", "")] = error_content
+
+                results.append(ToolMessage(content=error_content, tool_call_id=tool_id))
 
         # Append SKIPPED messages for overflow calls (after executed results)
         # so the LLM knows they weren't processed
@@ -1306,53 +1328,59 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
         current_draft = article_draft
         revision_count = 0
 
-        while revision_count < self.MAX_REVISIONS:
-            # Review the current draft
-            feedback = await self.review(current_draft, fact_check_context)
+        # Session-scoped URL cache: avoids re-fetching the same URLs across
+        # review iterations (e.g. paywalled sites that 401 every time).
+        self._url_cache: dict[str, str] = {}
+        try:
+            while revision_count < self.MAX_REVISIONS:
+                # Review the current draft
+                feedback = await self.review(current_draft, fact_check_context)
+
+                logger.info(
+                    "Editor review complete",
+                    ticker=ticker,
+                    verdict=feedback.get("verdict"),
+                    confidence=feedback.get("confidence"),
+                    revision=revision_count,
+                )
+
+                # Check if approved
+                if feedback.get("verdict") == "APPROVED":
+                    feedback["revisions"] = revision_count
+                    return current_draft, feedback
+
+                # Revise based on feedback
+                revision_count += 1
+                logger.info(
+                    "Revising article",
+                    ticker=ticker,
+                    revision=revision_count,
+                    max_revisions=self.MAX_REVISIONS,
+                )
+
+                current_draft = writer.revise(
+                    original_draft=current_draft,
+                    editor_feedback=feedback,
+                    ticker=ticker,
+                    company_name=company_name,
+                )
+
+            # Max revisions reached, do final review
+            final_feedback = await self.review(current_draft, fact_check_context)
+
+            # Add revision count to feedback for caller logging
+            final_feedback["revisions"] = revision_count
 
             logger.info(
-                "Editor review complete",
+                "Editorial loop complete",
                 ticker=ticker,
-                verdict=feedback.get("verdict"),
-                confidence=feedback.get("confidence"),
-                revision=revision_count,
+                revisions=revision_count,
+                final_verdict=final_feedback.get("verdict"),
             )
 
-            # Check if approved
-            if feedback.get("verdict") == "APPROVED":
-                feedback["revisions"] = revision_count
-                return current_draft, feedback
-
-            # Revise based on feedback
-            revision_count += 1
-            logger.info(
-                "Revising article",
-                ticker=ticker,
-                revision=revision_count,
-                max_revisions=self.MAX_REVISIONS,
-            )
-
-            current_draft = writer.revise(
-                original_draft=current_draft,
-                editor_feedback=feedback,
-                ticker=ticker,
-                company_name=company_name,
-            )
-
-        # Max revisions reached, do final review
-        final_feedback = await self.review(current_draft, fact_check_context)
-
-        # Add revision count to feedback for caller logging
-        final_feedback["revisions"] = revision_count
-
-        logger.info(
-            "Editorial loop complete",
-            ticker=ticker,
-            revisions=revision_count,
-            final_verdict=final_feedback.get("verdict"),
-        )
-
-        return current_draft, final_feedback
+            return current_draft, final_feedback
+        finally:
+            self._url_cache = {}
 
 
 def generate_article(

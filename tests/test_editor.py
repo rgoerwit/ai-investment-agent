@@ -1507,6 +1507,147 @@ class TestEditorToolCalling:
 
 
 # =============================================================================
+# URL Cache Tests
+# =============================================================================
+
+
+class TestEditorUrlCache:
+    """Tests for the session-scoped URL cache in the editorial loop."""
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_skips_tool_invocation(self):
+        """Second fetch of the same URL should be served from cache."""
+        from src.article_writer import ArticleEditor
+
+        editor = ArticleEditor()
+        editor._url_cache = {"https://reuters.com/test": "FETCH_FAILED: HTTP 401"}
+
+        mock_tool = AsyncMock()
+        mock_tool.ainvoke = AsyncMock(return_value="should not be called")
+        mock_tool.name = "fetch_reference_content"
+        editor._tools_by_name = {"fetch_reference_content": mock_tool}
+
+        results = await editor._execute_tool_calls(
+            [
+                {
+                    "name": "fetch_reference_content",
+                    "args": {"url": "https://reuters.com/test"},
+                    "id": "call_1",
+                }
+            ]
+        )
+
+        assert len(results) == 1
+        assert "HTTP 401" in results[0].content
+        mock_tool.ainvoke.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cache_miss_invokes_tool_and_stores(self):
+        """First fetch should invoke the tool and populate the cache."""
+        from src.article_writer import ArticleEditor
+
+        editor = ArticleEditor()
+        editor._url_cache = {}
+
+        mock_tool = AsyncMock()
+        mock_tool.ainvoke = AsyncMock(return_value="Page content here")
+        mock_tool.name = "fetch_reference_content"
+        editor._tools_by_name = {"fetch_reference_content": mock_tool}
+
+        results = await editor._execute_tool_calls(
+            [
+                {
+                    "name": "fetch_reference_content",
+                    "args": {"url": "https://example.com/page"},
+                    "id": "call_1",
+                }
+            ]
+        )
+
+        assert len(results) == 1
+        assert "Page content" in results[0].content
+        mock_tool.ainvoke.assert_called_once()
+        assert editor._url_cache["https://example.com/page"] == "Page content here"
+
+    @pytest.mark.asyncio
+    async def test_cache_stores_errors(self):
+        """Tool exceptions should also be cached to avoid retrying broken URLs."""
+        from src.article_writer import ArticleEditor
+
+        editor = ArticleEditor()
+        editor._url_cache = {}
+
+        mock_tool = AsyncMock()
+        mock_tool.ainvoke = AsyncMock(side_effect=RuntimeError("Connection refused"))
+        mock_tool.name = "fetch_reference_content"
+        editor._tools_by_name = {"fetch_reference_content": mock_tool}
+
+        results = await editor._execute_tool_calls(
+            [
+                {
+                    "name": "fetch_reference_content",
+                    "args": {"url": "https://broken.com"},
+                    "id": "call_1",
+                }
+            ]
+        )
+
+        assert "TOOL_ERROR" in results[0].content
+        assert "https://broken.com" in editor._url_cache
+        assert "TOOL_ERROR" in editor._url_cache["https://broken.com"]
+
+    @pytest.mark.asyncio
+    async def test_non_fetch_tools_bypass_cache(self):
+        """search_claim and other tools should not use the URL cache."""
+        from src.article_writer import ArticleEditor
+
+        editor = ArticleEditor()
+        editor._url_cache = {}
+
+        mock_tool = AsyncMock()
+        mock_tool.ainvoke = AsyncMock(return_value="Search results")
+        mock_tool.name = "search_claim"
+        editor._tools_by_name = {"search_claim": mock_tool}
+
+        await editor._execute_tool_calls(
+            [
+                {
+                    "name": "search_claim",
+                    "args": {"query": "test query"},
+                    "id": "call_1",
+                }
+            ]
+        )
+
+        mock_tool.ainvoke.assert_called_once()
+        assert len(editor._url_cache) == 0
+
+    @pytest.mark.asyncio
+    async def test_editorial_loop_clears_cache(self):
+        """Cache should be empty after run_editorial_loop completes."""
+        from src.article_writer import ArticleEditor
+
+        editor = ArticleEditor()
+
+        # Mock review to approve immediately
+        async def mock_review(draft, context):
+            return {"verdict": "APPROVED", "confidence": 0.95}
+
+        editor.review = mock_review
+        editor.llm = MagicMock()  # Needed for is_available()
+
+        _, feedback = await editor.edit(
+            writer=MagicMock(),
+            article_draft="# Test\n\nContent.",
+            ticker="TEST.X",
+            company_name="Test Corp",
+        )
+
+        assert feedback["verdict"] == "APPROVED"
+        assert editor._url_cache == {}
+
+
+# =============================================================================
 # search_claim Tool Tests
 # =============================================================================
 

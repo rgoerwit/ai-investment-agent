@@ -8,7 +8,7 @@ Provides: major shareholders, segment breakdowns, and filing-level cash flow
 from 有価証券報告書 (Annual Securities Reports) and other filings.
 
 Requires: EDINET_API_KEY environment variable (free, registration at
-https://disclosure.edinet-fsa.go.jp).
+https://disclosure2.edinet-fsa.go.jp).
 """
 
 import asyncio
@@ -104,7 +104,7 @@ class EdinetFetcher(FilingFetcher):
         result.filing_date = str(getattr(doc, "filing_datetime", ""))[:10]
         result.filing_type = getattr(doc, "doc_type_name", "Annual")
         result.filing_url = (
-            f"https://disclosure.edinet-fsa.go.jp/E01EW/download?"
+            f"https://disclosure2.edinet-fsa.go.jp/E01EW/download?"
             f"uji.verb=W1E62071EdinetCodeDownload&uji.bean=ee.bean.W1E62071.EEW1E62071Bean"
             f"&TID=0&PID=W1E62071&SESSIONKEY=&DLKEY=&cat=yuho&edinession=&"
             f"key={getattr(doc, 'doc_id', '')}"
