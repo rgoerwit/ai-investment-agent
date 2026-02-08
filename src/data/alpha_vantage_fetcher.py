@@ -18,6 +18,9 @@ from src.data.interfaces import FinancialFetcher
 
 logger = structlog.get_logger(__name__)
 
+# Default timeout for HTTP requests (session-level safety net + per-request)
+_TIMEOUT = aiohttp.ClientTimeout(total=10)
+
 
 class AlphaVantageFetcher(FinancialFetcher):
     """
@@ -36,7 +39,7 @@ class AlphaVantageFetcher(FinancialFetcher):
         self._is_exhausted = False  # Circuit breaker
 
     async def __aenter__(self):
-        self._session = aiohttp.ClientSession()
+        self._session = aiohttp.ClientSession(timeout=_TIMEOUT)
         return self
 
     async def __aexit__(self, *args):
@@ -83,7 +86,7 @@ class AlphaVantageFetcher(FinancialFetcher):
             return None
 
         if not self._session:
-            self._session = aiohttp.ClientSession()
+            self._session = aiohttp.ClientSession(timeout=_TIMEOUT)
 
         # Alpha Vantage uses standard ticker format (0005.HK, AAPL, etc.)
         params = {"function": "OVERVIEW", "symbol": symbol, "apikey": self.api_key}
@@ -92,7 +95,7 @@ class AlphaVantageFetcher(FinancialFetcher):
             logger.debug("alpha_vantage_request", symbol=symbol)
 
             async with self._session.get(
-                self.base_url, params=params, timeout=aiohttp.ClientTimeout(total=10)
+                self.base_url, params=params, timeout=_TIMEOUT
             ) as response:
                 if response.status != 200:
                     # HTTP errors are debug level - not user-facing issues

@@ -24,6 +24,10 @@ from src.data.interfaces import FinancialFetcher
 
 logger = logging.getLogger(__name__)
 
+# Default timeout for HTTP requests (session-level safety net + per-request)
+_TIMEOUT = aiohttp.ClientTimeout(total=10)
+_ANCHOR_TIMEOUT = aiohttp.ClientTimeout(total=5)
+
 
 class EODHDFetcher(FinancialFetcher):
     """
@@ -38,7 +42,7 @@ class EODHDFetcher(FinancialFetcher):
         self._is_exhausted = False  # Circuit breaker for rate limits
 
     async def __aenter__(self):
-        self._session = aiohttp.ClientSession()
+        self._session = aiohttp.ClientSession(timeout=_TIMEOUT)
         return self
 
     async def __aexit__(self, *args):
@@ -93,14 +97,16 @@ class EODHDFetcher(FinancialFetcher):
             return None
 
         if not self._session:
-            self._session = aiohttp.ClientSession()
+            self._session = aiohttp.ClientSession(timeout=_TIMEOUT)
 
         eod_symbol = self._normalize_ticker(symbol)
         url = f"{self.base_url}/fundamentals/{eod_symbol}"
         params = {"api_token": self.api_key, "fmt": "json"}
 
         try:
-            async with self._session.get(url, params=params, timeout=10) as response:
+            async with self._session.get(
+                url, params=params, timeout=_TIMEOUT
+            ) as response:
                 # --- Error Handling & Circuit Breaking ---
                 if response.status == 200:
                     try:
@@ -150,7 +156,7 @@ class EODHDFetcher(FinancialFetcher):
             return None
 
         if not self._session:
-            self._session = aiohttp.ClientSession()
+            self._session = aiohttp.ClientSession(timeout=_TIMEOUT)
 
         eod_symbol = self._normalize_ticker(symbol)
         url = f"{self.base_url}/fundamentals/{eod_symbol}"
@@ -159,7 +165,9 @@ class EODHDFetcher(FinancialFetcher):
         params = {"api_token": self.api_key, "fmt": "json", "filter": "Highlights"}
 
         try:
-            async with self._session.get(url, params=params, timeout=5) as response:
+            async with self._session.get(
+                url, params=params, timeout=_ANCHOR_TIMEOUT
+            ) as response:
                 # CASE 1: Success
                 if response.status == 200:
                     try:

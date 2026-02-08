@@ -32,6 +32,9 @@ from src.data.interfaces import FinancialFetcher
 
 logger = logging.getLogger(__name__)
 
+# Default timeout for HTTP requests (session-level safety net + per-request)
+_TIMEOUT = aiohttp.ClientTimeout(total=10)
+
 
 class FMPFetcher(FinancialFetcher):
     """
@@ -55,7 +58,7 @@ class FMPFetcher(FinancialFetcher):
 
     async def __aenter__(self):
         """Async context manager entry."""
-        self._session = aiohttp.ClientSession()
+        self._session = aiohttp.ClientSession(timeout=_TIMEOUT)
         return self
 
     async def __aexit__(self, *args):
@@ -90,13 +93,15 @@ class FMPFetcher(FinancialFetcher):
             return None
 
         if not self._session:
-            self._session = aiohttp.ClientSession()
+            self._session = aiohttp.ClientSession(timeout=_TIMEOUT)
 
         url = f"{self.base_url}/{endpoint}"
         params["apikey"] = self.api_key
 
         try:
-            async with self._session.get(url, params=params, timeout=10) as response:
+            async with self._session.get(
+                url, params=params, timeout=_TIMEOUT
+            ) as response:
                 if response.status == 200:
                     try:
                         data = await response.json()

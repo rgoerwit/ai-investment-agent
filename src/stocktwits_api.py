@@ -5,6 +5,9 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
+# Default timeout for HTTP requests
+_TIMEOUT = aiohttp.ClientTimeout(total=10)
+
 
 class StockTwitsAPI:
     """
@@ -33,9 +36,11 @@ class StockTwitsAPI:
 
         headers = {"User-Agent": "Mozilla/5.0 (compatible; TradingBot/1.0)"}
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
             try:
-                async with session.get(url, headers=headers, timeout=10) as response:
+                async with session.get(
+                    url, headers=headers, timeout=_TIMEOUT
+                ) as response:
                     if response.status == 404:
                         return {"error": "Symbol not found on StockTwits"}
                     if response.status == 429:
