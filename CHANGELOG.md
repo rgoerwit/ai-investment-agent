@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.0] - 2026-02-08
+
+### Added
+- **Parallel Analyst Architecture** - Re-engineered the analysis pipeline from sequential to a high-concurrency Fan-Out/Fan-In model.
+  - Seven analysts (Market, Sentiment, News, Junior Fundamentals, Foreign Language, Legal, and Value Trap) now execute simultaneously.
+  - Synchronization barriers (`Fundamentals Sync` and `Main Sync`) ensure data integrity and consistent state before debate phases.
+  - Reduced total analysis latency by 40-60 seconds in standard runs.
+- **Legal Counsel Agent** - New specialized node for assessing regulatory risks, VIE structures, and jurisdictional implications.
+- **Value Trap Detector** - Dedicated governance analyst that flags accounting anomalies and unsustainable capital allocation.
+- **Consultant Tool Integration** - The Consultant node is now equipped with independent verification tools for primary source spot-checks.
+- **EDINET Filing Support** - Native fetcher for Japanese regulatory filings, reducing reliance on third-party aggregators for 7000-series tickers.
+- **Ticker Screening Suite** - Added `screen_tickers.py` and supporting scripts for large-scale discovery and multi-factor filtering of equity universes.
+- **Robust Network Layer** - Implemented session-per-request pattern with `aiohttp` and mandatory timeouts to eliminate stranded connections and improved reliability under load.
+
+### Changed
+- **Unicode Sanitization** - Replaced character whitelists with category-based validation for superior handling of international company names.
+- **Truncation Detection** - Refined the "false positive" logic where agents referencing schemas were incorrectly flagged as truncated.
+- **Prompt Consolidation** - Significant shortening of core analyst prompts to improve instruction following and reduce token overhead.
+
+### Fixed
+- Fixed singletons in `aiohttp.ClientSession` that caused stranded connections during long-running batch processes.
+- Fixed EDINET domain resolution following their recent infrastructure migration.
+
 ## [3.7.0] - 2026-02-01
 
 ### Added
