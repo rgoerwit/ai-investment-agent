@@ -134,3 +134,30 @@ class TestEdgeCases:
         """Non-string input should not crash."""
         result = detect_truncation(12345)
         assert result["truncated"] is False
+
+
+class TestAgentScoping:
+    """Test that block checks are scoped to the producing agent."""
+
+    def test_consultant_mentioning_data_block_not_flagged(self):
+        """Consultant referencing DATA_BLOCK in prose should not trigger false positive."""
+        text = (
+            "CONSULTANT REVIEW: CONDITIONAL APPROVAL\n"
+            "The DATA_BLOCK: shows P/E of 10.3 which is consistent with filings.\n"
+            "Overall analysis is sound."
+        )
+        result = detect_truncation(text, agent="consultant")
+        assert result["truncated"] is False
+
+    def test_fundamentals_analyst_incomplete_data_block_flagged(self):
+        """Fundamentals analyst with incomplete DATA_BLOCK should still be caught."""
+        text = "DATA_BLOCK:\nTICKER: TEST.X\nSECTOR: Technology"
+        result = detect_truncation(text, agent="fundamentals_analyst")
+        assert result["truncated"] is True
+        assert "DATA_BLOCK" in result["marker"]
+
+    def test_no_agent_checks_all_blocks(self):
+        """Without agent param, all block checks apply (backward compat)."""
+        text = "DATA_BLOCK:\nTICKER: TEST.X\nSECTOR: Technology"
+        result = detect_truncation(text)
+        assert result["truncated"] is True

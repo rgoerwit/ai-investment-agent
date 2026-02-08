@@ -1604,7 +1604,7 @@ def create_research_manager_node(llm, memory: Any | None) -> Callable:
             # Truncation detection and logging
             from src.utils import detect_truncation
 
-            trunc_info = detect_truncation(content_str)
+            trunc_info = detect_truncation(content_str, agent="research_manager")
             if trunc_info["truncated"]:
                 logger.warning(
                     "agent_output_truncated",
@@ -1906,7 +1906,7 @@ RISK TEAM DEBATE:
             # Truncation detection and logging
             from src.utils import detect_truncation
 
-            trunc_info = detect_truncation(content_str)
+            trunc_info = detect_truncation(content_str, agent="portfolio_manager")
             if trunc_info["truncated"]:
                 logger.warning(
                     "agent_output_truncated",
@@ -2119,7 +2119,7 @@ Provide your independent consultant review."""
             # Truncation detection and logging
             from src.utils import detect_truncation
 
-            trunc_info = detect_truncation(content_str)
+            trunc_info = detect_truncation(content_str, agent="consultant")
             if trunc_info["truncated"]:
                 logger.warning(
                     "agent_output_truncated",

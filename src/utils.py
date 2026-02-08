@@ -199,7 +199,7 @@ def clean_duplicate_data_blocks(report: str) -> str:
     return cleaned_report
 
 
-def detect_truncation(text: str) -> dict:
+def detect_truncation(text: str, agent: str | None = None) -> dict:
     """
     Detect if text appears truncated and identify the truncation source.
 
@@ -209,6 +209,9 @@ def detect_truncation(text: str) -> dict:
 
     Args:
         text: The text to analyze for truncation
+        agent: Agent key (e.g. "portfolio_manager"). When set, structured-block
+               checks only fire for the agent that produces that block type,
+               preventing false positives when other agents merely reference it.
 
     Returns:
         dict with keys:
@@ -254,18 +257,18 @@ def detect_truncation(text: str) -> dict:
 
     # Check for incomplete structured blocks FIRST (MEDIUM confidence)
     # These blocks should have both start and required fields
+    # (block_marker, required_fields, producing_agent)
     block_completeness = [
-        ("PM_BLOCK:", ["VERDICT:", "RISK_ZONE:"]),  # PM output needs verdict
-        (
-            "DATA_BLOCK:",
-            ["HEALTH_SCORE:", "GROWTH_SCORE:"],
-        ),  # Fundamentals needs scores
-        ("FORENSIC_DATA_BLOCK:", ["VERDICT:", "STATUS:"]),  # Auditor needs verdict
-        ("VALUE_TRAP_BLOCK:", ["SCORE:", "VERDICT:"]),  # Value trap needs score
+        ("PM_BLOCK:", ["VERDICT:", "RISK_ZONE:"], "portfolio_manager"),
+        ("DATA_BLOCK:", ["HEALTH_SCORE:", "GROWTH_SCORE:"], "fundamentals_analyst"),
+        ("FORENSIC_DATA_BLOCK:", ["VERDICT:", "STATUS:"], "global_forensic_auditor"),
+        ("VALUE_TRAP_BLOCK:", ["SCORE:", "VERDICT:"], "value_trap_detector"),
     ]
 
     has_complete_block = False
-    for block_start, required_fields in block_completeness:
+    for block_start, required_fields, owner in block_completeness:
+        if agent and agent != owner:
+            continue
         if block_start in text:
             # Block started - check if any required field is present
             has_required = any(field in text for field in required_fields)
