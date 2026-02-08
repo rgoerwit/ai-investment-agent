@@ -298,7 +298,6 @@ class TestEODHDArbitration:
     async def test_eodhd_success(self):
         """EODHD returns anchor metrics successfully."""
         fetcher = EODHDFetcher(api_key="test_key")
-        fetcher._session = MagicMock()
 
         # Mock successful response
         mock_resp = AsyncMock()
@@ -311,11 +310,19 @@ class TestEODHDArbitration:
             }
         )
 
-        mock_ctx_mgr = AsyncMock()
-        mock_ctx_mgr.__aenter__.return_value = mock_resp
-        fetcher._session.get = MagicMock(return_value=mock_ctx_mgr)
+        # Create proper async context manager mock for response
+        mock_response_cm = AsyncMock()
+        mock_response_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_response_cm.__aexit__ = AsyncMock(return_value=None)
 
-        result = await fetcher.verify_anchor_metrics("AAPL")
+        # Create proper async context manager mock for session
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=mock_response_cm)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            result = await fetcher.verify_anchor_metrics("AAPL")
 
         assert result is not None
         assert result["marketCap"] == 1000000000
@@ -326,16 +333,23 @@ class TestEODHDArbitration:
     async def test_eodhd_402_paywall(self):
         """EODHD returns 402 Payment Required."""
         fetcher = EODHDFetcher(api_key="test_key")
-        fetcher._session = MagicMock()
 
         mock_resp = AsyncMock()
         mock_resp.status = 402
 
-        mock_ctx_mgr = AsyncMock()
-        mock_ctx_mgr.__aenter__.return_value = mock_resp
-        fetcher._session.get = MagicMock(return_value=mock_ctx_mgr)
+        # Create proper async context manager mock for response
+        mock_response_cm = AsyncMock()
+        mock_response_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_response_cm.__aexit__ = AsyncMock(return_value=None)
 
-        result = await fetcher.verify_anchor_metrics("INTL.MX")
+        # Create proper async context manager mock for session
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=mock_response_cm)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            result = await fetcher.verify_anchor_metrics("INTL.MX")
 
         assert result is None
         # Should not disable future calls (could be exchange-specific)
@@ -344,16 +358,23 @@ class TestEODHDArbitration:
     async def test_eodhd_401_auth_error(self):
         """EODHD returns 401 Auth Error."""
         fetcher = EODHDFetcher(api_key="bad_key")
-        fetcher._session = MagicMock()
 
         mock_resp = AsyncMock()
         mock_resp.status = 401
 
-        mock_ctx_mgr = AsyncMock()
-        mock_ctx_mgr.__aenter__.return_value = mock_resp
-        fetcher._session.get = MagicMock(return_value=mock_ctx_mgr)
+        # Create proper async context manager mock for response
+        mock_response_cm = AsyncMock()
+        mock_response_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_response_cm.__aexit__ = AsyncMock(return_value=None)
 
-        result = await fetcher.verify_anchor_metrics("AAPL")
+        # Create proper async context manager mock for session
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=mock_response_cm)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            result = await fetcher.verify_anchor_metrics("AAPL")
 
         assert result is None
         # Should disable future calls
@@ -362,16 +383,23 @@ class TestEODHDArbitration:
     async def test_eodhd_429_rate_limit(self):
         """EODHD returns 429 Rate Limit."""
         fetcher = EODHDFetcher(api_key="test_key")
-        fetcher._session = MagicMock()
 
         mock_resp = AsyncMock()
         mock_resp.status = 429
 
-        mock_ctx_mgr = AsyncMock()
-        mock_ctx_mgr.__aenter__.return_value = mock_resp
-        fetcher._session.get = MagicMock(return_value=mock_ctx_mgr)
+        # Create proper async context manager mock for response
+        mock_response_cm = AsyncMock()
+        mock_response_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_response_cm.__aexit__ = AsyncMock(return_value=None)
 
-        result = await fetcher.verify_anchor_metrics("AAPL")
+        # Create proper async context manager mock for session
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=mock_response_cm)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            result = await fetcher.verify_anchor_metrics("AAPL")
 
         assert result is None
         # Should disable future calls
@@ -380,16 +408,23 @@ class TestEODHDArbitration:
     async def test_eodhd_404_not_found(self):
         """EODHD returns 404 Not Found."""
         fetcher = EODHDFetcher(api_key="test_key")
-        fetcher._session = MagicMock()
 
         mock_resp = AsyncMock()
         mock_resp.status = 404
 
-        mock_ctx_mgr = AsyncMock()
-        mock_ctx_mgr.__aenter__.return_value = mock_resp
-        fetcher._session.get = MagicMock(return_value=mock_ctx_mgr)
+        # Create proper async context manager mock for response
+        mock_response_cm = AsyncMock()
+        mock_response_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_response_cm.__aexit__ = AsyncMock(return_value=None)
 
-        result = await fetcher.verify_anchor_metrics("UNKNOWN")
+        # Create proper async context manager mock for session
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=mock_response_cm)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            result = await fetcher.verify_anchor_metrics("UNKNOWN")
 
         assert result is None
         assert fetcher._is_exhausted is False
@@ -397,31 +432,39 @@ class TestEODHDArbitration:
     async def test_eodhd_malformed_json(self):
         """EODHD returns 200 but malformed JSON."""
         fetcher = EODHDFetcher(api_key="test_key")
-        fetcher._session = MagicMock()
 
         mock_resp = AsyncMock()
         mock_resp.status = 200
         mock_resp.json = AsyncMock(side_effect=ValueError("Invalid JSON"))
 
-        mock_ctx_mgr = AsyncMock()
-        mock_ctx_mgr.__aenter__.return_value = mock_resp
-        fetcher._session.get = MagicMock(return_value=mock_ctx_mgr)
+        # Create proper async context manager mock for response
+        mock_response_cm = AsyncMock()
+        mock_response_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_response_cm.__aexit__ = AsyncMock(return_value=None)
 
-        result = await fetcher.verify_anchor_metrics("AAPL")
+        # Create proper async context manager mock for session
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=mock_response_cm)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            result = await fetcher.verify_anchor_metrics("AAPL")
 
         assert result is None
 
     async def test_eodhd_network_timeout(self):
         """EODHD request times out."""
         fetcher = EODHDFetcher(api_key="test_key")
-        fetcher._session = MagicMock()
 
-        # Mock timeout exception
-        fetcher._session.get = MagicMock(
+        # Create session mock that raises error when entering context
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(
             side_effect=aiohttp.ClientError("Connection timeout")
         )
 
-        result = await fetcher.verify_anchor_metrics("AAPL")
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            result = await fetcher.verify_anchor_metrics("AAPL")
 
         assert result is None
 
@@ -445,7 +488,6 @@ class TestEODHDArbitration:
     async def test_eodhd_missing_fields(self):
         """EODHD returns 200 but with missing/null fields."""
         fetcher = EODHDFetcher(api_key="test_key")
-        fetcher._session = MagicMock()
 
         mock_resp = AsyncMock()
         mock_resp.status = 200
@@ -457,11 +499,19 @@ class TestEODHDArbitration:
             }
         )
 
-        mock_ctx_mgr = AsyncMock()
-        mock_ctx_mgr.__aenter__.return_value = mock_resp
-        fetcher._session.get = MagicMock(return_value=mock_ctx_mgr)
+        # Create proper async context manager mock for response
+        mock_response_cm = AsyncMock()
+        mock_response_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_response_cm.__aexit__ = AsyncMock(return_value=None)
 
-        result = await fetcher.verify_anchor_metrics("AAPL")
+        # Create proper async context manager mock for session
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=mock_response_cm)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            result = await fetcher.verify_anchor_metrics("AAPL")
 
         assert result is not None
         assert result["marketCap"] is None

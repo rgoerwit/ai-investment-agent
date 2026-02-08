@@ -35,21 +35,7 @@ class AlphaVantageFetcher(FinancialFetcher):
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key or config.get_alpha_vantage_api_key()
         self.base_url = "https://www.alphavantage.co/query"
-        self._session = None
         self._is_exhausted = False  # Circuit breaker
-
-    async def __aenter__(self):
-        self._session = aiohttp.ClientSession(timeout=_TIMEOUT)
-        return self
-
-    async def __aexit__(self, *args):
-        await self.close()
-
-    async def close(self):
-        """Close the aiohttp session. Safe to call multiple times."""
-        if self._session and not self._session.closed:
-            await self._session.close()
-            self._session = None
 
     def is_available(self) -> bool:
         """Check if configured and quota remaining."""
@@ -85,69 +71,69 @@ class AlphaVantageFetcher(FinancialFetcher):
         if not self.is_available():
             return None
 
-        if not self._session:
-            self._session = aiohttp.ClientSession(timeout=_TIMEOUT)
-
         # Alpha Vantage uses standard ticker format (0005.HK, AAPL, etc.)
         params = {"function": "OVERVIEW", "symbol": symbol, "apikey": self.api_key}
 
         try:
             logger.debug("alpha_vantage_request", symbol=symbol)
 
-            async with self._session.get(
-                self.base_url, params=params, timeout=_TIMEOUT
-            ) as response:
-                if response.status != 200:
-                    # HTTP errors are debug level - not user-facing issues
-                    logger.debug(
-                        "alpha_vantage_http_error",
-                        symbol=symbol,
-                        status=response.status,
-                    )
-                    return None
-
-                try:
-                    data = await response.json()
-                except (ValueError, aiohttp.ContentTypeError) as e:
-                    logger.debug(
-                        "alpha_vantage_malformed_json", symbol=symbol, error=str(e)
-                    )
-                    return None
-
-                # Check for API rate limit message
-                if "Note" in data:
-                    if (
-                        "higher API call volume" in data["Note"]
-                        or "call frequency" in data["Note"]
-                    ):
-                        # Rate limit hit - INFO level (visible but not alarming)
-                        logger.info(
-                            "alpha_vantage_rate_limit_hit",
+            async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
+                async with session.get(
+                    self.base_url, params=params, timeout=_TIMEOUT
+                ) as response:
+                    if response.status != 200:
+                        # HTTP errors are debug level - not user-facing issues
+                        logger.debug(
+                            "alpha_vantage_http_error",
                             symbol=symbol,
-                            message="Daily quota exhausted (25 requests/day free tier)",
+                            status=response.status,
                         )
-                        self._is_exhausted = True
                         return None
 
-                # Check for "Information" field (often used for errors)
-                if "Information" in data:
-                    # API info messages are debug level
+                    try:
+                        data = await response.json()
+                    except (ValueError, aiohttp.ContentTypeError) as e:
+                        logger.debug(
+                            "alpha_vantage_malformed_json", symbol=symbol, error=str(e)
+                        )
+                        return None
+
+                    # Check for API rate limit message
+                    if "Note" in data:
+                        if (
+                            "higher API call volume" in data["Note"]
+                            or "call frequency" in data["Note"]
+                        ):
+                            # Rate limit hit - INFO level (visible but not alarming)
+                            logger.info(
+                                "alpha_vantage_rate_limit_hit",
+                                symbol=symbol,
+                                message="Daily quota exhausted (25 requests/day free tier)",
+                            )
+                            self._is_exhausted = True
+                            return None
+
+                    # Check for "Information" field (often used for errors)
+                    if "Information" in data:
+                        # API info messages are debug level
+                        logger.debug(
+                            "alpha_vantage_info",
+                            symbol=symbol,
+                            message=data["Information"],
+                        )
+                        return None
+
+                    # Check for valid response (must have Symbol field)
+                    if not data or "Symbol" not in data:
+                        logger.debug("alpha_vantage_no_data", symbol=symbol)
+                        return None
+
+                    # Success - debug level (only visible when debugging data sources)
                     logger.debug(
-                        "alpha_vantage_info", symbol=symbol, message=data["Information"]
+                        "alpha_vantage_success", symbol=symbol, fields_count=len(data)
                     )
-                    return None
 
-                # Check for valid response (must have Symbol field)
-                if not data or "Symbol" not in data:
-                    logger.debug("alpha_vantage_no_data", symbol=symbol)
-                    return None
-
-                # Success - debug level (only visible when debugging data sources)
-                logger.debug(
-                    "alpha_vantage_success", symbol=symbol, fields_count=len(data)
-                )
-
-                return self._parse_overview(data)
+                    return self._parse_overview(data)
 
         except asyncio.TimeoutError:
             # Timeout - debug level (expected occasionally)
