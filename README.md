@@ -14,7 +14,7 @@
 
 ## What Makes This Different
 
-**Most "AI trading bots" are simple scripts.** This is a **thesis-driven fundamental analysis engine** with institutional-grade architecture.  (I spent hours and hours working my *ss off to get this right.)
+**Most "AI trading bots" are simple scripts.** This is a **thesis-driven fundamental analysis engine** with institutional-grade architecture.
 
 ### The Problem This Solves
 
@@ -148,28 +148,28 @@ graph TB
 
 ### How Agents Collaborate
 
-1. **Parallel Data Gathering (Fan-Out)** - Seven analyst branches (plus optional Auditor) run **simultaneously** to maximize speed:
-   - Market Analyst (technical indicators, liquidity)
-   - Sentiment Analyst (social media signals)
-   - News Analyst (recent events, catalysts)
-   - Junior Fundamentals (API-based financial data)
-   - Foreign Language Analyst (native-language sources, premium English fallback)
-   - **Legal Counsel** (tax risks like PFIC, regulatory structures like VIE, withholding rates)
-   - **Value Trap Detector** - identifies stocks that appear cheap but won't reward shareholders due to poor governance, capital hoarding, or no catalyst. Uses native terminology (持ち合い, 재벌, etc.) for jurisdiction-specific searches.
-   - **Forensic Auditor** (optional, OpenAI-powered) - retrieves primary financial documents using multilingual search and flags accounting anomalies (earnings quality, DSO trends, zombie ratios, etc.). Output is available to External Consultant via shared state.
+1. **Parallel Data Gathering (Fan-Out)** - Seven analyst branches (plus optional Auditor) run **simultaneously** to maximize speed. In `graph.py`, a conditional edge from the Dispatcher fans out to all branches at once — each branch is a `workflow.add_node()` call with its own tool-calling loop (agent node + tool node pair connected by a `route_tools` conditional edge):
+   - Market Analyst — calls `get_technical_indicators`, `calculate_liquidity_metrics` via `toolkit.get_market_tools()`
+   - Sentiment Analyst — calls `get_social_media_sentiment`, `get_multilingual_sentiment_search`
+   - News Analyst — calls `get_news`, `get_macroeconomic_news`
+   - Junior Fundamentals — calls `get_financial_metrics`, `get_fundamental_analysis` (raw API data only)
+   - Foreign Language Analyst — calls `search_foreign_sources` (Tavily + DuckDuckGo in parallel) and `get_official_filings` (EDINET/DART structured filing data when available)
+   - **Legal Counsel** — calls `search_legal_tax_disclosures` (PFIC/VIE risk, withholding rates)
+   - **Value Trap Detector** — calls `get_ownership_structure`, `get_news`, `search_foreign_sources`, `get_official_filings` for governance analysis. Uses native terminology (持ち合い, 재벌, etc.) for jurisdiction-specific searches.
+   - **Forensic Auditor** (optional, OpenAI-powered) — uses the same tools as FLA + Junior combined. Retrieves primary financial documents and flags accounting anomalies. Output is available to External Consultant via `auditor_report` in shared state.
 
-   Each branch has its own tool-calling loop. This parallel architecture reduces analysis time by ~60% compared to sequential execution.
+   Each branch has its own tool-calling loop (`agent_node` → `route_tools` → `tool_node` → back to `agent_node`). This parallel architecture reduces analysis time by ~60% compared to sequential execution.
 
-2. **Sync Check (Fan-In Barrier)** - All branches converge at synchronization points. The Fundamentals Sync waits for **Junior + Foreign Language + Legal Counsel** analysts before Senior processes their combined data. The main Sync Check waits for all reports before proceeding.
+2. **Sync Check (Fan-In Barrier)** - All branches converge at synchronization points implemented as barrier nodes in `graph.py`. The Fundamentals Sync waits for **Junior + Foreign Language + Legal Counsel** (3 edges converge) before Senior processes their combined data. The main Sync Check waits for all 7+ branches before proceeding. Each barrier uses a state-counting router that checks whether all expected reports are present before advancing.
 
-3. **Junior/Senior/Foreign/Legal Fundamentals Split** - The Junior Fundamentals Analyst calls data tools (get_financial_metrics, get_fundamental_analysis) and returns raw API data. The Foreign Language Analyst searches native-language sources (IR pages, exchange filings). The **Legal Counsel** identifies specific jurisdictional risks (e.g., PFIC status for US taxpayers, VIE structure risks in China). The Senior Fundamentals Analyst receives all three data streams and produces scored analysis with a structured DATA_BLOCK.
+3. **Junior/Senior/Foreign/Legal Fundamentals Split** - The Junior Fundamentals Analyst calls data tools (get_financial_metrics, get_fundamental_analysis) and returns raw API data. The Foreign Language Analyst searches native-language sources for segment breakdowns, parent-subsidiary ownership, and filing-level cash flow statements — high-value data that API-only tools miss. The **Legal Counsel** identifies specific jurisdictional risks (e.g., PFIC status for US taxpayers, VIE structure risks in China). The Senior Fundamentals Analyst receives all three data streams, cross-validates operating cash flow against filing data, flags segment deterioration and ownership concentration, and produces scored analysis with a structured DATA_BLOCK.
 
-4. **Red-Flag Pre-Screening** - Financial Validator parses the DATA_BLOCK for catastrophic risks (extreme leverage >500% D/E, earnings quality issues, refinancing risk). **REJECT** routes directly to PM Fast-Fail (skipping debate); **PASS** continues to adversarial debate.
+4. **Red-Flag Pre-Screening** - The Financial Validator (`validators/red_flag_detector.py`) is pure Python, not an LLM — it parses the DATA_BLOCK with exact thresholds for catastrophic risks (extreme leverage >500% D/E, earnings quality issues, refinancing risk, unsustainable distributions, cyclical peak signals) and warning-level flags (segment deterioration, OCF discrepancy, value trap indicators, PFIC/VIE risks). A conditional edge in `graph.py` reads `pre_screening_result`: **REJECT** routes directly to PM Fast-Fail (skipping debate entirely); **PASS** continues to adversarial debate (warnings add risk penalty but don't block).
 
-5. **Adversarial Debate (Parallel Rounds)** - Bull and Bear researchers argue opposite perspectives in parallel rounds:
-   - **Round 1**: Bull R1 and Bear R1 run simultaneously, then sync
-   - **Round 2** (normal mode only): Bull R2 and Bear R2 run simultaneously with R1 context
-   - Quick mode (`--quick`) skips Round 2 for faster execution
+5. **Adversarial Debate (Parallel Rounds)** - Bull and Bear researchers argue opposite perspectives in parallel rounds (fan-out/fan-in for each round):
+   - **Round 1**: Bull R1 and Bear R1 run simultaneously, then converge at Debate Sync R1
+   - **Round 2** (normal mode only): Bull R2 and Bear R2 fan out again with R1 context, converge at Debate Sync Final
+   - Quick mode (`--quick`): a conditional edge skips R2, routing directly from Debate Sync R1 to Final
 
 6. **Research Synthesis** - After debate converges at Debate Sync Final, the Research Manager combines all analyst reports with full debate history to create an investment plan.
 
@@ -253,6 +253,15 @@ poetry run python -m src.main --ticker 0005.HK --svg --transparent --output resu
 
 # Skip chart generation entirely
 poetry run python -m src.main --ticker 0005.HK --no-charts
+
+# Verbose logging (more detail than default)
+poetry run python -m src.main --ticker 0005.HK --verbose
+
+# Disable persistent memory (skip ChromaDB)
+poetry run python -m src.main --ticker 0005.HK --no-memory
+
+# Override AI models via CLI (takes precedence over .env)
+poetry run python -m src.main --ticker 0005.HK --quick-model gemini-3-flash-preview --deep-model gemini-3-pro-preview
 
 # Custom image directory
 # If --output is provided, --imagedir defaults to {output_dir}/images
@@ -606,7 +615,7 @@ The system enforces a **value-to-growth transition** strategy focused on:
 
 - ✅ **Financial Health Score ≥ 50%** - Sustainable profitability, cash flow, manageable debt
 - ✅ **Growth Score ≥ 50%** - Revenue/EPS growth, margin expansion, or turnaround trajectory  
-- ✅ **Liquidity ≥ $500k USD daily** - Tradeable via IBKR without excessive slippage
+- ✅ **Liquidity ≥ $500k USD daily** - Tradeable via IBKR without excessive slippage ($500k = PASS, $100k-$500k = MARGINAL, <$100k = HARD FAIL)
 - ✅ **Analyst Coverage < 15** - "Undiscovered" by mainstream US research
 
 ### Soft Factors (Risk Scoring)
@@ -627,27 +636,25 @@ The system enforces a **value-to-growth transition** strategy focused on:
 The system uses a **smart fallback architecture** to handle unreliable free APIs.  I wish web (Tavily) were more reliable, but, sigh:
 
 ```python
-# Simplified data fetching logic
-def get_financial_metrics(ticker):
-    result = try_yfinance(ticker)
-    if insufficient(result):
-        result = merge(result, try_yahooquery(ticker))
-    if still_insufficient(result):
-        result = merge(result, try_fmp(ticker))
-    if still_insufficient(result):
-        result = merge(result, try_eodhd(ticker))
-    if critical_gaps(result):
-        result = fill_with_tavily_search(ticker)
-    return validate_and_sanitize(result)
+# Simplified data fetching logic (actual implementation fetches all sources in parallel)
+async def get_financial_metrics(ticker):
+    # All sources fetched simultaneously via ThreadPoolExecutor
+    results = await fetch_all_sources_parallel(ticker)  # yfinance, yahooquery, FMP, EODHD, Alpha Vantage
+    merged = merge_all(results)  # Best value wins per metric
+    if critical_gaps(merged):
+        merged = fill_with_tavily_search(ticker)  # Web search fallback
+    return validate_and_sanitize(merged)
 ```
 
-**Data Sources** (in priority order):
+**Data Sources** (fetched in parallel, merged by priority):
 
 1. **yfinance** - Primary (free, comprehensive)
 2. **YahooQuery** - Backup for specific metrics
 3. **FMP** (Financial Modeling Prep) - Premium data if API key provided
 4. **EODHD** - Alternative fundamental data (paid for a key, but still not great for international equities)
-5. **Tavily** - Web search fallback for critical gaps (this code needs improvement)
+5. **Alpha Vantage** - Additional fundamental data source
+6. **Tavily + DuckDuckGo** - Dual web search (run in parallel, results merged and deduplicated). DDG is free with no API key, providing a different search index from Tavily.
+7. **Official Filing APIs** - EDINET (Japan), with DART (Korea) and Companies House (UK) planned. Structured filing data (shareholders, segments, cash flow) that web search can't reliably surface.
 
 ### Memory System (Ticker Isolation)
 
@@ -743,22 +750,62 @@ This repository is an educational resource for understanding **production-grade 
 ### Architecture Patterns Worth Studying
 
 ```text
-src/
-├── agents.py          # Agent factory functions (analyst_node, researcher_node)
-├── graph.py           # LangGraph state machine orchestration
-├── toolkit.py         # Tool definitions (get_financial_metrics, get_news)
-├── memory.py          # ChromaDB vector storage with ticker isolation
-├── prompts/           # Versioned, structured agent prompts (JSON)
-├── charts/
-│   ├── base.py        # Chart dataclasses (FootballFieldData, ChartConfig)
-│   ├── extractors/    # Parse DATA_BLOCK and VALUATION_PARAMS
-│   └── generators/    # Seaborn/Matplotlib chart generation
-├── data/
-│   ├── fetcher.py     # Smart multi-source data pipeline
-│   └── validator.py   # Financial data sanity checks
-│   └── other...       # Other fetcher-tool auxiliary files
-└── main.py            # CLI entry point with clean state management
+├── prompts/                  # Versioned agent prompts (JSON) — each agent has its own file
+│   ├── fundamentals_analyst.json      # Senior Fundamentals (DATA_BLOCK scoring)
+│   ├── foreign_language_analyst.json  # Native-language search (segments/ownership/filing CF)
+│   ├── value_trap_detector.json       # Governance analysis (VALUE_TRAP_BLOCK)
+│   ├── legal_counsel.json             # PFIC/VIE risk detection
+│   ├── bull_researcher.json           # Pre-mortem failure analysis, adversarial debate
+│   ├── bear_researcher.json           # Kill criteria, downside probability
+│   ├── portfolio_manager.json         # Final decision with PM_BLOCK output
+│   └── ...                            # research_manager, writer, risk analysts, etc.
+│
+├── src/
+│   ├── main.py               # CLI entry point — parses args, calls run_analysis(), optional article generation
+│   ├── graph.py              # LangGraph StateGraph — wires nodes, edges, fan-out/fan-in barriers, conditional routing
+│   ├── agents.py             # Node factories — create_analyst_node(), create_researcher_node(), etc.
+│   │                         #   Each factory returns a callable that graph.py registers via workflow.add_node()
+│   ├── toolkit.py            # @tool functions — get_financial_metrics, search_foreign_sources, get_official_filings, etc.
+│   │                         #   Toolkit class groups tools by agent role (get_foreign_language_tools(), etc.)
+│   ├── prompts.py            # Loads versioned JSON prompts, injects ticker/date context into system messages
+│   ├── config.py             # Pydantic Settings — validated config from .env, API key getters, directory setup
+│   ├── llms.py               # LLM factory — create_gemini_model(), create_writer_llm() (Claude), thinking levels
+│   ├── memory.py             # ChromaDB vector store — ticker-isolated collections, prevents cross-contamination
+│   ├── observability.py      # Langfuse/LangSmith callback setup for tracing
+│   ├── report_generator.py   # Formats final markdown report from graph state
+│   ├── article_writer.py     # Post-graph article generation (Claude-first, Gemini fallback; --article flag)
+│   ├── fx_normalization.py   # Live FX rates (yfinance) for international liquidity calculation
+│   ├── ticker_utils.py       # Ticker normalization (7203 → 7203.T), company name cleaning
+│   ├── ticker_corrections.py # Known ticker format corrections by exchange
+│   ├── tavily_utils.py       # Shared Tavily search-with-timeout (breaks circular import)
+│   ├── consultant_tools.py   # Tools available to the External Consultant (spot-check metrics)
+│   ├── enhanced_sentiment_toolkit.py  # Multilingual sentiment search tool
+│   ├── liquidity_calculation_tool.py  # $500k USD threshold check with FX conversion
+│   ├── stocktwits_api.py     # StockTwits social sentiment data
+│   ├── token_tracker.py      # Token usage tracking across agents
+│   ├── cleanup.py            # Graceful shutdown — closes LLM connections, ChromaDB handles
+│   │
+│   ├── validators/
+│   │   └── red_flag_detector.py  # Deterministic pre-screening — sector-aware thresholds, code-driven (not LLM)
+│   ├── charts/
+│   │   ├── base.py           # Chart dataclasses (FootballFieldData, RadarChartData, ChartConfig)
+│   │   ├── chart_node.py     # LangGraph node — runs post-PM to generate charts from PM_BLOCK
+│   │   ├── extractors/       # Parse DATA_BLOCK, PM_BLOCK, VALUATION_PARAMS into chart data
+│   │   └── generators/       # Matplotlib/Seaborn chart rendering (football field, radar)
+│   └── data/
+│       ├── fetcher.py        # Smart multi-source pipeline — parallel fetch, merge-by-priority, gap detection
+│       ├── validator.py      # Financial data sanity checks (P/E not 50,000, etc.)
+│       ├── interfaces.py     # Abstract base for data source fetchers
+│       ├── fmp_fetcher.py    # Financial Modeling Prep integration
+│       ├── eodhd_fetcher.py  # EODHD international data integration
+│       ├── alpha_vantage_fetcher.py  # Alpha Vantage fallback
+│       └── filings/          # Official filing APIs (EDINET for Japan, DART for Korea — phase 2)
+│           ├── base.py       # FilingResult dataclass + FilingFetcher ABC
+│           ├── registry.py   # Suffix→fetcher dispatcher (e.g., .T → EDINET)
+│           └── edinet_fetcher.py  # Japan EDINET: shareholders, segments, cash flow from 有価証券報告書
 ```
+
+**How the pieces connect:** `main.py` calls `create_graph()` in `graph.py`, which builds a `StateGraph` by registering nodes from `agents.py` factories, binding tools from `toolkit.py`, and wiring edges (including conditional fan-out/fan-in barriers). Each agent node receives a system prompt from `prompts.py`, calls an LLM from `llms.py`, and writes results to typed state fields. The `data/` layer provides financial data to tools; `validators/` pre-screens before debate; `charts/` visualizes after the PM decides. The `article_writer.py` is entirely outside the graph — a post-analysis step triggered by `--article`.
 
 **Why This Matters for Practitioners:**
 
@@ -875,7 +922,7 @@ terraform apply  # Only after validating plan
 
 Contributions welcome! Areas for improvement:
 
-1. **Data Sources** - Integrate Polygon.io, Alpha Vantage, or Coingecko
+1. **Data Sources** - Integrate Polygon.io, Coingecko, or other specialized APIs
 2. **Sentiment** - Add X (Twitter) API, Reddit scraping, or Stocktwits Pro
 3. **Execution** - IBKR API integration for automated order placement
 4. **UI** - Streamlit/Gradio frontend for non-technical users

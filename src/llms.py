@@ -328,19 +328,28 @@ def create_consultant_llm(
         f"(timeout={timeout}s, retries={max_retries})"
     )
 
-    # Create ChatOpenAI instance with similar config to Gemini models
-    llm = ChatOpenAI(
-        model=model_name,
-        temperature=temperature,
-        timeout=timeout,
-        max_retries=max_retries,
-        openai_api_key=api_key,
-        callbacks=callbacks or [],
-        # Increased from 4096 - consultant reviews need room for tiered flags + forensic analysis
-        max_tokens=16384,
-        # Enable streaming for better UX (optional)
-        streaming=False,
-    )
+    # OpenAI reasoning models (o1, o3, etc.) reject temperature != 1.0.
+    is_reasoning_model = bool(re.match(r"^o[0-9]", model_name))
+
+    kwargs = {
+        "model": model_name,
+        "timeout": timeout,
+        "max_retries": max_retries,
+        "openai_api_key": api_key,
+        "callbacks": callbacks or [],
+        "max_tokens": 16384,
+        "streaming": False,
+    }
+
+    if is_reasoning_model:
+        logger.info(
+            f"Consultant model {model_name} is a reasoning model — "
+            f"omitting temperature (must be default 1.0)"
+        )
+    else:
+        kwargs["temperature"] = temperature
+
+    llm = ChatOpenAI(**kwargs)
 
     return llm
 
@@ -378,16 +387,29 @@ def create_auditor_llm(
 
     logger.info(f"Initializing Auditor LLM: {model_name}")
 
-    return ChatOpenAI(
-        model=model_name,
-        temperature=0,  # Forensic work requires precision
-        timeout=120,
-        max_retries=3,
-        openai_api_key=api_key,
-        callbacks=callbacks or [],
-        max_tokens=16384,  # Increased from 4096 - auditor needs room for forensic analysis
-        streaming=False,
-    )
+    # OpenAI reasoning models (o1, o3, etc.) reject temperature != 1.0.
+    # Detect them and omit temperature so the SDK uses the default.
+    is_reasoning_model = bool(re.match(r"^o[0-9]", model_name))
+
+    kwargs = {
+        "model": model_name,
+        "timeout": 120,
+        "max_retries": 3,
+        "openai_api_key": api_key,
+        "callbacks": callbacks or [],
+        "max_tokens": 16384,
+        "streaming": False,
+    }
+
+    if is_reasoning_model:
+        logger.info(
+            f"Auditor model {model_name} is a reasoning model — "
+            f"omitting temperature (must be default 1.0)"
+        )
+    else:
+        kwargs["temperature"] = 0  # Forensic work requires precision
+
+    return ChatOpenAI(**kwargs)
 
 
 def create_writer_llm(
@@ -454,7 +476,7 @@ def create_writer_llm(
     if "opus-4-6" in model_name:
         # Opus 4.6: adaptive thinking (Claude decides when/how much to think)
         kwargs["thinking"] = {"type": "adaptive"}
-        kwargs["model_kwargs"] = {"effort": "high"}
+        kwargs["model_kwargs"] = {"output_config": {"effort": "high"}}
         # CRITICAL: Anthropic returns 400 if temperature != 1.0 with thinking.
         # Omit temperature entirely — SDK defaults to 1.0.
         logger.info(

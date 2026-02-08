@@ -1116,6 +1116,76 @@ class TestCreateWriterLLM:
             # Should return something (Gemini fallback), not raise
             assert llm is not None
 
+    def test_opus_effort_not_top_level_kwarg(self):
+        """Regression: effort must be inside output_config, not a top-level API param.
+
+        anthropic SDK rejects unknown top-level kwargs like 'effort' on Messages.create().
+        The effort parameter must be nested: model_kwargs={"output_config": {"effort": "high"}}.
+        """
+        from src.llms import create_writer_llm
+
+        with patch("src.llms.config") as mock_config:
+            mock_config.get_claude_api_key.return_value = "fake-key"
+            mock_config.writer_model = "claude-opus-4-6"
+            mock_config.api_timeout = 300
+            mock_config.api_retry_attempts = 3
+
+            llm = create_writer_llm()
+            # effort must NOT be a top-level model_kwarg
+            assert "effort" not in llm.model_kwargs, (
+                "effort must be nested inside output_config, not top-level "
+                "(causes Messages.create() unexpected keyword argument error)"
+            )
+            # effort must be inside output_config
+            assert "output_config" in llm.model_kwargs
+            assert llm.model_kwargs["output_config"]["effort"] == "high"
+
+    def test_model_kwargs_are_valid_api_params(self):
+        """Regression: all model_kwargs must be valid Anthropic Messages.create() params.
+
+        Only these top-level params are allowed by the Anthropic API:
+        model, max_tokens, messages, metadata, stop_sequences, stream, system,
+        temperature, thinking, tool_choice, tools, top_k, top_p, output_config.
+        Anything else causes 'unexpected keyword argument' errors at runtime.
+        """
+        from src.llms import create_writer_llm
+
+        VALID_API_PARAMS = {
+            "model",
+            "max_tokens",
+            "messages",
+            "metadata",
+            "stop_sequences",
+            "stream",
+            "system",
+            "temperature",
+            "thinking",
+            "tool_choice",
+            "tools",
+            "top_k",
+            "top_p",
+            "output_config",
+        }
+
+        for model_name in [
+            "claude-opus-4-6",
+            "claude-sonnet-4-5-20250929",
+            "claude-haiku-4-5-20251001",
+        ]:
+            with patch("src.llms.config") as mock_config:
+                mock_config.get_claude_api_key.return_value = "fake-key"
+                mock_config.writer_model = model_name
+                mock_config.api_timeout = 300
+                mock_config.api_retry_attempts = 3
+
+                llm = create_writer_llm()
+                for key in llm.model_kwargs:
+                    assert key in VALID_API_PARAMS, (
+                        f"model_kwargs['{key}'] for {model_name} is not a valid "
+                        f"Anthropic Messages.create() parameter. "
+                        f"Valid: {sorted(VALID_API_PARAMS)}"
+                    )
+
 
 # =============================================================================
 # Writer Config Tests

@@ -14,7 +14,7 @@ import structlog
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from src.config import config
-from src.llms import create_writer_llm
+from src.llms import create_deep_thinking_llm, create_writer_llm
 
 # Maximum characters for fact-check context (controls token usage)
 MAX_FACT_CHECK_CHARS = 1500
@@ -448,14 +448,42 @@ class ArticleWriter:
             )
             return ""
 
+    def _invoke_with_fallback(self, messages: list):
+        """Invoke LLM with automatic Claude → Gemini fallback on API errors."""
+        try:
+            return self.llm.invoke(messages)
+        except Exception as e:
+            error_str = str(e)
+            # Only fall back for Claude-specific API errors, not all exceptions
+            is_anthropic_error = any(
+                marker in error_str
+                for marker in ("anthropic", "credit balance", "Anthropic API")
+            )
+            if not is_anthropic_error:
+                # Check exception module for anthropic SDK errors
+                mod = type(e).__module__ or ""
+                is_anthropic_error = "anthropic" in mod
+
+            if not is_anthropic_error:
+                raise  # Not a Claude error — propagate
+
+            logger.warning(
+                "Claude writer failed, falling back to Gemini",
+                error=error_str[:200],
+            )
+            fallback_llm = create_deep_thinking_llm()
+            self.llm = fallback_llm  # Cache for subsequent calls (e.g., retry)
+            return fallback_llm.invoke(messages)
+
     def _invoke_writer(self, messages: list) -> str:
         """
         Invoke the writer LLM with provider-aware post-processing.
 
         Handles:
-        1. Thinking block extraction (Claude adaptive thinking / Gemini thinking)
-        2. Preamble stripping (Claude's politeness tendency)
-        3. Refusal detection (financial advice guardrails)
+        1. Claude → Gemini fallback on API errors (billing, auth, rate limits)
+        2. Thinking block extraction (Claude adaptive thinking / Gemini thinking)
+        3. Preamble stripping (Claude's politeness tendency)
+        4. Refusal detection (financial advice guardrails)
 
         Args:
             messages: List of SystemMessage/HumanMessage to send
@@ -466,7 +494,7 @@ class ArticleWriter:
         Raises:
             RuntimeError: If the model refuses to generate the article
         """
-        response = self.llm.invoke(messages)
+        response = self._invoke_with_fallback(messages)
 
         # 1. Extract text, filtering out thinking blocks
         article = _extract_text_from_response(response)

@@ -215,12 +215,15 @@ class TestSpotCheckMetricTool:
             assert "error" in parsed
 
     def test_get_consultant_tools_returns_list(self):
-        """get_consultant_tools should return a non-empty list."""
+        """get_consultant_tools should return independent (non-yfinance) tools only."""
         from src.consultant_tools import get_consultant_tools
 
         tools = get_consultant_tools()
         assert len(tools) >= 1
-        assert tools[0].name == "spot_check_metric"
+        tool_names = [t.name for t in tools]
+        # spot_check_metric (yfinance) deliberately excluded — circular validation
+        assert "spot_check_metric" not in tool_names
+        assert "spot_check_metric_alt" in tool_names
 
 
 # =============================================================================
@@ -342,10 +345,16 @@ class TestConsultantToolLoop:
         final_response.tool_calls = []
 
         mock_llm = AsyncMock()
-        # 3 tool responses (iterations 0,1,2) + safety valve doesn't trigger because
-        # iteration 2 == MAX_TOOL_ITERATIONS, so content is extracted from that response
+        # MAX_TOOL_ITERATIONS=3: iterations 0,1,2 return tool calls, iteration 3 hits
+        # the max and extracts content from that response
         mock_llm.ainvoke = AsyncMock(
-            side_effect=[tool_response, tool_response, tool_response, final_response]
+            side_effect=[
+                tool_response,
+                tool_response,
+                tool_response,
+                tool_response,
+                final_response,
+            ]
         )
         mock_llm.bind_tools = MagicMock(return_value=mock_llm)
 
@@ -372,7 +381,7 @@ class TestConsultantToolLoop:
 
         result = await node(state, MagicMock())
         assert "consultant_review" in result
-        # Should have been called: iteration 0 (tool call), iteration 1 (tool call),
-        # iteration 2 == MAX (extract content from this response)
-        # Total LLM calls: 3 (not 4 — the last one extracts content)
-        assert mock_llm.ainvoke.call_count == 3
+        # MAX_TOOL_ITERATIONS=3: iterations 0, 1, 2 each produce tool calls,
+        # iteration 3 == MAX extracts content from that response.
+        # Total LLM calls: 4
+        assert mock_llm.ainvoke.call_count == 4

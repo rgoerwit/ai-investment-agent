@@ -208,5 +208,14 @@ async def spot_check_metric_alt(
 
 
 def get_consultant_tools() -> list:
-    """Get the list of tools available to the External Consultant."""
-    return [spot_check_metric, spot_check_metric_alt]
+    """Get the list of tools available to the External Consultant.
+
+    DELIBERATELY excludes spot_check_metric (yfinance) because the main
+    pipeline already uses yfinance — verifying yfinance against yfinance is
+    circular validation. The consultant gets only independent sources:
+    - spot_check_metric_alt: FMP (independent of pipeline)
+    - get_official_filings: Official filing APIs (EDINET/DART) for ground-truth
+    """
+    from src.toolkit import get_official_filings
+
+    return [spot_check_metric_alt, get_official_filings]

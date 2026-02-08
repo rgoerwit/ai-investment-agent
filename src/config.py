@@ -583,6 +583,11 @@ class Settings(BaseSettings):
         validation_alias="ALPHAVANTAGE_API_KEY",
         description="Alpha Vantage API key (optional fallback)",
     )
+    edinet_api_key: SecretStr = Field(
+        default=SecretStr(""),
+        validation_alias="EDINET_API_KEY",
+        description="Japan EDINET filing API key (optional, free registration)",
+    )
 
     # --- Pydantic Settings Configuration ---
     model_config = SettingsConfigDict(
@@ -657,6 +662,11 @@ class Settings(BaseSettings):
         if self.langfuse_host and "LANGFUSE_BASE_URL" not in os.environ:
             os.environ["LANGFUSE_BASE_URL"] = self.langfuse_host
 
+        # Export EDINET API key for edinet-tools SDK (reads from os.environ).
+        edinet_key = self.edinet_api_key.get_secret_value()
+        if edinet_key and "EDINET_API_KEY" not in os.environ:
+            os.environ["EDINET_API_KEY"] = edinet_key
+
         # Export telemetry/system settings for third-party libraries.
         # ChromaDB and gRPC read directly from os.environ.
         if self.disable_chroma_telemetry:
@@ -713,6 +723,10 @@ class Settings(BaseSettings):
     def get_claude_api_key(self) -> str | None:
         """Get Anthropic API key, or None if not configured."""
         return self.claude_api_key.get_secret_value() if self.claude_api_key else None
+
+    def get_edinet_api_key(self) -> str:
+        """Get EDINET API key securely from SecretStr field."""
+        return self.edinet_api_key.get_secret_value()
 
     def get_langfuse_public_key(self) -> str:
         """Get Langfuse public key securely from SecretStr field."""

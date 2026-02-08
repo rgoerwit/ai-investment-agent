@@ -98,6 +98,27 @@ class RedFlagDetector:
             return Sector.GENERAL
 
     @staticmethod
+    def _parse_currency_value(
+        sign: str, value_str: str, multiplier: str | None
+    ) -> float:
+        """Parse a sign + numeric string + B/M/K multiplier into a float.
+
+        Shared by all currency extraction methods to avoid duplication.
+        """
+        value = float(value_str.replace(",", ""))
+        if sign == "-":
+            value = -value
+        if multiplier:
+            m = multiplier.upper()
+            if m == "B":
+                value *= 1_000_000_000
+            elif m == "M":
+                value *= 1_000_000
+            elif m == "K":
+                value *= 1_000
+        return value
+
+    @staticmethod
     def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
         """
         Extract financial metrics from Fundamentals Analyst DATA_BLOCK.
@@ -143,6 +164,9 @@ class RedFlagDetector:
             "roe_5y_avg": None,
             "peg_ratio": None,
             "ocf": None,
+            "ocf_source": None,
+            "segment_flag": None,
+            "parent_company": None,
             "_raw_report": fundamentals_report,  # For downstream data quality checks
         }
 
@@ -253,19 +277,38 @@ class RedFlagDetector:
             re.IGNORECASE,
         )
         if ocf_match:
-            sign = ocf_match.group(1)
-            value = float(ocf_match.group(2).replace(",", ""))
-            if sign == "-":
-                value = -value
-            multiplier = ocf_match.group(3)
-            if multiplier:
-                if multiplier.upper() == "B":
-                    value *= 1_000_000_000
-                elif multiplier.upper() == "M":
-                    value *= 1_000_000
-                elif multiplier.upper() == "K":
-                    value *= 1_000
-            metrics["ocf"] = value
+            metrics["ocf"] = RedFlagDetector._parse_currency_value(
+                ocf_match.group(1), ocf_match.group(2), ocf_match.group(3)
+            )
+
+        # Extract OPERATING_CASH_FLOW_SOURCE
+        ocf_source_match = re.search(
+            r"OPERATING_CASH_FLOW_SOURCE:\s*(JUNIOR|FILING|N/A)",
+            data_block,
+            re.IGNORECASE,
+        )
+        if ocf_source_match:
+            val = ocf_source_match.group(1).upper()
+            if val != "N/A":
+                metrics["ocf_source"] = val
+
+        # Extract SEGMENT_FLAG
+        segment_flag_match = re.search(
+            r"SEGMENT_FLAG:\s*(DETERIORATING|STABLE|N/A)",
+            data_block,
+            re.IGNORECASE,
+        )
+        if segment_flag_match:
+            val = segment_flag_match.group(1).upper()
+            if val != "N/A":
+                metrics["segment_flag"] = val
+
+        # Extract PARENT_COMPANY (name with percentage, or NONE)
+        parent_match = re.search(r"PARENT_COMPANY:\s*(.+?)(?:\n|$)", data_block)
+        if parent_match:
+            val = parent_match.group(1).strip()
+            if val.upper() not in ("NONE", "N/A"):
+                metrics["parent_company"] = val
 
         # Now extract from detailed sections (below DATA_BLOCK)
         metrics["debt_to_equity"] = RedFlagDetector._extract_debt_to_equity(
@@ -372,26 +415,13 @@ class RedFlagDetector:
             match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
             if match:
                 groups = match.groups()
-                # Handle two different pattern structures
-                if len(groups) == 2:  # "Positive FCF" pattern
-                    value = float(groups[0].replace(",", ""))
-                    multiplier = groups[1] if len(groups) > 1 else None
-                else:  # All other patterns with sign capture
-                    sign = groups[0]  # '+' or '-' or ''
-                    value = float(groups[1].replace(",", ""))
-                    if sign == "-":
-                        value = -value
-                    multiplier = groups[2] if len(groups) > 2 else None
-
-                # Handle B/M/K multipliers
-                if multiplier:
-                    if multiplier.upper() == "B":
-                        value *= 1_000_000_000
-                    elif multiplier.upper() == "M":
-                        value *= 1_000_000
-                    elif multiplier.upper() == "K":
-                        value *= 1_000
-                return value
+                if len(groups) == 2:  # "Positive FCF" pattern (no sign group)
+                    return RedFlagDetector._parse_currency_value(
+                        "", groups[0], groups[1]
+                    )
+                return RedFlagDetector._parse_currency_value(
+                    groups[0], groups[1], groups[2]
+                )
         return None
 
     @staticmethod
@@ -420,21 +450,9 @@ class RedFlagDetector:
             match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
             if match:
                 groups = match.groups()
-                sign = groups[0]  # '+' or '-' or ''
-                value = float(groups[1].replace(",", ""))
-                if sign == "-":
-                    value = -value
-                multiplier = groups[2] if len(groups) > 2 else None
-
-                # Handle B/M/K multipliers
-                if multiplier:
-                    if multiplier.upper() == "B":
-                        value *= 1_000_000_000
-                    elif multiplier.upper() == "M":
-                        value *= 1_000_000
-                    elif multiplier.upper() == "K":
-                        value *= 1_000
-                return value
+                return RedFlagDetector._parse_currency_value(
+                    groups[0], groups[1], groups[2]
+                )
         return None
 
     @staticmethod
@@ -463,21 +481,9 @@ class RedFlagDetector:
             match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
             if match:
                 groups = match.groups()
-                sign = groups[0]  # '+' or '-' or ''
-                value = float(groups[1].replace(",", ""))
-                if sign == "-":
-                    value = -value
-                multiplier = groups[2] if len(groups) > 2 else None
-
-                # Handle B/M/K multipliers
-                if multiplier:
-                    if multiplier.upper() == "B":
-                        value *= 1_000_000_000
-                    elif multiplier.upper() == "M":
-                        value *= 1_000_000
-                    elif multiplier.upper() == "K":
-                        value *= 1_000
-                return value
+                return RedFlagDetector._parse_currency_value(
+                    groups[0], groups[1], groups[2]
+                )
         return None
 
     @staticmethod
@@ -792,19 +798,24 @@ class RedFlagDetector:
             and ni_for_ocf > 0
         ):
             ocf_ni_ratio = ocf / ni_for_ocf
-            if ocf_ni_ratio > 5.0:
+            # Tiered severity: >5x likely data error, >3x unusual
+            if ocf_ni_ratio > 3.0:
+                penalty, label = (
+                    (1.5, "likely data error or period mismatch")
+                    if ocf_ni_ratio > 5.0
+                    else (1.0, "unusual, verify data source")
+                )
                 red_flags.append(
                     {
                         "type": "SUSPICIOUS_OCF_NI_RATIO",
                         "severity": "WARNING",
-                        "detail": f"OCF {ocf_ni_ratio:.1f}x net income — likely data error or period mismatch",
+                        "detail": f"OCF {ocf_ni_ratio:.1f}x net income — {label}",
                         "action": "RISK_PENALTY",
-                        "risk_penalty": 1.5,
+                        "risk_penalty": penalty,
                         "rationale": (
-                            "Operating cash flow exceeding net income by >5x is extremely "
-                            "unusual and typically indicates a data source error (wrong "
-                            "currency, wrong period) or period mismatch between OCF and NI. "
-                            "Cross-validate with an independent data source before trusting."
+                            f"Operating cash flow exceeding net income by >{ocf_ni_ratio:.0f}x "
+                            "is unusual and may indicate a data source error, wrong currency, "
+                            "or period mismatch. Cross-validate with an independent source."
                         ),
                     }
                 )
@@ -815,52 +826,33 @@ class RedFlagDetector:
                     net_income=ni_for_ocf,
                     ratio=ocf_ni_ratio,
                 )
-            elif ocf_ni_ratio > 3.0:
-                red_flags.append(
-                    {
-                        "type": "SUSPICIOUS_OCF_NI_RATIO",
-                        "severity": "WARNING",
-                        "detail": f"OCF {ocf_ni_ratio:.1f}x net income — unusual, verify data source",
-                        "action": "RISK_PENALTY",
-                        "risk_penalty": 1.0,
-                        "rationale": (
-                            "Operating cash flow exceeding net income by >3x is unusual. "
-                            "While some scenarios (large depreciation, working capital release) "
-                            "can explain this, it warrants verification against an independent "
-                            "data source."
-                        ),
-                    }
-                )
-                logger.info(
-                    "red_flag_elevated_ocf_ni_ratio",
-                    ticker=ticker,
-                    ocf=ocf,
-                    net_income=ni_for_ocf,
-                    ratio=ocf_ni_ratio,
-                )
 
         # --- RED FLAG 8: Unreliable PEG (Implausible Valuation) ---
-        # PEG < 0.05 implies >20x expected growth — mathematically implausible for any
-        # real company. Treat all valuation metrics as unreliable when PEG is this low.
+        # PEG in [0, 0.05): growth denominator missing/zero/infinite, or implies
+        # >20x expected growth — either way PEG is meaningless.
         peg_for_floor = metrics.get("peg_ratio")
-        if peg_for_floor is not None and peg_for_floor > 0 and peg_for_floor < 0.05:
-            implied_growth = 1 / peg_for_floor
+        if peg_for_floor is not None and 0 <= peg_for_floor < 0.05:
+            detail = (
+                "PEG 0.00 — mathematically undefined (growth denominator is "
+                "zero, negative, or infinite). Valuation metrics are unreliable."
+                if peg_for_floor == 0
+                else (
+                    f"PEG {peg_for_floor:.3f} implies {1 / peg_for_floor:.0f}x expected "
+                    f"growth — mathematically implausible, treat valuation metrics as unreliable"
+                )
+            )
             red_flags.append(
                 {
                     "type": "UNRELIABLE_PEG",
                     "severity": "WARNING",
-                    "detail": (
-                        f"PEG {peg_for_floor:.3f} implies {implied_growth:.0f}x expected "
-                        f"growth — mathematically implausible, treat valuation metrics as unreliable"
-                    ),
+                    "detail": detail,
                     "action": "RISK_PENALTY",
                     "risk_penalty": 1.0,
                     "rationale": (
-                        "A PEG ratio below 0.05 implies the market expects enormous "
-                        "earnings growth that no real company can sustain. This typically "
-                        "means the growth rate input is stale, cyclical peak earnings are "
-                        "being projected forward, or the data source has an error. All "
-                        "PEG-derived conclusions should be discounted."
+                        "A PEG ratio below 0.05 means the growth rate input is missing, "
+                        "stale, or implies implausible growth. All PEG-derived conclusions "
+                        "should be discounted. Check whether current earnings are at a "
+                        "cyclical peak."
                     ),
                 }
             )
@@ -868,7 +860,54 @@ class RedFlagDetector:
                 "red_flag_unreliable_peg",
                 ticker=ticker,
                 peg=peg_for_floor,
-                implied_growth=implied_growth,
+            )
+
+        # --- RED FLAG 9: Segment Deterioration ---
+        # Dominant business segment showing significant profit decline
+        segment_flag = metrics.get("segment_flag")
+        if segment_flag == "DETERIORATING":
+            red_flags.append(
+                {
+                    "type": "SEGMENT_DETERIORATION",
+                    "severity": "WARNING",
+                    "detail": "Dominant segment showing profit decline (flagged by Senior Fundamentals)",
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 0.5,
+                    "rationale": (
+                        "A major business segment contributing >20% of revenue has operating "
+                        "profit declining >20% YoY. Consolidated metrics may mask deterioration "
+                        "in a key business unit."
+                    ),
+                }
+            )
+            logger.info(
+                "red_flag_segment_deterioration",
+                ticker=ticker,
+            )
+
+        # --- RED FLAG 10: OCF Source Discrepancy ---
+        # Filing OCF differs from API data — signals potential data quality issue
+        ocf_source = metrics.get("ocf_source")
+        if ocf_source == "FILING":
+            red_flags.append(
+                {
+                    "type": "OCF_SOURCE_DISCREPANCY",
+                    "severity": "WARNING",
+                    "detail": "OCF value sourced from filing differs from API data — verify",
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 0.5,
+                    "rationale": (
+                        "The Senior Fundamentals Analyst preferred the filing-sourced OCF "
+                        "over the API-sourced value due to a >30% discrepancy. This may "
+                        "indicate a yfinance data error, currency mismatch, or period "
+                        "mismatch. The filing value is likely more accurate but warrants "
+                        "cross-validation."
+                    ),
+                }
+            )
+            logger.info(
+                "red_flag_ocf_source_discrepancy",
+                ticker=ticker,
             )
 
         # Determine result

@@ -207,6 +207,162 @@ def extract_news_highlights(news_report: str, max_chars: int = 25000) -> str:
     return result if result.strip() else news_report[:max_chars]
 
 
+def compute_data_conflicts(raw_data: str, foreign_data: str) -> str:
+    """
+    Deterministically compare Junior (aggregator) vs FLA (filing) data.
+
+    Returns a structured conflict report for injection into Senior's context.
+    This replaces asking the LLM to discover discrepancies — the code finds
+    them and presents them as facts the LLM cannot rationalize away.
+    """
+    if not raw_data:
+        return ""
+
+    conflicts: list[str] = []
+
+    # --- Parse Junior's raw JSON for key metrics ---
+    junior_ocf = None
+    junior_analysts = None
+    junior_peg = None
+    junior_mcap = None
+
+    # Junior output is tool-call JSON; extract from the text
+    def _extract_json_number(text: str, key: str) -> float | None:
+        """Find a JSON key-value pair and extract the number."""
+        for pattern in [
+            rf'"{key}"\s*:\s*(-?[\d.eE+]+)',
+            rf"'{key}'\s*:\s*(-?[\d.eE+]+)",
+        ]:
+            m = re.search(pattern, text)
+            if m:
+                try:
+                    return float(m.group(1))
+                except (ValueError, OverflowError):
+                    return None
+        return None
+
+    junior_ocf = _extract_json_number(raw_data, "operatingCashflow")
+    junior_analysts = _extract_json_number(raw_data, "numberOfAnalystOpinions")
+    junior_peg = _extract_json_number(raw_data, "pegRatio")
+    junior_mcap = _extract_json_number(raw_data, "marketCap")
+
+    # --- Parse FLA report for filing data ---
+    filing_ocf = None
+    filing_ocf_period = None
+    parent_company = None
+
+    if foreign_data:
+        # Filing OCF: look for "Operating Cash Flow (Filing): ¥10.91B" etc.
+        ocf_match = re.search(
+            r"Operating Cash Flow\s*\(?Filing\)?[:\s]*([¥$€£₩]?[\d,.]+)\s*(B|M|T|billion|million|trillion)?",
+            foreign_data,
+            re.IGNORECASE,
+        )
+        if ocf_match:
+            try:
+                val_str = ocf_match.group(1).replace(",", "").lstrip("¥$€£₩")
+                filing_ocf = float(val_str)
+                suffix = (ocf_match.group(2) or "").upper()
+                if suffix in ("B", "BILLION"):
+                    filing_ocf *= 1e9
+                elif suffix in ("M", "MILLION"):
+                    filing_ocf *= 1e6
+                elif suffix in ("T", "TRILLION"):
+                    filing_ocf *= 1e12
+            except (ValueError, OverflowError):
+                filing_ocf = None
+
+        period_match = re.search(
+            r"Period[:\s]*(FY\d{4}|H[12]\s*\d{4}|Q[1-4]\s*\d{4}|\d{4})",
+            foreign_data,
+            re.IGNORECASE,
+        )
+        if period_match:
+            filing_ocf_period = period_match.group(1).strip()
+
+        # Parent company
+        parent_match = re.search(
+            r"(?:Parent Company|Controlling Shareholder)[:\s]*(.+?)(?:\n|$)",
+            foreign_data,
+            re.IGNORECASE,
+        )
+        if parent_match:
+            parent_val = parent_match.group(1).strip()
+            if parent_val.upper() not in ("NONE", "N/A", "NOT FOUND", ""):
+                parent_company = parent_val
+
+    # --- Generate conflict report ---
+
+    # 1. OCF conflict
+    if junior_ocf is not None and filing_ocf is not None and junior_ocf != 0:
+        # Normalize to same scale if possible
+        j_abs = abs(junior_ocf)
+        f_abs = abs(filing_ocf)
+        # Only compare if both are in similar magnitude (both raw or both scaled)
+        if j_abs > 0 and f_abs > 0:
+            ratio = max(j_abs, f_abs) / min(j_abs, f_abs)
+            if ratio > 1.3:
+                period_note = f" ({filing_ocf_period})" if filing_ocf_period else ""
+                conflicts.append(
+                    f"- OCF: Junior={junior_ocf:,.0f} [yfinance] vs "
+                    f"Filing={filing_ocf:,.0f}{period_note} [FLA] — "
+                    f"{ratio:.1f}x difference. "
+                    f"{'PERIOD MISMATCH — cannot directly compare' if filing_ocf_period and 'H' in filing_ocf_period.upper() else 'INVESTIGATE: same metric, material divergence'}"
+                )
+
+    # 2. Analyst count anomaly
+    if junior_analysts is not None:
+        analysts_int = int(junior_analysts)
+        if analysts_int < 5 and junior_mcap is not None and junior_mcap > 500_000_000:
+            conflicts.append(
+                f"- ANALYST_COUNT: {analysts_int} [yfinance] for "
+                f"${junior_mcap / 1e9:.1f}B market cap — "
+                f"ANOMALY: likely data gap, not genuinely uncovered. "
+                f"Verify independently before relying on 'undiscovered' thesis."
+            )
+
+    # 3. PEG anomaly
+    if junior_peg is not None and 0 <= junior_peg < 0.05:
+        detail = (
+            "growth denominator zero/missing/infinite"
+            if junior_peg == 0
+            else f"implies {1/junior_peg:.0f}x expected growth"
+        )
+        conflicts.append(
+            f"- PEG: {junior_peg:.2f} [yfinance] — UNRELIABLE ({detail}). "
+            f"Do not use PEG to justify valuation."
+        )
+
+    # 4. Ownership gap
+    if foreign_data and parent_company:
+        conflicts.append(
+            f"- PARENT/CONTROLLER: {parent_company} [FLA] — "
+            f"yfinance does not provide parent-subsidiary data. "
+            f"If controlling holder >40%, minority influence is limited."
+        )
+    elif foreign_data and not parent_company:
+        # FLA searched but didn't find — note the gap
+        if "OWNERSHIP STRUCTURE" in foreign_data.upper() and (
+            "NONE" in foreign_data.upper() or "NOT FOUND" in foreign_data.upper()
+        ):
+            conflicts.append(
+                "- PARENT/CONTROLLER: Not found by FLA search. "
+                "yfinance only provides institutional holders, not parent companies. "
+                "Ownership structure is UNVERIFIED for this ticker."
+            )
+
+    if not conflicts:
+        return ""
+
+    header = (
+        "\n\n### AUTOMATED CONFLICT CHECK (system-generated, not agent output)\n"
+        "The following discrepancies were detected by comparing Junior (aggregator) "
+        "data against Foreign Language Analyst (filing/search) data. These are FACTS, "
+        "not suggestions. Address each in your CROSS-CHECK FLAGS.\n"
+    )
+    return header + "\n".join(conflicts) + "\n"
+
+
 # --- PM Input Summarization ---
 
 
@@ -977,6 +1133,16 @@ def create_analyst_node(
                         "senior_fundamentals_no_news",
                         ticker=ticker,
                         message="News report not yet available (parallel execution) - proceeding without news context",
+                    )
+
+                # Pre-computed conflict check (deterministic, not LLM)
+                conflict_report = compute_data_conflicts(raw_data, foreign_data)
+                if conflict_report:
+                    extra_context += conflict_report
+                    logger.info(
+                        "senior_fundamentals_conflicts_detected",
+                        ticker=ticker,
+                        conflict_count=conflict_report.count("\n- "),
                     )
 
                 # Legal Counsel data for PFIC/VIE reconciliation
@@ -1780,8 +1946,8 @@ def create_consultant_node(
     Returns:
         Async function compatible with LangGraph StateGraph.add_node()
     """
-    MAX_TOOL_ITERATIONS = 2
-    MAX_TOOL_CALLS_PER_TURN = 2
+    MAX_TOOL_ITERATIONS = 3
+    MAX_TOOL_CALLS_PER_TURN = 4
 
     # Pre-bind tools if available
     tools_by_name = {t.name: t for t in tools} if tools else {}

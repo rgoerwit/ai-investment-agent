@@ -597,3 +597,92 @@ class TestWritingSamplesDirectory:
                 continue
 
         assert has_content, "At least one sample should have substantial content"
+
+
+class TestClaudeToGeminiFallback:
+    """Tests for automatic Claude → Gemini fallback on API errors."""
+
+    @patch("src.article_writer.create_deep_thinking_llm")
+    @patch("src.article_writer.create_writer_llm")
+    def test_fallback_on_anthropic_billing_error(
+        self, mock_create_writer, mock_create_gemini
+    ):
+        """Regression: billing errors should fall back to Gemini, not crash."""
+        from src.article_writer import ArticleWriter
+
+        # Claude LLM that raises billing error
+        mock_claude = MagicMock()
+        mock_claude.invoke.side_effect = Exception(
+            "Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', "
+            "'message': 'Your credit balance is too low to access the Anthropic API.'}}"
+        )
+        mock_create_writer.return_value = mock_claude
+
+        # Gemini fallback
+        mock_gemini = MagicMock()
+        mock_gemini.invoke.return_value = MagicMock(
+            content="# Fallback Article\n\nWritten by Gemini."
+        )
+        mock_create_gemini.return_value = mock_gemini
+
+        writer = ArticleWriter(
+            samples_dir=Path("writing_samples")
+            if Path("writing_samples").exists()
+            else None,
+        )
+        article = writer._invoke_writer([MagicMock()])
+
+        # Should have fallen back to Gemini and produced an article
+        assert "Fallback Article" in article
+        mock_create_gemini.assert_called_once()
+
+    @patch("src.article_writer.create_deep_thinking_llm")
+    @patch("src.article_writer.create_writer_llm")
+    def test_fallback_caches_gemini_for_subsequent_calls(
+        self, mock_create_writer, mock_create_gemini
+    ):
+        """After fallback, Gemini should be cached so subsequent calls don't retry Claude."""
+        from src.article_writer import ArticleWriter
+
+        mock_claude = MagicMock()
+        mock_claude.invoke.side_effect = Exception(
+            "Your credit balance is too low to access the Anthropic API."
+        )
+        mock_create_writer.return_value = mock_claude
+
+        mock_gemini = MagicMock()
+        mock_gemini.invoke.return_value = MagicMock(content="# Article\n\nContent.")
+        mock_create_gemini.return_value = mock_gemini
+
+        writer = ArticleWriter(
+            samples_dir=Path("writing_samples")
+            if Path("writing_samples").exists()
+            else None,
+        )
+
+        # First call triggers fallback
+        writer._invoke_writer([MagicMock()])
+        # Second call should use cached Gemini, not retry Claude
+        writer._invoke_writer([MagicMock()])
+
+        # Claude called once (first attempt), Gemini created once (cached), invoked twice
+        assert mock_claude.invoke.call_count == 1
+        assert mock_gemini.invoke.call_count == 2
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_non_anthropic_errors_propagate(self, mock_create_writer):
+        """Non-Anthropic errors should NOT trigger fallback."""
+        from src.article_writer import ArticleWriter
+
+        mock_claude = MagicMock()
+        mock_claude.invoke.side_effect = ValueError("Some unrelated error")
+        mock_create_writer.return_value = mock_claude
+
+        writer = ArticleWriter(
+            samples_dir=Path("writing_samples")
+            if Path("writing_samples").exists()
+            else None,
+        )
+
+        with pytest.raises(ValueError, match="Some unrelated error"):
+            writer._invoke_writer([MagicMock()])
