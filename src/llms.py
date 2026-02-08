@@ -260,7 +260,7 @@ def create_consultant_llm(
     on Gemini's analysis outputs. This helps detect biases and groupthink.
 
     Args:
-        temperature: Sampling temperature (default 0.3 for balanced creativity)
+        temperature: Deprecated, ignored. Kept for API compatibility.
         model: Model name (overrides env vars if provided)
         timeout: Request timeout in seconds
         max_retries: Max retry attempts for failed requests
@@ -328,8 +328,10 @@ def create_consultant_llm(
         f"(timeout={timeout}s, retries={max_retries})"
     )
 
-    # OpenAI reasoning models (o1, o3, etc.) reject temperature != 1.0.
-    is_reasoning_model = bool(re.match(r"^o[0-9]", model_name))
+    # Do NOT set temperature — multiple OpenAI model families (o-series,
+    # gpt-5.x, and potentially future models) reject temperature != 1.0.
+    # The consultant's precision comes from its structured prompt and
+    # spot-check tool methodology, not from temperature settings.
 
     kwargs = {
         "model": model_name,
@@ -340,14 +342,6 @@ def create_consultant_llm(
         "max_tokens": 16384,
         "streaming": False,
     }
-
-    if is_reasoning_model:
-        logger.info(
-            f"Consultant model {model_name} is a reasoning model — "
-            f"omitting temperature (must be default 1.0)"
-        )
-    else:
-        kwargs["temperature"] = temperature
 
     llm = ChatOpenAI(**kwargs)
 
@@ -387,9 +381,10 @@ def create_auditor_llm(
 
     logger.info(f"Initializing Auditor LLM: {model_name}")
 
-    # OpenAI reasoning models (o1, o3, etc.) reject temperature != 1.0.
-    # Detect them and omit temperature so the SDK uses the default.
-    is_reasoning_model = bool(re.match(r"^o[0-9]", model_name))
+    # Do NOT set temperature — multiple OpenAI model families (o-series reasoning
+    # models, gpt-5.x) reject temperature != 1.0.  Forensic precision comes from
+    # the structured prompt and deterministic tool calls, not from temperature=0.
+    # Omitting temperature lets the SDK use each model's default safely.
 
     kwargs = {
         "model": model_name,
@@ -400,14 +395,6 @@ def create_auditor_llm(
         "max_tokens": 16384,
         "streaming": False,
     }
-
-    if is_reasoning_model:
-        logger.info(
-            f"Auditor model {model_name} is a reasoning model — "
-            f"omitting temperature (must be default 1.0)"
-        )
-    else:
-        kwargs["temperature"] = 0  # Forensic work requires precision
 
     return ChatOpenAI(**kwargs)
 

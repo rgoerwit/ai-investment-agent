@@ -2397,11 +2397,18 @@ Perform a forensic audit using your tools."""
             error_str = str(e)
             logger.error("auditor_error", ticker=ticker, error=error_str)
 
-            # Fallback for edge cases where truncation wasn't enough
-            if (
+            # Classify the error for appropriate recovery
+            is_context_error = (
                 "context_length_exceeded" in error_str
                 or "maximum context length" in error_str
-            ):
+            )
+            is_param_error = (
+                "does not support" in error_str
+                or "Unsupported value" in error_str
+                or "invalid_request_error" in error_str
+            )
+
+            if is_context_error:
                 graceful_msg = f"""## FORENSIC AUDITOR REPORT
 
 **STATUS**: CONTEXT_LIMIT_EXCEEDED
@@ -2422,6 +2429,56 @@ VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
                     "auditor_report": graceful_msg,
                     "sender": "global_forensic_auditor",
                 }
+
+            if is_param_error:
+                # Model rejected a parameter (temperature, max_tokens, etc.)
+                # Retry with a safe fallback configuration
+                logger.warning(
+                    "auditor_param_error_retry",
+                    ticker=ticker,
+                    error=error_str,
+                )
+                try:
+                    from langchain_openai import ChatOpenAI
+
+                    fallback_llm = ChatOpenAI(
+                        model=llm.model_name,
+                        timeout=120,
+                        max_retries=3,
+                        streaming=False,
+                        # Omit temperature and max_tokens — use model defaults
+                    )
+                    agent = create_react_agent(
+                        fallback_llm,
+                        tools,
+                        pre_model_hook=truncate_tool_outputs_hook,
+                    )
+                    result = await agent.ainvoke(
+                        {
+                            "messages": [
+                                SystemMessage(content=agent_prompt.system_message),
+                                HumanMessage(content=human_msg),
+                            ]
+                        },
+                        config={"recursion_limit": 12},
+                    )
+                    response = result["messages"][-1].content
+                    response_str = extract_string_content(response)
+                    logger.info(
+                        "auditor_complete_after_retry",
+                        ticker=ticker,
+                        length=len(response_str),
+                    )
+                    return {
+                        "auditor_report": response_str,
+                        "sender": "global_forensic_auditor",
+                    }
+                except Exception as retry_e:
+                    logger.error(
+                        "auditor_retry_failed",
+                        ticker=ticker,
+                        error=str(retry_e),
+                    )
 
             return {
                 "auditor_report": f"Auditor Error: {error_str}",

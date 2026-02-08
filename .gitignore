@@ -4,6 +4,7 @@ CLAUDE.md
 .claude/*
 .gemini
 .gemini/*
+GEMINI.md
 
 # Local things we ignore
 examples/~*
