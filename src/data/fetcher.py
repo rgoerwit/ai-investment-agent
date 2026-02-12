@@ -1279,6 +1279,34 @@ class SmartMarketDataFetcher(FinancialFetcher):
 
         return results
 
+    def _normalize_scaling_errors(self, val_a: float, val_b: float) -> float:
+        """
+        Detects and fixes 100x scaling errors (e.g. Sen vs Ringgit, Pence vs Pound).
+        Returns the value normalized to the lower magnitude (base currency).
+
+        This adjudicates conflicts between data providers where one might report
+        in sub-units (e.g. cents) while another reports in whole units.
+        """
+        if not val_a or not val_b:
+            return val_a or val_b
+
+        try:
+            ratio = val_a / val_b
+            # Case 1: val_a is ~100x val_b (e.g. 201 Sen vs 2.01 Ringgit)
+            # Use val_b (the base currency value)
+            if 90 < ratio < 110:
+                return val_b
+
+            # Case 2: val_b is ~100x val_a (e.g. 2.01 Ringgit vs 201 Sen)
+            # Use val_a (the base currency value)
+            if 0.009 < ratio < 0.011:
+                return val_a
+
+            # No obvious scaling error -> return val_b (the new candidate value)
+            return val_b
+        except ZeroDivisionError:
+            return val_b
+
     def _smart_merge_with_quality(
         self, source_results: dict[str, dict | None], symbol: str
     ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1344,6 +1372,39 @@ class SmartMarketDataFetcher(FinancialFetcher):
                         )
 
                 if should_use:
+                    # SCALING CORRECTION: Check for 100x errors before replacing
+                    if (
+                        key in merged
+                        and merged[key] is not None
+                        and isinstance(value, int | float)
+                    ):
+                        try:
+                            # If new value is ~100x different, pick the base currency version
+                            # But be careful not to trigger this on percentages vs decimals (handled below)
+                            # Only apply to large nominal values like Price or Market Cap
+                            if key in [
+                                "currentPrice",
+                                "regularMarketPrice",
+                                "previousClose",
+                                "marketCap",
+                            ]:
+                                corrected_val = self._normalize_scaling_errors(
+                                    float(merged[key]), float(value)
+                                )
+                                # If the function returned something other than the new value, it means
+                                # scaling logic intervened.
+                                if corrected_val != float(value):
+                                    logger.info(
+                                        "scaling_error_corrected",
+                                        field=key,
+                                        original=merged[key],
+                                        candidate=value,
+                                        corrected=corrected_val,
+                                    )
+                                    value = corrected_val
+                        except (ValueError, TypeError):
+                            pass
+
                     # Record source conflicts when replacing with >20% variance
                     # Normalize decimal-vs-percentage fields before comparison
                     _PCT_FIELDS = frozenset(
@@ -1712,18 +1773,88 @@ class SmartMarketDataFetcher(FinancialFetcher):
 
         return quality
 
+    async def _resolve_ticker_via_search(self, symbol: str) -> str | None:
+        """
+        Recover from a failed yfinance lookup by searching for the numeric ticker.
+        Used primarily for Asian markets where users provide Alpha codes (e.g., PADINI.KL)
+        but yfinance expects Numeric codes (e.g., 7052.KL).
+
+        This prevents 'Frankenstein Analysis' where tools might otherwise drift to
+        the wrong entity due to symbol ambiguity.
+        """
+        if not self.tavily_client:
+            return None
+
+        # Only attempt for markets known to use numeric codes
+        # KL=Malaysia, HK=Hong Kong, T=Japan, TW=Taiwan
+        target_suffixes = (".KL", ".HK", ".T", ".TW")
+        if not symbol.endswith(target_suffixes):
+            return None
+
+        try:
+            # Construct a surgical query to find the numeric code
+            query = f"{symbol} yahoo finance ticker numeric code"
+
+            # Use Tavily to find the mapping
+            result = await asyncio.to_thread(
+                self.tavily_client.search, query, max_results=1
+            )
+
+            if not result or "results" not in result or not result["results"]:
+                return None
+
+            content = (
+                result["results"][0].get("content", "")
+                + " "
+                + result["results"][0].get("title", "")
+            )
+
+            # Look for patterns like "7052.KL" or just "7052" near the company name
+            # Simple heuristic: Look for 4-digit number followed by the original suffix
+            suffix = symbol.split(".")[-1]
+            match = re.search(rf"\b(\d{{4}})\.{suffix}\b", content, re.IGNORECASE)
+
+            if match:
+                resolved = match.group(0).upper()
+                # Sanity check: Ensure it's different from input
+                if resolved != symbol:
+                    return resolved
+
+            return None
+
+        except Exception as e:
+            logger.warning("ticker_resolution_failed", symbol=symbol, error=str(e))
+            return None
+
     async def get_financial_metrics(
         self, ticker: str, timeout: int = 30
     ) -> dict[str, Any]:
         """
         UNIFIED APPROACH: Main entry point with parallel sources and mandatory gap-filling.
-        Includes EODHD fallback.
+        Includes EODHD fallback and Smart Ticker Resolution.
         """
         self.stats["fetches"] += 1
 
         try:
             # PHASE 1: Parallel source execution
             source_results = await self._fetch_all_sources_parallel(ticker)
+
+            # CHECK: Did yfinance fail completely?
+            # If so, and it's a target market, try to resolve the ticker
+            if not source_results.get("yfinance"):
+                resolved_ticker = await self._resolve_ticker_via_search(ticker)
+                if resolved_ticker:
+                    logger.info(
+                        "ticker_resolved_retrying",
+                        original=ticker,
+                        resolved=resolved_ticker,
+                    )
+                    # Retry with resolved ticker
+                    source_results = await self._fetch_all_sources_parallel(
+                        resolved_ticker
+                    )
+                    # Update ticker for downstream consistency
+                    ticker = resolved_ticker
 
             # PHASE 3: Smart merge with quality scoring
             merged, merge_metadata = self._smart_merge_with_quality(

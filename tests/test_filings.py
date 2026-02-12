@@ -330,6 +330,7 @@ class TestEdinetFetcher:
     @pytest.mark.asyncio
     async def test_get_filing_data_entity_not_found(self):
         """Should return None if entity is not found in EDINET."""
+        pytest.importorskip("edinet_tools")
         from src.data.filings.edinet_fetcher import EdinetFetcher
 
         fetcher = EdinetFetcher()
@@ -344,6 +345,7 @@ class TestEdinetFetcher:
     @pytest.mark.asyncio
     async def test_get_filing_data_no_documents(self):
         """Should return result with data gaps if no documents found."""
+        pytest.importorskip("edinet_tools")
         from src.data.filings.edinet_fetcher import EdinetFetcher
 
         fetcher = EdinetFetcher()
@@ -364,6 +366,7 @@ class TestEdinetFetcher:
     @pytest.mark.asyncio
     async def test_get_filing_data_with_parsed_document(self):
         """Should extract data from a parsed annual report."""
+        pytest.importorskip("edinet_tools")
         from src.data.filings.edinet_fetcher import EdinetFetcher
 
         fetcher = EdinetFetcher()
