@@ -101,10 +101,10 @@ def check_ticker(ticker):
 
 def main():
     source_file = (
-        "scratch/sample_tickers-UNCHECKED.txt"  # Use the unchecked list we just made
+        "scratch/ticker_filter_results_exus.txt"  # Use the unchecked list we just made
     )
-    output_file = "scratch/sample_tickers-CLEAN.txt"
-    log_file = "scratch/ticker_screening_log.txt"
+    output_file = "scratch/ticker_filter_results-CLEAN.txt"
+    log_file = "scratch/ticker_filter_results-LOG.txt"
 
     if not os.path.exists(source_file):
         # Fallback to the original if unchecked doesn't exist
@@ -131,7 +131,7 @@ def main():
     # simple skip logic if we want to resume?
     # For now just start from 0 but limit to 200
 
-    start_index = 250  # Resume after the first 250
+    start_index = 0  # Resume after the first 250
 
     print(f"Resuming from index {start_index}...")
 

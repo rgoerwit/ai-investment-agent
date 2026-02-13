@@ -167,6 +167,9 @@ class RedFlagDetector:
             "ocf_source": None,
             "segment_flag": None,
             "parent_company": None,
+            "growth_trajectory": None,
+            "revenue_growth_ttm": None,
+            "latest_quarter_date": None,
             "_raw_report": fundamentals_report,  # For downstream data quality checks
         }
 
@@ -309,6 +312,31 @@ class RedFlagDetector:
             val = parent_match.group(1).strip()
             if val.upper() not in ("NONE", "N/A"):
                 metrics["parent_company"] = val
+
+        # Extract GROWTH_TRAJECTORY
+        trajectory_match = re.search(
+            r"GROWTH_TRAJECTORY:\s*(ACCELERATING|DECELERATING|STABLE|N/A)",
+            data_block,
+            re.IGNORECASE,
+        )
+        if trajectory_match:
+            val = trajectory_match.group(1).upper()
+            if val != "N/A":
+                metrics["growth_trajectory"] = val
+
+        # Extract REVENUE_GROWTH_TTM (percentage value)
+        rev_ttm_match = re.search(
+            r"REVENUE_GROWTH_TTM:\s*(-?\d+(?:\.\d+)?)%", data_block
+        )
+        if rev_ttm_match:
+            metrics["revenue_growth_ttm"] = float(rev_ttm_match.group(1))
+
+        # Extract LATEST_QUARTER_DATE for staleness checks
+        quarter_date_match = re.search(
+            r"LATEST_QUARTER_DATE:\s*(\d{4}-\d{2}-\d{2})", data_block
+        )
+        if quarter_date_match:
+            metrics["latest_quarter_date"] = quarter_date_match.group(1)
 
         # Now extract from detailed sections (below DATA_BLOCK)
         metrics["debt_to_equity"] = RedFlagDetector._extract_debt_to_equity(
@@ -908,6 +936,35 @@ class RedFlagDetector:
             logger.info(
                 "red_flag_ocf_source_discrepancy",
                 ticker=ticker,
+            )
+
+        # --- GROWTH CLIFF WARNING ---
+        # TTM revenue growth sharply negative indicates rapid deterioration
+        # not visible in FY data (rearview-mirror bias)
+        revenue_growth_ttm = metrics.get("revenue_growth_ttm")
+        if revenue_growth_ttm is not None and revenue_growth_ttm < -15.0:
+            red_flags.append(
+                {
+                    "type": "GROWTH_CLIFF",
+                    "severity": "WARNING",
+                    "detail": (
+                        f"TTM revenue growth {revenue_growth_ttm:.1f}% — "
+                        "sharp deterioration not reflected in annual data"
+                    ),
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 0.5,
+                    "rationale": (
+                        "Trailing twelve-month revenue shows sharp decline. "
+                        "This may indicate loss of key contracts, competitive "
+                        "disruption, or demand collapse. Annual data may still "
+                        "look acceptable, masking the deterioration."
+                    ),
+                }
+            )
+            logger.info(
+                "red_flag_growth_cliff",
+                ticker=ticker,
+                revenue_growth_ttm=revenue_growth_ttm,
             )
 
         # Determine result

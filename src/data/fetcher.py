@@ -551,6 +551,187 @@ class SmartMarketDataFetcher(FinancialFetcher):
         for key, value in graham_signals.items():
             extracted[key] = value
 
+        # --- QUARTERLY HORIZON METRICS (TTM / MRQ) ---
+        # Extract multi-horizon growth from quarterly financial statements
+        quarterly_horizons = self._extract_quarterly_horizons(ticker, symbol)
+        for key, value in quarterly_horizons.items():
+            extracted[key] = value
+
+        return extracted
+
+    def _extract_quarterly_horizons(
+        self, ticker: yf.Ticker, symbol: str
+    ) -> dict[str, Any]:
+        """
+        Extract TTM and MRQ metrics from quarterly financial statements.
+
+        Provides three distinct growth horizons to mitigate rearview-mirror bias:
+        - FY: Already calculated by _extract_from_financial_statements (revenueGrowth)
+        - TTM: Sum of last 4 quarters vs sum of prior 4 quarters
+        - MRQ: Most recent quarter vs same quarter last year (YoY)
+
+        Also calculates TTM aggregates for Net Income, OCF, and FCF to enable
+        temporally-aligned ratio checks (e.g., TTM P/E consistency, PEG).
+
+        Note: yfinance .quarterly_financials is an alias for .quarterly_income_stmt.
+        We use .quarterly_financials for consistency with existing .financials usage.
+        """
+        extracted: dict[str, Any] = {}
+
+        try:
+            qt_inc = ticker.quarterly_financials
+            qt_cf = ticker.quarterly_cashflow
+        except Exception as e:
+            logger.debug("quarterly_data_unavailable", symbol=symbol, error=str(e))
+            return extracted
+
+        # --- DATE METADATA ---
+        if qt_inc is not None and not qt_inc.empty:
+            latest_q_date = qt_inc.columns[0]
+            extracted["latest_quarter_date"] = str(latest_q_date.date())
+            extracted["_latest_quarter_date_source"] = "yfinance_quarterly"
+
+        # --- Helper: find the quarter closest to 12 months ago ---
+        def _find_yoy_match_idx(
+            series_index: pd.DatetimeIndex, latest_date: pd.Timestamp
+        ) -> int | None:
+            """Find the index of the quarter closest to 12 months before latest_date."""
+            target = latest_date - pd.DateOffset(months=12)
+            best_idx = None
+            best_delta = timedelta(days=999)
+            for i, dt in enumerate(series_index):
+                if i == 0:
+                    continue  # Skip the latest quarter itself
+                delta = abs(dt - target)
+                if delta < best_delta and delta < timedelta(days=45):
+                    best_delta = delta
+                    best_idx = i
+            return best_idx
+
+        # --- REVENUE HORIZONS ---
+        if qt_inc is not None and not qt_inc.empty and "Total Revenue" in qt_inc.index:
+            rev_series = qt_inc.loc["Total Revenue"].dropna()
+
+            if len(rev_series) >= 5:
+                # MRQ YoY: latest quarter vs same quarter last year
+                match_idx = _find_yoy_match_idx(rev_series.index, rev_series.index[0])
+                if match_idx is not None:
+                    mrq_current = float(rev_series.iloc[0])
+                    mrq_prior = float(rev_series.iloc[match_idx])
+                    if mrq_prior > 0:
+                        mrq_growth = (mrq_current - mrq_prior) / mrq_prior
+                        if -1.0 < mrq_growth < 10.0:
+                            extracted["revenueGrowth_MRQ"] = mrq_growth
+                            extracted["_revenueGrowth_MRQ_source"] = (
+                                "calculated_from_quarterly"
+                            )
+
+            if len(rev_series) >= 8:
+                # TTM: sum of last 4 quarters vs sum of prior 4 quarters
+                # min_count=4 ensures NaN if any quarter is missing
+                ttm_current = rev_series.iloc[0:4].sum(min_count=4)
+                ttm_prior = rev_series.iloc[4:8].sum(min_count=4)
+                if pd.notna(ttm_current) and pd.notna(ttm_prior) and ttm_prior > 0:
+                    ttm_growth = (ttm_current - ttm_prior) / ttm_prior
+                    if -1.0 < ttm_growth < 10.0:
+                        extracted["revenueGrowth_TTM"] = float(ttm_growth)
+                        extracted["_revenueGrowth_TTM_source"] = (
+                            "calculated_from_quarterly"
+                        )
+
+                # TTM Revenue absolute (for cross-checks)
+                if pd.notna(ttm_current):
+                    extracted["revenue_TTM"] = float(ttm_current)
+                    extracted["_revenue_TTM_source"] = "calculated_from_quarterly"
+
+        # --- NET INCOME HORIZONS ---
+        if qt_inc is not None and not qt_inc.empty and "Net Income" in qt_inc.index:
+            ni_series = qt_inc.loc["Net Income"].dropna()
+
+            if len(ni_series) >= 5:
+                match_idx = _find_yoy_match_idx(ni_series.index, ni_series.index[0])
+                if match_idx is not None:
+                    mrq_ni = float(ni_series.iloc[0])
+                    mrq_ni_prior = float(ni_series.iloc[match_idx])
+                    if mrq_ni_prior > 0:
+                        mrq_ni_growth = (mrq_ni - mrq_ni_prior) / mrq_ni_prior
+                        if -5.0 < mrq_ni_growth < 50.0:
+                            extracted["earningsGrowth_MRQ"] = mrq_ni_growth
+                            extracted["_earningsGrowth_MRQ_source"] = (
+                                "calculated_from_quarterly"
+                            )
+
+            if len(ni_series) >= 4:
+                ttm_ni = ni_series.iloc[0:4].sum(min_count=4)
+                if pd.notna(ttm_ni):
+                    extracted["netIncome_TTM"] = float(ttm_ni)
+                    extracted["_netIncome_TTM_source"] = "calculated_from_quarterly"
+
+                if len(ni_series) >= 8:
+                    ttm_ni_prior = ni_series.iloc[4:8].sum(min_count=4)
+                    if pd.notna(ttm_ni) and pd.notna(ttm_ni_prior) and ttm_ni_prior > 0:
+                        ttm_ni_growth = (ttm_ni - ttm_ni_prior) / ttm_ni_prior
+                        if -5.0 < ttm_ni_growth < 50.0:
+                            extracted["earningsGrowth_TTM"] = float(ttm_ni_growth)
+                            extracted["_earningsGrowth_TTM_source"] = (
+                                "calculated_from_quarterly"
+                            )
+
+        # --- OCF TTM ---
+        if (
+            qt_cf is not None
+            and not qt_cf.empty
+            and "Operating Cash Flow" in qt_cf.index
+        ):
+            ocf_series = qt_cf.loc["Operating Cash Flow"].dropna()
+            if len(ocf_series) >= 4:
+                ttm_ocf = ocf_series.iloc[0:4].sum(min_count=4)
+                if pd.notna(ttm_ocf):
+                    extracted["operatingCashflow_TTM"] = float(ttm_ocf)
+                    extracted["_operatingCashflow_TTM_source"] = (
+                        "calculated_from_quarterly"
+                    )
+
+        # --- FCF TTM ---
+        if qt_cf is not None and not qt_cf.empty:
+            has_ocf = "Operating Cash Flow" in qt_cf.index
+            has_capex = "Capital Expenditure" in qt_cf.index
+            if has_ocf and has_capex:
+                ocf_s = qt_cf.loc["Operating Cash Flow"].dropna()
+                capex_s = qt_cf.loc["Capital Expenditure"].dropna()
+                common_dates = ocf_s.index.intersection(capex_s.index)[:4]
+                if len(common_dates) >= 4:
+                    ttm_fcf_ocf = ocf_s[common_dates].sum(min_count=4)
+                    ttm_fcf_capex = capex_s[common_dates].sum(min_count=4)
+                    if pd.notna(ttm_fcf_ocf) and pd.notna(ttm_fcf_capex):
+                        extracted["freeCashflow_TTM"] = float(
+                            ttm_fcf_ocf + ttm_fcf_capex
+                        )
+                        extracted["_freeCashflow_TTM_source"] = (
+                            "calculated_from_quarterly"
+                        )
+
+        # --- GROWTH TRAJECTORY (deterministic) ---
+        mrq_growth = extracted.get("revenueGrowth_MRQ")
+        ttm_growth = extracted.get("revenueGrowth_TTM")
+
+        if mrq_growth is not None and ttm_growth is not None:
+            delta = mrq_growth - ttm_growth
+            if delta > 0.10:
+                extracted["growth_trajectory"] = "ACCELERATING"
+            elif delta < -0.10:
+                extracted["growth_trajectory"] = "DECELERATING"
+            else:
+                extracted["growth_trajectory"] = "STABLE"
+            extracted["_growth_trajectory_source"] = "calculated_from_quarterly"
+
+        if extracted:
+            logger.debug(
+                "quarterly_horizons_extracted",
+                symbol=symbol,
+                fields=sorted(k for k in extracted if not k.startswith("_")),
+            )
+
         return extracted
 
     def _calculate_moat_signals(
@@ -1619,17 +1800,32 @@ class SmartMarketDataFetcher(FinancialFetcher):
                     calculated["returnOnEquity"] = roa * (1 + de)
                     calculated["_returnOnEquity_source"] = "calculated_from_roa_de"
 
-            # PEG fallback calculation DISABLED (Jan 2026)
-            # Reason: earningsGrowth (quarterly YoY) mismatches TTM P/E time horizon,
-            # producing unreliable ratios (e.g., SKL.NZ showed 0.81 vs actual ~0.95).
-            # Missing PEG is more honest than a misleading calculated value.
-            # Downstream prompts handle N/A via adaptive scoring (remove from denominator).
-            # if data.get("pegRatio") is None:
-            #     pe = data.get("trailingPE")
-            #     growth = data.get("earningsGrowth")
-            #     if pe and growth and growth > 0:
-            #         calculated["pegRatio"] = pe / (growth * 100)
-            #         calculated["_pegRatio_source"] = "calculated_from_pe_growth"
+            # PEG fallback: RE-ENABLED with TTM-aligned earnings growth (Feb 2026)
+            # Previously disabled because earningsGrowth (quarterly YoY) mismatched
+            # TTM P/E time horizon. Now uses earningsGrowth_TTM which sums last 4
+            # quarters vs prior 4 quarters — temporally aligned with trailingPE.
+            if data.get("pegRatio") is None:
+                pe = data.get("trailingPE")
+                ttm_eg = data.get("earningsGrowth_TTM")
+                if pe and ttm_eg and ttm_eg > 0.01:
+                    calculated_peg = pe / (ttm_eg * 100)
+                    if 0 < calculated_peg < 10:
+                        calculated["pegRatio"] = calculated_peg
+                        calculated["_pegRatio_source"] = "calculated_from_ttm_aligned"
+
+            # Growth trajectory fallback: MRQ vs FY when TTM not available
+            if data.get("growth_trajectory") is None:
+                mrq = data.get("revenueGrowth_MRQ")
+                fy = data.get("revenueGrowth")
+                if mrq is not None and fy is not None:
+                    delta = mrq - fy
+                    if delta > 0.10:
+                        calculated["growth_trajectory"] = "ACCELERATING"
+                    elif delta < -0.10:
+                        calculated["growth_trajectory"] = "DECELERATING"
+                    else:
+                        calculated["growth_trajectory"] = "STABLE"
+                    calculated["_growth_trajectory_source"] = "calculated_mrq_vs_fy"
 
             # FIX: Ensure marketCap is calculated if missing
             if data.get("marketCap") is None:
@@ -1980,6 +2176,14 @@ class SmartMarketDataFetcher(FinancialFetcher):
         try:
             stock = yf.Ticker(ticker)
             hist = await asyncio.to_thread(stock.history, period=period)
+            if hist.empty:
+                resolved = await self._resolve_ticker_via_search(ticker)
+                if resolved:
+                    logger.info(
+                        "history_ticker_resolved", original=ticker, resolved=resolved
+                    )
+                    stock = yf.Ticker(resolved)
+                    hist = await asyncio.to_thread(stock.history, period=period)
             return hist
         except Exception as e:
             logger.error("history_fetch_failed", ticker=ticker, error=str(e))
