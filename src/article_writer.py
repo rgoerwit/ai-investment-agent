@@ -15,6 +15,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from src.config import config
 from src.llms import create_deep_thinking_llm, create_writer_llm
+from src.token_tracker import TokenTrackingCallback, get_tracker
 
 # Maximum characters for fact-check context (controls token usage)
 MAX_FACT_CHECK_CHARS = 1500
@@ -215,6 +216,7 @@ class ArticleWriter:
             temperature=temperature,
             timeout=config.api_timeout,
             max_retries=config.api_retry_attempts,
+            callbacks=[TokenTrackingCallback("Article Writer", get_tracker())],
         )
 
     def _load_voice_samples(self, max_chars: int | None = None) -> str:
@@ -911,7 +913,9 @@ class ArticleEditor:
         from src.editor_tools import get_editor_tools
         from src.llms import create_editor_llm
 
-        self.llm = create_editor_llm()
+        self.llm = create_editor_llm(
+            callbacks=[TokenTrackingCallback("Article Editor", get_tracker())],
+        )
         self.tools = get_editor_tools()
         self.prompt_config = self._load_prompt_config()
 

@@ -30,6 +30,16 @@ logger = structlog.get_logger(__name__)
 console = Console()
 
 
+def _cost_suffix() -> str:
+    """Return formatted cost string for display, or empty if no tracking data."""
+    from src.token_tracker import get_tracker
+
+    stats = get_tracker().get_total_stats()
+    if stats["total_calls"] == 0:
+        return ""
+    return f" [dim](Est. cost: ${stats['total_cost_usd']:.4f})[/dim]"
+
+
 def suppress_all_logging():
     """Suppress all logging output for quiet mode."""
     logging.getLogger().setLevel(logging.CRITICAL)
@@ -390,7 +400,7 @@ async def handle_article_generation(
 
         if not args.quiet and not args.brief:
             console.print(
-                f"[green]Article saved to:[/green] [cyan]{article_path}[/cyan]"
+                f"[green]Article saved to:[/green] [cyan]{article_path}[/cyan]{_cost_suffix()}"
             )
             # Defensive: ensure article is a string before counting words
             word_count = (
@@ -1077,7 +1087,7 @@ async def main():
 
                         if not args.quiet and not args.brief:
                             console.print(
-                                f"[green]Report saved to:[/green] [cyan]{output_file}[/cyan]"
+                                f"[green]Report saved to:[/green] [cyan]{output_file}[/cyan]{_cost_suffix()}"
                             )
                     except Exception as e:
                         logger.error(f"Failed to write report to {output_file}: {e}")
@@ -1092,7 +1102,7 @@ async def main():
                 filepath = save_results_to_file(result, args.ticker)
                 if not args.quiet and not args.brief:
                     console.print(
-                        f"[green]Results saved to:[/green] [cyan]{filepath}[/cyan]"
+                        f"[green]Results saved to:[/green] [cyan]{filepath}[/cyan]{_cost_suffix()}"
                     )
             except Exception as e:
                 logger.error(f"Failed to save results: {e}")
