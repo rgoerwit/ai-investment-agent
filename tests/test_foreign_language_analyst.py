@@ -533,3 +533,56 @@ class TestPromptLoading:
 
         assert prompt.version is not None
         assert len(prompt.version) > 0
+
+
+class TestValueTrapVerdictExtraction:
+    """Tests for extract_value_trap_verdict() helper used in PM input assembly."""
+
+    def test_aligned_verdict(self):
+        """ALIGNED verdict with high score produces correct header."""
+        from src.agents import extract_value_trap_verdict
+
+        report = (
+            "SCORE: 85\nVERDICT: ALIGNED\nTRAP_RISK: LOW\n"
+            "OWNERSHIP:\n  CONCENTRATION: LOW"
+        )
+        result = extract_value_trap_verdict(report)
+        assert "ALIGNED" in result
+        assert "85/100" in result
+        assert "LOW" in result
+
+    def test_trap_verdict(self):
+        """TRAP verdict surfaces correctly."""
+        from src.agents import extract_value_trap_verdict
+
+        report = "SCORE: 25\nVERDICT: TRAP\nTRAP_RISK: HIGH"
+        result = extract_value_trap_verdict(report)
+        assert "TRAP" in result
+        assert "25/100" in result
+        assert "HIGH" in result
+
+    def test_missing_verdict_returns_empty(self):
+        """Report without VALUE_TRAP_BLOCK fields returns empty string."""
+        from src.agents import extract_value_trap_verdict
+
+        result = extract_value_trap_verdict(
+            "Some narrative text without structured block"
+        )
+        assert result == ""
+
+    def test_empty_report_returns_empty(self):
+        """Empty or None input returns empty string."""
+        from src.agents import extract_value_trap_verdict
+
+        assert extract_value_trap_verdict("") == ""
+        assert extract_value_trap_verdict(None) == ""
+
+    def test_missing_trap_risk_still_works(self):
+        """SCORE + VERDICT present but TRAP_RISK missing → still produces header."""
+        from src.agents import extract_value_trap_verdict
+
+        report = "SCORE: 60\nVERDICT: WATCHABLE"
+        result = extract_value_trap_verdict(report)
+        assert "WATCHABLE" in result
+        assert "60/100" in result
+        assert "N/A" in result

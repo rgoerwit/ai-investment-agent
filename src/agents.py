@@ -397,6 +397,34 @@ def compute_data_conflicts(raw_data: str, foreign_data: str) -> str:
     return header + "\n".join(conflicts) + "\n"
 
 
+# --- Value Trap Verdict Extraction ---
+
+
+def extract_value_trap_verdict(value_trap_report: str) -> str:
+    """Extract structured verdict from VALUE_TRAP_BLOCK and return a 1-line header.
+
+    The Value Trap Detector is a dedicated agent with governance/catalyst analysis.
+    Its structured verdict (SCORE/VERDICT/TRAP_RISK) must not be overridden by
+    narrative labels from Bear/RM. This header makes the signal impossible to miss.
+    """
+    if not value_trap_report:
+        return ""
+    score_m = re.search(r"SCORE:\s*(\d+)", value_trap_report)
+    verdict_m = re.search(
+        r"VERDICT:\s*(TRAP|CAUTIOUS|WATCHABLE|ALIGNED)", value_trap_report
+    )
+    risk_m = re.search(r"TRAP_RISK:\s*(HIGH|MEDIUM|LOW)", value_trap_report)
+    if not (score_m and verdict_m):
+        return ""
+    score = score_m.group(1)
+    verdict = verdict_m.group(1)
+    risk = risk_m.group(1) if risk_m else "N/A"
+    return (
+        f"⚠ VALUE_TRAP_DETECTOR VERDICT: {verdict} (score {score}/100, "
+        f"risk {risk}) — dedicated governance/catalyst agent assessment\n"
+    )
+
+
 # --- PM Input Summarization ---
 
 
@@ -1966,7 +1994,7 @@ FUNDAMENTALS ANALYST REPORT:
 {summarize_for_pm(fundamentals, "fundamentals", 6000) if fundamentals else "N/A"}{attribution_table}{conflict_table}
 
 VALUE TRAP ANALYSIS:
-{summarize_for_pm(value_trap, "value_trap", 2500) if value_trap else "N/A"}{red_flag_section}
+{extract_value_trap_verdict(value_trap)}{summarize_for_pm(value_trap, "value_trap", 2500) if value_trap else "N/A"}{red_flag_section}
 
 RESEARCH MANAGER RECOMMENDATION:
 {summarize_for_pm(inv_plan, "research", 3000) if inv_plan else "N/A"}{consultant_section}

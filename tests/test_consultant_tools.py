@@ -77,14 +77,12 @@ class TestSpotCheckMetricAlt:
 
     @pytest.mark.asyncio
     async def test_fmp_returns_valid_data(self):
-        """Mock FMP response returns correct format."""
+        """Mock FMP response returns correct format (no async context manager)."""
         mock_fmp = MagicMock()
         mock_fmp.is_available.return_value = True
         mock_fmp._get = AsyncMock(
             return_value=[{"operatingCashFlow": 7_800_000_000, "period": "FY"}]
         )
-        mock_fmp.__aenter__ = AsyncMock(return_value=mock_fmp)
-        mock_fmp.__aexit__ = AsyncMock(return_value=None)
 
         with patch("src.data.fmp_fetcher.get_fmp_fetcher", return_value=mock_fmp):
             result = json.loads(
@@ -105,8 +103,6 @@ class TestSpotCheckMetricAlt:
         mock_fmp = MagicMock()
         mock_fmp.is_available.return_value = True
         mock_fmp._get = AsyncMock(return_value=[])
-        mock_fmp.__aenter__ = AsyncMock(return_value=mock_fmp)
-        mock_fmp.__aexit__ = AsyncMock(return_value=None)
 
         with patch("src.data.fmp_fetcher.get_fmp_fetcher", return_value=mock_fmp):
             result = json.loads(
@@ -117,6 +113,25 @@ class TestSpotCheckMetricAlt:
 
         assert result["value"] is None
         assert "No data" in result.get("note", "")
+
+    @pytest.mark.asyncio
+    async def test_fmp_no_async_context_manager_needed(self):
+        """FMPFetcher without __aenter__/__aexit__ must not crash."""
+        mock_fmp = MagicMock(spec=["is_available", "_get"])
+        mock_fmp.is_available.return_value = True
+        mock_fmp._get = AsyncMock(
+            return_value=[{"operatingCashFlow": 5_000_000, "period": "FY"}]
+        )
+
+        with patch("src.data.fmp_fetcher.get_fmp_fetcher", return_value=mock_fmp):
+            result = json.loads(
+                await spot_check_metric_alt.ainvoke(
+                    {"ticker": "EVO.ST", "metric": "operatingCashflow"}
+                )
+            )
+
+        assert result["value"] == 5_000_000
+        assert result["source"] == "fmp_direct"
 
     def test_fmp_field_map_covers_critical_metrics(self):
         """FMP field map includes the most error-prone metrics."""
