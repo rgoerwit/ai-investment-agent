@@ -580,6 +580,11 @@ def create_memory_instances(ticker: str) -> dict[str, FinancialSituationMemory]:
     return instances
 
 
+def create_lessons_collection() -> FinancialSituationMemory:
+    """Create a global lessons_learned ChromaDB collection for cross-ticker insights."""
+    return FinancialSituationMemory("lessons_learned")
+
+
 def cleanup_all_memories(days: int = 0, ticker: str | None = None) -> dict[str, int]:
     """
     Clean up memories from collections.

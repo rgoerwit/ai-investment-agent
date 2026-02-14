@@ -1,19 +1,16 @@
 """
 This module provides utility classes for post-processing the output of the
-agentic workflow, such as extracting a clean signal and enabling agents to
-reflect on their performance for continuous learning.
+agentic workflow, such as extracting a clean signal and detecting truncation.
 """
 
 import re
 import unicodedata
-from collections.abc import Callable
 
 import structlog
 
-from src.agents import AgentState, extract_string_content
+from src.agents import extract_string_content
 from src.config import Config
 from src.llms import quick_thinking_llm
-from src.memory import FinancialSituationMemory
 
 logger = structlog.get_logger(__name__)
 
@@ -63,80 +60,6 @@ class SignalProcessor:
         except Exception as e:
             logger.error("llm_signal_extraction_exception", error=str(e), exc_info=True)
             return "ERROR_PROCESSING_SIGNAL"
-
-
-class Reflector:
-    """
-    Orchestrates the learning process for the agents by prompting them to
-    reflect on a trade's outcome and store the resulting lesson.
-    """
-
-    def __init__(self, config: Config):
-        self.config = config
-        self.llm = quick_thinking_llm
-        self.reflection_prompt = """You are an expert financial analyst reviewing a past decision.
-        Your goal is to generate a concise, one-sentence lesson from this experience to improve future performance.
-
-        Analyze the provided context, the decision/analysis made, and the financial outcome.
-        - First, determine if the decision was correct or incorrect.
-        - Identify the most critical factors that led to the outcome.
-        - Formulate a single, powerful heuristic or lesson.
-
-        Market Context & Analysis:
-        {situation}
-
-        Outcome (Profit/Loss): ${returns_losses:,.2f}
-
-        Your output must be a single sentence. Example: 'In a market with strong technical momentum, high valuation concerns can be temporarily overlooked.'
-        """
-
-    async def reflect(
-        self,
-        current_state: AgentState,
-        returns_losses: float,
-        memory: FinancialSituationMemory,
-        component_key_func: Callable[[AgentState], str],
-    ):
-        """
-        Generates a reflection and stores it in the agent's memory.
-
-        Args:
-            current_state: The final state of the graph run.
-            returns_losses: The profit or loss from the trade.
-            memory: The memory object of the agent that will learn.
-            component_key_func: A function to extract the specific text for the agent to reflect on.
-        """
-        if not self.config.enable_memory:
-            return
-
-        decision_text = component_key_func(current_state)
-        situation = (
-            f"Reports:\n"
-            f"- Market: {current_state.get('market_report', 'N/A')}\n"
-            f"- Sentiment: {current_state.get('sentiment_report', 'N/A')}\n"
-            f"- News: {current_state.get('news_report', 'N/A')}\n"
-            f"- Fundamentals: {current_state.get('fundamentals_report', 'N/A')}\n\n"
-            f"Decision/Analysis Text to reflect on:\n{decision_text}"
-        )
-
-        prompt = self.reflection_prompt.format(
-            situation=situation, returns_losses=returns_losses
-        )
-
-        try:
-            result = await self.llm.ainvoke(prompt)
-            # CRITICAL FIX: Normalize response.content to string (Gemini may return dict)
-            lesson = extract_string_content(result.content).strip()
-
-            # The situation (context) and the lesson (result) are stored.
-            await memory.add_situations([(situation, lesson)])
-            logger.info(
-                "reflection_completed_and_memory_updated", agent_name=memory.name
-            )
-        except Exception as e:
-            logger.error(
-                "reflection_failed", agent_name=memory.name, error=str(e), exc_info=True
-            )
 
 
 def clean_duplicate_data_blocks(report: str) -> str:

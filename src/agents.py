@@ -1329,6 +1329,19 @@ def create_analyst_node(
     return analyst_node
 
 
+def _extract_sector_from_state(state: dict) -> str:
+    """Extract sector from fundamentals report DATA_BLOCK for lesson retrieval."""
+    fundamentals = state.get("fundamentals_report", "") or ""
+    if not fundamentals:
+        return "Unknown"
+    match = re.search(r"SECTOR:\s*(.+?)(?:\n|$)", fundamentals, re.IGNORECASE)
+    if match:
+        value = match.group(1).strip()
+        if value.upper() not in ("N/A", "NA", "NONE", "-", ""):
+            return value
+    return "Unknown"
+
+
 def create_researcher_node(
     llm, memory: Any | None, agent_key: str, round_num: int = 1
 ) -> Callable:
@@ -1426,6 +1439,29 @@ Now provide your Round 2 rebuttal, addressing the opponent's key points."""
                 logger.error("memory_retrieval_failed", ticker=ticker, error=str(e))
                 past_insights = ""
 
+        # Retrieve lessons from past retrospective evaluations (cross-ticker)
+        lessons_text = ""
+        try:
+            from src.retrospective import (
+                create_lessons_memory,
+                format_lessons_for_injection,
+            )
+
+            lessons_memory = create_lessons_memory()
+            sector = _extract_sector_from_state(state)
+            lessons_text = await format_lessons_for_injection(
+                lessons_memory, ticker, sector
+            )
+            if lessons_text:
+                logger.info(
+                    "lessons_injected",
+                    agent=agent_key,
+                    ticker=ticker,
+                    lessons_length=len(lessons_text),
+                )
+        except Exception as e:
+            logger.debug("lessons_injection_skipped", error=str(e))
+
         # Add Negative Constraint to prevent hallucination
         negative_constraint = f"""
 CRITICAL INSTRUCTION:
@@ -1441,7 +1477,12 @@ Only use data explicitly related to {ticker} ({company_name}).
             else "Provide your rebuttal to the opponent's Round 1 argument."
         )
 
-        prompt = f"""{agent_prompt.system_message}\n{negative_constraint}\n\nREPORTS:\n{reports}\n{past_insights}\n\nDEBATE CONTEXT:\n{debate_history}\n\n{round_instruction}"""
+        # Combine past insights and lessons from retrospective
+        context_block = past_insights
+        if lessons_text:
+            context_block += f"\n\n{lessons_text}"
+
+        prompt = f"""{agent_prompt.system_message}\n{negative_constraint}\n\nREPORTS:\n{reports}\n{context_block}\n\nDEBATE CONTEXT:\n{debate_history}\n\n{round_instruction}"""
 
         try:
             response = await invoke_with_rate_limit_handling(

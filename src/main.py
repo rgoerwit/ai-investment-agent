@@ -97,6 +97,12 @@ Examples:
   # Enable Langfuse tracing for this run
   python -m src.main --ticker 0005.HK --trace-langfuse
 
+  # Evaluate past predictions, then re-analyze with lessons
+  python -m src.main --ticker 2767.T --retrospective --output results/2767.T.md
+
+  # Batch retrospective: process all past tickers
+  python -m src.main --retrospective-only
+
   # With Poetry
   poetry run python -m src.main --ticker MSFT --quick
         """,
@@ -105,7 +111,8 @@ Examples:
     parser.add_argument(
         "--ticker",
         type=str,
-        required=True,
+        required=False,
+        default=None,
         help="Stock ticker symbol to analyze (e.g., AAPL, NVDA, TSLA)",
     )
 
@@ -200,7 +207,28 @@ Examples:
         ),
     )
 
-    return parser.parse_args()
+    parser.add_argument(
+        "--retrospective",
+        action="store_true",
+        help="Evaluate past predictions for this ticker before running analysis. "
+        "Generates lessons from significant prediction errors and stores them "
+        "for injection into future analyses.",
+    )
+
+    parser.add_argument(
+        "--retrospective-only",
+        action="store_true",
+        help="Run retrospective evaluation on all past analyses without running "
+        "a new analysis. Processes all tickers found in results directory.",
+    )
+
+    args = parser.parse_args()
+
+    # Validate: --ticker is required unless --retrospective-only
+    if not args.retrospective_only and not args.ticker:
+        parser.error("--ticker is required unless --retrospective-only is specified")
+
+    return args
 
 
 def resolve_output_paths(args) -> tuple[Path | None, Path]:
@@ -726,6 +754,14 @@ def save_results_to_file(result: dict, ticker: str) -> Path:
         },
     }
 
+    # Extract prediction snapshot for future retrospective evaluation (zero LLM cost)
+    try:
+        from src.retrospective import extract_snapshot
+
+        save_data["prediction_snapshot"] = extract_snapshot(result, ticker)
+    except Exception as e:
+        logger.warning(f"Snapshot extraction failed (non-fatal): {e}")
+
     with open(filepath, "w") as f:
         json.dump(save_data, f, indent=2)
 
@@ -1008,6 +1044,87 @@ async def main():
                     "Please check your .env file and ensure all required API keys are set.\n"
                 )
             sys.exit(1)
+
+        # Handle --retrospective-only (no analysis, just evaluate past predictions)
+        if args.retrospective_only:
+            try:
+                from src.retrospective import run_retrospective
+
+                results_dir = Path(config.results_dir)
+                if not args.quiet and not args.brief:
+                    console.print(
+                        "[cyan]Running retrospective evaluation on all past analyses...[/cyan]"
+                    )
+
+                lessons = await run_retrospective(ticker=None, results_dir=results_dir)
+
+                if lessons:
+                    if not args.quiet and not args.brief:
+                        console.print(
+                            f"\n[green]Generated {len(lessons)} lesson(s):[/green]"
+                        )
+                        for lesson in lessons:
+                            stored = "[stored]" if lesson.get("stored") else "[skipped]"
+                            console.print(
+                                f"  {stored} [{lesson['ticker']}] {lesson['lesson']} "
+                                f"({lesson['failure_mode']} | conf: {lesson['confidence']:.2f})"
+                            )
+                    else:
+                        print(
+                            f"# Retrospective Complete\n\nGenerated {len(lessons)} lesson(s)."
+                        )
+                else:
+                    msg = "No significant prediction deltas found."
+                    if not args.quiet and not args.brief:
+                        console.print(f"[yellow]{msg}[/yellow]")
+                    else:
+                        print(f"# Retrospective Complete\n\n{msg}")
+            except Exception as e:
+                logger.error(f"Retrospective failed: {e}", exc_info=True)
+                if not args.quiet and not args.brief:
+                    console.print(
+                        f"[yellow]Warning: Retrospective evaluation failed: {e}[/yellow]"
+                    )
+
+            sys.exit(0)
+
+        # Run per-ticker retrospective before analysis (if --retrospective flag set)
+        if args.retrospective and args.ticker:
+            try:
+                from src.retrospective import run_retrospective
+
+                results_dir = Path(config.results_dir)
+                if not args.quiet and not args.brief:
+                    console.print(
+                        f"[cyan]Evaluating past predictions for {args.ticker}...[/cyan]"
+                    )
+
+                lessons = await run_retrospective(
+                    ticker=args.ticker, results_dir=results_dir
+                )
+
+                if lessons:
+                    if not args.quiet and not args.brief:
+                        console.print(
+                            f"[green]Generated {len(lessons)} lesson(s) for {args.ticker}[/green]"
+                        )
+                        for lesson in lessons:
+                            stored = "[stored]" if lesson.get("stored") else "[skipped]"
+                            console.print(
+                                f"  {stored} {lesson['lesson']} "
+                                f"({lesson['failure_mode']} | conf: {lesson['confidence']:.2f})"
+                            )
+                else:
+                    if not args.quiet and not args.brief:
+                        console.print(
+                            f"[dim]No significant prediction deltas for {args.ticker}[/dim]"
+                        )
+            except Exception as e:
+                logger.warning(f"Retrospective evaluation failed (non-fatal): {e}")
+                if not args.quiet and not args.brief:
+                    console.print(
+                        f"[yellow]Warning: Retrospective evaluation failed: {e}[/yellow]"
+                    )
 
         # Generate welcome banner
         welcome_banner = get_welcome_banner(args.ticker, args.quick)
