@@ -53,7 +53,8 @@ CURRENT_PRICE: 1774
 PE_RATIO_TTM: 8.5
 PEG_RATIO: 0.03
 PB_RATIO: 1.12
-ANALYST_COVERAGE: 4
+ANALYST_COVERAGE_ENGLISH: 4
+ANALYST_COVERAGE_TOTAL_EST: 12
 PROFITABILITY_TREND: UNSTABLE
 52W_HIGH: 2100
 52W_LOW: 1200
@@ -1146,3 +1147,61 @@ class TestEarlyDedupInRetrospective:
         # compare_to_reality SHOULD have been called
         mock_compare.assert_called_once()
         assert len(lessons) == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Analyst Coverage Field Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestAnalystCoverageFields:
+    """Tests for ANALYST_COVERAGE_ENGLISH field fix and ANALYST_COVERAGE_TOTAL_EST."""
+
+    def test_snapshot_extracts_analyst_coverage_english(self):
+        """Verify field name fix: ANALYST_COVERAGE_ENGLISH is extracted, not ANALYST_COVERAGE."""
+        result = _make_result()
+        snapshot = extract_snapshot(result, "2767.T")
+        # Should extract 4.0 from ANALYST_COVERAGE_ENGLISH field
+        assert snapshot["analyst_coverage"] == 4.0
+
+    def test_snapshot_extracts_analyst_coverage_total_est(self):
+        """Verify new field ANALYST_COVERAGE_TOTAL_EST is extracted."""
+        result = _make_result()
+        snapshot = extract_snapshot(result, "2767.T")
+        assert snapshot["analyst_coverage_total_est"] == "12"
+
+    def test_snapshot_total_est_missing(self):
+        """ANALYST_COVERAGE_TOTAL_EST absent → None."""
+        data_block_no_total = """
+### --- START DATA_BLOCK ---
+ANALYST_COVERAGE_ENGLISH: 5
+PROFITABILITY_TREND: STABLE
+### --- END DATA_BLOCK ---
+"""
+        result = _make_result(fundamentals_report=data_block_no_total)
+        snapshot = extract_snapshot(result, "0005.HK")
+        assert snapshot["analyst_coverage_total_est"] is None
+
+    def test_snapshot_total_est_tier(self):
+        """ANALYST_COVERAGE_TOTAL_EST with tier value (HIGH)."""
+        data_block = """
+### --- START DATA_BLOCK ---
+ANALYST_COVERAGE_ENGLISH: 3
+ANALYST_COVERAGE_TOTAL_EST: HIGH
+### --- END DATA_BLOCK ---
+"""
+        result = _make_result(fundamentals_report=data_block)
+        snapshot = extract_snapshot(result, "7203.T")
+        assert snapshot["analyst_coverage_total_est"] == "HIGH"
+
+    def test_old_analyst_coverage_field_returns_none(self):
+        """Old DATA_BLOCK with ANALYST_COVERAGE (no _ENGLISH suffix) → None coverage."""
+        old_data_block = """
+### --- START DATA_BLOCK ---
+ANALYST_COVERAGE: 4
+### --- END DATA_BLOCK ---
+"""
+        result = _make_result(fundamentals_report=old_data_block)
+        snapshot = extract_snapshot(result, "2767.T")
+        # ANALYST_COVERAGE doesn't match ANALYST_COVERAGE_ENGLISH, so should be None
+        assert snapshot["analyst_coverage"] is None

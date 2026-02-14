@@ -169,6 +169,8 @@ def extract_chart_data_from_data_block(fundamentals_report: str) -> ChartRawData
         adjusted_growth_score=_extract_float(
             rf"ADJUSTED_GROWTH_SCORE:\s*{num_pattern}", data_block
         ),
+        # ANALYST_COVERAGE_ENGLISH = Refinitiv/FactSet count (skews English-accessible).
+        # Falls back to 0 when missing; chart_node.py treats 0 as "unknown" (neutral score).
         analyst_coverage=int(
             _extract_float(rf"ANALYST_COVERAGE_ENGLISH:\s*{num_pattern}", data_block)
             or 0

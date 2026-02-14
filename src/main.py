@@ -1093,7 +1093,9 @@ async def main():
                         f"\n[green]Generated {len(lessons)} new lesson(s) from past analyses[/green]"
                     )
             except Exception as e:
-                logger.debug("retrospective_skipped", error=str(e))
+                logger.warning("retrospective_failed", ticker=args.ticker, error=str(e))
+        elif args.ticker and args.no_memory:
+            logger.info("retrospective_skipped_no_memory", ticker=args.ticker)
 
         # Generate welcome banner
         welcome_banner = get_welcome_banner(args.ticker, args.quick)

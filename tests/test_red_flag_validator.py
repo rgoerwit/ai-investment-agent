@@ -2691,3 +2691,253 @@ VIE_STRUCTURE: NO
         total_penalty = sum(f.get("risk_penalty", 0) for f in flags)
         assert total_penalty == 1.0  # 0.5 + 0.5
         assert result == "PASS"  # Warnings only, not reject
+
+
+class TestThinConsensusFlag:
+    """Tests for THIN_CONSENSUS warning flag and ANALYST_COVERAGE_TOTAL_EST extraction."""
+
+    def test_extract_total_est_numeric(self):
+        """ANALYST_COVERAGE_TOTAL_EST integer extraction from DATA_BLOCK."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 60%
+ANALYST_COVERAGE_ENGLISH: 2
+ANALYST_COVERAGE_TOTAL_EST: 8
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["analyst_coverage_total_est"] == 8
+
+    def test_extract_total_est_tier(self):
+        """ANALYST_COVERAGE_TOTAL_EST tier string extraction from DATA_BLOCK."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 60%
+ANALYST_COVERAGE_TOTAL_EST: HIGH
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["analyst_coverage_total_est"] == "HIGH"
+
+    def test_extract_total_est_moderate(self):
+        """ANALYST_COVERAGE_TOTAL_EST MODERATE tier."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 60%
+ANALYST_COVERAGE_TOTAL_EST: MODERATE
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["analyst_coverage_total_est"] == "MODERATE"
+
+    def test_extract_total_est_low(self):
+        """ANALYST_COVERAGE_TOTAL_EST LOW tier."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 60%
+ANALYST_COVERAGE_TOTAL_EST: LOW
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["analyst_coverage_total_est"] == "LOW"
+
+    def test_extract_total_est_na(self):
+        """ANALYST_COVERAGE_TOTAL_EST N/A treated as None."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 60%
+ANALYST_COVERAGE_TOTAL_EST: N/A
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["analyst_coverage_total_est"] is None
+
+    def test_extract_total_est_unknown(self):
+        """ANALYST_COVERAGE_TOTAL_EST UNKNOWN treated as None."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 60%
+ANALYST_COVERAGE_TOTAL_EST: UNKNOWN
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["analyst_coverage_total_est"] is None
+
+    def test_extract_total_est_absent(self):
+        """Missing ANALYST_COVERAGE_TOTAL_EST defaults to None."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 60%
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["analyst_coverage_total_est"] is None
+
+    def test_thin_consensus_1_flags(self):
+        """TOTAL_EST: 1 → THIN_CONSENSUS warning with 0.5 penalty."""
+        metrics = {
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": None,
+            "pb_ratio": None,
+            "adjusted_health_score": 60,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+            "profitability_trend": None,
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": None,
+            "ocf": None,
+            "ocf_source": None,
+            "segment_flag": None,
+            "parent_company": None,
+            "analyst_coverage_total_est": 1,
+            "growth_trajectory": None,
+            "revenue_growth_ttm": None,
+            "latest_quarter_date": None,
+            "_raw_report": "",
+        }
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        flag_types = [f["type"] for f in flags]
+        assert "THIN_CONSENSUS" in flag_types
+        thin = [f for f in flags if f["type"] == "THIN_CONSENSUS"][0]
+        assert thin["risk_penalty"] == 0.5
+        assert thin["severity"] == "WARNING"
+        assert result == "PASS"
+
+    def test_thin_consensus_2_flags(self):
+        """TOTAL_EST: 2 → THIN_CONSENSUS warning."""
+        metrics = {
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": None,
+            "pb_ratio": None,
+            "adjusted_health_score": 70,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+            "profitability_trend": None,
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": None,
+            "ocf": None,
+            "ocf_source": None,
+            "segment_flag": None,
+            "parent_company": None,
+            "analyst_coverage_total_est": 2,
+            "growth_trajectory": None,
+            "revenue_growth_ttm": None,
+            "latest_quarter_date": None,
+            "_raw_report": "",
+        }
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        flag_types = [f["type"] for f in flags]
+        assert "THIN_CONSENSUS" in flag_types
+
+    def test_thin_consensus_3_no_flag(self):
+        """TOTAL_EST: 3 → no THIN_CONSENSUS flag (threshold is <3)."""
+        metrics = {
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": None,
+            "pb_ratio": None,
+            "adjusted_health_score": 70,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+            "profitability_trend": None,
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": None,
+            "ocf": None,
+            "ocf_source": None,
+            "segment_flag": None,
+            "parent_company": None,
+            "analyst_coverage_total_est": 3,
+            "growth_trajectory": None,
+            "revenue_growth_ttm": None,
+            "latest_quarter_date": None,
+            "_raw_report": "",
+        }
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        flag_types = [f["type"] for f in flags]
+        assert "THIN_CONSENSUS" not in flag_types
+
+    def test_thin_consensus_tier_no_flag(self):
+        """TOTAL_EST: 'LOW' (tier string) → no THIN_CONSENSUS flag (only numeric triggers)."""
+        metrics = {
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": None,
+            "pb_ratio": None,
+            "adjusted_health_score": 70,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+            "profitability_trend": None,
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": None,
+            "ocf": None,
+            "ocf_source": None,
+            "segment_flag": None,
+            "parent_company": None,
+            "analyst_coverage_total_est": "LOW",
+            "growth_trajectory": None,
+            "revenue_growth_ttm": None,
+            "latest_quarter_date": None,
+            "_raw_report": "",
+        }
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        flag_types = [f["type"] for f in flags]
+        assert "THIN_CONSENSUS" not in flag_types
+
+    def test_thin_consensus_none_no_flag(self):
+        """TOTAL_EST: None → no THIN_CONSENSUS flag."""
+        metrics = {
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": None,
+            "pb_ratio": None,
+            "adjusted_health_score": 70,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+            "profitability_trend": None,
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": None,
+            "ocf": None,
+            "ocf_source": None,
+            "segment_flag": None,
+            "parent_company": None,
+            "analyst_coverage_total_est": None,
+            "growth_trajectory": None,
+            "revenue_growth_ttm": None,
+            "latest_quarter_date": None,
+            "_raw_report": "",
+        }
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        flag_types = [f["type"] for f in flags]
+        assert "THIN_CONSENSUS" not in flag_types

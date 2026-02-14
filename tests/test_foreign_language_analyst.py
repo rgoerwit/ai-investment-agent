@@ -438,6 +438,80 @@ class TestComputeDataConflicts:
         assert "system-generated" in result
 
 
+class TestLocalAnalystCoverageConflict:
+    """Tests for conflict #5: local analyst coverage detection."""
+
+    def test_fla_local_analyst_numeric(self):
+        """FLA finds 25 local analysts vs Junior's 3 → conflict."""
+        from src.agents import compute_data_conflicts
+
+        junior = '{"numberOfAnalystOpinions": 3, "marketCap": 500000000}'
+        fla = (
+            "**LOCAL ANALYST COVERAGE**\n"
+            "- Estimated Local Analysts: 25\n"
+            "- Key Brokerages: Nomura, Daiwa, SMBC Nikko\n"
+        )
+        result = compute_data_conflicts(junior, fla)
+        assert "LOCAL_ANALYST_COVERAGE" in result
+        assert "25" in result
+
+    def test_fla_local_analyst_tier_high(self):
+        """FLA reports HIGH tier → conflict."""
+        from src.agents import compute_data_conflicts
+
+        junior = '{"numberOfAnalystOpinions": 5}'
+        fla = "**LOCAL ANALYST COVERAGE**\n" "- Estimated Local Analysts: HIGH\n"
+        result = compute_data_conflicts(junior, fla)
+        assert "LOCAL_ANALYST_COVERAGE" in result
+        assert "HIGH" in result
+
+    def test_fla_local_analyst_tier_moderate(self):
+        """FLA reports MODERATE tier → conflict."""
+        from src.agents import compute_data_conflicts
+
+        junior = '{"numberOfAnalystOpinions": 2}'
+        fla = "**LOCAL ANALYST COVERAGE**\n" "- Estimated Local Analysts: MODERATE\n"
+        result = compute_data_conflicts(junior, fla)
+        assert "LOCAL_ANALYST_COVERAGE" in result
+        assert "MODERATE" in result
+
+    def test_fla_local_analyst_unknown(self):
+        """FLA reports UNKNOWN → no conflict."""
+        from src.agents import compute_data_conflicts
+
+        junior = '{"numberOfAnalystOpinions": 3}'
+        fla = "**LOCAL ANALYST COVERAGE**\n" "- Estimated Local Analysts: UNKNOWN\n"
+        result = compute_data_conflicts(junior, fla)
+        assert "LOCAL_ANALYST_COVERAGE" not in result
+
+    def test_fla_local_analyst_low(self):
+        """FLA reports LOW → no conflict."""
+        from src.agents import compute_data_conflicts
+
+        junior = '{"numberOfAnalystOpinions": 3}'
+        fla = "**LOCAL ANALYST COVERAGE**\n" "- Estimated Local Analysts: LOW\n"
+        result = compute_data_conflicts(junior, fla)
+        assert "LOCAL_ANALYST_COVERAGE" not in result
+
+    def test_fla_no_local_section(self):
+        """No LOCAL ANALYST section → no conflict."""
+        from src.agents import compute_data_conflicts
+
+        junior = '{"numberOfAnalystOpinions": 3}'
+        fla = "**FILING CASH FLOW**\n" "- Operating Cash Flow (Filing): ¥10.91B\n"
+        result = compute_data_conflicts(junior, fla)
+        assert "LOCAL_ANALYST_COVERAGE" not in result
+
+    def test_fla_local_analyst_not_higher(self):
+        """FLA finds 2 local analysts but Junior has 5 → no conflict."""
+        from src.agents import compute_data_conflicts
+
+        junior = '{"numberOfAnalystOpinions": 5}'
+        fla = "**LOCAL ANALYST COVERAGE**\n" "- Estimated Local Analysts: 2\n"
+        result = compute_data_conflicts(junior, fla)
+        assert "LOCAL_ANALYST_COVERAGE" not in result
+
+
 class TestPromptLoading:
     """Tests that the prompt system correctly loads Foreign Language Analyst."""
 

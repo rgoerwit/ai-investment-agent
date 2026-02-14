@@ -249,7 +249,14 @@ def extract_snapshot(result: dict, ticker: str) -> dict[str, Any]:
         "pe_ratio": _extract_data_block_float(fundamentals, "PE_RATIO_TTM"),
         "peg_ratio": _extract_data_block_float(fundamentals, "PEG_RATIO"),
         "pb_ratio": _extract_data_block_float(fundamentals, "PB_RATIO"),
-        "analyst_coverage": _extract_data_block_float(fundamentals, "ANALYST_COVERAGE"),
+        # ENGLISH = Refinitiv/FactSet (global aggregator, English-bias). TOTAL_EST =
+        # Senior's synthesis including FLA local-language estimates (may be int or tier).
+        "analyst_coverage": _extract_data_block_float(
+            fundamentals, "ANALYST_COVERAGE_ENGLISH"
+        ),
+        "analyst_coverage_total_est": _extract_data_block_field(
+            fundamentals, "ANALYST_COVERAGE_TOTAL_EST"
+        ),
         "profitability_trend": _extract_data_block_field(
             fundamentals, "PROFITABILITY_TREND"
         ),
@@ -380,6 +387,14 @@ async def compare_to_reality(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     if not ticker or not analysis_date_str or not verdict:
         logger.debug("incomplete_snapshot", ticker=ticker)
         return None
+
+    logger.debug(
+        "comparison_starting",
+        ticker=ticker,
+        analysis_date=analysis_date_str,
+        verdict=verdict,
+        snapshot_price=snapshot_price,
+    )
 
     # Parse analysis date
     try:
@@ -598,7 +613,17 @@ def compute_confidence(comparison: dict[str, Any]) -> float:
     signal = min(excess / 30.0, 1.0)
 
     confidence = temporal * model_q * mode * signal
-    return round(min(max(confidence, 0.0), 1.0), 3)
+    final = round(min(max(confidence, 0.0), 1.0), 3)
+    logger.debug(
+        "confidence_computed",
+        ticker=comparison.get("ticker"),
+        confidence=final,
+        temporal=round(temporal, 2),
+        model_q=round(model_q, 2),
+        mode_factor=round(mode, 2),
+        signal=round(signal, 2),
+    )
+    return final
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -762,7 +787,23 @@ async def store_lesson(
         "timestamp": datetime.now().isoformat(),
     }
 
-    return await lessons_memory.add_situations([lesson], [metadata])
+    stored = await lessons_memory.add_situations([lesson], [metadata])
+    if stored:
+        logger.info(
+            "lesson_stored",
+            ticker=ticker,
+            lesson_type=lesson_type,
+            failure_mode=failure_mode,
+            confidence=confidence,
+            excess_return=comparison.get("excess_return_pct"),
+        )
+    else:
+        logger.warning(
+            "lesson_storage_failed",
+            ticker=ticker,
+            lesson_type=lesson_type,
+        )
+    return stored
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -877,6 +918,17 @@ async def format_lessons_for_injection(
     scored_lessons.sort(key=lambda x: x["confidence"], reverse=True)
     top_lessons = scored_lessons[:3]
 
+    filtered_count = len(results) - len(scored_lessons) if results else 0
+    logger.debug(
+        "lesson_retrieval_stats",
+        ticker=ticker,
+        sector=sector,
+        candidates=len(results) if results else 0,
+        passed_filter=len(scored_lessons),
+        filtered_out=filtered_count,
+        top_n=len(top_lessons),
+    )
+
     if not top_lessons:
         return ""
 
@@ -959,9 +1011,22 @@ async def run_retrospective(
         logger.info(f"No past analyses with snapshots found {msg}")
         return []
 
+    total_snapshots = sum(len(s) for s in all_snapshots.values())
+    logger.info(
+        "retrospective_starting",
+        tickers=len(all_snapshots),
+        total_snapshots=total_snapshots,
+        filter_ticker=ticker or "all",
+    )
+
     generated_lessons = []
 
     for snap_ticker, snapshots in all_snapshots.items():
+        logger.info(
+            "retrospective_processing_ticker",
+            ticker=snap_ticker,
+            snapshot_count=len(snapshots),
+        )
         ticker_lessons = 0
         # Sort by significance (we'll evaluate all, but cap stored lessons)
         comparisons = []
@@ -1026,6 +1091,13 @@ async def run_retrospective(
             if stored:
                 ticker_lessons += 1
 
+    stored_count = sum(1 for lesson in generated_lessons if lesson.get("stored"))
+    logger.info(
+        "retrospective_complete",
+        lessons_generated=len(generated_lessons),
+        lessons_stored=stored_count,
+        tickers_evaluated=len(all_snapshots),
+    )
     return generated_lessons
 
 

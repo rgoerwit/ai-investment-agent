@@ -333,6 +333,40 @@ def compute_data_conflicts(raw_data: str, foreign_data: str) -> str:
             f"Do not use PEG to justify valuation."
         )
 
+    # 5. Local analyst coverage gap
+    # yfinance's numberOfAnalystOpinions reflects Refinitiv/FactSet counts, which skew
+    # toward English-accessible research. For ex-US equities the true total analyst count
+    # may be higher due to local-language coverage invisible to global aggregators. FLA
+    # web searches provide an estimate, but overlap between local and English counts is
+    # unknown — we use max(English, Local) as a conservative lower bound for TOTAL_EST.
+    if foreign_data:
+        local_analyst_match = re.search(
+            r"Estimated Local Analysts[:\s]*(\d+|HIGH|MODERATE|LOW|UNKNOWN)",
+            foreign_data,
+            re.IGNORECASE,
+        )
+        if local_analyst_match:
+            local_val = local_analyst_match.group(1).strip().upper()
+            if local_val.isdigit():
+                local_count = int(local_val)
+                junior_count = (
+                    int(junior_analysts) if junior_analysts is not None else 0
+                )
+                if local_count > junior_count:
+                    conflicts.append(
+                        f"- LOCAL_ANALYST_COVERAGE: FLA found ~{local_count} local analysts "
+                        f"vs {junior_count} [yfinance English-only count]. "
+                        f"Total coverage likely higher than English count suggests. "
+                        f"Consensus targets may be more reliable than English count implies."
+                    )
+            elif local_val in ("HIGH", "MODERATE"):
+                conflicts.append(
+                    f"- LOCAL_ANALYST_COVERAGE: FLA estimates {local_val} local analyst coverage. "
+                    f"yfinance shows {int(junior_analysts) if junior_analysts is not None else 'N/A'} "
+                    f"[English-only]. Total coverage is likely higher."
+                )
+            # UNKNOWN or LOW: no conflict
+
     # 4. Ownership gap
     if foreign_data and parent_company:
         conflicts.append(
@@ -1459,8 +1493,14 @@ Now provide your Round 2 rebuttal, addressing the opponent's key points."""
                     ticker=ticker,
                     lessons_length=len(lessons_text),
                 )
+            else:
+                logger.debug(
+                    "no_lessons_available",
+                    agent=agent_key,
+                    ticker=ticker,
+                )
         except Exception as e:
-            logger.debug("lessons_injection_skipped", error=str(e))
+            logger.warning("lessons_injection_failed", agent=agent_key, error=str(e))
 
         # Add Negative Constraint to prevent hallucination
         negative_constraint = f"""

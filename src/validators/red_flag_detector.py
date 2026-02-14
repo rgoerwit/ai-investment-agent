@@ -167,6 +167,7 @@ class RedFlagDetector:
             "ocf_source": None,
             "segment_flag": None,
             "parent_company": None,
+            "analyst_coverage_total_est": None,
             "growth_trajectory": None,
             "revenue_growth_ttm": None,
             "latest_quarter_date": None,
@@ -312,6 +313,28 @@ class RedFlagDetector:
             val = parent_match.group(1).strip()
             if val.upper() not in ("NONE", "N/A"):
                 metrics["parent_company"] = val
+
+        # Extract ANALYST_COVERAGE_TOTAL_EST (integer or tier string).
+        # This is Senior's synthesis of English (Refinitiv/FactSet) + FLA local-language
+        # analyst estimates. May be an integer or a qualitative tier (HIGH/MODERATE/LOW).
+        # Missing/UNKNOWN values stay None — THIN_CONSENSUS only fires on confirmed ints.
+        total_est_match = re.search(
+            r"ANALYST_COVERAGE_TOTAL_EST:\s*(.+?)(?:\n|$)",
+            data_block,
+            re.IGNORECASE,
+        )
+        if total_est_match:
+            val = total_est_match.group(1).strip()
+            if val.upper() not in ("N/A", "NA", "NONE", "-", "", "UNKNOWN"):
+                # Try to parse as integer first
+                int_match = re.match(r"^(\d+)", val)
+                if int_match:
+                    metrics["analyst_coverage_total_est"] = int(int_match.group(1))
+                else:
+                    # Store tier string (HIGH/MODERATE/LOW)
+                    tier = val.upper().split()[0]  # Take first word
+                    if tier in ("HIGH", "MODERATE", "LOW"):
+                        metrics["analyst_coverage_total_est"] = tier
 
         # Extract GROWTH_TRAJECTORY
         trajectory_match = re.search(
@@ -965,6 +988,39 @@ class RedFlagDetector:
                 "red_flag_growth_cliff",
                 ticker=ticker,
                 revenue_growth_ttm=revenue_growth_ttm,
+            )
+
+        # --- THIN CONSENSUS WARNING ---
+        # Total analyst coverage < 3 means consensus targets are statistically unreliable.
+        # PEG and forward P/E are also consensus-derived (PEG = P/E ÷ consensus growth;
+        # forward P/E = price ÷ consensus forward EPS), so they're equally tainted.
+        # Only fires on confirmed numeric counts, not tier values (LOW/MODERATE/HIGH).
+        total_est = metrics.get("analyst_coverage_total_est")
+        if isinstance(total_est, int) and total_est < 3:
+            red_flags.append(
+                {
+                    "type": "THIN_CONSENSUS",
+                    "severity": "WARNING",
+                    "detail": (
+                        f"Total estimated analyst coverage is {total_est} — "
+                        "consensus targets, PEG, and forward P/E based on <3 analysts "
+                        "are statistically unreliable"
+                    ),
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 0.5,
+                    "rationale": (
+                        "Price targets, PEG ratio, and forward P/E are all derived from "
+                        "consensus analyst estimates. With fewer than 3 analysts, these "
+                        "figures reflect individual opinions, not statistical consensus. "
+                        "Prefer trailing P/E, P/B, and intrinsic valuation (DCF, "
+                        "asset-based) over consensus-derived metrics for this stock."
+                    ),
+                }
+            )
+            logger.info(
+                "red_flag_thin_consensus",
+                ticker=ticker,
+                total_est=total_est,
             )
 
         # Determine result
