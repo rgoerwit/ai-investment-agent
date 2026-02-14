@@ -97,9 +97,6 @@ Examples:
   # Enable Langfuse tracing for this run
   python -m src.main --ticker 0005.HK --trace-langfuse
 
-  # Evaluate past predictions, then re-analyze with lessons
-  python -m src.main --ticker 2767.T --retrospective --output results/2767.T.md
-
   # Batch retrospective: process all past tickers
   python -m src.main --retrospective-only
 
@@ -205,14 +202,6 @@ Examples:
             "Can specify output path (e.g., --article article.md) or use default "
             "(e.g., --article generates {ticker}_article.md in results dir)."
         ),
-    )
-
-    parser.add_argument(
-        "--retrospective",
-        action="store_true",
-        help="Evaluate past predictions for this ticker before running analysis. "
-        "Generates lessons from significant prediction errors and stores them "
-        "for injection into future analyses.",
     )
 
     parser.add_argument(
@@ -1088,43 +1077,23 @@ async def main():
 
             sys.exit(0)
 
-        # Run per-ticker retrospective before analysis (if --retrospective flag set)
-        if args.retrospective and args.ticker:
+        # Always evaluate past predictions for this ticker (if any exist)
+        # Gated on memory being enabled (--no-memory skips this)
+        if args.ticker and not args.no_memory:
             try:
                 from src.retrospective import run_retrospective
 
                 results_dir = Path(config.results_dir)
-                if not args.quiet and not args.brief:
-                    console.print(
-                        f"[cyan]Evaluating past predictions for {args.ticker}...[/cyan]"
-                    )
-
                 lessons = await run_retrospective(
                     ticker=args.ticker, results_dir=results_dir
                 )
 
-                if lessons:
-                    if not args.quiet and not args.brief:
-                        console.print(
-                            f"[green]Generated {len(lessons)} lesson(s) for {args.ticker}[/green]"
-                        )
-                        for lesson in lessons:
-                            stored = "[stored]" if lesson.get("stored") else "[skipped]"
-                            console.print(
-                                f"  {stored} {lesson['lesson']} "
-                                f"({lesson['failure_mode']} | conf: {lesson['confidence']:.2f})"
-                            )
-                else:
-                    if not args.quiet and not args.brief:
-                        console.print(
-                            f"[dim]No significant prediction deltas for {args.ticker}[/dim]"
-                        )
-            except Exception as e:
-                logger.warning(f"Retrospective evaluation failed (non-fatal): {e}")
-                if not args.quiet and not args.brief:
+                if lessons and not args.quiet and not args.brief:
                     console.print(
-                        f"[yellow]Warning: Retrospective evaluation failed: {e}[/yellow]"
+                        f"\n[green]Generated {len(lessons)} new lesson(s) from past analyses[/green]"
                     )
+            except Exception as e:
+                logger.debug("retrospective_skipped", error=str(e))
 
         # Generate welcome banner
         welcome_banner = get_welcome_banner(args.ticker, args.quick)

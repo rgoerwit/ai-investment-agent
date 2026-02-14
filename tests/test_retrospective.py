@@ -26,6 +26,7 @@ from src.retrospective import (
     _extract_data_block_field,
     _extract_data_block_float,
     _get_ticker_suffix,
+    _lesson_already_processed,
     compare_to_reality,
     compute_confidence,
     create_lessons_memory,
@@ -977,3 +978,171 @@ class TestCreateLessonsMemory:
             result = create_lessons_memory()
             MockFSM.assert_called_once_with("lessons_learned")
             assert result == mock_instance
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Early Dedup Helper Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestLessonAlreadyProcessed:
+    """Test _lesson_already_processed() ChromaDB metadata query."""
+
+    def test_returns_true_when_lesson_exists(self):
+        """Returns True when ChromaDB has a matching (ticker, date) entry."""
+        mock_memory = MagicMock()
+        mock_memory.available = True
+        mock_memory.situation_collection.get.return_value = {
+            "ids": ["lesson_1"],
+            "documents": ["Some lesson"],
+        }
+
+        assert _lesson_already_processed(mock_memory, "2767.T", "2025-08-01") is True
+        mock_memory.situation_collection.get.assert_called_once()
+
+    def test_returns_false_when_no_lesson(self):
+        """Returns False when ChromaDB has no matching entry."""
+        mock_memory = MagicMock()
+        mock_memory.available = True
+        mock_memory.situation_collection.get.return_value = {"ids": [], "documents": []}
+
+        assert _lesson_already_processed(mock_memory, "2767.T", "2025-08-01") is False
+
+    def test_returns_false_when_memory_unavailable(self):
+        """Returns False when memory is not available."""
+        mock_memory = MagicMock()
+        mock_memory.available = False
+
+        assert _lesson_already_processed(mock_memory, "2767.T", "2025-08-01") is False
+
+    def test_returns_false_when_memory_none(self):
+        """Returns False when memory is None."""
+        assert _lesson_already_processed(None, "2767.T", "2025-08-01") is False
+
+    def test_returns_false_on_exception(self):
+        """Returns False on ChromaDB query failure (graceful degradation)."""
+        mock_memory = MagicMock()
+        mock_memory.available = True
+        mock_memory.situation_collection.get.side_effect = Exception("ChromaDB down")
+
+        assert _lesson_already_processed(mock_memory, "2767.T", "2025-08-01") is False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Count Fast-Path Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCountFastPath:
+    """Verify format_lessons_for_injection() returns "" immediately when empty."""
+
+    @pytest.mark.asyncio
+    async def test_empty_collection_skips_embedding(self):
+        """count() == 0 returns empty string without calling query_similar_situations."""
+        mock_memory = MagicMock()
+        mock_memory.available = True
+        mock_memory.situation_collection.count.return_value = 0
+        mock_memory.query_similar_situations = AsyncMock(return_value=[])
+
+        text = await format_lessons_for_injection(
+            mock_memory, "7203.T", "Consumer Cyclical"
+        )
+        assert text == ""
+        # query_similar_situations should NOT have been called
+        mock_memory.query_similar_situations.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_nonempty_collection_proceeds(self):
+        """count() > 0 proceeds to normal query path."""
+        mock_memory = MagicMock()
+        mock_memory.available = True
+        mock_memory.situation_collection.count.return_value = 3
+        mock_memory.query_similar_situations = AsyncMock(return_value=[])
+
+        text = await format_lessons_for_injection(
+            mock_memory, "7203.T", "Consumer Cyclical"
+        )
+        assert text == ""
+        # query_similar_situations SHOULD have been called
+        mock_memory.query_similar_situations.assert_called_once()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Early Dedup in run_retrospective() Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestEarlyDedupInRetrospective:
+    """Verify already-processed snapshots skip compare_to_reality()."""
+
+    @pytest.mark.asyncio
+    async def test_already_processed_snapshots_skipped(self):
+        """Snapshots with existing lessons skip the expensive yfinance call."""
+        snapshot = _make_snapshot(
+            analysis_date=(datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d"),
+        )
+        snapshot["_source_file"] = "test.json"
+        snapshots = {"2767.T": [snapshot]}
+
+        mock_memory = MagicMock()
+        mock_memory.available = True
+        # Simulate lesson already exists for this snapshot
+        mock_memory.situation_collection.get.return_value = {
+            "ids": ["existing_1"],
+            "documents": ["Existing lesson"],
+        }
+
+        with (
+            patch("src.retrospective.load_past_snapshots", return_value=snapshots),
+            patch(
+                "src.retrospective.compare_to_reality",
+                new_callable=AsyncMock,
+            ) as mock_compare,
+        ):
+            lessons = await run_retrospective("2767.T", Path("/fake"), mock_memory)
+
+        # compare_to_reality should NOT have been called
+        mock_compare.assert_not_called()
+        assert lessons == []
+
+    @pytest.mark.asyncio
+    async def test_new_snapshots_processed(self):
+        """Snapshots without existing lessons proceed to comparison."""
+        snapshot = _make_snapshot(
+            analysis_date=(datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d"),
+        )
+        snapshot["_source_file"] = "test.json"
+        snapshots = {"2767.T": [snapshot]}
+
+        mock_memory = MagicMock()
+        mock_memory.available = True
+        # No existing lesson
+        mock_memory.situation_collection.get.return_value = {"ids": [], "documents": []}
+        mock_memory.add_situations = AsyncMock(return_value=True)
+
+        comparison = _make_snapshot(
+            excess_return_pct=-35.0,
+            days_elapsed=180,
+            start_price=1774.0,
+            end_price=1200.0,
+        )
+        comparison["_confidence"] = 0.9
+
+        with (
+            patch("src.retrospective.load_past_snapshots", return_value=snapshots),
+            patch(
+                "src.retrospective.compare_to_reality",
+                new_callable=AsyncMock,
+                return_value=comparison,
+            ) as mock_compare,
+            patch(
+                "src.retrospective.generate_lesson",
+                new_callable=AsyncMock,
+                return_value=("test lesson", "missed_risk", "CYCLICAL_PEAK"),
+            ),
+        ):
+            lessons = await run_retrospective("2767.T", Path("/fake"), mock_memory)
+
+        # compare_to_reality SHOULD have been called
+        mock_compare.assert_called_once()
+        assert len(lessons) == 1

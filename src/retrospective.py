@@ -3,11 +3,13 @@ Lessons Learned / Retrospective System
 
 Compares past analysis verdicts to actual market outcomes and generates
 generalizable lessons for future analyses. Prediction snapshots are auto-saved
-with every analysis; retrospective comparison is opt-in via --retrospective.
+with every analysis; retrospective comparison runs automatically for the current
+ticker on re-analysis (skipped with --no-memory).
 
 Design principles:
 - Deterministic where possible ($0 cost for snapshot extraction, comparison, confidence)
 - One cheap Gemini Flash LLM call per significant delta (~$0.001)
+- Early dedup: already-processed snapshots are skipped via ChromaDB metadata query (~50ms)
 - Global lesson storage (cross-ticker, cross-sector) with geographic boost at retrieval
 - Graceful degradation: failures never block analysis
 """
@@ -823,6 +825,13 @@ async def format_lessons_for_injection(
     if not lessons_memory or not lessons_memory.available:
         return ""
 
+    # Fast-path: no lessons exist yet — skip embedding API call (~1-2ms check vs ~200ms)
+    try:
+        if lessons_memory.situation_collection.count() == 0:
+            return ""
+    except Exception:
+        pass  # Fall through to normal query
+
     try:
         results = await get_relevant_lessons(lessons_memory, sector, ticker)
     except Exception:
@@ -883,7 +892,35 @@ async def format_lessons_for_injection(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Component 7: Orchestrator
+# Component 7: Early Dedup Helper
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _lesson_already_processed(
+    lessons_memory: Any, ticker: str, analysis_date: str
+) -> bool:
+    """Check if a lesson already exists for this (ticker, analysis_date).
+
+    Uses ChromaDB metadata query — no embedding needed. ~50ms.
+    """
+    if not lessons_memory or not lessons_memory.available:
+        return False
+    try:
+        existing = lessons_memory.situation_collection.get(
+            where={
+                "$and": [
+                    {"ticker": {"$eq": ticker}},
+                    {"analysis_date": {"$eq": analysis_date}},
+                ]
+            }
+        )
+        return bool(existing and existing.get("ids"))
+    except Exception:
+        return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Component 8: Orchestrator
 # ══════════════════════════════════════════════════════════════════════════════
 
 
@@ -930,6 +967,18 @@ async def run_retrospective(
         comparisons = []
 
         for snapshot in snapshots:
+            # Early dedup: skip snapshots that already have a lesson in ChromaDB
+            # This avoids the expensive yfinance call for already-processed data
+            snap_ticker = snapshot.get("ticker", "")
+            snap_date = snapshot.get("analysis_date", "")
+            if _lesson_already_processed(lessons_memory, snap_ticker, snap_date):
+                logger.debug(
+                    "snapshot_already_processed",
+                    ticker=snap_ticker,
+                    date=snap_date,
+                )
+                continue
+
             comparison = await compare_to_reality(snapshot)
             if comparison:
                 comparison["_confidence"] = compute_confidence(comparison)

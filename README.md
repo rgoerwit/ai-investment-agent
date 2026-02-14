@@ -191,7 +191,7 @@ graph TB
     - **6-Axis Radar Chart** - Thesis alignment with PM-adjusted scores
     - Both fast-fail and normal paths route through Chart Generator before completing
 
-12. **Lessons Learned (Optional, `--retrospective`)** - Compares past analysis verdicts to actual market outcomes. When excess return vs local benchmark exceeds significance thresholds, a single Gemini Flash call generates a generalizable lesson (e.g., "Low PEG in cyclical entertainment stocks indicates peak earnings, not undervaluation"). Lessons are stored in a global ChromaDB collection and injected into Bull/Bear researcher prompts for future analyses. Prediction snapshots are auto-saved with every analysis for future retrospective evaluation.
+12. **Lessons Learned (Automatic)** - Compares past analysis verdicts to actual market outcomes. On re-analysis of a ticker, the system automatically evaluates past prediction snapshots; when excess return vs local benchmark exceeds significance thresholds, a single Gemini Flash call generates a generalizable lesson (e.g., "Low PEG in cyclical entertainment stocks indicates peak earnings, not undervaluation"). Lessons are stored in a global ChromaDB collection and injected into Bull/Bear researcher prompts for future analyses. Already-processed snapshots are skipped via early dedup (~50ms), so repeated runs add near-zero overhead. Disabled with `--no-memory`.
 
 **Why This Matters:** Single-LLM (and worse yet, single-prompt) systems are prone to confirmation bias. Multi-model + multi-agent debate forces the system as a whole to consider contradictory evidence, mimicking how institutional research teams actually work. The parallel fan-out/fan-in pattern provides speed without sacrificing data quality. The Junior/Senior/Foreign split uses multiple data pathways (APIs + native-language web sources) to reduce data gaps common when analyzing international stocks. The Financial Validator provides deterministic pre-screening to catch catastrophic risks before debate. The Valuation Calculator separates LLM judgment (method selection) from Python calculation (arithmetic), avoiding LLM math hallucinations. The structured **DATA_BLOCK** and **PM_BLOCK** provide reliable schemas for extracting complex metrics, ensuring the visualization layer remains accurate. The optional External Consultant uses a different AI model (OpenAI) to catch groupthink.
 
@@ -269,9 +269,6 @@ poetry run python -m src.main --ticker 0005.HK --quick-model gemini-3-flash-prev
 # If --output is provided, --imagedir defaults to {output_dir}/images
 # You can override it:
 poetry run python -m src.main --ticker 0005.HK --output results/report.md --imagedir results/assets/charts
-
-# Evaluate past predictions and re-analyze with lessons
-poetry run python -m src.main --ticker 2767.T --retrospective --output results/2767.T.md
 
 # Batch retrospective: process all past tickers
 poetry run python -m src.main --retrospective-only
