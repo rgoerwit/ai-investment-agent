@@ -188,7 +188,7 @@ class TestMoatSignalExtraction:
         """Test extraction from complete DATA_BLOCK with moat signals."""
         report = """
 ### --- START DATA_BLOCK ---
-SECTOR: Technology/Software
+SECTOR: Information Technology
 ADJUSTED_HEALTH_SCORE: 75%
 MOAT_MARGIN_STABILITY: HIGH
 MOAT_MARGIN_CV: 0.0456

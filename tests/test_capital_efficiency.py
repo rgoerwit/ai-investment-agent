@@ -467,7 +467,7 @@ class TestRealWorldScenarios:
         Analysis for SUZ (Suzano S.A.)
 
         ### --- START DATA_BLOCK ---
-        SECTOR: Shipping/Commodities
+        SECTOR: Materials
         ROIC_PERCENT: -4.10
         ROIC_QUALITY: DESTRUCTIVE
         LEVERAGE_QUALITY: VALUE_DESTRUCTION
@@ -488,7 +488,7 @@ class TestRealWorldScenarios:
         Analysis for 9984.T (SoftBank Group)
 
         ### --- START DATA_BLOCK ---
-        SECTOR: General/Diversified
+        SECTOR: Industrials
         ROIC_PERCENT: 7.30
         ROIC_QUALITY: WEAK
         LEVERAGE_QUALITY: ENGINEERED
@@ -512,7 +512,7 @@ class TestRealWorldScenarios:
         Analysis for META (Meta Platforms)
 
         ### --- START DATA_BLOCK ---
-        SECTOR: Technology/Software
+        SECTOR: Information Technology
         ROIC_PERCENT: 29.80
         ROIC_QUALITY: STRONG
         LEVERAGE_QUALITY: GENUINE
@@ -533,7 +533,7 @@ class TestRealWorldScenarios:
         Analysis for 7203.T (Toyota Motor)
 
         ### --- START DATA_BLOCK ---
-        SECTOR: General/Diversified
+        SECTOR: Industrials
         ROIC_PERCENT: 6.50
         ROIC_QUALITY: WEAK
         LEVERAGE_QUALITY: GENUINE

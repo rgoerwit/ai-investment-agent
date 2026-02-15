@@ -247,21 +247,21 @@ class TestDownstreamCompatibility:
     def test_sector_detection_from_string(self):
         """RedFlagDetector should parse sector from string input."""
         sector = RedFlagDetector.detect_sector(SAMPLE_FUNDAMENTALS_REPORT)
-        assert sector == Sector.GENERAL  # Healthcare maps to GENERAL
+        assert sector == Sector.HEALTH_CARE  # Healthcare maps to HEALTH_CARE
 
     def test_sector_detection_from_dict_extraction(self):
         """RedFlagDetector should parse sector from dict-extracted content."""
         input_dict = {"text": SAMPLE_FUNDAMENTALS_REPORT}
         extracted = extract_string_content(input_dict)
         sector = RedFlagDetector.detect_sector(extracted)
-        assert sector == Sector.GENERAL
+        assert sector == Sector.HEALTH_CARE
 
     def test_sector_detection_banking_from_dict(self):
-        """Banking sector should be detected from dict-extracted content."""
+        """Financials sector should be detected from dict-extracted content."""
         input_dict = {"text": SAMPLE_BANKING_REPORT}
         extracted = extract_string_content(input_dict)
         sector = RedFlagDetector.detect_sector(extracted)
-        assert sector == Sector.BANKING
+        assert sector == Sector.FINANCIALS
 
     def test_metrics_extraction_from_string(self):
         """RedFlagDetector should extract metrics from string input."""
@@ -348,7 +348,7 @@ class TestEdgeCasesAndRobustness:
         extracted = extract_string_content(input_dict)
         # Should not raise and should be parseable
         sector = RedFlagDetector.detect_sector(extracted)
-        assert sector == Sector.TECHNOLOGY
+        assert sector == Sector.INFORMATION_TECHNOLOGY
 
     def test_whitespace_only_string(self):
         """Whitespace-only string should be returned as-is."""
@@ -878,7 +878,7 @@ class TestMockedLLMResponseScenarios:
         sector = RedFlagDetector.detect_sector(fundamentals_report)
         metrics = RedFlagDetector.extract_metrics(fundamentals_report)
 
-        assert sector == Sector.GENERAL
+        assert sector == Sector.HEALTH_CARE
         assert metrics["adjusted_health_score"] == 67.0
         assert metrics["debt_to_equity"] == 45.0
 

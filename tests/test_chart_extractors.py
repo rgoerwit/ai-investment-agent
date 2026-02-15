@@ -26,7 +26,7 @@ class TestDataBlockExtractor:
         Some analysis text here...
 
         ### --- START DATA_BLOCK ---
-        SECTOR: General/Diversified
+        SECTOR: Industrials
         RAW_HEALTH_SCORE: 8/12
         ADJUSTED_HEALTH_SCORE: 80% (based on 10 available points)
         FIFTY_TWO_WEEK_HIGH: 175.50
@@ -336,7 +336,7 @@ class TestExtendedDataExtraction:
         """Test extraction of adjusted health and growth scores."""
         report = """
         ### --- START DATA_BLOCK ---
-        SECTOR: General/Diversified
+        SECTOR: Industrials
         RAW_HEALTH_SCORE: 10/12
         ADJUSTED_HEALTH_SCORE: 83%
         RAW_GROWTH_SCORE: 4/6

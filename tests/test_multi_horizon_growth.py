@@ -574,7 +574,7 @@ LATEST_QUARTER_DATE: 2025-09-30
         """TTM growth < -15% triggers GROWTH_CLIFF warning."""
         report = """
 ### --- START DATA_BLOCK ---
-SECTOR: General/Diversified
+SECTOR: Industrials
 ADJUSTED_HEALTH_SCORE: 60%
 REVENUE_GROWTH_TTM: -18.5%
 GROWTH_TRAJECTORY: DECELERATING
@@ -601,7 +601,7 @@ GROWTH_TRAJECTORY: DECELERATING
         """TTM growth of -8% should NOT trigger GROWTH_CLIFF."""
         report = """
 ### --- START DATA_BLOCK ---
-SECTOR: General/Diversified
+SECTOR: Industrials
 ADJUSTED_HEALTH_SCORE: 60%
 REVENUE_GROWTH_TTM: -8.0%
 GROWTH_TRAJECTORY: DECELERATING
