@@ -21,7 +21,7 @@ from src.liquidity_calculation_tool import calculate_liquidity_metrics
 from src.stocktwits_api import StockTwitsAPI
 
 # FIX: Use dynamic ticker utils for normalization and name cleaning
-from src.ticker_utils import normalize_company_name, normalize_ticker
+from src.ticker_utils import normalize_ticker
 
 logger = structlog.get_logger(__name__)
 stocktwits_api = StockTwitsAPI()
@@ -198,32 +198,11 @@ async def fetch_with_timeout(coroutine, timeout_seconds=10, error_msg="Timeout")
 
 
 async def extract_company_name_async(ticker_obj) -> str:
-    """Robust company name extraction with dynamic cleaning."""
-    ticker_str = ticker_obj.ticker
+    """Company name extraction, delegating to shared multi-source resolver."""
+    from src.ticker_utils import resolve_company_name
 
-    try:
-        # 1. Try yfinance fast_info (no network call if cached)
-        if hasattr(ticker_obj, "fast_info"):
-            # fast_info is lazy, accessing it triggers load
-            pass
-
-        # 2. Try standard info with timeout
-        info = await fetch_with_timeout(
-            asyncio.to_thread(lambda: ticker_obj.info),
-            timeout_seconds=5,
-            error_msg="Name Extraction",
-        )
-
-        if info:
-            long_name = info.get("longName") or info.get("shortName")
-            if long_name:
-                # Use dynamic cleaner to strip legal suffixes
-                return normalize_company_name(long_name)
-
-        return ticker_str
-
-    except Exception:
-        return ticker_str
+    result = await resolve_company_name(ticker_obj.ticker)
+    return result.name
 
 
 def extract_from_dataframe(

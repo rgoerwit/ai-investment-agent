@@ -4,7 +4,9 @@ Updated: Removed brittle hardcoded maps in favor of dynamic name normalization
 and strict search query generation.
 """
 
+import asyncio
 import re
+from dataclasses import dataclass
 
 import structlog
 
@@ -443,3 +445,155 @@ def get_ticker_info(ticker: str) -> dict[str, str]:
     """Get complete ticker information."""
     _, metadata = TickerFormatter.normalize_ticker(ticker)
     return metadata
+
+
+# --- Company Name Resolution ---
+
+
+@dataclass
+class CompanyNameResult:
+    """Result of multi-source company name resolution."""
+
+    name: str  # Resolved name or ticker as fallback
+    source: str  # Which source resolved it ("yfinance", "yahooquery", "fmp", "eodhd", "unresolved")
+    is_resolved: bool  # True if a real name was found (not just ticker echoed back)
+
+
+def _is_valid_company_name(name: str | None, ticker: str) -> bool:
+    """Check if a resolved name is valid (not empty, not just the ticker echoed back)."""
+    if not name or not name.strip():
+        return False
+    cleaned = name.strip()
+    # Reject if name is just the ticker string (some APIs echo ticker as name)
+    if cleaned.upper() == ticker.upper():
+        return False
+    # Reject if name is just the ticker base (without exchange suffix)
+    ticker_base = ticker.split(".")[0]
+    if cleaned.upper() == ticker_base.upper():
+        return False
+    return True
+
+
+async def _try_yfinance(ticker: str) -> str | None:
+    """Attempt company name resolution via yfinance."""
+    try:
+        import yfinance as yf
+
+        info = await asyncio.wait_for(
+            asyncio.to_thread(lambda: yf.Ticker(ticker).info),
+            timeout=5,
+        )
+        if info:
+            return info.get("longName") or info.get("shortName")
+    except (asyncio.TimeoutError, Exception) as e:
+        logger.debug("company_name_yfinance_failed", ticker=ticker, error=str(e))
+    return None
+
+
+async def _try_yahooquery(ticker: str) -> str | None:
+    """Attempt company name resolution via yahooquery."""
+    try:
+        from yahooquery import Ticker as YQTicker
+
+        result = await asyncio.wait_for(
+            asyncio.to_thread(lambda: YQTicker(ticker).quote_type),
+            timeout=5,
+        )
+        if isinstance(result, dict) and ticker in result:
+            data = result[ticker]
+            if isinstance(data, dict):
+                return data.get("longName") or data.get("shortName")
+    except (asyncio.TimeoutError, Exception) as e:
+        logger.debug("company_name_yahooquery_failed", ticker=ticker, error=str(e))
+    return None
+
+
+async def _try_fmp(ticker: str) -> str | None:
+    """Attempt company name resolution via FMP profile endpoint."""
+    try:
+        from src.data.fmp_fetcher import get_fmp_fetcher
+
+        fmp = get_fmp_fetcher()
+        if not fmp.is_available():
+            return None
+        name = await asyncio.wait_for(fmp.get_company_name(ticker), timeout=5)
+        return name
+    except (asyncio.TimeoutError, Exception) as e:
+        logger.debug("company_name_fmp_failed", ticker=ticker, error=str(e))
+    return None
+
+
+async def _try_eodhd(ticker: str) -> str | None:
+    """Attempt company name resolution via EODHD General endpoint."""
+    try:
+        from src.data.eodhd_fetcher import get_eodhd_fetcher
+
+        eodhd = get_eodhd_fetcher()
+        if not eodhd.is_available():
+            return None
+        name = await asyncio.wait_for(eodhd.get_company_name(ticker), timeout=5)
+        return name
+    except (asyncio.TimeoutError, Exception) as e:
+        logger.debug("company_name_eodhd_failed", ticker=ticker, error=str(e))
+    return None
+
+
+async def resolve_company_name(ticker: str) -> CompanyNameResult:
+    """
+    Resolve company name from multiple sources with fallback chain.
+
+    Tries sources in order (stops at first success):
+    1. yfinance (free, cached)
+    2. yahooquery (free, different backend)
+    3. FMP (paid, lightweight profile call)
+    4. EODHD (paid, filtered General endpoint)
+
+    Each source has a 5-second timeout. Names are validated to ensure
+    they aren't just the ticker string echoed back.
+
+    Returns:
+        CompanyNameResult with resolved name, source, and is_resolved flag.
+    """
+    sources = [
+        ("yfinance", _try_yfinance),
+        ("yahooquery", _try_yahooquery),
+        ("fmp", _try_fmp),
+        ("eodhd", _try_eodhd),
+    ]
+
+    for source_name, resolver in sources:
+        try:
+            raw_name = await resolver(ticker)
+            if _is_valid_company_name(raw_name, ticker):
+                normalized = normalize_company_name(raw_name)
+                logger.info(
+                    "company_name_resolved",
+                    ticker=ticker,
+                    name=normalized,
+                    source=source_name,
+                )
+                return CompanyNameResult(
+                    name=normalized, source=source_name, is_resolved=True
+                )
+            elif raw_name:
+                logger.debug(
+                    "company_name_rejected",
+                    ticker=ticker,
+                    raw_name=raw_name,
+                    source=source_name,
+                    reason="name matches ticker string",
+                )
+        except Exception as e:
+            logger.debug(
+                "company_name_source_error",
+                ticker=ticker,
+                source=source_name,
+                error=str(e),
+            )
+
+    logger.warning(
+        "company_name_unresolved",
+        ticker=ticker,
+        message="No source could resolve company name — LLM hallucination risk",
+    )
+    return CompanyNameResult(name=ticker, source="unresolved", is_resolved=False)

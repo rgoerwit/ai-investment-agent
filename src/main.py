@@ -806,26 +806,18 @@ async def run_analysis(
         real_date = datetime.now().strftime("%Y-%m-%d")
 
         # CRITICAL FIX: Fetch and verify company name BEFORE graph execution
-        # This prevents LLM hallucination when tickers are similar (e.g., 0291.HK vs 0293.HK)
-        company_name = ticker  # Default fallback
-        try:
-            import yfinance as yf
+        # Multi-source resolution prevents identity hallucination when yfinance fails
+        # (e.g., delisted tickers like 2154.HK where agents guess different companies)
+        from src.ticker_utils import resolve_company_name
 
-            ticker_obj = yf.Ticker(ticker)
-            info = ticker_obj.info
-            company_name = info.get("longName") or info.get("shortName") or ticker
-            logger.info(
-                "company_name_verified",
-                ticker=ticker,
-                company_name=company_name,
-                source="yfinance",
-            )
-        except Exception as e:
+        name_result = await resolve_company_name(ticker)
+        company_name = name_result.name
+
+        if not name_result.is_resolved:
             logger.warning(
-                "company_name_fetch_failed",
+                "company_name_unresolved_at_startup",
                 ticker=ticker,
-                error=str(e),
-                fallback=ticker,
+                message="No source could resolve company name — LLM hallucination risk",
             )
 
         graph = create_trading_graph(
@@ -851,6 +843,7 @@ async def run_analysis(
             ],
             company_of_interest=ticker,
             company_name=company_name,  # ADDED: Anchor verified company name in state
+            company_name_resolved=name_result.is_resolved,
             trade_date=real_date,
             sender="user",
             market_report="",

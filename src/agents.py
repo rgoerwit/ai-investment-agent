@@ -780,6 +780,7 @@ def merge_invest_debate_state(
 class AgentState(MessagesState):
     company_of_interest: str
     company_name: str  # ADDED: Verified company name to prevent LLM hallucination
+    company_name_resolved: bool  # Whether company_name was verified from a data source
     trade_date: str
     sender: Annotated[str, take_last]  # Support parallel writes
 
@@ -828,6 +829,22 @@ def get_context_from_config(config: RunnableConfig) -> Any | None:
         return configurable.get("context")
     except (AttributeError, TypeError):
         return None
+
+
+_UNRESOLVED_NAME_WARNING = (
+    "\nWARNING: Company name could not be verified from any data source. "
+    "The ticker may be delisted or illiquid. Do NOT guess or assume which company "
+    "this ticker belongs to. If you cannot confirm the identity from your tool "
+    "results, state that the company identity is unverified."
+)
+
+
+def _company_line(company_name: str, resolved: bool) -> str:
+    """Build Company: line with optional unresolved warning."""
+    line = f"Company: {company_name}"
+    if not resolved:
+        line += _UNRESOLVED_NAME_WARNING
+    return line
 
 
 def get_analysis_context(ticker: str) -> str:
@@ -1127,6 +1144,7 @@ def create_analyst_node(
             company_name = state.get(
                 "company_name", ticker
             )  # Get verified company name from state
+            company_resolved = state.get("company_name_resolved", True)
 
             # --- Context injection for specific agents ---
             extra_context = ""
@@ -1230,7 +1248,7 @@ def create_analyst_node(
                     )
 
             # CRITICAL FIX: Include verified company name to prevent hallucination
-            full_system_instruction = f"{agent_prompt.system_message}\n\nDate: {_format_date_with_fy_hint(current_date)}\nTicker: {ticker}\nCompany: {company_name}\n{get_analysis_context(ticker)}{extra_context}"
+            full_system_instruction = f"{agent_prompt.system_message}\n\nDate: {_format_date_with_fy_hint(current_date)}\nTicker: {ticker}\n{_company_line(company_name, company_resolved)}\n{get_analysis_context(ticker)}{extra_context}"
             invocation_messages = [
                 SystemMessage(content=full_system_instruction)
             ] + filtered_messages
@@ -1479,6 +1497,7 @@ Now provide your Round 2 rebuttal, addressing the opponent's key points."""
         # Contextualize memory retrieval to prevent cross-contamination
         ticker = state.get("company_of_interest", "UNKNOWN")
         company_name = state.get("company_name", ticker)
+        company_resolved = state.get("company_name_resolved", True)
 
         # Retrieve RELEVANT past insights for THIS ticker
         past_insights = ""
@@ -1531,9 +1550,10 @@ Now provide your Round 2 rebuttal, addressing the opponent's key points."""
             logger.warning("lessons_injection_failed", agent=agent_key, error=str(e))
 
         # Add Negative Constraint to prevent hallucination
+        unresolved_warning = "" if company_resolved else f"\n{_UNRESOLVED_NAME_WARNING}"
         negative_constraint = f"""
 CRITICAL INSTRUCTION:
-You are analyzing **{ticker} ({company_name})**.
+You are analyzing **{ticker} ({company_name})**.{unresolved_warning}
 If the provided context or memory contains information about a DIFFERENT company (e.g., from a previous analysis run), you MUST IGNORE IT.
 Only use data explicitly related to {ticker} ({company_name}).
 """
@@ -2076,6 +2096,7 @@ def create_consultant_node(
 
         ticker = state.get("company_of_interest", "UNKNOWN")
         company_name = state.get("company_name", ticker)
+        company_resolved = state.get("company_name_resolved", True)
 
         context = get_context_from_config(config)
         current_date = (
@@ -2145,11 +2166,12 @@ Pre-Screening Result: {state.get("pre_screening_result", "UNKNOWN")}
 {summarize_for_pm(auditor, "auditor", 3000) if auditor != "N/A" else "N/A"}
 """
 
+        company_warning = "" if company_resolved else f"\n{_UNRESOLVED_NAME_WARNING}"
         prompt = f"""{agent_prompt.system_message}
 
 ANALYSIS DATE: {_format_date_with_fy_hint(current_date)}
 TICKER: {ticker}
-COMPANY: {company_name}
+COMPANY: {company_name}{company_warning}
 
 {all_context}
 
@@ -2290,6 +2312,7 @@ def create_legal_counsel_node(llm, tools: list) -> Callable:
 
         ticker = state.get("company_of_interest", "UNKNOWN")
         company_name = state.get("company_name", ticker)
+        company_resolved = state.get("company_name_resolved", True)
 
         context = get_context_from_config(config)
         current_date = (
@@ -2300,9 +2323,10 @@ def create_legal_counsel_node(llm, tools: list) -> Callable:
         raw_data = state.get("raw_fundamentals_data", "")
         sector, country = _extract_sector_country(raw_data)
 
+        company_warning = "" if company_resolved else f"\n{_UNRESOLVED_NAME_WARNING}"
         human_msg = f"""Analyze legal/tax risks for:
 Ticker: {ticker}
-Company: {company_name}
+Company: {company_name}{company_warning}
 Sector: {sector}
 Country: {country}
 Date: {_format_date_with_fy_hint(current_date)}
@@ -2458,6 +2482,7 @@ def create_auditor_node(llm, tools: list) -> Callable:
 
         ticker = state.get("company_of_interest", "UNKNOWN")
         company_name = state.get("company_name", ticker)
+        company_resolved = state.get("company_name_resolved", True)
 
         context = get_context_from_config(config)
         current_date = (
@@ -2465,9 +2490,10 @@ def create_auditor_node(llm, tools: list) -> Callable:
         )
 
         # Only provide basic identity info to ensure independence
+        company_warning = "" if company_resolved else f"\n{_UNRESOLVED_NAME_WARNING}"
         human_msg = f"""Analyze financial statements for:
 Ticker: {ticker}
-Company: {company_name}
+Company: {company_name}{company_warning}
 Date: {_format_date_with_fy_hint(current_date)}
 
 Perform a forensic audit using your tools."""

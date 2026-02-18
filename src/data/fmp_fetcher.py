@@ -126,6 +126,15 @@ class FMPFetcher(FinancialFetcher):
             logger.debug(f"FMP request failed for {endpoint}: {e}")
             return None
 
+    async def get_company_name(self, ticker: str) -> str | None:
+        """Fetch company name from FMP profile endpoint."""
+        data = await self._get("profile", {"symbol": ticker})
+        if data and isinstance(data, list) and len(data) > 0:
+            name = data[0].get("companyName")
+            if name:
+                return name
+        return None
+
     async def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
         """
         Returns OHLC DataFrame with standard columns.
