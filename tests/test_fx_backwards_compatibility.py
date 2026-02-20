@@ -379,9 +379,17 @@ class TestBackwardsCompatibility:
         prices = 4.8 + np.random.uniform(-0.048, 0.048, 60)
         mock_hist = pd.DataFrame({"Close": prices, "Volume": [100_000] * 60})
 
-        with patch(
-            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
-            return_value=mock_hist,
+        with (
+            patch(
+                "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+                return_value=mock_hist,
+            ),
+            patch(
+                # Mock get_financial_metrics to return None to force fallback
+                # to historical mean price (standard test behavior here).
+                "src.liquidity_calculation_tool.market_data_fetcher.get_financial_metrics",
+                new=AsyncMock(return_value=None),
+            ),
         ):
             with patch(
                 "src.liquidity_calculation_tool.get_fx_rate",

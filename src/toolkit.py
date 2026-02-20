@@ -21,7 +21,7 @@ from src.liquidity_calculation_tool import calculate_liquidity_metrics
 from src.stocktwits_api import StockTwitsAPI
 
 # FIX: Use dynamic ticker utils for normalization and name cleaning
-from src.ticker_utils import normalize_ticker
+from src.ticker_utils import normalize_company_name, normalize_ticker
 
 logger = structlog.get_logger(__name__)
 stocktwits_api = StockTwitsAPI()
@@ -198,11 +198,32 @@ async def fetch_with_timeout(coroutine, timeout_seconds=10, error_msg="Timeout")
 
 
 async def extract_company_name_async(ticker_obj) -> str:
-    """Company name extraction, delegating to shared multi-source resolver."""
-    from src.ticker_utils import resolve_company_name
+    """
+    Lightweight company name extraction for tool calls.
 
-    result = await resolve_company_name(ticker_obj.ticker)
-    return result.name
+    Uses only the already-created ticker_obj (yfinance) with a 5s timeout.
+    The heavy multi-source resolution (yahooquery/FMP/EODHD) runs once at startup
+    in main.py via resolve_company_name() — NOT here, because this function is
+    called by every tool in every parallel agent and would cause resource contention.
+    """
+    ticker_str = ticker_obj.ticker
+
+    try:
+        info = await fetch_with_timeout(
+            asyncio.to_thread(lambda: ticker_obj.info),
+            timeout_seconds=5,
+            error_msg="Name Extraction",
+        )
+
+        if info:
+            long_name = info.get("longName") or info.get("shortName")
+            if long_name:
+                return normalize_company_name(long_name)
+
+        return ticker_str
+
+    except Exception:
+        return ticker_str
 
 
 def extract_from_dataframe(
