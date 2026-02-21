@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.0] - 2026-02-20
+
+### Added
+- **Multi-Horizon Growth Analysis** - Data fetcher now computes three distinct growth horizons from quarterly statements: FY (annual), TTM (trailing twelve months), and MRQ (most recent quarter YoY). Deterministic `growth_trajectory` field (ACCELERATING/STABLE/DECELERATING) added to DATA_BLOCK. Catches deterioration hidden in rearview-mirror annual figures.
+- **Retrospective Learning System** (`src/retrospective.py`) - Compares past analysis verdicts to actual market outcomes using excess return vs local benchmark. Generates lessons via Gemini Flash (~$0.001/lesson) and stores them in a global `lessons_learned` ChromaDB collection with geographic boost at retrieval time. Top-3 relevant lessons injected into Bull/Bear researcher prompts on future runs. Eight failure mode taxonomy aligned with Bear pre-mortem analysis.
+- **Company Name Verification** (`src/ticker_utils.py`) - Multi-source resolution chain (yfinance → yahooquery → FMP → EODHD) prevents hallucinations when tickers are delisted or ambiguous. Unresolved names inject an explicit warning into all agent system instructions.
+- **New Red Flags** - `GROWTH_CLIFF` fires when TTM revenue drops >15%. `THIN_CONSENSUS` fires when total analyst coverage <3, flagging unreliable PEG and target prices.
+- **Batch Screening Pipeline** - `scripts/find_gems.py` consolidates scraper and filter into a single two-phase script. `scripts/run_pipeline.sh` orchestrates three-stage screening (scrape → quick analysis → full analysis on BUYs) with resumability and `--force`/`--stage`/`--cooldown` options.
+- **Script Tests** - 61 new tests covering `find_gems.py` filters, scraping, CLI parsing, and `run_pipeline.sh` verdict extraction, filename conventions, and resumability logic.
+
+### Changed
+- **GICS 11-Sector Alignment** - Red flag detector and fundamentals analyst now use standard GICS taxonomy (Energy, Materials, Industrials, Consumer Discretionary, Consumer Staples, Health Care, Financials, Information Technology, Communication Services, Utilities, Real Estate) instead of legacy ad-hoc sector names. Three threshold profiles: Financials (D/E disabled), Capital-intensive (D/E >800%), Standard (D/E >500%).
+- **English vs Total Analyst Coverage** - `ANALYST_COVERAGE_ENGLISH` (yfinance) now distinguished from `ANALYST_COVERAGE_TOTAL_EST` (supplemented by Foreign Language Analyst's local coverage estimate). Prevents false "undiscovered" signals on stocks with heavy local-language coverage.
+- **Test Directory Reorganization** - 86 test files moved from flat `tests/` into 10 domain subdirectories: `agents/`, `memory/`, `validators/`, `charts/`, `reports/`, `financial/`, `config/`, `prompts/`, `advanced/`, `scripts/`. All `pytest` commands continue to work unchanged.
+
+### Removed
+- Obsolete scripts: `scripts/filter_tickers.py`, `scripts/ticker_scraper.py`, `scripts/run-analysis.sh`, `scripts/SCRIPTS_QUICK_REFERENCE.md` (replaced by consolidated pipeline).
+
 ## [3.8.0] - 2026-02-08
 
 ### Added
