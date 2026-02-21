@@ -30,6 +30,16 @@ logger = structlog.get_logger(__name__)
 console = Console()
 
 
+def _cost_suffix() -> str:
+    """Return formatted cost string for display, or empty if no tracking data."""
+    from src.token_tracker import get_tracker
+
+    stats = get_tracker().get_total_stats()
+    if stats["total_calls"] == 0:
+        return ""
+    return f" [dim](Est. cost: ${stats['total_cost_usd']:.4f})[/dim]"
+
+
 def suppress_all_logging():
     """Suppress all logging output for quiet mode."""
     logging.getLogger().setLevel(logging.CRITICAL)
@@ -87,6 +97,9 @@ Examples:
   # Enable Langfuse tracing for this run
   python -m src.main --ticker 0005.HK --trace-langfuse
 
+  # Batch retrospective: process all past tickers
+  python -m src.main --retrospective-only
+
   # With Poetry
   poetry run python -m src.main --ticker MSFT --quick
         """,
@@ -95,7 +108,8 @@ Examples:
     parser.add_argument(
         "--ticker",
         type=str,
-        required=True,
+        required=False,
+        default=None,
         help="Stock ticker symbol to analyze (e.g., AAPL, NVDA, TSLA)",
     )
 
@@ -190,7 +204,20 @@ Examples:
         ),
     )
 
-    return parser.parse_args()
+    parser.add_argument(
+        "--retrospective-only",
+        action="store_true",
+        help="Run retrospective evaluation on all past analyses without running "
+        "a new analysis. Processes all tickers found in results directory.",
+    )
+
+    args = parser.parse_args()
+
+    # Validate: --ticker is required unless --retrospective-only
+    if not args.retrospective_only and not args.ticker:
+        parser.error("--ticker is required unless --retrospective-only is specified")
+
+    return args
 
 
 def resolve_output_paths(args) -> tuple[Path | None, Path]:
@@ -390,7 +417,7 @@ async def handle_article_generation(
 
         if not args.quiet and not args.brief:
             console.print(
-                f"[green]Article saved to:[/green] [cyan]{article_path}[/cyan]"
+                f"[green]Article saved to:[/green] [cyan]{article_path}[/cyan]{_cost_suffix()}"
             )
             # Defensive: ensure article is a string before counting words
             word_count = (
@@ -716,6 +743,14 @@ def save_results_to_file(result: dict, ticker: str) -> Path:
         },
     }
 
+    # Extract prediction snapshot for future retrospective evaluation (zero LLM cost)
+    try:
+        from src.retrospective import extract_snapshot
+
+        save_data["prediction_snapshot"] = extract_snapshot(result, ticker)
+    except Exception as e:
+        logger.warning(f"Snapshot extraction failed (non-fatal): {e}")
+
     with open(filepath, "w") as f:
         json.dump(save_data, f, indent=2)
 
@@ -771,26 +806,18 @@ async def run_analysis(
         real_date = datetime.now().strftime("%Y-%m-%d")
 
         # CRITICAL FIX: Fetch and verify company name BEFORE graph execution
-        # This prevents LLM hallucination when tickers are similar (e.g., 0291.HK vs 0293.HK)
-        company_name = ticker  # Default fallback
-        try:
-            import yfinance as yf
+        # Multi-source resolution prevents identity hallucination when yfinance fails
+        # (e.g., delisted tickers like 2154.HK where agents guess different companies)
+        from src.ticker_utils import resolve_company_name
 
-            ticker_obj = yf.Ticker(ticker)
-            info = ticker_obj.info
-            company_name = info.get("longName") or info.get("shortName") or ticker
-            logger.info(
-                "company_name_verified",
-                ticker=ticker,
-                company_name=company_name,
-                source="yfinance",
-            )
-        except Exception as e:
+        name_result = await resolve_company_name(ticker)
+        company_name = name_result.name
+
+        if not name_result.is_resolved:
             logger.warning(
-                "company_name_fetch_failed",
+                "company_name_unresolved_at_startup",
                 ticker=ticker,
-                error=str(e),
-                fallback=ticker,
+                message="No source could resolve company name — LLM hallucination risk",
             )
 
         graph = create_trading_graph(
@@ -816,6 +843,7 @@ async def run_analysis(
             ],
             company_of_interest=ticker,
             company_name=company_name,  # ADDED: Anchor verified company name in state
+            company_name_resolved=name_result.is_resolved,
             trade_date=real_date,
             sender="user",
             market_report="",
@@ -999,6 +1027,69 @@ async def main():
                 )
             sys.exit(1)
 
+        # Handle --retrospective-only (no analysis, just evaluate past predictions)
+        if args.retrospective_only:
+            try:
+                from src.retrospective import run_retrospective
+
+                results_dir = Path(config.results_dir)
+                if not args.quiet and not args.brief:
+                    console.print(
+                        "[cyan]Running retrospective evaluation on all past analyses...[/cyan]"
+                    )
+
+                lessons = await run_retrospective(ticker=None, results_dir=results_dir)
+
+                if lessons:
+                    if not args.quiet and not args.brief:
+                        console.print(
+                            f"\n[green]Generated {len(lessons)} lesson(s):[/green]"
+                        )
+                        for lesson in lessons:
+                            stored = "[stored]" if lesson.get("stored") else "[skipped]"
+                            console.print(
+                                f"  {stored} [{lesson['ticker']}] {lesson['lesson']} "
+                                f"({lesson['failure_mode']} | conf: {lesson['confidence']:.2f})"
+                            )
+                    else:
+                        print(
+                            f"# Retrospective Complete\n\nGenerated {len(lessons)} lesson(s)."
+                        )
+                else:
+                    msg = "No significant prediction deltas found."
+                    if not args.quiet and not args.brief:
+                        console.print(f"[yellow]{msg}[/yellow]")
+                    else:
+                        print(f"# Retrospective Complete\n\n{msg}")
+            except Exception as e:
+                logger.error(f"Retrospective failed: {e}", exc_info=True)
+                if not args.quiet and not args.brief:
+                    console.print(
+                        f"[yellow]Warning: Retrospective evaluation failed: {e}[/yellow]"
+                    )
+
+            sys.exit(0)
+
+        # Always evaluate past predictions for this ticker (if any exist)
+        # Gated on memory being enabled (--no-memory skips this)
+        if args.ticker and not args.no_memory:
+            try:
+                from src.retrospective import run_retrospective
+
+                results_dir = Path(config.results_dir)
+                lessons = await run_retrospective(
+                    ticker=args.ticker, results_dir=results_dir
+                )
+
+                if lessons and not args.quiet and not args.brief:
+                    console.print(
+                        f"\n[green]Generated {len(lessons)} new lesson(s) from past analyses[/green]"
+                    )
+            except Exception as e:
+                logger.warning("retrospective_failed", ticker=args.ticker, error=str(e))
+        elif args.ticker and args.no_memory:
+            logger.info("retrospective_skipped_no_memory", ticker=args.ticker)
+
         # Generate welcome banner
         welcome_banner = get_welcome_banner(args.ticker, args.quick)
 
@@ -1077,7 +1168,7 @@ async def main():
 
                         if not args.quiet and not args.brief:
                             console.print(
-                                f"[green]Report saved to:[/green] [cyan]{output_file}[/cyan]"
+                                f"[green]Report saved to:[/green] [cyan]{output_file}[/cyan]{_cost_suffix()}"
                             )
                     except Exception as e:
                         logger.error(f"Failed to write report to {output_file}: {e}")
@@ -1092,7 +1183,7 @@ async def main():
                 filepath = save_results_to_file(result, args.ticker)
                 if not args.quiet and not args.brief:
                     console.print(
-                        f"[green]Results saved to:[/green] [cyan]{filepath}[/cyan]"
+                        f"[green]Results saved to:[/green] [cyan]{filepath}[/cyan]{_cost_suffix()}"
                     )
             except Exception as e:
                 logger.error(f"Failed to save results: {e}")

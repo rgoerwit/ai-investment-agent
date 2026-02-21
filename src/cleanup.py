@@ -60,32 +60,35 @@ async def cleanup_async_resources() -> None:
 async def _cleanup_data_fetchers() -> None:
     """Close all singleton data fetcher sessions."""
     # Import here to avoid circular imports
-    try:
-        from src.data.alpha_vantage_fetcher import get_av_fetcher
-
-        fetcher = get_av_fetcher()
-        await fetcher.close()
-        logger.debug("cleanup_closed", resource="alpha_vantage_session")
-    except Exception as e:
-        logger.debug("cleanup_error", resource="alpha_vantage", error=str(e))
-
-    try:
-        from src.data.fmp_fetcher import get_fmp_fetcher
-
-        fetcher = get_fmp_fetcher()
-        await fetcher.close()
-        logger.debug("cleanup_closed", resource="fmp_session")
-    except Exception as e:
-        logger.debug("cleanup_error", resource="fmp", error=str(e))
-
-    try:
-        from src.data.eodhd_fetcher import get_eodhd_fetcher
-
-        fetcher = get_eodhd_fetcher()
-        await fetcher.close()
-        logger.debug("cleanup_closed", resource="eodhd_session")
-    except Exception as e:
-        logger.debug("cleanup_error", resource="eodhd", error=str(e))
+    # These fetchers create/close aiohttp sessions per request, so there's
+    # nothing to clean up at shutdown. Guard with hasattr to avoid noisy errors.
+    for resource_name, fetcher_import in [
+        (
+            "alpha_vantage",
+            lambda: __import__(
+                "src.data.alpha_vantage_fetcher", fromlist=["get_av_fetcher"]
+            ).get_av_fetcher(),
+        ),
+        (
+            "fmp",
+            lambda: __import__(
+                "src.data.fmp_fetcher", fromlist=["get_fmp_fetcher"]
+            ).get_fmp_fetcher(),
+        ),
+        (
+            "eodhd",
+            lambda: __import__(
+                "src.data.eodhd_fetcher", fromlist=["get_eodhd_fetcher"]
+            ).get_eodhd_fetcher(),
+        ),
+    ]:
+        try:
+            fetcher = fetcher_import()
+            if hasattr(fetcher, "close"):
+                await fetcher.close()
+                logger.debug("cleanup_closed", resource=f"{resource_name}_session")
+        except Exception as e:
+            logger.debug("cleanup_error", resource=resource_name, error=str(e))
 
 
 async def _cleanup_genai_clients() -> None:

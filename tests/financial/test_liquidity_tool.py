@@ -8,6 +8,25 @@ import pytest
 
 from src.liquidity_calculation_tool import calculate_liquidity_metrics
 
+# ==================== TEST FIXTURES ====================
+
+
+@pytest.fixture(autouse=True)
+def mock_get_financial_metrics():
+    """
+    Ensure all tests in this module use a mock for get_financial_metrics.
+    This forces the liquidity tool to use the historical mean price from
+    the mock data provided by the tests, ensuring isolation.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    with patch(
+        "src.data.fetcher.SmartMarketDataFetcher.get_financial_metrics",
+        new=AsyncMock(return_value=None),
+    ):
+        yield
+
+
 # ==================== EXISTING TESTS ====================
 
 

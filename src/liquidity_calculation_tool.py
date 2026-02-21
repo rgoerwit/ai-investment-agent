@@ -93,7 +93,15 @@ async def calculate_liquidity_metrics(
     normalized_symbol = normalize_ticker(ticker)
 
     try:
-        # Use the robust fetcher for history
+        # Step 1: Fetch ROBUST anchor price (multi-source validated)
+        # This prevents "cent-scaling" bugs where history data is 1/100th of reality
+        # Anchoring to the validated spot price ensures turnover reflects actual market value.
+        anchor_data = await market_data_fetcher.get_financial_metrics(normalized_symbol)
+        anchor_price = (
+            anchor_data.get("currentPrice") if isinstance(anchor_data, dict) else None
+        )
+
+        # Step 2: Fetch volume history
         hist = await market_data_fetcher.get_historical_prices(
             normalized_symbol, period="3mo"
         )
@@ -108,7 +116,12 @@ Avg Daily Turnover (USD): N/A
 
         # Calculate metrics
         avg_volume = hist["Volume"].mean()
-        avg_close = hist["Close"].mean()
+
+        # Use robust anchor price if available; fallback to history mean
+        # This ensures liquidity calculation matches the valuation price
+        price_for_turnover = (
+            anchor_price if anchor_price and anchor_price > 0 else hist["Close"].mean()
+        )
 
         # --- HEARTBEAT CHECK (Trap A: Liquidity Distortion) ---
         # Detect irregular trading patterns that create stale/manipulated pricing
@@ -122,10 +135,10 @@ Avg Daily Turnover (USD): N/A
         # NOTE: For UK stocks (.L), prices are in Pence, so we must divide by 100
         # to get Pounds before converting to USD.
         if normalized_symbol.endswith(".L"):
-            avg_turnover_local = avg_volume * (avg_close / 100.0)
+            avg_turnover_local = avg_volume * (price_for_turnover / 100.0)
             logger.info("pence_adjustment_applied", ticker=ticker)
         else:
-            avg_turnover_local = avg_volume * avg_close
+            avg_turnover_local = avg_volume * price_for_turnover
 
         # Determine currency and FX rate based on suffix
         suffix = "US"  # Default to US

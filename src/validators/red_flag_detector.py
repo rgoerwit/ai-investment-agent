@@ -30,13 +30,29 @@ logger = structlog.get_logger(__name__)
 
 
 class Sector(Enum):
-    """Sector classifications for sector-aware red flag detection."""
+    """GICS-aligned sector classifications (Global Industry Classification Standard)."""
 
-    GENERAL = "General/Diversified"
-    BANKING = "Banking"
+    ENERGY = "Energy"
+    MATERIALS = "Materials"
+    INDUSTRIALS = "Industrials"
+    CONSUMER_DISCRETIONARY = "Consumer Discretionary"
+    CONSUMER_STAPLES = "Consumer Staples"
+    HEALTH_CARE = "Health Care"
+    FINANCIALS = "Financials"
+    INFORMATION_TECHNOLOGY = "Information Technology"
+    COMMUNICATION_SERVICES = "Communication Services"
     UTILITIES = "Utilities"
-    SHIPPING = "Shipping & Cyclical Commodities"
-    TECHNOLOGY = "Technology & Software"
+    REAL_ESTATE = "Real Estate"
+
+
+# Threshold profile groupings
+FINANCIALS_SECTORS = {Sector.FINANCIALS}
+CAPITAL_INTENSIVE_SECTORS = {
+    Sector.ENERGY,
+    Sector.MATERIALS,
+    Sector.UTILITIES,
+    Sector.REAL_ESTATE,
+}
 
 
 class RedFlagDetector:
@@ -56,12 +72,90 @@ class RedFlagDetector:
     7. Unsustainable Distribution (recoverable): Payout >100% + uncovered but ROIC okay or improving
     """
 
+    # Exact GICS name → Sector (case-insensitive lookup built at class level)
+    _GICS_EXACT: dict[str, "Sector"] = {s.value.lower(): s for s in Sector}
+
+    # Keyword fallback for LLM variations and backward compatibility
+    _KEYWORD_MAP: list[tuple[list[str], "Sector"]] = [
+        # Financials (+ legacy "Banking")
+        (
+            ["banking", "bank", "financial services", "insurance", "capital markets"],
+            Sector.FINANCIALS,
+        ),
+        # Energy
+        (["energy", "oil", "gas", "petroleum"], Sector.ENERGY),
+        # Materials (+ legacy "Shipping/Commodities")
+        (
+            [
+                "materials",
+                "mining",
+                "chemicals",
+                "shipping",
+                "commodities",
+                "cyclical",
+                "tanker",
+                "dry bulk",
+            ],
+            Sector.MATERIALS,
+        ),
+        # Utilities
+        (["utilities", "utility", "electric", "water"], Sector.UTILITIES),
+        # Real Estate
+        (["real estate", "reit"], Sector.REAL_ESTATE),
+        # Information Technology (+ legacy "Technology/Software")
+        (
+            [
+                "information technology",
+                "technology",
+                "software",
+                "saas",
+                "semiconductor",
+            ],
+            Sector.INFORMATION_TECHNOLOGY,
+        ),
+        # Health Care
+        (
+            ["health care", "healthcare", "pharmaceutical", "biotech"],
+            Sector.HEALTH_CARE,
+        ),
+        # Communication Services
+        (
+            ["communication services", "telecom", "media", "entertainment"],
+            Sector.COMMUNICATION_SERVICES,
+        ),
+        # Consumer Discretionary
+        (
+            ["consumer discretionary", "retail", "automotive", "luxury"],
+            Sector.CONSUMER_DISCRETIONARY,
+        ),
+        # Consumer Staples
+        (
+            ["consumer staples", "grocery", "supermarket", "food", "beverage"],
+            Sector.CONSUMER_STAPLES,
+        ),
+        # Industrials (+ legacy "General/Diversified")
+        (
+            [
+                "industrials",
+                "industrial",
+                "aerospace",
+                "defense",
+                "conglomerate",
+                "general",
+                "diversified",
+            ],
+            Sector.INDUSTRIALS,
+        ),
+    ]
+
     @staticmethod
     def detect_sector(fundamentals_report: str) -> Sector:
         """
         Detect sector from Fundamentals Analyst report.
 
-        Looks for SECTOR field in DATA_BLOCK. Falls back to GENERAL if not found.
+        Primary: exact GICS name match (case-insensitive).
+        Fallback: keyword matching for LLM variations and backward compat.
+        Default: INDUSTRIALS (safest standard-threshold default).
 
         Args:
             fundamentals_report: Full fundamentals analyst report text
@@ -70,32 +164,33 @@ class RedFlagDetector:
             Sector enum value
         """
         if not fundamentals_report:
-            return Sector.GENERAL
+            return Sector.INDUSTRIALS
 
         # Extract SECTOR from DATA_BLOCK
         sector_match = re.search(r"SECTOR:\s*(.+?)(?:\n|$)", fundamentals_report)
 
         if not sector_match:
-            logger.debug("no_sector_found_in_report", fallback="GENERAL")
-            return Sector.GENERAL
+            logger.debug("no_sector_found_in_report", fallback="INDUSTRIALS")
+            return Sector.INDUSTRIALS
 
         sector_text = sector_match.group(1).strip()
 
-        # Map to enum
-        if "Banking" in sector_text or "Bank" in sector_text:
-            return Sector.BANKING
-        elif "Utilities" in sector_text or "Utility" in sector_text:
-            return Sector.UTILITIES
-        elif (
-            "Shipping" in sector_text
-            or "Commodities" in sector_text
-            or "Cyclical" in sector_text
-        ):
-            return Sector.SHIPPING
-        elif "Technology" in sector_text or "Software" in sector_text:
-            return Sector.TECHNOLOGY
-        else:
-            return Sector.GENERAL
+        # Primary: exact GICS name match (case-insensitive)
+        exact = RedFlagDetector._GICS_EXACT.get(sector_text.lower())
+        if exact is not None:
+            return exact
+
+        # Fallback: keyword matching (handles LLM variations, old names)
+        sector_lower = sector_text.lower()
+        for keywords, sector_enum in RedFlagDetector._KEYWORD_MAP:
+            for kw in keywords:
+                if kw in sector_lower:
+                    return sector_enum
+
+        logger.debug(
+            "unrecognized_sector", sector_text=sector_text, fallback="INDUSTRIALS"
+        )
+        return Sector.INDUSTRIALS
 
     @staticmethod
     def _parse_currency_value(
@@ -167,6 +262,10 @@ class RedFlagDetector:
             "ocf_source": None,
             "segment_flag": None,
             "parent_company": None,
+            "analyst_coverage_total_est": None,
+            "growth_trajectory": None,
+            "revenue_growth_ttm": None,
+            "latest_quarter_date": None,
             "_raw_report": fundamentals_report,  # For downstream data quality checks
         }
 
@@ -309,6 +408,53 @@ class RedFlagDetector:
             val = parent_match.group(1).strip()
             if val.upper() not in ("NONE", "N/A"):
                 metrics["parent_company"] = val
+
+        # Extract ANALYST_COVERAGE_TOTAL_EST (integer or tier string).
+        # This is Senior's synthesis of English (Refinitiv/FactSet) + FLA local-language
+        # analyst estimates. May be an integer or a qualitative tier (HIGH/MODERATE/LOW).
+        # Missing/UNKNOWN values stay None — THIN_CONSENSUS only fires on confirmed ints.
+        total_est_match = re.search(
+            r"ANALYST_COVERAGE_TOTAL_EST:\s*(.+?)(?:\n|$)",
+            data_block,
+            re.IGNORECASE,
+        )
+        if total_est_match:
+            val = total_est_match.group(1).strip()
+            if val.upper() not in ("N/A", "NA", "NONE", "-", "", "UNKNOWN"):
+                # Try to parse as integer first
+                int_match = re.match(r"^(\d+)", val)
+                if int_match:
+                    metrics["analyst_coverage_total_est"] = int(int_match.group(1))
+                else:
+                    # Store tier string (HIGH/MODERATE/LOW)
+                    tier = val.upper().split()[0]  # Take first word
+                    if tier in ("HIGH", "MODERATE", "LOW"):
+                        metrics["analyst_coverage_total_est"] = tier
+
+        # Extract GROWTH_TRAJECTORY
+        trajectory_match = re.search(
+            r"GROWTH_TRAJECTORY:\s*(ACCELERATING|DECELERATING|STABLE|N/A)",
+            data_block,
+            re.IGNORECASE,
+        )
+        if trajectory_match:
+            val = trajectory_match.group(1).upper()
+            if val != "N/A":
+                metrics["growth_trajectory"] = val
+
+        # Extract REVENUE_GROWTH_TTM (percentage value)
+        rev_ttm_match = re.search(
+            r"REVENUE_GROWTH_TTM:\s*(-?\d+(?:\.\d+)?)%", data_block
+        )
+        if rev_ttm_match:
+            metrics["revenue_growth_ttm"] = float(rev_ttm_match.group(1))
+
+        # Extract LATEST_QUARTER_DATE for staleness checks
+        quarter_date_match = re.search(
+            r"LATEST_QUARTER_DATE:\s*(\d{4}-\d{2}-\d{2})", data_block
+        )
+        if quarter_date_match:
+            metrics["latest_quarter_date"] = quarter_date_match.group(1)
 
         # Now extract from detailed sections (below DATA_BLOCK)
         metrics["debt_to_equity"] = RedFlagDetector._extract_debt_to_equity(
@@ -490,7 +636,7 @@ class RedFlagDetector:
     def detect_red_flags(
         metrics: dict[str, float | None],
         ticker: str = "UNKNOWN",
-        sector: Sector = Sector.GENERAL,
+        sector: Sector = Sector.INDUSTRIALS,
     ) -> tuple[list[dict], str]:
         """
         Apply sector-aware threshold-based red-flag detection logic.
@@ -508,21 +654,20 @@ class RedFlagDetector:
         2. Positive income but negative FCF >2x income: Earnings quality (fraud)
         3. Interest coverage < SECTOR_THRESHOLD AND D/E > SECTOR_THRESHOLD: Refinancing risk
 
-        Sector-specific thresholds:
-        - GENERAL: D/E > 500%, Interest Coverage < 2.0x + D/E > 100%
-        - UTILITIES/SHIPPING: D/E > 800%, Interest Coverage < 1.5x + D/E > 200%
-        - BANKING: D/E check DISABLED (leverage is their business model)
-        - TECHNOLOGY: Standard thresholds (D/E > 500%)
+        Sector-specific thresholds (3 profiles):
+        - Financials: D/E check DISABLED (leverage is their business model)
+        - Capital-intensive (Energy, Materials, Utilities, Real Estate): D/E > 800%, Coverage < 1.5x + D/E > 200%
+        - Standard (all others): D/E > 500%, Coverage < 2.0x + D/E > 100%
         """
         red_flags = []
 
-        # Define sector-specific thresholds
-        if sector == Sector.BANKING:
-            # Banks: Leverage is their business model - skip D/E checks entirely
+        # Define sector-specific thresholds (3 profiles)
+        if sector in FINANCIALS_SECTORS:
+            # Financials: Leverage is their business model - skip D/E checks entirely
             leverage_threshold = None
             coverage_threshold = None
             coverage_de_threshold = None
-        elif sector in (Sector.UTILITIES, Sector.SHIPPING):
+        elif sector in CAPITAL_INTENSIVE_SECTORS:
             # Capital-intensive sectors: Higher thresholds
             leverage_threshold = 800  # D/E > 800% is extreme (vs 500% standard)
             coverage_threshold = 1.5  # Interest coverage < 1.5x (vs 2.0x standard)
@@ -786,12 +931,12 @@ class RedFlagDetector:
 
         # --- RED FLAG 7: Suspicious OCF/NI Ratio (Data Quality Check) ---
         # OCF significantly exceeding net income suggests data error or period mismatch.
-        # Banking sector exempt (deposit flows naturally inflate OCF/NI).
+        # Financials sector exempt (deposit flows naturally inflate OCF/NI).
         ocf = metrics.get("ocf")
         ni_for_ocf = metrics.get("net_income")
 
         if (
-            sector != Sector.BANKING
+            sector not in FINANCIALS_SECTORS
             and ocf is not None
             and ni_for_ocf is not None
             and ocf > 0
@@ -908,6 +1053,68 @@ class RedFlagDetector:
             logger.info(
                 "red_flag_ocf_source_discrepancy",
                 ticker=ticker,
+            )
+
+        # --- GROWTH CLIFF WARNING ---
+        # TTM revenue growth sharply negative indicates rapid deterioration
+        # not visible in FY data (rearview-mirror bias)
+        revenue_growth_ttm = metrics.get("revenue_growth_ttm")
+        if revenue_growth_ttm is not None and revenue_growth_ttm < -15.0:
+            red_flags.append(
+                {
+                    "type": "GROWTH_CLIFF",
+                    "severity": "WARNING",
+                    "detail": (
+                        f"TTM revenue growth {revenue_growth_ttm:.1f}% — "
+                        "sharp deterioration not reflected in annual data"
+                    ),
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 0.5,
+                    "rationale": (
+                        "Trailing twelve-month revenue shows sharp decline. "
+                        "This may indicate loss of key contracts, competitive "
+                        "disruption, or demand collapse. Annual data may still "
+                        "look acceptable, masking the deterioration."
+                    ),
+                }
+            )
+            logger.info(
+                "red_flag_growth_cliff",
+                ticker=ticker,
+                revenue_growth_ttm=revenue_growth_ttm,
+            )
+
+        # --- THIN CONSENSUS WARNING ---
+        # Total analyst coverage < 3 means consensus targets are statistically unreliable.
+        # PEG and forward P/E are also consensus-derived (PEG = P/E ÷ consensus growth;
+        # forward P/E = price ÷ consensus forward EPS), so they're equally tainted.
+        # Only fires on confirmed numeric counts, not tier values (LOW/MODERATE/HIGH).
+        total_est = metrics.get("analyst_coverage_total_est")
+        if isinstance(total_est, int) and total_est < 3:
+            red_flags.append(
+                {
+                    "type": "THIN_CONSENSUS",
+                    "severity": "WARNING",
+                    "detail": (
+                        f"Total estimated analyst coverage is {total_est} — "
+                        "consensus targets, PEG, and forward P/E based on <3 analysts "
+                        "are statistically unreliable"
+                    ),
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 0.5,
+                    "rationale": (
+                        "Price targets, PEG ratio, and forward P/E are all derived from "
+                        "consensus analyst estimates. With fewer than 3 analysts, these "
+                        "figures reflect individual opinions, not statistical consensus. "
+                        "Prefer trailing P/E, P/B, and intrinsic valuation (DCF, "
+                        "asset-based) over consensus-derived metrics for this stock."
+                    ),
+                }
+            )
+            logger.info(
+                "red_flag_thin_consensus",
+                ticker=ticker,
+                total_est=total_est,
             )
 
         # Determine result

@@ -191,6 +191,8 @@ graph TB
     - **6-Axis Radar Chart** - Thesis alignment with PM-adjusted scores
     - Both fast-fail and normal paths route through Chart Generator before completing
 
+12. **Lessons Learned (Automatic)** - Compares past analysis verdicts to actual market outcomes. On re-analysis of a ticker, the system automatically evaluates past prediction snapshots; when excess return vs local benchmark exceeds significance thresholds, a single Gemini Flash call generates a generalizable lesson (e.g., "Low PEG in cyclical entertainment stocks indicates peak earnings, not undervaluation"). Lessons are stored in a global ChromaDB collection and injected into Bull/Bear researcher prompts for future analyses. Already-processed snapshots are skipped via early dedup (~50ms), so repeated runs add near-zero overhead. Disabled with `--no-memory`.
+
 **Why This Matters:** Single-LLM (and worse yet, single-prompt) systems are prone to confirmation bias. Multi-model + multi-agent debate forces the system as a whole to consider contradictory evidence, mimicking how institutional research teams actually work. The parallel fan-out/fan-in pattern provides speed without sacrificing data quality. The Junior/Senior/Foreign split uses multiple data pathways (APIs + native-language web sources) to reduce data gaps common when analyzing international stocks. The Financial Validator provides deterministic pre-screening to catch catastrophic risks before debate. The Valuation Calculator separates LLM judgment (method selection) from Python calculation (arithmetic), avoiding LLM math hallucinations. The structured **DATA_BLOCK** and **PM_BLOCK** provide reliable schemas for extracting complex metrics, ensuring the visualization layer remains accurate. The optional External Consultant uses a different AI model (OpenAI) to catch groupthink.
 
 ---
@@ -268,17 +270,49 @@ poetry run python -m src.main --ticker 0005.HK --quick-model gemini-3-flash-prev
 # You can override it:
 poetry run python -m src.main --ticker 0005.HK --output results/report.md --imagedir results/assets/charts
 
+# Batch retrospective: process all past tickers
+poetry run python -m src.main --retrospective-only
+
 # Run with real-time logging visible (unbuffered Python output)
 # Redirect to file and monitor with: tail -f scratch/ticker_analysis_info.txt
 # Note: Use --output for the report so that charts are generated
 poetry run python -u -m src.main --ticker 0005.HK --output scratch/report.md >scratch/ticker_analysis_info.txt 2>&1 &
 
-# Batch analysis
-poetry run bash run_tickers.sh
+# Batch analysis (manual ticker list)
+./scripts/run_tickers.sh
 
 # Run tests to verify installation
 poetry run pytest tests/ -v
 ```
+
+### Automated Screening Pipeline (Fastest Path to Gems)
+
+Find undervalued international stocks end-to-end — no manual steps:
+
+```bash
+# One command: scrape 18 exchanges → filter by fundamentals → quick-screen
+# all candidates → full analysis on BUY verdicts only
+./scripts/run_pipeline.sh
+
+# Or step by step:
+
+# 1. Scrape + filter (produces a ticker list)
+poetry run python scripts/find_gems.py --output scratch/gems.txt
+
+# 2. Run the 3-stage pipeline against that list
+./scripts/run_pipeline.sh --skip-scrape scratch/gems.txt
+
+# Paid API tier? Shorten the cooldown
+./scripts/run_pipeline.sh --cooldown 10
+
+# Resume after a crash (already-processed tickers are skipped automatically)
+./scripts/run_pipeline.sh --skip-scrape scratch/gems_2026-02-19.txt
+
+# Overnight run on macOS
+caffeinate -i ./scripts/run_pipeline.sh
+```
+
+Output lands in `scratch/`: quick-screen reports (`*_quick.md`), full reports for BUYs, and a `buys_YYYY-MM-DD.txt` summary.
 
 ### Configuring API Rate Limits (NEW)
 

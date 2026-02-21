@@ -20,7 +20,7 @@ class TestValuationContextException:
     @pytest.fixture
     def pm_prompt(self):
         """Load Portfolio Manager prompt."""
-        prompts_dir = Path(__file__).parent.parent / "prompts"
+        prompts_dir = Path(__file__).parent.parent.parent / "prompts"
         with open(prompts_dir / "portfolio_manager.json") as f:
             return json.load(f)
 
@@ -63,7 +63,7 @@ class TestDataIntegrityTiers:
     @pytest.fixture
     def pm_prompt(self):
         """Load Portfolio Manager prompt."""
-        prompts_dir = Path(__file__).parent.parent / "prompts"
+        prompts_dir = Path(__file__).parent.parent.parent / "prompts"
         with open(prompts_dir / "portfolio_manager.json") as f:
             return json.load(f)
 
@@ -113,7 +113,7 @@ class TestActionTerminology:
     @pytest.fixture
     def pm_prompt(self):
         """Load Portfolio Manager prompt."""
-        prompts_dir = Path(__file__).parent.parent / "prompts"
+        prompts_dir = Path(__file__).parent.parent.parent / "prompts"
         with open(prompts_dir / "portfolio_manager.json") as f:
             return json.load(f)
 
@@ -166,7 +166,7 @@ class TestFundamentalsValuationContext:
     @pytest.fixture
     def fund_prompt(self):
         """Load Fundamentals Analyst prompt."""
-        prompts_dir = Path(__file__).parent.parent / "prompts"
+        prompts_dir = Path(__file__).parent.parent.parent / "prompts"
         with open(prompts_dir / "fundamentals_analyst.json") as f:
             return json.load(f)
 
@@ -204,7 +204,7 @@ class TestResearchManagerTerminology:
     @pytest.fixture
     def rm_prompt(self):
         """Load Research Manager prompt."""
-        prompts_dir = Path(__file__).parent.parent / "prompts"
+        prompts_dir = Path(__file__).parent.parent.parent / "prompts"
         with open(prompts_dir / "research_manager.json") as f:
             return json.load(f)
 
@@ -223,7 +223,7 @@ class TestPromptVersionsUpdated:
     @pytest.fixture
     def prompts_dir(self):
         """Get prompts directory."""
-        return Path(__file__).parent.parent / "prompts"
+        return Path(__file__).parent.parent.parent / "prompts"
 
     def test_pm_version_updated(self, prompts_dir):
         """Portfolio Manager should be v7.6+."""

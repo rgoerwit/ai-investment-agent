@@ -783,7 +783,7 @@ STRICT BOUNDARIES - DO NOT analyze price charts, technicals, social media sentim
 
 **Leverage (2 pts)**:
 - **Standard**: D/E <0.8: 1 pt
-- **Sector Exception (Utilities, Shipping, Banks)**: D/E <2.0 allowed (Score as 1 pt)
+- **Sector Exception (Utilities, Energy, Materials, Real Estate, Financials)**: D/E <2.0 allowed (Score as 1 pt)
 - NetDebt/EBITDA <2: 1 pt (If N/A, remove 1pt from denominator)
 
 **Liquidity (2 pts)**:
@@ -903,88 +903,65 @@ Report: "PFIC Risk: LOW / MEDIUM / HIGH"
 
 ## SECTOR-SPECIFIC ADJUSTMENTS (Apply During Scoring)
 
-Different industries have fundamentally different financial structures. Apply these sector-specific thresholds when scoring metrics. **Document all sector adjustments applied in SECTOR_ADJUSTMENTS field.**
+Use the GICS sector from raw data (the "sector" field). Output using exact GICS names in DATA_BLOCK. Document all sector adjustments in SECTOR_ADJUSTMENTS field.
 
-### 1. BANKS & FINANCIAL INSTITUTIONS
+### FINANCIALS (Banks, Insurance, Capital Markets)
+- **D/E Ratio**: NOT APPLICABLE (remove from denominator entirely)
+- ROE >12% (not 15%) = 1 pt; ROA >1.0% (not 7%) = 1 pt
+- Banks: Net Interest Margin >2.5% replaces Operating Margin
+- Insurance: Combined Ratio <100% is positive signal
+- **Distributable Cash Check**: If Dividend Yield <2% OR Total Payout <20% of NI, COUNT ROE/ROA as 0.5 pts each (trapped capital risk)
 
-**Identification**: SIC codes 60xx, business description includes "bank", "banking", "financial services"
+### UTILITIES & REGULATED INFRASTRUCTURE
+Includes airports, regulated concessions.
+- D/E <2.0 acceptable (not 0.8) = 1 pt; ROE >8% (not 15%) = 1 pt
+- FCF Yield >3% (not 4%) = 1 pt; P/B <1.8 (not 1.4) = 1 pt
+- Airports/concessions: Growth score CAPPED at 4/6 (bond proxy); no R&D/capex points
 
-**Adjustments**:
-- **D/E Ratio**: NOT APPLICABLE (their business IS leverage - skip this metric entirely)
-  → Remove 1 point from Leverage denominator (2 pts → 1 pt available)
-- **Profitability Thresholds**:
-  → ROE >12% (vs standard 15%) = 1 pt
-  → ROA >1.0% (vs standard 7%) = 1 pt
-  → Net Interest Margin >2.5% replaces Operating Margin
-- **Regulatory Capital**: Tier 1 Capital Ratio >10% (add as qualitative strength if available)
-- **Asset Quality**: NPL Ratio <3% (add as qualitative strength if available)
+### CYCLICAL RESOURCES (Energy, Materials)
+Covers mining, oil & gas, chemicals, shipping, dry bulk.
+- Use 5-year averages for profitability if available
+- 5Y Avg ROE >10% (not TTM 15%) = 1 pt; D/E <1.2 acceptable = 1 pt
+- P/B <1.0 during downturns acceptable
+- Document cycle position (trough/recovery/peak/decline)
 
-**Rationale**: Banks operate on leverage by design. Focus shifts to capital adequacy, asset quality, and return metrics.
+### INFORMATION TECHNOLOGY
+- Negative FCF acceptable IF: Revenue Growth >30% AND Gross Margin >60% → 0.5 pts
+- R&D/Revenue >15% is neutral
+- P/S <8 AND Revenue Growth >25% = 1 pt (alternative to P/E)
 
-### 2. UTILITIES (Electric, Gas, Water)
+### HEALTH CARE
+- R&D intensity is neutral (not penalized)
+- Pre-revenue biotech: use cash runway (cash / quarterly burn) instead of FCF
+- Regulatory pipeline risk: note phase and approval probability
 
-**Identification**: SIC codes 49xx, business description includes "utility", "electric", "gas", "water"
+### REAL ESTATE & REITs
+- FFO (Funds From Operations) replaces EPS for valuation
+- D/E <2.0 acceptable (capital-intensive, similar to Utilities)
+- NAV-based valuation: P/NAV <1.0 is value signal
+- REITs trigger PFIC reporting — flag in PFIC_RISK
 
-**Adjustments**:
-- **D/E Ratio**: <2.0 acceptable (vs standard 0.8) = 1 pt
-- **ROE Threshold**: >8% acceptable (vs standard 15%) = 1 pt
-- **Cash Flow**: Regulated utilities have predictable cash flows
-  → Positive FCF = 1 pt (maintain standard)
-  → FCF Yield >3% (vs standard 4%) = 1 pt
-- **Valuation**: P/B <1.8 acceptable (vs standard 1.4) = 1 pt
-
-**Rationale**: Regulated entities have lower margins but stable cash flows. Higher leverage is industry norm due to capital-intensive infrastructure.
-
-### 3. REITs trigger PFIC reporting. Skip.
-
-### 4. SHIPPING & CYCLICAL COMMODITIES
-
-**Identification**: SIC codes 44xx (shipping), 10xx-14xx (mining, oil & gas extraction), business description includes "shipping", "tanker", "dry bulk", "commodity"
-
-**Adjustments**:
-- **Multi-Year Averaging**: Use 5-year averages for profitability and cash flow metrics to smooth cyclical volatility
-  → 5Y Avg ROE >10% (vs TTM 15%) = 1 pt
-  → 5Y Avg Operating Margin >8% (vs TTM 12%) = 1 pt
-- **Leverage**: D/E <1.2 acceptable (capital-intensive) = 1 pt
-- **Cycle Awareness**: Document current cycle position (trough, recovery, peak, decline)
-- **Valuation**: P/B <1.0 during downturns acceptable (asset value focus)
-
-**Rationale**: Cyclical businesses have extreme earnings volatility. Multi-year averaging prevents penalizing companies at cycle troughs. Asset backing (P/B) more relevant than earnings multiples.
-
-### 5. TECHNOLOGY & SOFTWARE
-
-**Identification**: SIC codes 73xx (software), 35xx (computer equipment), business description includes "software", "SaaS", "technology platform"
-
-**Adjustments**:
-- **Negative FCF Acceptable IF**:
-  → Revenue Growth >30% AND
-  → Gross Margin >60% AND
-  → Gross Margin improving YoY
-  → Award 0.5 pts for FCF (vs 0 pts standard) if above conditions met
-- **R&D Intensity**: R&D/Revenue >15% is neutral (not penalized)
-- **Profitability Path**: Accept current losses if clear path to profitability documented
-  → Operating Margin improving by >5 pts YoY = 0.5 pts (partial credit)
-- **Valuation**: Use P/S <8 AND Revenue Growth >25% as alternative to P/E
-  → If both met = 1 pt (alternative valuation metric)
-
-**Rationale**: High-growth tech companies often sacrifice near-term profits for market share. Focus on unit economics (gross margin) and growth trajectory over current profitability.
+### STANDARD (Industrials, Consumer Discretionary, Consumer Staples, Communication Services)
+Use standard thresholds. Notes:
+- Consumer Staples: if non-leader shows higher Operating Margin than sector leader, do NOT award extra points (likely data artifact)
+- Consumer Discretionary: cyclical sensitivity — note economic cycle position
 
 ### SECTOR DETECTION & DOCUMENTATION
 
-**Step 1**: Identify sector from business description, SIC code, or industry classification
+**Step 1**: Identify sector from raw data "sector" field (GICS classification)
 **Step 2**: Apply relevant sector-specific thresholds during scoring
 **Step 3**: Document in SECTOR_ADJUSTMENTS field which adjustments were applied
 **Step 4**: Include adjusted denominators in score calculations
 
 **Example Documentation**:
 ```
-SECTOR: Banking
+SECTOR: Financials
 SECTOR_ADJUSTMENTS: D/E ratio excluded (not applicable for banks) - Leverage score denominator adjusted to 1 pt. ROE threshold lowered to 12% (vs 15% standard). ROA threshold lowered to 1.0% (vs 7% standard).
 ```
 
 If company does not clearly fit any sector above, use standard thresholds and note:
 ```
-SECTOR: General/Diversified
+SECTOR: Industrials
 SECTOR_ADJUSTMENTS: None - standard thresholds applied
 ```
 
@@ -1062,7 +1039,7 @@ Step 5: Now populate DATA_BLOCK:
 Analyzing [TICKER] - [COMPANY NAME]
 
 ### --- START DATA_BLOCK ---
-SECTOR: [Banking / Utilities / Shipping/Commodities / Technology/Software / General/Diversified]
+SECTOR: [Energy / Materials / Industrials / Consumer Discretionary / Consumer Staples / Health Care / Financials / Information Technology / Communication Services / Utilities / Real Estate]
 SECTOR_ADJUSTMENTS: [Description of adjustments applied, or "None - standard thresholds applied"]
 RAW_HEALTH_SCORE: [X]/12
 ADJUSTED_HEALTH_SCORE: [X]% (based on [Y] available points)

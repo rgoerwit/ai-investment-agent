@@ -344,6 +344,10 @@ def _generate_football_field(
         footnote_parts.append(
             f"Risk-adjusted ({pm_block.zone or 'N/A'} zone, {pm_block.valuation_discount:.0%} discount)"
         )
+    if data_block.analyst_coverage and data_block.analyst_coverage > 0:
+        # This is the English/Refinitiv count — labels it "analysts" not "English analysts"
+        # because that's what the consensus targets are actually based on.
+        footnote_parts.append(f"Consensus: {data_block.analyst_coverage} analysts")
 
     # Get currency format from ticker exchange suffix
     currency_format = _get_currency_format(ticker)
@@ -440,9 +444,16 @@ def _generate_radar_chart(
 
     val_score = max(0.0, min(100.0, val_score))
 
-    # Undiscovered score (low analyst coverage = high score)
+    # Undiscovered score (low analyst coverage = high score).
+    # analyst_coverage is from ANALYST_COVERAGE_ENGLISH (Refinitiv/FactSet), which
+    # undercounts for ex-US stocks — but that's correct here: the "undiscovered"
+    # thesis specifically measures visibility to English-language research.
+    # If missing (None/0), default to neutral (10) rather than assuming undiscovered,
+    # since absence of data ≠ absence of coverage.
     coverage = (
-        data_block.analyst_coverage if data_block.analyst_coverage is not None else 10
+        data_block.analyst_coverage
+        if data_block.analyst_coverage is not None and data_block.analyst_coverage > 0
+        else 10
     )
     undiscovered = max(0.0, min(100.0, (15.0 - coverage) * 10.0))
 
@@ -518,13 +529,14 @@ def _generate_radar_chart(
             ]
         ):
             axis_warnings["growth"] = True
-        # Valuation axis: cyclical peaks, unreliable ratios
+        # Valuation axis: cyclical peaks, unreliable ratios, thin consensus
         if any(
             x in flag_type
             for x in [
                 "CYCLICAL",
                 "PEG",
                 "FRAGILE_VALUATION",
+                "THIN_CONSENSUS",
             ]
         ):
             axis_warnings["valuation"] = True

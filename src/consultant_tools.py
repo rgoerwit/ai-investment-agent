@@ -153,8 +153,9 @@ async def spot_check_metric_alt(
         # FMP uses .T for Tokyo but some need no suffix changes
         # Most international tickers work as-is with FMP
 
-        async with fmp:
-            data = await fmp._get(endpoint, {"symbol": fmp_ticker, "limit": 1})
+        # FMPFetcher manages its own aiohttp sessions per _get() call —
+        # no async context manager needed (or implemented) at the fetcher level.
+        data = await fmp._get(endpoint, {"symbol": fmp_ticker, "limit": 1})
 
         if not data or not isinstance(data, list) or len(data) == 0:
             return json.dumps(

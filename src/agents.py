@@ -333,6 +333,40 @@ def compute_data_conflicts(raw_data: str, foreign_data: str) -> str:
             f"Do not use PEG to justify valuation."
         )
 
+    # 5. Local analyst coverage gap
+    # yfinance's numberOfAnalystOpinions reflects Refinitiv/FactSet counts, which skew
+    # toward English-accessible research. For ex-US equities the true total analyst count
+    # may be higher due to local-language coverage invisible to global aggregators. FLA
+    # web searches provide an estimate, but overlap between local and English counts is
+    # unknown — we use max(English, Local) as a conservative lower bound for TOTAL_EST.
+    if foreign_data:
+        local_analyst_match = re.search(
+            r"Estimated Local Analysts[:\s]*(\d+|HIGH|MODERATE|LOW|UNKNOWN)",
+            foreign_data,
+            re.IGNORECASE,
+        )
+        if local_analyst_match:
+            local_val = local_analyst_match.group(1).strip().upper()
+            if local_val.isdigit():
+                local_count = int(local_val)
+                junior_count = (
+                    int(junior_analysts) if junior_analysts is not None else 0
+                )
+                if local_count > junior_count:
+                    conflicts.append(
+                        f"- LOCAL_ANALYST_COVERAGE: FLA found ~{local_count} local analysts "
+                        f"vs {junior_count} [yfinance English-only count]. "
+                        f"Total coverage likely higher than English count suggests. "
+                        f"Consensus targets may be more reliable than English count implies."
+                    )
+            elif local_val in ("HIGH", "MODERATE"):
+                conflicts.append(
+                    f"- LOCAL_ANALYST_COVERAGE: FLA estimates {local_val} local analyst coverage. "
+                    f"yfinance shows {int(junior_analysts) if junior_analysts is not None else 'N/A'} "
+                    f"[English-only]. Total coverage is likely higher."
+                )
+            # UNKNOWN or LOW: no conflict
+
     # 4. Ownership gap
     if foreign_data and parent_company:
         conflicts.append(
@@ -361,6 +395,34 @@ def compute_data_conflicts(raw_data: str, foreign_data: str) -> str:
         "not suggestions. Address each in your CROSS-CHECK FLAGS.\n"
     )
     return header + "\n".join(conflicts) + "\n"
+
+
+# --- Value Trap Verdict Extraction ---
+
+
+def extract_value_trap_verdict(value_trap_report: str) -> str:
+    """Extract structured verdict from VALUE_TRAP_BLOCK and return a 1-line header.
+
+    The Value Trap Detector is a dedicated agent with governance/catalyst analysis.
+    Its structured verdict (SCORE/VERDICT/TRAP_RISK) must not be overridden by
+    narrative labels from Bear/RM. This header makes the signal impossible to miss.
+    """
+    if not value_trap_report:
+        return ""
+    score_m = re.search(r"SCORE:\s*(\d+)", value_trap_report)
+    verdict_m = re.search(
+        r"VERDICT:\s*(TRAP|CAUTIOUS|WATCHABLE|ALIGNED)", value_trap_report
+    )
+    risk_m = re.search(r"TRAP_RISK:\s*(HIGH|MEDIUM|LOW)", value_trap_report)
+    if not (score_m and verdict_m):
+        return ""
+    score = score_m.group(1)
+    verdict = verdict_m.group(1)
+    risk = risk_m.group(1) if risk_m else "N/A"
+    return (
+        f"⚠ VALUE_TRAP_DETECTOR VERDICT: {verdict} (score {score}/100, "
+        f"risk {risk}) — dedicated governance/catalyst agent assessment\n"
+    )
 
 
 # --- PM Input Summarization ---
@@ -718,6 +780,7 @@ def merge_invest_debate_state(
 class AgentState(MessagesState):
     company_of_interest: str
     company_name: str  # ADDED: Verified company name to prevent LLM hallucination
+    company_name_resolved: bool  # Whether company_name was verified from a data source
     trade_date: str
     sender: Annotated[str, take_last]  # Support parallel writes
 
@@ -766,6 +829,22 @@ def get_context_from_config(config: RunnableConfig) -> Any | None:
         return configurable.get("context")
     except (AttributeError, TypeError):
         return None
+
+
+_UNRESOLVED_NAME_WARNING = (
+    "\nWARNING: Company name could not be verified from any data source. "
+    "The ticker may be delisted or illiquid. Do NOT guess or assume which company "
+    "this ticker belongs to. If you cannot confirm the identity from your tool "
+    "results, state that the company identity is unverified."
+)
+
+
+def _company_line(company_name: str, resolved: bool) -> str:
+    """Build Company: line with optional unresolved warning."""
+    line = f"Company: {company_name}"
+    if not resolved:
+        line += _UNRESOLVED_NAME_WARNING
+    return line
 
 
 def get_analysis_context(ticker: str) -> str:
@@ -1065,6 +1144,7 @@ def create_analyst_node(
             company_name = state.get(
                 "company_name", ticker
             )  # Get verified company name from state
+            company_resolved = state.get("company_name_resolved", True)
 
             # --- Context injection for specific agents ---
             extra_context = ""
@@ -1168,7 +1248,7 @@ def create_analyst_node(
                     )
 
             # CRITICAL FIX: Include verified company name to prevent hallucination
-            full_system_instruction = f"{agent_prompt.system_message}\n\nDate: {_format_date_with_fy_hint(current_date)}\nTicker: {ticker}\nCompany: {company_name}\n{get_analysis_context(ticker)}{extra_context}"
+            full_system_instruction = f"{agent_prompt.system_message}\n\nDate: {_format_date_with_fy_hint(current_date)}\nTicker: {ticker}\n{_company_line(company_name, company_resolved)}\n{get_analysis_context(ticker)}{extra_context}"
             invocation_messages = [
                 SystemMessage(content=full_system_instruction)
             ] + filtered_messages
@@ -1329,6 +1409,19 @@ def create_analyst_node(
     return analyst_node
 
 
+def _extract_sector_from_state(state: dict) -> str:
+    """Extract sector from fundamentals report DATA_BLOCK for lesson retrieval."""
+    fundamentals = state.get("fundamentals_report", "") or ""
+    if not fundamentals:
+        return "Unknown"
+    match = re.search(r"SECTOR:\s*(.+?)(?:\n|$)", fundamentals, re.IGNORECASE)
+    if match:
+        value = match.group(1).strip()
+        if value.upper() not in ("N/A", "NA", "NONE", "-", ""):
+            return value
+    return "Unknown"
+
+
 def create_researcher_node(
     llm, memory: Any | None, agent_key: str, round_num: int = 1
 ) -> Callable:
@@ -1404,6 +1497,7 @@ Now provide your Round 2 rebuttal, addressing the opponent's key points."""
         # Contextualize memory retrieval to prevent cross-contamination
         ticker = state.get("company_of_interest", "UNKNOWN")
         company_name = state.get("company_name", ticker)
+        company_resolved = state.get("company_name_resolved", True)
 
         # Retrieve RELEVANT past insights for THIS ticker
         past_insights = ""
@@ -1426,10 +1520,40 @@ Now provide your Round 2 rebuttal, addressing the opponent's key points."""
                 logger.error("memory_retrieval_failed", ticker=ticker, error=str(e))
                 past_insights = ""
 
+        # Retrieve lessons from past retrospective evaluations (cross-ticker)
+        lessons_text = ""
+        try:
+            from src.retrospective import (
+                create_lessons_memory,
+                format_lessons_for_injection,
+            )
+
+            lessons_memory = create_lessons_memory()
+            sector = _extract_sector_from_state(state)
+            lessons_text = await format_lessons_for_injection(
+                lessons_memory, ticker, sector
+            )
+            if lessons_text:
+                logger.info(
+                    "lessons_injected",
+                    agent=agent_key,
+                    ticker=ticker,
+                    lessons_length=len(lessons_text),
+                )
+            else:
+                logger.debug(
+                    "no_lessons_available",
+                    agent=agent_key,
+                    ticker=ticker,
+                )
+        except Exception as e:
+            logger.warning("lessons_injection_failed", agent=agent_key, error=str(e))
+
         # Add Negative Constraint to prevent hallucination
+        unresolved_warning = "" if company_resolved else f"\n{_UNRESOLVED_NAME_WARNING}"
         negative_constraint = f"""
 CRITICAL INSTRUCTION:
-You are analyzing **{ticker} ({company_name})**.
+You are analyzing **{ticker} ({company_name})**.{unresolved_warning}
 If the provided context or memory contains information about a DIFFERENT company (e.g., from a previous analysis run), you MUST IGNORE IT.
 Only use data explicitly related to {ticker} ({company_name}).
 """
@@ -1441,7 +1565,12 @@ Only use data explicitly related to {ticker} ({company_name}).
             else "Provide your rebuttal to the opponent's Round 1 argument."
         )
 
-        prompt = f"""{agent_prompt.system_message}\n{negative_constraint}\n\nREPORTS:\n{reports}\n{past_insights}\n\nDEBATE CONTEXT:\n{debate_history}\n\n{round_instruction}"""
+        # Combine past insights and lessons from retrospective
+        context_block = past_insights
+        if lessons_text:
+            context_block += f"\n\n{lessons_text}"
+
+        prompt = f"""{agent_prompt.system_message}\n{negative_constraint}\n\nREPORTS:\n{reports}\n{context_block}\n\nDEBATE CONTEXT:\n{debate_history}\n\n{round_instruction}"""
 
         try:
             response = await invoke_with_rate_limit_handling(
@@ -1885,7 +2014,7 @@ FUNDAMENTALS ANALYST REPORT:
 {summarize_for_pm(fundamentals, "fundamentals", 6000) if fundamentals else "N/A"}{attribution_table}{conflict_table}
 
 VALUE TRAP ANALYSIS:
-{summarize_for_pm(value_trap, "value_trap", 2500) if value_trap else "N/A"}{red_flag_section}
+{extract_value_trap_verdict(value_trap)}{summarize_for_pm(value_trap, "value_trap", 2500) if value_trap else "N/A"}{red_flag_section}
 
 RESEARCH MANAGER RECOMMENDATION:
 {summarize_for_pm(inv_plan, "research", 3000) if inv_plan else "N/A"}{consultant_section}
@@ -1967,6 +2096,7 @@ def create_consultant_node(
 
         ticker = state.get("company_of_interest", "UNKNOWN")
         company_name = state.get("company_name", ticker)
+        company_resolved = state.get("company_name_resolved", True)
 
         context = get_context_from_config(config)
         current_date = (
@@ -2036,11 +2166,12 @@ Pre-Screening Result: {state.get("pre_screening_result", "UNKNOWN")}
 {summarize_for_pm(auditor, "auditor", 3000) if auditor != "N/A" else "N/A"}
 """
 
+        company_warning = "" if company_resolved else f"\n{_UNRESOLVED_NAME_WARNING}"
         prompt = f"""{agent_prompt.system_message}
 
 ANALYSIS DATE: {_format_date_with_fy_hint(current_date)}
 TICKER: {ticker}
-COMPANY: {company_name}
+COMPANY: {company_name}{company_warning}
 
 {all_context}
 
@@ -2181,6 +2312,7 @@ def create_legal_counsel_node(llm, tools: list) -> Callable:
 
         ticker = state.get("company_of_interest", "UNKNOWN")
         company_name = state.get("company_name", ticker)
+        company_resolved = state.get("company_name_resolved", True)
 
         context = get_context_from_config(config)
         current_date = (
@@ -2191,9 +2323,10 @@ def create_legal_counsel_node(llm, tools: list) -> Callable:
         raw_data = state.get("raw_fundamentals_data", "")
         sector, country = _extract_sector_country(raw_data)
 
+        company_warning = "" if company_resolved else f"\n{_UNRESOLVED_NAME_WARNING}"
         human_msg = f"""Analyze legal/tax risks for:
 Ticker: {ticker}
-Company: {company_name}
+Company: {company_name}{company_warning}
 Sector: {sector}
 Country: {country}
 Date: {_format_date_with_fy_hint(current_date)}
@@ -2349,6 +2482,7 @@ def create_auditor_node(llm, tools: list) -> Callable:
 
         ticker = state.get("company_of_interest", "UNKNOWN")
         company_name = state.get("company_name", ticker)
+        company_resolved = state.get("company_name_resolved", True)
 
         context = get_context_from_config(config)
         current_date = (
@@ -2356,9 +2490,10 @@ def create_auditor_node(llm, tools: list) -> Callable:
         )
 
         # Only provide basic identity info to ensure independence
+        company_warning = "" if company_resolved else f"\n{_UNRESOLVED_NAME_WARNING}"
         human_msg = f"""Analyze financial statements for:
 Ticker: {ticker}
-Company: {company_name}
+Company: {company_name}{company_warning}
 Date: {_format_date_with_fy_hint(current_date)}
 
 Perform a forensic audit using your tools."""

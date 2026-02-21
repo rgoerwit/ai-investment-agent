@@ -107,7 +107,7 @@ PE_RATIO_TTM: 14.50
         """Test extraction when DATA_BLOCK marker contains descriptive text (v8.6+)."""
         report = """
 ### --- START DATA_BLOCK (INTERNAL SCORING — NOT THIRD-PARTY RATINGS) ---
-SECTOR: General/Diversified
+SECTOR: Industrials
 RAW_HEALTH_SCORE: 10/12
 ADJUSTED_HEALTH_SCORE: 87.5% (10/12 available)
 PE_RATIO_TTM: 6.19
@@ -814,7 +814,7 @@ PE_RATIO_TTM: 12.5
             "company_name": "Suzano Pulp & Paper",
             "fundamentals_report": """
 ### --- START DATA_BLOCK ---
-SECTOR: Shipping & Cyclical Commodities
+SECTOR: Materials
 SECTOR_ADJUSTMENTS: D/E threshold raised to 800% (vs 500% standard). Interest coverage threshold lowered to 1.5x (vs 2.0x standard) for capital-intensive sector.
 ADJUSTED_HEALTH_SCORE: 60%
 PE_RATIO_TTM: 10.2
@@ -852,7 +852,7 @@ PE_RATIO_TTM: 10.2
             "company_name": "Asian Shipping Corp",
             "fundamentals_report": """
 ### --- START DATA_BLOCK ---
-SECTOR: Shipping & Cyclical Commodities
+SECTOR: Materials
 ADJUSTED_HEALTH_SCORE: 52%
 ### --- END DATA_BLOCK ---
 
@@ -882,7 +882,7 @@ ADJUSTED_HEALTH_SCORE: 52%
             "company_name": "Failing Shipping Corp",
             "fundamentals_report": """
 ### --- START DATA_BLOCK ---
-SECTOR: Shipping & Cyclical Commodities
+SECTOR: Materials
 ADJUSTED_HEALTH_SCORE: 30%
 ### --- END DATA_BLOCK ---
 
@@ -913,7 +913,7 @@ ADJUSTED_HEALTH_SCORE: 30%
             "company_name": "HSBC Holdings",
             "fundamentals_report": """
 ### --- START DATA_BLOCK ---
-SECTOR: Banking
+SECTOR: Financials
 SECTOR_ADJUSTMENTS: D/E ratio excluded (not applicable for banks) - Leverage score denominator adjusted to 1 pt. ROE threshold lowered to 12% (vs 15% standard). ROA threshold lowered to 1.0% (vs 7% standard).
 ADJUSTED_HEALTH_SCORE: 65%
 PE_RATIO_TTM: 9.8
@@ -941,14 +941,14 @@ PE_RATIO_TTM: 9.8
     @pytest.mark.asyncio
     async def test_general_sector_uses_standard_thresholds(self, validator_node):
         """
-        Test that General/Diversified sector uses standard thresholds (500% D/E).
+        Test that Industrials sector uses standard thresholds (500% D/E).
         """
         state = {
             "company_of_interest": "GEN.HK",
             "company_name": "General Manufacturing",
             "fundamentals_report": """
 ### --- START DATA_BLOCK ---
-SECTOR: General/Diversified
+SECTOR: Industrials
 SECTOR_ADJUSTMENTS: None - standard thresholds applied
 ADJUSTED_HEALTH_SCORE: 55%
 ### --- END DATA_BLOCK ---
@@ -970,44 +970,63 @@ ADJUSTED_HEALTH_SCORE: 55%
     @pytest.mark.asyncio
     async def test_sector_detection_from_report(self, validator_node):
         """
-        Test that sector is correctly detected from SECTOR field in DATA_BLOCK.
+        Test that all 11 GICS sectors are correctly detected from SECTOR field in DATA_BLOCK.
         """
         from src.validators.red_flag_detector import RedFlagDetector, Sector
 
-        # Test utilities detection
-        report_utilities = """
+        # Test all 11 GICS exact matches
+        gics_sectors = [
+            ("Energy", Sector.ENERGY),
+            ("Materials", Sector.MATERIALS),
+            ("Industrials", Sector.INDUSTRIALS),
+            ("Consumer Discretionary", Sector.CONSUMER_DISCRETIONARY),
+            ("Consumer Staples", Sector.CONSUMER_STAPLES),
+            ("Health Care", Sector.HEALTH_CARE),
+            ("Financials", Sector.FINANCIALS),
+            ("Information Technology", Sector.INFORMATION_TECHNOLOGY),
+            ("Communication Services", Sector.COMMUNICATION_SERVICES),
+            ("Utilities", Sector.UTILITIES),
+            ("Real Estate", Sector.REAL_ESTATE),
+        ]
+        for name, expected in gics_sectors:
+            report = f"""
 ### --- START DATA_BLOCK ---
-SECTOR: Utilities
-ADJUSTED_HEALTH_SCORE: 60%
+SECTOR: {name}
 ### --- END DATA_BLOCK ---
 """
-        sector_utilities = RedFlagDetector.detect_sector(report_utilities)
-        assert sector_utilities == Sector.UTILITIES
+            assert (
+                RedFlagDetector.detect_sector(report) == expected
+            ), f"Failed for {name}"
 
-        # Test shipping detection
-        report_shipping = """
-### --- START DATA_BLOCK ---
-SECTOR: Shipping & Cyclical Commodities
-### --- END DATA_BLOCK ---
-"""
-        sector_shipping = RedFlagDetector.detect_sector(report_shipping)
-        assert sector_shipping == Sector.SHIPPING
-
-        # Test banking detection
-        report_banking = """
-### --- START DATA_BLOCK ---
-SECTOR: Banking
-### --- END DATA_BLOCK ---
-"""
-        sector_banking = RedFlagDetector.detect_sector(report_banking)
-        assert sector_banking == Sector.BANKING
-
-        # Test fallback to GENERAL
+        # Test fallback to INDUSTRIALS when no sector field
         report_no_sector = """
 No SECTOR field here
 """
-        sector_general = RedFlagDetector.detect_sector(report_no_sector)
-        assert sector_general == Sector.GENERAL
+        assert RedFlagDetector.detect_sector(report_no_sector) == Sector.INDUSTRIALS
+
+    @pytest.mark.asyncio
+    async def test_detect_sector_backward_compat(self, validator_node):
+        """
+        Test that old sector names still resolve to correct GICS sectors.
+        """
+        from src.validators.red_flag_detector import RedFlagDetector, Sector
+
+        backward_compat = [
+            ("Banking", Sector.FINANCIALS),
+            ("Banking / Financial Services", Sector.FINANCIALS),
+            ("Shipping & Cyclical Commodities", Sector.MATERIALS),
+            ("Technology & Software", Sector.INFORMATION_TECHNOLOGY),
+            ("General/Diversified", Sector.INDUSTRIALS),
+        ]
+        for old_name, expected in backward_compat:
+            report = f"""
+### --- START DATA_BLOCK ---
+SECTOR: {old_name}
+### --- END DATA_BLOCK ---
+"""
+            assert (
+                RedFlagDetector.detect_sector(report) == expected
+            ), f"Failed backward compat for {old_name}"
 
 
 class TestRealWorldSectorExamples:
@@ -1116,7 +1135,7 @@ PE_RATIO_TTM: 8.5
             "company_name": "Suzano S.A. (Pulp & Paper)",
             "fundamentals_report": """
 ### --- START DATA_BLOCK ---
-SECTOR: Shipping & Cyclical Commodities
+SECTOR: Materials
 SECTOR_ADJUSTMENTS: D/E threshold raised to 800% (vs 500% standard). Interest coverage threshold lowered to 1.5x (vs 2.0x standard) for capital-intensive sector.
 ADJUSTED_HEALTH_SCORE: 62%
 PE_RATIO_TTM: 9.8
@@ -1157,7 +1176,7 @@ PE_RATIO_TTM: 9.8
             "company_name": "Failing Dry Bulk Shipper",
             "fundamentals_report": """
 ### --- START DATA_BLOCK ---
-SECTOR: Shipping & Cyclical Commodities
+SECTOR: Materials
 SECTOR_ADJUSTMENTS: D/E threshold raised to 800% for capital-intensive sector
 ADJUSTED_HEALTH_SCORE: 28%
 PE_RATIO_TTM: N/A (losses)
@@ -1203,7 +1222,7 @@ PE_RATIO_TTM: N/A (losses)
             "company_name": "HSBC Holdings",
             "fundamentals_report": """
 ### --- START DATA_BLOCK ---
-SECTOR: Banking
+SECTOR: Financials
 SECTOR_ADJUSTMENTS: D/E ratio excluded (not applicable for banks) - Leverage score denominator adjusted to 1 pt. ROE threshold lowered to 12% (vs 15% standard). ROA threshold lowered to 1.0% (vs 7% standard).
 ADJUSTED_HEALTH_SCORE: 68%
 PE_RATIO_TTM: 9.2
@@ -1244,7 +1263,7 @@ PE_RATIO_TTM: 9.2
             "company_name": "Mizuho Financial Group",
             "fundamentals_report": """
 ### --- START DATA_BLOCK ---
-SECTOR: Banking
+SECTOR: Financials
 SECTOR_ADJUSTMENTS: D/E ratio excluded (not applicable for banks)
 ADJUSTED_HEALTH_SCORE: 55%
 PE_RATIO_TTM: 7.8
@@ -1287,7 +1306,7 @@ PE_RATIO_TTM: 7.8
             "company_name": "Samsung Electronics",
             "fundamentals_report": """
 ### --- START DATA_BLOCK ---
-SECTOR: Technology & Software
+SECTOR: Information Technology
 SECTOR_ADJUSTMENTS: None - standard thresholds applied
 ADJUSTED_HEALTH_SCORE: 78%
 PE_RATIO_TTM: 12.5
@@ -1329,7 +1348,7 @@ PE_RATIO_TTM: 12.5
             "company_name": "Overleveraged Tech Corp",
             "fundamentals_report": """
 ### --- START DATA_BLOCK ---
-SECTOR: Technology & Software
+SECTOR: Information Technology
 SECTOR_ADJUSTMENTS: None - standard thresholds applied
 ADJUSTED_HEALTH_SCORE: 38%
 PE_RATIO_TTM: 15.2
@@ -1375,7 +1394,7 @@ PE_RATIO_TTM: 15.2
             "company_name": "Toyota Motor Corporation",
             "fundamentals_report": """
 ### --- START DATA_BLOCK ---
-SECTOR: General/Diversified
+SECTOR: Industrials
 SECTOR_ADJUSTMENTS: None - standard thresholds applied
 ADJUSTED_HEALTH_SCORE: 72%
 PE_RATIO_TTM: 9.8
@@ -1417,7 +1436,7 @@ PE_RATIO_TTM: 9.8
             "company_name": "Distressed Property Developer",
             "fundamentals_report": """
 ### --- START DATA_BLOCK ---
-SECTOR: General/Diversified
+SECTOR: Industrials
 SECTOR_ADJUSTMENTS: None - standard thresholds applied
 ADJUSTED_HEALTH_SCORE: 18%
 PE_RATIO_TTM: 3.2 (distressed valuation)
@@ -1455,6 +1474,115 @@ PE_RATIO_TTM: 3.2 (distressed valuation)
         assert "EXTREME_LEVERAGE" in flag_types  # 620% > 500% standard threshold
         assert "REFINANCING_RISK" in flag_types  # Coverage 0.8x < 2.0x + D/E > 100%
 
+    # --- NEW GICS SECTORS ---
+
+    @pytest.mark.asyncio
+    async def test_energy_sector_capital_intensive_thresholds(self, validator_node):
+        """
+        PASS: Energy company with D/E 300% (within 800% capital-intensive threshold).
+        """
+        state = {
+            "company_of_interest": "PTR",
+            "company_name": "PetroChina Co Ltd",
+            "fundamentals_report": """
+### --- START DATA_BLOCK ---
+SECTOR: Energy
+SECTOR_ADJUSTMENTS: D/E threshold raised to 800% for capital-intensive Energy sector.
+ADJUSTED_HEALTH_SCORE: 55%
+PE_RATIO_TTM: 8.5
+### --- END DATA_BLOCK ---
+
+**Leverage** - Capital-intensive sector:
+- D/E: 300 (typical for integrated oil major)
+- Interest Coverage: 4.2x (strong commodity cash flows)
+""",
+            "messages": [],
+        }
+
+        result = await validator_node(state, {})
+
+        assert result["pre_screening_result"] == "PASS"
+        assert len(result["red_flags"]) == 0
+
+    @pytest.mark.asyncio
+    async def test_real_estate_sector_capital_intensive_thresholds(
+        self, validator_node
+    ):
+        """
+        PASS: Real Estate company with D/E 350% (within 800% capital-intensive threshold).
+        FAIL: Real Estate company with D/E 850% (exceeds 800% threshold).
+        """
+        # PASS case
+        state_pass = {
+            "company_of_interest": "1109.HK",
+            "company_name": "China Resources Land",
+            "fundamentals_report": """
+### --- START DATA_BLOCK ---
+SECTOR: Real Estate
+SECTOR_ADJUSTMENTS: D/E threshold raised to 800% for capital-intensive Real Estate sector.
+ADJUSTED_HEALTH_SCORE: 52%
+PE_RATIO_TTM: 6.0
+### --- END DATA_BLOCK ---
+
+**Leverage**:
+- D/E: 350 (typical for property developer)
+- Interest Coverage: 2.5x
+""",
+            "messages": [],
+        }
+
+        result_pass = await validator_node(state_pass, {})
+        assert result_pass["pre_screening_result"] == "PASS"
+
+        # FAIL case
+        state_fail = {
+            "company_of_interest": "FAIL.HK",
+            "company_name": "Distressed REIT",
+            "fundamentals_report": """
+### --- START DATA_BLOCK ---
+SECTOR: Real Estate
+ADJUSTED_HEALTH_SCORE: 25%
+### --- END DATA_BLOCK ---
+
+**Leverage**:
+- D/E: 850 (exceeds 800% threshold even for real estate)
+- Interest Coverage: 0.8x
+""",
+            "messages": [],
+        }
+
+        result_fail = await validator_node(state_fail, {})
+        assert result_fail["pre_screening_result"] == "REJECT"
+        flag_types = [flag["type"] for flag in result_fail["red_flags"]]
+        assert "EXTREME_LEVERAGE" in flag_types
+
+    @pytest.mark.asyncio
+    async def test_health_care_standard_thresholds(self, validator_node):
+        """
+        Health Care uses standard thresholds (D/E > 500% = reject).
+        """
+        state = {
+            "company_of_interest": "4568.T",
+            "company_name": "Daiichi Sankyo",
+            "fundamentals_report": """
+### --- START DATA_BLOCK ---
+SECTOR: Health Care
+SECTOR_ADJUSTMENTS: None - standard thresholds applied
+ADJUSTED_HEALTH_SCORE: 70%
+PE_RATIO_TTM: 22.0
+### --- END DATA_BLOCK ---
+
+**Leverage**:
+- D/E: 45 (minimal leverage for pharma)
+- Interest Coverage: 15.0x
+""",
+            "messages": [],
+        }
+
+        result = await validator_node(state, {})
+        assert result["pre_screening_result"] == "PASS"
+        assert len(result["red_flags"]) == 0
+
 
 class TestUnsustainableDistribution:
     """
@@ -1487,7 +1615,7 @@ class TestUnsustainableDistribution:
             "company_name": "Dividend Trap Corp",
             "fundamentals_report": """
 ### --- START DATA_BLOCK ---
-SECTOR: General/Diversified
+SECTOR: Industrials
 ADJUSTED_HEALTH_SCORE: 45%
 PE_RATIO_TTM: 8.5
 PAYOUT_RATIO: 136%
@@ -1550,7 +1678,7 @@ PROFITABILITY_TREND: DECLINING
             "company_name": "Cyclical Recovery Corp",
             "fundamentals_report": """
 ### --- START DATA_BLOCK ---
-SECTOR: Shipping & Cyclical Commodities
+SECTOR: Materials
 ADJUSTED_HEALTH_SCORE: 52%
 PE_RATIO_TTM: 12.0
 PAYOUT_RATIO: 120%
@@ -1604,7 +1732,7 @@ PROFITABILITY_TREND: IMPROVING
             "company_name": "Stretched Dividend Corp",
             "fundamentals_report": """
 ### --- START DATA_BLOCK ---
-SECTOR: General/Diversified
+SECTOR: Industrials
 ADJUSTED_HEALTH_SCORE: 58%
 PE_RATIO_TTM: 10.5
 PAYOUT_RATIO: 110%
@@ -1683,7 +1811,7 @@ PROFITABILITY_TREND: STABLE
             "company_name": "Acceptable Dividend Corp",
             "fundamentals_report": """
 ### --- START DATA_BLOCK ---
-SECTOR: General/Diversified
+SECTOR: Industrials
 ADJUSTED_HEALTH_SCORE: 60%
 PE_RATIO_TTM: 11.0
 PAYOUT_RATIO: 85%
@@ -1713,7 +1841,7 @@ PROFITABILITY_TREND: STABLE
             "company_name": "No Dividend Corp",
             "fundamentals_report": """
 ### --- START DATA_BLOCK ---
-SECTOR: Technology & Software
+SECTOR: Information Technology
 ADJUSTED_HEALTH_SCORE: 70%
 PE_RATIO_TTM: 25.0
 PAYOUT_RATIO: N/A
@@ -2011,13 +2139,13 @@ class TestOCFNIRatioCheck:
         ocf_flags = [f for f in flags if f["type"] == "SUSPICIOUS_OCF_NI_RATIO"]
         assert len(ocf_flags) == 0
 
-    def test_banking_sector_ocf_exempt(self):
-        """Banking with OCF 5x NI → no flag (sector exempt)."""
+    def test_financials_sector_ocf_exempt(self):
+        """Financials with OCF 5x NI → no flag (sector exempt)."""
         from src.validators.red_flag_detector import Sector
 
         metrics = self._make_metrics(ocf=5_000, net_income=1_000)
         flags, _ = RedFlagDetector.detect_red_flags(
-            metrics, "BANK.HK", sector=Sector.BANKING
+            metrics, "BANK.HK", sector=Sector.FINANCIALS
         )
         ocf_flags = [f for f in flags if f["type"] == "SUSPICIOUS_OCF_NI_RATIO"]
         assert len(ocf_flags) == 0
@@ -2629,7 +2757,7 @@ ADJUSTED_HEALTH_SCORE: 70%
         """Test extraction of all new fields from a complete DATA_BLOCK (2767.T-style)."""
         report = """
 ### --- START DATA_BLOCK (INTERNAL SCORING — NOT THIRD-PARTY RATINGS) ---
-SECTOR: General/Diversified
+SECTOR: Industrials
 RAW_HEALTH_SCORE: 8/12
 ADJUSTED_HEALTH_SCORE: 67%
 PE_RATIO_TTM: 12.5
@@ -2691,3 +2819,253 @@ VIE_STRUCTURE: NO
         total_penalty = sum(f.get("risk_penalty", 0) for f in flags)
         assert total_penalty == 1.0  # 0.5 + 0.5
         assert result == "PASS"  # Warnings only, not reject
+
+
+class TestThinConsensusFlag:
+    """Tests for THIN_CONSENSUS warning flag and ANALYST_COVERAGE_TOTAL_EST extraction."""
+
+    def test_extract_total_est_numeric(self):
+        """ANALYST_COVERAGE_TOTAL_EST integer extraction from DATA_BLOCK."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 60%
+ANALYST_COVERAGE_ENGLISH: 2
+ANALYST_COVERAGE_TOTAL_EST: 8
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["analyst_coverage_total_est"] == 8
+
+    def test_extract_total_est_tier(self):
+        """ANALYST_COVERAGE_TOTAL_EST tier string extraction from DATA_BLOCK."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 60%
+ANALYST_COVERAGE_TOTAL_EST: HIGH
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["analyst_coverage_total_est"] == "HIGH"
+
+    def test_extract_total_est_moderate(self):
+        """ANALYST_COVERAGE_TOTAL_EST MODERATE tier."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 60%
+ANALYST_COVERAGE_TOTAL_EST: MODERATE
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["analyst_coverage_total_est"] == "MODERATE"
+
+    def test_extract_total_est_low(self):
+        """ANALYST_COVERAGE_TOTAL_EST LOW tier."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 60%
+ANALYST_COVERAGE_TOTAL_EST: LOW
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["analyst_coverage_total_est"] == "LOW"
+
+    def test_extract_total_est_na(self):
+        """ANALYST_COVERAGE_TOTAL_EST N/A treated as None."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 60%
+ANALYST_COVERAGE_TOTAL_EST: N/A
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["analyst_coverage_total_est"] is None
+
+    def test_extract_total_est_unknown(self):
+        """ANALYST_COVERAGE_TOTAL_EST UNKNOWN treated as None."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 60%
+ANALYST_COVERAGE_TOTAL_EST: UNKNOWN
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["analyst_coverage_total_est"] is None
+
+    def test_extract_total_est_absent(self):
+        """Missing ANALYST_COVERAGE_TOTAL_EST defaults to None."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 60%
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["analyst_coverage_total_est"] is None
+
+    def test_thin_consensus_1_flags(self):
+        """TOTAL_EST: 1 → THIN_CONSENSUS warning with 0.5 penalty."""
+        metrics = {
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": None,
+            "pb_ratio": None,
+            "adjusted_health_score": 60,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+            "profitability_trend": None,
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": None,
+            "ocf": None,
+            "ocf_source": None,
+            "segment_flag": None,
+            "parent_company": None,
+            "analyst_coverage_total_est": 1,
+            "growth_trajectory": None,
+            "revenue_growth_ttm": None,
+            "latest_quarter_date": None,
+            "_raw_report": "",
+        }
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        flag_types = [f["type"] for f in flags]
+        assert "THIN_CONSENSUS" in flag_types
+        thin = [f for f in flags if f["type"] == "THIN_CONSENSUS"][0]
+        assert thin["risk_penalty"] == 0.5
+        assert thin["severity"] == "WARNING"
+        assert result == "PASS"
+
+    def test_thin_consensus_2_flags(self):
+        """TOTAL_EST: 2 → THIN_CONSENSUS warning."""
+        metrics = {
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": None,
+            "pb_ratio": None,
+            "adjusted_health_score": 70,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+            "profitability_trend": None,
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": None,
+            "ocf": None,
+            "ocf_source": None,
+            "segment_flag": None,
+            "parent_company": None,
+            "analyst_coverage_total_est": 2,
+            "growth_trajectory": None,
+            "revenue_growth_ttm": None,
+            "latest_quarter_date": None,
+            "_raw_report": "",
+        }
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        flag_types = [f["type"] for f in flags]
+        assert "THIN_CONSENSUS" in flag_types
+
+    def test_thin_consensus_3_no_flag(self):
+        """TOTAL_EST: 3 → no THIN_CONSENSUS flag (threshold is <3)."""
+        metrics = {
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": None,
+            "pb_ratio": None,
+            "adjusted_health_score": 70,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+            "profitability_trend": None,
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": None,
+            "ocf": None,
+            "ocf_source": None,
+            "segment_flag": None,
+            "parent_company": None,
+            "analyst_coverage_total_est": 3,
+            "growth_trajectory": None,
+            "revenue_growth_ttm": None,
+            "latest_quarter_date": None,
+            "_raw_report": "",
+        }
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        flag_types = [f["type"] for f in flags]
+        assert "THIN_CONSENSUS" not in flag_types
+
+    def test_thin_consensus_tier_no_flag(self):
+        """TOTAL_EST: 'LOW' (tier string) → no THIN_CONSENSUS flag (only numeric triggers)."""
+        metrics = {
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": None,
+            "pb_ratio": None,
+            "adjusted_health_score": 70,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+            "profitability_trend": None,
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": None,
+            "ocf": None,
+            "ocf_source": None,
+            "segment_flag": None,
+            "parent_company": None,
+            "analyst_coverage_total_est": "LOW",
+            "growth_trajectory": None,
+            "revenue_growth_ttm": None,
+            "latest_quarter_date": None,
+            "_raw_report": "",
+        }
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        flag_types = [f["type"] for f in flags]
+        assert "THIN_CONSENSUS" not in flag_types
+
+    def test_thin_consensus_none_no_flag(self):
+        """TOTAL_EST: None → no THIN_CONSENSUS flag."""
+        metrics = {
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": None,
+            "pb_ratio": None,
+            "adjusted_health_score": 70,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+            "profitability_trend": None,
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": None,
+            "ocf": None,
+            "ocf_source": None,
+            "segment_flag": None,
+            "parent_company": None,
+            "analyst_coverage_total_est": None,
+            "growth_trajectory": None,
+            "revenue_growth_ttm": None,
+            "latest_quarter_date": None,
+            "_raw_report": "",
+        }
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        flag_types = [f["type"] for f in flags]
+        assert "THIN_CONSENSUS" not in flag_types

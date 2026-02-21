@@ -42,9 +42,17 @@ class TestBackwardsCompatibility:
         prices = 60.0 + np.random.uniform(-0.6, 0.6, 60)
         mock_hist = pd.DataFrame({"Close": prices, "Volume": [100_000] * 60})
 
-        with patch(
-            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
-            return_value=mock_hist,
+        with (
+            patch(
+                "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+                return_value=mock_hist,
+            ),
+            patch(
+                # Mock get_financial_metrics to return None to force fallback
+                # to historical mean price (standard test behavior here).
+                "src.liquidity_calculation_tool.market_data_fetcher.get_financial_metrics",
+                new=AsyncMock(return_value=None),
+            ),
         ):
             # Mock FX rate to match old static rate
             with patch(
@@ -78,9 +86,17 @@ class TestBackwardsCompatibility:
         prices = 2500.0 + np.random.uniform(-25, 25, 60)
         mock_hist = pd.DataFrame({"Close": prices, "Volume": [100_000] * 60})
 
-        with patch(
-            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
-            return_value=mock_hist,
+        with (
+            patch(
+                "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+                return_value=mock_hist,
+            ),
+            patch(
+                # Mock get_financial_metrics to return None to force fallback
+                # to historical mean price (standard test behavior here).
+                "src.liquidity_calculation_tool.market_data_fetcher.get_financial_metrics",
+                new=AsyncMock(return_value=None),
+            ),
         ):
             # Mock FX rate to match old static rate
             with patch(
@@ -112,9 +128,17 @@ class TestBackwardsCompatibility:
         prices = 500.0 + np.random.uniform(-5, 5, 60)
         mock_hist = pd.DataFrame({"Close": prices, "Volume": [100_000] * 60})
 
-        with patch(
-            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
-            return_value=mock_hist,
+        with (
+            patch(
+                "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+                return_value=mock_hist,
+            ),
+            patch(
+                # Mock get_financial_metrics to return None to force fallback
+                # to historical mean price (standard test behavior here).
+                "src.liquidity_calculation_tool.market_data_fetcher.get_financial_metrics",
+                new=AsyncMock(return_value=None),
+            ),
         ):
             # Mock FX rate to match old static rate
             with patch(
@@ -144,9 +168,17 @@ class TestBackwardsCompatibility:
         mock_hist = pd.DataFrame({"Close": prices, "Volume": [100_000] * 60})
 
         # Test with old rate
-        with patch(
-            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
-            return_value=mock_hist,
+        with (
+            patch(
+                "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+                return_value=mock_hist,
+            ),
+            patch(
+                # Mock get_financial_metrics to return None to force fallback
+                # to historical mean price (standard test behavior here).
+                "src.liquidity_calculation_tool.market_data_fetcher.get_financial_metrics",
+                new=AsyncMock(return_value=None),
+            ),
         ):
             with patch(
                 "src.liquidity_calculation_tool.get_fx_rate",
@@ -157,9 +189,17 @@ class TestBackwardsCompatibility:
                 )
 
         # Test with new rate
-        with patch(
-            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
-            return_value=mock_hist,
+        with (
+            patch(
+                "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+                return_value=mock_hist,
+            ),
+            patch(
+                # Mock get_financial_metrics to return None to force fallback
+                # to historical mean price (standard test behavior here).
+                "src.liquidity_calculation_tool.market_data_fetcher.get_financial_metrics",
+                new=AsyncMock(return_value=None),
+            ),
         ):
             with patch(
                 "src.liquidity_calculation_tool.get_fx_rate",
@@ -216,9 +256,16 @@ class TestBackwardsCompatibility:
         prices = 150.0 + np.random.uniform(-1.5, 1.5, 60)
         mock_hist = pd.DataFrame({"Close": prices, "Volume": [50_000_000] * 60})
 
-        with patch(
-            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
-            return_value=mock_hist,
+        with (
+            patch(
+                "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+                return_value=mock_hist,
+            ),
+            patch(
+                # Class-level mock to ensure singleton doesn't hit network
+                "src.data.fetcher.SmartMarketDataFetcher.get_financial_metrics",
+                new=AsyncMock(return_value=None),
+            ),
         ):
             with patch(
                 "src.liquidity_calculation_tool.get_fx_rate",
@@ -255,9 +302,17 @@ class TestBackwardsCompatibility:
             }
         )
 
-        with patch(
-            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
-            return_value=mock_hist,
+        with (
+            patch(
+                "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+                return_value=mock_hist,
+            ),
+            patch(
+                # Mock get_financial_metrics to return None to force fallback
+                # to historical mean price (standard test behavior here).
+                "src.liquidity_calculation_tool.market_data_fetcher.get_financial_metrics",
+                new=AsyncMock(return_value=None),
+            ),
         ):
             with patch(
                 "src.liquidity_calculation_tool.get_fx_rate",
@@ -289,9 +344,17 @@ class TestBackwardsCompatibility:
             }
         )
 
-        with patch(
-            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
-            return_value=mock_hist,
+        with (
+            patch(
+                "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+                return_value=mock_hist,
+            ),
+            patch(
+                # Mock get_financial_metrics to return None to force fallback
+                # to historical mean price (standard test behavior here).
+                "src.liquidity_calculation_tool.market_data_fetcher.get_financial_metrics",
+                new=AsyncMock(return_value=None),
+            ),
         ):
             with patch(
                 "src.liquidity_calculation_tool.get_fx_rate",
@@ -316,9 +379,17 @@ class TestBackwardsCompatibility:
         prices = 4.8 + np.random.uniform(-0.048, 0.048, 60)
         mock_hist = pd.DataFrame({"Close": prices, "Volume": [100_000] * 60})
 
-        with patch(
-            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
-            return_value=mock_hist,
+        with (
+            patch(
+                "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+                return_value=mock_hist,
+            ),
+            patch(
+                # Mock get_financial_metrics to return None to force fallback
+                # to historical mean price (standard test behavior here).
+                "src.liquidity_calculation_tool.market_data_fetcher.get_financial_metrics",
+                new=AsyncMock(return_value=None),
+            ),
         ):
             with patch(
                 "src.liquidity_calculation_tool.get_fx_rate",
@@ -355,9 +426,17 @@ class TestRealWorldScenarios:
         prices = 65.0 + np.random.uniform(-1.3, 1.3, 60)
         mock_hist = pd.DataFrame({"Close": prices, "Volume": [15_000_000] * 60})
 
-        with patch(
-            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
-            return_value=mock_hist,
+        with (
+            patch(
+                "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+                return_value=mock_hist,
+            ),
+            patch(
+                # Mock get_financial_metrics to return None to force fallback
+                # to historical mean price (standard test behavior here).
+                "src.liquidity_calculation_tool.market_data_fetcher.get_financial_metrics",
+                new=AsyncMock(return_value=None),
+            ),
         ):
             with patch(
                 "src.liquidity_calculation_tool.get_fx_rate",
@@ -382,9 +461,17 @@ class TestRealWorldScenarios:
         prices = 550.0 + np.random.uniform(-11, 11, 60)
         mock_hist = pd.DataFrame({"Close": prices, "Volume": [30_000_000] * 60})
 
-        with patch(
-            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
-            return_value=mock_hist,
+        with (
+            patch(
+                "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+                return_value=mock_hist,
+            ),
+            patch(
+                # Mock get_financial_metrics to return None to force fallback
+                # to historical mean price (standard test behavior here).
+                "src.liquidity_calculation_tool.market_data_fetcher.get_financial_metrics",
+                new=AsyncMock(return_value=None),
+            ),
         ):
             with patch(
                 "src.liquidity_calculation_tool.get_fx_rate",
@@ -409,9 +496,17 @@ class TestRealWorldScenarios:
         prices = 2500.0 + np.random.uniform(-50, 50, 60)
         mock_hist = pd.DataFrame({"Close": prices, "Volume": [7_000_000] * 60})
 
-        with patch(
-            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
-            return_value=mock_hist,
+        with (
+            patch(
+                "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
+                return_value=mock_hist,
+            ),
+            patch(
+                # Mock get_financial_metrics to return None to force fallback
+                # to historical mean price (standard test behavior here).
+                "src.liquidity_calculation_tool.market_data_fetcher.get_financial_metrics",
+                new=AsyncMock(return_value=None),
+            ),
         ):
             with patch(
                 "src.liquidity_calculation_tool.get_fx_rate",

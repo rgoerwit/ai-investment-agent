@@ -93,7 +93,7 @@ class TestPromptContentUpdates:
     @pytest.fixture
     def prompts_dir(self):
         """Get prompts directory path."""
-        return Path(__file__).parent.parent / "prompts"
+        return Path(__file__).parent.parent.parent / "prompts"
 
     def test_news_analyst_precision_guidelines(self, prompts_dir):
         """News analyst should have precision guidelines for US revenue reporting."""

@@ -65,6 +65,32 @@ class EODHDFetcher(FinancialFetcher):
 
         return ticker
 
+    async def get_company_name(self, symbol: str) -> str | None:
+        """Fetch company name from EODHD General data (lightweight, ~1kb)."""
+        if not self.is_available():
+            return None
+
+        eod_symbol = self._normalize_ticker(symbol)
+        url = f"{self.base_url}/fundamentals/{eod_symbol}"
+        params = {"api_token": self.api_key, "fmt": "json", "filter": "General"}
+
+        try:
+            async with aiohttp.ClientSession(timeout=_ANCHOR_TIMEOUT) as session:
+                async with session.get(
+                    url, params=params, timeout=_ANCHOR_TIMEOUT
+                ) as response:
+                    if response.status == 200:
+                        try:
+                            data = await response.json()
+                        except (ValueError, aiohttp.ContentTypeError):
+                            return None
+                        if isinstance(data, dict):
+                            return data.get("Name")
+                    return None
+        except Exception as e:
+            logger.debug(f"EODHD company name fetch failed for {eod_symbol}: {e}")
+            return None
+
     async def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
         """
         Fetch OHLC data.

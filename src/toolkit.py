@@ -198,16 +198,17 @@ async def fetch_with_timeout(coroutine, timeout_seconds=10, error_msg="Timeout")
 
 
 async def extract_company_name_async(ticker_obj) -> str:
-    """Robust company name extraction with dynamic cleaning."""
+    """
+    Lightweight company name extraction for tool calls.
+
+    Uses only the already-created ticker_obj (yfinance) with a 5s timeout.
+    The heavy multi-source resolution (yahooquery/FMP/EODHD) runs once at startup
+    in main.py via resolve_company_name() — NOT here, because this function is
+    called by every tool in every parallel agent and would cause resource contention.
+    """
     ticker_str = ticker_obj.ticker
 
     try:
-        # 1. Try yfinance fast_info (no network call if cached)
-        if hasattr(ticker_obj, "fast_info"):
-            # fast_info is lazy, accessing it triggers load
-            pass
-
-        # 2. Try standard info with timeout
         info = await fetch_with_timeout(
             asyncio.to_thread(lambda: ticker_obj.info),
             timeout_seconds=5,
@@ -217,7 +218,6 @@ async def extract_company_name_async(ticker_obj) -> str:
         if info:
             long_name = info.get("longName") or info.get("shortName")
             if long_name:
-                # Use dynamic cleaner to strip legal suffixes
                 return normalize_company_name(long_name)
 
         return ticker_str
