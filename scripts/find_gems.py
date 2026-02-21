@@ -1,0 +1,815 @@
+#!/usr/bin/env python3
+"""
+Consolidated screening pipeline: scrape exchange listings + filter by fundamentals.
+
+Two-phase internal pipeline:
+  Phase 1 (scrape): Download ticker listings from configured exchanges
+  Phase 2 (filter): Fetch yfinance financials and apply hard filters
+
+Modes:
+  Default:        Run both phases in-memory (scrape → filter → output)
+  --scrape-only:  Only scrape exchanges, output raw CSV, skip filtering
+  --filter-only:  Skip scraping, filter from existing CSV file
+
+Replaces the manual chaining of ticker_scraper.py + filter_tickers.py.
+Both original scripts remain untouched for backward compatibility.
+"""
+
+import argparse
+import io
+import json
+import random
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+import pandas as pd
+import requests
+import yfinance as yf
+
+# --- CONSTANTS ---
+DEFAULT_CONFIG_PATH = "config/exchanges.json"
+DEFAULT_WORKERS = 4
+BATCH_SIZE = 50
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36",
+]
+
+SCRAPE_COLUMNS = [
+    "Country",
+    "Exchange",
+    "YF_Ticker",
+    "Ticker_Raw",
+    "Company",
+    "Sector",
+    "Currency",
+    "Lot_Size",
+    "Listing_Code",
+]
+
+ENRICHED_COLUMNS = [
+    "YF_Ticker",
+    "Company_YF",
+    "P/E",
+    "Debt_to_Equity",
+    "OCF_Yield",
+    "ROE",
+    "ROA",
+    "Operating_Cash_Flow",
+    "Free_Cash_Flow",
+    "Market_Cap",
+    "YF_Sector",
+    "YF_Industry",
+    "Price",
+    "Currency_YF",
+    "Country",
+    "Exchange",
+    "Ticker_Raw",
+]
+
+
+# ============================================================
+# Phase 1: Scrape exchanges (from ticker_scraper.py)
+# ============================================================
+
+
+def _get_session():
+    s = requests.Session()
+    s.headers.update(
+        {
+            "User-Agent": random.choice(USER_AGENTS),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.google.com/",
+        }
+    )
+    return s
+
+
+def _check_deps():
+    import importlib.util
+
+    missing = []
+    for pkg in ("openpyxl", "xlrd", "lxml"):
+        if importlib.util.find_spec(pkg) is None:
+            missing.append(pkg)
+    if missing:
+        print(f"WARNING: Missing optional deps: {', '.join(missing)}", file=sys.stderr)
+        print(f"Run: poetry add {' '.join(missing)}", file=sys.stderr)
+
+
+def _find_col_fuzzy(df, target):
+    if not target:
+        return None
+    target_clean = str(target).strip().lower()
+    if target in df.columns:
+        return target
+    for col in df.columns:
+        if str(col).strip().lower() == target_clean:
+            return col
+    return None
+
+
+def _standardize_dataframe(df, config):
+    params = config.get("params", {})
+    rename_dict = {}
+
+    ticker_col = params.get("ticker_col")
+    actual_ticker = _find_col_fuzzy(df, ticker_col)
+    if actual_ticker:
+        rename_dict[actual_ticker] = "Ticker_Raw"
+
+    name_col = params.get("name_col")
+    actual_name = _find_col_fuzzy(df, name_col)
+    if actual_name:
+        rename_dict[actual_name] = "Company"
+
+    col_map = params.get("col_map", {})
+    for std_col, source_col in col_map.items():
+        actual_source = _find_col_fuzzy(df, source_col)
+        if actual_source:
+            rename_dict[actual_source] = std_col
+
+    df = df.rename(columns=rename_dict)
+    df["Country"] = config["country"]
+    df["Exchange"] = config["exchange_name"]
+
+    for col in SCRAPE_COLUMNS:
+        if col not in df.columns:
+            df[col] = None
+
+    return df
+
+
+def _generate_yf_ticker(row, config):
+    if pd.isna(row.get("Ticker_Raw")) or str(row.get("Ticker_Raw")).strip() == "":
+        return None
+
+    raw = str(row["Ticker_Raw"]).strip()
+    suffix = config["yahoo_suffix"]
+
+    if config.get("params", {}).get("clean_rule") == "pad_4_digits":
+        try:
+            raw = raw.split(".")[0].zfill(4)
+        except Exception:
+            pass
+
+    if suffix == "dynamic":
+        suffix_map = config["params"].get("suffix_map", {})
+        market_col = config["params"].get("market_col")
+        if market_col and market_col in row and pd.notna(row[market_col]):
+            market_val = str(row[market_col])
+            for key, sfx in suffix_map.items():
+                if key.lower() in market_val.lower():
+                    return f"{raw}{sfx}"
+        return raw
+
+    return f"{raw}{suffix}"
+
+
+def _handle_download_json(config, session):
+    response = session.get(config["source_url"])
+    response.raise_for_status()
+    data = response.json()
+    params = config.get("params", {})
+    root = params.get("root_key")
+    if root:
+        if root in data:
+            data = data[root]
+        else:
+            raise ValueError(f"JSON root key '{root}' not found")
+    if not isinstance(data, list):
+        raise ValueError(f"JSON data is {type(data)}, expected list")
+    return pd.DataFrame(data)
+
+
+def _handle_download_csv(config, session):
+    response = session.get(config["source_url"])
+    response.raise_for_status()
+    params = config["params"]
+    skip = params.get("skip_rows", 0)
+    sep = params.get("delimiter", ",")
+
+    for enc in ["utf-8", "latin1", "cp1252", "utf-16"]:
+        try:
+            return pd.read_csv(
+                io.BytesIO(response.content),
+                sep=sep,
+                skiprows=skip,
+                encoding=enc,
+                engine="python",
+                on_bad_lines="skip",
+            )
+        except (UnicodeDecodeError, Exception):
+            continue
+
+    raise ValueError("CSV parsing failed (check delimiter or encoding)")
+
+
+def _handle_download_excel(config, session):
+    response = session.get(config["source_url"])
+    response.raise_for_status()
+    params = config["params"]
+    sheet = params.get("sheet_name", 0)
+    skip = params.get("skip_rows", 0)
+    return pd.read_excel(io.BytesIO(response.content), sheet_name=sheet, skiprows=skip)
+
+
+def _handle_scrape_html(config, session):
+    response = session.get(config["source_url"])
+    response.raise_for_status()
+
+    if "<table" not in response.text.lower():
+        raise ValueError("No HTML tables found (likely JS-rendered page)")
+
+    params = config["params"]
+    idx = params.get("table_index", 0)
+    dfs = pd.read_html(io.StringIO(response.text), flavor=["lxml", "html5lib", "bs4"])
+
+    if len(dfs) > idx:
+        primary_df = dfs[idx]
+        if _find_col_fuzzy(primary_df, params.get("ticker_col")):
+            return primary_df
+
+    target_col = params.get("ticker_col")
+    if target_col:
+        for df in dfs:
+            if _find_col_fuzzy(df, target_col):
+                return df
+
+    raise ValueError(f"Table containing '{target_col}' not found")
+
+
+_HANDLERS = {
+    "download_csv": _handle_download_csv,
+    "download_excel": _handle_download_excel,
+    "scrape_html": _handle_scrape_html,
+    "download_json": _handle_download_json,
+}
+
+
+def scrape_exchanges(config: dict, *, exclude_us: bool = True) -> pd.DataFrame:
+    """Scrape all configured exchanges. Returns DataFrame with YF_Ticker column.
+
+    Skips US exchanges by default (config 'country' field = 'United States').
+    """
+    _check_deps()
+    session = _get_session()
+    all_dfs = []
+
+    print(f"Loaded {config['meta']['description']}", file=sys.stderr)
+
+    for ex in config["exchanges"]:
+        country = ex.get("country", "")
+        if exclude_us and country.lower() == "united states":
+            print(f"Skipping {ex['exchange_name']} (US excluded)", file=sys.stderr)
+            continue
+
+        print(
+            f"Processing {country} ({ex['exchange_name']})...", file=sys.stderr, end=" "
+        )
+
+        handler = _HANDLERS.get(ex["method"])
+        if not handler:
+            print(f"Unknown method: {ex['method']}", file=sys.stderr)
+            continue
+
+        try:
+            df = handler(ex, session)
+
+            if df is None or df.empty:
+                print("Empty DataFrame", file=sys.stderr)
+                continue
+
+            raw_cols = list(df.columns)
+            df = _standardize_dataframe(df, ex)
+            df["YF_Ticker"] = df.apply(
+                lambda r, _ex=ex: _generate_yf_ticker(r, _ex), axis=1
+            )
+
+            final_df = df[SCRAPE_COLUMNS].dropna(subset=["YF_Ticker"])
+            all_dfs.append(final_df)
+
+            if len(final_df) > 0:
+                print(f"OK ({len(final_df)} rows)", file=sys.stderr)
+            else:
+                print(
+                    f"OK (0 rows) - Check Config. Found columns: {raw_cols}",
+                    file=sys.stderr,
+                )
+
+            time.sleep(1.0)
+
+        except Exception as e:
+            print(f"FAILED: {e}", file=sys.stderr)
+
+    if not all_dfs:
+        print("No data extracted from any exchange.", file=sys.stderr)
+        return pd.DataFrame(columns=SCRAPE_COLUMNS)
+
+    master = pd.concat(all_dfs, ignore_index=True)
+    master = master.drop_duplicates(subset=["YF_Ticker"])
+    print(f"\nScraped {len(master)} unique tickers", file=sys.stderr)
+    return master
+
+
+# ============================================================
+# Phase 2: Filter by financials (from filter_tickers.py)
+# ============================================================
+
+
+def _normalize_ticker(ticker):
+    """Converts exchange formats to Yahoo format."""
+    if not isinstance(ticker, str):
+        return str(ticker)
+
+    parts = ticker.split(".")
+    if len(parts) > 2:
+        symbol = "-".join(parts[:-1])
+        suffix = parts[-1]
+        return f"{symbol}.{suffix}"
+    elif len(parts) == 2:
+        p1, p2 = parts
+        exchange_suffixes = {
+            "V",
+            "T",
+            "L",
+            "K",
+            "S",
+            "AX",
+            "TO",
+            "HK",
+            "DE",
+            "PA",
+            "AS",
+            "BR",
+            "MI",
+            "MC",
+            "SW",
+            "OL",
+            "ST",
+            "CO",
+            "NZ",
+            "JO",
+        }
+        if p2 in exchange_suffixes:
+            return ticker
+        if len(p2) == 1:
+            return f"{p1}-{p2}"
+    return ticker
+
+
+def _process_row(row, *, debug=False):
+    """Fetch financials for a single ticker via yfinance."""
+    ticker_symbol = row.get("YF_Ticker")
+    if pd.isna(ticker_symbol) or not ticker_symbol or str(ticker_symbol).strip() == "":
+        return None
+
+    yf_symbol = _normalize_ticker(str(ticker_symbol))
+
+    max_retries = 4
+    for attempt in range(max_retries + 1):
+        time.sleep(random.uniform(0.5, 1.5))
+
+        try:
+            ticker = yf.Ticker(yf_symbol)
+            info = ticker.info
+
+            if not info:
+                if debug:
+                    print(f"[DEBUG] {yf_symbol}: Empty info", file=sys.stderr)
+                return None
+
+            if (
+                "regularMarketPrice" not in info
+                and "currentPrice" not in info
+                and "trailingPE" not in info
+            ):
+                if debug:
+                    print(
+                        f"[DEBUG] {yf_symbol}: No price/PE data found", file=sys.stderr
+                    )
+                return None
+
+            row["Company_YF"] = info.get("longName") or info.get("shortName")
+            row["P/E"] = info.get("trailingPE")
+            row["ROE"] = info.get("returnOnEquity")
+            row["ROA"] = info.get("returnOnAssets")
+            row["Debt_to_Equity"] = info.get("debtToEquity")
+            row["Operating_Cash_Flow"] = info.get("operatingCashflow")
+            row["Free_Cash_Flow"] = info.get("freeCashflow")
+            row["Market_Cap"] = info.get("marketCap")
+
+            if (
+                row["Operating_Cash_Flow"]
+                and row["Market_Cap"]
+                and row["Market_Cap"] > 0
+            ):
+                row["OCF_Yield"] = row["Operating_Cash_Flow"] / row["Market_Cap"]
+            else:
+                row["OCF_Yield"] = None
+
+            row["YF_Sector"] = info.get("sector")
+            row["YF_Industry"] = info.get("industry")
+            row["Price"] = info.get("currentPrice")
+            row["Currency_YF"] = info.get("currency")
+
+            return row
+
+        except Exception as e:
+            str_e = str(e)
+
+            if "404" in str_e and "Not Found" in str_e:
+                if debug:
+                    print(f"[DEBUG] {yf_symbol}: 404 Not Found", file=sys.stderr)
+                return None
+
+            if "429" in str_e or "Too Many Requests" in str_e or "500" in str_e:
+                if attempt < max_retries:
+                    is_rate_limit = "429" in str_e or "Too Many Requests" in str_e
+                    base_wait = 20 if is_rate_limit else 5
+                    wait_time = (base_wait * (attempt + 1)) + random.uniform(1, 5)
+                    if debug:
+                        print(
+                            f"[RETRY] {yf_symbol}: Sleeping {wait_time:.1f}s",
+                            file=sys.stderr,
+                        )
+                    time.sleep(wait_time)
+                    continue
+
+            if debug:
+                print(f"[DEBUG] {yf_symbol}: Error {str_e}", file=sys.stderr)
+            return None
+
+    return None
+
+
+def _safe_float(val):
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return None
+
+
+def _passes_filters(row, *, max_pe, min_roe, min_roa, max_de, debug=False):
+    """Apply hard financial filters to an enriched row."""
+    if not row:
+        return False
+
+    ticker = row.get("YF_Ticker", "?")
+
+    pe = _safe_float(row.get("P/E"))
+    if pe is None:
+        if debug:
+            print(f"[SKIP] {ticker}: Missing P/E", file=sys.stderr)
+        return False
+    if pe > max_pe:
+        if debug:
+            print(f"[SKIP] {ticker}: P/E {pe} > {max_pe}", file=sys.stderr)
+        return False
+
+    roe = _safe_float(row.get("ROE"))
+    roa = _safe_float(row.get("ROA"))
+    roe_threshold = min_roe / 100.0
+    roa_threshold = min_roa / 100.0
+
+    has_good_roe = roe is not None and roe > roe_threshold
+    has_good_roa = roa is not None and roa > roa_threshold
+
+    if not (has_good_roe or has_good_roa):
+        if debug:
+            print(
+                f"[SKIP] {ticker}: Low Profit (ROE={roe}, ROA={roa})", file=sys.stderr
+            )
+        return False
+
+    de = _safe_float(row.get("Debt_to_Equity"))
+    if de is None:
+        if debug:
+            print(f"[SKIP] {ticker}: Missing D/E", file=sys.stderr)
+        return False
+    if de > max_de:
+        if debug:
+            print(f"[SKIP] {ticker}: High Debt ({de}%)", file=sys.stderr)
+        return False
+
+    ocf = _safe_float(row.get("Operating_Cash_Flow"))
+    if ocf is None or ocf <= 0:
+        if debug:
+            print(f"[SKIP] {ticker}: Negative/No OCF", file=sys.stderr)
+        return False
+
+    if debug:
+        print(f"[KEEP] {ticker}: P/E={pe}, D/E={de}%, ROE={roe}", file=sys.stderr)
+    return True
+
+
+def _load_csv_robust(filepath):
+    """Robust CSV loader that handles bad lines and encoding issues."""
+    try:
+        df = pd.read_csv(filepath, on_bad_lines="skip", engine="python")
+
+        if "YF_Ticker" in df.columns and len(df) > 0:
+            sample_ticker_col = str(df["YF_Ticker"].iloc[0])
+            sample_index = str(df.index[0])
+
+            if " " in sample_ticker_col and (
+                "." in sample_index or sample_index.isupper()
+            ):
+                print(
+                    "Warning: Detected CSV misalignment (Ticker in index). Fixing...",
+                    file=sys.stderr,
+                )
+                df.reset_index(inplace=True)
+                index_col = df.columns[0]
+                df["YF_Ticker"] = df[index_col]
+
+        if "YF_Ticker" not in df.columns:
+            if "Ticker" in df.columns:
+                df.rename(columns={"Ticker": "YF_Ticker"}, inplace=True)
+            else:
+                df.rename(columns={df.columns[0]: "YF_Ticker"}, inplace=True)
+                print(
+                    "Warning: 'YF_Ticker' column not found, using first column as ticker.",
+                    file=sys.stderr,
+                )
+
+        return df
+    except Exception as e:
+        print(f"Error reading input: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def fetch_and_filter(
+    tickers_df: pd.DataFrame,
+    *,
+    max_pe: float = 18.0,
+    min_roe: float = 13.0,
+    min_roa: float = 6.0,
+    max_de: float = 150.0,
+    workers: int = 4,
+    debug: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Fetch yfinance financials and apply hard filters.
+
+    Returns (passing_df, all_enriched_df).
+    """
+    records = tickers_df.to_dict("records")
+    total = len(records)
+
+    print(
+        f"Scanning {total} tickers with {workers} workers...",
+        file=sys.stderr,
+    )
+    print(
+        f"Criteria: P/E<{max_pe}, ROE>{min_roe}%/ROA>{min_roa}%, D/E<{max_de}%, OCF>0",
+        file=sys.stderr,
+    )
+
+    passing = []
+    all_enriched = []
+    processed_count = 0
+    start_time = time.time()
+
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_row = {
+                executor.submit(_process_row, row, debug=debug): row for row in records
+            }
+
+            for future in as_completed(future_to_row):
+                processed_count += 1
+                try:
+                    data = future.result()
+                    if data is not None:
+                        all_enriched.append(data)
+
+                        if _passes_filters(
+                            data,
+                            max_pe=max_pe,
+                            min_roe=min_roe,
+                            min_roa=min_roa,
+                            max_de=max_de,
+                            debug=debug,
+                        ):
+                            passing.append(data)
+
+                    if processed_count % 50 == 0:
+                        elapsed = time.time() - start_time
+                        rate = processed_count / elapsed if elapsed > 0 else 0
+                        n_pass = len(passing)
+                        print(
+                            f"Progress: {processed_count}/{total} ({rate:.1f} t/s, {n_pass} passing)",
+                            file=sys.stderr,
+                        )
+                except Exception:
+                    pass
+    except KeyboardInterrupt:
+        print("\nInterrupted! Returning partial results...", file=sys.stderr)
+
+    passing_df = (
+        pd.DataFrame(passing) if passing else pd.DataFrame(columns=ENRICHED_COLUMNS)
+    )
+    enriched_df = (
+        pd.DataFrame(all_enriched)
+        if all_enriched
+        else pd.DataFrame(columns=ENRICHED_COLUMNS)
+    )
+
+    print(
+        f"\nFilter complete: {len(passing_df)}/{total} tickers passed",
+        file=sys.stderr,
+    )
+
+    return passing_df, enriched_df
+
+
+# ============================================================
+# Output
+# ============================================================
+
+
+def write_outputs(
+    filtered_df: pd.DataFrame, output_path: str, details_path: str | None = None
+):
+    """Write ticker-only file (one per line) + optional enriched CSV."""
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    tickers = filtered_df["YF_Ticker"].dropna().unique()
+
+    with open(out, "w") as f:
+        for t in sorted(tickers):
+            f.write(f"{t}\n")
+
+    print(f"Wrote {len(tickers)} tickers to {out}", file=sys.stderr)
+
+    if details_path:
+        det = Path(details_path)
+        det.parent.mkdir(parents=True, exist_ok=True)
+        available_cols = [c for c in ENRICHED_COLUMNS if c in filtered_df.columns]
+        extra_cols = [c for c in filtered_df.columns if c not in available_cols]
+        filtered_df[available_cols + extra_cols].to_csv(det, index=False)
+        print(f"Wrote enriched details to {det}", file=sys.stderr)
+
+
+# ============================================================
+# CLI
+# ============================================================
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Scrape exchange listings and filter by fundamentals (consolidated pipeline)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+Examples:
+  # Full pipeline (scrape + filter, ex-US)
+  python scripts/find_gems.py --output scratch/gems.txt
+
+  # With enriched CSV for debugging
+  python scripts/find_gems.py --output scratch/gems.txt --details scratch/gems_details.csv
+
+  # Scrape only (produce raw CSV, no yfinance filtering)
+  python scripts/find_gems.py --scrape-only --output scratch/raw_tickers.csv
+
+  # Filter from existing CSV (skip scraping)
+  python scripts/find_gems.py --filter-only scratch/raw_tickers.csv --output scratch/gems.txt
+
+  # Include US exchanges
+  python scripts/find_gems.py --include-us --output scratch/gems.txt --debug
+""",
+    )
+
+    parser.add_argument(
+        "--output",
+        required=True,
+        help="Output file. Ticker-only (.txt) in filter mode, CSV in scrape-only mode.",
+    )
+    parser.add_argument(
+        "--details",
+        help="Also write enriched CSV with financial metrics (filter mode only).",
+    )
+    parser.add_argument(
+        "--configfile", default=DEFAULT_CONFIG_PATH, help="Exchange config JSON"
+    )
+
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--scrape-only",
+        action="store_true",
+        help="Only scrape exchanges, output raw CSV, skip filtering.",
+    )
+    mode_group.add_argument(
+        "--filter-only",
+        metavar="FILE",
+        help="Skip scraping, filter from existing CSV file.",
+    )
+
+    parser.add_argument(
+        "--include-us",
+        action="store_true",
+        help="Include US exchanges (excluded by default)",
+    )
+    parser.add_argument(
+        "--max-pe", type=float, default=18.0, help="Max P/E ratio (default: 18.0)"
+    )
+    parser.add_argument(
+        "--min-roe", type=float, default=13.0, help="Min ROE %% (default: 13.0)"
+    )
+    parser.add_argument(
+        "--min-roa", type=float, default=6.0, help="Min ROA %% (default: 6.0)"
+    )
+    parser.add_argument(
+        "--max-de",
+        type=float,
+        default=150.0,
+        help="Max D/E %% (default: 150.0, i.e. 1.5x)",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help="ThreadPoolExecutor concurrency (default: 4)",
+    )
+    parser.add_argument(
+        "--debug", action="store_true", help="Show skip reasons per ticker"
+    )
+
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    # --- Mode: scrape-only ---
+    if args.scrape_only:
+        with open(args.configfile) as f:
+            config = json.load(f)
+
+        scraped_df = scrape_exchanges(config, exclude_us=not args.include_us)
+
+        if scraped_df.empty:
+            print("No tickers scraped.", file=sys.stderr)
+            sys.exit(1)
+
+        out = Path(args.output)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        scraped_df.to_csv(out, index=False)
+        print(f"Saved {len(scraped_df)} rows to {out}", file=sys.stderr)
+        return
+
+    # --- Mode: filter-only ---
+    if args.filter_only:
+        tickers_df = _load_csv_robust(args.filter_only)
+
+        passing_df, enriched_df = fetch_and_filter(
+            tickers_df,
+            max_pe=args.max_pe,
+            min_roe=args.min_roe,
+            min_roa=args.min_roa,
+            max_de=args.max_de,
+            workers=args.workers,
+            debug=args.debug,
+        )
+
+        if passing_df.empty:
+            print("No tickers passed filters.", file=sys.stderr)
+            sys.exit(1)
+
+        write_outputs(passing_df, args.output, args.details)
+        return
+
+    # --- Default mode: scrape + filter ---
+    with open(args.configfile) as f:
+        config = json.load(f)
+
+    scraped_df = scrape_exchanges(config, exclude_us=not args.include_us)
+
+    if scraped_df.empty:
+        print("No tickers scraped. Aborting.", file=sys.stderr)
+        sys.exit(1)
+
+    passing_df, enriched_df = fetch_and_filter(
+        scraped_df,
+        max_pe=args.max_pe,
+        min_roe=args.min_roe,
+        min_roa=args.min_roa,
+        max_de=args.max_de,
+        workers=args.workers,
+        debug=args.debug,
+    )
+
+    if passing_df.empty:
+        print("No tickers passed filters.", file=sys.stderr)
+        sys.exit(1)
+
+    write_outputs(passing_df, args.output, args.details)
+
+
+if __name__ == "__main__":
+    main()

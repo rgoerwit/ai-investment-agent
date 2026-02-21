@@ -278,12 +278,41 @@ poetry run python -m src.main --retrospective-only
 # Note: Use --output for the report so that charts are generated
 poetry run python -u -m src.main --ticker 0005.HK --output scratch/report.md >scratch/ticker_analysis_info.txt 2>&1 &
 
-# Batch analysis
-poetry run bash run_tickers.sh
+# Batch analysis (manual ticker list)
+./scripts/run_tickers.sh
 
 # Run tests to verify installation
 poetry run pytest tests/ -v
 ```
+
+### Automated Screening Pipeline (Fastest Path to Gems)
+
+Find undervalued international stocks end-to-end — no manual steps:
+
+```bash
+# One command: scrape 18 exchanges → filter by fundamentals → quick-screen
+# all candidates → full analysis on BUY verdicts only
+./scripts/run_pipeline.sh
+
+# Or step by step:
+
+# 1. Scrape + filter (produces a ticker list)
+poetry run python scripts/find_gems.py --output scratch/gems.txt
+
+# 2. Run the 3-stage pipeline against that list
+./scripts/run_pipeline.sh --skip-scrape scratch/gems.txt
+
+# Paid API tier? Shorten the cooldown
+./scripts/run_pipeline.sh --cooldown 10
+
+# Resume after a crash (already-processed tickers are skipped automatically)
+./scripts/run_pipeline.sh --skip-scrape scratch/gems_2026-02-19.txt
+
+# Overnight run on macOS
+caffeinate -i ./scripts/run_pipeline.sh
+```
+
+Output lands in `scratch/`: quick-screen reports (`*_quick.md`), full reports for BUYs, and a `buys_YYYY-MM-DD.txt` summary.
 
 ### Configuring API Rate Limits (NEW)
 
