@@ -252,6 +252,37 @@ _HANDLERS = {
 }
 
 
+def _apply_filters(df, config):
+    """Apply positive filter and exclude_filter from exchange config to a DataFrame.
+
+    Returns the filtered DataFrame (may be empty).
+    """
+    # Apply positive filter (keep rows matching column=value)
+    filter_rules = config.get("params", {}).get("filter", {})
+    if filter_rules:
+        for col, value in filter_rules.items():
+            actual_col = _find_col_fuzzy(df, col)
+            if actual_col:
+                df = df[df[actual_col].astype(str).str.strip() == str(value)]
+
+    # Apply negative filter (exclude rows matching column pattern)
+    exclude_rules = config.get("params", {}).get("exclude_filter", {})
+    if exclude_rules:
+        for col, values in exclude_rules.items():
+            actual_col = _find_col_fuzzy(df, col)
+            if actual_col:
+                if isinstance(values, list):
+                    df = df[~df[actual_col].astype(str).str.strip().isin(values)]
+                else:
+                    df = df[
+                        ~df[actual_col]
+                        .astype(str)
+                        .str.contains(str(values), case=False, na=False)
+                    ]
+
+    return df
+
+
 def scrape_exchanges(config: dict, *, exclude_us: bool = True) -> pd.DataFrame:
     """Scrape all configured exchanges. Returns DataFrame with YF_Ticker column.
 
@@ -267,6 +298,10 @@ def scrape_exchanges(config: dict, *, exclude_us: bool = True) -> pd.DataFrame:
         country = ex.get("country", "")
         if exclude_us and country.lower() == "united states":
             print(f"Skipping {ex['exchange_name']} (US excluded)", file=sys.stderr)
+            continue
+
+        if not ex.get("enabled", True):
+            print(f"Skipping {ex['exchange_name']} (disabled)", file=sys.stderr)
             continue
 
         print(
@@ -286,6 +321,13 @@ def scrape_exchanges(config: dict, *, exclude_us: bool = True) -> pd.DataFrame:
                 continue
 
             raw_cols = list(df.columns)
+
+            df = _apply_filters(df, ex)
+
+            if df.empty:
+                print("Empty after filtering", file=sys.stderr)
+                continue
+
             df = _standardize_dataframe(df, ex)
             df["YF_Ticker"] = df.apply(
                 lambda r, _ex=ex: _generate_yf_ticker(r, _ex), axis=1
@@ -355,6 +397,17 @@ def _normalize_ticker(ticker):
             "CO",
             "NZ",
             "JO",
+            "KS",
+            "KQ",
+            "TW",
+            "TWO",
+            "SI",
+            "LS",
+            "KL",
+            "BK",
+            "JK",
+            "NS",
+            "BO",
         }
         if p2 in exchange_suffixes:
             return ticker

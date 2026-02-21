@@ -1,5 +1,6 @@
 """Tests for scripts/find_gems.py — screening pipeline."""
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -11,6 +12,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 
 import find_gems  # noqa: E402
+
+# Path to real exchange config for integration tests
+_CONFIG_PATH = Path(__file__).parent.parent.parent / "config" / "exchanges.json"
 
 
 # ============================================================
@@ -202,6 +206,153 @@ class TestScrapeExchanges:
 
         assert len(result) == 1
         assert result.iloc[0]["Country"] == "Korea"
+
+    def test_filter_param_applied(self):
+        """Config with filter: {"Type": "Equity"} should keep only matching rows."""
+        ex = self._make_exchange("Hong Kong", "HKEX", suffix=".HK")
+        ex["params"]["filter"] = {"Type": "Equity"}
+        config = self._make_config(ex)
+
+        df = pd.DataFrame(
+            {
+                "Code": ["0001", "W001", "0005", "C002"],
+                "Name": ["CKH", "Warrant A", "HSBC", "CBBC B"],
+                "Type": ["Equity", "Warrant", "Equity", "CBBC"],
+            }
+        )
+        mock_handler = MagicMock(return_value=df)
+
+        with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
+            with patch.object(find_gems, "_check_deps"):
+                with patch("find_gems.time.sleep"):
+                    result = find_gems.scrape_exchanges(config, exclude_us=True)
+
+        assert len(result) == 2
+        tickers = result["YF_Ticker"].tolist()
+        assert "0001.HK" in tickers
+        assert "0005.HK" in tickers
+
+    def test_exclude_filter_list(self):
+        """exclude_filter with a list should remove rows matching any value."""
+        ex = self._make_exchange("Germany", "XETRA", suffix=".DE")
+        ex["params"]["exclude_filter"] = {"Type": ["ETF", "Bond"]}
+        config = self._make_config(ex)
+
+        df = pd.DataFrame(
+            {
+                "Code": ["SAP", "ETF1", "SIE", "BND1"],
+                "Name": ["SAP SE", "ETF Fund", "Siemens", "Bond Corp"],
+                "Type": ["Equity", "ETF", "Equity", "Bond"],
+            }
+        )
+        mock_handler = MagicMock(return_value=df)
+
+        with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
+            with patch.object(find_gems, "_check_deps"):
+                with patch("find_gems.time.sleep"):
+                    result = find_gems.scrape_exchanges(config, exclude_us=True)
+
+        assert len(result) == 2
+        tickers = result["YF_Ticker"].tolist()
+        assert "SAP.DE" in tickers
+        assert "SIE.DE" in tickers
+
+    def test_exclude_filter_string_contains(self):
+        """exclude_filter with a string should use case-insensitive contains."""
+        ex = self._make_exchange("Europe", "Euronext", suffix=".PA")
+        ex["params"]["exclude_filter"] = {"Market": "Growth"}
+        config = self._make_config(ex)
+
+        df = pd.DataFrame(
+            {
+                "Code": ["AI", "ML", "BIG"],
+                "Name": ["Air Liquide", "ML Growth Co", "BIG Corp"],
+                "Market": ["Euronext Paris", "Euronext Growth Paris", "Euronext Paris"],
+            }
+        )
+        mock_handler = MagicMock(return_value=df)
+
+        with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
+            with patch.object(find_gems, "_check_deps"):
+                with patch("find_gems.time.sleep"):
+                    result = find_gems.scrape_exchanges(config, exclude_us=True)
+
+        assert len(result) == 2
+        tickers = result["YF_Ticker"].tolist()
+        assert "AI.PA" in tickers
+        assert "BIG.PA" in tickers
+
+    def test_filter_fuzzy_column_match(self):
+        """Filter column name with different case should still match."""
+        ex = self._make_exchange("Hong Kong", "HKEX", suffix=".HK")
+        ex["params"]["filter"] = {"category": "Equity"}  # lowercase
+        config = self._make_config(ex)
+
+        df = pd.DataFrame(
+            {
+                "Code": ["0001", "W001"],
+                "Name": ["CKH", "Warrant A"],
+                "Category": ["Equity", "Warrant"],  # Uppercase in DataFrame
+            }
+        )
+        mock_handler = MagicMock(return_value=df)
+
+        with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
+            with patch.object(find_gems, "_check_deps"):
+                with patch("find_gems.time.sleep"):
+                    result = find_gems.scrape_exchanges(config, exclude_us=True)
+
+        assert len(result) == 1
+        assert result.iloc[0]["YF_Ticker"] == "0001.HK"
+
+    def test_disabled_exchange_skipped(self):
+        """Exchanges with enabled:false should be skipped entirely."""
+        ex_enabled = self._make_exchange("Japan", "TSE")
+        ex_disabled = self._make_exchange("South Korea", "KOSPI", suffix=".KS")
+        ex_disabled["enabled"] = False
+        config = self._make_config(ex_enabled, ex_disabled)
+
+        jp_df = pd.DataFrame({"Code": ["7203"], "Name": ["Toyota"]})
+        kr_df = pd.DataFrame({"Code": ["005930"], "Name": ["Samsung"]})
+
+        def side_effect(cfg, session):
+            if "KOSPI" in cfg["exchange_name"]:
+                return kr_df
+            return jp_df
+
+        mock_handler = MagicMock(side_effect=side_effect)
+
+        with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
+            with patch.object(find_gems, "_check_deps"):
+                with patch("find_gems.time.sleep"):
+                    result = find_gems.scrape_exchanges(config, exclude_us=True)
+
+        assert len(result) == 1
+        assert result.iloc[0]["YF_Ticker"] == "7203.T"
+        # Handler should only be called once (Korea skipped)
+        assert mock_handler.call_count == 1
+
+    def test_filter_empty_result_skipped(self):
+        """If filter removes all rows, exchange should be skipped gracefully."""
+        ex = self._make_exchange("Japan", "TSE")
+        ex["params"]["filter"] = {"Type": "Equity"}
+        config = self._make_config(ex)
+
+        df = pd.DataFrame(
+            {
+                "Code": ["W001"],
+                "Name": ["Warrant A"],
+                "Type": ["Warrant"],
+            }
+        )
+        mock_handler = MagicMock(return_value=df)
+
+        with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
+            with patch.object(find_gems, "_check_deps"):
+                with patch("find_gems.time.sleep"):
+                    result = find_gems.scrape_exchanges(config, exclude_us=True)
+
+        assert len(result) == 0
 
     def test_deduplication(self):
         ex1 = self._make_exchange("Japan", "TSE1")
@@ -469,3 +620,114 @@ class TestSafeFloat:
 
     def test_int_converted(self):
         assert find_gems._safe_float(42) == 42.0
+
+
+# ============================================================
+# TestApplyFilters — unit tests for extracted helper
+# ============================================================
+class TestApplyFilters:
+    """Unit tests for the _apply_filters() helper."""
+
+    def test_positive_filter(self):
+        df = pd.DataFrame(
+            {"Type": ["Equity", "Warrant", "Equity"], "Name": ["A", "B", "C"]}
+        )
+        config = {"params": {"filter": {"Type": "Equity"}}}
+        result = find_gems._apply_filters(df, config)
+        assert len(result) == 2
+
+    def test_exclude_filter_list(self):
+        df = pd.DataFrame({"Type": ["Equity", "ETF", "Bond"], "Name": ["A", "B", "C"]})
+        config = {"params": {"exclude_filter": {"Type": ["ETF", "Bond"]}}}
+        result = find_gems._apply_filters(df, config)
+        assert len(result) == 1
+        assert result.iloc[0]["Name"] == "A"
+
+    def test_exclude_filter_string_contains(self):
+        df = pd.DataFrame(
+            {"Market": ["Paris", "Growth Paris", "Amsterdam"], "Name": ["A", "B", "C"]}
+        )
+        config = {"params": {"exclude_filter": {"Market": "Growth"}}}
+        result = find_gems._apply_filters(df, config)
+        assert len(result) == 2
+
+    def test_no_filters_returns_unchanged(self):
+        df = pd.DataFrame({"A": [1, 2, 3]})
+        config = {"params": {}}
+        result = find_gems._apply_filters(df, config)
+        assert len(result) == 3
+
+    def test_missing_column_ignored(self):
+        df = pd.DataFrame({"Name": ["A", "B"]})
+        config = {"params": {"filter": {"NonExistent": "X"}}}
+        result = find_gems._apply_filters(df, config)
+        assert len(result) == 2
+
+
+# ============================================================
+# TestExchangeScrapeIntegration — live exchange scraping
+# ============================================================
+def _load_enabled_exchanges():
+    """Load enabled exchanges with min_expected_rows from config for parametrize."""
+    if not _CONFIG_PATH.exists():
+        return []
+    with open(_CONFIG_PATH) as f:
+        config = json.load(f)
+    exchanges = []
+    for ex in config["exchanges"]:
+        if ex.get("enabled", True) and ex.get("min_expected_rows"):
+            exchanges.append(ex)
+    return exchanges
+
+
+def _exchange_ids(exchanges):
+    return [ex["exchange_name"] for ex in exchanges]
+
+
+_ENABLED_EXCHANGES = _load_enabled_exchanges()
+
+
+@pytest.mark.integration
+@pytest.mark.slow
+class TestExchangeScrapeIntegration:
+    """Live integration tests: hit each exchange source and verify sane row counts.
+
+    Catches broken URLs, changed HTML structure, misconfigured filters,
+    and dead sources before they silently produce empty results.
+
+    Run with: pytest tests/scripts/test_find_gems.py::TestExchangeScrapeIntegration -v
+    """
+
+    @pytest.fixture(autouse=True)
+    def _session(self):
+        self.session = find_gems._get_session()
+
+    @pytest.mark.parametrize(
+        "exchange", _ENABLED_EXCHANGES, ids=_exchange_ids(_ENABLED_EXCHANGES)
+    )
+    def test_exchange_returns_sane_count(self, exchange):
+        handler = find_gems._HANDLERS.get(exchange["method"])
+        assert handler is not None, f"Unknown method: {exchange['method']}"
+
+        df = handler(exchange, self.session)
+        assert df is not None, f"Handler returned None for {exchange['exchange_name']}"
+        assert (
+            not df.empty
+        ), f"Handler returned empty DataFrame for {exchange['exchange_name']}"
+
+        # Apply the same filters used by scrape_exchanges()
+        df = find_gems._apply_filters(df, exchange)
+
+        min_rows = exchange["min_expected_rows"]
+        assert (
+            len(df) >= min_rows
+        ), f"{exchange['exchange_name']}: got {len(df)} rows, expected >= {min_rows}"
+
+        # Verify the configured ticker column exists (pre-standardization name)
+        ticker_col = exchange["params"].get("ticker_col")
+        if ticker_col:
+            actual = find_gems._find_col_fuzzy(df, ticker_col)
+            assert actual is not None, (
+                f"{exchange['exchange_name']}: ticker_col '{ticker_col}' not found "
+                f"in columns {list(df.columns)}"
+            )

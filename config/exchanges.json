@@ -1,15 +1,17 @@
 {
   "meta": {
-    "version": "2.7",
-    "description": "Stable Recipe: NZX Fixed via StockAnalysis"
+    "version": "3.2",
+    "description": "Full Exchange Listings — US-tradeable markets via IBKR. Set enabled:false to skip an exchange."
   },
   "exchanges": [
     {
       "country": "United States",
       "exchange_name": "NYSE/NASDAQ/AMEX",
+      "enabled": true,
       "method": "download_csv",
       "source_url": "http://www.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt",
       "yahoo_suffix": "",
+      "min_expected_rows": 2000,
       "params": {
         "delimiter": "|",
         "ticker_col": "Symbol",
@@ -22,9 +24,11 @@
     {
       "country": "Canada",
       "exchange_name": "Toronto Stock Exchange",
+      "enabled": true,
       "method": "scrape_html",
       "source_url": "https://stockanalysis.com/list/toronto-stock-exchange/",
       "yahoo_suffix": ".TO",
+      "min_expected_rows": 100,
       "params": {
         "ticker_col": "Symbol",
         "name_col": "Company Name"
@@ -33,9 +37,11 @@
     {
       "country": "Canada",
       "exchange_name": "TSX Venture",
+      "enabled": true,
       "method": "scrape_html",
       "source_url": "https://stockanalysis.com/list/tsx-venture-exchange/",
       "yahoo_suffix": ".V",
+      "min_expected_rows": 100,
       "params": {
         "ticker_col": "Symbol",
         "name_col": "Company Name"
@@ -43,70 +49,67 @@
     },
     {
       "country": "United Kingdom",
-      "exchange_name": "FTSE 100",
+      "exchange_name": "London Stock Exchange",
+      "enabled": true,
       "method": "scrape_html",
-      "source_url": "https://en.wikipedia.org/wiki/FTSE_100_Index",
+      "source_url": "https://stockanalysis.com/list/london-stock-exchange/",
       "yahoo_suffix": ".L",
+      "min_expected_rows": 100,
       "params": {
-        "table_index": 4,
-        "ticker_col": "Ticker",
-        "name_col": "Company"
+        "ticker_col": "Symbol",
+        "name_col": "Company Name"
       }
     },
     {
-      "country": "United Kingdom",
-      "exchange_name": "FTSE 250",
-      "method": "scrape_html",
-      "source_url": "https://en.wikipedia.org/wiki/FTSE_250_Index",
-      "yahoo_suffix": ".L",
+      "country": "Europe",
+      "exchange_name": "Euronext",
+      "enabled": true,
+      "method": "download_csv",
+      "source_url": "https://live.euronext.com/pd_es/data/stocks/download?mics=dm_all_stock",
+      "yahoo_suffix": "dynamic",
+      "min_expected_rows": 500,
       "params": {
-        "table_index": 0,
-        "ticker_col": "Ticker",
-        "name_col": "Company"
+        "delimiter": ";",
+        "ticker_col": "Symbol",
+        "name_col": "Name",
+        "market_col": "Market",
+        "suffix_map": {
+          "Paris": ".PA",
+          "Amsterdam": ".AS",
+          "Brussels": ".BR",
+          "Lisbon": ".LS",
+          "Dublin": ".IR",
+          "Milan": ".MI",
+          "Oslo": ".OL"
+        }
       }
     },
     {
       "country": "Germany",
-      "exchange_name": "DAX",
-      "method": "scrape_html",
-      "source_url": "https://en.wikipedia.org/wiki/DAX",
+      "exchange_name": "XETRA",
+      "enabled": true,
+      "method": "download_csv",
+      "source_url": "https://www.xetra.com/resource/blob/1528/823d14d9460bdf43ab53f20a665e3098/data/t7-xetr-allTradableInstruments.csv",
       "yahoo_suffix": ".DE",
+      "min_expected_rows": 100,
       "params": {
-        "table_index": 3,
-        "ticker_col": "Ticker",
-        "name_col": "Company"
-      }
-    },
-    {
-      "country": "France",
-      "exchange_name": "CAC 40",
-      "method": "scrape_html",
-      "source_url": "https://en.wikipedia.org/wiki/CAC_40",
-      "yahoo_suffix": ".PA",
-      "params": {
-        "table_index": 3,
-        "ticker_col": "Ticker",
-        "name_col": "Company"
-      }
-    },
-    {
-      "country": "Netherlands",
-      "exchange_name": "AEX",
-      "method": "scrape_html",
-      "source_url": "https://en.wikipedia.org/wiki/AEX_index",
-      "yahoo_suffix": ".AS",
-      "params": {
-        "table_index": 1,
-        "ticker_col": "Ticker",
-        "name_col": "Company"
+        "delimiter": ";",
+        "skip_rows": 2,
+        "ticker_col": "Mnemonic",
+        "name_col": "Instrument Name",
+        "filter": {
+          "Instrument Type": "CS"
+        }
       }
     },
     {
       "country": "Switzerland",
       "exchange_name": "SMI",
+      "enabled": true,
       "method": "scrape_html",
       "source_url": "https://en.wikipedia.org/wiki/Swiss_Market_Index",
       "yahoo_suffix": ".SW",
+      "min_expected_rows": 15,
       "params": {
         "table_index": 1,
         "ticker_col": "Ticker",
@@ -115,34 +118,25 @@
     },
     {
       "country": "Sweden",
-      "exchange_name": "OMX Stockholm 30",
+      "exchange_name": "Nasdaq Stockholm",
+      "enabled": true,
       "method": "scrape_html",
-      "source_url": "https://en.wikipedia.org/wiki/OMX_Stockholm_30",
+      "source_url": "https://stockanalysis.com/list/nasdaq-stockholm/",
       "yahoo_suffix": ".ST",
+      "min_expected_rows": 100,
       "params": {
-        "table_index": 2,
-        "ticker_col": "Ticker",
-        "name_col": "Company"
-      }
-    },
-    {
-      "country": "Italy",
-      "exchange_name": "FTSE MIB",
-      "method": "scrape_html",
-      "source_url": "https://en.wikipedia.org/wiki/FTSE_MIB",
-      "yahoo_suffix": ".MI",
-      "params": {
-        "table_index": 1,
-        "ticker_col": "Ticker",
-        "name_col": "Company"
+        "ticker_col": "Symbol",
+        "name_col": "Company Name"
       }
     },
     {
       "country": "Spain",
       "exchange_name": "IBEX 35",
+      "enabled": true,
       "method": "scrape_html",
       "source_url": "https://en.wikipedia.org/wiki/IBEX_35",
       "yahoo_suffix": ".MC",
+      "min_expected_rows": 20,
       "params": {
         "table_index": 1,
         "ticker_col": "Ticker",
@@ -152,9 +146,11 @@
     {
       "country": "Japan",
       "exchange_name": "Tokyo Stock Exchange",
+      "enabled": true,
       "method": "download_excel",
       "source_url": "https://www.jpx.co.jp/english/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_e.xls",
       "yahoo_suffix": ".T",
+      "min_expected_rows": 2000,
       "params": {
         "ticker_col": "Local Code",
         "name_col": "Name (English)"
@@ -163,22 +159,146 @@
     {
       "country": "Hong Kong",
       "exchange_name": "HKEX",
+      "enabled": true,
       "method": "download_excel",
       "source_url": "https://www.hkex.com.hk/eng/services/trading/securities/securitieslists/ListOfSecurities.xlsx",
       "yahoo_suffix": ".HK",
+      "min_expected_rows": 500,
       "params": {
         "skip_rows": 2,
         "ticker_col": "Stock Code",
         "name_col": "Name of Listed Entity",
-        "clean_rule": "pad_4_digits"
+        "clean_rule": "pad_4_digits",
+        "filter": {
+          "Category": "Equity"
+        }
+      }
+    },
+    {
+      "country": "Taiwan",
+      "exchange_name": "Taiwan Stock Exchange (TWSE)",
+      "enabled": true,
+      "method": "scrape_html",
+      "source_url": "https://stockanalysis.com/list/taiwan-stock-exchange/",
+      "yahoo_suffix": ".TW",
+      "min_expected_rows": 100,
+      "params": {
+        "ticker_col": "Symbol",
+        "name_col": "Company Name"
+      }
+    },
+    {
+      "country": "Taiwan",
+      "exchange_name": "Taipei Exchange (TPEX)",
+      "enabled": true,
+      "method": "scrape_html",
+      "source_url": "https://stockanalysis.com/list/taipei-exchange/",
+      "yahoo_suffix": ".TWO",
+      "min_expected_rows": 100,
+      "params": {
+        "ticker_col": "Symbol",
+        "name_col": "Company Name"
+      }
+    },
+    {
+      "country": "Singapore",
+      "exchange_name": "Singapore Exchange (SGX)",
+      "enabled": true,
+      "method": "scrape_html",
+      "source_url": "https://stockanalysis.com/list/singapore-exchange/",
+      "yahoo_suffix": ".SI",
+      "min_expected_rows": 50,
+      "params": {
+        "ticker_col": "Symbol",
+        "name_col": "Company Name"
+      }
+    },
+    {
+      "country": "Malaysia",
+      "exchange_name": "Bursa Malaysia",
+      "enabled": true,
+      "method": "scrape_html",
+      "source_url": "https://stockanalysis.com/list/bursa-malaysia/",
+      "yahoo_suffix": ".KL",
+      "min_expected_rows": 50,
+      "params": {
+        "ticker_col": "Symbol",
+        "name_col": "Company Name"
+      }
+    },
+    {
+      "country": "Thailand",
+      "exchange_name": "Stock Exchange of Thailand",
+      "enabled": false,
+      "note": "Not available on IBKR for US clients",
+      "method": "scrape_html",
+      "source_url": "https://stockanalysis.com/list/stock-exchange-of-thailand/",
+      "yahoo_suffix": ".BK",
+      "params": {
+        "ticker_col": "Symbol",
+        "name_col": "Company Name"
+      }
+    },
+    {
+      "country": "Indonesia",
+      "exchange_name": "Indonesia Stock Exchange",
+      "enabled": true,
+      "method": "scrape_html",
+      "source_url": "https://stockanalysis.com/list/indonesia-stock-exchange/",
+      "yahoo_suffix": ".JK",
+      "min_expected_rows": 50,
+      "params": {
+        "ticker_col": "Symbol",
+        "name_col": "Company Name"
+      }
+    },
+    {
+      "country": "India",
+      "exchange_name": "National Stock Exchange of India",
+      "enabled": false,
+      "note": "Not directly accessible to US retail investors (requires FPI registration)",
+      "method": "scrape_html",
+      "source_url": "https://stockanalysis.com/list/national-stock-exchange-of-india/",
+      "yahoo_suffix": ".NS",
+      "params": {
+        "ticker_col": "Symbol",
+        "name_col": "Company Name"
+      }
+    },
+    {
+      "country": "South Korea",
+      "exchange_name": "Korea Stock Exchange (KOSPI)",
+      "enabled": false,
+      "note": "Not tradeable by US citizens via IBKR (restricted market)",
+      "method": "scrape_html",
+      "source_url": "https://stockanalysis.com/list/korea-stock-exchange/",
+      "yahoo_suffix": ".KS",
+      "params": {
+        "ticker_col": "Symbol",
+        "name_col": "Company Name"
+      }
+    },
+    {
+      "country": "South Korea",
+      "exchange_name": "KOSDAQ",
+      "enabled": false,
+      "note": "Not tradeable by US citizens via IBKR (restricted market)",
+      "method": "scrape_html",
+      "source_url": "https://stockanalysis.com/list/kosdaq-korea/",
+      "yahoo_suffix": ".KQ",
+      "params": {
+        "ticker_col": "Symbol",
+        "name_col": "Company Name"
       }
     },
     {
       "country": "Australia",
       "exchange_name": "ASX",
+      "enabled": true,
       "method": "download_csv",
       "source_url": "https://www.asx.com.au/asx/research/ASXListedCompanies.csv",
       "yahoo_suffix": ".AX",
+      "min_expected_rows": 500,
       "params": {
         "skip_rows": 1,
         "ticker_col": "ASX code",
@@ -188,9 +308,11 @@
     {
       "country": "New Zealand",
       "exchange_name": "NZX",
+      "enabled": true,
       "method": "scrape_html",
       "source_url": "https://stockanalysis.com/list/new-zealand-stock-exchange/",
       "yahoo_suffix": ".NZ",
+      "min_expected_rows": 30,
       "params": {
         "ticker_col": "Symbol",
         "name_col": "Company Name"
