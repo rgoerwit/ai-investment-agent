@@ -39,6 +39,27 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36",
 ]
 
+# Currencies used by configured exchanges (fetched once per scan)
+_FX_CURRENCIES = [
+    "CAD",
+    "GBP",
+    "EUR",
+    "CHF",
+    "SEK",
+    "NOK",
+    "JPY",
+    "HKD",
+    "TWD",
+    "SGD",
+    "MYR",
+    "IDR",
+    "AUD",
+    "NZD",
+    "THB",
+    "INR",
+    "KRW",
+]
+
 SCRAPE_COLUMNS = [
     "Country",
     "Exchange",
@@ -55,13 +76,24 @@ ENRICHED_COLUMNS = [
     "YF_Ticker",
     "Company_YF",
     "P/E",
+    "Forward_PE",
     "Debt_to_Equity",
+    "Net_Debt_to_Equity",
     "OCF_Yield",
+    "OCF_NI_Ratio",
     "ROE",
     "ROA",
     "Operating_Cash_Flow",
     "Free_Cash_Flow",
+    "Net_Income",
+    "Total_Debt",
+    "Total_Cash",
+    "Revenue_Years_Positive",
     "Market_Cap",
+    "Market_Cap_USD",
+    "Avg_Volume",
+    "Daily_Turnover_USD",
+    "Analyst_Coverage",
     "YF_Sector",
     "YF_Industry",
     "Price",
@@ -70,6 +102,58 @@ ENRICHED_COLUMNS = [
     "Exchange",
     "Ticker_Raw",
 ]
+
+
+# ============================================================
+# FX helpers — fetch once per scan, reuse across all tickers
+# ============================================================
+
+
+def _fetch_one_fx_rate(currency):
+    """Fetch a single FX rate (currency → USD). Returns (currency, rate|None)."""
+    try:
+        t = yf.Ticker(f"{currency}USD=X")
+        price = getattr(t.fast_info, "last_price", None)
+        if not price:
+            price = t.info.get("regularMarketPrice")
+        if price and price > 0:
+            return currency, float(price)
+    except Exception:
+        pass
+    return currency, None
+
+
+def _fetch_fx_rates():
+    """Fetch live FX rates from yfinance in parallel. Called once per scan."""
+    rates = {"USD": 1.0}
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        for cur, rate in executor.map(_fetch_one_fx_rate, _FX_CURRENCIES):
+            if rate is not None:
+                rates[cur] = rate
+    # Fill gaps from fallback table
+    try:
+        from src.fx_normalization import FALLBACK_RATES_TO_USD
+
+        for cur in _FX_CURRENCIES:
+            if cur not in rates and cur in FALLBACK_RATES_TO_USD:
+                rates[cur] = FALLBACK_RATES_TO_USD[cur]
+    except ImportError:
+        pass
+    return rates
+
+
+def _to_usd(value, currency, fx_rates):
+    """Convert *value* in *currency* to USD. Returns None for unknown currencies."""
+    if value is None or currency is None:
+        return None
+    # Normalize GBp (pence) → GBP
+    if currency == "GBp":
+        currency = "GBP"
+        value = value / 100.0
+    rate = fx_rates.get(currency)
+    if rate is None:
+        return None
+    return value * rate
 
 
 # ============================================================
@@ -416,13 +500,21 @@ def _normalize_ticker(ticker):
     return ticker
 
 
-def _process_row(row, *, debug=False):
-    """Fetch financials for a single ticker via yfinance."""
+def _process_row(row, *, fx_rates=None, min_mcap=None, min_volume=None, debug=False):
+    """Fetch financials for a single ticker via yfinance.
+
+    Early-exit filters (A/B/C) run BEFORE the expensive income_stmt fetch:
+      A) Quote type must be EQUITY (reject ETFs, warrants, CBBCs)
+      B) Market cap (USD) must exceed *min_mcap*
+      C) Daily dollar volume (USD) must exceed *min_volume*
+    """
     ticker_symbol = row.get("YF_Ticker")
     if pd.isna(ticker_symbol) or not ticker_symbol or str(ticker_symbol).strip() == "":
         return None
 
     yf_symbol = _normalize_ticker(str(ticker_symbol))
+    if fx_rates is None:
+        fx_rates = {"USD": 1.0}
 
     max_retries = 4
     for attempt in range(max_retries + 1):
@@ -448,14 +540,77 @@ def _process_row(row, *, debug=False):
                     )
                 return None
 
+            # --- Filter A: Quote type guard (ETFs, warrants, CBBCs) ---
+            quote_type = info.get("quoteType")
+            if quote_type and quote_type != "EQUITY":
+                if debug:
+                    print(
+                        f"[SKIP] {yf_symbol}: quoteType={quote_type} (not EQUITY)",
+                        file=sys.stderr,
+                    )
+                return None
+
+            # Extract price/currency early (needed for Filters B & C)
+            currency = info.get("currency")
+            price = info.get("currentPrice") or info.get("regularMarketPrice")
+            market_cap = info.get("marketCap")
+            avg_volume = info.get("averageVolume")
+
+            # --- Filter B: Minimum market cap (USD) ---
+            mcap_usd = None
+            if market_cap is not None and currency:
+                mcap_usd = _to_usd(market_cap, currency, fx_rates)
+            if (
+                min_mcap
+                and min_mcap > 0
+                and mcap_usd is not None
+                and mcap_usd < min_mcap
+            ):
+                if debug:
+                    print(
+                        f"[SKIP] {yf_symbol}: Micro-cap ${mcap_usd:,.0f} < ${min_mcap:,.0f}",
+                        file=sys.stderr,
+                    )
+                return None
+
+            # --- Filter C: Minimum daily dollar volume (USD) ---
+            turnover_usd = None
+            if avg_volume and price and currency:
+                local_turnover = avg_volume * price
+                # Pence correction for .L tickers (same as liquidity_calculation_tool)
+                if yf_symbol.endswith(".L"):
+                    local_turnover = local_turnover / 100.0
+                turnover_usd = _to_usd(local_turnover, currency, fx_rates)
+            if (
+                min_volume
+                and min_volume > 0
+                and turnover_usd is not None
+                and turnover_usd < min_volume
+            ):
+                if debug:
+                    print(
+                        f"[SKIP] {yf_symbol}: Low volume ${turnover_usd:,.0f} < ${min_volume:,.0f}",
+                        file=sys.stderr,
+                    )
+                return None
+
+            # --- Populate standard fields ---
             row["Company_YF"] = info.get("longName") or info.get("shortName")
             row["P/E"] = info.get("trailingPE")
+            row["Forward_PE"] = info.get("forwardPE")
             row["ROE"] = info.get("returnOnEquity")
             row["ROA"] = info.get("returnOnAssets")
             row["Debt_to_Equity"] = info.get("debtToEquity")
             row["Operating_Cash_Flow"] = info.get("operatingCashflow")
             row["Free_Cash_Flow"] = info.get("freeCashflow")
-            row["Market_Cap"] = info.get("marketCap")
+            row["Net_Income"] = info.get("netIncomeToCommon")
+            row["Total_Debt"] = info.get("totalDebt")
+            row["Total_Cash"] = info.get("totalCash")
+            row["Market_Cap"] = market_cap
+            row["Market_Cap_USD"] = mcap_usd
+            row["Avg_Volume"] = avg_volume
+            row["Daily_Turnover_USD"] = turnover_usd
+            row["Analyst_Coverage"] = info.get("numberOfAnalystOpinions")
 
             if (
                 row["Operating_Cash_Flow"]
@@ -466,10 +621,46 @@ def _process_row(row, *, debug=False):
             else:
                 row["OCF_Yield"] = None
 
+            # Earnings quality: OCF / Net Income
+            ocf = row["Operating_Cash_Flow"]
+            ni = row["Net_Income"]
+            if ocf and ni and ni > 0:
+                row["OCF_NI_Ratio"] = ocf / ni
+            else:
+                row["OCF_NI_Ratio"] = None
+
+            # Net Debt/Equity: (Debt - Cash) / Equity
+            de = row["Debt_to_Equity"]
+            total_debt = row["Total_Debt"]
+            total_cash = row["Total_Cash"]
+            if de and de > 0 and total_debt and total_cash is not None:
+                equity = total_debt / (de / 100.0)
+                if equity > 0:
+                    row["Net_Debt_to_Equity"] = (
+                        (total_debt - total_cash) / equity * 100.0
+                    )
+                else:
+                    row["Net_Debt_to_Equity"] = None
+            else:
+                row["Net_Debt_to_Equity"] = None
+
+            # Revenue history: count annual periods with positive revenue
+            row["Revenue_Years_Positive"] = None
+            try:
+                income_stmt = ticker.income_stmt
+                if income_stmt is not None and not income_stmt.empty:
+                    for label in ["Total Revenue", "Operating Revenue"]:
+                        if label in income_stmt.index:
+                            revenues = income_stmt.loc[label].dropna()
+                            row["Revenue_Years_Positive"] = int((revenues > 0).sum())
+                            break
+            except Exception:
+                pass
+
             row["YF_Sector"] = info.get("sector")
             row["YF_Industry"] = info.get("industry")
-            row["Price"] = info.get("currentPrice")
-            row["Currency_YF"] = info.get("currency")
+            row["Price"] = price
+            row["Currency_YF"] = currency
 
             return row
 
@@ -508,13 +699,26 @@ def _safe_float(val):
         return None
 
 
-def _passes_filters(row, *, max_pe, min_roe, min_roa, max_de, debug=False):
+def _passes_filters(
+    row,
+    *,
+    max_pe,
+    min_roe,
+    min_roa,
+    max_de,
+    min_ocf_ni_ratio=0.8,
+    min_revenue_years=3,
+    max_coverage=30,
+    ocf_waiver=True,
+    debug=False,
+):
     """Apply hard financial filters to an enriched row."""
     if not row:
         return False
 
     ticker = row.get("YF_Ticker", "?")
 
+    # --- P/E ---
     pe = _safe_float(row.get("P/E"))
     if pe is None:
         if debug:
@@ -525,6 +729,7 @@ def _passes_filters(row, *, max_pe, min_roe, min_roa, max_de, debug=False):
             print(f"[SKIP] {ticker}: P/E {pe} > {max_pe}", file=sys.stderr)
         return False
 
+    # --- Profitability (ROE OR ROA) ---
     roe = _safe_float(row.get("ROE"))
     roa = _safe_float(row.get("ROA"))
     roe_threshold = min_roe / 100.0
@@ -540,21 +745,101 @@ def _passes_filters(row, *, max_pe, min_roe, min_roa, max_de, debug=False):
             )
         return False
 
+    # --- Leverage: Gross D/E with net debt fallback ---
     de = _safe_float(row.get("Debt_to_Equity"))
     if de is None:
         if debug:
             print(f"[SKIP] {ticker}: Missing D/E", file=sys.stderr)
         return False
     if de > max_de:
-        if debug:
-            print(f"[SKIP] {ticker}: High Debt ({de}%)", file=sys.stderr)
-        return False
+        # Fallback: net debt/equity = (Debt - Cash) / Equity
+        net_de = _safe_float(row.get("Net_Debt_to_Equity"))
+        if net_de is not None and net_de <= max_de:
+            if debug:
+                print(
+                    f"[NOTE] {ticker}: Gross D/E {de}% > {max_de}%, "
+                    f"but Net D/E {net_de:.0f}% OK",
+                    file=sys.stderr,
+                )
+        else:
+            if debug:
+                net_str = f"{net_de:.0f}%" if net_de is not None else "N/A"
+                print(
+                    f"[SKIP] {ticker}: High Debt (D/E={de}%, Net D/E={net_str})",
+                    file=sys.stderr,
+                )
+            return False
 
+    # --- Filter D: Maximum analyst coverage ---
+    if max_coverage and max_coverage > 0:
+        coverage = row.get("Analyst_Coverage")
+        if coverage is not None:
+            try:
+                coverage = int(coverage)
+                if coverage > max_coverage:
+                    if debug:
+                        print(
+                            f"[SKIP] {ticker}: Too many analysts ({coverage} > {max_coverage})",
+                            file=sys.stderr,
+                        )
+                    return False
+            except (ValueError, TypeError):
+                pass  # fail-open: non-numeric coverage → skip check
+
+    # --- Operating Cash Flow > 0 (with Filter E: forward-PE recovery waiver) ---
     ocf = _safe_float(row.get("Operating_Cash_Flow"))
     if ocf is None or ocf <= 0:
-        if debug:
-            print(f"[SKIP] {ticker}: Negative/No OCF", file=sys.stderr)
-        return False
+        # Filter E: waiver for transient OCF dips when forward PE signals recovery
+        if ocf_waiver and ocf is not None and ocf <= 0:
+            fwd_pe = _safe_float(row.get("Forward_PE"))
+            trailing_pe = _safe_float(row.get("P/E"))
+            if (
+                fwd_pe is not None
+                and trailing_pe is not None
+                and fwd_pe < trailing_pe
+                and fwd_pe < 15
+            ):
+                if debug:
+                    print(
+                        f"[WAIVER] {ticker}: OCF negative but forward PE {fwd_pe:.1f} "
+                        f"< trailing {trailing_pe:.1f} and < 15 → recovery expected",
+                        file=sys.stderr,
+                    )
+                # Fall through to remaining checks (don't return False)
+            else:
+                if debug:
+                    print(f"[SKIP] {ticker}: Negative/No OCF", file=sys.stderr)
+                return False
+        else:
+            if debug:
+                print(f"[SKIP] {ticker}: Negative/No OCF", file=sys.stderr)
+            return False
+
+    # --- Earnings quality: OCF / Net Income (when NI positive) ---
+    ni = _safe_float(row.get("Net_Income"))
+    if ni is not None and ni > 0:
+        ocf_ni = _safe_float(row.get("OCF_NI_Ratio"))
+        if ocf_ni is not None and ocf_ni < min_ocf_ni_ratio:
+            if debug:
+                print(
+                    f"[SKIP] {ticker}: Low earnings quality "
+                    f"(OCF/NI={ocf_ni:.2f} < {min_ocf_ni_ratio})",
+                    file=sys.stderr,
+                )
+            return False
+
+    # --- Revenue history: 3+ years of positive revenue ---
+    rev_years = row.get("Revenue_Years_Positive")
+    if rev_years is not None:
+        rev_years = int(rev_years)
+        if rev_years < min_revenue_years:
+            if debug:
+                print(
+                    f"[SKIP] {ticker}: Insufficient revenue history "
+                    f"({rev_years}yr positive < {min_revenue_years}yr required)",
+                    file=sys.stderr,
+                )
+            return False
 
     if debug:
         print(f"[KEEP] {ticker}: P/E={pe}, D/E={de}%, ROE={roe}", file=sys.stderr)
@@ -604,6 +889,10 @@ def fetch_and_filter(
     min_roe: float = 13.0,
     min_roa: float = 6.0,
     max_de: float = 150.0,
+    min_mcap: float = 50_000_000,
+    min_volume: float = 100_000,
+    max_coverage: int = 30,
+    ocf_waiver: bool = True,
     workers: int = 4,
     debug: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -614,14 +903,28 @@ def fetch_and_filter(
     records = tickers_df.to_dict("records")
     total = len(records)
 
+    # Fetch FX rates once (parallel, ~2s)
+    print("Fetching live FX rates...", file=sys.stderr, end=" ")
+    fx_rates = _fetch_fx_rates()
+    print(f"OK ({len(fx_rates)} currencies)", file=sys.stderr)
+
     print(
         f"Scanning {total} tickers with {workers} workers...",
         file=sys.stderr,
     )
-    print(
-        f"Criteria: P/E<{max_pe}, ROE>{min_roe}%/ROA>{min_roa}%, D/E<{max_de}%, OCF>0",
-        file=sys.stderr,
-    )
+    criteria_parts = [
+        f"P/E<{max_pe}",
+        f"ROE>{min_roe}%/ROA>{min_roa}%",
+        f"D/E<{max_de}%",
+        "OCF>0",
+    ]
+    if min_mcap and min_mcap > 0:
+        criteria_parts.append(f"MCap>${min_mcap/1e6:.0f}M")
+    if min_volume and min_volume > 0:
+        criteria_parts.append(f"Vol>${min_volume/1e3:.0f}K")
+    if max_coverage and max_coverage > 0:
+        criteria_parts.append(f"Analysts<={max_coverage}")
+    print(f"Criteria: {', '.join(criteria_parts)}", file=sys.stderr)
 
     passing = []
     all_enriched = []
@@ -631,7 +934,15 @@ def fetch_and_filter(
     try:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_row = {
-                executor.submit(_process_row, row, debug=debug): row for row in records
+                executor.submit(
+                    _process_row,
+                    row,
+                    fx_rates=fx_rates,
+                    min_mcap=min_mcap,
+                    min_volume=min_volume,
+                    debug=debug,
+                ): row
+                for row in records
             }
 
             for future in as_completed(future_to_row):
@@ -647,6 +958,8 @@ def fetch_and_filter(
                             min_roe=min_roe,
                             min_roa=min_roa,
                             max_de=max_de,
+                            max_coverage=max_coverage,
+                            ocf_waiver=ocf_waiver,
                             debug=debug,
                         ):
                             passing.append(data)
@@ -784,6 +1097,29 @@ Examples:
         help="Max D/E %% (default: 150.0, i.e. 1.5x)",
     )
     parser.add_argument(
+        "--min-mcap",
+        type=float,
+        default=50_000_000,
+        help="Min market cap in USD (default: 50000000, set 0 to disable)",
+    )
+    parser.add_argument(
+        "--min-volume",
+        type=float,
+        default=100_000,
+        help="Min daily dollar volume in USD (default: 100000, set 0 to disable)",
+    )
+    parser.add_argument(
+        "--max-coverage",
+        type=int,
+        default=30,
+        help="Max analyst coverage count (default: 30, set 0 to disable)",
+    )
+    parser.add_argument(
+        "--no-ocf-waiver",
+        action="store_true",
+        help="Disable forward-PE recovery waiver for negative OCF",
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=DEFAULT_WORKERS,
@@ -826,6 +1162,10 @@ def main():
             min_roe=args.min_roe,
             min_roa=args.min_roa,
             max_de=args.max_de,
+            min_mcap=args.min_mcap,
+            min_volume=args.min_volume,
+            max_coverage=args.max_coverage,
+            ocf_waiver=not args.no_ocf_waiver,
             workers=args.workers,
             debug=args.debug,
         )
@@ -853,6 +1193,10 @@ def main():
         min_roe=args.min_roe,
         min_roa=args.min_roa,
         max_de=args.max_de,
+        min_mcap=args.min_mcap,
+        min_volume=args.min_volume,
+        max_coverage=args.max_coverage,
+        ocf_waiver=not args.no_ocf_waiver,
         workers=args.workers,
         debug=args.debug,
     )

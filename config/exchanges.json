@@ -1,6 +1,6 @@
 {
   "meta": {
-    "version": "3.2",
+    "version": "3.3",
     "description": "Full Exchange Listings — US-tradeable markets via IBKR. Set enabled:false to skip an exchange."
   },
   "exchanges": [
@@ -25,39 +25,42 @@
       "country": "Canada",
       "exchange_name": "Toronto Stock Exchange",
       "enabled": true,
-      "method": "scrape_html",
-      "source_url": "https://stockanalysis.com/list/toronto-stock-exchange/",
+      "method": "download_json",
+      "source_url": "https://www.tsx.com/json/company-directory/search/tsx/%5E*",
       "yahoo_suffix": ".TO",
-      "min_expected_rows": 100,
+      "min_expected_rows": 500,
       "params": {
-        "ticker_col": "Symbol",
-        "name_col": "Company Name"
+        "root_key": "results",
+        "ticker_col": "symbol",
+        "name_col": "name"
       }
     },
     {
       "country": "Canada",
       "exchange_name": "TSX Venture",
       "enabled": true,
-      "method": "scrape_html",
-      "source_url": "https://stockanalysis.com/list/tsx-venture-exchange/",
+      "method": "download_json",
+      "source_url": "https://www.tsx.com/json/company-directory/search/tsxv/%5E*",
       "yahoo_suffix": ".V",
-      "min_expected_rows": 100,
+      "min_expected_rows": 500,
       "params": {
-        "ticker_col": "Symbol",
-        "name_col": "Company Name"
+        "root_key": "results",
+        "ticker_col": "symbol",
+        "name_col": "name"
       }
     },
     {
       "country": "United Kingdom",
       "exchange_name": "London Stock Exchange",
       "enabled": true,
-      "method": "scrape_html",
-      "source_url": "https://stockanalysis.com/list/london-stock-exchange/",
+      "method": "download_excel",
+      "source_url": "https://docs.londonstockexchange.com/sites/default/files/documents/List%20of%20SETS%20securities_0.xls",
       "yahoo_suffix": ".L",
-      "min_expected_rows": 100,
+      "min_expected_rows": 400,
       "params": {
-        "ticker_col": "Symbol",
-        "name_col": "Company Name"
+        "skip_rows": 3,
+        "ticker_col": "Mnemonic",
+        "name_col": "Long Name"
       }
     },
     {
@@ -104,16 +107,15 @@
     },
     {
       "country": "Switzerland",
-      "exchange_name": "SMI",
+      "exchange_name": "SIX Swiss Exchange",
       "enabled": true,
       "method": "scrape_html",
-      "source_url": "https://en.wikipedia.org/wiki/Swiss_Market_Index",
+      "source_url": "https://stockanalysis.com/list/six-swiss-exchange/",
       "yahoo_suffix": ".SW",
-      "min_expected_rows": 15,
+      "min_expected_rows": 100,
       "params": {
-        "table_index": 1,
-        "ticker_col": "Ticker",
-        "name_col": "Company"
+        "ticker_col": "Symbol",
+        "name_col": "Company Name"
       }
     },
     {
@@ -131,16 +133,15 @@
     },
     {
       "country": "Spain",
-      "exchange_name": "IBEX 35",
+      "exchange_name": "Madrid Stock Exchange",
       "enabled": true,
       "method": "scrape_html",
-      "source_url": "https://en.wikipedia.org/wiki/IBEX_35",
+      "source_url": "https://stockanalysis.com/list/madrid-stock-exchange/",
       "yahoo_suffix": ".MC",
-      "min_expected_rows": 20,
+      "min_expected_rows": 80,
       "params": {
-        "table_index": 1,
-        "ticker_col": "Ticker",
-        "name_col": "Company"
+        "ticker_col": "Symbol",
+        "name_col": "Company Name"
       }
     },
     {
@@ -178,26 +179,26 @@
       "country": "Taiwan",
       "exchange_name": "Taiwan Stock Exchange (TWSE)",
       "enabled": true,
-      "method": "scrape_html",
-      "source_url": "https://stockanalysis.com/list/taiwan-stock-exchange/",
+      "method": "download_json",
+      "source_url": "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL",
       "yahoo_suffix": ".TW",
-      "min_expected_rows": 100,
+      "min_expected_rows": 500,
       "params": {
-        "ticker_col": "Symbol",
-        "name_col": "Company Name"
+        "ticker_col": "Code",
+        "name_col": "Name"
       }
     },
     {
       "country": "Taiwan",
       "exchange_name": "Taipei Exchange (TPEX)",
       "enabled": true,
-      "method": "scrape_html",
-      "source_url": "https://stockanalysis.com/list/taipei-exchange/",
+      "method": "download_json",
+      "source_url": "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes",
       "yahoo_suffix": ".TWO",
-      "min_expected_rows": 100,
+      "min_expected_rows": 400,
       "params": {
-        "ticker_col": "Symbol",
-        "name_col": "Company Name"
+        "ticker_col": "SecuritiesCompanyCode",
+        "name_col": "CompanyName"
       }
     },
     {

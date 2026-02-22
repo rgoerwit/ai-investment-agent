@@ -290,7 +290,7 @@ poetry run pytest tests/ -v
 Find undervalued international stocks end-to-end — no manual steps:
 
 ```bash
-# One command: scrape 18 exchanges → filter by fundamentals → quick-screen
+# One command: scrape 18+ exchanges → filter by fundamentals → quick-screen
 # all candidates → full analysis on BUY verdicts only
 ./scripts/run_pipeline.sh
 
@@ -308,9 +308,11 @@ poetry run python scripts/find_gems.py --output scratch/gems.txt
 # Resume after a crash (already-processed tickers are skipped automatically)
 ./scripts/run_pipeline.sh --skip-scrape scratch/gems_2026-02-19.txt
 
-# Overnight run on macOS
-caffeinate -i ./scripts/run_pipeline.sh
+# Overnight run on macOS (--yes skips confirmation prompts)
+caffeinate -i ./scripts/run_pipeline.sh --yes
 ```
+
+The pipeline pauses before each AI stage to show a summary (ticker count, estimated time, output location) and asks for confirmation. Use `--yes` / `-y` to skip prompts for unattended runs.
 
 Output lands in `scratch/`: quick-screen reports (`*_quick.md`), full reports for BUYs, and a `buys_YYYY-MM-DD.txt` summary.
 

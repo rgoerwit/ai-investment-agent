@@ -30,10 +30,18 @@ class TestPassesFilters:
         base = {
             "YF_Ticker": "TEST.T",
             "P/E": 12.0,
+            "Forward_PE": None,
             "ROE": 0.15,
             "ROA": 0.08,
             "Debt_to_Equity": 80.0,
             "Operating_Cash_Flow": 1_000_000,
+            "Net_Income": 800_000,
+            "OCF_NI_Ratio": 1.25,
+            "Net_Debt_to_Equity": 50.0,
+            "Total_Debt": 500_000,
+            "Total_Cash": 200_000,
+            "Revenue_Years_Positive": 4,
+            "Analyst_Coverage": 5,
         }
         base.update(overrides)
         return base
@@ -69,8 +77,64 @@ class TestPassesFilters:
         assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is False
 
     def test_high_de_fails(self):
-        row = self._make_row(Debt_to_Equity=200.0)
+        row = self._make_row(Debt_to_Equity=200.0, Net_Debt_to_Equity=180.0)
         assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is False
+
+    def test_high_gross_de_passes_via_net_debt_fallback(self):
+        """Gross D/E above threshold but net D/E below should pass."""
+        row = self._make_row(Debt_to_Equity=200.0, Net_Debt_to_Equity=100.0)
+        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
+
+    def test_high_gross_de_no_net_debt_fails(self):
+        """Gross D/E above threshold with no net debt data should fail."""
+        row = self._make_row(Debt_to_Equity=200.0, Net_Debt_to_Equity=None)
+        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is False
+
+    # --- OCF / Net Income earnings quality ---
+
+    def test_low_ocf_ni_ratio_fails(self):
+        """OCF/NI below 0.8 with positive NI should fail."""
+        row = self._make_row(
+            Net_Income=1_000_000, OCF_NI_Ratio=0.5, Operating_Cash_Flow=500_000
+        )
+        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is False
+
+    def test_good_ocf_ni_ratio_passes(self):
+        """OCF/NI above 0.8 should pass."""
+        row = self._make_row(Net_Income=800_000, OCF_NI_Ratio=1.25)
+        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
+
+    def test_negative_ni_skips_ocf_ni_check(self):
+        """When NI is negative, OCF/NI check should be skipped entirely."""
+        row = self._make_row(Net_Income=-500_000, OCF_NI_Ratio=None)
+        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
+
+    def test_missing_ni_skips_ocf_ni_check(self):
+        """When NI is None, OCF/NI check should be skipped."""
+        row = self._make_row(Net_Income=None, OCF_NI_Ratio=None)
+        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
+
+    # --- Revenue history ---
+
+    def test_insufficient_revenue_history_fails(self):
+        """Fewer than 3 years of positive revenue should fail."""
+        row = self._make_row(Revenue_Years_Positive=2)
+        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is False
+
+    def test_sufficient_revenue_history_passes(self):
+        """3+ years of positive revenue should pass."""
+        row = self._make_row(Revenue_Years_Positive=4)
+        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
+
+    def test_missing_revenue_history_passes(self):
+        """When revenue data unavailable, check should be skipped (no penalty)."""
+        row = self._make_row(Revenue_Years_Positive=None)
+        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
+
+    def test_exactly_three_revenue_years_passes(self):
+        """Exactly 3 years should pass (boundary check)."""
+        row = self._make_row(Revenue_Years_Positive=3)
+        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
 
     def test_negative_ocf_fails(self):
         row = self._make_row(Operating_Cash_Flow=-500)
@@ -389,13 +453,15 @@ class TestFetchAndFilter:
             "returnOnEquity": 0.15,
             "returnOnAssets": 0.08,
             "debtToEquity": 80.0,
-            "operatingCashflow": 1_000_000,
-            "freeCashflow": 500_000,
-            "marketCap": 10_000_000,
+            "operatingCashflow": 1_000_000_000,
+            "freeCashflow": 500_000_000,
+            "marketCap": 100_000_000_000,  # ¥100B (~$670M USD)
+            "averageVolume": 1_000_000,
             "sector": "Industrials",
             "industry": "Auto Manufacturers",
             "longName": "Test Corp",
             "currency": "JPY",
+            "quoteType": "EQUITY",
         }
 
     @staticmethod
@@ -548,6 +614,10 @@ class TestCLIParsing:
         assert args.min_roe == 13.0
         assert args.min_roa == 6.0
         assert args.max_de == 150.0
+        assert args.min_mcap == 50_000_000
+        assert args.min_volume == 100_000
+        assert args.max_coverage == 30
+        assert args.no_ocf_waiver is False
         assert args.workers == 4
         assert args.debug is False
         assert args.include_us is False
@@ -662,6 +732,478 @@ class TestApplyFilters:
         config = {"params": {"filter": {"NonExistent": "X"}}}
         result = find_gems._apply_filters(df, config)
         assert len(result) == 2
+
+
+# ============================================================
+# TestToUsd — FX conversion helper
+# ============================================================
+class TestToUsd:
+    """Unit tests for _to_usd() helper."""
+
+    def test_usd_identity(self):
+        rates = {"USD": 1.0, "JPY": 0.0067}
+        assert find_gems._to_usd(1000, "USD", rates) == 1000
+
+    def test_jpy_conversion(self):
+        rates = {"USD": 1.0, "JPY": 0.0067}
+        result = find_gems._to_usd(150_000, "JPY", rates)
+        assert result == pytest.approx(150_000 * 0.0067)
+
+    def test_unknown_currency_returns_none(self):
+        rates = {"USD": 1.0}
+        assert find_gems._to_usd(1000, "XYZ", rates) is None
+
+    def test_gbp_pence_normalization(self):
+        """GBp (pence) should be divided by 100 and converted as GBP."""
+        rates = {"USD": 1.0, "GBP": 1.27}
+        result = find_gems._to_usd(10000, "GBp", rates)
+        # 10000 pence = 100 GBP * 1.27 = 127 USD
+        assert result == pytest.approx(100 * 1.27)
+
+    def test_none_value_returns_none(self):
+        rates = {"USD": 1.0, "JPY": 0.0067}
+        assert find_gems._to_usd(None, "JPY", rates) is None
+
+    def test_none_currency_returns_none(self):
+        rates = {"USD": 1.0}
+        assert find_gems._to_usd(1000, None, rates) is None
+
+
+# ============================================================
+# TestQuoteTypeGuard — Filter A
+# ============================================================
+class TestQuoteTypeGuard:
+    """Filter A: quoteType must be EQUITY."""
+
+    @staticmethod
+    def _make_info(**overrides):
+        base = {
+            "regularMarketPrice": 100,
+            "currentPrice": 100,
+            "trailingPE": 10,
+            "returnOnEquity": 0.15,
+            "returnOnAssets": 0.08,
+            "debtToEquity": 50,
+            "operatingCashflow": 1_000_000,
+            "marketCap": 1_000_000_000,
+            "currency": "USD",
+            "quoteType": "EQUITY",
+        }
+        base.update(overrides)
+        return base
+
+    def test_etf_rejected(self):
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(quoteType="ETF")
+        row = {"YF_Ticker": "VTI"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(row, debug=True)
+
+        assert result is None
+
+    def test_equity_passes(self):
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(quoteType="EQUITY")
+        row = {"YF_Ticker": "7203.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(row)
+
+        assert result is not None
+
+    def test_missing_quotetype_passes(self):
+        """If quoteType is absent, don't reject (fail-open)."""
+        info = self._make_info()
+        del info["quoteType"]
+        mock_ticker = MagicMock()
+        mock_ticker.info = info
+        row = {"YF_Ticker": "UNKNOWN.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(row)
+
+        assert result is not None
+
+    def test_warrant_rejected(self):
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(quoteType="WARRANT")
+        row = {"YF_Ticker": "W001.HK"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(row)
+
+        assert result is None
+
+
+# ============================================================
+# TestMarketCapFilter — Filter B
+# ============================================================
+class TestMarketCapFilter:
+    """Filter B: market cap USD must exceed threshold."""
+
+    @staticmethod
+    def _make_info(**overrides):
+        base = {
+            "regularMarketPrice": 100,
+            "currentPrice": 100,
+            "trailingPE": 10,
+            "returnOnEquity": 0.15,
+            "returnOnAssets": 0.08,
+            "debtToEquity": 50,
+            "operatingCashflow": 1_000_000,
+            "marketCap": 1_000_000_000,
+            "currency": "USD",
+            "quoteType": "EQUITY",
+        }
+        base.update(overrides)
+        return base
+
+    def test_micro_cap_rejected(self):
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(marketCap=10_000_000, currency="USD")
+        row = {"YF_Ticker": "TINY.V"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(
+                    row, fx_rates={"USD": 1.0}, min_mcap=50_000_000
+                )
+
+        assert result is None
+
+    def test_mid_cap_passes(self):
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(marketCap=500_000_000, currency="USD")
+        row = {"YF_Ticker": "MID.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(
+                    row, fx_rates={"USD": 1.0}, min_mcap=50_000_000
+                )
+
+        assert result is not None
+
+    def test_missing_marketcap_passes(self):
+        """Missing market cap should not reject (fail-open)."""
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(marketCap=None, currency="USD")
+        row = {"YF_Ticker": "NOMC.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(
+                    row, fx_rates={"USD": 1.0}, min_mcap=50_000_000
+                )
+
+        assert result is not None
+
+    def test_unknown_currency_passes(self):
+        """Unknown currency → can't convert → fail-open."""
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(marketCap=10_000_000, currency="XYZ")
+        row = {"YF_Ticker": "WEIRD.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(
+                    row, fx_rates={"USD": 1.0}, min_mcap=50_000_000
+                )
+
+        assert result is not None
+
+    def test_jpy_conversion_applied(self):
+        """JPY market cap should be converted to USD before threshold check."""
+        # 5B JPY * 0.0067 = 33.5M USD → below $50M threshold
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(marketCap=5_000_000_000, currency="JPY")
+        row = {"YF_Ticker": "JPSMALL.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(
+                    row, fx_rates={"USD": 1.0, "JPY": 0.0067}, min_mcap=50_000_000
+                )
+
+        assert result is None  # 33.5M < 50M
+
+    def test_disabled_when_zero(self):
+        """min_mcap=0 should disable the check."""
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(marketCap=1_000, currency="USD")
+        row = {"YF_Ticker": "MICRO.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(row, fx_rates={"USD": 1.0}, min_mcap=0)
+
+        assert result is not None
+
+
+# ============================================================
+# TestVolumeFilter — Filter C
+# ============================================================
+class TestVolumeFilter:
+    """Filter C: daily dollar volume must exceed threshold."""
+
+    @staticmethod
+    def _make_info(**overrides):
+        base = {
+            "regularMarketPrice": 100,
+            "currentPrice": 100,
+            "trailingPE": 10,
+            "returnOnEquity": 0.15,
+            "returnOnAssets": 0.08,
+            "debtToEquity": 50,
+            "operatingCashflow": 1_000_000,
+            "marketCap": 1_000_000_000,
+            "averageVolume": 100_000,
+            "currency": "USD",
+            "quoteType": "EQUITY",
+        }
+        base.update(overrides)
+        return base
+
+    def test_low_volume_rejected(self):
+        # 500 shares * $10 = $5,000/day → below $100K
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(averageVolume=500, currentPrice=10)
+        row = {"YF_Ticker": "ILLIQUID.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(
+                    row, fx_rates={"USD": 1.0}, min_volume=100_000
+                )
+
+        assert result is None
+
+    def test_adequate_volume_passes(self):
+        # 10,000 shares * $50 = $500K/day → above $100K
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(averageVolume=10_000, currentPrice=50)
+        row = {"YF_Ticker": "LIQUID.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(
+                    row, fx_rates={"USD": 1.0}, min_volume=100_000
+                )
+
+        assert result is not None
+
+    def test_london_pence_correction(self):
+        """For .L tickers, price*volume should be divided by 100 (pence→GBP)."""
+        # 50,000 shares * 500p = 25,000,000p → /100 = 250,000 GBP * 1.27 = 317,500 USD
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(
+            averageVolume=50_000, currentPrice=500, currency="GBP"
+        )
+        row = {"YF_Ticker": "VOD.L"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(
+                    row,
+                    fx_rates={"USD": 1.0, "GBP": 1.27},
+                    min_volume=100_000,
+                )
+
+        assert result is not None
+        # turnover_usd should be ~317,500 (above threshold)
+        assert result["Daily_Turnover_USD"] == pytest.approx(
+            50_000 * 500 / 100.0 * 1.27, rel=0.01
+        )
+
+    def test_missing_volume_passes(self):
+        """Missing averageVolume should not reject (fail-open)."""
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(averageVolume=None)
+        row = {"YF_Ticker": "NOVOL.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(
+                    row, fx_rates={"USD": 1.0}, min_volume=100_000
+                )
+
+        assert result is not None
+
+    def test_missing_price_passes(self):
+        """Missing price should not reject (fail-open)."""
+        mock_ticker = MagicMock()
+        info = self._make_info(averageVolume=100)
+        info["currentPrice"] = None
+        info["regularMarketPrice"] = None
+        mock_ticker.info = info
+        row = {"YF_Ticker": "NOPRICE.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(
+                    row, fx_rates={"USD": 1.0}, min_volume=100_000
+                )
+
+        # Missing price means we can't compute turnover → fail-open
+        assert result is not None
+
+
+# ============================================================
+# TestCoverageFilter — Filter D
+# ============================================================
+class TestCoverageFilter:
+    """Filter D: analyst coverage must not exceed threshold."""
+
+    KWARGS = {"max_pe": 18.0, "min_roe": 13.0, "min_roa": 6.0, "max_de": 150.0}
+
+    @staticmethod
+    def _make_row(**overrides):
+        base = {
+            "YF_Ticker": "TEST.T",
+            "P/E": 12.0,
+            "Forward_PE": None,
+            "ROE": 0.15,
+            "ROA": 0.08,
+            "Debt_to_Equity": 80.0,
+            "Operating_Cash_Flow": 1_000_000,
+            "Net_Income": 800_000,
+            "OCF_NI_Ratio": 1.25,
+            "Net_Debt_to_Equity": 50.0,
+            "Total_Debt": 500_000,
+            "Total_Cash": 200_000,
+            "Revenue_Years_Positive": 4,
+            "Analyst_Coverage": 5,
+        }
+        base.update(overrides)
+        return base
+
+    def test_high_coverage_rejected(self):
+        row = self._make_row(Analyst_Coverage=35)
+        assert find_gems._passes_filters(row, **self.KWARGS, max_coverage=30) is False
+
+    def test_moderate_coverage_passes(self):
+        row = self._make_row(Analyst_Coverage=12)
+        assert find_gems._passes_filters(row, **self.KWARGS, max_coverage=30) is True
+
+    def test_none_coverage_passes(self):
+        """Missing coverage data should not reject (fail-open)."""
+        row = self._make_row(Analyst_Coverage=None)
+        assert find_gems._passes_filters(row, **self.KWARGS, max_coverage=30) is True
+
+    def test_boundary_coverage_passes(self):
+        """Exactly at threshold (30) should pass (> not >=)."""
+        row = self._make_row(Analyst_Coverage=30)
+        assert find_gems._passes_filters(row, **self.KWARGS, max_coverage=30) is True
+
+    def test_disabled_when_zero(self):
+        """max_coverage=0 should disable the check."""
+        row = self._make_row(Analyst_Coverage=100)
+        assert find_gems._passes_filters(row, **self.KWARGS, max_coverage=0) is True
+
+
+# ============================================================
+# TestOCFWaiver — Filter E
+# ============================================================
+class TestOCFWaiver:
+    """Filter E: forward-PE recovery waiver for negative OCF."""
+
+    KWARGS = {"max_pe": 18.0, "min_roe": 13.0, "min_roa": 6.0, "max_de": 150.0}
+
+    @staticmethod
+    def _make_row(**overrides):
+        base = {
+            "YF_Ticker": "TEST.T",
+            "P/E": 16.0,
+            "Forward_PE": None,
+            "ROE": 0.15,
+            "ROA": 0.08,
+            "Debt_to_Equity": 80.0,
+            "Operating_Cash_Flow": -500_000,
+            "Net_Income": 800_000,
+            "OCF_NI_Ratio": None,
+            "Net_Debt_to_Equity": 50.0,
+            "Total_Debt": 500_000,
+            "Total_Cash": 200_000,
+            "Revenue_Years_Positive": 4,
+            "Analyst_Coverage": 5,
+        }
+        base.update(overrides)
+        return base
+
+    def test_negative_ocf_with_recovery_passes(self):
+        """Negative OCF + forward PE < trailing PE and < 15 → waiver fires."""
+        row = self._make_row(
+            **{"P/E": 16.0},
+            Forward_PE=10.0,
+            Operating_Cash_Flow=-500_000,
+        )
+        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=True) is True
+
+    def test_negative_ocf_no_forward_pe_fails(self):
+        """Negative OCF + no forward PE data → strict fail."""
+        row = self._make_row(Forward_PE=None, Operating_Cash_Flow=-500_000)
+        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=True) is False
+
+    def test_negative_ocf_forward_pe_too_high_fails(self):
+        """Negative OCF + forward PE >= 15 → waiver doesn't fire."""
+        row = self._make_row(
+            **{"P/E": 18.0},
+            Forward_PE=16.0,
+            Operating_Cash_Flow=-500_000,
+        )
+        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=True) is False
+
+    def test_negative_ocf_forward_pe_above_trailing_fails(self):
+        """Negative OCF + forward PE >= trailing PE → no recovery signal."""
+        row = self._make_row(
+            **{"P/E": 10.0},
+            Forward_PE=12.0,
+            Operating_Cash_Flow=-500_000,
+        )
+        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=True) is False
+
+    def test_waiver_disabled_via_flag(self):
+        """With ocf_waiver=False, even valid recovery signals are rejected."""
+        row = self._make_row(
+            **{"P/E": 16.0},
+            Forward_PE=10.0,
+            Operating_Cash_Flow=-500_000,
+        )
+        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=False) is False
+
+    def test_positive_ocf_unaffected(self):
+        """Positive OCF should pass regardless of waiver setting."""
+        row = self._make_row(
+            **{"P/E": 12.0},
+            Operating_Cash_Flow=1_000_000,
+            Net_Income=800_000,
+            OCF_NI_Ratio=1.25,
+        )
+        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=True) is True
+        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=False) is True
+
+    def test_zero_ocf_with_recovery_passes(self):
+        """OCF == 0 + recovery signal → waiver fires."""
+        row = self._make_row(
+            **{"P/E": 16.0},
+            Forward_PE=10.0,
+            Operating_Cash_Flow=0,
+        )
+        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=True) is True
+
+    def test_none_ocf_fails_even_with_waiver(self):
+        """OCF is None (missing data) → fails; waiver only applies to actual negative/zero."""
+        row = self._make_row(
+            **{"P/E": 16.0},
+            Forward_PE=10.0,
+            Operating_Cash_Flow=None,
+        )
+        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=True) is False
 
 
 # ============================================================
