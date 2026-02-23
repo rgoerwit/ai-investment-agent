@@ -33,7 +33,6 @@ PFIC_KEYWORDS = [
     "INVESTMENT TRUST",
     "CLOSED END FUND",
     "CAPITAL",
-    "HOLDINGS",
 ]
 
 # VIE Risky Sectors (China)

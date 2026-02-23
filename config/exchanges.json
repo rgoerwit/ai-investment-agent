@@ -32,7 +32,10 @@
       "params": {
         "root_key": "results",
         "ticker_col": "symbol",
-        "name_col": "name"
+        "name_col": "name",
+        "exclude_filter": {
+          "symbol": "\\.(?:PR|DB|RT|WT)(?:\\.|$)"
+        }
       }
     },
     {
@@ -46,7 +49,10 @@
       "params": {
         "root_key": "results",
         "ticker_col": "symbol",
-        "name_col": "name"
+        "name_col": "name",
+        "exclude_filter": {
+          "symbol": "\\.(?:PR|DB|RT|WT)(?:\\.|$)"
+        }
       }
     },
     {

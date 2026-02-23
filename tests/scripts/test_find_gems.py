@@ -652,6 +652,90 @@ class TestCLIParsing:
 # ============================================================
 # TestNormalizeTicker — ticker format conversion
 # ============================================================
+# TestGenerateYfTicker — ticker generation from raw exchange data
+# ============================================================
+class TestGenerateYfTicker:
+    """Tests for _generate_yf_ticker() — static suffix, dynamic suffix, edge cases."""
+
+    @staticmethod
+    def _row(ticker_raw, market=None):
+        return {"Ticker_Raw": ticker_raw, "Market": market}
+
+    @staticmethod
+    def _static_config(suffix):
+        return {"yahoo_suffix": suffix, "params": {}}
+
+    @staticmethod
+    def _dynamic_config(suffix_map):
+        return {
+            "yahoo_suffix": "dynamic",
+            "params": {
+                "suffix_map": suffix_map,
+                "market_col": "Market",
+            },
+        }
+
+    # --- Static suffix ---
+
+    def test_static_suffix_appended(self):
+        row = self._row("7203")
+        config = self._static_config(".T")
+        assert find_gems._generate_yf_ticker(row, config) == "7203.T"
+
+    def test_trailing_dash_stripped_before_suffix(self):
+        """LSE SETS file emits mnemonics like 'JD-' → should produce 'JD.L'."""
+        row = self._row("JD-")
+        config = self._static_config(".L")
+        assert find_gems._generate_yf_ticker(row, config) == "JD.L"
+
+    def test_trailing_dash_only_becomes_none(self):
+        """A raw ticker that is nothing but a dash should return None."""
+        row = self._row("-")
+        config = self._static_config(".L")
+        assert find_gems._generate_yf_ticker(row, config) is None
+
+    def test_empty_raw_returns_none(self):
+        row = self._row("")
+        config = self._static_config(".T")
+        assert find_gems._generate_yf_ticker(row, config) is None
+
+    def test_nan_raw_returns_none(self):
+        row = self._row(float("nan"))
+        config = self._static_config(".T")
+        assert find_gems._generate_yf_ticker(row, config) is None
+
+    # --- Dynamic suffix ---
+
+    def test_dynamic_suffix_matched(self):
+        row = self._row("MC", market="Euronext Paris")
+        config = self._dynamic_config({"Paris": ".PA", "Amsterdam": ".AS"})
+        assert find_gems._generate_yf_ticker(row, config) == "MC.PA"
+
+    def test_dynamic_suffix_match_case_insensitive(self):
+        row = self._row("ASML", market="Euronext Amsterdam")
+        config = self._dynamic_config({"paris": ".PA", "amsterdam": ".AS"})
+        assert find_gems._generate_yf_ticker(row, config) == "ASML.AS"
+
+    def test_dynamic_suffix_no_match_returns_none(self):
+        """Euronext structured products with unrecognised market → None, not bare symbol."""
+        row = self._row("1DDD", market="EasyNext")
+        config = self._dynamic_config({"Paris": ".PA", "Amsterdam": ".AS"})
+        assert find_gems._generate_yf_ticker(row, config) is None
+
+    def test_dynamic_suffix_missing_market_col_returns_none(self):
+        """No market column value → can't resolve → None."""
+        row = self._row("2BGN")  # No Market key
+        config = self._dynamic_config({"Paris": ".PA"})
+        assert find_gems._generate_yf_ticker(row, config) is None
+
+    def test_dynamic_suffix_null_market_returns_none(self):
+        """Null market value → can't resolve → None."""
+        row = self._row("2BMED", market=None)
+        config = self._dynamic_config({"Paris": ".PA"})
+        assert find_gems._generate_yf_ticker(row, config) is None
+
+
+# ============================================================
 class TestNormalizeTicker:
     """Tests for _normalize_ticker() utility."""
 

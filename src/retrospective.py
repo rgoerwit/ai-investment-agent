@@ -190,6 +190,54 @@ def _extract_data_block_float(
     return None
 
 
+def _extract_trade_block_price(text: str, field: str) -> float | None:
+    """Extract a price from a TRADE_BLOCK field like 'ENTRY: 2,145 (Scaled Limit)'."""
+    pattern = rf"{field}:\s*(.+?)(?:\n|$)"
+    match = re.search(pattern, text, re.IGNORECASE)
+    if not match:
+        return None
+    raw = match.group(1).strip()
+    if raw.upper().startswith("N/A"):
+        return None
+    price_match = re.match(r"([\d,]+(?:\.\d+)?)", raw)
+    if price_match:
+        try:
+            return float(price_match.group(1).replace(",", ""))
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_trade_block_fields(trader_plan: str) -> dict[str, Any]:
+    """
+    Extract structured TRADE_BLOCK fields from trader output.
+
+    Zero LLM cost — pure regex. Backward-compatible: older JSONs
+    without these fields will have None values (handled by reconciler).
+
+    Returns dict with keys: entry_price, stop_price, target_1_price,
+    target_2_price, conviction.
+    """
+    if not trader_plan:
+        return {
+            "entry_price": None,
+            "stop_price": None,
+            "target_1_price": None,
+            "target_2_price": None,
+            "conviction": None,
+        }
+
+    conviction_match = re.search(r"CONVICTION:\s*(\w+)", trader_plan, re.IGNORECASE)
+
+    return {
+        "entry_price": _extract_trade_block_price(trader_plan, "ENTRY"),
+        "stop_price": _extract_trade_block_price(trader_plan, "STOP"),
+        "target_1_price": _extract_trade_block_price(trader_plan, "TARGET_1"),
+        "target_2_price": _extract_trade_block_price(trader_plan, "TARGET_2"),
+        "conviction": conviction_match.group(1) if conviction_match else None,
+    }
+
+
 def extract_snapshot(result: dict, ticker: str) -> dict[str, Any]:
     """
     Extract a compact prediction snapshot from an analysis result.
@@ -235,6 +283,10 @@ def extract_snapshot(result: dict, ticker: str) -> dict[str, Any]:
     except ImportError:
         fx_rate = 1.0
 
+    # TRADE_BLOCK extraction from trader plan (zero LLM cost — pure regex)
+    trader_plan = result.get("investment_analysis", {}).get("trader_plan", "") or ""
+    trade_block_fields = _extract_trade_block_fields(trader_plan)
+
     snapshot = {
         # Core verdict
         "verdict": verdict,
@@ -262,6 +314,8 @@ def extract_snapshot(result: dict, ticker: str) -> dict[str, Any]:
         ),
         "52w_high": _extract_data_block_float(fundamentals, "52W_HIGH"),
         "52w_low": _extract_data_block_float(fundamentals, "52W_LOW"),
+        # TRADE_BLOCK fields (structured for portfolio reconciliation)
+        **trade_block_fields,
         # Bear thesis excerpt
         "bear_risks_excerpt": _extract_bear_risks(result),
         # Exchange/currency/benchmark

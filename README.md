@@ -643,6 +643,46 @@ poetry install
 
 ---
 
+## IBKR Portfolio Management (Optional)
+
+For users who trade international equities via Interactive Brokers, an optional reconciliation tool bridges the gap between evaluator recommendations and live portfolio positions.
+
+```bash
+# Requires IBKR credentials in .env and the ibind optional dependency
+poetry install -E ibkr
+
+# Report only (no IBKR connection needed in --read-only mode)
+python scripts/portfolio_manager.py --read-only
+
+# Full reconciliation against live IBKR positions
+python scripts/portfolio_manager.py
+
+# With order size recommendations
+python scripts/portfolio_manager.py --recommend
+
+# Place orders interactively (per-order confirmation)
+python scripts/portfolio_manager.py --execute
+
+# Re-run evaluator on stale analyses and then reconcile
+python scripts/portfolio_manager.py --refresh-stale --quick
+```
+
+The tool compares live IBKR positions against the latest analysis JSONs in `results/` and produces position-aware actions:
+
+| Action | Trigger |
+|--------|---------|
+| **BUY** | Not held, evaluator says BUY, cash available |
+| **SELL** | Held + evaluator says SELL/DNI, or stop-loss breached |
+| **TRIM** | Held and overweight vs target allocation |
+| **HOLD** | Within target range, verdict is BUY |
+| **REVIEW** | Stale analysis, no analysis, or price target hit |
+
+Staleness detection flags analyses older than 14 days or with >15% price drift from the TRADE_BLOCK entry price. A configurable cash buffer (default 5% of portfolio) is reserved and never deployed into new positions.
+
+See `src/ibkr/` for the supporting modules and `src/ibkr_config.py` for credential configuration.
+
+---
+
 ## Investment Thesis (Built-In)
 
 The system enforces a **value-to-growth transition** strategy focused on:

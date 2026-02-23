@@ -18,6 +18,7 @@ Both original scripts remain untouched for backward compatibility.
 import argparse
 import io
 import json
+import logging
 import random
 import sys
 import time
@@ -27,6 +28,10 @@ from pathlib import Path
 import pandas as pd
 import requests
 import yfinance as yf
+
+# yfinance logs every 404 to stderr at ERROR level — suppress since missing
+# tickers are expected and handled by returning None in _process_row.
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 # --- CONSTANTS ---
 DEFAULT_CONFIG_PATH = "config/exchanges.json"
@@ -250,7 +255,15 @@ def _generate_yf_ticker(row, config):
             for key, sfx in suffix_map.items():
                 if key.lower() in market_val.lower():
                     return f"{raw}{sfx}"
-        return raw
+        # No market match → drop rather than emit unsuffixed ticker (guaranteed 404)
+        return None
+
+    # Strip trailing dashes from raw mnemonics before appending suffix.
+    # Some exchange files (e.g. LSE SETS) tag special-status securities with a
+    # trailing dash (e.g. "JD-", "RM-"). Yahoo Finance uses the plain ticker.
+    raw = raw.rstrip("-")
+    if not raw:
+        return None
 
     return f"{raw}{suffix}"
 
