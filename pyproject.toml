@@ -75,6 +75,7 @@ lxml = "^6.0.2"
 ddgs = ">=9.0.0"
 edinet-tools = {version = ">=0.2.0", optional = true}
 ibind = {version = ">=0.1.22", optional = true}
+pycryptodome = {version = ">=3.21", optional = true}  # Required by ibind OAuth 1.0a
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.0.2"
@@ -93,7 +94,7 @@ observability = ["opentelemetry-api", "opentelemetry-sdk"]
 consultant = ["langchain-openai"]  # Enable external consultant for cross-validation
 writer = ["langchain-anthropic"]  # Claude-based article writer
 filings = ["edinet-tools"]  # Japan EDINET filing API
-ibkr = ["ibind"]  # IBKR portfolio management partner tool
+ibkr = ["ibind", "pycryptodome"]  # IBKR portfolio management (pycryptodome for OAuth 1.0a)
 
 [build-system]
 requires = ["poetry-core"]

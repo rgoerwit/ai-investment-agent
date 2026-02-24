@@ -651,20 +651,31 @@ For users who trade international equities via Interactive Brokers, an optional 
 # Requires IBKR credentials in .env and the ibind optional dependency
 poetry install -E ibkr
 
+# All portfolio_manager.py commands require the Poetry venv.
+# Either prefix every command with `poetry run`, or activate once:
+source .venv/bin/activate   # then plain `python` works for the session
+
+# Verify credentials and IBKR connection before doing anything else
+poetry run python scripts/portfolio_manager.py --test-auth
+# Checks every required env var, validates RSA key files locally
+# (sign/verify + encrypt/decrypt round-trips), then opens a live
+# read-only session and prints account ID, portfolio value, and cash.
+# Prompts for IBKR_OAUTH_ACCESS_TOKEN_SECRET if it's not in .env.
+
 # Report only (no IBKR connection needed in --read-only mode)
-python scripts/portfolio_manager.py --read-only
+poetry run python scripts/portfolio_manager.py --read-only
 
 # Full reconciliation against live IBKR positions
-python scripts/portfolio_manager.py
+poetry run python scripts/portfolio_manager.py
 
 # With order size recommendations
-python scripts/portfolio_manager.py --recommend
+poetry run python scripts/portfolio_manager.py --recommend
 
 # Place orders interactively (per-order confirmation)
-python scripts/portfolio_manager.py --execute
+poetry run python scripts/portfolio_manager.py --execute
 
 # Re-run evaluator on stale analyses and then reconcile
-python scripts/portfolio_manager.py --refresh-stale --quick
+poetry run python scripts/portfolio_manager.py --refresh-stale --quick
 ```
 
 The tool compares live IBKR positions against the latest analysis JSONs in `results/` and produces position-aware actions:

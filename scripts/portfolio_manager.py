@@ -6,11 +6,15 @@ Compares live IBKR positions against the equity evaluator's latest
 analysis recommendations. Produces position-aware BUY/SELL/HOLD/TRIM/REVIEW
 actions that account for existing holdings.
 
-Usage:
-    python scripts/portfolio_manager.py                      # Report only
-    python scripts/portfolio_manager.py --recommend          # + order suggestions
-    python scripts/portfolio_manager.py --execute            # + place orders (with confirmation)
-    python scripts/portfolio_manager.py --read-only          # No IBKR connection (offline)
+Usage (requires Poetry venv — either activate it or prefix with `poetry run`):
+    poetry run python scripts/portfolio_manager.py --test-auth          # Verify IBKR credentials work
+    poetry run python scripts/portfolio_manager.py                      # Report only
+    poetry run python scripts/portfolio_manager.py --recommend          # + order suggestions
+    poetry run python scripts/portfolio_manager.py --execute            # + place orders (with confirmation)
+    poetry run python scripts/portfolio_manager.py --read-only          # No IBKR connection (offline)
+
+    # Or activate once: source .venv/bin/activate
+    # Then plain `python scripts/portfolio_manager.py` works for the session.
 
 Requires: poetry install -E ibkr
 """
@@ -38,17 +42,179 @@ from src.ibkr.order_builder import build_order_dict
 from src.ibkr.reconciler import load_latest_analyses, reconcile
 from src.ibkr.ticker_mapper import resolve_conid
 
+_IBKR_OAUTH_PORTAL = (
+    "https://ndcdyn.interactivebrokers.com/sso/Login?action=OAUTH&RL=1&ip2loc=US"
+)
+
 
 def _prompt_for_missing_secret(config) -> None:
     """Prompt for OAuth token secret if absent. Held in memory only — never written to disk."""
     if not config.get_oauth_access_token_secret():
         from pydantic import SecretStr
 
-        secret = getpass.getpass("IBKR OAuth Access Token Secret: ")
+        print(
+            f"\nIBKR OAuth Access Token Secret not set.\n"
+            f"Generate a fresh token at: {_IBKR_OAUTH_PORTAL}\n"
+            f"(Token and secret disappear when you leave that page — copy them immediately.)",
+            file=sys.stderr,
+        )
+        secret = getpass.getpass("Access Token Secret: ")
         if not secret:
             print("No secret provided. Cannot connect to IBKR.", file=sys.stderr)
             sys.exit(1)
         config.ibkr_oauth_access_token_secret = SecretStr(secret)
+
+
+# Required credentials checked before any IBKR connection attempt.
+# Each tuple is (ENV_VAR_NAME, getter_callable).
+# IBKR_OAUTH_ACCESS_TOKEN_SECRET is excluded — handled by _prompt_for_missing_secret.
+# IBKR_OAUTH_DH_PRIME is required by ibind (no built-in default).
+_REQUIRED_CREDENTIALS: list[tuple[str, object]] = [
+    ("IBKR_ACCOUNT_ID", lambda c: c.ibkr_account_id),
+    ("IBKR_OAUTH_CONSUMER_KEY", lambda c: c.get_oauth_consumer_key()),
+    ("IBKR_OAUTH_ACCESS_TOKEN", lambda c: c.get_oauth_access_token()),
+    ("IBKR_OAUTH_ENCRYPTION_KEY_FP", lambda c: c.ibkr_oauth_encryption_key_fp),
+    ("IBKR_OAUTH_SIGNATURE_KEY_FP", lambda c: c.ibkr_oauth_signature_key_fp),
+    (
+        "IBKR_OAUTH_DH_PRIME (or _FP)",
+        lambda c: c.ibkr_oauth_dh_prime or c.ibkr_oauth_dh_prime_fp,
+    ),
+]
+
+
+def _validate_key_files(config) -> dict[str, str]:
+    """
+    Load and locally test the RSA signing and encryption key files.
+
+    Runs a sign→verify round-trip on the signature key and an
+    encrypt→decrypt round-trip on the encryption key.  Both tests
+    are purely local — no network calls, no writes, no side effects.
+
+    Returns a dict with human-readable key info on success
+    (e.g. {"signature_key": "2048-bit RSA", "encryption_key": "2048-bit RSA"}).
+    Prints errors to stderr and exits on any failure.
+    """
+    from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
+    from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
+    from cryptography.hazmat.primitives.hashes import SHA256
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+    errors: list[str] = []
+
+    # Flag same-file misconfiguration before touching either key.
+    sig_fp = Path(config.ibkr_oauth_signature_key_fp)
+    enc_fp = Path(config.ibkr_oauth_encryption_key_fp)
+    if sig_fp.exists() and enc_fp.exists() and sig_fp.resolve() == enc_fp.resolve():
+        errors.append(
+            "IBKR_OAUTH_SIGNATURE_KEY_FP and IBKR_OAUTH_ENCRYPTION_KEY_FP both point "
+            "to the same file. IBKR requires two separate RSA private key files:\n"
+            "  - Signature key:   your private signing key (-----BEGIN RSA PRIVATE KEY----- or\n"
+            "                     -----BEGIN PRIVATE KEY-----)\n"
+            "  - Encryption key:  your private encryption key (same format, different key pair)\n"
+            "  The matching PUBLIC keys are what you upload to the IBKR portal — do not use\n"
+            "  those here."
+        )
+
+    # PEM headers that indicate a public key or certificate (not a private key).
+    _PUBLIC_HEADERS = (
+        b"-----BEGIN PUBLIC KEY-----",
+        b"-----BEGIN RSA PUBLIC KEY-----",
+        b"-----BEGIN CERTIFICATE-----",
+        b"-----BEGIN CERTIFICATE REQUEST-----",
+    )
+
+    def _load_rsa(fp: str, label: str):
+        """Try to load an RSA private key from a PEM file; record any error."""
+        path = Path(fp)
+        if not path.exists():
+            errors.append(f"{label}: file not found: {fp}")
+            return None
+        if not path.is_file():
+            errors.append(f"{label}: path is not a regular file: {fp}")
+            return None
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            errors.append(f"{label}: cannot read file: {exc}")
+            return None
+
+        # Detect public-key / certificate headers before trying to load.
+        first_line = data.lstrip().split(b"\n", 1)[0].strip()
+        if any(first_line.startswith(h) for h in _PUBLIC_HEADERS):
+            errors.append(
+                f"{label}: {fp}\n"
+                f"  contains a public key or certificate (header: {first_line.decode()})\n"
+                f"  but IBKR requires the *private* key here — the one you kept locally.\n"
+                f"  (The public key is what you uploaded to the IBKR portal.)\n"
+                f"  Expected header: -----BEGIN RSA PRIVATE KEY----- or -----BEGIN PRIVATE KEY-----"
+            )
+            return None
+
+        try:
+            key = load_pem_private_key(data, password=None)
+        except Exception as exc:
+            errors.append(f"{label}: not a valid PEM private key ({fp}): {exc}")
+            return None
+        if not isinstance(key, RSAPrivateKey):
+            errors.append(f"{label}: key type is not RSA ({fp})")
+            return None
+        return key
+
+    info: dict[str, str] = {}
+
+    # --- Signature key: sign → verify round-trip ---
+    sig_key = _load_rsa(config.ibkr_oauth_signature_key_fp, "Signature key")
+    if sig_key is not None:
+        try:
+            payload = b"ibkr-auth-selftest-sign"
+            sig = sig_key.sign(payload, PKCS1v15(), SHA256())
+            sig_key.public_key().verify(sig, payload, PKCS1v15(), SHA256())
+            info["signature_key"] = f"{sig_key.key_size}-bit RSA (sign/verify passed)"
+        except Exception as exc:
+            errors.append(f"Signature key: sign/verify self-test failed: {exc}")
+
+    # --- Encryption key: encrypt → decrypt round-trip ---
+    enc_key = _load_rsa(config.ibkr_oauth_encryption_key_fp, "Encryption key")
+    if enc_key is not None:
+        try:
+            plaintext = b"ibkr-auth-selftest-enc"
+            ciphertext = enc_key.public_key().encrypt(plaintext, PKCS1v15())
+            recovered = enc_key.decrypt(ciphertext, PKCS1v15())
+            if recovered != plaintext:
+                raise ValueError("Decrypted value does not match original")
+            info["encryption_key"] = (
+                f"{enc_key.key_size}-bit RSA (encrypt/decrypt passed)"
+            )
+        except Exception as exc:
+            errors.append(f"Encryption key: encrypt/decrypt self-test failed: {exc}")
+
+    if errors:
+        print("\nKey file validation failed:", file=sys.stderr)
+        for err in errors:
+            print(f"  {err}", file=sys.stderr)
+        sys.exit(1)
+
+    return info
+
+
+def _check_config(config) -> None:
+    """
+    Validate that all required IBKR credentials are present.
+
+    Prints a clear list of missing environment variable names and exits
+    if anything is absent. IBKR_OAUTH_ACCESS_TOKEN_SECRET is not checked
+    here; use _prompt_for_missing_secret() for that field.
+    """
+    missing = [var for var, getter in _REQUIRED_CREDENTIALS if not getter(config)]
+    if missing:
+        print("Missing required IBKR credentials:", file=sys.stderr)
+        for var in missing:
+            print(f"  {var}", file=sys.stderr)
+        print(
+            "\nSet these in your .env file or as environment variables, then retry.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def parse_args() -> argparse.Namespace:
@@ -73,6 +239,11 @@ def parse_args() -> argparse.Namespace:
         "--execute",
         action="store_true",
         help="Report + recommendations + place orders (with per-order confirmation)",
+    )
+    mode_group.add_argument(
+        "--test-auth",
+        action="store_true",
+        help="Verify IBKR credentials and connection, then exit",
     )
 
     # Options
@@ -271,8 +442,84 @@ async def refresh_stale_analysis(ticker: str, quick: bool = True) -> bool:
         return False
 
 
+def cmd_test_auth(args) -> None:
+    """
+    Verify IBKR credentials and connection.
+
+    Checks that all required settings are present, prompts for the OAuth
+    token secret if absent, connects in read-only mode, and prints basic
+    account information confirming the session is live.
+    """
+    try:
+        from src.ibkr.client import IbkrClient
+        from src.ibkr.portfolio import build_portfolio_summary
+        from src.ibkr_config import ibkr_config
+    except ImportError:
+        print(
+            "ibind not installed. Run: poetry install -E ibkr",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    print("Checking IBKR credentials...", file=sys.stderr)
+    _check_config(ibkr_config)
+
+    print("Validating key files...", file=sys.stderr)
+    key_info = _validate_key_files(ibkr_config)
+
+    _prompt_for_missing_secret(ibkr_config)
+
+    account_id = args.account_id or ibkr_config.ibkr_account_id
+
+    print(f"Connecting to IBKR (account: {account_id})...", file=sys.stderr)
+    try:
+        client = IbkrClient(ibkr_config)
+        client.connect(brokerage_session=False)
+    except IBKRAuthError as e:
+        print(f"\nAuthentication error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except IBKRError as e:
+        print(f"\nConnection error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        accounts = client.get_accounts()
+        ledger = client.get_ledger(account_id)
+        raw_positions = client.get_positions(account_id)
+    except IBKRError as e:
+        print(f"\nFailed to fetch account data: {e}", file=sys.stderr)
+        client.close()
+        sys.exit(1)
+
+    client.close()
+
+    summary = build_portfolio_summary(ledger, [], account_id)
+
+    print()
+    print("=== IBKR Authentication: OK ===")
+    print()
+    print(f"  Configured account:  {account_id}")
+    if accounts:
+        print(f"  Accounts visible:    {', '.join(accounts)}")
+    print(f"  Signature key:       {key_info.get('signature_key', 'N/A')}")
+    print(f"  Encryption key:      {key_info.get('encryption_key', 'N/A')}")
+    print(f"  Portfolio value:     ${summary.portfolio_value_usd:,.2f}")
+    print(
+        f"  Cash balance:        ${summary.cash_balance_usd:,.2f}"
+        f"  ({summary.cash_pct:.1f}%)"
+    )
+    print(f"  Open positions:      {len(raw_positions)}")
+    print()
+
+
 def main() -> None:
     args = parse_args()
+
+    # --test-auth exits immediately after credential check — no analyses needed.
+    if args.test_auth:
+        cmd_test_auth(args)
+        return
+
     results_dir = Path(args.results_dir)
 
     # Load analyses from disk (always works, no IBKR needed)

@@ -107,6 +107,10 @@ FAILURE_MODES = {
     "MACRO_REGIME",
     "DISRUPTION",
     "VALUATION_TRAP",
+    "ACCOUNTING_FRAUD",
+    "GEOPOLITICAL",
+    "LIQUIDITY_CRISIS",
+    "DEAD_MONEY",
 }
 
 LESSON_TYPES = {"missed_risk", "false_positive", "missed_opportunity", "correct_call"}
@@ -715,7 +719,7 @@ Rules:
 
 LESSON: [your lesson]
 TYPE: missed_risk | false_positive | missed_opportunity | correct_call
-FAILURE_MODE: CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_BLEED | OPERATIONAL_MISS | REGULATORY_SHIFT | MACRO_REGIME | DISRUPTION | VALUATION_TRAP"""
+FAILURE_MODE: CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_BLEED | OPERATIONAL_MISS | REGULATORY_SHIFT | MACRO_REGIME | DISRUPTION | VALUATION_TRAP | ACCOUNTING_FRAUD | GEOPOLITICAL | LIQUIDITY_CRISIS | DEAD_MONEY"""
 
     try:
         from src.llms import create_quick_thinking_llm

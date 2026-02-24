@@ -30,6 +30,7 @@ repos:
         args: [--maxkb=500]
       - id: check-merge-conflict
       - id: detect-private-key
+        exclude: '^\.env\.example$|^scripts/portfolio_manager\.py$'
 
   # Type checking (optional - runs on commit but doesn't block)
   # Uncomment if you want strict type checking on every commit
