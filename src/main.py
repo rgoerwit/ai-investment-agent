@@ -619,7 +619,7 @@ def display_results(result: dict, ticker: str):
     console.print("=" * 80 + "\n")
 
 
-def save_results_to_file(result: dict, ticker: str) -> Path:
+def save_results_to_file(result: dict, ticker: str, quick_mode: bool = False) -> Path:
     """Save analysis results to a JSON file in the results directory."""
     from src.memory import create_memory_instances, sanitize_ticker_for_collection
     from src.prompts import get_all_prompts
@@ -747,7 +747,7 @@ def save_results_to_file(result: dict, ticker: str) -> Path:
     try:
         from src.retrospective import extract_snapshot
 
-        save_data["prediction_snapshot"] = extract_snapshot(result, ticker)
+        save_data["prediction_snapshot"] = extract_snapshot(result, ticker, quick_mode)
     except Exception as e:
         logger.warning(f"Snapshot extraction failed (non-fatal): {e}")
 
@@ -1180,7 +1180,9 @@ async def main():
                 display_results(result, args.ticker)
 
             try:
-                filepath = save_results_to_file(result, args.ticker)
+                filepath = save_results_to_file(
+                    result, args.ticker, quick_mode=args.quick
+                )
                 if not args.quiet and not args.brief:
                     console.print(
                         f"[green]Results saved to:[/green] [cyan]{filepath}[/cyan]{_cost_suffix()}"

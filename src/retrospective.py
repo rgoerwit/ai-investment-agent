@@ -212,6 +212,16 @@ def _extract_trade_block_price(text: str, field: str) -> float | None:
     return None
 
 
+def _extract_trade_block_text(trader_plan: str, field: str) -> str | None:
+    """Extract a text value from a TRADE_BLOCK field (non-numeric)."""
+    pattern = rf"{field}:\s*(.+?)(?:\n|$)"
+    match = re.search(pattern, trader_plan, re.IGNORECASE)
+    if not match:
+        return None
+    raw = match.group(1).strip()
+    return raw if raw and raw.upper() not in ("N/A", "NA", "-", "") else None
+
+
 def _extract_trade_block_fields(trader_plan: str) -> dict[str, Any]:
     """
     Extract structured TRADE_BLOCK fields from trader output.
@@ -220,7 +230,7 @@ def _extract_trade_block_fields(trader_plan: str) -> dict[str, Any]:
     without these fields will have None values (handled by reconciler).
 
     Returns dict with keys: entry_price, stop_price, target_1_price,
-    target_2_price, conviction.
+    target_2_price, conviction, investment_horizon.
     """
     if not trader_plan:
         return {
@@ -229,6 +239,7 @@ def _extract_trade_block_fields(trader_plan: str) -> dict[str, Any]:
             "target_1_price": None,
             "target_2_price": None,
             "conviction": None,
+            "investment_horizon": None,
         }
 
     conviction_match = re.search(r"CONVICTION:\s*(\w+)", trader_plan, re.IGNORECASE)
@@ -239,10 +250,13 @@ def _extract_trade_block_fields(trader_plan: str) -> dict[str, Any]:
         "target_1_price": _extract_trade_block_price(trader_plan, "TARGET_1"),
         "target_2_price": _extract_trade_block_price(trader_plan, "TARGET_2"),
         "conviction": conviction_match.group(1) if conviction_match else None,
+        "investment_horizon": _extract_trade_block_text(trader_plan, "HORIZON"),
     }
 
 
-def extract_snapshot(result: dict, ticker: str) -> dict[str, Any]:
+def extract_snapshot(
+    result: dict, ticker: str, is_quick_mode: bool = False
+) -> dict[str, Any]:
     """
     Extract a compact prediction snapshot from an analysis result.
 
@@ -332,6 +346,7 @@ def extract_snapshot(result: dict, ticker: str) -> dict[str, Any]:
         "analysis_date": datetime.now().strftime("%Y-%m-%d"),
         "deep_model": config.deep_think_llm,
         "quick_model": config.quick_think_llm,
+        "is_quick_mode": is_quick_mode,
     }
 
     logger.info(
@@ -660,11 +675,14 @@ def compute_confidence(comparison: dict[str, Any]) -> float:
     deep_model = comparison.get("deep_model", "")
     model_q = MODEL_QUALITY.get(deep_model, DEFAULT_MODEL_QUALITY)
 
-    # Analysis mode component
-    quick_model = comparison.get("quick_model", "")
-    deep = comparison.get("deep_model", "")
-    # If quick_model == deep_model, it was likely quick mode
-    mode = 0.7 if quick_model == deep else 1.0
+    # Analysis mode: prefer explicit flag (modern snapshots); fall back to
+    # model-name heuristic for snapshots predating is_quick_mode field.
+    if "is_quick_mode" in comparison:
+        mode = 0.7 if comparison["is_quick_mode"] else 1.0
+    else:
+        quick_model = comparison.get("quick_model", "")
+        deep = comparison.get("deep_model", "")
+        mode = 0.7 if quick_model == deep else 1.0
 
     # Signal strength component (bigger deltas = clearer lessons)
     excess = abs(comparison.get("excess_return_pct", 0.0))
@@ -704,6 +722,7 @@ ANALYSIS ({comparison.get('analysis_date', 'unknown')}):
 Ticker: {comparison.get('ticker')} | Sector: {comparison.get('sector', 'Unknown')} | Exchange: {comparison.get('exchange', 'Unknown')} | Currency: {comparison.get('currency', 'USD')}
 Verdict: {comparison.get('verdict')} (Position: {comparison.get('position_size', 'N/A')}%) | Zone: {comparison.get('zone', 'N/A')}
 Health: {comparison.get('health_adj', 'N/A')} | Growth: {comparison.get('growth_adj', 'N/A')} | P/E: {comparison.get('pe_ratio', 'N/A')} | PEG: {comparison.get('peg_ratio', 'N/A')}
+Targets: Entry {comparison.get('entry_price') or 'N/A'} | T1 {comparison.get('target_1_price') or 'N/A'} | T2 {comparison.get('target_2_price') or 'N/A'} | Stop {comparison.get('stop_price') or 'N/A'} | Horizon: {comparison.get('investment_horizon') or 'N/A'}
 Key bear risks: {comparison.get('bear_risks_excerpt', 'N/A')[:300]}
 
 OUTCOME ({comparison.get('days_elapsed', 0)} days later):
