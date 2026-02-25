@@ -38,9 +38,7 @@ from src.ibkr.models import (
     PortfolioSummary,
     ReconciliationItem,
 )
-from src.ibkr.order_builder import build_order_dict
 from src.ibkr.reconciler import load_latest_analyses, reconcile
-from src.ibkr.ticker_mapper import resolve_conid
 
 _IBKR_OAUTH_PORTAL = (
     "https://ndcdyn.interactivebrokers.com/sso/Login?action=OAUTH&RL=1&ip2loc=US"
@@ -238,7 +236,7 @@ def parse_args() -> argparse.Namespace:
     mode_group.add_argument(
         "--execute",
         action="store_true",
-        help="Report + recommendations + place orders (with per-order confirmation)",
+        help="[DISABLED] Order execution coming soon — use --recommend for now",
     )
     mode_group.add_argument(
         "--test-auth",
@@ -299,18 +297,52 @@ def parse_args() -> argparse.Namespace:
 # ══════════════════════════════════════════════════════════════════════════════
 
 ACTION_SYMBOLS = {
-    "BUY": "+",
-    "SELL": "!",
-    "TRIM": "~",
+    "BUY": "BUY",
+    "SELL": "SELL",
+    "TRIM": "TRIM",
+    "ADD": "ADD",
     "HOLD": " ",
     "REVIEW": "?",
 }
 
-URGENCY_COLORS = {
-    "HIGH": "!!",
-    "MEDIUM": " !",
-    "LOW": "  ",
+_DIVIDER = "═" * 54
+
+_CURRENCY_SYMBOLS: dict[str, str] = {
+    "USD": "$",
+    "HKD": "HK$",
+    "JPY": "¥",
+    "TWD": "NT$",
+    "KRW": "₩",
+    "EUR": "€",
+    "GBP": "£",
+    "SGD": "S$",
+    "AUD": "A$",
+    "CAD": "C$",
+    "CNY": "¥",
+    "CHF": "Fr",
+    "SEK": "kr",
+    "NOK": "kr",
+    "DKK": "kr",
 }
+
+
+def _ccy(currency: str) -> str:
+    """Get currency symbol for a currency code."""
+    return _CURRENCY_SYMBOLS.get(
+        (currency or "").upper(), (currency + " ") if currency else "$"
+    )
+
+
+def _item_currency(item: ReconciliationItem) -> str:
+    if item.analysis and item.analysis.currency:
+        return item.analysis.currency
+    if item.ibkr_position and item.ibkr_position.currency:
+        return item.ibkr_position.currency
+    return "USD"
+
+
+def _urgency_prefix(item: ReconciliationItem) -> str:
+    return {"HIGH": "  !!", "MEDIUM": "   !", "LOW": "    "}.get(item.urgency, "    ")
 
 
 def format_report(
@@ -318,90 +350,276 @@ def format_report(
     portfolio: PortfolioSummary,
     show_recommendations: bool = False,
 ) -> str:
-    """Format reconciliation results as human-readable text."""
+    """Format reconciliation results as sectioned human-readable text."""
     lines: list[str] = []
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    lines.append(f"=== IBKR Portfolio Reconciliation ({now}) ===")
+    # ── Header ──────────────────────────────────────────────────────────────
+    lines.append(f"=== IBKR Portfolio Reconciliation  {now} ===")
     lines.append("")
-    lines.append(
-        f"Account: {portfolio.account_id} | "
-        f"Portfolio: ${portfolio.portfolio_value_usd:,.0f} | "
-        f"Cash: ${portfolio.cash_balance_usd:,.0f} ({portfolio.cash_pct:.1f}%) | "
-        f"Available: ${portfolio.available_cash_usd:,.0f}"
-    )
+    nlv = portfolio.portfolio_value_usd
+    cash = portfolio.cash_balance_usd
+    settled = portfolio.settled_cash_usd
+    available = portfolio.available_cash_usd
+    buffer_amt = max(0.0, settled - available)
+
+    lines.append(f"  Account:          {portfolio.account_id or 'N/A'}")
+    lines.append(f"  Net liquidation:  ${nlv:>10,.0f}")
+    if nlv > 0:
+        lines.append(
+            f"  Cash (total):     ${cash:>10,.0f}   ({cash / nlv * 100:.1f}%)"
+            "  includes unsettled T+2 proceeds"
+        )
+        lines.append(
+            f"  Settled cash:     ${settled:>10,.0f}   ({settled / nlv * 100:.1f}%)"
+            "  spendable today"
+        )
+        lines.append(
+            f"  Buffer reserve:   ${buffer_amt:>10,.0f}   ({buffer_amt / nlv * 100:.1f}%)"
+            "  held back"
+        )
+        lines.append(
+            f"  Available:        ${available:>10,.0f}"
+            "           see cash summary — buys consume this"
+        )
+    else:
+        lines.append(f"  Cash (total):     ${cash:,.0f}")
+        lines.append(f"  Settled cash:     ${settled:,.0f}")
+        lines.append(f"  Available:        ${available:,.0f}")
     lines.append("")
 
-    # Held positions
-    held_items = [i for i in items if i.ibkr_position is not None]
-    if held_items:
-        lines.append("--- POSITIONS vs EVALUATOR ---")
+    # Split by action
+    sells = [i for i in items if i.action == "SELL"]
+    trims = [i for i in items if i.action == "TRIM"]
+    adds = [i for i in items if i.action == "ADD"]
+    buys = [i for i in items if i.action == "BUY" and i.ibkr_position is None]
+    holds = [i for i in items if i.action == "HOLD"]
+    reviews = [i for i in items if i.action == "REVIEW"]
+
+    def _section(title: str, subtitle: str = "") -> None:
+        lines.append(_DIVIDER)
+        header = f"  {title}"
+        if subtitle:
+            header += f"  ({subtitle})"
+        lines.append(header)
+        lines.append(_DIVIDER)
         lines.append("")
-        for item in held_items:
-            pos = item.ibkr_position
-            sym = ACTION_SYMBOLS.get(item.action, " ")
-            urg = URGENCY_COLORS.get(item.urgency, "  ")
 
-            price_info = ""
-            if pos and pos.current_price_local > 0 and pos.avg_cost_local > 0:
-                gain = (
-                    (pos.current_price_local - pos.avg_cost_local) / pos.avg_cost_local
-                ) * 100
-                price_info = f" {int(pos.quantity)} @ {pos.avg_cost_local:.2f} → {pos.current_price_local:.2f} ({gain:+.1f}%)"
+    def _order_line(item: ReconciliationItem, ccy: str) -> str:
+        """Build the first line: urgency + action + ticker + qty + price + order type."""
+        pfx = _urgency_prefix(item)
+        sym = ACTION_SYMBOLS.get(item.action, item.action)
+        parts = [f"{pfx} [{sym}]", f"  {item.ticker:<12}"]
+        if show_recommendations:
+            if item.suggested_quantity:
+                parts.append(f"  {abs(item.suggested_quantity)} sh")
+            if item.suggested_price:
+                parts.append(f"  @ {_ccy(ccy)}{item.suggested_price:,.2f}")
+            if item.suggested_order_type:
+                parts.append(f"  {item.suggested_order_type}")
+        return "".join(parts)
 
-            verdict_info = ""
-            if item.analysis:
-                a = item.analysis
-                verdict_info = f"  {a.verdict} ({a.analysis_date})"
-                if a.health_adj or a.growth_adj:
-                    verdict_info += f"  H:{a.health_adj or '?'} G:{a.growth_adj or '?'}"
+    def _proceeds_line(item: ReconciliationItem) -> str | None:
+        """Build proceeds/settlement line for SELL and TRIM."""
+        if not show_recommendations or not item.cash_impact_usd:
+            return None
+        amount = item.cash_impact_usd
+        settle = (
+            f"settles {item.settlement_date}  ·  not spendable until then"
+            if item.settlement_date
+            else ""
+        )
+        parts = [f"Proceeds: ~${amount:,.0f} USD"]
+        if settle:
+            parts.append(settle)
+        return "             " + "  ·  ".join(parts)
 
-            lines.append(f"{urg} [{sym}] {item.ticker}{price_info}{verdict_info}")
-            lines.append(f"       {item.action} — {item.reason}")
+    def _cost_line(item: ReconciliationItem, label: str = "Cost") -> str | None:
+        """Build cost line for ADD and BUY."""
+        if not show_recommendations or not item.cash_impact_usd:
+            return None
+        cost = abs(item.cash_impact_usd)
+        funded = (
+            f"funded from settled cash (${settled:,.0f})"
+            if settled > 0
+            else "funded from settled cash"
+        )
+        return f"             {label}: ~${cost:,.0f} USD  ·  {funded}"
 
-            if show_recommendations and item.suggested_quantity:
-                order_type = item.suggested_order_type or "LMT"
-                price_str = (
-                    f" @ {item.suggested_price:.2f}" if item.suggested_price else ""
-                )
-                lines.append(
-                    f"       → {item.action} {item.suggested_quantity} shares ({order_type}){price_str}"
-                )
-
+    # ── SELLS ────────────────────────────────────────────────────────────────
+    if sells:
+        _section("SELLS", "action needed — verdict changed or stop breached")
+        for item in sells:
+            ccy = _item_currency(item)
+            lines.append(_order_line(item, ccy))
+            lines.append(f"             {item.reason}")
+            pl = _proceeds_line(item)
+            if pl:
+                lines.append(pl)
             lines.append("")
 
-    # New buy recommendations (not held)
-    buy_items = [i for i in items if i.ibkr_position is None and i.action == "BUY"]
-    if buy_items:
-        lines.append("--- NEW BUY RECOMMENDATIONS (not held) ---")
-        lines.append("")
-        for item in buy_items:
+    # ── TRIMS ────────────────────────────────────────────────────────────────
+    if trims:
+        _section("TRIMS", "reduce to target weight")
+        for item in trims:
+            ccy = _item_currency(item)
+            lines.append(_order_line(item, ccy))
+            lines.append(f"             {item.reason}")
+            pl = _proceeds_line(item)
+            if pl:
+                lines.append(pl)
+            lines.append("")
+
+    # ── ADDS ─────────────────────────────────────────────────────────────────
+    if adds:
+        _section("ADDS", "increase underweight positions")
+        for item in adds:
+            ccy = _item_currency(item)
+            lines.append(_order_line(item, ccy))
+            lines.append(f"             {item.reason}")
+            cl = _cost_line(item)
+            if cl:
+                lines.append(cl)
+            lines.append("")
+
+    # ── NEW BUYS ──────────────────────────────────────────────────────────────
+    if buys:
+        _section("NEW BUYS")
+        for item in buys:
+            ccy = _item_currency(item)
+            lines.append(_order_line(item, ccy))
             a = item.analysis
             if a:
+                conviction = a.conviction or a.trade_block.conviction or ""
                 size_pct = a.trade_block.size_pct or a.position_size or 0
-                lines.append(
-                    f"  {item.ticker}  BUY ({a.analysis_date})  Size:{size_pct:.1f}%  Entry:{a.entry_price or '?'}"
-                )
-                if show_recommendations and item.suggested_price:
-                    lines.append(f"       → BUY @ {item.suggested_price:.2f} (LMT)")
-            else:
-                lines.append(f"  {item.ticker}  BUY — {item.reason}")
+                detail_parts: list[str] = []
+                if conviction:
+                    detail_parts.append(f"{conviction} conviction")
+                if size_pct and nlv > 0:
+                    target_usd = nlv * size_pct / 100
+                    detail_parts.append(f"target {size_pct:.1f}% (${target_usd:,.0f})")
+                if detail_parts:
+                    lines.append(f"             {'  ·  '.join(detail_parts)}")
+            cl = _cost_line(item)
+            if cl:
+                lines.append(cl)
             lines.append("")
 
-    if not items:
-        lines.append(
-            "No reconciliation items. Portfolio is empty and no BUY recommendations found."
-        )
+    # ── HOLDS ────────────────────────────────────────────────────────────────
+    if holds:
+        _section("HOLDS", "no action")
+        for item in holds:
+            pos = item.ibkr_position
+            a = item.analysis
+            ccy = _item_currency(item)
+            sym = _ccy(ccy)
+
+            weight_str = ""
+            if pos and nlv > 0:
+                wt = pos.market_value_usd / nlv * 100
+                weight_str = f"{wt:.1f}%"
+
+            price_str = ""
+            if a and pos and a.entry_price and pos.current_price_local:
+                gain = (pos.current_price_local - a.entry_price) / a.entry_price * 100
+                price_str = (
+                    f"entry {sym}{a.entry_price:,.2f} → {sym}{pos.current_price_local:,.2f}"
+                    f" ({gain:+.1f}%)"
+                )
+
+            stop_str = f"stop {sym}{a.stop_price:,.2f}" if a and a.stop_price else ""
+            t1_str = (
+                f"T1 {sym}{a.target_1_price:,.2f}" if a and a.target_1_price else ""
+            )
+
+            row_parts = [p for p in [weight_str, price_str, stop_str, t1_str] if p]
+            lines.append(f"     [ ]    {item.ticker:<12}  {'  '.join(row_parts)}")
+
         lines.append("")
 
-    # Summary
-    action_counts = {}
+    # ── REVIEWS ───────────────────────────────────────────────────────────────
+    if reviews:
+        _section("REVIEWS", "stale or price-drifted — re-run analysis")
+        for item in reviews:
+            reason_short = item.reason.replace("Stale analysis: ", "").replace(
+                "Position held but no evaluator analysis found", "no analysis found"
+            )
+            run_cmd = f"python -m src.main --ticker {item.ticker}"
+            lines.append(f"     [?]    {item.ticker:<12}  {reason_short}  →  {run_cmd}")
+        lines.append("")
+
+    if not items:
+        lines.append("  No reconciliation items.")
+        lines.append("")
+
+    # ── CASH SUMMARY ──────────────────────────────────────────────────────────
+    if show_recommendations:
+        _section("CASH SUMMARY")
+
+        buy_cost_items = [
+            i for i in items if i.action in ("ADD", "BUY") and i.cash_impact_usd < 0
+        ]
+        sell_proceed_items = [
+            i for i in items if i.action in ("SELL", "TRIM") and i.cash_impact_usd > 0
+        ]
+
+        lines.append(
+            f"  Settled cash today:                          ${settled:>7,.0f}"
+        )
+
+        total_cost = 0.0
+        for item in buy_cost_items:
+            cost = abs(item.cash_impact_usd)
+            total_cost += cost
+            qty_str = (
+                f"({abs(item.suggested_quantity)} sh)"
+                if item.suggested_quantity
+                else ""
+            )
+            label = f"  {item.action}  {item.ticker}  {qty_str}:"
+            lines.append(f"{label:<46}- ${cost:>6,.0f}")
+
+        if buy_cost_items:
+            remaining = settled - total_cost
+            lines.append("  " + "─" * 48)
+            lines.append(
+                f"  Settled cash after recommended buys:         ${remaining:>7,.0f}"
+            )
+            lines.append("")
+
+        if sell_proceed_items:
+            settle_dates = [
+                i.settlement_date for i in sell_proceed_items if i.settlement_date
+            ]
+            settle_date_str = settle_dates[0] if settle_dates else "T+2"
+            lines.append(f"  Pending inflows (T+2, settles {settle_date_str}):")
+            total_proceeds = 0.0
+            for item in sell_proceed_items:
+                proceeds = item.cash_impact_usd
+                total_proceeds += proceeds
+                qty_str = (
+                    f"({abs(item.suggested_quantity)} sh)"
+                    if item.suggested_quantity
+                    else ""
+                )
+                label = f"    {item.action}  {item.ticker}  {qty_str}:"
+                lines.append(f"{label:<46}+ ${proceeds:>6,.0f}")
+            lines.append(f"{'  Total pending:':<46}  ${total_proceeds:>6,.0f}")
+            lines.append("")
+            lines.append("  ⚠  Sell/trim proceeds are NOT spendable today.")
+            lines.append(
+                f"     If orders fill by market close, funds available {settle_date_str}."
+            )
+            lines.append("     Consider additional BUYs only after settlement date.")
+            lines.append("")
+
+    # ── Summary line ──────────────────────────────────────────────────────────
+    action_counts: dict[str, int] = {}
     for item in items:
         action_counts[item.action] = action_counts.get(item.action, 0) + 1
-    summary_parts = [
-        f"{action}: {count}" for action, count in sorted(action_counts.items())
-    ]
-    lines.append(f"--- Summary: {', '.join(summary_parts) or 'empty'} ---")
+    order = ["SELL", "TRIM", "ADD", "BUY", "HOLD", "REVIEW"]
+    summary_parts = [f"{action_counts[a]} {a}" for a in order if a in action_counts]
+    lines.append(f"  Summary:  {'  ·  '.join(summary_parts) or 'empty'}")
 
     return "\n".join(lines)
 
@@ -432,7 +650,7 @@ async def refresh_stale_analysis(ticker: str, quick: bool = True) -> bool:
         print(f"  Re-analyzing {ticker} (quick={quick})...", file=sys.stderr)
         result = await run_analysis(ticker=ticker, quick_mode=quick, skip_charts=True)
         if result:
-            save_results_to_file(result, ticker)
+            save_results_to_file(result, ticker, quick_mode=quick)
             print(f"  {ticker} re-analysis complete.", file=sys.stderr)
             return True
         print(f"  {ticker} re-analysis returned no result.", file=sys.stderr)
@@ -520,6 +738,14 @@ def main() -> None:
         cmd_test_auth(args)
         return
 
+    # --execute is disabled for this release; use --recommend for order suggestions.
+    if args.execute:
+        print(
+            "--execute is currently disabled. Use --recommend for order suggestions.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     results_dir = Path(args.results_dir)
 
     # Load analyses from disk (always works, no IBKR needed)
@@ -554,7 +780,7 @@ def main() -> None:
 
             _prompt_for_missing_secret(ibkr_config)
             client = IbkrClient(ibkr_config)
-            client.connect(brokerage_session=args.execute)
+            client.connect(brokerage_session=False)
 
             account_id = args.account_id or ibkr_config.ibkr_account_id
             positions, portfolio = read_portfolio(
@@ -613,7 +839,7 @@ def main() -> None:
             )
 
     # Output
-    show_recs = args.recommend or args.execute
+    show_recs = args.recommend
 
     if args.json:
         output = format_json(items, portfolio)
@@ -626,69 +852,6 @@ def main() -> None:
         print(f"Report written to {args.output}", file=sys.stderr)
     else:
         print(output)
-
-    # Order execution (Phase 5 — with per-order confirmation)
-    if args.execute:
-        actionable = [
-            i
-            for i in items
-            if i.action in ("BUY", "SELL", "TRIM") and i.suggested_quantity
-        ]
-        if not actionable:
-            print("\nNo actionable orders to execute.", file=sys.stderr)
-            return
-
-        print(f"\n{len(actionable)} orders ready for execution:", file=sys.stderr)
-        for item in actionable:
-            print(
-                f"  {item.action} {item.ticker}: {item.suggested_quantity} shares",
-                file=sys.stderr,
-            )
-
-        from src.ibkr.client import IbkrClient
-        from src.ibkr_config import ibkr_config
-
-        _prompt_for_missing_secret(ibkr_config)
-        exec_client = IbkrClient(ibkr_config)
-        exec_client.connect(brokerage_session=True)
-
-        try:
-            for item in actionable:
-                prompt = (
-                    f"\nExecute {item.action} {item.suggested_quantity} {item.ticker}"
-                    f" @ {item.suggested_price or 'MKT'}? [y/N]: "
-                )
-                confirm = input(prompt).strip().lower()
-                if confirm != "y":
-                    print(f"  Skipped {item.ticker}", file=sys.stderr)
-                    continue
-
-                try:
-                    conid = resolve_conid(item.ticker, exec_client)
-                    if not conid:
-                        print(
-                            f"  Failed to resolve conid for {item.ticker}",
-                            file=sys.stderr,
-                        )
-                        continue
-
-                    order = build_order_dict(
-                        conid=conid,
-                        action=item.action if item.action != "TRIM" else "SELL",
-                        quantity=item.suggested_quantity,
-                        price=item.suggested_price,
-                        order_type=item.suggested_order_type,
-                        account_id=portfolio.account_id,
-                    )
-                    result = exec_client.place_order(portfolio.account_id, order)
-                    print(
-                        f"  Order placed for {item.ticker}: {result}", file=sys.stderr
-                    )
-
-                except Exception as e:
-                    print(f"  Order failed for {item.ticker}: {e}", file=sys.stderr)
-        finally:
-            exec_client.close()
 
 
 if __name__ == "__main__":

@@ -90,8 +90,15 @@ def build_portfolio_summary(
         portfolio_value = float(
             base.get("netliquidationvalue", 0) or base.get("netLiquidation", 0)
         )
+        # IBKR ledger BASE section contains "settledcash" as a separate field
+        settled_cash = float(
+            base.get("settledcash", 0) or base.get("settledBalance", 0)
+        )
+        if settled_cash <= 0:
+            settled_cash = cash  # fallback: if IBKR doesn't separate it, use total cash
     else:
         cash = 0.0
+        settled_cash = 0.0
         portfolio_value = sum(p.market_value_usd for p in positions)
 
     # Fallback portfolio value from positions
@@ -99,12 +106,14 @@ def build_portfolio_summary(
         portfolio_value = sum(p.market_value_usd for p in positions) + max(cash, 0)
 
     cash_pct = (cash / portfolio_value * 100) if portfolio_value > 0 else 0.0
-    available_cash = max(0, cash - (portfolio_value * cash_buffer_pct))
+    # available_cash derived from settled_cash (not total cash) — only spendable funds
+    available_cash = max(0, settled_cash - (portfolio_value * cash_buffer_pct))
 
     return PortfolioSummary(
         account_id=account_id,
         portfolio_value_usd=portfolio_value,
         cash_balance_usd=cash,
+        settled_cash_usd=settled_cash,
         cash_pct=cash_pct,
         position_count=len(positions),
         available_cash_usd=available_cash,

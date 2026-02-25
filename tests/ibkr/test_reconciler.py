@@ -191,7 +191,7 @@ class TestReconcile:
         assert items[0].action == "HOLD"
 
     def test_held_but_verdict_dni(self):
-        """Held + evaluator says DO_NOT_INITIATE → SELL (conflict)."""
+        """Held + evaluator says DO_NOT_INITIATE → SELL."""
         pos = _make_position(current_price=2100)
         analysis = _make_analysis(verdict="DO_NOT_INITIATE")
         items = reconcile(
@@ -202,7 +202,7 @@ class TestReconcile:
         assert len(items) == 1
         assert items[0].action == "SELL"
         assert items[0].urgency == "HIGH"
-        assert "conflict" in items[0].reason.lower()
+        assert "do_not_initiate" in items[0].reason.lower()
 
     def test_held_but_verdict_sell(self):
         """Held + evaluator says SELL → SELL."""
@@ -212,14 +212,15 @@ class TestReconcile:
         assert items[0].action == "SELL"
 
     def test_held_stop_breached(self):
-        """Held + price below stop → urgent SELL."""
+        """Held + price below stop → urgent SELL via LMT at current price."""
         pos = _make_position(current_price=1700)
         analysis = _make_analysis(stop_price=1900)
         items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
         assert items[0].action == "SELL"
         assert items[0].urgency == "HIGH"
         assert "stop" in items[0].reason.lower()
-        assert items[0].suggested_order_type == "MKT"
+        assert items[0].suggested_order_type == "LMT"
+        assert items[0].suggested_price == 1700
 
     def test_held_target_hit(self):
         """Held + price at target → REVIEW."""

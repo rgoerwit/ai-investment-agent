@@ -32,7 +32,11 @@ from src.ibkr.models import (
     ReconciliationItem,
     TradeBlockData,
 )
-from src.ibkr.order_builder import parse_trade_block
+from src.ibkr.order_builder import (
+    calculate_quantity,
+    parse_trade_block,
+    round_to_lot_size,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -187,6 +191,24 @@ def check_target_hit(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Settlement Helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _settlement_date(business_days: int) -> str:
+    """Return settlement date as YYYY-MM-DD, skipping weekends."""
+    from datetime import date, timedelta
+
+    d = date.today()
+    added = 0
+    while added < business_days:
+        d += timedelta(days=1)
+        if d.weekday() < 5:  # Mon–Fri
+            added += 1
+    return d.isoformat()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Position-Aware Reconciliation
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -198,6 +220,7 @@ def reconcile(
     max_age_days: int = 14,
     drift_threshold_pct: float = 15.0,
     overweight_threshold_pct: float = 20.0,
+    underweight_threshold_pct: float = 20.0,
 ) -> list[ReconciliationItem]:
     """
     Compare IBKR positions against evaluator recommendations.
@@ -213,12 +236,15 @@ def reconcile(
         max_age_days: Max analysis age for staleness
         drift_threshold_pct: Price drift threshold
         overweight_threshold_pct: % overweight before suggesting TRIM
+        underweight_threshold_pct: % shortfall vs target before suggesting ADD
 
     Returns:
         List of ReconciliationItems with position-aware actions
     """
     items: list[ReconciliationItem] = []
     held_tickers: set[str] = set()
+    # Track remaining settled cash across Phase 1 ADDs and Phase 2 BUYs
+    remaining_cash = portfolio.available_cash_usd
 
     # ── Phase 1: Evaluate existing positions ──
     for pos in positions:
@@ -252,7 +278,10 @@ def reconcile(
                     ibkr_position=pos,
                     analysis=analysis,
                     suggested_quantity=abs(int(pos.quantity)),
-                    suggested_order_type="MKT",
+                    suggested_price=current_price,
+                    suggested_order_type="LMT",
+                    cash_impact_usd=pos.market_value_usd,
+                    settlement_date=_settlement_date(2),
                 )
             )
             continue
@@ -264,13 +293,15 @@ def reconcile(
                 ReconciliationItem(
                     ticker=ticker,
                     action="SELL",
-                    reason=f"Verdict conflict: holding but evaluator says {analysis.verdict}",
+                    reason=f"Verdict → {analysis.verdict}  ({analysis.analysis_date})",
                     urgency="HIGH",
                     ibkr_position=pos,
                     analysis=analysis,
                     suggested_quantity=abs(int(pos.quantity)),
                     suggested_order_type="LMT",
                     suggested_price=current_price,
+                    cash_impact_usd=pos.market_value_usd,
+                    settlement_date=_settlement_date(2),
                 )
             )
             continue
@@ -306,20 +337,77 @@ def reconcile(
             )
             continue
 
-        # Check overweight
+        # Check overweight / underweight
         target_size_pct = analysis.trade_block.size_pct or (analysis.position_size or 0)
         if target_size_pct > 0 and portfolio.portfolio_value_usd > 0:
             actual_pct = (pos.market_value_usd / portfolio.portfolio_value_usd) * 100
             excess_pct = actual_pct - target_size_pct
             if excess_pct > overweight_threshold_pct:
+                target_value_usd = portfolio.portfolio_value_usd * (
+                    target_size_pct / 100
+                )
+                trim_value_usd = pos.market_value_usd - target_value_usd
+                # Use implied USD price per share for cross-currency accuracy
+                price_usd_per_share = (
+                    pos.market_value_usd / abs(pos.quantity)
+                    if pos.quantity != 0
+                    else 1.0
+                )
+                trim_qty = round_to_lot_size(
+                    int(trim_value_usd / (price_usd_per_share or 1.0)), ticker
+                )
                 items.append(
                     ReconciliationItem(
                         ticker=ticker,
                         action="TRIM",
                         reason=f"Overweight: {actual_pct:.1f}% vs target {target_size_pct:.1f}% (+{excess_pct:.1f}%)",
+                        urgency="MEDIUM",
+                        ibkr_position=pos,
+                        analysis=analysis,
+                        suggested_quantity=trim_qty,
+                        suggested_price=pos.current_price_local,
+                        suggested_order_type="LMT",
+                        cash_impact_usd=trim_value_usd,
+                        settlement_date=_settlement_date(2),
+                    )
+                )
+                continue
+
+            # Check underweight — only for BUY-verdict positions with sufficient shortfall
+            shortfall_pct = target_size_pct - actual_pct
+            verdict_upper = (analysis.verdict or "").upper()
+            if (
+                shortfall_pct > underweight_threshold_pct
+                and verdict_upper == "BUY"
+                and remaining_cash > 0
+            ):
+                target_value_usd = portfolio.portfolio_value_usd * (
+                    target_size_pct / 100
+                )
+                add_value_usd = min(
+                    target_value_usd - pos.market_value_usd, remaining_cash
+                )
+                price_usd_per_share = (
+                    pos.market_value_usd / abs(pos.quantity)
+                    if pos.quantity != 0
+                    else 1.0
+                )
+                add_qty = round_to_lot_size(
+                    int(add_value_usd / (price_usd_per_share or 1.0)), ticker
+                )
+                remaining_cash -= add_value_usd
+                items.append(
+                    ReconciliationItem(
+                        ticker=ticker,
+                        action="ADD",
+                        reason=f"Underweight: {actual_pct:.1f}% vs target {target_size_pct:.1f}% (-{shortfall_pct:.1f}%)",
                         urgency="LOW",
                         ibkr_position=pos,
                         analysis=analysis,
+                        suggested_quantity=add_qty,
+                        suggested_price=analysis.entry_price or pos.current_price_local,
+                        suggested_order_type="LMT",
+                        cash_impact_usd=-add_value_usd,
                     )
                 )
                 continue
@@ -352,7 +440,6 @@ def reconcile(
         )
 
     # ── Phase 2: Find BUY recommendations not yet held ──
-    available_cash = portfolio.available_cash_usd
     for ticker, analysis in analyses.items():
         if ticker in held_tickers:
             continue  # Already handled above
@@ -371,22 +458,35 @@ def reconcile(
         # Only skip new buys if we have a live portfolio but no cash
         # (in --read-only mode portfolio_value_usd=0, so buys still surface)
         has_portfolio = portfolio.portfolio_value_usd > 0
-        if has_portfolio and available_cash <= 0:
+        if has_portfolio and remaining_cash <= 0:
             continue
 
         entry_price = analysis.entry_price or analysis.current_price
         conviction = analysis.conviction or analysis.trade_block.conviction or ""
         size_pct = analysis.trade_block.size_pct or (analysis.position_size or 0)
 
+        buy_qty = calculate_quantity(
+            available_cash_usd=remaining_cash,
+            entry_price_local=entry_price or 0.0,
+            fx_rate_to_usd=analysis.fx_rate_to_usd,
+            size_pct=size_pct,
+            portfolio_value_usd=portfolio.portfolio_value_usd,
+            yf_ticker=ticker,
+        )
+        buy_cost_usd = buy_qty * (entry_price or 0.0) * (analysis.fx_rate_to_usd or 1.0)
+        remaining_cash -= buy_cost_usd
+
         items.append(
             ReconciliationItem(
                 ticker=ticker,
                 action="BUY",
-                reason=f"New BUY recommendation ({analysis.analysis_date}) — {conviction} conviction, {size_pct:.1f}%",
+                reason=f"New BUY ({analysis.analysis_date}) — {conviction} conviction, target {size_pct:.1f}%",
                 urgency="MEDIUM",
                 analysis=analysis,
+                suggested_quantity=buy_qty if buy_qty > 0 else None,
                 suggested_price=entry_price,
                 suggested_order_type="LMT",
+                cash_impact_usd=-buy_cost_usd if buy_cost_usd > 0 else 0.0,
             )
         )
 
@@ -398,10 +498,11 @@ def reconcile(
         "reconciliation_complete",
         total_items=len(items),
         sells=sum(1 for i in items if i.action == "SELL"),
+        trims=sum(1 for i in items if i.action == "TRIM"),
+        adds=sum(1 for i in items if i.action == "ADD"),
         buys=sum(1 for i in items if i.action == "BUY"),
         holds=sum(1 for i in items if i.action == "HOLD"),
         reviews=sum(1 for i in items if i.action == "REVIEW"),
-        trims=sum(1 for i in items if i.action == "TRIM"),
     )
 
     return items

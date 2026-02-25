@@ -43,106 +43,83 @@ This isn't a single prompt to an LLM. It's a **stateful orchestration** of speci
 graph TB
     Start(["User: Analyze TICKER"]) --> Dispatcher{"Parallel<br/>Dispatch"}
 
-    %% Parallel Fan-Out: 7 branches run simultaneously (+ optional Auditor)
-    Dispatcher --> MarketAnalyst["Market Analyst<br/>(Technical Analysis)"]
-    Dispatcher --> SentimentAnalyst["Sentiment Analyst<br/>(Social Media)"]
-    Dispatcher --> NewsAnalyst["News Analyst<br/>(Recent Events)"]
+    %% Parallel Fan-Out
+    Dispatcher --> MarketAnalyst["Market Analyst<br/>(Technical)"]
+    Dispatcher --> SentimentAnalyst["Sentiment Analyst<br/>(Social)"]
+    Dispatcher --> NewsAnalyst["News Analyst<br/>(Events)"]
     Dispatcher --> JuniorFund["Junior Fundamentals<br/>(API Data)"]
     Dispatcher --> ForeignLang["Foreign Language<br/>(Native Sources)"]
-    Dispatcher --> LegalCounsel["Legal Counsel<br/>(Tax & Regulatory)"]
+    Dispatcher --> LegalCounsel["Legal Counsel<br/>(Tax & Reg)"]
     Dispatcher --> ValueTrap["Value Trap Detector<br/>(Governance)"]
+    
+    %% THE INDEPENDENT CHANNEL
     Dispatcher -.-> Auditor["Forensic Auditor<br/>(Independent Check)<br/>Optional"]
 
-    %% Market/Sentiment/News/ValueTrap go directly to main Sync Check
     MarketAnalyst --> SyncCheck["Sync Check<br/>(Fan-In Barrier)"]
     SentimentAnalyst --> SyncCheck
     NewsAnalyst --> SyncCheck
     ValueTrap --> SyncCheck
     Auditor -.-> SyncCheck
 
-    %% Fundamentals sub-graph: Junior + Foreign + Legal sync first
+    %% Fundamentals sub-graph
     JuniorFund --> FundSync["Fundamentals<br/>Sync"]
     ForeignLang --> FundSync
     LegalCounsel --> FundSync
-    FundSync --> SeniorFund["Senior Fundamentals<br/>(Scoring & Analysis)"]
+    FundSync --> SeniorFund["Senior Fundamentals<br/>(Scoring)"]
     SeniorFund --> Validator["Financial Validator<br/>(Red-Flag Detection)"]
     Validator --> SyncCheck
 
-    %% After all branches complete - routing based on pre-screening
+    %% Decision Logic
     SyncCheck -->|"REJECT"| PMFastFail["PM Fast-Fail<br/>(Skip Debate)"]
     SyncCheck -->|"PASS"| DebateR1{"Parallel<br/>Debate R1"}
 
-    %% Bull/Bear Debate - Round 1 (parallel)
-    DebateR1 --> BullR1["Bull Researcher<br/>Round 1"]
-    DebateR1 --> BearR1["Bear Researcher<br/>Round 1"]
+    %% Bull/Bear Debate
+    DebateR1 --> BullR1["Bull Researcher R1"]
+    DebateR1 --> BearR1["Bear Researcher R1"]
     BullR1 --> DebateSyncR1["Debate Sync R1"]
     BearR1 --> DebateSyncR1
 
-    %% Round 2 (if normal mode) or skip to final
-    DebateSyncR1 -->|"Normal Mode"| DebateR2{"Parallel<br/>Debate R2"}
-    DebateSyncR1 -->|"Quick Mode"| DebateSyncFinal["Debate Sync Final"]
+    DebateSyncR1 -->|"Normal"| DebateR2{"Parallel<br/>Debate R2"}
+    DebateSyncR1 -->|"Quick"| DebateSyncFinal["Debate Sync Final"]
 
-    DebateR2 --> BullR2["Bull Researcher<br/>Round 2"]
-    DebateR2 --> BearR2["Bear Researcher<br/>Round 2"]
+    DebateR2 --> BullR2["Bull Researcher R2"]
+    DebateR2 --> BearR2["Bear Researcher R2"]
     BullR2 --> DebateSyncFinal
     BearR2 --> DebateSyncFinal
 
-    DebateSyncFinal --> ResearchManager["Research Manager<br/>(Synthesize All Data)"]
+    DebateSyncFinal --> ResearchManager["Research Manager<br/>(Synthesis)"]
 
-    %% Post-Research Manager: ValCalc and Consultant run in parallel, BOTH go to Trader
-    ResearchManager --> ValuationCalc["Valuation Calculator<br/>(Parameter Extraction)"]
-    ResearchManager -.-> Consultant["External Consultant<br/>(Cross-Validation)<br/>Optional"]
+    %% INDEPENDENT CHANNEL CROSS-VALIDATION
+    ResearchManager --> ValuationCalc["Valuation Calculator"]
+    ResearchManager -.-> Consultant["External Consultant<br/>(Cross-Validation)"]
+    
+    %% Visualizing the Independent Data Injection
+    Auditor -.->|Independent Forensic Report| Consultant
 
-    ValuationCalc --> Trader["Trader<br/>(Trade Plan)"]
+    ValuationCalc --> Trader["Trader<br/>(Plan)"]
     Consultant -.-> Trader
 
-    %% Risk Team (parallel fan-out, converge to PM)
+    %% Risk Team
     Trader --> RiskyAnalyst["Risky Analyst"]
     Trader --> SafeAnalyst["Safe Analyst"]
     Trader --> NeutralAnalyst["Neutral Analyst"]
 
-    RiskyAnalyst --> PortfolioManager["Portfolio Manager<br/>(Final Decision)"]
+    RiskyAnalyst --> PortfolioManager["Portfolio Manager<br/>(Verdict)"]
     SafeAnalyst --> PortfolioManager
     NeutralAnalyst --> PortfolioManager
 
-    %% Fast-fail path also goes through Chart Generator
-    PMFastFail --> ChartGen["Chart Generator<br/>(Post-Verdict Visuals)"]
+    PMFastFail --> ChartGen["Chart Generator"]
     PortfolioManager --> ChartGen
 
-    ChartGen --> Decision(["BUY / SELL / HOLD<br/>+ Position Size<br/>+ Charts"])
+    ChartGen --> Decision(["BUY / SELL / HOLD"])
 
     %% Styling
     style Dispatcher fill:#ffeaa7,color:#333
-    style MarketAnalyst fill:#e1f5ff,color:#333
-    style NewsAnalyst fill:#e1f5ff,color:#333
-    style SentimentAnalyst fill:#e1f5ff,color:#333
-    style JuniorFund fill:#e1f5ff,color:#333
-    style ForeignLang fill:#e1ffe1,color:#333
-    style LegalCounsel fill:#e1ffe1,color:#333
-    style FundSync fill:#e0e0e0,color:#333
-    style SeniorFund fill:#e1f5ff,color:#333
-    style Validator fill:#ffcccc,color:#333
     style SyncCheck fill:#e0e0e0,color:#333
-    style DebateR1 fill:#ffeaa7,color:#333
-    style DebateR2 fill:#ffeaa7,color:#333
-    style DebateSyncR1 fill:#e0e0e0,color:#333
-    style DebateSyncFinal fill:#e0e0e0,color:#333
-    style ResearchManager fill:#fff4e1,color:#333
-    style BullR1 fill:#d4edda,color:#333
-    style BearR1 fill:#f8d7da,color:#333
-    style BullR2 fill:#d4edda,color:#333
-    style BearR2 fill:#f8d7da,color:#333
-    style ValuationCalc fill:#e6f3ff,color:#333
+    style Validator fill:#ffcccc,color:#333
     style Consultant fill:#e8daff,color:#333
-    style Auditor fill:#e8daff,color:#333
-    style ValueTrap fill:#fff0f5,color:#333
-    style Trader fill:#ffe4e1,color:#333
-    style RiskyAnalyst fill:#fff3cd,color:#333
-    style SafeAnalyst fill:#fff3cd,color:#333
-    style NeutralAnalyst fill:#fff3cd,color:#333
-    style PortfolioManager fill:#d1ecf1,color:#333
+    style Auditor fill:#e8daff,color:#333,stroke-dasharray: 5 5
     style PMFastFail fill:#ffcccc,color:#333
-    style ChartGen fill:#e6f3ff,color:#333
     style Decision fill:#55efc4,color:#333
 ```
 

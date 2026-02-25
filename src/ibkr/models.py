@@ -77,7 +77,7 @@ class ReconciliationItem(BaseModel):
     """A single reconciliation item comparing IBKR position vs evaluator recommendation."""
 
     ticker: str
-    action: Literal["BUY", "SELL", "TRIM", "HOLD", "REVIEW"]
+    action: Literal["BUY", "SELL", "TRIM", "ADD", "HOLD", "REVIEW"]
     reason: str
     urgency: Literal["HIGH", "MEDIUM", "LOW"]
     ibkr_position: NormalizedPosition | None = None
@@ -85,6 +85,8 @@ class ReconciliationItem(BaseModel):
     suggested_quantity: int | None = None
     suggested_price: float | None = None
     suggested_order_type: str = "LMT"  # LMT or MKT
+    cash_impact_usd: float = 0.0  # negative = cost, positive = proceeds
+    settlement_date: str | None = None  # for sells/trims: "YYYY-MM-DD"
 
 
 class PortfolioSummary(BaseModel):
@@ -92,7 +94,8 @@ class PortfolioSummary(BaseModel):
 
     account_id: str = ""
     portfolio_value_usd: float = 0.0
-    cash_balance_usd: float = 0.0
+    cash_balance_usd: float = 0.0  # total cash incl. unsettled
+    settled_cash_usd: float = 0.0  # T+0 spendable cash
     cash_pct: float = 0.0
     position_count: int = 0
-    available_cash_usd: float = 0.0  # After cash buffer
+    available_cash_usd: float = 0.0  # settled_cash minus cash_buffer
