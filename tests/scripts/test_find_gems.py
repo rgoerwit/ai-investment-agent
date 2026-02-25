@@ -1362,3 +1362,161 @@ class TestExchangeScrapeIntegration:
                 f"{exchange['exchange_name']}: ticker_col '{ticker_col}' not found "
                 f"in columns {list(df.columns)}"
             )
+
+
+# ============================================================
+# TestHandleScrapeHtmlPagination — unit tests (no network)
+# ============================================================
+def _make_html_table(symbols, col="Symbol"):
+    """Return minimal HTML string with a one-column table."""
+    rows = "".join(f"<tr><td>{s}</td></tr>" for s in symbols)
+    return f"<html><body><table><thead><tr><th>{col}</th></tr></thead><tbody>{rows}</tbody></table></body></html>"
+
+
+def _make_mock_session(pages: dict):
+    """Return a mock session where session.get(url).text returns pages[url].
+
+    pages: {url: html_text or Exception}
+    """
+    session = MagicMock()
+
+    def _get(url, **_kwargs):
+        val = pages.get(url, "")
+        if isinstance(val, Exception):
+            raise val
+        resp = MagicMock()
+        resp.text = val
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    session.get.side_effect = _get
+    return session
+
+
+class TestHandleScrapeHtmlPagination:
+    """Unit tests for _handle_scrape_html() pagination logic."""
+
+    BASE_CONFIG = {
+        "source_url": "https://example.com/list/test-exchange/",
+        "params": {"ticker_col": "Symbol", "name_col": "Company Name"},
+    }
+
+    def _config(self, max_pages=1):
+        cfg = {
+            "source_url": self.BASE_CONFIG["source_url"],
+            "params": dict(self.BASE_CONFIG["params"]),
+        }
+        if max_pages != 1:
+            cfg["params"]["paginate_max_pages"] = max_pages
+        return cfg
+
+    def test_single_page_no_pagination_key(self):
+        """Without paginate_max_pages, fetches only page 1."""
+        base = self.BASE_CONFIG["source_url"]
+        html = _make_html_table([f"SYM{i}" for i in range(10)])
+        session = _make_mock_session({base: html})
+
+        df = find_gems._handle_scrape_html(self._config(max_pages=1), session)
+
+        assert len(df) == 10
+        # Should have fetched exactly page 1 (no ?p=2 call)
+        assert session.get.call_count == 1
+
+    def test_two_pages_concatenated(self):
+        """paginate_max_pages=3, two full pages returned, third page is empty → stops."""
+        base = self.BASE_CONFIG["source_url"]
+        page1_syms = [f"A{i}" for i in range(500)]
+        page2_syms = [f"B{i}" for i in range(500)]
+        pages = {
+            base: _make_html_table(page1_syms),
+            f"{base}?p=2": _make_html_table(page2_syms),
+            f"{base}?p=3": "<html><body><p>No table here</p></body></html>",
+        }
+        session = _make_mock_session(pages)
+
+        df = find_gems._handle_scrape_html(self._config(max_pages=3), session)
+
+        assert len(df) == 1000
+        assert session.get.call_count == 3  # page 1, page 2, page 3 (stops)
+
+    def test_partial_last_page_stops_early(self):
+        """When page N has fewer rows than page 1, it's the last page and is still collected."""
+        base = self.BASE_CONFIG["source_url"]
+        page1_syms = [f"A{i}" for i in range(500)]
+        page2_syms = [f"B{i}" for i in range(300)]  # partial page
+        pages = {
+            base: _make_html_table(page1_syms),
+            f"{base}?p=2": _make_html_table(page2_syms),
+        }
+        session = _make_mock_session(pages)
+
+        df = find_gems._handle_scrape_html(self._config(max_pages=5), session)
+
+        # Partial page still collected; loop stops after it
+        assert len(df) == 800
+        assert session.get.call_count == 2
+
+    def test_http_error_on_page_2_returns_page_1(self):
+        """An HTTP error on page 2 is silently swallowed; page 1 data returned."""
+        base = self.BASE_CONFIG["source_url"]
+        page1_syms = [f"A{i}" for i in range(500)]
+        import requests as _req
+
+        pages = {
+            base: _make_html_table(page1_syms),
+            f"{base}?p=2": _req.exceptions.ConnectionError("timeout"),
+        }
+        session = _make_mock_session(pages)
+
+        df = find_gems._handle_scrape_html(self._config(max_pages=3), session)
+
+        assert len(df) == 500
+
+    def test_no_table_on_page_1_raises(self):
+        """No table on page 1 raises ValueError (not silently returns empty)."""
+        base = self.BASE_CONFIG["source_url"]
+        session = _make_mock_session(
+            {base: "<html><body><p>Nothing here</p></body></html>"}
+        )
+
+        with pytest.raises(ValueError, match="No HTML tables found"):
+            find_gems._handle_scrape_html(self._config(max_pages=1), session)
+
+    def test_paginate_max_pages_cap_respected(self):
+        """Never fetches more pages than paginate_max_pages, even if more data exists."""
+        base = self.BASE_CONFIG["source_url"]
+        full_page = _make_html_table([f"X{i}" for i in range(500)])
+        pages = {base: full_page}
+        for p in range(2, 10):
+            pages[f"{base}?p={p}"] = full_page
+        session = _make_mock_session(pages)
+
+        df = find_gems._handle_scrape_html(self._config(max_pages=2), session)
+
+        assert len(df) == 1000
+        assert session.get.call_count == 2  # page 1 + page 2 only
+
+    def test_exchange_configs_have_paginate_key(self):
+        """Sweden, Malaysia, Indonesia configs all have paginate_max_pages set."""
+        with open(_CONFIG_PATH) as f:
+            config = json.load(f)
+
+        targets = {
+            "Nasdaq Stockholm",
+            "Bursa Malaysia",
+            "Indonesia Stock Exchange",
+        }
+        found = {}
+        for ex in config["exchanges"]:
+            if ex["exchange_name"] in targets:
+                found[ex["exchange_name"]] = ex
+
+        assert len(found) == len(targets), f"Missing configs: {targets - set(found)}"
+
+        for name, ex in found.items():
+            assert (
+                ex["params"].get("paginate_max_pages", 1) > 1
+            ), f"{name} missing paginate_max_pages > 1"
+            assert (
+                ex.get("min_expected_rows", 0) >= 700
+            ), f"{name} min_expected_rows too low: {ex.get('min_expected_rows')}"

@@ -131,10 +131,11 @@
       "method": "scrape_html",
       "source_url": "https://stockanalysis.com/list/nasdaq-stockholm/",
       "yahoo_suffix": ".ST",
-      "min_expected_rows": 100,
+      "min_expected_rows": 700,
       "params": {
         "ticker_col": "Symbol",
-        "name_col": "Company Name"
+        "name_col": "Company Name",
+        "paginate_max_pages": 5
       }
     },
     {
@@ -227,10 +228,11 @@
       "method": "scrape_html",
       "source_url": "https://stockanalysis.com/list/bursa-malaysia/",
       "yahoo_suffix": ".KL",
-      "min_expected_rows": 50,
+      "min_expected_rows": 700,
       "params": {
         "ticker_col": "Symbol",
-        "name_col": "Company Name"
+        "name_col": "Company Name",
+        "paginate_max_pages": 5
       }
     },
     {
@@ -253,10 +255,11 @@
       "method": "scrape_html",
       "source_url": "https://stockanalysis.com/list/indonesia-stock-exchange/",
       "yahoo_suffix": ".JK",
-      "min_expected_rows": 50,
+      "min_expected_rows": 700,
       "params": {
         "ticker_col": "Symbol",
-        "name_col": "Company Name"
+        "name_col": "Company Name",
+        "paginate_max_pages": 5
       }
     },
     {

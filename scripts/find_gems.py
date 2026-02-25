@@ -335,28 +335,66 @@ def _handle_download_excel(config, session):
 
 
 def _handle_scrape_html(config, session):
-    response = session.get(config["source_url"])
-    response.raise_for_status()
-
-    if "<table" not in response.text.lower():
-        raise ValueError("No HTML tables found (likely JS-rendered page)")
-
     params = config["params"]
+    base_url = config["source_url"]
+    max_pages = params.get("paginate_max_pages", 1)
     idx = params.get("table_index", 0)
-    dfs = pd.read_html(io.StringIO(response.text), flavor=["lxml", "html5lib", "bs4"])
-
-    if len(dfs) > idx:
-        primary_df = dfs[idx]
-        if _find_col_fuzzy(primary_df, params.get("ticker_col")):
-            return primary_df
-
     target_col = params.get("ticker_col")
-    if target_col:
-        for df in dfs:
-            if _find_col_fuzzy(df, target_col):
-                return df
 
-    raise ValueError(f"Table containing '{target_col}' not found")
+    all_frames = []
+    first_page_len = None
+
+    for page_num in range(1, max_pages + 1):
+        url = base_url if page_num == 1 else f"{base_url}?p={page_num}"
+        try:
+            response = session.get(url)
+            response.raise_for_status()
+        except Exception:
+            if page_num == 1:
+                raise
+            break  # Stop on HTTP error for pages 2+
+
+        if "<table" not in response.text.lower():
+            if page_num == 1:
+                raise ValueError("No HTML tables found (likely JS-rendered page)")
+            break  # End of pagination
+
+        dfs = pd.read_html(
+            io.StringIO(response.text), flavor=["lxml", "html5lib", "bs4"]
+        )
+
+        df = None
+        if len(dfs) > idx and _find_col_fuzzy(dfs[idx], target_col):
+            df = dfs[idx]
+        else:
+            for candidate in dfs:
+                if _find_col_fuzzy(candidate, target_col):
+                    df = candidate
+                    break
+
+        if df is None or df.empty:
+            if page_num == 1:
+                raise ValueError(f"Table containing '{target_col}' not found")
+            break
+
+        all_frames.append(df)
+
+        if first_page_len is None:
+            first_page_len = len(df)
+        elif len(df) < first_page_len:
+            break  # Partial page = last page
+
+        if max_pages > 1 and page_num < max_pages:
+            time.sleep(0.5)  # Be polite to stockanalysis.com
+
+    if not all_frames:
+        raise ValueError(f"Table containing '{target_col}' not found")
+
+    return (
+        all_frames[0]
+        if len(all_frames) == 1
+        else pd.concat(all_frames, ignore_index=True)
+    )
 
 
 _HANDLERS = {
