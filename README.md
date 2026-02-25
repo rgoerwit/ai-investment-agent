@@ -269,7 +269,7 @@ Find undervalued international stocks end-to-end — no manual steps:
 ```bash
 # One command: scrape 18+ exchanges → filter by fundamentals → quick-screen
 # all candidates → full analysis on BUY verdicts only
-./scripts/run_pipeline.sh
+caffeinate -i ./scripts/run_pipeline.sh
 
 # Or step by step:
 
@@ -290,6 +290,16 @@ caffeinate -i ./scripts/run_pipeline.sh --yes
 ```
 
 The pipeline pauses before each AI stage to show a summary (ticker count, estimated time, output location) and asks for confirmation. Use `--yes` / `-y` to skip prompts for unattended runs.
+
+**Key flags:**
+
+| Flag | Description |
+|------|-------------|
+| `-y, --yes` | Skip all confirmation prompts (for cron/CI/overnight runs) |
+| `--skip-scrape FILE` | Skip Stage 0 scraping; use an existing ticker list file |
+| `--stage N` | Run only stage N (0=scrape, 1=quick-screen, 2=full analysis) |
+| `--cooldown N` | Seconds between analyses (default: 60 for free tier, 10 for paid) |
+| `--quick` | Pass `--quick` flag to each analysis (1 debate round, faster) |
 
 Output lands in `scratch/`: quick-screen reports (`*_quick.md`), full reports for BUYs, and a `buys_YYYY-MM-DD.txt` summary.
 

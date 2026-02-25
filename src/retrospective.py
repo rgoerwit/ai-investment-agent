@@ -113,7 +113,13 @@ FAILURE_MODES = {
     "DEAD_MONEY",
 }
 
-LESSON_TYPES = {"missed_risk", "false_positive", "missed_opportunity", "correct_call"}
+LESSON_TYPES = {
+    "missed_risk",
+    "false_positive",
+    "missed_opportunity",
+    "correct_call",
+    "prior_rejection",
+}
 
 LESSONS_COLLECTION_NAME = "lessons_learned"
 
@@ -786,6 +792,161 @@ FAILURE_MODE: CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_BLEED | OPERATIONAL_MISS | 
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Component 4b: Rejection Record Storage (non-BUY verdicts)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+async def save_rejection_record(
+    snapshot: dict[str, Any],
+    lessons_memory: Any,
+) -> bool:
+    """
+    Save a non-BUY screening verdict as a rejection record in the global
+    lessons_learned ChromaDB collection.
+
+    Called from main.py after each HOLD/DO_NOT_INITIATE/SELL verdict.
+    Zero LLM cost — pure metadata extraction and ChromaDB write.
+
+    Dedup / upsert logic:
+    - Exact match (ticker + analysis_date + lesson_type=prior_rejection): skip
+    - Existing quick-mode + new full-mode: delete old, insert new (upgrade)
+    - Existing full-mode + new quick-mode: skip (don't downgrade)
+    - Existing full-mode + new full-mode: delete old, insert new (fresher data)
+
+    Args:
+        snapshot: Prediction snapshot dict from extract_snapshot()
+        lessons_memory: FinancialSituationMemory for lessons_learned collection
+
+    Returns:
+        True if stored, False if skipped/failed
+    """
+    if not lessons_memory or not lessons_memory.available:
+        logger.debug("rejection_record_memory_unavailable")
+        return False
+
+    ticker = snapshot.get("ticker", "UNKNOWN")
+    analysis_date = snapshot.get("analysis_date", "")
+    verdict = snapshot.get("verdict", "")
+    is_quick_mode = bool(snapshot.get("is_quick_mode", False))
+
+    if not verdict or verdict == "BUY":
+        return False
+
+    # 1. Check for exact match (same ticker + analysis_date → idempotent re-run)
+    try:
+        exact = lessons_memory.situation_collection.get(
+            where={
+                "$and": [
+                    {"ticker": {"$eq": ticker}},
+                    {"analysis_date": {"$eq": analysis_date}},
+                    {"lesson_type": {"$eq": "prior_rejection"}},
+                ]
+            }
+        )
+        if exact and exact.get("ids") and len(exact["ids"]) > 0:
+            logger.debug(
+                "rejection_record_already_exists", ticker=ticker, date=analysis_date
+            )
+            return False
+    except Exception as e:
+        logger.debug("rejection_dedup_check_failed", error=str(e))
+
+    # 2. Check for any existing rejection record for this ticker (any date)
+    try:
+        any_existing = lessons_memory.situation_collection.get(
+            where={
+                "$and": [
+                    {"ticker": {"$eq": ticker}},
+                    {"lesson_type": {"$eq": "prior_rejection"}},
+                ]
+            }
+        )
+        if any_existing and any_existing.get("ids") and len(any_existing["ids"]) > 0:
+            existing_ids = any_existing["ids"]
+            existing_meta = (any_existing.get("metadatas") or [{}])[0]
+            existing_is_full = not existing_meta.get("is_quick_mode", True)
+
+            # Don't downgrade: existing full-mode + new quick-mode → skip
+            if existing_is_full and is_quick_mode:
+                logger.debug(
+                    "rejection_record_skip_downgrade",
+                    ticker=ticker,
+                    existing_date=existing_meta.get("analysis_date"),
+                    new_date=analysis_date,
+                )
+                return False
+
+            # Delete existing record(s) before inserting fresher data
+            try:
+                lessons_memory.situation_collection.delete(ids=existing_ids)
+                logger.debug(
+                    "rejection_record_deleted_for_upsert",
+                    ticker=ticker,
+                    count=len(existing_ids),
+                )
+            except Exception as e:
+                logger.debug("rejection_record_delete_failed", error=str(e))
+    except Exception as e:
+        logger.debug("rejection_existing_check_failed", error=str(e))
+
+    # 3. Build document text (factual only — no agent reasoning)
+    sector = snapshot.get("sector") or "Unknown"
+    exchange = snapshot.get("exchange") or "US"
+    currency = snapshot.get("currency") or FALLBACK_CURRENCY
+    health_adj = snapshot.get("health_adj", "N/A")
+    growth_adj = snapshot.get("growth_adj", "N/A")
+    risk_tally = snapshot.get("risk_tally", "N/A")
+    zone = snapshot.get("zone") or "N/A"
+    bear_risks = (snapshot.get("bear_risks_excerpt") or "")[:300]
+
+    document = (
+        f"PRIOR SCREENING RECORD: {ticker} ({sector} / {exchange}) — "
+        f"{verdict} on {analysis_date}. "
+        f"Health {health_adj}/100, Growth {growth_adj}/100, risk tally {risk_tally}. "
+        f"Risk zone: {zone}. Quick mode: {is_quick_mode}."
+    )
+    if bear_risks:
+        document += f"\nBear risks excerpt: {bear_risks}"
+
+    # 4. Build metadata (extends existing schema)
+    confidence_weight = 0.3 if is_quick_mode else 0.5
+    deep_model = snapshot.get("deep_model") or config.deep_think_llm or "unknown"
+
+    metadata = {
+        "ticker": ticker,
+        "sector": sector,
+        "exchange": exchange,
+        "currency": currency,
+        "verdict": verdict,
+        "lesson_type": "prior_rejection",
+        "failure_mode": "N/A",
+        "actual_return_pct": 0.0,
+        "benchmark_return_pct": 0.0,
+        "excess_return_pct": 0.0,
+        "days_elapsed": 0,
+        "confidence_weight": confidence_weight,
+        "analysis_date": analysis_date,
+        "retrospective_date": analysis_date,
+        "timestamp": datetime.now().isoformat(),
+        "is_quick_mode": is_quick_mode,
+        "analysis_model": deep_model,
+    }
+
+    stored = await lessons_memory.add_situations([document], [metadata])
+    if stored:
+        logger.info(
+            "rejection_record_stored",
+            ticker=ticker,
+            verdict=verdict,
+            is_quick_mode=is_quick_mode,
+            confidence_weight=confidence_weight,
+        )
+    else:
+        logger.warning("rejection_record_storage_failed", ticker=ticker)
+    return stored
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Component 5: Lesson Storage
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -968,12 +1129,19 @@ async def format_lessons_for_injection(
         meta = r.get("metadata", {})
         base_confidence = meta.get("confidence_weight", 0.5)
 
-        # Geographic boost
+        # Boost priority: same-ticker rejection record > geographic proximity
         boost = 0.0
-        if meta.get("exchange") == current_exchange:
-            boost += 0.15
-        if meta.get("currency") == current_currency:
-            boost += 0.10
+        if (
+            meta.get("lesson_type") == "prior_rejection"
+            and meta.get("ticker") == ticker
+        ):
+            boost += 0.35  # Same ticker was previously screened out — very relevant
+        else:
+            # Geographic boost for regular lessons
+            if meta.get("exchange") == current_exchange:
+                boost += 0.15
+            if meta.get("currency") == current_currency:
+                boost += 0.10
 
         effective_score = base_confidence + boost
 

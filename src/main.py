@@ -1194,6 +1194,26 @@ async def main():
                         f"\n[yellow]Warning: Could not save results to file: {e}[/yellow]\n"
                     )
 
+            # Save rejection record for non-BUY verdicts (unconditional — not gated
+            # by --no-memory, since rejection records are factual metrics, not agent
+            # reasoning; they're always useful for future analyses of the same ticker)
+            try:
+                from src.retrospective import (
+                    create_lessons_memory,
+                    extract_snapshot,
+                    save_rejection_record,
+                )
+
+                _snapshot = extract_snapshot(
+                    result, args.ticker, is_quick_mode=args.quick
+                )
+                _verdict = _snapshot.get("verdict", "")
+                if _verdict and _verdict != "BUY":
+                    _rejection_memory = create_lessons_memory()
+                    await save_rejection_record(_snapshot, _rejection_memory)
+            except Exception as e:
+                logger.debug("rejection_record_save_skipped", error=str(e))
+
             # Generate article if --article flag is set
             if args.article:
                 # Warn if article will lack images (stdout mode disables charts)

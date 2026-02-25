@@ -874,9 +874,10 @@ class TestConstants:
         assert "DEAD_MONEY" in FAILURE_MODES
 
     def test_lesson_types_complete(self):
-        assert len(LESSON_TYPES) == 4
+        assert len(LESSON_TYPES) == 5
         assert "missed_risk" in LESSON_TYPES
         assert "correct_call" in LESSON_TYPES
+        assert "prior_rejection" in LESSON_TYPES
 
     def test_collection_name(self):
         assert LESSONS_COLLECTION_NAME == "lessons_learned"
