@@ -38,7 +38,11 @@ from src.ibkr.models import (
     PortfolioSummary,
     ReconciliationItem,
 )
-from src.ibkr.reconciler import load_latest_analyses, reconcile
+from src.ibkr.reconciler import (
+    compute_portfolio_health,
+    load_latest_analyses,
+    reconcile,
+)
 
 _IBKR_OAUTH_PORTAL = (
     "https://ndcdyn.interactivebrokers.com/sso/Login?action=OAUTH&RL=1&ip2loc=US"
@@ -52,8 +56,11 @@ def _prompt_for_missing_secret(config) -> None:
 
         print(
             f"\nIBKR OAuth Access Token Secret not set.\n"
-            f"Generate a fresh token at: {_IBKR_OAUTH_PORTAL}\n"
-            f"(Token and secret disappear when you leave that page — copy them immediately.)",
+            f"The secret is shown ONCE when you generate the token at the IBKR portal:\n"
+            f"  {_IBKR_OAUTH_PORTAL}\n"
+            f"Copy it immediately and save it as IBKR_OAUTH_ACCESS_TOKEN_SECRET in your .env file.\n"
+            f"It does NOT expire — only the 24-hour brokerage session does (needed for --execute).\n"
+            f"For read-only portfolio reconciliation, the access token is all you need.",
             file=sys.stderr,
         )
         secret = getpass.getpass("Access Token Secret: ")
@@ -261,7 +268,21 @@ def parse_args() -> argparse.Namespace:
         help="Cash reserve fraction (default: 0.05)",
     )
     parser.add_argument(
-        "--refresh-stale", action="store_true", help="Re-run evaluator on stale tickers"
+        "--refresh-stale",
+        action="store_true",
+        help="Re-run evaluator on stale tickers and positions with no analysis",
+    )
+    parser.add_argument(
+        "--sector-limit",
+        type=float,
+        default=30.0,
+        help="Warn when a BUY/ADD would push a sector above this %% (default: 30)",
+    )
+    parser.add_argument(
+        "--exchange-limit",
+        type=float,
+        default=40.0,
+        help="Warn when a BUY/ADD would push an exchange above this %% (default: 40)",
     )
     parser.add_argument(
         "--quick", action="store_true", help="Use quick mode for re-analysis"
@@ -345,10 +366,20 @@ def _urgency_prefix(item: ReconciliationItem) -> str:
     return {"HIGH": "  !!", "MEDIUM": "   !", "LOW": "    "}.get(item.urgency, "    ")
 
 
+def _bar_chart(pct: float, limit: float, width: int = 14) -> str:
+    """ASCII bar scaled so 'limit' fills the full bar width."""
+    filled = min(width, round(pct / max(limit, 0.1) * width))
+    bar = "█" * filled + "░" * (width - filled)
+    warn = " ⚠" if pct >= limit * 0.9 else ""
+    return f"{bar}{warn}"
+
+
 def format_report(
     items: list[ReconciliationItem],
     portfolio: PortfolioSummary,
     show_recommendations: bool = False,
+    portfolio_health_flags: list[str] | None = None,
+    max_age_days: int = 14,
 ) -> str:
     """Format reconciliation results as sectioned human-readable text."""
     lines: list[str] = []
@@ -552,6 +583,36 @@ def format_report(
         lines.append("  No reconciliation items.")
         lines.append("")
 
+    # ── CONCENTRATION ──────────────────────────────────────────────────────────
+    sector_weights = portfolio.sector_weights
+    exchange_weights = portfolio.exchange_weights
+    if sector_weights or exchange_weights:
+        _section("CONCENTRATION")
+
+        if sector_weights:
+            lines.append("  Sector:")
+            for sector, pct in sorted(sector_weights.items(), key=lambda x: -x[1]):
+                bar = _bar_chart(pct, 30.0)
+                lines.append(f"    {sector:<22} {pct:>5.1f}%  {bar}")
+            lines.append("")
+
+        if exchange_weights:
+            from src.ibkr.reconciler import _EXCHANGE_LONG_NAMES
+
+            lines.append("  Exchange:")
+            for exch, pct in sorted(exchange_weights.items(), key=lambda x: -x[1]):
+                long_name = _EXCHANGE_LONG_NAMES.get(exch, exch)
+                bar = _bar_chart(pct, 40.0)
+                lines.append(f"    {exch:<5} ({long_name:<12}) {pct:>5.1f}%  {bar}")
+            lines.append("")
+
+    # ── PORTFOLIO HEALTH ───────────────────────────────────────────────────────
+    if portfolio_health_flags:
+        _section("PORTFOLIO HEALTH", "cross-portfolio signals")
+        for flag in portfolio_health_flags:
+            lines.append(f"  !! {flag}")
+        lines.append("")
+
     # ── CASH SUMMARY ──────────────────────────────────────────────────────────
     if show_recommendations:
         _section("CASH SUMMARY")
@@ -611,6 +672,96 @@ def format_report(
                 f"     If orders fill by market close, funds available {settle_date_str}."
             )
             lines.append("     Consider additional BUYs only after settlement date.")
+            lines.append("")
+
+    # ── DEFERRED ACTIONS ──────────────────────────────────────────────────────
+    # Show a sequenced action plan: what to do today vs after T+2 settlement,
+    # and which HOLD positions are approaching their staleness deadline.
+    from datetime import date, timedelta
+    from datetime import datetime as _dt
+
+    today_str = date.today().isoformat()
+    action_today = [i for i in items if i.action in ("SELL", "TRIM")]
+    funded_today = [
+        i for i in items if i.action in ("ADD", "BUY") and i.cash_impact_usd < 0
+    ]
+    # Sell proceeds grouped by settlement date
+    settle_groups: dict[str, float] = {}
+    for i in action_today:
+        if i.settlement_date and i.cash_impact_usd > 0:
+            settle_groups[i.settlement_date] = (
+                settle_groups.get(i.settlement_date, 0.0) + i.cash_impact_usd
+            )
+    # Upcoming review deadlines: HOLDs / items with analysis nearing max_age_days
+    upcoming_reviews: list[
+        tuple[str, str, int]
+    ] = []  # (ticker, expires_date, days_left)
+    for item in items:
+        if item.action == "HOLD" and item.analysis:
+            remaining_days = max_age_days - item.analysis.age_days
+            if 0 < remaining_days <= 7:
+                try:
+                    expires_dt = _dt.strptime(
+                        item.analysis.analysis_date, "%Y-%m-%d"
+                    ) + timedelta(days=max_age_days)
+                    upcoming_reviews.append(
+                        (item.ticker, expires_dt.date().isoformat(), remaining_days)
+                    )
+                except (ValueError, TypeError):
+                    pass
+
+    if action_today or funded_today or settle_groups or upcoming_reviews:
+        _section("DEFERRED ACTIONS", "pending settlement & upcoming deadlines")
+
+        if action_today or funded_today:
+            lines.append(f"  TODAY ({today_str}):")
+            for i in action_today:
+                qty_str = (
+                    f"  {abs(i.suggested_quantity)} sh" if i.suggested_quantity else ""
+                )
+                price_str = (
+                    f"  @ {_ccy(_item_currency(i))}{i.suggested_price:,.2f}"
+                    if i.suggested_price
+                    else ""
+                )
+                lines.append(
+                    f"    → {i.action}  {i.ticker}{qty_str}{price_str}  {i.suggested_order_type or 'LMT'}"
+                )
+            for i in funded_today:
+                qty_str = (
+                    f"  {abs(i.suggested_quantity)} sh" if i.suggested_quantity else ""
+                )
+                price_str = (
+                    f"  @ {_ccy(_item_currency(i))}{i.suggested_price:,.2f}"
+                    if i.suggested_price
+                    else ""
+                )
+                cost_str = (
+                    f"  (~${abs(i.cash_impact_usd):,.0f})" if i.cash_impact_usd else ""
+                )
+                lines.append(
+                    f"    → {i.action}  {i.ticker}{qty_str}{price_str}{cost_str}  — funded from settled cash"
+                )
+            lines.append("")
+
+        for settle_date, proceeds in sorted(settle_groups.items()):
+            lines.append(f"  {settle_date} (T+2 proceeds from today's sell/trim):")
+            lines.append(f"    → ${proceeds:,.0f} clears on this date")
+            lines.append("    → Run before placing any additional buys:")
+            lines.append(
+                "        poetry run python scripts/portfolio_manager.py --recommend"
+            )
+            lines.append("")
+
+        if upcoming_reviews:
+            lines.append("  Upcoming review deadlines:")
+            for ticker, expires, days_left in sorted(
+                upcoming_reviews, key=lambda x: x[2]
+            ):
+                lines.append(
+                    f"    → {ticker:<14} expires {expires}  ({days_left}d remaining)"
+                    f"  →  poetry run python -m src.main --ticker {ticker}"
+                )
             lines.append("")
 
     # ── Summary line ──────────────────────────────────────────────────────────
@@ -812,14 +963,28 @@ def main() -> None:
         portfolio=portfolio,
         max_age_days=args.max_age,
         drift_threshold_pct=args.drift_pct,
+        sector_limit_pct=args.sector_limit,
+        exchange_limit_pct=args.exchange_limit,
     )
 
-    # Handle stale refreshes
+    # Compute portfolio-level health flags (uses weights populated by reconcile())
+    health_flags = compute_portfolio_health(
+        positions=positions,
+        analyses=analyses,
+        portfolio=portfolio,
+        max_age_days=args.max_age,
+    )
+
+    # Handle stale refreshes — also picks up positions with no analysis at all
     if args.refresh_stale:
         stale_tickers = [
             item.ticker
             for item in items
-            if item.action == "REVIEW" and "stale" in (item.reason or "").lower()
+            if item.action == "REVIEW"
+            and (
+                "stale" in (item.reason or "").lower()
+                or "no evaluator analysis found" in (item.reason or "").lower()
+            )
         ]
         if stale_tickers:
             print(
@@ -836,6 +1001,14 @@ def main() -> None:
                 portfolio=portfolio,
                 max_age_days=args.max_age,
                 drift_threshold_pct=args.drift_pct,
+                sector_limit_pct=args.sector_limit,
+                exchange_limit_pct=args.exchange_limit,
+            )
+            health_flags = compute_portfolio_health(
+                positions=positions,
+                analyses=analyses,
+                portfolio=portfolio,
+                max_age_days=args.max_age,
             )
 
     # Output
@@ -844,7 +1017,13 @@ def main() -> None:
     if args.json:
         output = format_json(items, portfolio)
     else:
-        output = format_report(items, portfolio, show_recommendations=show_recs)
+        output = format_report(
+            items,
+            portfolio,
+            show_recommendations=show_recs,
+            portfolio_health_flags=health_flags,
+            max_age_days=args.max_age,
+        )
 
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)

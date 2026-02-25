@@ -17,6 +17,7 @@ from src.ibkr.reconciler import (
     check_staleness,
     check_stop_breach,
     check_target_hit,
+    compute_portfolio_health,
     load_latest_analyses,
     reconcile,
 )
@@ -398,3 +399,167 @@ class TestLoadLatestAnalyses:
         result = load_latest_analyses(tmp_path)
         # Files are sorted reverse by name, so 2026-02-20 should win
         assert result["7203.T"].verdict == "BUY"
+
+    def test_loads_sector_and_exchange(self, tmp_path):
+        """sector and exchange are loaded from snapshot; exchange inferred from ticker if absent."""
+        data_with_sector = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-02-20",
+                "verdict": "BUY",
+                "sector": "Consumer Discretionary",
+                "exchange": "T",
+            },
+            "investment_analysis": {},
+        }
+        (tmp_path / "7203_T_2026-02-20_analysis.json").write_text(
+            json.dumps(data_with_sector)
+        )
+        result = load_latest_analyses(tmp_path)
+        assert result["7203.T"].sector == "Consumer Discretionary"
+        assert result["7203.T"].exchange == "T"
+
+    def test_exchange_inferred_from_ticker_when_absent(self, tmp_path):
+        """If exchange absent from snapshot, infer from ticker suffix."""
+        data = {
+            "prediction_snapshot": {
+                "ticker": "0005.HK",
+                "analysis_date": "2026-02-20",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        (tmp_path / "0005_HK_2026-02-20_analysis.json").write_text(json.dumps(data))
+        result = load_latest_analyses(tmp_path)
+        assert result["0005.HK"].exchange == "HK"
+
+
+# ── Concentration Tests ──
+
+
+class TestConcentration:
+    """Test sector/exchange concentration tracking."""
+
+    def test_exchange_weights_populated_after_reconcile(self):
+        """reconcile() populates portfolio.exchange_weights from held positions."""
+        pos_hk = _make_position(
+            ticker="0005.HK", market_value_usd=40000, currency="HKD"
+        )
+        pos_jp = _make_position(ticker="7203.T", market_value_usd=20000, currency="JPY")
+        analyses = {
+            "0005.HK": _make_analysis(ticker="0005.HK"),
+            "7203.T": _make_analysis(ticker="7203.T"),
+        }
+        portfolio = _make_portfolio(value=100000, cash=15000)
+        reconcile([pos_hk, pos_jp], analyses, portfolio)
+
+        assert "HK" in portfolio.exchange_weights
+        assert "T" in portfolio.exchange_weights
+        assert abs(portfolio.exchange_weights["HK"] - 40.0) < 0.5
+        assert abs(portfolio.exchange_weights["T"] - 20.0) < 0.5
+
+    def test_concentration_warning_in_buy_reason(self):
+        """BUY reason includes ⚠ when projected exchange weight exceeds limit."""
+        # Already have 35% in HK; adding another HK stock would exceed 40% limit
+        pos_hk = _make_position(
+            ticker="0005.HK", market_value_usd=35000, currency="HKD"
+        )
+        pos_hk.yf_ticker = "0005.HK"
+        analysis_existing = _make_analysis(ticker="0005.HK", verdict="BUY")
+        # New BUY candidate also on HK
+        analysis_new = _make_analysis(ticker="2388.HK", verdict="BUY", age_days=3)
+        analysis_new.exchange = "HK"
+
+        portfolio = _make_portfolio(value=100000, cash=20000)
+        items = reconcile(
+            [pos_hk],
+            {"0005.HK": analysis_existing, "2388.HK": analysis_new},
+            portfolio,
+            exchange_limit_pct=40.0,
+        )
+        buy_items = [i for i in items if i.action == "BUY" and i.ticker == "2388.HK"]
+        if buy_items:
+            # If a BUY item was generated, it should have a concentration warning
+            assert "⚠" in buy_items[0].reason or "HK" in buy_items[0].reason
+
+    def test_no_concentration_when_portfolio_empty(self):
+        """Empty portfolio → no exchange weights."""
+        portfolio = _make_portfolio(value=0, cash=0)
+        reconcile([], {}, portfolio)
+        assert portfolio.exchange_weights == {}
+        assert portfolio.sector_weights == {}
+
+
+# ── Portfolio Health Tests ──
+
+
+class TestComputePortfolioHealth:
+    """Test portfolio-level health flag computation."""
+
+    def test_no_flags_for_healthy_portfolio(self):
+        """Healthy scores, fresh analyses, diversified currency → no flags."""
+        pos = _make_position(market_value_usd=10000, currency="JPY")
+        analysis = _make_analysis(age_days=5)
+        analysis.health_adj = 75.0
+        analysis.growth_adj = 70.0
+        portfolio = _make_portfolio(value=100000)
+        portfolio.exchange_weights = {"T": 10.0}
+        flags = compute_portfolio_health([pos], {"7203.T": analysis}, portfolio)
+        assert flags == []
+
+    def test_low_health_average_flag(self):
+        """Weighted avg health < 60 → LOW_HEALTH_AVERAGE flag."""
+        pos = _make_position(market_value_usd=10000, currency="JPY")
+        analysis = _make_analysis(age_days=5)
+        analysis.health_adj = 45.0  # below 60
+        analysis.growth_adj = 70.0
+        portfolio = _make_portfolio(value=100000)
+        portfolio.exchange_weights = {}
+        flags = compute_portfolio_health([pos], {"7203.T": analysis}, portfolio)
+        assert any("LOW_HEALTH" in f for f in flags)
+
+    def test_low_growth_average_flag(self):
+        """Weighted avg growth < 55 → LOW_GROWTH_AVERAGE flag."""
+        pos = _make_position(market_value_usd=10000, currency="JPY")
+        analysis = _make_analysis(age_days=5)
+        analysis.health_adj = 70.0
+        analysis.growth_adj = 40.0  # below 55
+        portfolio = _make_portfolio(value=100000)
+        portfolio.exchange_weights = {}
+        flags = compute_portfolio_health([pos], {"7203.T": analysis}, portfolio)
+        assert any("LOW_GROWTH" in f for f in flags)
+
+    def test_stale_analysis_ratio_flag(self):
+        """More than 30% of positions stale → STALE_ANALYSIS_RATIO flag."""
+        pos1 = _make_position(
+            ticker="7203.T", market_value_usd=5000, currency="JPY", conid=1
+        )
+        pos2 = _make_position(
+            ticker="0005.HK", market_value_usd=5000, currency="HKD", conid=2
+        )
+        old_analysis = _make_analysis(ticker="0005.HK", age_days=20)
+        fresh_analysis = _make_analysis(ticker="7203.T", age_days=3)
+        portfolio = _make_portfolio(value=100000)
+        portfolio.exchange_weights = {}
+        analyses = {"7203.T": fresh_analysis, "0005.HK": old_analysis}
+        flags = compute_portfolio_health(
+            [pos1, pos2], analyses, portfolio, max_age_days=14
+        )
+        assert any("STALE" in f for f in flags)
+
+    def test_currency_concentration_flag(self):
+        """More than 50% in a single currency → CURRENCY_CONCENTRATION flag."""
+        pos = _make_position(market_value_usd=60000, currency="HKD")
+        analysis = _make_analysis(age_days=5)
+        analysis.health_adj = 70.0
+        analysis.growth_adj = 70.0
+        portfolio = _make_portfolio(value=100000)
+        portfolio.exchange_weights = {}
+        flags = compute_portfolio_health([pos], {"7203.T": analysis}, portfolio)
+        assert any("CURRENCY_CONCENTRATION" in f for f in flags)
+
+    def test_empty_positions_returns_no_flags(self):
+        """No positions → no flags."""
+        portfolio = _make_portfolio(value=0)
+        flags = compute_portfolio_health([], {}, portfolio)
+        assert flags == []

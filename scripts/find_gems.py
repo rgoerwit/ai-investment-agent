@@ -166,6 +166,21 @@ def _to_usd(value, currency, fx_rates):
 # ============================================================
 
 
+_DEFAULT_TIMEOUT = (10, 30)  # (connect, read) seconds
+
+
+class _TimeoutAdapter(requests.adapters.HTTPAdapter):
+    """Enforce a default timeout on every request made through the session."""
+
+    def __init__(self, timeout=_DEFAULT_TIMEOUT, **kwargs):
+        self._timeout = timeout
+        super().__init__(**kwargs)
+
+    def send(self, request, **kwargs):
+        kwargs.setdefault("timeout", self._timeout)
+        return super().send(request, **kwargs)
+
+
 def _get_session():
     s = requests.Session()
     s.headers.update(
@@ -176,6 +191,9 @@ def _get_session():
             "Referer": "https://www.google.com/",
         }
     )
+    adapter = _TimeoutAdapter()
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
     return s
 
 

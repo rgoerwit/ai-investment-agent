@@ -1332,10 +1332,15 @@ class TestExchangeScrapeIntegration:
         "exchange", _ENABLED_EXCHANGES, ids=_exchange_ids(_ENABLED_EXCHANGES)
     )
     def test_exchange_returns_sane_count(self, exchange):
+        import requests as _req
+
         handler = find_gems._HANDLERS.get(exchange["method"])
         assert handler is not None, f"Unknown method: {exchange['method']}"
 
-        df = handler(exchange, self.session)
+        try:
+            df = handler(exchange, self.session)
+        except (_req.exceptions.Timeout, _req.exceptions.ConnectionError) as exc:
+            pytest.skip(f"{exchange['exchange_name']} unreachable: {exc}")
         assert df is not None, f"Handler returned None for {exchange['exchange_name']}"
         assert (
             not df.empty

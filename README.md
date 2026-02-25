@@ -651,8 +651,11 @@ poetry run python scripts/portfolio_manager.py --recommend
 # Place orders interactively (per-order confirmation)
 poetry run python scripts/portfolio_manager.py --execute
 
-# Re-run evaluator on stale analyses and then reconcile
+# Re-run evaluator on stale analyses (and unanalyzed positions) then reconcile
 poetry run python scripts/portfolio_manager.py --refresh-stale --quick
+
+# Concentration limits — warn when a BUY/ADD would breach a threshold
+poetry run python scripts/portfolio_manager.py --recommend --sector-limit 25 --exchange-limit 35
 ```
 
 The tool compares live IBKR positions against the latest analysis JSONs in `results/` and produces position-aware actions:
@@ -662,8 +665,14 @@ The tool compares live IBKR positions against the latest analysis JSONs in `resu
 | **BUY** | Not held, evaluator says BUY, cash available |
 | **SELL** | Held + evaluator says SELL/DNI, or stop-loss breached |
 | **TRIM** | Held and overweight vs target allocation |
+| **ADD** | Held but underweight vs target allocation |
 | **HOLD** | Within target range, verdict is BUY |
 | **REVIEW** | Stale analysis, no analysis, or price target hit |
+
+The `--recommend` report includes:
+- **CONCENTRATION** — sector and exchange weights as ASCII bar charts; ADD/BUY reasons flag when a trade would push any bucket over its limit (default: sector 30%, exchange 40%)
+- **PORTFOLIO HEALTH** — cross-portfolio signals: low average health/growth scores, currency concentration, stale-analysis ratio
+- **DEFERRED ACTIONS** — sequenced plan showing what to execute today, when T+2 sell proceeds clear, and which HOLDs are approaching their re-analysis deadline
 
 Staleness detection flags analyses older than 14 days or with >15% price drift from the TRADE_BLOCK entry price. A configurable cash buffer (default 5% of portfolio) is reserved and never deployed into new positions.
 
