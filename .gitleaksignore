@@ -9,3 +9,8 @@
 6f52e2a271a434e42f9371246eede1404eb3632c:terraform/environments/prod/main.tf:finnhub-api-key:17
 6f52e2a271a434e42f9371246eede1404eb3632c:terraform/environments/stage/main.tf:finnhub-api-key:17
 6f52e2a271a434e42f9371246eede1404eb3632c:terraform/environments/dev/main.tf:finnhub-api-key:17
+
+# False positive: PEM header string literal in error message (not a real key)
+# portfolio_manager.py quotes the expected PEM format in a user-facing error
+# message explaining key configuration — no actual private key present
+40e833e7900b515688443651c3efde27e2640ab1:scripts/portfolio_manager.py:private-key:111
