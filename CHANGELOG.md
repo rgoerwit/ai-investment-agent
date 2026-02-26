@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.1] - 2026-02-22
+
+### Added
+- **IBKR Portfolio Integration** - Full support for Interactive Brokers REST API via `ibind`. Includes `IbkrClient` for rate-limited OAuth 1.0a sessions and a `portfolio_manager.py` tool for position-aware reconciliation against AI verdicts.
+- **Settled Cash Awareness** - Portfolio logic now distinguishes between total cash and settled (spendable) cash, accounting for T+2 settlement delays in trade recommendations.
+- **Automated Portfolio ADD/TRIM** - Reconciler now calculates precise order quantities to scale into underweight positions (ADD) or reduce overweight positions (TRIM) based on target weights.
+- **Pipeline Rejection Records** - Stage 1 pipeline rejections (HOLD/DNI) are now stored in the global `lessons_learned` collection. These factual "Negative Evidence" records are injected into future analyses of the same ticker to prevent redundant debate and ensure consistent rejection reasoning.
+- **Independent Forensic Channel Visualization** - Updated documentation and Mermaid diagrams to reflect the decoupled data flow from the Forensic Auditor to the External Consultant for independent cross-validation.
+
+### Changed
+- **Safety-First Execution** - The `--execute` flag in `portfolio_manager.py` is currently disabled to ensure manual verification of AI recommendations.
+
 ## [3.9.0] - 2026-02-20
 
 ### Added
