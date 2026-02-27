@@ -148,6 +148,7 @@ Thumbs.db
 # Secrets and credentials
 secrets/
 credentials/
+ibkr_*.*
 *.pem
 *.key
 *.crt
