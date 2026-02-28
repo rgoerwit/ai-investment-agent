@@ -72,8 +72,8 @@ def suppress_all_logging():
     warnings.filterwarnings("ignore")
 
 
-def parse_arguments() -> argparse.Namespace:
-    """Parse command line arguments."""
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Build and return the argument parser (separated for testability)."""
     parser = argparse.ArgumentParser(
         description="Multi-Agent Investment Analysis System (Gemini 3 Edition)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -84,6 +84,12 @@ Examples:
 
   # Quick analysis mode (Gemini Flash)
   python -m src.main --ticker NVDA --quick
+
+  # Strict quality gate (tighter thresholds, fewer BUYs, token savings on rejects)
+  python -m src.main --ticker 0005.HK --strict
+
+  # Composable: strict quality bar + quick/cheap models
+  python -m src.main --ticker 0005.HK --strict --quick
 
   # Quiet mode (markdown report only)
   python -m src.main --ticker AAPL --quiet
@@ -117,6 +123,18 @@ Examples:
         "--quick",
         action="store_true",
         help="Use quick analysis mode (faster, less detailed)",
+    )
+
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        default=False,
+        help=(
+            "Apply stricter financial health criteria: tighter D/E and coverage thresholds, "
+            "auto-reject REITs/ETFs, PFIC, and VIE structures, escalate value-trap warnings "
+            "to rejects, and require higher conviction for BUY. Reduces BUY count and saves "
+            "tokens by rejecting candidates before Bull/Bear debate. Composable with --quick."
+        ),
     )
 
     parser.add_argument(
@@ -211,6 +229,12 @@ Examples:
         "a new analysis. Processes all tickers found in results directory.",
     )
 
+    return parser
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = build_arg_parser()
     args = parser.parse_args()
 
     # Validate: --ticker is required unless --retrospective-only
@@ -773,6 +797,7 @@ def save_results_to_file(result: dict, ticker: str, quick_mode: bool = False) ->
 async def run_analysis(
     ticker: str,
     quick_mode: bool,
+    strict_mode: bool = False,
     chart_format: str = "png",
     transparent_charts: bool = False,
     image_dir: Path | None = None,
@@ -783,6 +808,7 @@ async def run_analysis(
     Args:
         ticker: Stock ticker symbol
         quick_mode: If True, use faster/cheaper models and skip some steps
+        strict_mode: If True, apply tighter quality gates and reject REITs/PFIC/VIE
         chart_format: Chart output format ('png' or 'svg')
         transparent_charts: Whether to use transparent chart backgrounds
         image_dir: Directory for chart output (None = use config default)
@@ -828,6 +854,7 @@ async def run_analysis(
             enable_memory=config.enable_memory,
             recursion_limit=100,
             quick_mode=quick_mode,  # Pass quick_mode for consultant LLM selection
+            strict_mode=strict_mode,  # Pass strict_mode for quality gates
             # Chart generation (post-PM)
             chart_format=chart_format,
             transparent_charts=transparent_charts,
@@ -1107,6 +1134,7 @@ async def main():
         result = await run_analysis(
             args.ticker,
             args.quick,
+            strict_mode=args.strict,
             chart_format="svg" if args.svg else "png",
             transparent_charts=args.transparent,
             image_dir=image_dir,

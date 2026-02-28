@@ -3069,3 +3069,383 @@ ADJUSTED_HEALTH_SCORE: 60%
         flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
         flag_types = [f["type"] for f in flags]
         assert "THIN_CONSENSUS" not in flag_types
+
+
+# ============================================================
+# STRICT MODE TESTS
+# ============================================================
+
+
+class TestStrictDetectRedFlags:
+    """Unit tests for detect_red_flags() in strict_mode=True."""
+
+    def _make_metrics(self, **overrides) -> dict:
+        base = {
+            "debt_to_equity": 100.0,
+            "net_income": 500.0,
+            "fcf": 400.0,
+            "ocf": 450.0,
+            "interest_coverage": 5.0,
+            "adjusted_health_score": 65.0,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "profitability_trend": "STABLE",
+            "roic_quality": "ADEQUATE",
+            "sector": "industrials",
+            "industry": "manufacturing",
+            "pe_ratio": None,
+            "pb_ratio": None,
+            "net_margin": None,
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": None,
+            "ocf_source": None,
+            "segment_flag": None,
+            "parent_company": None,
+            "analyst_coverage_total_est": None,
+            "growth_trajectory": None,
+            "revenue_growth_ttm": None,
+            "latest_quarter_date": None,
+            "_raw_report": "",
+        }
+        base.update(overrides)
+        return base
+
+    # --- Threshold tightening ---
+
+    def test_de_400_rejected_strict_passes_normal(self):
+        """D/E 400% > strict threshold (300%) but < normal (500%): strict rejects."""
+        from src.validators.red_flag_detector import Sector
+
+        m = self._make_metrics(debt_to_equity=400.0)
+        _, normal = RedFlagDetector.detect_red_flags(m, sector=Sector.INDUSTRIALS)
+        _, strict = RedFlagDetector.detect_red_flags(
+            m, sector=Sector.INDUSTRIALS, strict_mode=True
+        )
+        assert normal == "PASS"
+        assert strict == "REJECT"
+
+    def test_de_250_passes_both_modes(self):
+        """D/E 250% < both thresholds: passes in both modes."""
+        from src.validators.red_flag_detector import Sector
+
+        m = self._make_metrics(debt_to_equity=250.0)
+        _, normal = RedFlagDetector.detect_red_flags(m, sector=Sector.INDUSTRIALS)
+        _, strict = RedFlagDetector.detect_red_flags(
+            m, sector=Sector.INDUSTRIALS, strict_mode=True
+        )
+        assert normal == "PASS"
+        assert strict == "PASS"
+
+    def test_de_600_rejected_both_modes(self):
+        """D/E 600% > both thresholds: rejected in both modes."""
+        from src.validators.red_flag_detector import Sector
+
+        m = self._make_metrics(debt_to_equity=600.0)
+        _, normal = RedFlagDetector.detect_red_flags(m, sector=Sector.INDUSTRIALS)
+        _, strict = RedFlagDetector.detect_red_flags(
+            m, sector=Sector.INDUSTRIALS, strict_mode=True
+        )
+        assert normal == "REJECT"
+        assert strict == "REJECT"
+
+    def test_coverage_20x_rejected_strict_passes_normal(self):
+        """Interest coverage 2.0x = normal threshold (just passing); strict needs >2.5x."""
+        from src.validators.red_flag_detector import Sector
+
+        # 2.0x: exactly at normal threshold (coverage_threshold < 2.0 → not triggered since 2.0 is not < 2.0)
+        # strict threshold is 2.5x; 2.0 < 2.5, so strict fires if D/E also > 150
+        m = self._make_metrics(interest_coverage=2.0, debt_to_equity=200.0)
+        _, normal = RedFlagDetector.detect_red_flags(m, sector=Sector.INDUSTRIALS)
+        _, strict = RedFlagDetector.detect_red_flags(
+            m, sector=Sector.INDUSTRIALS, strict_mode=True
+        )
+        assert normal == "PASS"
+        assert strict == "REJECT"
+
+    # --- REIT/ETF exclusion ---
+
+    def test_reit_industry_rejected_in_strict(self):
+        """Industry containing 'reit' → REJECT in strict mode."""
+        from src.validators.red_flag_detector import Sector
+
+        m = self._make_metrics(sector="real estate", industry="retail reit")
+        flags, result = RedFlagDetector.detect_red_flags(
+            m, sector=Sector.REAL_ESTATE, strict_mode=True
+        )
+        assert result == "REJECT"
+        assert any(f["type"] == "STRICT_REIT_ETF" for f in flags)
+
+    def test_real_estate_developer_passes_in_strict(self):
+        """Real estate developer is NOT a REIT — should not be auto-rejected."""
+        from src.validators.red_flag_detector import Sector
+
+        m = self._make_metrics(sector="real estate", industry="residential developer")
+        _, result = RedFlagDetector.detect_red_flags(
+            m, sector=Sector.REAL_ESTATE, strict_mode=True
+        )
+        assert result == "PASS"
+
+    def test_reit_not_rejected_in_normal_mode(self):
+        """REIT check is strict-mode only — normal mode should not apply it."""
+        from src.validators.red_flag_detector import Sector
+
+        m = self._make_metrics(sector="real estate", industry="office reit")
+        _, result = RedFlagDetector.detect_red_flags(m, sector=Sector.REAL_ESTATE)
+        assert result == "PASS"
+
+    def test_real_estate_no_industry_not_rejected(self):
+        """Real Estate sector with no industry data: REIT check skipped (no false positives)."""
+        from src.validators.red_flag_detector import Sector
+
+        m = self._make_metrics(sector="real estate", industry="")
+        _, result = RedFlagDetector.detect_red_flags(
+            m, sector=Sector.REAL_ESTATE, strict_mode=True
+        )
+        # No industry data → REIT check skipped
+        assert result == "PASS"
+
+    # --- OCF/NI earnings quality ---
+
+    def test_ocf_ni_ratio_below_threshold_rejected_in_strict(self):
+        """OCF/NI = 0.75 < 0.8 threshold → REJECT in strict mode."""
+        from src.validators.red_flag_detector import Sector
+
+        m = self._make_metrics(ocf=375.0, net_income=500.0)  # ratio = 0.75
+        flags, result = RedFlagDetector.detect_red_flags(
+            m, sector=Sector.INDUSTRIALS, strict_mode=True
+        )
+        assert result == "REJECT"
+        assert any(f["type"] == "STRICT_EARNINGS_QUALITY" for f in flags)
+
+    def test_ocf_ni_ratio_above_threshold_passes_strict(self):
+        """OCF/NI = 0.9 ≥ 0.8 → PASS in strict mode."""
+        from src.validators.red_flag_detector import Sector
+
+        m = self._make_metrics(ocf=450.0, net_income=500.0)  # ratio = 0.9
+        _, result = RedFlagDetector.detect_red_flags(
+            m, sector=Sector.INDUSTRIALS, strict_mode=True
+        )
+        assert result == "PASS"
+
+    def test_ocf_zero_triggers_strict_rejection(self):
+        """OCF = 0 with positive NI: ratio = 0 < 0.8 → REJECT. Not skipped by falsy check."""
+        from src.validators.red_flag_detector import Sector
+
+        m = self._make_metrics(ocf=0.0, net_income=500.0)
+        flags, result = RedFlagDetector.detect_red_flags(
+            m, sector=Sector.INDUSTRIALS, strict_mode=True
+        )
+        assert result == "REJECT"
+        assert any(f["type"] == "STRICT_EARNINGS_QUALITY" for f in flags)
+
+    def test_ocf_none_skips_check(self):
+        """OCF = None (unavailable): skip check rather than reject on missing data."""
+        from src.validators.red_flag_detector import Sector
+
+        m = self._make_metrics(ocf=None, net_income=500.0)
+        _, result = RedFlagDetector.detect_red_flags(
+            m, sector=Sector.INDUSTRIALS, strict_mode=True
+        )
+        assert result == "PASS"
+
+    def test_negative_ni_skips_ocf_check(self):
+        """NI ≤ 0: OCF/NI check is skipped (negative NI caught by other flags)."""
+        from src.validators.red_flag_detector import Sector
+
+        m = self._make_metrics(ocf=100.0, net_income=-200.0)
+        flags, result = RedFlagDetector.detect_red_flags(
+            m, sector=Sector.INDUSTRIALS, strict_mode=True
+        )
+        assert not any(f["type"] == "STRICT_EARNINGS_QUALITY" for f in flags)
+
+    def test_ocf_ni_not_checked_in_normal_mode(self):
+        """OCF/NI check is strict-mode only — normal mode should not apply it."""
+        from src.validators.red_flag_detector import Sector
+
+        m = self._make_metrics(ocf=375.0, net_income=500.0)  # ratio = 0.75
+        _, result = RedFlagDetector.detect_red_flags(m, sector=Sector.INDUSTRIALS)
+        assert result == "PASS"
+
+    # --- Capital-intensive sector strict thresholds ---
+
+    def test_capital_intensive_de_600_rejected_strict_passes_normal(self):
+        """D/E 600% < CI normal threshold (800%) → PASS normal; > CI strict threshold (500%) → REJECT strict."""
+        from src.validators.red_flag_detector import Sector
+
+        # interest_coverage=5.0 (default) keeps the coverage check from firing
+        m = self._make_metrics(debt_to_equity=600.0, sector="energy", industry="oil")
+        _, normal = RedFlagDetector.detect_red_flags(m, sector=Sector.ENERGY)
+        _, strict = RedFlagDetector.detect_red_flags(
+            m, sector=Sector.ENERGY, strict_mode=True
+        )
+        assert normal == "PASS"
+        assert strict == "REJECT"
+
+    def test_capital_intensive_de_900_rejected_both_modes(self):
+        """D/E 900% > CI normal threshold (800%): rejected in both normal and strict mode."""
+        from src.validators.red_flag_detector import Sector
+
+        m = self._make_metrics(debt_to_equity=900.0, sector="energy", industry="oil")
+        _, normal = RedFlagDetector.detect_red_flags(m, sector=Sector.ENERGY)
+        _, strict = RedFlagDetector.detect_red_flags(
+            m, sector=Sector.ENERGY, strict_mode=True
+        )
+        assert normal == "REJECT"
+        assert strict == "REJECT"
+
+
+class TestStrictValidatorNodeEscalation:
+    """Tests for legal/VT escalation in the validator node (strict_mode=True)."""
+
+    def _make_state(
+        self,
+        fundamentals_report: str,
+        legal_report: str = "",
+        value_trap_report: str = "",
+    ) -> dict:
+        return {
+            "company_of_interest": "TEST.HK",
+            "company_name": "Test Company Ltd",
+            "fundamentals_report": fundamentals_report,
+            "legal_report": legal_report,
+            "value_trap_report": value_trap_report,
+            "messages": [],
+        }
+
+    _CLEAN_DATA_BLOCK = """
+### --- START DATA_BLOCK (INTERNAL SCORING) ---
+ADJUSTED_HEALTH_SCORE: 70%
+PE_RATIO_TTM: 12.0
+OPERATING_CASH_FLOW: $600M
+OPERATING_CASH_FLOW_SOURCE: JUNIOR
+NET_INCOME: $700M
+DEBT_TO_EQUITY: 80%
+INTEREST_COVERAGE: 6.0x
+SEGMENT_FLAG: STABLE
+PARENT_COMPANY: NONE
+PFIC_RISK: CLEAN
+### --- END DATA_BLOCK ---
+"""
+
+    _PFIC_LEGAL_JSON = (
+        '{"pfic_status": "PROBABLE", "vie_structure": "NO", "pfic_evidence": "test"}'
+    )
+    _VIE_LEGAL_JSON = (
+        '{"pfic_status": "CLEAN", "vie_structure": "YES", "vie_evidence": "test"}'
+    )
+    _CLEAN_LEGAL_JSON = '{"pfic_status": "CLEAN", "vie_structure": "NO"}'
+
+    @pytest.mark.asyncio
+    async def test_pfic_probable_escalates_to_reject_strict(self):
+        """PFIC_PROBABLE + strict mode → REJECT (normally warning only)."""
+        node = create_financial_health_validator_node(strict_mode=True)
+        state = self._make_state(self._CLEAN_DATA_BLOCK, self._PFIC_LEGAL_JSON)
+        result = await node(state, {})
+        assert result["pre_screening_result"] == "REJECT"
+        assert any(f["type"] == "STRICT_PFIC_ESCALATED" for f in result["red_flags"])
+
+    @pytest.mark.asyncio
+    async def test_pfic_probable_is_warning_in_normal_mode(self):
+        """PFIC_PROBABLE in normal mode → PASS (risk penalty, not REJECT)."""
+        node = create_financial_health_validator_node(strict_mode=False)
+        state = self._make_state(self._CLEAN_DATA_BLOCK, self._PFIC_LEGAL_JSON)
+        result = await node(state, {})
+        assert result["pre_screening_result"] == "PASS"
+        assert not any(
+            f["type"] == "STRICT_PFIC_ESCALATED" for f in result["red_flags"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_vie_escalates_to_reject_strict(self):
+        """VIE_STRUCTURE + strict mode → REJECT (normally warning only)."""
+        node = create_financial_health_validator_node(strict_mode=True)
+        state = self._make_state(self._CLEAN_DATA_BLOCK, self._VIE_LEGAL_JSON)
+        result = await node(state, {})
+        assert result["pre_screening_result"] == "REJECT"
+        assert any(f["type"] == "STRICT_VIE_ESCALATED" for f in result["red_flags"])
+
+    @pytest.mark.asyncio
+    async def test_vie_is_warning_in_normal_mode(self):
+        """VIE in normal mode → PASS (risk penalty, not REJECT)."""
+        node = create_financial_health_validator_node(strict_mode=False)
+        state = self._make_state(self._CLEAN_DATA_BLOCK, self._VIE_LEGAL_JSON)
+        result = await node(state, {})
+        assert result["pre_screening_result"] == "PASS"
+
+    @pytest.mark.asyncio
+    async def test_clean_legal_passes_strict(self):
+        """No PFIC/VIE risk + healthy financials → PASS even in strict mode."""
+        node = create_financial_health_validator_node(strict_mode=True)
+        state = self._make_state(self._CLEAN_DATA_BLOCK, self._CLEAN_LEGAL_JSON)
+        result = await node(state, {})
+        assert result["pre_screening_result"] == "PASS"
+
+    @pytest.mark.asyncio
+    async def test_normal_reject_still_rejects_in_strict(self):
+        """A normal-mode REJECT (e.g. extreme leverage) still rejects in strict mode.
+
+        The validator's _extract_debt_to_equity reads from the report body (not the
+        DATA_BLOCK DEBT_TO_EQUITY field), so we append a body section with D/E in
+        the format that _extract_debt_to_equity can parse.
+        """
+        high_leverage_report = (
+            self._CLEAN_DATA_BLOCK
+            + "\n\n### FINANCIAL HEALTH DETAIL\n"
+            + "**Leverage**:\n"
+            + "- D/E: 700\n"
+        )
+        node = create_financial_health_validator_node(strict_mode=True)
+        state = self._make_state(high_leverage_report, self._CLEAN_LEGAL_JSON)
+        result = await node(state, {})
+        assert result["pre_screening_result"] == "REJECT"
+
+    @pytest.mark.asyncio
+    async def test_pfic_uncertain_escalates_to_reject_strict(self):
+        """PFIC_UNCERTAIN + strict mode → REJECT; normal mode → PASS (warning only)."""
+        pfic_uncertain_json = '{"pfic_status": "UNCERTAIN", "vie_structure": "NO", "pfic_evidence": "hedge language detected"}'
+        node_strict = create_financial_health_validator_node(strict_mode=True)
+        node_normal = create_financial_health_validator_node(strict_mode=False)
+        state = self._make_state(self._CLEAN_DATA_BLOCK, pfic_uncertain_json)
+
+        strict_result = await node_strict(state, {})
+        assert strict_result["pre_screening_result"] == "REJECT"
+        assert any(
+            f["type"] == "STRICT_PFIC_ESCALATED" for f in strict_result["red_flags"]
+        )
+
+        normal_result = await node_normal(state, {})
+        assert normal_result["pre_screening_result"] == "PASS"
+        assert not any(
+            f["type"] == "STRICT_PFIC_ESCALATED" for f in normal_result["red_flags"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_value_trap_high_risk_escalates_via_state(self):
+        """VALUE_TRAP_HIGH_RISK (score < 40) in value_trap_report + strict → REJECT."""
+        vt_report = "SCORE: 25\nVERDICT: TRAP\nTRAP_RISK: HIGH\n"
+        node = create_financial_health_validator_node(strict_mode=True)
+        state = self._make_state(
+            self._CLEAN_DATA_BLOCK, self._CLEAN_LEGAL_JSON, vt_report
+        )
+        result = await node(state, {})
+        assert result["pre_screening_result"] == "REJECT"
+        assert any(
+            f["type"] == "STRICT_VALUE_TRAP_ESCALATED" for f in result["red_flags"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_value_trap_verdict_escalates_via_state(self):
+        """Explicit VERDICT: TRAP (score > 40, so only VERDICT flag fires) + strict → REJECT."""
+        # Score 55 > 40 → no VALUE_TRAP_HIGH_RISK, but VERDICT: TRAP → VALUE_TRAP_VERDICT flag
+        vt_report = "SCORE: 55\nVERDICT: TRAP\nTRAP_RISK: MEDIUM\n"
+        node = create_financial_health_validator_node(strict_mode=True)
+        state = self._make_state(
+            self._CLEAN_DATA_BLOCK, self._CLEAN_LEGAL_JSON, vt_report
+        )
+        result = await node(state, {})
+        assert result["pre_screening_result"] == "REJECT"
+        assert any(
+            f["type"] == "STRICT_VALUE_TRAP_ESCALATED" for f in result["red_flags"]
+        )

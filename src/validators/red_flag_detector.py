@@ -266,6 +266,8 @@ class RedFlagDetector:
             "growth_trajectory": None,
             "revenue_growth_ttm": None,
             "latest_quarter_date": None,
+            "sector": None,  # SECTOR string from DATA_BLOCK (for strict-mode REIT check)
+            "industry": None,  # INDUSTRY string from DATA_BLOCK (for strict-mode REIT check)
             "_raw_report": fundamentals_report,  # For downstream data quality checks
         }
 
@@ -456,6 +458,16 @@ class RedFlagDetector:
         if quarter_date_match:
             metrics["latest_quarter_date"] = quarter_date_match.group(1)
 
+        # Extract SECTOR string (for strict-mode REIT/ETF check)
+        sector_str_match = re.search(r"SECTOR:\s*(.+?)(?:\n|$)", data_block)
+        if sector_str_match:
+            metrics["sector"] = sector_str_match.group(1).strip().lower()
+
+        # Extract INDUSTRY string (for strict-mode REIT/developer distinction)
+        industry_str_match = re.search(r"INDUSTRY:\s*(.+?)(?:\n|$)", data_block)
+        if industry_str_match:
+            metrics["industry"] = industry_str_match.group(1).strip().lower()
+
         # Now extract from detailed sections (below DATA_BLOCK)
         metrics["debt_to_equity"] = RedFlagDetector._extract_debt_to_equity(
             fundamentals_report
@@ -637,6 +649,7 @@ class RedFlagDetector:
         metrics: dict[str, float | None],
         ticker: str = "UNKNOWN",
         sector: Sector = Sector.INDUSTRIALS,
+        strict_mode: bool = False,
     ) -> tuple[list[dict], str]:
         """
         Apply sector-aware threshold-based red-flag detection logic.
@@ -645,6 +658,7 @@ class RedFlagDetector:
             metrics: Extracted financial metrics
             ticker: Ticker symbol for logging
             sector: Sector classification (affects D/E and coverage thresholds)
+            strict_mode: If True, apply tighter thresholds plus REIT/ETF and OCF/NI checks
 
         Returns:
             Tuple of (red_flags_list, "PASS" or "REJECT")
@@ -654,31 +668,45 @@ class RedFlagDetector:
         2. Positive income but negative FCF >2x income: Earnings quality (fraud)
         3. Interest coverage < SECTOR_THRESHOLD AND D/E > SECTOR_THRESHOLD: Refinancing risk
 
-        Sector-specific thresholds (3 profiles):
+        Sector-specific thresholds (3 profiles, strict_mode tightens Standard and Capital-intensive):
         - Financials: D/E check DISABLED (leverage is their business model)
-        - Capital-intensive (Energy, Materials, Utilities, Real Estate): D/E > 800%, Coverage < 1.5x + D/E > 200%
-        - Standard (all others): D/E > 500%, Coverage < 2.0x + D/E > 100%
+        - Capital-intensive (Energy, Materials, Utilities, Real Estate):
+            Normal: D/E > 800%, Coverage < 1.5x + D/E > 200%
+            Strict: D/E > 500%, Coverage < 1.8x + D/E > 300%
+        - Standard (all others):
+            Normal: D/E > 500%, Coverage < 2.0x + D/E > 100%
+            Strict: D/E > 300%, Coverage < 2.5x + D/E > 150%
         """
         red_flags = []
 
-        # Define sector-specific thresholds (3 profiles)
+        # Define sector-specific thresholds (3 profiles; strict_mode tightens 2 of them)
         if sector in FINANCIALS_SECTORS:
             # Financials: Leverage is their business model - skip D/E checks entirely
             leverage_threshold = None
             coverage_threshold = None
             coverage_de_threshold = None
         elif sector in CAPITAL_INTENSIVE_SECTORS:
-            # Capital-intensive sectors: Higher thresholds
-            leverage_threshold = 800  # D/E > 800% is extreme (vs 500% standard)
-            coverage_threshold = 1.5  # Interest coverage < 1.5x (vs 2.0x standard)
-            coverage_de_threshold = (
-                200  # D/E > 200% when coverage weak (vs 100% standard)
-            )
+            if strict_mode:
+                leverage_threshold = 500  # was 800
+                coverage_threshold = 1.8  # was 1.5
+                coverage_de_threshold = 300  # was 200
+            else:
+                # Capital-intensive sectors: Higher thresholds
+                leverage_threshold = 800  # D/E > 800% is extreme (vs 500% standard)
+                coverage_threshold = 1.5  # Interest coverage < 1.5x (vs 2.0x standard)
+                coverage_de_threshold = (
+                    200  # D/E > 200% when coverage weak (vs 100% standard)
+                )
         else:
-            # General/Technology: Standard thresholds
-            leverage_threshold = 500
-            coverage_threshold = 2.0
-            coverage_de_threshold = 100
+            if strict_mode:
+                leverage_threshold = 300  # was 500
+                coverage_threshold = 2.5  # was 2.0
+                coverage_de_threshold = 150  # was 100
+            else:
+                # General/Technology: Standard thresholds
+                leverage_threshold = 500
+                coverage_threshold = 2.0
+                coverage_de_threshold = 100
 
         # --- RED FLAG 1: Extreme Leverage (Leverage Bomb) ---
         debt_to_equity = metrics.get("debt_to_equity")
@@ -1116,6 +1144,67 @@ class RedFlagDetector:
                 ticker=ticker,
                 total_est=total_est,
             )
+
+        # --- STRICT MODE ONLY: REIT/ETF Exclusion ---
+        # REITs are pass-through vehicles with poor capital allocation discipline;
+        # not appropriate for GARP growth-transition strategy.
+        # Developer/builder exclusion: real estate developers have operating businesses.
+        if strict_mode:
+            sector_str = (metrics.get("sector") or "").lower()
+            industry_str = (metrics.get("industry") or "").lower()
+            is_reit = (
+                "reit" in industry_str
+                or "real estate investment trust" in industry_str
+                or (
+                    sector == Sector.REAL_ESTATE
+                    and "developer" not in industry_str
+                    and "builder" not in industry_str
+                    and industry_str  # Only fire if we actually have industry data
+                )
+            )
+            if is_reit:
+                red_flags.append(
+                    {
+                        "type": "STRICT_REIT_ETF",
+                        "severity": "CRITICAL",
+                        "detail": f"REIT/ETF excluded in strict mode (sector: {sector_str or sector.value}, industry: {industry_str or 'N/A'})",
+                        "action": "AUTO_REJECT",
+                        "rationale": "REITs are pass-through vehicles; not compatible with GARP growth-transition strategy",
+                    }
+                )
+                logger.info(
+                    "strict_reit_etf_rejected",
+                    ticker=ticker,
+                    industry=industry_str,
+                    sector=sector_str,
+                )
+
+        # --- STRICT MODE ONLY: OCF/NI Earnings Quality ---
+        # Tighter than the existing FCF/NI check: requires OCF (operating cash flow) ≥ 80% of NI.
+        # Accrual-heavy accounting (OCF < 0.8x NI) is a leading indicator of earnings overstatement.
+        # Guard: explicitly check `is not None` (not truthiness) so OCF=0 is correctly caught.
+        if strict_mode:
+            ocf = metrics.get("ocf")
+            ni = metrics.get("net_income")
+            if ocf is not None and ni is not None and ni > 0:
+                ratio = ocf / ni
+                if ratio < 0.8:
+                    red_flags.append(
+                        {
+                            "type": "STRICT_EARNINGS_QUALITY",
+                            "severity": "CRITICAL",
+                            "detail": f"OCF/NI ratio {ratio:.2f} < 0.8 (accrual-heavy accounting; OCF={ocf:,.0f}, NI={ni:,.0f})",
+                            "action": "AUTO_REJECT",
+                            "rationale": "Operating cash flow well below net income — earnings likely overstated via accruals",
+                        }
+                    )
+                    logger.info(
+                        "strict_earnings_quality_rejected",
+                        ticker=ticker,
+                        ocf_ni_ratio=ratio,
+                        ocf=ocf,
+                        net_income=ni,
+                    )
 
         # Determine result
         has_auto_reject = any(flag["action"] == "AUTO_REJECT" for flag in red_flags)

@@ -13,6 +13,8 @@
 #   --include-us        Pass --include-us to find_gems.py
 #   --cooldown N        Override COOLDOWN_SECONDS (default: 60)
 #   --stage N           Start from stage N (0, 1, or 2). Requires prior stages' outputs.
+#   --buys-file FILE    Explicit BUY list path (bypasses date-based default; use with --stage 2
+#                       when resuming a run that started on a previous calendar day)
 #   -y, --yes           Skip confirmation prompts (run non-interactively)
 #   -h, --help          Show this help message
 #
@@ -37,6 +39,7 @@ SKIP_SCRAPE=""
 INCLUDE_US=""
 START_STAGE=0
 AUTO_YES=false
+STRICT_FLAG=""
 
 # --- Colors ---
 RED='\033[0;31m'
@@ -97,8 +100,14 @@ while [[ $# -gt 0 ]]; do
         --stage)
             START_STAGE="$2"
             shift 2 ;;
+        --buys-file)
+            BUY_LIST="$2"
+            shift 2 ;;
         -y|--yes)
             AUTO_YES=true
+            shift ;;
+        --strict)
+            STRICT_FLAG="--strict"
             shift ;;
         -h|--help)
             cat << 'HELPEOF'
@@ -117,6 +126,13 @@ OPTIONS:
   --include-us        Include US exchanges in scrape phase
   --cooldown N        Seconds between ticker analyses (default: 60)
   --stage N           Start from stage N (0, 1, or 2)
+  --buys-file FILE    Explicit BUY list path — bypasses the date-based default
+                      (scratch/buys_YYYY-MM-DD.txt). Use with --stage 2 when
+                      resuming a run that crossed midnight:
+                        ./scripts/run_pipeline.sh --stage 2 --buys-file scratch/buys_2026-02-24.txt
+  --strict            Apply strict mode to Stage 2 full analysis (tighter D/E, reject
+                      REITs/PFIC/VIE, escalate value traps, higher BUY conviction bar).
+                      Stage 1 screening always runs strict regardless of this flag.
   -y, --yes           Skip confirmation prompts (run non-interactively)
   -h, --help          Show this help message
 
@@ -152,6 +168,12 @@ HELPEOF
             exit 1 ;;
     esac
 done
+
+# Resolve TICKER_LIST from --skip-scrape immediately (not deferred to stage 0 block)
+# This ensures --stage 1 --skip-scrape FILE works without going through stage 0.
+if [[ -n "$SKIP_SCRAPE" ]]; then
+    TICKER_LIST="$SKIP_SCRAPE"
+fi
 
 # --- Ensure scratch directory exists ---
 mkdir -p "$SCRATCH"
@@ -226,7 +248,7 @@ if [[ $START_STAGE -le 0 ]]; then
         info "Already completed:   $STAGE1_SKIP (will be skipped)"
     fi
     info "Est. time:           ~$(format_duration $STAGE1_SECS) (${COOLDOWN}s cooldown)"
-    info "Mode:                --quick --brief --no-memory"
+    info "Mode:                --quick --strict --brief --no-memory"
     info "Output dir:          $SCRATCH/"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
@@ -279,7 +301,7 @@ if [[ $START_STAGE -le 1 ]]; then
             info "Already completed:   $STAGE1_SKIP (will be skipped)"
         fi
         info "Est. time:           ~$(format_duration $STAGE1_SECS) (${COOLDOWN}s cooldown)"
-        info "Mode:                --quick --brief --no-memory"
+        info "Mode:                --quick --strict --brief --no-memory"
         info "Output dir:          $SCRATCH/"
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
@@ -318,7 +340,7 @@ if [[ $START_STAGE -le 1 ]]; then
 
         if poetry run python -m src.main \
             --ticker "$ticker" \
-            --quick --no-charts --quiet --brief --no-memory \
+            --quick --strict --no-charts --quiet --brief --no-memory \
             --output "$OUTFILE" \
             2> "$LOGFILE"; then
             success "$ticker done"
@@ -379,9 +401,16 @@ if [[ $START_STAGE -le 1 ]]; then
             SELL_COUNT=$((SELL_COUNT + 1))
             info "DO_NOT_INITIATE: $ticker"
         else
-            # Try to extract verdict from line 10
-            VERDICT=$(sed -n '10p' "$OUTFILE" | sed 's/.*): //')
-            warn "${VERDICT:-UNKNOWN}: $ticker"
+            # None of the known verdicts matched — show line 10 verbatim for debugging
+            LINE10=$(sed -n '10p' "$OUTFILE")
+            VERDICT=$(echo "$LINE10" | sed 's/.*): //')
+            if [[ -n "$VERDICT" && "$VERDICT" != "$LINE10" ]]; then
+                # Pattern matched — unusual verdict string (e.g. WATCHLIST, SPECULATIVE_BUY)
+                warn "UNKNOWN_VERDICT ($VERDICT): $ticker"
+            else
+                # Pattern didn't match — title not on line 10 or unexpected format
+                warn "UNKNOWN: $ticker [line10: ${LINE10:-<empty>}]"
+            fi
             OTHER_COUNT=$((OTHER_COUNT + 1))
         fi
 
@@ -406,7 +435,8 @@ if [[ $START_STAGE -le 2 ]]; then
 
     if [[ ! -f "$BUY_LIST" ]]; then
         warn "No BUY list found at $BUY_LIST"
-        info "Run Stages 0-1 first"
+        info "Run Stages 0-1 first, or specify an existing file with --buys-file"
+        info "Example (cross-day resume): --stage 2 --buys-file scratch/buys_2026-02-24.txt"
         exit 0
     fi
 
@@ -476,6 +506,7 @@ if [[ $START_STAGE -le 2 ]]; then
         if poetry run python -m src.main \
             --ticker "$ticker" \
             --transparent --quiet \
+            $STRICT_FLAG \
             --output "$OUTFILE" \
             2> "$LOGFILE"; then
             success "$ticker done"

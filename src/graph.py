@@ -417,6 +417,7 @@ def create_trading_graph(
     ticker: str | None = None,
     cleanup_previous: bool = False,
     quick_mode: bool = False,
+    strict_mode: bool = False,
     # Chart generation parameters (post-PM)
     chart_format: str = "png",
     transparent_charts: bool = False,
@@ -711,7 +712,7 @@ def create_trading_graph(
         toolkit.get_senior_fundamental_tools(),
         "fundamentals_report",
     )
-    validator = create_financial_health_validator_node()
+    validator = create_financial_health_validator_node(strict_mode=strict_mode)
 
     # Agent-specific tool nodes for parallel execution
     # CRITICAL: Uses create_agent_tool_node to filter messages by agent's tools
@@ -746,14 +747,18 @@ def create_trading_graph(
     bear_r2 = create_researcher_node(
         bear_llm, bear_memory, "bear_researcher", round_num=2
     )
-    res_mgr = create_research_manager_node(res_mgr_llm, invest_judge_memory)
+    res_mgr = create_research_manager_node(
+        res_mgr_llm, invest_judge_memory, strict_mode=strict_mode
+    )
     trader = create_trader_node(trader_llm, trader_memory)
 
     # Risk nodes
     risky = create_risk_debater_node(risky_llm, "risky_analyst")
     safe = create_risk_debater_node(safe_llm, "safe_analyst")
     neutral = create_risk_debater_node(neutral_llm, "neutral_analyst")
-    pm = create_portfolio_manager_node(pm_llm, risk_manager_memory)
+    pm = create_portfolio_manager_node(
+        pm_llm, risk_manager_memory, strict_mode=strict_mode
+    )
 
     # Consultant node (optional, with independent verification tools)
     consultant = None
@@ -1052,7 +1057,9 @@ BEAR RESEARCHER:
     # PM Fast-Fail node: separate from main Portfolio Manager to avoid edge conflict
     # This node runs when pre_screening == "REJECT" (fast-fail path)
     # Using the same PM implementation but as a distinct graph node
-    pm_fast_fail = create_portfolio_manager_node(pm_llm, risk_manager_memory)
+    pm_fast_fail = create_portfolio_manager_node(
+        pm_llm, risk_manager_memory, strict_mode=strict_mode
+    )
     workflow.add_node("PM Fast-Fail", pm_fast_fail)
     workflow.add_edge(
         "PM Fast-Fail", "Chart Generator"
