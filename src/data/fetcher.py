@@ -472,6 +472,9 @@ class SmartMarketDataFetcher(FinancialFetcher):
 
             # BALANCE SHEET
             if not balance_sheet.empty:
+                extracted["_statements_date"] = balance_sheet.columns[0].strftime(
+                    "%Y-%m-%d"
+                )
                 try:
                     if (
                         "Current Assets" in balance_sheet.index
