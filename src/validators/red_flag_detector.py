@@ -503,18 +503,21 @@ class RedFlagDetector:
             D/E ratio as percentage (e.g., 250.0), or None if not found
         """
         patterns = [
-            r"(?:^|\n)\s*-?\s*D/E:\s*([0-9.]+)",
-            r"(?:^|\n)\s*-?\s*Debt/Equity:\s*([0-9.]+)",
-            r"(?:^|\n)\s*-?\s*Debt-to-Equity:\s*([0-9.]+)",
-            r"D/E:\s*([0-9.]+)",
-            r"Debt/Equity:\s*([0-9.]+)",
-            r"DE_RATIO:\s*([0-9.]+)",
+            r"(?:^|\n)\s*-?\s*D/E:\s*([0-9.]+)(%?)",
+            r"(?:^|\n)\s*-?\s*Debt/Equity:\s*([0-9.]+)(%?)",
+            r"(?:^|\n)\s*-?\s*Debt-to-Equity:\s*([0-9.]+)(%?)",
+            r"D/E:\s*([0-9.]+)(%?)",
+            r"Debt/Equity:\s*([0-9.]+)(%?)",
+            r"DE_RATIO:\s*([0-9.]+)(%?)",
         ]
         for pattern in patterns:
             match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
             if match:
                 value = float(match.group(1))
-                # Convert to percentage if < 10 (assume ratio like 2.5 -> 250%)
+                # If the source already has a % sign, it's already a percentage.
+                # Otherwise apply the ratio→percentage heuristic (< 10 → ×100).
+                if match.group(2):
+                    return value
                 return value if value >= 10 else value * 100
         return None
 
@@ -1002,38 +1005,54 @@ class RedFlagDetector:
 
         # --- RED FLAG 8: Unreliable PEG (Implausible Valuation) ---
         # PEG in [0, 0.05): growth denominator missing/zero/infinite, or implies
-        # >20x expected growth — either way PEG is meaningless.
+        # very high growth — may be meaningless OR may reflect a genuine high-growth phase.
         peg_for_floor = metrics.get("peg_ratio")
         if peg_for_floor is not None and 0 <= peg_for_floor < 0.05:
-            detail = (
-                "PEG 0.00 — mathematically undefined (growth denominator is "
-                "zero, negative, or infinite). Valuation metrics are unreliable."
-                if peg_for_floor == 0
-                else (
-                    f"PEG {peg_for_floor:.3f} implies {1 / peg_for_floor:.0f}x expected "
-                    f"growth — mathematically implausible, treat valuation metrics as unreliable"
+            # Skip the penalty when confirmed high revenue growth (≥50% TTM) explains
+            # the low PEG.  PEG = 0.01 is mathematically consistent with, e.g.,
+            # P/E=5 + EPS_growth=500%, or P/E=12 + EPS_growth=1200% — neither
+            # implausible for a company with genuine triple-digit revenue growth.
+            # PEG = 0 is still always flagged (denominator truly zero/undefined).
+            rev_growth = metrics.get("revenue_growth_ttm")
+            peg_explained_by_growth = (
+                peg_for_floor > 0 and rev_growth is not None and rev_growth >= 50.0
+            )
+            if peg_explained_by_growth:
+                logger.info(
+                    "unreliable_peg_skipped_high_growth",
+                    ticker=ticker,
+                    peg=peg_for_floor,
+                    revenue_growth_ttm=rev_growth,
                 )
-            )
-            red_flags.append(
-                {
-                    "type": "UNRELIABLE_PEG",
-                    "severity": "WARNING",
-                    "detail": detail,
-                    "action": "RISK_PENALTY",
-                    "risk_penalty": 1.0,
-                    "rationale": (
-                        "A PEG ratio below 0.05 means the growth rate input is missing, "
-                        "stale, or implies implausible growth. All PEG-derived conclusions "
-                        "should be discounted. Check whether current earnings are at a "
-                        "cyclical peak."
-                    ),
-                }
-            )
-            logger.info(
-                "red_flag_unreliable_peg",
-                ticker=ticker,
-                peg=peg_for_floor,
-            )
+            else:
+                detail = (
+                    "PEG 0.00 — mathematically undefined (growth denominator is "
+                    "zero, negative, or infinite). Valuation metrics are unreliable."
+                    if peg_for_floor == 0
+                    else (
+                        f"PEG {peg_for_floor:.3f} — growth rate input is missing or stale. "
+                        f"Treat PEG-derived conclusions as unreliable."
+                    )
+                )
+                red_flags.append(
+                    {
+                        "type": "UNRELIABLE_PEG",
+                        "severity": "WARNING",
+                        "detail": detail,
+                        "action": "RISK_PENALTY",
+                        "risk_penalty": 1.0,
+                        "rationale": (
+                            "A PEG ratio below 0.05 without confirmed high revenue growth "
+                            "means the growth rate input is likely missing or stale. "
+                            "All PEG-derived conclusions should be discounted."
+                        ),
+                    }
+                )
+                logger.info(
+                    "red_flag_unreliable_peg",
+                    ticker=ticker,
+                    peg=peg_for_floor,
+                )
 
         # --- RED FLAG 9: Segment Deterioration ---
         # Dominant business segment showing significant profit decline

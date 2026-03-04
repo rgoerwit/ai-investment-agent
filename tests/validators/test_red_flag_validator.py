@@ -2243,7 +2243,7 @@ class TestUnreliablePEG:
         peg_flags = [f for f in flags if f["type"] == "UNRELIABLE_PEG"]
         assert len(peg_flags) == 1
         assert peg_flags[0]["risk_penalty"] == 1.0
-        assert "50x" in peg_flags[0]["detail"]  # 1/0.02 = 50
+        assert "0.020" in peg_flags[0]["detail"]
         assert result == "PASS"
 
     def test_peg_004_triggers_warning(self):
@@ -3449,3 +3449,199 @@ PFIC_RISK: CLEAN
         assert any(
             f["type"] == "STRICT_VALUE_TRAP_ESCALATED" for f in result["red_flags"]
         )
+
+
+class TestDebtToEquityNormalization:
+    """Regression tests for D/E % sign handling (Fix: capture % to avoid 6.92% → 692%).
+
+    Root cause: regex stripped the % sign, then the < 10 heuristic would multiply
+    a value like 6.92 by 100, producing 692%.  A D/E expressed as "6.92%" is already
+    a percentage and must NOT be multiplied.
+    """
+
+    def test_percent_suffix_prevents_multiplication(self):
+        """D/E: 6.92% must return 6.92, not 692."""
+        report = "- D/E: 6.92%: 1 pts"
+        result = RedFlagDetector._extract_debt_to_equity(report)
+        assert result == pytest.approx(6.92)
+
+    def test_percent_suffix_large_value(self):
+        """D/E: 692% is already a percentage and must return 692."""
+        report = "- D/E: 692%: 0 pts"
+        result = RedFlagDetector._extract_debt_to_equity(report)
+        assert result == pytest.approx(692.0)
+
+    def test_no_percent_small_value_still_converts(self):
+        """D/E: 6.92 (no %) is treated as ratio → returns 692 (existing heuristic preserved)."""
+        report = "- D/E: 6.92: 0 pts"
+        result = RedFlagDetector._extract_debt_to_equity(report)
+        assert result == pytest.approx(692.0)
+
+    def test_no_percent_large_value_stays(self):
+        """D/E: 120 (no %) is already-percentage form → returns 120."""
+        report = "- D/E: 120: 0 pts"
+        result = RedFlagDetector._extract_debt_to_equity(report)
+        assert result == pytest.approx(120.0)
+
+    def test_debt_equity_label_with_percent(self):
+        """Debt/Equity: 6.92% → 6.92."""
+        report = "- Debt/Equity: 6.92%: 1 pts"
+        result = RedFlagDetector._extract_debt_to_equity(report)
+        assert result == pytest.approx(6.92)
+
+    def test_de_ratio_label_with_percent(self):
+        """DE_RATIO: 50.5% → 50.5 (already a percentage)."""
+        report = "DE_RATIO: 50.5%"
+        result = RedFlagDetector._extract_debt_to_equity(report)
+        assert result == pytest.approx(50.5)
+
+    def test_percent_suffix_does_not_trigger_extreme_leverage(self):
+        """End-to-end: D/E: 6.92% must not fire EXTREME_LEVERAGE (< 500% threshold)."""
+        report = """
+### --- START DATA_BLOCK ---
+SECTOR: Industrials
+ADJUSTED_HEALTH_SCORE: 80%
+### --- END DATA_BLOCK ---
+
+- D/E: 6.92%: 1 pts
+Interest Coverage: 12.0x
+Free Cash Flow: ¥1B
+Net Income: ¥500M
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["debt_to_equity"] == pytest.approx(6.92)
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "6489.T")
+        leverage_flags = [f for f in flags if f["type"] == "EXTREME_LEVERAGE"]
+        assert (
+            len(leverage_flags) == 0
+        ), f"6.92% D/E incorrectly triggered EXTREME_LEVERAGE: {leverage_flags}"
+
+    def test_ratio_without_percent_triggers_leverage_flag(self):
+        """Sanity check: D/E: 6.92 (no %, treated as 6.92x = 692%) DOES trigger EXTREME_LEVERAGE."""
+        report = """
+### --- START DATA_BLOCK ---
+SECTOR: Industrials
+ADJUSTED_HEALTH_SCORE: 80%
+### --- END DATA_BLOCK ---
+
+- D/E: 6.92: 0 pts
+Interest Coverage: 12.0x
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["debt_to_equity"] == pytest.approx(692.0)
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "6489.T")
+        leverage_flags = [f for f in flags if f["type"] == "EXTREME_LEVERAGE"]
+        assert len(leverage_flags) == 1
+
+
+class TestUnreliablePEGHighGrowth:
+    """Regression tests for UNRELIABLE_PEG false positive on genuine high-growth companies.
+
+    Root cause: PEG < 0.05 triggered a +1.0 risk penalty with an "implausible" label
+    even when confirmed high revenue growth (e.g. 124% TTM for Cadeler) fully explained
+    the low PEG.  The fix skips the flag when revenue_growth_ttm >= 50%.
+    """
+
+    _BASE_METRICS: dict = {
+        "debt_to_equity": None,
+        "net_income": None,
+        "fcf": None,
+        "interest_coverage": None,
+        "pe_ratio": 12.0,
+        "pb_ratio": None,
+        "adjusted_health_score": 65.0,
+        "payout_ratio": None,
+        "dividend_coverage": None,
+        "net_margin": None,
+        "roic_quality": None,
+        "profitability_trend": None,
+        "roa_current": None,
+        "roa_5y_avg": None,
+        "roe_5y_avg": None,
+        "peg_ratio": 0.01,
+        "ocf": None,
+        "ocf_source": None,
+        "segment_flag": None,
+        "parent_company": None,
+        "analyst_coverage_total_est": None,
+        "growth_trajectory": None,
+        "revenue_growth_ttm": None,
+        "latest_quarter_date": None,
+        "sector": None,
+        "industry": None,
+        "_raw_report": "",
+    }
+
+    def _metrics(self, **overrides) -> dict:
+        return {**self._BASE_METRICS, **overrides}
+
+    def test_low_peg_with_high_growth_no_flag(self):
+        """PEG 0.01 + revenue_growth_ttm 124% → UNRELIABLE_PEG suppressed."""
+        metrics = self._metrics(peg_ratio=0.01, revenue_growth_ttm=124.0)
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "CADLR.OL")
+        peg_flags = [f for f in flags if f["type"] == "UNRELIABLE_PEG"]
+        assert (
+            len(peg_flags) == 0
+        ), "UNRELIABLE_PEG should not fire when revenue growth explains PEG"
+
+    def test_low_peg_with_exactly_50pct_growth_no_flag(self):
+        """PEG 0.01 + revenue_growth_ttm exactly 50% → boundary: flag suppressed."""
+        metrics = self._metrics(peg_ratio=0.01, revenue_growth_ttm=50.0)
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.OL")
+        peg_flags = [f for f in flags if f["type"] == "UNRELIABLE_PEG"]
+        assert len(peg_flags) == 0
+
+    def test_low_peg_with_moderate_growth_still_flags(self):
+        """PEG 0.01 + revenue_growth_ttm 30% → UNRELIABLE_PEG fires (+1.0 penalty)."""
+        metrics = self._metrics(peg_ratio=0.01, revenue_growth_ttm=30.0)
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        peg_flags = [f for f in flags if f["type"] == "UNRELIABLE_PEG"]
+        assert len(peg_flags) == 1
+        assert peg_flags[0]["risk_penalty"] == 1.0
+
+    def test_low_peg_with_no_growth_data_still_flags(self):
+        """PEG 0.01 + revenue_growth_ttm None → UNRELIABLE_PEG fires (can't confirm growth)."""
+        metrics = self._metrics(peg_ratio=0.01, revenue_growth_ttm=None)
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        peg_flags = [f for f in flags if f["type"] == "UNRELIABLE_PEG"]
+        assert len(peg_flags) == 1
+
+    def test_zero_peg_always_flags_regardless_of_growth(self):
+        """PEG 0.00 is mathematically undefined — always flag even with high revenue growth."""
+        metrics = self._metrics(peg_ratio=0.0, revenue_growth_ttm=200.0)
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        peg_flags = [f for f in flags if f["type"] == "UNRELIABLE_PEG"]
+        assert (
+            len(peg_flags) == 1
+        ), "PEG=0 must always be flagged (undefined denominator)"
+
+    def test_peg_above_threshold_no_flag(self):
+        """PEG 0.06 (above 0.05 threshold) → no flag regardless of growth."""
+        metrics = self._metrics(peg_ratio=0.06, revenue_growth_ttm=None)
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        peg_flags = [f for f in flags if f["type"] == "UNRELIABLE_PEG"]
+        assert len(peg_flags) == 0
+
+    def test_peg_none_no_flag(self):
+        """PEG None → no flag (field absent from DATA_BLOCK)."""
+        metrics = self._metrics(peg_ratio=None, revenue_growth_ttm=None)
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        peg_flags = [f for f in flags if f["type"] == "UNRELIABLE_PEG"]
+        assert len(peg_flags) == 0
+
+    def test_high_growth_extraction_from_data_block(self):
+        """End-to-end: REVENUE_GROWTH_TTM in DATA_BLOCK suppresses UNRELIABLE_PEG."""
+        report = """
+### --- START DATA_BLOCK ---
+SECTOR: Industrials
+ADJUSTED_HEALTH_SCORE: 65%
+PEG_RATIO: 0.01
+REVENUE_GROWTH_TTM: 124%
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["peg_ratio"] == pytest.approx(0.01)
+        assert metrics["revenue_growth_ttm"] == pytest.approx(124.0)
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "CADLR.OL")
+        peg_flags = [f for f in flags if f["type"] == "UNRELIABLE_PEG"]
+        assert len(peg_flags) == 0
