@@ -282,9 +282,6 @@ poetry run python scripts/find_gems.py --output scratch/gems.txt
 # Paid API tier? Shorten the cooldown
 ./scripts/run_pipeline.sh --cooldown 10
 
-# Resume after a crash (already-processed tickers are skipped automatically)
-./scripts/run_pipeline.sh --skip-scrape scratch/gems_2026-02-19.txt
-
 # Overnight run on macOS (--yes skips confirmation prompts)
 caffeinate -i ./scripts/run_pipeline.sh --yes
 ```
@@ -298,10 +295,29 @@ The pipeline pauses before each AI stage to show a summary (ticker count, estima
 | `-y, --yes` | Skip all confirmation prompts (for cron/CI/overnight runs) |
 | `--skip-scrape FILE` | Skip Stage 0 scraping; use an existing ticker list file |
 | `--stage N` | Run only stage N (0=scrape, 1=quick-screen, 2=full analysis) |
+| `--buys-file FILE` | Explicit BUY list to use for Stage 2 (see resumption notes below) |
 | `--cooldown N` | Seconds between analyses (default: 60 for free tier, 10 for paid) |
 | `--quick` | Pass `--quick` flag to each analysis (1 debate round, faster) |
 
 Output lands in `scratch/`: quick-screen reports (`*_quick.md`), full reports for BUYs, and a `buys_YYYY-MM-DD.txt` summary.
+
+#### Resuming an Interrupted Run
+
+The pipeline has built-in resumability: any ticker whose output file already contains a verdict line is skipped automatically. To resume:
+
+```bash
+# Same-day resume (pipeline ran and was interrupted today)
+# Just re-run with --stage 2 — it finds today's buys file and skips completed tickers
+./scripts/run_pipeline.sh --stage 2
+
+# Cross-day resume (pipeline started yesterday, interrupted, resuming today)
+# Use --buys-file to point at yesterday's BUY list.
+# The script detects the date in the filename and matches output files correctly —
+# without this, it would look for today's output files and re-analyze everything.
+./scripts/run_pipeline.sh --stage 2 --buys-file scratch/buys_2026-03-02.txt
+```
+
+Without `--buys-file` on a cross-day resume, the script would look for `scratch/buys_TODAY.txt` (which doesn't exist) and exit immediately. Even if you pointed it at the right BUY list another way, the resumability check uses the date embedded in the filename to locate existing output files — so `--buys-file` is required to avoid re-running everything from scratch.
 
 ### Configuring API Rate Limits (NEW)
 

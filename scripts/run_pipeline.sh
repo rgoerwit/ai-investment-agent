@@ -175,6 +175,17 @@ if [[ -n "$SKIP_SCRAPE" ]]; then
     TICKER_LIST="$SKIP_SCRAPE"
 fi
 
+# If --buys-file was given, derive DATE from the filename so that Stage 2 output
+# filenames and resumability checks stay consistent with the original run.
+# e.g. scratch/buys_2026-03-02.txt  →  DATE=2026-03-02
+if [[ "$BUY_LIST" != "${SCRATCH}/buys_${DATE}.txt" ]]; then
+    EXTRACTED_DATE=$(basename "$BUY_LIST" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1)
+    if [[ -n "$EXTRACTED_DATE" ]]; then
+        info "Cross-day resume: using date ${EXTRACTED_DATE} from buys file (was ${DATE})"
+        DATE="$EXTRACTED_DATE"
+    fi
+fi
+
 # --- Ensure scratch directory exists ---
 mkdir -p "$SCRATCH"
 
@@ -343,7 +354,8 @@ if [[ $START_STAGE -le 1 ]]; then
             --quick --strict --no-charts --quiet --brief --no-memory \
             --output "$OUTFILE" \
             2> "$LOGFILE"; then
-            success "$ticker done"
+            VERDICT=$(grep -m1 -E '^# .*\): ' "$OUTFILE" 2>/dev/null | sed 's/.*): //' | tr -d '\r')
+            [[ -n "$VERDICT" ]] && success "$ticker done [Verdict=${VERDICT}]" || success "$ticker done"
         else
             fail "FAILED: $ticker (see $LOGFILE)"
             STAGE1_FAILED=$((STAGE1_FAILED + 1))
@@ -509,7 +521,8 @@ if [[ $START_STAGE -le 2 ]]; then
             $STRICT_FLAG \
             --output "$OUTFILE" \
             2> "$LOGFILE"; then
-            success "$ticker done"
+            VERDICT=$(grep -m1 -E '^# .*\): ' "$OUTFILE" 2>/dev/null | sed 's/.*): //' | tr -d '\r')
+            [[ -n "$VERDICT" ]] && success "$ticker done [Verdict=${VERDICT}]" || success "$ticker done"
         else
             fail "FAILED: $ticker (see $LOGFILE)"
             STAGE2_FAILED=$((STAGE2_FAILED + 1))
