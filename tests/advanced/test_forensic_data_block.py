@@ -164,12 +164,15 @@ class TestConsultantForensicValidation:
         assert "Threshold Calibration" in system_msg
 
     def test_consultant_version_updated(self):
-        """Verify consultant version was incremented."""
+        """Verify consultant version was incremented (must be >= 1.1)."""
         consultant = get_prompt("consultant")
-        # Version should be 1.1 or higher
         version_parts = consultant.version.split(".")
-        assert int(version_parts[0]) >= 1, "Major version should be at least 1"
-        assert int(version_parts[1]) >= 1, "Minor version should be at least 1"
+        major = int(version_parts[0])
+        minor = int(version_parts[1])
+        assert (major, minor) >= (
+            1,
+            1,
+        ), f"Consultant version {consultant.version} must be >= 1.1"
 
 
 class TestPortfolioManagerForensicPenalties:
