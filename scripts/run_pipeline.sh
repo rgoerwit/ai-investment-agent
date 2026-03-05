@@ -13,6 +13,9 @@
 #   --include-us        Pass --include-us to find_gems.py
 #   --cooldown N        Override COOLDOWN_SECONDS (default: 60)
 #   --stage N           Start from stage N (0, 1, or 2). Requires prior stages' outputs.
+#   --buys-file FILE    Explicit BUY list path (bypasses date-based default; use with --stage 2
+#                       when resuming a run that started on a previous calendar day)
+#   -y, --yes           Skip confirmation prompts (run non-interactively)
 #   -h, --help          Show this help message
 #
 # Environment:
@@ -35,18 +38,49 @@ FORCE=false
 SKIP_SCRAPE=""
 INCLUDE_US=""
 START_STAGE=0
+AUTO_YES=false
+STRICT_FLAG=""
 
 # --- Colors ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
 NC='\033[0m'
 
 info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
 success() { echo -e "${GREEN}[OK]${NC} $1"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
 fail()    { echo -e "${RED}[FAIL]${NC} $1"; }
+
+# --- Confirmation prompt (skipped with --yes) ---
+confirm() {
+    local prompt="$1"
+    if $AUTO_YES; then
+        return 0
+    fi
+    echo ""
+    echo -en "${BOLD}${prompt}${NC} [y/N] "
+    read -r answer
+    case "$answer" in
+        [yY]|[yY][eE][sS]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# --- Time formatting ---
+format_duration() {
+    local total_secs=$1
+    local hours=$((total_secs / 3600))
+    local mins=$(( (total_secs % 3600) / 60 ))
+    if [[ $hours -gt 0 ]]; then
+        echo "${hours}h ${mins}m"
+    else
+        echo "${mins}m"
+    fi
+}
 
 # --- Parse arguments ---
 while [[ $# -gt 0 ]]; do
@@ -66,6 +100,15 @@ while [[ $# -gt 0 ]]; do
         --stage)
             START_STAGE="$2"
             shift 2 ;;
+        --buys-file)
+            BUY_LIST="$2"
+            shift 2 ;;
+        -y|--yes)
+            AUTO_YES=true
+            shift ;;
+        --strict)
+            STRICT_FLAG="--strict"
+            shift ;;
         -h|--help)
             cat << 'HELPEOF'
 Usage: ./scripts/run_pipeline.sh [OPTIONS]
@@ -83,6 +126,14 @@ OPTIONS:
   --include-us        Include US exchanges in scrape phase
   --cooldown N        Seconds between ticker analyses (default: 60)
   --stage N           Start from stage N (0, 1, or 2)
+  --buys-file FILE    Explicit BUY list path — bypasses the date-based default
+                      (scratch/buys_YYYY-MM-DD.txt). Use with --stage 2 when
+                      resuming a run that crossed midnight:
+                        ./scripts/run_pipeline.sh --stage 2 --buys-file scratch/buys_2026-02-24.txt
+  --strict            Apply strict mode to Stage 2 full analysis (tighter D/E, reject
+                      REITs/PFIC/VIE, escalate value traps, higher BUY conviction bar).
+                      Stage 1 screening always runs strict regardless of this flag.
+  -y, --yes           Skip confirmation prompts (run non-interactively)
   -h, --help          Show this help message
 
 ENVIRONMENT:
@@ -104,6 +155,9 @@ EXAMPLES:
   # Start from Stage 2 (BUY list must exist from prior run)
   ./scripts/run_pipeline.sh --stage 2
 
+  # Non-interactive (e.g. cron, CI, overnight run)
+  caffeinate -i ./scripts/run_pipeline.sh --yes
+
   # Prevent macOS sleep during overnight run
   caffeinate -i ./scripts/run_pipeline.sh
 HELPEOF
@@ -114,6 +168,23 @@ HELPEOF
             exit 1 ;;
     esac
 done
+
+# Resolve TICKER_LIST from --skip-scrape immediately (not deferred to stage 0 block)
+# This ensures --stage 1 --skip-scrape FILE works without going through stage 0.
+if [[ -n "$SKIP_SCRAPE" ]]; then
+    TICKER_LIST="$SKIP_SCRAPE"
+fi
+
+# If --buys-file was given, derive DATE from the filename so that Stage 2 output
+# filenames and resumability checks stay consistent with the original run.
+# e.g. scratch/buys_2026-03-02.txt  →  DATE=2026-03-02
+if [[ "$BUY_LIST" != "${SCRATCH}/buys_${DATE}.txt" ]]; then
+    EXTRACTED_DATE=$(basename "$BUY_LIST" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1)
+    if [[ -n "$EXTRACTED_DATE" ]]; then
+        info "Cross-day resume: using date ${EXTRACTED_DATE} from buys file (was ${DATE})"
+        DATE="$EXTRACTED_DATE"
+    fi
+fi
 
 # --- Ensure scratch directory exists ---
 mkdir -p "$SCRATCH"
@@ -163,6 +234,41 @@ if [[ $START_STAGE -le 0 ]]; then
         fail "No tickers to analyze"
         exit 1
     fi
+
+    # --- Confirmation before Stage 1 ---
+    # Count how many would actually be processed (not skipped by resumability)
+    STAGE1_TODO=0
+    while IFS= read -r ticker || [[ -n "$ticker" ]]; do
+        [[ -z "$ticker" || "$ticker" =~ ^[[:space:]]*# ]] && continue
+        ticker=$(echo "$ticker" | xargs)
+        [[ -z "$ticker" ]] && continue
+        DASH=$(echo "$ticker" | tr '._' '-')
+        OUTFILE="${SCRATCH}/README-${DASH}-${DATE}_quick.md"
+        if $FORCE || ! [[ -f "$OUTFILE" ]] || ! grep -qE '^# .*\): ' "$OUTFILE"; then
+            STAGE1_TODO=$((STAGE1_TODO + 1))
+        fi
+    done < "$TICKER_LIST"
+
+    STAGE1_SKIP=$((TICKER_COUNT - STAGE1_TODO))
+    STAGE1_SECS=$((STAGE1_TODO * (COOLDOWN + 120)))
+
+    echo ""
+    echo -e "${CYAN}━━━ Stage 1 Preview ━━━━━━━━━━━━━━━━━━━━${NC}"
+    info "Tickers to analyze:  $STAGE1_TODO (of $TICKER_COUNT candidates)"
+    if [[ $STAGE1_SKIP -gt 0 ]]; then
+        info "Already completed:   $STAGE1_SKIP (will be skipped)"
+    fi
+    info "Est. time:           ~$(format_duration $STAGE1_SECS) (${COOLDOWN}s cooldown)"
+    info "Mode:                --quick --strict --brief --no-memory"
+    info "Output dir:          $SCRATCH/"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+    if [[ $STAGE1_TODO -eq 0 ]]; then
+        info "Nothing to do — all tickers already processed."
+    elif ! confirm "Proceed with Stage 1 quick analysis?"; then
+        warn "Aborted by user."
+        exit 0
+    fi
 fi
 
 # ============================================================
@@ -178,6 +284,44 @@ if [[ $START_STAGE -le 1 ]]; then
         fail "Ticker list not found: $TICKER_LIST"
         info "Run Stage 0 first, or use --skip-scrape FILE"
         exit 1
+    fi
+
+    # If entering at --stage 1, we haven't shown a preview yet
+    if [[ $START_STAGE -eq 1 ]]; then
+        TICKER_COUNT=$(grep -c '^[[:space:]]*[^[:space:]#]' "$TICKER_LIST" || echo "0")
+
+        STAGE1_TODO=0
+        while IFS= read -r ticker || [[ -n "$ticker" ]]; do
+            [[ -z "$ticker" || "$ticker" =~ ^[[:space:]]*# ]] && continue
+            ticker=$(echo "$ticker" | xargs)
+            [[ -z "$ticker" ]] && continue
+            DASH=$(echo "$ticker" | tr '._' '-')
+            OUTFILE="${SCRATCH}/README-${DASH}-${DATE}_quick.md"
+            if $FORCE || ! [[ -f "$OUTFILE" ]] || ! grep -qE '^# .*\): ' "$OUTFILE"; then
+                STAGE1_TODO=$((STAGE1_TODO + 1))
+            fi
+        done < "$TICKER_LIST"
+
+        STAGE1_SKIP=$((TICKER_COUNT - STAGE1_TODO))
+        STAGE1_SECS=$((STAGE1_TODO * (COOLDOWN + 120)))
+
+        echo ""
+        echo -e "${CYAN}━━━ Stage 1 Preview ━━━━━━━━━━━━━━━━━━━━${NC}"
+        info "Tickers to analyze:  $STAGE1_TODO (of $TICKER_COUNT candidates)"
+        if [[ $STAGE1_SKIP -gt 0 ]]; then
+            info "Already completed:   $STAGE1_SKIP (will be skipped)"
+        fi
+        info "Est. time:           ~$(format_duration $STAGE1_SECS) (${COOLDOWN}s cooldown)"
+        info "Mode:                --quick --strict --brief --no-memory"
+        info "Output dir:          $SCRATCH/"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+        if [[ $STAGE1_TODO -eq 0 ]]; then
+            info "Nothing to do — all tickers already processed."
+        elif ! confirm "Proceed with Stage 1 quick analysis?"; then
+            warn "Aborted by user."
+            exit 0
+        fi
     fi
 
     STAGE1_PROCESSED=0
@@ -207,10 +351,11 @@ if [[ $START_STAGE -le 1 ]]; then
 
         if poetry run python -m src.main \
             --ticker "$ticker" \
-            --quick --no-charts --quiet --brief --no-memory \
+            --quick --strict --no-charts --quiet --brief --no-memory \
             --output "$OUTFILE" \
             2> "$LOGFILE"; then
-            success "$ticker done"
+            VERDICT=$(grep -m1 -E '^# .*\): ' "$OUTFILE" 2>/dev/null | sed 's/.*): //' | tr -d '\r')
+            [[ -n "$VERDICT" ]] && success "$ticker done [Verdict=${VERDICT}]" || success "$ticker done"
         else
             fail "FAILED: $ticker (see $LOGFILE)"
             STAGE1_FAILED=$((STAGE1_FAILED + 1))
@@ -268,9 +413,16 @@ if [[ $START_STAGE -le 1 ]]; then
             SELL_COUNT=$((SELL_COUNT + 1))
             info "DO_NOT_INITIATE: $ticker"
         else
-            # Try to extract verdict from line 10
-            VERDICT=$(sed -n '10p' "$OUTFILE" | sed 's/.*): //')
-            warn "${VERDICT:-UNKNOWN}: $ticker"
+            # None of the known verdicts matched — show line 10 verbatim for debugging
+            LINE10=$(sed -n '10p' "$OUTFILE")
+            VERDICT=$(echo "$LINE10" | sed 's/.*): //')
+            if [[ -n "$VERDICT" && "$VERDICT" != "$LINE10" ]]; then
+                # Pattern matched — unusual verdict string (e.g. WATCHLIST, SPECULATIVE_BUY)
+                warn "UNKNOWN_VERDICT ($VERDICT): $ticker"
+            else
+                # Pattern didn't match — title not on line 10 or unexpected format
+                warn "UNKNOWN: $ticker [line10: ${LINE10:-<empty>}]"
+            fi
             OTHER_COUNT=$((OTHER_COUNT + 1))
         fi
 
@@ -295,7 +447,8 @@ if [[ $START_STAGE -le 2 ]]; then
 
     if [[ ! -f "$BUY_LIST" ]]; then
         warn "No BUY list found at $BUY_LIST"
-        info "Run Stages 0-1 first"
+        info "Run Stages 0-1 first, or specify an existing file with --buys-file"
+        info "Example (cross-day resume): --stage 2 --buys-file scratch/buys_2026-02-24.txt"
         exit 0
     fi
 
@@ -305,7 +458,39 @@ if [[ $START_STAGE -le 2 ]]; then
         exit 0
     fi
 
-    info "$BUY_TOTAL BUY tickers to analyze in full"
+    # Count how many would actually be processed
+    STAGE2_TODO=0
+    while IFS= read -r ticker || [[ -n "$ticker" ]]; do
+        [[ -z "$ticker" || "$ticker" =~ ^[[:space:]]*# ]] && continue
+        ticker=$(echo "$ticker" | xargs)
+        [[ -z "$ticker" ]] && continue
+        DASH=$(echo "$ticker" | tr '._' '-')
+        OUTFILE="${SCRATCH}/README-${DASH}-${DATE}.md"
+        if $FORCE || ! [[ -f "$OUTFILE" ]] || ! grep -qE '^# .*\): ' "$OUTFILE"; then
+            STAGE2_TODO=$((STAGE2_TODO + 1))
+        fi
+    done < "$BUY_LIST"
+
+    STAGE2_SKIP=$((BUY_TOTAL - STAGE2_TODO))
+    STAGE2_SECS=$((STAGE2_TODO * (COOLDOWN + 300)))
+
+    echo ""
+    echo -e "${CYAN}━━━ Stage 2 Preview ━━━━━━━━━━━━━━━━━━━━${NC}"
+    info "BUY tickers to analyze: $STAGE2_TODO (of $BUY_TOTAL)"
+    if [[ $STAGE2_SKIP -gt 0 ]]; then
+        info "Already completed:     $STAGE2_SKIP (will be skipped)"
+    fi
+    info "Est. time:             ~$(format_duration $STAGE2_SECS) (${COOLDOWN}s cooldown)"
+    info "Mode:                  Full analysis with charts"
+    info "Output dir:            $SCRATCH/"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+    if [[ $STAGE2_TODO -eq 0 ]]; then
+        info "Nothing to do — all BUY tickers already have full analysis."
+    elif ! confirm "Proceed with Stage 2 full analysis?"; then
+        warn "Aborted by user."
+        exit 0
+    fi
 
     STAGE2_PROCESSED=0
     STAGE2_SKIPPED=0
@@ -333,9 +518,11 @@ if [[ $START_STAGE -le 2 ]]; then
         if poetry run python -m src.main \
             --ticker "$ticker" \
             --transparent --quiet \
+            $STRICT_FLAG \
             --output "$OUTFILE" \
             2> "$LOGFILE"; then
-            success "$ticker done"
+            VERDICT=$(grep -m1 -E '^# .*\): ' "$OUTFILE" 2>/dev/null | sed 's/.*): //' | tr -d '\r')
+            [[ -n "$VERDICT" ]] && success "$ticker done [Verdict=${VERDICT}]" || success "$ticker done"
         else
             fail "FAILED: $ticker (see $LOGFILE)"
             STAGE2_FAILED=$((STAGE2_FAILED + 1))

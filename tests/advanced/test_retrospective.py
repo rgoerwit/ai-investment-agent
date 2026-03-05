@@ -864,15 +864,20 @@ class TestConstants:
     """Validate constant definitions."""
 
     def test_failure_modes_complete(self):
-        assert len(FAILURE_MODES) == 8
+        assert len(FAILURE_MODES) == 12
         assert "CYCLICAL_PEAK" in FAILURE_MODES
         assert "FX_DRIVEN" in FAILURE_MODES
         assert "VALUATION_TRAP" in FAILURE_MODES
+        assert "ACCOUNTING_FRAUD" in FAILURE_MODES
+        assert "GEOPOLITICAL" in FAILURE_MODES
+        assert "LIQUIDITY_CRISIS" in FAILURE_MODES
+        assert "DEAD_MONEY" in FAILURE_MODES
 
     def test_lesson_types_complete(self):
-        assert len(LESSON_TYPES) == 4
+        assert len(LESSON_TYPES) == 5
         assert "missed_risk" in LESSON_TYPES
         assert "correct_call" in LESSON_TYPES
+        assert "prior_rejection" in LESSON_TYPES
 
     def test_collection_name(self):
         assert LESSONS_COLLECTION_NAME == "lessons_learned"

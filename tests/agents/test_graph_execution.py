@@ -431,5 +431,158 @@ class TestGraphCompilation:
         # Graph should be compiled and ready to invoke
 
 
+class TestStrictGraphWiring:
+    """Smoke tests: strict_mode threads correctly through graph construction."""
+
+    @patch("src.graph.create_financial_health_validator_node")
+    @patch("src.graph.create_portfolio_manager_node")
+    @patch("src.graph.create_research_manager_node")
+    @patch("src.graph.create_analyst_node")
+    @patch("src.graph.create_researcher_node")
+    @patch("src.graph.create_trader_node")
+    @patch("src.graph.create_risk_debater_node")
+    @patch("src.graph.create_agent_tool_node")
+    @patch("src.graph.toolkit")
+    def test_strict_mode_reaches_validator_factory(
+        self,
+        mock_toolkit,
+        mock_tool_node,
+        mock_risk,
+        mock_trader,
+        mock_researcher,
+        mock_analyst,
+        mock_rm,
+        mock_pm,
+        mock_validator,
+    ):
+        """strict_mode=True is forwarded to create_financial_health_validator_node."""
+        from src.graph import create_trading_graph
+
+        for m in (
+            mock_analyst,
+            mock_researcher,
+            mock_rm,
+            mock_trader,
+            mock_risk,
+            mock_tool_node,
+        ):
+            m.return_value = lambda s, c: {}
+        mock_pm.return_value = lambda s, c: {}
+        mock_validator.return_value = lambda s, c: {}
+        mock_toolkit.get_all_tools.return_value = []
+        mock_toolkit.get_market_tools.return_value = []
+        mock_toolkit.get_sentiment_tools.return_value = []
+        mock_toolkit.get_news_tools.return_value = []
+        mock_toolkit.get_junior_fundamental_tools.return_value = []
+        mock_toolkit.get_senior_fundamental_tools.return_value = []
+        mock_toolkit.get_foreign_language_tools.return_value = []
+        mock_toolkit.get_legal_tools.return_value = []
+        mock_toolkit.get_value_trap_tools.return_value = []
+
+        create_trading_graph(strict_mode=True, enable_memory=False)
+        mock_validator.assert_called_once_with(strict_mode=True)
+
+    @patch("src.graph.create_financial_health_validator_node")
+    @patch("src.graph.create_portfolio_manager_node")
+    @patch("src.graph.create_research_manager_node")
+    @patch("src.graph.create_analyst_node")
+    @patch("src.graph.create_researcher_node")
+    @patch("src.graph.create_trader_node")
+    @patch("src.graph.create_risk_debater_node")
+    @patch("src.graph.create_agent_tool_node")
+    @patch("src.graph.toolkit")
+    def test_strict_mode_reaches_pm_factory(
+        self,
+        mock_toolkit,
+        mock_tool_node,
+        mock_risk,
+        mock_trader,
+        mock_researcher,
+        mock_analyst,
+        mock_rm,
+        mock_pm,
+        mock_validator,
+    ):
+        """strict_mode=True is forwarded to create_portfolio_manager_node (both instances)."""
+        from src.graph import create_trading_graph
+
+        for m in (
+            mock_analyst,
+            mock_researcher,
+            mock_rm,
+            mock_trader,
+            mock_risk,
+            mock_tool_node,
+            mock_validator,
+        ):
+            m.return_value = lambda s, c: {}
+        mock_pm.return_value = lambda s, c: {}
+        mock_toolkit.get_all_tools.return_value = []
+        mock_toolkit.get_market_tools.return_value = []
+        mock_toolkit.get_sentiment_tools.return_value = []
+        mock_toolkit.get_news_tools.return_value = []
+        mock_toolkit.get_junior_fundamental_tools.return_value = []
+        mock_toolkit.get_senior_fundamental_tools.return_value = []
+        mock_toolkit.get_foreign_language_tools.return_value = []
+        mock_toolkit.get_legal_tools.return_value = []
+        mock_toolkit.get_value_trap_tools.return_value = []
+
+        create_trading_graph(strict_mode=True, enable_memory=False)
+        # PM factory is called twice (main PM + fast-fail PM)
+        calls = mock_pm.call_args_list
+        assert len(calls) == 2
+        assert all(call.kwargs.get("strict_mode") is True for call in calls)
+
+    @patch("src.graph.create_financial_health_validator_node")
+    @patch("src.graph.create_portfolio_manager_node")
+    @patch("src.graph.create_research_manager_node")
+    @patch("src.graph.create_analyst_node")
+    @patch("src.graph.create_researcher_node")
+    @patch("src.graph.create_trader_node")
+    @patch("src.graph.create_risk_debater_node")
+    @patch("src.graph.create_agent_tool_node")
+    @patch("src.graph.toolkit")
+    def test_strict_mode_reaches_rm_factory(
+        self,
+        mock_toolkit,
+        mock_tool_node,
+        mock_risk,
+        mock_trader,
+        mock_researcher,
+        mock_analyst,
+        mock_rm,
+        mock_pm,
+        mock_validator,
+    ):
+        """strict_mode=True is forwarded to create_research_manager_node."""
+        from src.graph import create_trading_graph
+
+        for m in (
+            mock_analyst,
+            mock_researcher,
+            mock_trader,
+            mock_risk,
+            mock_tool_node,
+            mock_validator,
+            mock_pm,
+        ):
+            m.return_value = lambda s, c: {}
+        mock_rm.return_value = lambda s, c: {}
+        mock_toolkit.get_all_tools.return_value = []
+        mock_toolkit.get_market_tools.return_value = []
+        mock_toolkit.get_sentiment_tools.return_value = []
+        mock_toolkit.get_news_tools.return_value = []
+        mock_toolkit.get_junior_fundamental_tools.return_value = []
+        mock_toolkit.get_senior_fundamental_tools.return_value = []
+        mock_toolkit.get_foreign_language_tools.return_value = []
+        mock_toolkit.get_legal_tools.return_value = []
+        mock_toolkit.get_value_trap_tools.return_value = []
+
+        create_trading_graph(strict_mode=True, enable_memory=False)
+        mock_rm.assert_called_once()
+        call_kwargs = mock_rm.call_args.kwargs
+        assert call_kwargs.get("strict_mode") is True
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

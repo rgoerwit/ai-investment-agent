@@ -472,6 +472,9 @@ class SmartMarketDataFetcher(FinancialFetcher):
 
             # BALANCE SHEET
             if not balance_sheet.empty:
+                extracted["_statements_date"] = balance_sheet.columns[0].strftime(
+                    "%Y-%m-%d"
+                )
                 try:
                     if (
                         "Current Assets" in balance_sheet.index
@@ -518,6 +521,38 @@ class SmartMarketDataFetcher(FinancialFetcher):
                     if debt is not None and equity is not None and equity != 0:
                         extracted["debtToEquity"] = debt / equity
                         extracted["_debtToEquity_source"] = "calculated_from_statements"
+                except Exception:
+                    pass
+
+                # PFIC passive asset data: total assets and liquid assets for IRS cash-to-assets test
+                # (IRS Form 8621 counts cash + short-term investments + marketable securities)
+                try:
+                    if "Total Assets" in balance_sheet.index:
+                        extracted["totalAssets"] = float(
+                            balance_sheet.loc["Total Assets"].iloc[0]
+                        )
+                        extracted["_totalAssets_source"] = "calculated_from_statements"
+
+                    # Sum cash equivalents + short-term investments for broad passive-asset base
+                    liquid = None
+                    for cash_row in [
+                        "Cash And Cash Equivalents",
+                        "Cash",
+                        "Cash And Short Term Investments",
+                    ]:
+                        if cash_row in balance_sheet.index:
+                            liquid = float(balance_sheet.loc[cash_row].iloc[0])
+                            break
+                    if liquid is not None:
+                        sti = 0.0
+                        if "Short Term Investments" in balance_sheet.index:
+                            sti = float(
+                                balance_sheet.loc["Short Term Investments"].iloc[0]
+                            )
+                        extracted["cashAndShortTermInvestments"] = liquid + sti
+                        extracted["_cashAndShortTermInvestments_source"] = (
+                            "calculated_from_statements"
+                        )
                 except Exception:
                     pass
 
@@ -1873,8 +1908,23 @@ class SmartMarketDataFetcher(FinancialFetcher):
 
     def _fix_debt_equity_scaling(self, info: dict, symbol: str) -> dict:
         de = info.get("debtToEquity")
-        if de is not None and de > DEBT_EQUITY_PERCENTAGE_THRESHOLD:
+        if de is None:
+            return info
+        # Statement-calculated values are already ratios — no correction needed
+        if info.get("_debtToEquity_source") == "calculated_from_statements":
+            return info
+        # Large values are clearly percentage format (e.g., 793.0 → divide → 7.93)
+        if de > DEBT_EQUITY_PERCENTAGE_THRESHOLD:
             info["debtToEquity"] = de / 100.0
+        # Values in 1.5–10 range from API sources may also be percentage format
+        # (e.g., yfinance returns 7.93 for a company with 7.93% D/E).
+        # Cross-validate: EV < Market Cap confirms net-cash position, making
+        # a genuine 1.5×–10× D/E ratio essentially impossible.
+        elif de > 1.5:
+            ev = info.get("enterpriseValue")
+            mc = info.get("marketCap")
+            if ev is not None and mc is not None and ev < mc:
+                info["debtToEquity"] = de / 100.0
         return info
 
     def _normalize_data_integrity(self, info: dict, symbol: str) -> dict:

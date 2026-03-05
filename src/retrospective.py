@@ -107,9 +107,19 @@ FAILURE_MODES = {
     "MACRO_REGIME",
     "DISRUPTION",
     "VALUATION_TRAP",
+    "ACCOUNTING_FRAUD",
+    "GEOPOLITICAL",
+    "LIQUIDITY_CRISIS",
+    "DEAD_MONEY",
 }
 
-LESSON_TYPES = {"missed_risk", "false_positive", "missed_opportunity", "correct_call"}
+LESSON_TYPES = {
+    "missed_risk",
+    "false_positive",
+    "missed_opportunity",
+    "correct_call",
+    "prior_rejection",
+}
 
 LESSONS_COLLECTION_NAME = "lessons_learned"
 
@@ -190,7 +200,69 @@ def _extract_data_block_float(
     return None
 
 
-def extract_snapshot(result: dict, ticker: str) -> dict[str, Any]:
+def _extract_trade_block_price(text: str, field: str) -> float | None:
+    """Extract a price from a TRADE_BLOCK field like 'ENTRY: 2,145 (Scaled Limit)'."""
+    pattern = rf"{field}:\s*(.+?)(?:\n|$)"
+    match = re.search(pattern, text, re.IGNORECASE)
+    if not match:
+        return None
+    raw = match.group(1).strip()
+    if raw.upper().startswith("N/A"):
+        return None
+    price_match = re.match(r"([\d,]+(?:\.\d+)?)", raw)
+    if price_match:
+        try:
+            return float(price_match.group(1).replace(",", ""))
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_trade_block_text(trader_plan: str, field: str) -> str | None:
+    """Extract a text value from a TRADE_BLOCK field (non-numeric)."""
+    pattern = rf"{field}:\s*(.+?)(?:\n|$)"
+    match = re.search(pattern, trader_plan, re.IGNORECASE)
+    if not match:
+        return None
+    raw = match.group(1).strip()
+    return raw if raw and raw.upper() not in ("N/A", "NA", "-", "") else None
+
+
+def _extract_trade_block_fields(trader_plan: str) -> dict[str, Any]:
+    """
+    Extract structured TRADE_BLOCK fields from trader output.
+
+    Zero LLM cost — pure regex. Backward-compatible: older JSONs
+    without these fields will have None values (handled by reconciler).
+
+    Returns dict with keys: entry_price, stop_price, target_1_price,
+    target_2_price, conviction, investment_horizon.
+    """
+    if not trader_plan:
+        return {
+            "entry_price": None,
+            "stop_price": None,
+            "target_1_price": None,
+            "target_2_price": None,
+            "conviction": None,
+            "investment_horizon": None,
+        }
+
+    conviction_match = re.search(r"CONVICTION:\s*(\w+)", trader_plan, re.IGNORECASE)
+
+    return {
+        "entry_price": _extract_trade_block_price(trader_plan, "ENTRY"),
+        "stop_price": _extract_trade_block_price(trader_plan, "STOP"),
+        "target_1_price": _extract_trade_block_price(trader_plan, "TARGET_1"),
+        "target_2_price": _extract_trade_block_price(trader_plan, "TARGET_2"),
+        "conviction": conviction_match.group(1) if conviction_match else None,
+        "investment_horizon": _extract_trade_block_text(trader_plan, "HORIZON"),
+    }
+
+
+def extract_snapshot(
+    result: dict, ticker: str, is_quick_mode: bool = False
+) -> dict[str, Any]:
     """
     Extract a compact prediction snapshot from an analysis result.
 
@@ -235,6 +307,10 @@ def extract_snapshot(result: dict, ticker: str) -> dict[str, Any]:
     except ImportError:
         fx_rate = 1.0
 
+    # TRADE_BLOCK extraction from trader plan (zero LLM cost — pure regex)
+    trader_plan = result.get("investment_analysis", {}).get("trader_plan", "") or ""
+    trade_block_fields = _extract_trade_block_fields(trader_plan)
+
     snapshot = {
         # Core verdict
         "verdict": verdict,
@@ -262,6 +338,8 @@ def extract_snapshot(result: dict, ticker: str) -> dict[str, Any]:
         ),
         "52w_high": _extract_data_block_float(fundamentals, "52W_HIGH"),
         "52w_low": _extract_data_block_float(fundamentals, "52W_LOW"),
+        # TRADE_BLOCK fields (structured for portfolio reconciliation)
+        **trade_block_fields,
         # Bear thesis excerpt
         "bear_risks_excerpt": _extract_bear_risks(result),
         # Exchange/currency/benchmark
@@ -274,6 +352,7 @@ def extract_snapshot(result: dict, ticker: str) -> dict[str, Any]:
         "analysis_date": datetime.now().strftime("%Y-%m-%d"),
         "deep_model": config.deep_think_llm,
         "quick_model": config.quick_think_llm,
+        "is_quick_mode": is_quick_mode,
     }
 
     logger.info(
@@ -602,11 +681,14 @@ def compute_confidence(comparison: dict[str, Any]) -> float:
     deep_model = comparison.get("deep_model", "")
     model_q = MODEL_QUALITY.get(deep_model, DEFAULT_MODEL_QUALITY)
 
-    # Analysis mode component
-    quick_model = comparison.get("quick_model", "")
-    deep = comparison.get("deep_model", "")
-    # If quick_model == deep_model, it was likely quick mode
-    mode = 0.7 if quick_model == deep else 1.0
+    # Analysis mode: prefer explicit flag (modern snapshots); fall back to
+    # model-name heuristic for snapshots predating is_quick_mode field.
+    if "is_quick_mode" in comparison:
+        mode = 0.7 if comparison["is_quick_mode"] else 1.0
+    else:
+        quick_model = comparison.get("quick_model", "")
+        deep = comparison.get("deep_model", "")
+        mode = 0.7 if quick_model == deep else 1.0
 
     # Signal strength component (bigger deltas = clearer lessons)
     excess = abs(comparison.get("excess_return_pct", 0.0))
@@ -646,6 +728,7 @@ ANALYSIS ({comparison.get('analysis_date', 'unknown')}):
 Ticker: {comparison.get('ticker')} | Sector: {comparison.get('sector', 'Unknown')} | Exchange: {comparison.get('exchange', 'Unknown')} | Currency: {comparison.get('currency', 'USD')}
 Verdict: {comparison.get('verdict')} (Position: {comparison.get('position_size', 'N/A')}%) | Zone: {comparison.get('zone', 'N/A')}
 Health: {comparison.get('health_adj', 'N/A')} | Growth: {comparison.get('growth_adj', 'N/A')} | P/E: {comparison.get('pe_ratio', 'N/A')} | PEG: {comparison.get('peg_ratio', 'N/A')}
+Targets: Entry {comparison.get('entry_price') or 'N/A'} | T1 {comparison.get('target_1_price') or 'N/A'} | T2 {comparison.get('target_2_price') or 'N/A'} | Stop {comparison.get('stop_price') or 'N/A'} | Horizon: {comparison.get('investment_horizon') or 'N/A'}
 Key bear risks: {comparison.get('bear_risks_excerpt', 'N/A')[:300]}
 
 OUTCOME ({comparison.get('days_elapsed', 0)} days later):
@@ -661,7 +744,7 @@ Rules:
 
 LESSON: [your lesson]
 TYPE: missed_risk | false_positive | missed_opportunity | correct_call
-FAILURE_MODE: CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_BLEED | OPERATIONAL_MISS | REGULATORY_SHIFT | MACRO_REGIME | DISRUPTION | VALUATION_TRAP"""
+FAILURE_MODE: CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_BLEED | OPERATIONAL_MISS | REGULATORY_SHIFT | MACRO_REGIME | DISRUPTION | VALUATION_TRAP | ACCOUNTING_FRAUD | GEOPOLITICAL | LIQUIDITY_CRISIS | DEAD_MONEY"""
 
     try:
         from src.llms import create_quick_thinking_llm
@@ -706,6 +789,161 @@ FAILURE_MODE: CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_BLEED | OPERATIONAL_MISS | 
     except Exception as e:
         logger.error("lesson_generation_failed", error=str(e))
         return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Component 4b: Rejection Record Storage (non-BUY verdicts)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+async def save_rejection_record(
+    snapshot: dict[str, Any],
+    lessons_memory: Any,
+) -> bool:
+    """
+    Save a non-BUY screening verdict as a rejection record in the global
+    lessons_learned ChromaDB collection.
+
+    Called from main.py after each HOLD/DO_NOT_INITIATE/SELL verdict.
+    Zero LLM cost — pure metadata extraction and ChromaDB write.
+
+    Dedup / upsert logic:
+    - Exact match (ticker + analysis_date + lesson_type=prior_rejection): skip
+    - Existing quick-mode + new full-mode: delete old, insert new (upgrade)
+    - Existing full-mode + new quick-mode: skip (don't downgrade)
+    - Existing full-mode + new full-mode: delete old, insert new (fresher data)
+
+    Args:
+        snapshot: Prediction snapshot dict from extract_snapshot()
+        lessons_memory: FinancialSituationMemory for lessons_learned collection
+
+    Returns:
+        True if stored, False if skipped/failed
+    """
+    if not lessons_memory or not lessons_memory.available:
+        logger.debug("rejection_record_memory_unavailable")
+        return False
+
+    ticker = snapshot.get("ticker", "UNKNOWN")
+    analysis_date = snapshot.get("analysis_date", "")
+    verdict = snapshot.get("verdict", "")
+    is_quick_mode = bool(snapshot.get("is_quick_mode", False))
+
+    if not verdict or verdict == "BUY":
+        return False
+
+    # 1. Check for exact match (same ticker + analysis_date → idempotent re-run)
+    try:
+        exact = lessons_memory.situation_collection.get(
+            where={
+                "$and": [
+                    {"ticker": {"$eq": ticker}},
+                    {"analysis_date": {"$eq": analysis_date}},
+                    {"lesson_type": {"$eq": "prior_rejection"}},
+                ]
+            }
+        )
+        if exact and exact.get("ids") and len(exact["ids"]) > 0:
+            logger.debug(
+                "rejection_record_already_exists", ticker=ticker, date=analysis_date
+            )
+            return False
+    except Exception as e:
+        logger.debug("rejection_dedup_check_failed", error=str(e))
+
+    # 2. Check for any existing rejection record for this ticker (any date)
+    try:
+        any_existing = lessons_memory.situation_collection.get(
+            where={
+                "$and": [
+                    {"ticker": {"$eq": ticker}},
+                    {"lesson_type": {"$eq": "prior_rejection"}},
+                ]
+            }
+        )
+        if any_existing and any_existing.get("ids") and len(any_existing["ids"]) > 0:
+            existing_ids = any_existing["ids"]
+            existing_meta = (any_existing.get("metadatas") or [{}])[0]
+            existing_is_full = not existing_meta.get("is_quick_mode", True)
+
+            # Don't downgrade: existing full-mode + new quick-mode → skip
+            if existing_is_full and is_quick_mode:
+                logger.debug(
+                    "rejection_record_skip_downgrade",
+                    ticker=ticker,
+                    existing_date=existing_meta.get("analysis_date"),
+                    new_date=analysis_date,
+                )
+                return False
+
+            # Delete existing record(s) before inserting fresher data
+            try:
+                lessons_memory.situation_collection.delete(ids=existing_ids)
+                logger.debug(
+                    "rejection_record_deleted_for_upsert",
+                    ticker=ticker,
+                    count=len(existing_ids),
+                )
+            except Exception as e:
+                logger.debug("rejection_record_delete_failed", error=str(e))
+    except Exception as e:
+        logger.debug("rejection_existing_check_failed", error=str(e))
+
+    # 3. Build document text (factual only — no agent reasoning)
+    sector = snapshot.get("sector") or "Unknown"
+    exchange = snapshot.get("exchange") or "US"
+    currency = snapshot.get("currency") or FALLBACK_CURRENCY
+    health_adj = snapshot.get("health_adj", "N/A")
+    growth_adj = snapshot.get("growth_adj", "N/A")
+    risk_tally = snapshot.get("risk_tally", "N/A")
+    zone = snapshot.get("zone") or "N/A"
+    bear_risks = (snapshot.get("bear_risks_excerpt") or "")[:300]
+
+    document = (
+        f"PRIOR SCREENING RECORD: {ticker} ({sector} / {exchange}) — "
+        f"{verdict} on {analysis_date}. "
+        f"Health {health_adj}/100, Growth {growth_adj}/100, risk tally {risk_tally}. "
+        f"Risk zone: {zone}. Quick mode: {is_quick_mode}."
+    )
+    if bear_risks:
+        document += f"\nBear risks excerpt: {bear_risks}"
+
+    # 4. Build metadata (extends existing schema)
+    confidence_weight = 0.3 if is_quick_mode else 0.5
+    deep_model = snapshot.get("deep_model") or config.deep_think_llm or "unknown"
+
+    metadata = {
+        "ticker": ticker,
+        "sector": sector,
+        "exchange": exchange,
+        "currency": currency,
+        "verdict": verdict,
+        "lesson_type": "prior_rejection",
+        "failure_mode": "N/A",
+        "actual_return_pct": 0.0,
+        "benchmark_return_pct": 0.0,
+        "excess_return_pct": 0.0,
+        "days_elapsed": 0,
+        "confidence_weight": confidence_weight,
+        "analysis_date": analysis_date,
+        "retrospective_date": analysis_date,
+        "timestamp": datetime.now().isoformat(),
+        "is_quick_mode": is_quick_mode,
+        "analysis_model": deep_model,
+    }
+
+    stored = await lessons_memory.add_situations([document], [metadata])
+    if stored:
+        logger.info(
+            "rejection_record_stored",
+            ticker=ticker,
+            verdict=verdict,
+            is_quick_mode=is_quick_mode,
+            confidence_weight=confidence_weight,
+        )
+    else:
+        logger.warning("rejection_record_storage_failed", ticker=ticker)
+    return stored
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -891,12 +1129,19 @@ async def format_lessons_for_injection(
         meta = r.get("metadata", {})
         base_confidence = meta.get("confidence_weight", 0.5)
 
-        # Geographic boost
+        # Boost priority: same-ticker rejection record > geographic proximity
         boost = 0.0
-        if meta.get("exchange") == current_exchange:
-            boost += 0.15
-        if meta.get("currency") == current_currency:
-            boost += 0.10
+        if (
+            meta.get("lesson_type") == "prior_rejection"
+            and meta.get("ticker") == ticker
+        ):
+            boost += 0.35  # Same ticker was previously screened out — very relevant
+        else:
+            # Geographic boost for regular lessons
+            if meta.get("exchange") == current_exchange:
+                boost += 0.15
+            if meta.get("currency") == current_currency:
+                boost += 0.10
 
         effective_score = base_confidence + boost
 

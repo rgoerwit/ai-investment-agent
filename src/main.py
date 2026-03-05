@@ -72,8 +72,8 @@ def suppress_all_logging():
     warnings.filterwarnings("ignore")
 
 
-def parse_arguments() -> argparse.Namespace:
-    """Parse command line arguments."""
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Build and return the argument parser (separated for testability)."""
     parser = argparse.ArgumentParser(
         description="Multi-Agent Investment Analysis System (Gemini 3 Edition)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -84,6 +84,12 @@ Examples:
 
   # Quick analysis mode (Gemini Flash)
   python -m src.main --ticker NVDA --quick
+
+  # Strict quality gate (tighter thresholds, fewer BUYs, token savings on rejects)
+  python -m src.main --ticker 0005.HK --strict
+
+  # Composable: strict quality bar + quick/cheap models
+  python -m src.main --ticker 0005.HK --strict --quick
 
   # Quiet mode (markdown report only)
   python -m src.main --ticker AAPL --quiet
@@ -117,6 +123,18 @@ Examples:
         "--quick",
         action="store_true",
         help="Use quick analysis mode (faster, less detailed)",
+    )
+
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        default=False,
+        help=(
+            "Apply stricter financial health criteria: tighter D/E and coverage thresholds, "
+            "auto-reject REITs/ETFs, PFIC, and VIE structures, escalate value-trap warnings "
+            "to rejects, and require higher conviction for BUY. Reduces BUY count and saves "
+            "tokens by rejecting candidates before Bull/Bear debate. Composable with --quick."
+        ),
     )
 
     parser.add_argument(
@@ -211,6 +229,12 @@ Examples:
         "a new analysis. Processes all tickers found in results directory.",
     )
 
+    return parser
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = build_arg_parser()
     args = parser.parse_args()
 
     # Validate: --ticker is required unless --retrospective-only
@@ -619,7 +643,7 @@ def display_results(result: dict, ticker: str):
     console.print("=" * 80 + "\n")
 
 
-def save_results_to_file(result: dict, ticker: str) -> Path:
+def save_results_to_file(result: dict, ticker: str, quick_mode: bool = False) -> Path:
     """Save analysis results to a JSON file in the results directory."""
     from src.memory import create_memory_instances, sanitize_ticker_for_collection
     from src.prompts import get_all_prompts
@@ -747,7 +771,7 @@ def save_results_to_file(result: dict, ticker: str) -> Path:
     try:
         from src.retrospective import extract_snapshot
 
-        save_data["prediction_snapshot"] = extract_snapshot(result, ticker)
+        save_data["prediction_snapshot"] = extract_snapshot(result, ticker, quick_mode)
     except Exception as e:
         logger.warning(f"Snapshot extraction failed (non-fatal): {e}")
 
@@ -773,6 +797,7 @@ def save_results_to_file(result: dict, ticker: str) -> Path:
 async def run_analysis(
     ticker: str,
     quick_mode: bool,
+    strict_mode: bool = False,
     chart_format: str = "png",
     transparent_charts: bool = False,
     image_dir: Path | None = None,
@@ -783,6 +808,7 @@ async def run_analysis(
     Args:
         ticker: Stock ticker symbol
         quick_mode: If True, use faster/cheaper models and skip some steps
+        strict_mode: If True, apply tighter quality gates and reject REITs/PFIC/VIE
         chart_format: Chart output format ('png' or 'svg')
         transparent_charts: Whether to use transparent chart backgrounds
         image_dir: Directory for chart output (None = use config default)
@@ -828,6 +854,7 @@ async def run_analysis(
             enable_memory=config.enable_memory,
             recursion_limit=100,
             quick_mode=quick_mode,  # Pass quick_mode for consultant LLM selection
+            strict_mode=strict_mode,  # Pass strict_mode for quality gates
             # Chart generation (post-PM)
             chart_format=chart_format,
             transparent_charts=transparent_charts,
@@ -1107,6 +1134,7 @@ async def main():
         result = await run_analysis(
             args.ticker,
             args.quick,
+            strict_mode=args.strict,
             chart_format="svg" if args.svg else "png",
             transparent_charts=args.transparent,
             image_dir=image_dir,
@@ -1180,7 +1208,9 @@ async def main():
                 display_results(result, args.ticker)
 
             try:
-                filepath = save_results_to_file(result, args.ticker)
+                filepath = save_results_to_file(
+                    result, args.ticker, quick_mode=args.quick
+                )
                 if not args.quiet and not args.brief:
                     console.print(
                         f"[green]Results saved to:[/green] [cyan]{filepath}[/cyan]{_cost_suffix()}"
@@ -1191,6 +1221,26 @@ async def main():
                     console.print(
                         f"\n[yellow]Warning: Could not save results to file: {e}[/yellow]\n"
                     )
+
+            # Save rejection record for non-BUY verdicts (unconditional — not gated
+            # by --no-memory, since rejection records are factual metrics, not agent
+            # reasoning; they're always useful for future analyses of the same ticker)
+            try:
+                from src.retrospective import (
+                    create_lessons_memory,
+                    extract_snapshot,
+                    save_rejection_record,
+                )
+
+                _snapshot = extract_snapshot(
+                    result, args.ticker, is_quick_mode=args.quick
+                )
+                _verdict = _snapshot.get("verdict", "")
+                if _verdict and _verdict != "BUY":
+                    _rejection_memory = create_lessons_memory()
+                    await save_rejection_record(_snapshot, _rejection_memory)
+            except Exception as e:
+                logger.debug("rejection_record_save_skipped", error=str(e))
 
             # Generate article if --article flag is set
             if args.article:

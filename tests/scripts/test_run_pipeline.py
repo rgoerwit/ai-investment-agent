@@ -1,7 +1,6 @@
 """Tests for scripts/run_pipeline.sh — end-to-end screening pipeline."""
 
 import re
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -131,27 +130,22 @@ class TestResumability:
 
     @staticmethod
     def _run_skip_check(outfile: Path, force: bool = False) -> str:
-        """Run a minimal shell snippet that replicates the skip logic.
+        """Pure-Python reimplementation of the skip logic from run_pipeline.sh.
+
+        The shell script checks:
+          if ! $FORCE && [[ -f "$OUTFILE" ]] && grep -qE '^# .*\\): ' "$OUTFILE"
 
         Returns "SKIP" or "PROCESS".
+
+        Note: Previously this shelled out to bash via subprocess.run(), but that
+        causes segfaults on macOS/Apple Silicon with Python 3.12 due to fork()
+        safety issues with loaded C extensions (grpc, numpy, pandas, etc.).
         """
-        force_val = "true" if force else "false"
-        script = f"""
-        FORCE={force_val}
-        OUTFILE="{outfile}"
-        if ! $FORCE && [[ -f "$OUTFILE" ]] && grep -qE '^# .*\\): ' "$OUTFILE"; then
-            echo "SKIP"
-        else
-            echo "PROCESS"
-        fi
-        """
-        result = subprocess.run(
-            ["bash", "-c", script],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        return result.stdout.strip()
+        if not force and outfile.is_file():
+            content = outfile.read_text()
+            if re.search(r"^# .*\): ", content, re.MULTILINE):
+                return "SKIP"
+        return "PROCESS"
 
     def test_existing_report_with_verdict_skipped(self, tmp_path):
         outfile = tmp_path / "report.md"

@@ -1,5 +1,6 @@
 """Tests for scripts/find_gems.py — screening pipeline."""
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -11,6 +12,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 
 import find_gems  # noqa: E402
+
+# Path to real exchange config for integration tests
+_CONFIG_PATH = Path(__file__).parent.parent.parent / "config" / "exchanges.json"
 
 
 # ============================================================
@@ -26,10 +30,18 @@ class TestPassesFilters:
         base = {
             "YF_Ticker": "TEST.T",
             "P/E": 12.0,
+            "Forward_PE": None,
             "ROE": 0.15,
             "ROA": 0.08,
             "Debt_to_Equity": 80.0,
             "Operating_Cash_Flow": 1_000_000,
+            "Net_Income": 800_000,
+            "OCF_NI_Ratio": 1.25,
+            "Net_Debt_to_Equity": 50.0,
+            "Total_Debt": 500_000,
+            "Total_Cash": 200_000,
+            "Revenue_Years_Positive": 4,
+            "Analyst_Coverage": 5,
         }
         base.update(overrides)
         return base
@@ -65,8 +77,64 @@ class TestPassesFilters:
         assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is False
 
     def test_high_de_fails(self):
-        row = self._make_row(Debt_to_Equity=200.0)
+        row = self._make_row(Debt_to_Equity=200.0, Net_Debt_to_Equity=180.0)
         assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is False
+
+    def test_high_gross_de_passes_via_net_debt_fallback(self):
+        """Gross D/E above threshold but net D/E below should pass."""
+        row = self._make_row(Debt_to_Equity=200.0, Net_Debt_to_Equity=100.0)
+        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
+
+    def test_high_gross_de_no_net_debt_fails(self):
+        """Gross D/E above threshold with no net debt data should fail."""
+        row = self._make_row(Debt_to_Equity=200.0, Net_Debt_to_Equity=None)
+        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is False
+
+    # --- OCF / Net Income earnings quality ---
+
+    def test_low_ocf_ni_ratio_fails(self):
+        """OCF/NI below 0.8 with positive NI should fail."""
+        row = self._make_row(
+            Net_Income=1_000_000, OCF_NI_Ratio=0.5, Operating_Cash_Flow=500_000
+        )
+        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is False
+
+    def test_good_ocf_ni_ratio_passes(self):
+        """OCF/NI above 0.8 should pass."""
+        row = self._make_row(Net_Income=800_000, OCF_NI_Ratio=1.25)
+        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
+
+    def test_negative_ni_skips_ocf_ni_check(self):
+        """When NI is negative, OCF/NI check should be skipped entirely."""
+        row = self._make_row(Net_Income=-500_000, OCF_NI_Ratio=None)
+        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
+
+    def test_missing_ni_skips_ocf_ni_check(self):
+        """When NI is None, OCF/NI check should be skipped."""
+        row = self._make_row(Net_Income=None, OCF_NI_Ratio=None)
+        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
+
+    # --- Revenue history ---
+
+    def test_insufficient_revenue_history_fails(self):
+        """Fewer than 3 years of positive revenue should fail."""
+        row = self._make_row(Revenue_Years_Positive=2)
+        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is False
+
+    def test_sufficient_revenue_history_passes(self):
+        """3+ years of positive revenue should pass."""
+        row = self._make_row(Revenue_Years_Positive=4)
+        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
+
+    def test_missing_revenue_history_passes(self):
+        """When revenue data unavailable, check should be skipped (no penalty)."""
+        row = self._make_row(Revenue_Years_Positive=None)
+        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
+
+    def test_exactly_three_revenue_years_passes(self):
+        """Exactly 3 years should pass (boundary check)."""
+        row = self._make_row(Revenue_Years_Positive=3)
+        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
 
     def test_negative_ocf_fails(self):
         row = self._make_row(Operating_Cash_Flow=-500)
@@ -203,6 +271,153 @@ class TestScrapeExchanges:
         assert len(result) == 1
         assert result.iloc[0]["Country"] == "Korea"
 
+    def test_filter_param_applied(self):
+        """Config with filter: {"Type": "Equity"} should keep only matching rows."""
+        ex = self._make_exchange("Hong Kong", "HKEX", suffix=".HK")
+        ex["params"]["filter"] = {"Type": "Equity"}
+        config = self._make_config(ex)
+
+        df = pd.DataFrame(
+            {
+                "Code": ["0001", "W001", "0005", "C002"],
+                "Name": ["CKH", "Warrant A", "HSBC", "CBBC B"],
+                "Type": ["Equity", "Warrant", "Equity", "CBBC"],
+            }
+        )
+        mock_handler = MagicMock(return_value=df)
+
+        with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
+            with patch.object(find_gems, "_check_deps"):
+                with patch("find_gems.time.sleep"):
+                    result = find_gems.scrape_exchanges(config, exclude_us=True)
+
+        assert len(result) == 2
+        tickers = result["YF_Ticker"].tolist()
+        assert "0001.HK" in tickers
+        assert "0005.HK" in tickers
+
+    def test_exclude_filter_list(self):
+        """exclude_filter with a list should remove rows matching any value."""
+        ex = self._make_exchange("Germany", "XETRA", suffix=".DE")
+        ex["params"]["exclude_filter"] = {"Type": ["ETF", "Bond"]}
+        config = self._make_config(ex)
+
+        df = pd.DataFrame(
+            {
+                "Code": ["SAP", "ETF1", "SIE", "BND1"],
+                "Name": ["SAP SE", "ETF Fund", "Siemens", "Bond Corp"],
+                "Type": ["Equity", "ETF", "Equity", "Bond"],
+            }
+        )
+        mock_handler = MagicMock(return_value=df)
+
+        with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
+            with patch.object(find_gems, "_check_deps"):
+                with patch("find_gems.time.sleep"):
+                    result = find_gems.scrape_exchanges(config, exclude_us=True)
+
+        assert len(result) == 2
+        tickers = result["YF_Ticker"].tolist()
+        assert "SAP.DE" in tickers
+        assert "SIE.DE" in tickers
+
+    def test_exclude_filter_string_contains(self):
+        """exclude_filter with a string should use case-insensitive contains."""
+        ex = self._make_exchange("Europe", "Euronext", suffix=".PA")
+        ex["params"]["exclude_filter"] = {"Market": "Growth"}
+        config = self._make_config(ex)
+
+        df = pd.DataFrame(
+            {
+                "Code": ["AI", "ML", "BIG"],
+                "Name": ["Air Liquide", "ML Growth Co", "BIG Corp"],
+                "Market": ["Euronext Paris", "Euronext Growth Paris", "Euronext Paris"],
+            }
+        )
+        mock_handler = MagicMock(return_value=df)
+
+        with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
+            with patch.object(find_gems, "_check_deps"):
+                with patch("find_gems.time.sleep"):
+                    result = find_gems.scrape_exchanges(config, exclude_us=True)
+
+        assert len(result) == 2
+        tickers = result["YF_Ticker"].tolist()
+        assert "AI.PA" in tickers
+        assert "BIG.PA" in tickers
+
+    def test_filter_fuzzy_column_match(self):
+        """Filter column name with different case should still match."""
+        ex = self._make_exchange("Hong Kong", "HKEX", suffix=".HK")
+        ex["params"]["filter"] = {"category": "Equity"}  # lowercase
+        config = self._make_config(ex)
+
+        df = pd.DataFrame(
+            {
+                "Code": ["0001", "W001"],
+                "Name": ["CKH", "Warrant A"],
+                "Category": ["Equity", "Warrant"],  # Uppercase in DataFrame
+            }
+        )
+        mock_handler = MagicMock(return_value=df)
+
+        with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
+            with patch.object(find_gems, "_check_deps"):
+                with patch("find_gems.time.sleep"):
+                    result = find_gems.scrape_exchanges(config, exclude_us=True)
+
+        assert len(result) == 1
+        assert result.iloc[0]["YF_Ticker"] == "0001.HK"
+
+    def test_disabled_exchange_skipped(self):
+        """Exchanges with enabled:false should be skipped entirely."""
+        ex_enabled = self._make_exchange("Japan", "TSE")
+        ex_disabled = self._make_exchange("South Korea", "KOSPI", suffix=".KS")
+        ex_disabled["enabled"] = False
+        config = self._make_config(ex_enabled, ex_disabled)
+
+        jp_df = pd.DataFrame({"Code": ["7203"], "Name": ["Toyota"]})
+        kr_df = pd.DataFrame({"Code": ["005930"], "Name": ["Samsung"]})
+
+        def side_effect(cfg, session):
+            if "KOSPI" in cfg["exchange_name"]:
+                return kr_df
+            return jp_df
+
+        mock_handler = MagicMock(side_effect=side_effect)
+
+        with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
+            with patch.object(find_gems, "_check_deps"):
+                with patch("find_gems.time.sleep"):
+                    result = find_gems.scrape_exchanges(config, exclude_us=True)
+
+        assert len(result) == 1
+        assert result.iloc[0]["YF_Ticker"] == "7203.T"
+        # Handler should only be called once (Korea skipped)
+        assert mock_handler.call_count == 1
+
+    def test_filter_empty_result_skipped(self):
+        """If filter removes all rows, exchange should be skipped gracefully."""
+        ex = self._make_exchange("Japan", "TSE")
+        ex["params"]["filter"] = {"Type": "Equity"}
+        config = self._make_config(ex)
+
+        df = pd.DataFrame(
+            {
+                "Code": ["W001"],
+                "Name": ["Warrant A"],
+                "Type": ["Warrant"],
+            }
+        )
+        mock_handler = MagicMock(return_value=df)
+
+        with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
+            with patch.object(find_gems, "_check_deps"):
+                with patch("find_gems.time.sleep"):
+                    result = find_gems.scrape_exchanges(config, exclude_us=True)
+
+        assert len(result) == 0
+
     def test_deduplication(self):
         ex1 = self._make_exchange("Japan", "TSE1")
         ex2 = self._make_exchange("Japan", "TSE2")
@@ -238,13 +453,15 @@ class TestFetchAndFilter:
             "returnOnEquity": 0.15,
             "returnOnAssets": 0.08,
             "debtToEquity": 80.0,
-            "operatingCashflow": 1_000_000,
-            "freeCashflow": 500_000,
-            "marketCap": 10_000_000,
+            "operatingCashflow": 1_000_000_000,
+            "freeCashflow": 500_000_000,
+            "marketCap": 100_000_000_000,  # ¥100B (~$670M USD)
+            "averageVolume": 1_000_000,
             "sector": "Industrials",
             "industry": "Auto Manufacturers",
             "longName": "Test Corp",
             "currency": "JPY",
+            "quoteType": "EQUITY",
         }
 
     @staticmethod
@@ -397,6 +614,10 @@ class TestCLIParsing:
         assert args.min_roe == 13.0
         assert args.min_roa == 6.0
         assert args.max_de == 150.0
+        assert args.min_mcap == 50_000_000
+        assert args.min_volume == 100_000
+        assert args.max_coverage == 30
+        assert args.no_ocf_waiver is False
         assert args.workers == 4
         assert args.debug is False
         assert args.include_us is False
@@ -430,6 +651,90 @@ class TestCLIParsing:
 
 # ============================================================
 # TestNormalizeTicker — ticker format conversion
+# ============================================================
+# TestGenerateYfTicker — ticker generation from raw exchange data
+# ============================================================
+class TestGenerateYfTicker:
+    """Tests for _generate_yf_ticker() — static suffix, dynamic suffix, edge cases."""
+
+    @staticmethod
+    def _row(ticker_raw, market=None):
+        return {"Ticker_Raw": ticker_raw, "Market": market}
+
+    @staticmethod
+    def _static_config(suffix):
+        return {"yahoo_suffix": suffix, "params": {}}
+
+    @staticmethod
+    def _dynamic_config(suffix_map):
+        return {
+            "yahoo_suffix": "dynamic",
+            "params": {
+                "suffix_map": suffix_map,
+                "market_col": "Market",
+            },
+        }
+
+    # --- Static suffix ---
+
+    def test_static_suffix_appended(self):
+        row = self._row("7203")
+        config = self._static_config(".T")
+        assert find_gems._generate_yf_ticker(row, config) == "7203.T"
+
+    def test_trailing_dash_stripped_before_suffix(self):
+        """LSE SETS file emits mnemonics like 'JD-' → should produce 'JD.L'."""
+        row = self._row("JD-")
+        config = self._static_config(".L")
+        assert find_gems._generate_yf_ticker(row, config) == "JD.L"
+
+    def test_trailing_dash_only_becomes_none(self):
+        """A raw ticker that is nothing but a dash should return None."""
+        row = self._row("-")
+        config = self._static_config(".L")
+        assert find_gems._generate_yf_ticker(row, config) is None
+
+    def test_empty_raw_returns_none(self):
+        row = self._row("")
+        config = self._static_config(".T")
+        assert find_gems._generate_yf_ticker(row, config) is None
+
+    def test_nan_raw_returns_none(self):
+        row = self._row(float("nan"))
+        config = self._static_config(".T")
+        assert find_gems._generate_yf_ticker(row, config) is None
+
+    # --- Dynamic suffix ---
+
+    def test_dynamic_suffix_matched(self):
+        row = self._row("MC", market="Euronext Paris")
+        config = self._dynamic_config({"Paris": ".PA", "Amsterdam": ".AS"})
+        assert find_gems._generate_yf_ticker(row, config) == "MC.PA"
+
+    def test_dynamic_suffix_match_case_insensitive(self):
+        row = self._row("ASML", market="Euronext Amsterdam")
+        config = self._dynamic_config({"paris": ".PA", "amsterdam": ".AS"})
+        assert find_gems._generate_yf_ticker(row, config) == "ASML.AS"
+
+    def test_dynamic_suffix_no_match_returns_none(self):
+        """Euronext structured products with unrecognised market → None, not bare symbol."""
+        row = self._row("1DDD", market="EasyNext")
+        config = self._dynamic_config({"Paris": ".PA", "Amsterdam": ".AS"})
+        assert find_gems._generate_yf_ticker(row, config) is None
+
+    def test_dynamic_suffix_missing_market_col_returns_none(self):
+        """No market column value → can't resolve → None."""
+        row = self._row("2BGN")  # No Market key
+        config = self._dynamic_config({"Paris": ".PA"})
+        assert find_gems._generate_yf_ticker(row, config) is None
+
+    def test_dynamic_suffix_null_market_returns_none(self):
+        """Null market value → can't resolve → None."""
+        row = self._row("2BMED", market=None)
+        config = self._dynamic_config({"Paris": ".PA"})
+        assert find_gems._generate_yf_ticker(row, config) is None
+
+
 # ============================================================
 class TestNormalizeTicker:
     """Tests for _normalize_ticker() utility."""
@@ -469,3 +774,749 @@ class TestSafeFloat:
 
     def test_int_converted(self):
         assert find_gems._safe_float(42) == 42.0
+
+
+# ============================================================
+# TestApplyFilters — unit tests for extracted helper
+# ============================================================
+class TestApplyFilters:
+    """Unit tests for the _apply_filters() helper."""
+
+    def test_positive_filter(self):
+        df = pd.DataFrame(
+            {"Type": ["Equity", "Warrant", "Equity"], "Name": ["A", "B", "C"]}
+        )
+        config = {"params": {"filter": {"Type": "Equity"}}}
+        result = find_gems._apply_filters(df, config)
+        assert len(result) == 2
+
+    def test_exclude_filter_list(self):
+        df = pd.DataFrame({"Type": ["Equity", "ETF", "Bond"], "Name": ["A", "B", "C"]})
+        config = {"params": {"exclude_filter": {"Type": ["ETF", "Bond"]}}}
+        result = find_gems._apply_filters(df, config)
+        assert len(result) == 1
+        assert result.iloc[0]["Name"] == "A"
+
+    def test_exclude_filter_string_contains(self):
+        df = pd.DataFrame(
+            {"Market": ["Paris", "Growth Paris", "Amsterdam"], "Name": ["A", "B", "C"]}
+        )
+        config = {"params": {"exclude_filter": {"Market": "Growth"}}}
+        result = find_gems._apply_filters(df, config)
+        assert len(result) == 2
+
+    def test_no_filters_returns_unchanged(self):
+        df = pd.DataFrame({"A": [1, 2, 3]})
+        config = {"params": {}}
+        result = find_gems._apply_filters(df, config)
+        assert len(result) == 3
+
+    def test_missing_column_ignored(self):
+        df = pd.DataFrame({"Name": ["A", "B"]})
+        config = {"params": {"filter": {"NonExistent": "X"}}}
+        result = find_gems._apply_filters(df, config)
+        assert len(result) == 2
+
+
+# ============================================================
+# TestToUsd — FX conversion helper
+# ============================================================
+class TestToUsd:
+    """Unit tests for _to_usd() helper."""
+
+    def test_usd_identity(self):
+        rates = {"USD": 1.0, "JPY": 0.0067}
+        assert find_gems._to_usd(1000, "USD", rates) == 1000
+
+    def test_jpy_conversion(self):
+        rates = {"USD": 1.0, "JPY": 0.0067}
+        result = find_gems._to_usd(150_000, "JPY", rates)
+        assert result == pytest.approx(150_000 * 0.0067)
+
+    def test_unknown_currency_returns_none(self):
+        rates = {"USD": 1.0}
+        assert find_gems._to_usd(1000, "XYZ", rates) is None
+
+    def test_gbp_pence_normalization(self):
+        """GBp (pence) should be divided by 100 and converted as GBP."""
+        rates = {"USD": 1.0, "GBP": 1.27}
+        result = find_gems._to_usd(10000, "GBp", rates)
+        # 10000 pence = 100 GBP * 1.27 = 127 USD
+        assert result == pytest.approx(100 * 1.27)
+
+    def test_none_value_returns_none(self):
+        rates = {"USD": 1.0, "JPY": 0.0067}
+        assert find_gems._to_usd(None, "JPY", rates) is None
+
+    def test_none_currency_returns_none(self):
+        rates = {"USD": 1.0}
+        assert find_gems._to_usd(1000, None, rates) is None
+
+
+# ============================================================
+# TestQuoteTypeGuard — Filter A
+# ============================================================
+class TestQuoteTypeGuard:
+    """Filter A: quoteType must be EQUITY."""
+
+    @staticmethod
+    def _make_info(**overrides):
+        base = {
+            "regularMarketPrice": 100,
+            "currentPrice": 100,
+            "trailingPE": 10,
+            "returnOnEquity": 0.15,
+            "returnOnAssets": 0.08,
+            "debtToEquity": 50,
+            "operatingCashflow": 1_000_000,
+            "marketCap": 1_000_000_000,
+            "currency": "USD",
+            "quoteType": "EQUITY",
+        }
+        base.update(overrides)
+        return base
+
+    def test_etf_rejected(self):
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(quoteType="ETF")
+        row = {"YF_Ticker": "VTI"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(row, debug=True)
+
+        assert result is None
+
+    def test_equity_passes(self):
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(quoteType="EQUITY")
+        row = {"YF_Ticker": "7203.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(row)
+
+        assert result is not None
+
+    def test_missing_quotetype_passes(self):
+        """If quoteType is absent, don't reject (fail-open)."""
+        info = self._make_info()
+        del info["quoteType"]
+        mock_ticker = MagicMock()
+        mock_ticker.info = info
+        row = {"YF_Ticker": "UNKNOWN.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(row)
+
+        assert result is not None
+
+    def test_warrant_rejected(self):
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(quoteType="WARRANT")
+        row = {"YF_Ticker": "W001.HK"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(row)
+
+        assert result is None
+
+
+# ============================================================
+# TestMarketCapFilter — Filter B
+# ============================================================
+class TestMarketCapFilter:
+    """Filter B: market cap USD must exceed threshold."""
+
+    @staticmethod
+    def _make_info(**overrides):
+        base = {
+            "regularMarketPrice": 100,
+            "currentPrice": 100,
+            "trailingPE": 10,
+            "returnOnEquity": 0.15,
+            "returnOnAssets": 0.08,
+            "debtToEquity": 50,
+            "operatingCashflow": 1_000_000,
+            "marketCap": 1_000_000_000,
+            "currency": "USD",
+            "quoteType": "EQUITY",
+        }
+        base.update(overrides)
+        return base
+
+    def test_micro_cap_rejected(self):
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(marketCap=10_000_000, currency="USD")
+        row = {"YF_Ticker": "TINY.V"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(
+                    row, fx_rates={"USD": 1.0}, min_mcap=50_000_000
+                )
+
+        assert result is None
+
+    def test_mid_cap_passes(self):
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(marketCap=500_000_000, currency="USD")
+        row = {"YF_Ticker": "MID.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(
+                    row, fx_rates={"USD": 1.0}, min_mcap=50_000_000
+                )
+
+        assert result is not None
+
+    def test_missing_marketcap_passes(self):
+        """Missing market cap should not reject (fail-open)."""
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(marketCap=None, currency="USD")
+        row = {"YF_Ticker": "NOMC.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(
+                    row, fx_rates={"USD": 1.0}, min_mcap=50_000_000
+                )
+
+        assert result is not None
+
+    def test_unknown_currency_passes(self):
+        """Unknown currency → can't convert → fail-open."""
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(marketCap=10_000_000, currency="XYZ")
+        row = {"YF_Ticker": "WEIRD.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(
+                    row, fx_rates={"USD": 1.0}, min_mcap=50_000_000
+                )
+
+        assert result is not None
+
+    def test_jpy_conversion_applied(self):
+        """JPY market cap should be converted to USD before threshold check."""
+        # 5B JPY * 0.0067 = 33.5M USD → below $50M threshold
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(marketCap=5_000_000_000, currency="JPY")
+        row = {"YF_Ticker": "JPSMALL.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(
+                    row, fx_rates={"USD": 1.0, "JPY": 0.0067}, min_mcap=50_000_000
+                )
+
+        assert result is None  # 33.5M < 50M
+
+    def test_disabled_when_zero(self):
+        """min_mcap=0 should disable the check."""
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(marketCap=1_000, currency="USD")
+        row = {"YF_Ticker": "MICRO.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(row, fx_rates={"USD": 1.0}, min_mcap=0)
+
+        assert result is not None
+
+
+# ============================================================
+# TestVolumeFilter — Filter C
+# ============================================================
+class TestVolumeFilter:
+    """Filter C: daily dollar volume must exceed threshold."""
+
+    @staticmethod
+    def _make_info(**overrides):
+        base = {
+            "regularMarketPrice": 100,
+            "currentPrice": 100,
+            "trailingPE": 10,
+            "returnOnEquity": 0.15,
+            "returnOnAssets": 0.08,
+            "debtToEquity": 50,
+            "operatingCashflow": 1_000_000,
+            "marketCap": 1_000_000_000,
+            "averageVolume": 100_000,
+            "currency": "USD",
+            "quoteType": "EQUITY",
+        }
+        base.update(overrides)
+        return base
+
+    def test_low_volume_rejected(self):
+        # 500 shares * $10 = $5,000/day → below $100K
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(averageVolume=500, currentPrice=10)
+        row = {"YF_Ticker": "ILLIQUID.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(
+                    row, fx_rates={"USD": 1.0}, min_volume=100_000
+                )
+
+        assert result is None
+
+    def test_adequate_volume_passes(self):
+        # 10,000 shares * $50 = $500K/day → above $100K
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(averageVolume=10_000, currentPrice=50)
+        row = {"YF_Ticker": "LIQUID.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(
+                    row, fx_rates={"USD": 1.0}, min_volume=100_000
+                )
+
+        assert result is not None
+
+    def test_london_pence_correction(self):
+        """For .L tickers, price*volume should be divided by 100 (pence→GBP)."""
+        # 50,000 shares * 500p = 25,000,000p → /100 = 250,000 GBP * 1.27 = 317,500 USD
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(
+            averageVolume=50_000, currentPrice=500, currency="GBP"
+        )
+        row = {"YF_Ticker": "VOD.L"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(
+                    row,
+                    fx_rates={"USD": 1.0, "GBP": 1.27},
+                    min_volume=100_000,
+                )
+
+        assert result is not None
+        # turnover_usd should be ~317,500 (above threshold)
+        assert result["Daily_Turnover_USD"] == pytest.approx(
+            50_000 * 500 / 100.0 * 1.27, rel=0.01
+        )
+
+    def test_missing_volume_passes(self):
+        """Missing averageVolume should not reject (fail-open)."""
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info(averageVolume=None)
+        row = {"YF_Ticker": "NOVOL.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(
+                    row, fx_rates={"USD": 1.0}, min_volume=100_000
+                )
+
+        assert result is not None
+
+    def test_missing_price_passes(self):
+        """Missing price should not reject (fail-open)."""
+        mock_ticker = MagicMock()
+        info = self._make_info(averageVolume=100)
+        info["currentPrice"] = None
+        info["regularMarketPrice"] = None
+        mock_ticker.info = info
+        row = {"YF_Ticker": "NOPRICE.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(
+                    row, fx_rates={"USD": 1.0}, min_volume=100_000
+                )
+
+        # Missing price means we can't compute turnover → fail-open
+        assert result is not None
+
+
+# ============================================================
+# TestCoverageFilter — Filter D
+# ============================================================
+class TestCoverageFilter:
+    """Filter D: analyst coverage must not exceed threshold."""
+
+    KWARGS = {"max_pe": 18.0, "min_roe": 13.0, "min_roa": 6.0, "max_de": 150.0}
+
+    @staticmethod
+    def _make_row(**overrides):
+        base = {
+            "YF_Ticker": "TEST.T",
+            "P/E": 12.0,
+            "Forward_PE": None,
+            "ROE": 0.15,
+            "ROA": 0.08,
+            "Debt_to_Equity": 80.0,
+            "Operating_Cash_Flow": 1_000_000,
+            "Net_Income": 800_000,
+            "OCF_NI_Ratio": 1.25,
+            "Net_Debt_to_Equity": 50.0,
+            "Total_Debt": 500_000,
+            "Total_Cash": 200_000,
+            "Revenue_Years_Positive": 4,
+            "Analyst_Coverage": 5,
+        }
+        base.update(overrides)
+        return base
+
+    def test_high_coverage_rejected(self):
+        row = self._make_row(Analyst_Coverage=35)
+        assert find_gems._passes_filters(row, **self.KWARGS, max_coverage=30) is False
+
+    def test_moderate_coverage_passes(self):
+        row = self._make_row(Analyst_Coverage=12)
+        assert find_gems._passes_filters(row, **self.KWARGS, max_coverage=30) is True
+
+    def test_none_coverage_passes(self):
+        """Missing coverage data should not reject (fail-open)."""
+        row = self._make_row(Analyst_Coverage=None)
+        assert find_gems._passes_filters(row, **self.KWARGS, max_coverage=30) is True
+
+    def test_boundary_coverage_passes(self):
+        """Exactly at threshold (30) should pass (> not >=)."""
+        row = self._make_row(Analyst_Coverage=30)
+        assert find_gems._passes_filters(row, **self.KWARGS, max_coverage=30) is True
+
+    def test_disabled_when_zero(self):
+        """max_coverage=0 should disable the check."""
+        row = self._make_row(Analyst_Coverage=100)
+        assert find_gems._passes_filters(row, **self.KWARGS, max_coverage=0) is True
+
+
+# ============================================================
+# TestOCFWaiver — Filter E
+# ============================================================
+class TestOCFWaiver:
+    """Filter E: forward-PE recovery waiver for negative OCF."""
+
+    KWARGS = {"max_pe": 18.0, "min_roe": 13.0, "min_roa": 6.0, "max_de": 150.0}
+
+    @staticmethod
+    def _make_row(**overrides):
+        base = {
+            "YF_Ticker": "TEST.T",
+            "P/E": 16.0,
+            "Forward_PE": None,
+            "ROE": 0.15,
+            "ROA": 0.08,
+            "Debt_to_Equity": 80.0,
+            "Operating_Cash_Flow": -500_000,
+            "Net_Income": 800_000,
+            "OCF_NI_Ratio": None,
+            "Net_Debt_to_Equity": 50.0,
+            "Total_Debt": 500_000,
+            "Total_Cash": 200_000,
+            "Revenue_Years_Positive": 4,
+            "Analyst_Coverage": 5,
+        }
+        base.update(overrides)
+        return base
+
+    def test_negative_ocf_with_recovery_passes(self):
+        """Negative OCF + forward PE < trailing PE and < 15 → waiver fires."""
+        row = self._make_row(
+            **{"P/E": 16.0},
+            Forward_PE=10.0,
+            Operating_Cash_Flow=-500_000,
+        )
+        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=True) is True
+
+    def test_negative_ocf_no_forward_pe_fails(self):
+        """Negative OCF + no forward PE data → strict fail."""
+        row = self._make_row(Forward_PE=None, Operating_Cash_Flow=-500_000)
+        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=True) is False
+
+    def test_negative_ocf_forward_pe_too_high_fails(self):
+        """Negative OCF + forward PE >= 15 → waiver doesn't fire."""
+        row = self._make_row(
+            **{"P/E": 18.0},
+            Forward_PE=16.0,
+            Operating_Cash_Flow=-500_000,
+        )
+        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=True) is False
+
+    def test_negative_ocf_forward_pe_above_trailing_fails(self):
+        """Negative OCF + forward PE >= trailing PE → no recovery signal."""
+        row = self._make_row(
+            **{"P/E": 10.0},
+            Forward_PE=12.0,
+            Operating_Cash_Flow=-500_000,
+        )
+        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=True) is False
+
+    def test_waiver_disabled_via_flag(self):
+        """With ocf_waiver=False, even valid recovery signals are rejected."""
+        row = self._make_row(
+            **{"P/E": 16.0},
+            Forward_PE=10.0,
+            Operating_Cash_Flow=-500_000,
+        )
+        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=False) is False
+
+    def test_positive_ocf_unaffected(self):
+        """Positive OCF should pass regardless of waiver setting."""
+        row = self._make_row(
+            **{"P/E": 12.0},
+            Operating_Cash_Flow=1_000_000,
+            Net_Income=800_000,
+            OCF_NI_Ratio=1.25,
+        )
+        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=True) is True
+        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=False) is True
+
+    def test_zero_ocf_with_recovery_passes(self):
+        """OCF == 0 + recovery signal → waiver fires."""
+        row = self._make_row(
+            **{"P/E": 16.0},
+            Forward_PE=10.0,
+            Operating_Cash_Flow=0,
+        )
+        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=True) is True
+
+    def test_none_ocf_fails_even_with_waiver(self):
+        """OCF is None (missing data) → fails; waiver only applies to actual negative/zero."""
+        row = self._make_row(
+            **{"P/E": 16.0},
+            Forward_PE=10.0,
+            Operating_Cash_Flow=None,
+        )
+        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=True) is False
+
+
+# ============================================================
+# TestExchangeScrapeIntegration — live exchange scraping
+# ============================================================
+def _load_enabled_exchanges():
+    """Load enabled exchanges with min_expected_rows from config for parametrize."""
+    if not _CONFIG_PATH.exists():
+        return []
+    with open(_CONFIG_PATH) as f:
+        config = json.load(f)
+    exchanges = []
+    for ex in config["exchanges"]:
+        if ex.get("enabled", True) and ex.get("min_expected_rows"):
+            exchanges.append(ex)
+    return exchanges
+
+
+def _exchange_ids(exchanges):
+    return [ex["exchange_name"] for ex in exchanges]
+
+
+_ENABLED_EXCHANGES = _load_enabled_exchanges()
+
+
+@pytest.mark.integration
+@pytest.mark.slow
+class TestExchangeScrapeIntegration:
+    """Live integration tests: hit each exchange source and verify sane row counts.
+
+    Catches broken URLs, changed HTML structure, misconfigured filters,
+    and dead sources before they silently produce empty results.
+
+    Run with: pytest tests/scripts/test_find_gems.py::TestExchangeScrapeIntegration -v
+    """
+
+    @pytest.fixture(autouse=True)
+    def _session(self):
+        self.session = find_gems._get_session()
+
+    @pytest.mark.parametrize(
+        "exchange", _ENABLED_EXCHANGES, ids=_exchange_ids(_ENABLED_EXCHANGES)
+    )
+    def test_exchange_returns_sane_count(self, exchange):
+        import requests as _req
+
+        handler = find_gems._HANDLERS.get(exchange["method"])
+        assert handler is not None, f"Unknown method: {exchange['method']}"
+
+        try:
+            df = handler(exchange, self.session)
+        except (_req.exceptions.Timeout, _req.exceptions.ConnectionError) as exc:
+            pytest.skip(f"{exchange['exchange_name']} unreachable: {exc}")
+        assert df is not None, f"Handler returned None for {exchange['exchange_name']}"
+        assert (
+            not df.empty
+        ), f"Handler returned empty DataFrame for {exchange['exchange_name']}"
+
+        # Apply the same filters used by scrape_exchanges()
+        df = find_gems._apply_filters(df, exchange)
+
+        min_rows = exchange["min_expected_rows"]
+        assert (
+            len(df) >= min_rows
+        ), f"{exchange['exchange_name']}: got {len(df)} rows, expected >= {min_rows}"
+
+        # Verify the configured ticker column exists (pre-standardization name)
+        ticker_col = exchange["params"].get("ticker_col")
+        if ticker_col:
+            actual = find_gems._find_col_fuzzy(df, ticker_col)
+            assert actual is not None, (
+                f"{exchange['exchange_name']}: ticker_col '{ticker_col}' not found "
+                f"in columns {list(df.columns)}"
+            )
+
+
+# ============================================================
+# TestHandleScrapeHtmlPagination — unit tests (no network)
+# ============================================================
+def _make_html_table(symbols, col="Symbol"):
+    """Return minimal HTML string with a one-column table."""
+    rows = "".join(f"<tr><td>{s}</td></tr>" for s in symbols)
+    return f"<html><body><table><thead><tr><th>{col}</th></tr></thead><tbody>{rows}</tbody></table></body></html>"
+
+
+def _make_mock_session(pages: dict):
+    """Return a mock session where session.get(url).text returns pages[url].
+
+    pages: {url: html_text or Exception}
+    """
+    session = MagicMock()
+
+    def _get(url, **_kwargs):
+        val = pages.get(url, "")
+        if isinstance(val, Exception):
+            raise val
+        resp = MagicMock()
+        resp.text = val
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    session.get.side_effect = _get
+    return session
+
+
+class TestHandleScrapeHtmlPagination:
+    """Unit tests for _handle_scrape_html() pagination logic."""
+
+    BASE_CONFIG = {
+        "source_url": "https://example.com/list/test-exchange/",
+        "params": {"ticker_col": "Symbol", "name_col": "Company Name"},
+    }
+
+    def _config(self, max_pages=1):
+        cfg = {
+            "source_url": self.BASE_CONFIG["source_url"],
+            "params": dict(self.BASE_CONFIG["params"]),
+        }
+        if max_pages != 1:
+            cfg["params"]["paginate_max_pages"] = max_pages
+        return cfg
+
+    def test_single_page_no_pagination_key(self):
+        """Without paginate_max_pages, fetches only page 1."""
+        base = self.BASE_CONFIG["source_url"]
+        html = _make_html_table([f"SYM{i}" for i in range(10)])
+        session = _make_mock_session({base: html})
+
+        df = find_gems._handle_scrape_html(self._config(max_pages=1), session)
+
+        assert len(df) == 10
+        # Should have fetched exactly page 1 (no ?p=2 call)
+        assert session.get.call_count == 1
+
+    def test_two_pages_concatenated(self):
+        """paginate_max_pages=3, two full pages returned, third page is empty → stops."""
+        base = self.BASE_CONFIG["source_url"]
+        page1_syms = [f"A{i}" for i in range(500)]
+        page2_syms = [f"B{i}" for i in range(500)]
+        pages = {
+            base: _make_html_table(page1_syms),
+            f"{base}?p=2": _make_html_table(page2_syms),
+            f"{base}?p=3": "<html><body><p>No table here</p></body></html>",
+        }
+        session = _make_mock_session(pages)
+
+        df = find_gems._handle_scrape_html(self._config(max_pages=3), session)
+
+        assert len(df) == 1000
+        assert session.get.call_count == 3  # page 1, page 2, page 3 (stops)
+
+    def test_partial_last_page_stops_early(self):
+        """When page N has fewer rows than page 1, it's the last page and is still collected."""
+        base = self.BASE_CONFIG["source_url"]
+        page1_syms = [f"A{i}" for i in range(500)]
+        page2_syms = [f"B{i}" for i in range(300)]  # partial page
+        pages = {
+            base: _make_html_table(page1_syms),
+            f"{base}?p=2": _make_html_table(page2_syms),
+        }
+        session = _make_mock_session(pages)
+
+        df = find_gems._handle_scrape_html(self._config(max_pages=5), session)
+
+        # Partial page still collected; loop stops after it
+        assert len(df) == 800
+        assert session.get.call_count == 2
+
+    def test_http_error_on_page_2_returns_page_1(self):
+        """An HTTP error on page 2 is silently swallowed; page 1 data returned."""
+        base = self.BASE_CONFIG["source_url"]
+        page1_syms = [f"A{i}" for i in range(500)]
+        import requests as _req
+
+        pages = {
+            base: _make_html_table(page1_syms),
+            f"{base}?p=2": _req.exceptions.ConnectionError("timeout"),
+        }
+        session = _make_mock_session(pages)
+
+        df = find_gems._handle_scrape_html(self._config(max_pages=3), session)
+
+        assert len(df) == 500
+
+    def test_no_table_on_page_1_raises(self):
+        """No table on page 1 raises ValueError (not silently returns empty)."""
+        base = self.BASE_CONFIG["source_url"]
+        session = _make_mock_session(
+            {base: "<html><body><p>Nothing here</p></body></html>"}
+        )
+
+        with pytest.raises(ValueError, match="No HTML tables found"):
+            find_gems._handle_scrape_html(self._config(max_pages=1), session)
+
+    def test_paginate_max_pages_cap_respected(self):
+        """Never fetches more pages than paginate_max_pages, even if more data exists."""
+        base = self.BASE_CONFIG["source_url"]
+        full_page = _make_html_table([f"X{i}" for i in range(500)])
+        pages = {base: full_page}
+        for p in range(2, 10):
+            pages[f"{base}?p={p}"] = full_page
+        session = _make_mock_session(pages)
+
+        df = find_gems._handle_scrape_html(self._config(max_pages=2), session)
+
+        assert len(df) == 1000
+        assert session.get.call_count == 2  # page 1 + page 2 only
+
+    def test_exchange_configs_have_paginate_key(self):
+        """Sweden, Malaysia, Indonesia configs all have paginate_max_pages set."""
+        with open(_CONFIG_PATH) as f:
+            config = json.load(f)
+
+        targets = {
+            "Nasdaq Stockholm",
+            "Bursa Malaysia",
+            "Indonesia Stock Exchange",
+        }
+        found = {}
+        for ex in config["exchanges"]:
+            if ex["exchange_name"] in targets:
+                found[ex["exchange_name"]] = ex
+
+        assert len(found) == len(targets), f"Missing configs: {targets - set(found)}"
+
+        for name, ex in found.items():
+            assert (
+                ex["params"].get("paginate_max_pages", 1) > 1
+            ), f"{name} missing paginate_max_pages > 1"
+            assert (
+                ex.get("min_expected_rows", 0) >= 700
+            ), f"{name} min_expected_rows too low: {ex.get('min_expected_rows')}"

@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.2] - 2026-03-04
+
+### Fixed
+- **D/E False Positive** — DATA_BLOCK `D/E: 6.92%` was escalated to 692% by the `<10 → ×100` normalisation heuristic after the `%` sign was stripped. Now captures the `%` across all six regex patterns and bypasses the multiplier.
+- **UNRELIABLE_PEG False Positive** — PEG < 0.05 penalty suppressed when `revenue_growth_ttm ≥ 50%`; high-growth companies were incorrectly penalised.
+- **D/E Scaling (1.5–10 range)** — Edge-case heuristic corrected for ratios in the ambiguous 1.5–10 band.
+- **`--skip-scrape` with `--stage 1`** — Flag was silently ignored; now handled correctly.
+- **Consultant Derived Metrics** — EV/EBITDA, ROE, and FCF Yield in FINANCIAL HEALTH DETAIL were incorrectly flagged as hallucinated; Derived Metrics Rule added (`consultant.json` v2.3).
+
+### Changed
+- **Analyst Hallucination Guardrails** — `NO FABRICATION` added to Bull and Bear KEY INSTRUCTIONS (v2.6/v2.8); `NO NEW NUMBERS` preamble and `PERIOD AWARENESS` note added to Research Manager (v5.1). Agents must write `[figure not in data]` rather than invent figures; 10–30% TTM vs FY divergence documented as normal.
+- **Forensic Auditor PERIOD Labeling** — META block now outputs `PERIOD: FY/H1/H2/Q1–Q4`; balance sheet date extracted in fetcher (`auditor.json` v2.6).
+- **Consultant COVERAGE_GAP Rule** — Neutral rule broadened from Taiwan/Japan micro-caps to all ex-US markets (`.AX`, `.TO/.V`, `.OL`, `.BR/.AS/.PA/.DE`) (`consultant.json` v2.4).
+- **PFIC Detection** — Short-term investments (STI) added to cash definition; balance sheet PFIC fields extracted directly.
+- **`--strict` in Stage 1** — Hardcoded to enforce thesis filters before LLM spend is incurred.
+- **Taiwanese Equity Gap Handling** — Data gaps no longer treated as integrity failures; construction-sector debt thresholds and extra equity-match checks added.
+- **Cross-Day Run Resumption** — Interrupted batch runs can resume mid-ticker-list without reprocessing completed tickers.
+
+## [3.9.1] - 2026-02-22
+
+### Added
+- **IBKR Portfolio Integration** - Full support for Interactive Brokers REST API via `ibind`. Includes `IbkrClient` for rate-limited OAuth 1.0a sessions and a `portfolio_manager.py` tool for position-aware reconciliation against AI verdicts.
+- **Settled Cash Awareness** - Portfolio logic now distinguishes between total cash and settled (spendable) cash, accounting for T+2 settlement delays in trade recommendations.
+- **Automated Portfolio ADD/TRIM** - Reconciler now calculates precise order quantities to scale into underweight positions (ADD) or reduce overweight positions (TRIM) based on target weights.
+- **Pipeline Rejection Records** - Stage 1 pipeline rejections (HOLD/DNI) are now stored in the global `lessons_learned` collection. These factual "Negative Evidence" records are injected into future analyses of the same ticker to prevent redundant debate and ensure consistent rejection reasoning.
+- **Independent Forensic Channel Visualization** - Updated documentation and Mermaid diagrams to reflect the decoupled data flow from the Forensic Auditor to the External Consultant for independent cross-validation.
+
+### Changed
+- **Safety-First Execution** - The `--execute` flag in `portfolio_manager.py` is currently disabled to ensure manual verification of AI recommendations.
+
 ## [3.9.0] - 2026-02-20
 
 ### Added

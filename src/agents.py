@@ -1697,7 +1697,64 @@ Extract valuation parameters and output in the required format."""
     return valuation_calculator_node
 
 
-def create_research_manager_node(llm, memory: Any | None) -> Callable:
+_STRICT_RM_ADDENDUM = """
+---
+## STRICT MODE — Research Manager Instruction
+
+You are operating in STRICT mode. Apply this lens when synthesizing analyst inputs:
+
+1. **Evidence over narrative**: Weight your synthesis toward concrete, documented facts
+   (filed cash flows, signed contracts, observable margin trends) over projections or
+   "could benefit from" language. If the bull case relies primarily on potential rather
+   than demonstrated momentum, frame your synthesis toward DO_NOT_INITIATE.
+
+2. **Near-term catalyst requirement**: A BUY recommendation requires at least one
+   high-probability catalyst already in motion (≤12 months). "Eventual" or "possible"
+   catalysts do not qualify in strict mode.
+
+3. **Data vacuum discipline**: If the combined analyst reports show significant data gaps
+   (missing OCF, unknown ownership structure, no analyst coverage data), flag them
+   explicitly and weight toward caution — do not paper over gaps with qualitative reasoning.
+
+4. **Bear argument weighting**: Give bear arguments proportionally more weight than in
+   normal mode. The burden of proof is on the bull case in strict mode.
+"""
+
+_STRICT_PM_ADDENDUM = """
+---
+## STRICT MODE ACTIVE — Additional Screening Rules
+
+Apply these as a final quality gate AFTER your normal Step 1A-1C analysis.
+They OVERRIDE normal zone decisions where they conflict.
+
+### AUTOMATIC DO_NOT_INITIATE (regardless of risk zone):
+
+1. **Any PFIC flag** (PFIC_PROBABLE or PFIC_UNCERTAIN): → DO_NOT_INITIATE
+2. **VIE structure detected**: → DO_NOT_INITIATE
+3. **Value Trap HIGH** (score < 40 or TRAP verdict): → DO_NOT_INITIATE
+4. **Risk tally ≥ 1.5** (vs normal 2.0 cutoff): → DO_NOT_INITIATE
+5. **Data vacuum present** (missing sector, OCF, or analyst coverage): → DO_NOT_INITIATE
+6. **Normal HOLD verdict**: → Upgrade to DO_NOT_INITIATE (no watchlist positions)
+
+### TIGHTER BUY REQUIREMENTS (all must hold):
+- Financial Health ≥ 60% (vs 50% normal)
+- Growth Score ≥ 55% (vs 50% normal)
+- Analyst Coverage ≤ 10 (vs 15 normal)
+- P/E ≤ 15 (vs 18/25 contextual normal)
+- Liquidity ≥ $750k daily USD (vs $500k normal)
+- Graham Earnings Test: PASS
+- Risk tally < 1.5
+
+### POSITION SIZING:
+- Maximum: 5% (vs 10% normal)
+- Authoritarian regimes: MAX 1.5% (vs 2%)
+- Any remaining uncertainty: MAX 2%
+"""
+
+
+def create_research_manager_node(
+    llm, memory: Any | None, strict_mode: bool = False
+) -> Callable:
     async def research_manager_node(
         state: AgentState, config: RunnableConfig
     ) -> dict[str, Any]:
@@ -1722,7 +1779,10 @@ def create_research_manager_node(llm, memory: Any | None) -> Callable:
             )
 
         all_reports = f"""MARKET ANALYST REPORT:\n{state.get("market_report", "N/A")}\n\nSENTIMENT ANALYST REPORT:\n{state.get("sentiment_report", "N/A")}\n\nNEWS ANALYST REPORT:\n{state.get("news_report", "N/A")}\n\nFUNDAMENTALS ANALYST REPORT:\n{state.get("fundamentals_report", "N/A")}{attribution_note}\n\nVALUE TRAP ANALYSIS:\n{value_trap}\n\nBULL RESEARCHER:\n{debate.get("bull_history", "N/A")}\n\nBEAR RESEARCHER:\n{debate.get("bear_history", "N/A")}"""
-        prompt = f"""{agent_prompt.system_message}\n\n{all_reports}\n\nProvide Investment Plan."""
+        system_msg = agent_prompt.system_message
+        if strict_mode:
+            system_msg = system_msg + _STRICT_RM_ADDENDUM
+        prompt = f"""{system_msg}\n\n{all_reports}\n\nProvide Investment Plan."""
         try:
             response = await invoke_with_rate_limit_handling(
                 llm, [HumanMessage(content=prompt)], context=agent_prompt.agent_name
@@ -1854,7 +1914,9 @@ def create_risk_debater_node(llm, agent_key: str) -> Callable:
     return risk_node
 
 
-def create_portfolio_manager_node(llm, memory: Any | None) -> Callable:
+def create_portfolio_manager_node(
+    llm, memory: Any | None, strict_mode: bool = False
+) -> Callable:
     async def pm_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         from src.prompts import get_prompt
 
@@ -2024,7 +2086,12 @@ TRADER PROPOSAL:
 
 RISK TEAM DEBATE:
 {risk if risk else "N/A"}"""
-        prompt = f"""{agent_prompt.system_message}\n\n{all_context}\n\nMake Portfolio Manager Verdict."""
+        pm_system_msg = agent_prompt.system_message
+        if strict_mode:
+            pm_system_msg = pm_system_msg + _STRICT_PM_ADDENDUM
+        prompt = (
+            f"""{pm_system_msg}\n\n{all_context}\n\nMake Portfolio Manager Verdict."""
+        )
         try:
             response = await invoke_with_rate_limit_handling(
                 llm, [HumanMessage(content=prompt)], context=agent_prompt.agent_name
@@ -2688,7 +2755,7 @@ def create_state_cleaner_node() -> Callable:
 # --- Red-Flag Detection System ---
 
 
-def create_financial_health_validator_node() -> Callable:
+def create_financial_health_validator_node(strict_mode: bool = False) -> Callable:
     """
     Factory function creating a pre-screening validator node to catch extreme financial risks
     before proceeding to bull/bear debate.
@@ -2811,7 +2878,7 @@ def create_financial_health_validator_node() -> Callable:
 
             # Apply sector-aware red-flag detection logic
             red_flags, pre_screening_result = RedFlagDetector.detect_red_flags(
-                metrics, ticker, sector
+                metrics, ticker, sector, strict_mode=strict_mode
             )
 
             # --- Legal/Tax Flag Detection ---
@@ -2836,6 +2903,65 @@ def create_financial_health_validator_node() -> Callable:
                                 w.get("risk_penalty", 0) for w in legal_warnings
                             ),
                         )
+
+            # --- Strict-Mode: Value Trap Flag Detection ---
+            # In strict mode, also detect value trap flags here so we can escalate to REJECT.
+            # value_trap_report may be empty if the Value Trap Detector hasn't run yet
+            # (parallel branch), but tests can inject it. The PM addendum handles the
+            # production case where VT runs in parallel with the Validator.
+            if strict_mode:
+                value_trap_report = state.get("value_trap_report", "")
+                if value_trap_report:
+                    if not isinstance(value_trap_report, str):
+                        value_trap_report = extract_string_content(value_trap_report)
+                    vt_warnings = RedFlagDetector.detect_value_trap_flags(
+                        value_trap_report, ticker
+                    )
+                    if vt_warnings:
+                        red_flags.extend(vt_warnings)
+
+            # --- Strict-Mode: Escalate WARNING-level legal/VT flags to REJECT ---
+            if strict_mode and pre_screening_result == "PASS":
+                flag_types = {f["type"] for f in red_flags}
+                if "PFIC_PROBABLE" in flag_types or "PFIC_UNCERTAIN" in flag_types:
+                    pre_screening_result = "REJECT"
+                    red_flags.append(
+                        {
+                            "type": "STRICT_PFIC_ESCALATED",
+                            "severity": "CRITICAL",
+                            "detail": "PFIC risk escalated to reject in strict mode",
+                            "action": "AUTO_REJECT",
+                            "rationale": "PFIC tax reporting burden is disqualifying in strict mode",
+                        }
+                    )
+                    logger.info("strict_pfic_escalated_to_reject", ticker=ticker)
+                elif "VIE_STRUCTURE" in flag_types:
+                    pre_screening_result = "REJECT"
+                    red_flags.append(
+                        {
+                            "type": "STRICT_VIE_ESCALATED",
+                            "severity": "CRITICAL",
+                            "detail": "VIE structure escalated to reject in strict mode",
+                            "action": "AUTO_REJECT",
+                            "rationale": "Contractual VIE ownership (not equity) is disqualifying in strict mode",
+                        }
+                    )
+                    logger.info("strict_vie_escalated_to_reject", ticker=ticker)
+                elif (
+                    "VALUE_TRAP_HIGH_RISK" in flag_types
+                    or "VALUE_TRAP_VERDICT" in flag_types
+                ):
+                    pre_screening_result = "REJECT"
+                    red_flags.append(
+                        {
+                            "type": "STRICT_VALUE_TRAP_ESCALATED",
+                            "severity": "CRITICAL",
+                            "detail": "High-risk value trap escalated to reject in strict mode",
+                            "action": "AUTO_REJECT",
+                            "rationale": "Value trap high-risk score is disqualifying in strict mode",
+                        }
+                    )
+                    logger.info("strict_value_trap_escalated_to_reject", ticker=ticker)
 
             # Log results
             if pre_screening_result == "REJECT":

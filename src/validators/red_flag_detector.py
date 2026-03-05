@@ -266,6 +266,8 @@ class RedFlagDetector:
             "growth_trajectory": None,
             "revenue_growth_ttm": None,
             "latest_quarter_date": None,
+            "sector": None,  # SECTOR string from DATA_BLOCK (for strict-mode REIT check)
+            "industry": None,  # INDUSTRY string from DATA_BLOCK (for strict-mode REIT check)
             "_raw_report": fundamentals_report,  # For downstream data quality checks
         }
 
@@ -456,6 +458,16 @@ class RedFlagDetector:
         if quarter_date_match:
             metrics["latest_quarter_date"] = quarter_date_match.group(1)
 
+        # Extract SECTOR string (for strict-mode REIT/ETF check)
+        sector_str_match = re.search(r"SECTOR:\s*(.+?)(?:\n|$)", data_block)
+        if sector_str_match:
+            metrics["sector"] = sector_str_match.group(1).strip().lower()
+
+        # Extract INDUSTRY string (for strict-mode REIT/developer distinction)
+        industry_str_match = re.search(r"INDUSTRY:\s*(.+?)(?:\n|$)", data_block)
+        if industry_str_match:
+            metrics["industry"] = industry_str_match.group(1).strip().lower()
+
         # Now extract from detailed sections (below DATA_BLOCK)
         metrics["debt_to_equity"] = RedFlagDetector._extract_debt_to_equity(
             fundamentals_report
@@ -491,18 +503,21 @@ class RedFlagDetector:
             D/E ratio as percentage (e.g., 250.0), or None if not found
         """
         patterns = [
-            r"(?:^|\n)\s*-?\s*D/E:\s*([0-9.]+)",
-            r"(?:^|\n)\s*-?\s*Debt/Equity:\s*([0-9.]+)",
-            r"(?:^|\n)\s*-?\s*Debt-to-Equity:\s*([0-9.]+)",
-            r"D/E:\s*([0-9.]+)",
-            r"Debt/Equity:\s*([0-9.]+)",
-            r"DE_RATIO:\s*([0-9.]+)",
+            r"(?:^|\n)\s*-?\s*D/E:\s*([0-9.]+)(%?)",
+            r"(?:^|\n)\s*-?\s*Debt/Equity:\s*([0-9.]+)(%?)",
+            r"(?:^|\n)\s*-?\s*Debt-to-Equity:\s*([0-9.]+)(%?)",
+            r"D/E:\s*([0-9.]+)(%?)",
+            r"Debt/Equity:\s*([0-9.]+)(%?)",
+            r"DE_RATIO:\s*([0-9.]+)(%?)",
         ]
         for pattern in patterns:
             match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
             if match:
                 value = float(match.group(1))
-                # Convert to percentage if < 10 (assume ratio like 2.5 -> 250%)
+                # If the source already has a % sign, it's already a percentage.
+                # Otherwise apply the ratio→percentage heuristic (< 10 → ×100).
+                if match.group(2):
+                    return value
                 return value if value >= 10 else value * 100
         return None
 
@@ -637,6 +652,7 @@ class RedFlagDetector:
         metrics: dict[str, float | None],
         ticker: str = "UNKNOWN",
         sector: Sector = Sector.INDUSTRIALS,
+        strict_mode: bool = False,
     ) -> tuple[list[dict], str]:
         """
         Apply sector-aware threshold-based red-flag detection logic.
@@ -645,6 +661,7 @@ class RedFlagDetector:
             metrics: Extracted financial metrics
             ticker: Ticker symbol for logging
             sector: Sector classification (affects D/E and coverage thresholds)
+            strict_mode: If True, apply tighter thresholds plus REIT/ETF and OCF/NI checks
 
         Returns:
             Tuple of (red_flags_list, "PASS" or "REJECT")
@@ -654,31 +671,45 @@ class RedFlagDetector:
         2. Positive income but negative FCF >2x income: Earnings quality (fraud)
         3. Interest coverage < SECTOR_THRESHOLD AND D/E > SECTOR_THRESHOLD: Refinancing risk
 
-        Sector-specific thresholds (3 profiles):
+        Sector-specific thresholds (3 profiles, strict_mode tightens Standard and Capital-intensive):
         - Financials: D/E check DISABLED (leverage is their business model)
-        - Capital-intensive (Energy, Materials, Utilities, Real Estate): D/E > 800%, Coverage < 1.5x + D/E > 200%
-        - Standard (all others): D/E > 500%, Coverage < 2.0x + D/E > 100%
+        - Capital-intensive (Energy, Materials, Utilities, Real Estate):
+            Normal: D/E > 800%, Coverage < 1.5x + D/E > 200%
+            Strict: D/E > 500%, Coverage < 1.8x + D/E > 300%
+        - Standard (all others):
+            Normal: D/E > 500%, Coverage < 2.0x + D/E > 100%
+            Strict: D/E > 300%, Coverage < 2.5x + D/E > 150%
         """
         red_flags = []
 
-        # Define sector-specific thresholds (3 profiles)
+        # Define sector-specific thresholds (3 profiles; strict_mode tightens 2 of them)
         if sector in FINANCIALS_SECTORS:
             # Financials: Leverage is their business model - skip D/E checks entirely
             leverage_threshold = None
             coverage_threshold = None
             coverage_de_threshold = None
         elif sector in CAPITAL_INTENSIVE_SECTORS:
-            # Capital-intensive sectors: Higher thresholds
-            leverage_threshold = 800  # D/E > 800% is extreme (vs 500% standard)
-            coverage_threshold = 1.5  # Interest coverage < 1.5x (vs 2.0x standard)
-            coverage_de_threshold = (
-                200  # D/E > 200% when coverage weak (vs 100% standard)
-            )
+            if strict_mode:
+                leverage_threshold = 500  # was 800
+                coverage_threshold = 1.8  # was 1.5
+                coverage_de_threshold = 300  # was 200
+            else:
+                # Capital-intensive sectors: Higher thresholds
+                leverage_threshold = 800  # D/E > 800% is extreme (vs 500% standard)
+                coverage_threshold = 1.5  # Interest coverage < 1.5x (vs 2.0x standard)
+                coverage_de_threshold = (
+                    200  # D/E > 200% when coverage weak (vs 100% standard)
+                )
         else:
-            # General/Technology: Standard thresholds
-            leverage_threshold = 500
-            coverage_threshold = 2.0
-            coverage_de_threshold = 100
+            if strict_mode:
+                leverage_threshold = 300  # was 500
+                coverage_threshold = 2.5  # was 2.0
+                coverage_de_threshold = 150  # was 100
+            else:
+                # General/Technology: Standard thresholds
+                leverage_threshold = 500
+                coverage_threshold = 2.0
+                coverage_de_threshold = 100
 
         # --- RED FLAG 1: Extreme Leverage (Leverage Bomb) ---
         debt_to_equity = metrics.get("debt_to_equity")
@@ -974,38 +1005,54 @@ class RedFlagDetector:
 
         # --- RED FLAG 8: Unreliable PEG (Implausible Valuation) ---
         # PEG in [0, 0.05): growth denominator missing/zero/infinite, or implies
-        # >20x expected growth — either way PEG is meaningless.
+        # very high growth — may be meaningless OR may reflect a genuine high-growth phase.
         peg_for_floor = metrics.get("peg_ratio")
         if peg_for_floor is not None and 0 <= peg_for_floor < 0.05:
-            detail = (
-                "PEG 0.00 — mathematically undefined (growth denominator is "
-                "zero, negative, or infinite). Valuation metrics are unreliable."
-                if peg_for_floor == 0
-                else (
-                    f"PEG {peg_for_floor:.3f} implies {1 / peg_for_floor:.0f}x expected "
-                    f"growth — mathematically implausible, treat valuation metrics as unreliable"
+            # Skip the penalty when confirmed high revenue growth (≥50% TTM) explains
+            # the low PEG.  PEG = 0.01 is mathematically consistent with, e.g.,
+            # P/E=5 + EPS_growth=500%, or P/E=12 + EPS_growth=1200% — neither
+            # implausible for a company with genuine triple-digit revenue growth.
+            # PEG = 0 is still always flagged (denominator truly zero/undefined).
+            rev_growth = metrics.get("revenue_growth_ttm")
+            peg_explained_by_growth = (
+                peg_for_floor > 0 and rev_growth is not None and rev_growth >= 50.0
+            )
+            if peg_explained_by_growth:
+                logger.info(
+                    "unreliable_peg_skipped_high_growth",
+                    ticker=ticker,
+                    peg=peg_for_floor,
+                    revenue_growth_ttm=rev_growth,
                 )
-            )
-            red_flags.append(
-                {
-                    "type": "UNRELIABLE_PEG",
-                    "severity": "WARNING",
-                    "detail": detail,
-                    "action": "RISK_PENALTY",
-                    "risk_penalty": 1.0,
-                    "rationale": (
-                        "A PEG ratio below 0.05 means the growth rate input is missing, "
-                        "stale, or implies implausible growth. All PEG-derived conclusions "
-                        "should be discounted. Check whether current earnings are at a "
-                        "cyclical peak."
-                    ),
-                }
-            )
-            logger.info(
-                "red_flag_unreliable_peg",
-                ticker=ticker,
-                peg=peg_for_floor,
-            )
+            else:
+                detail = (
+                    "PEG 0.00 — mathematically undefined (growth denominator is "
+                    "zero, negative, or infinite). Valuation metrics are unreliable."
+                    if peg_for_floor == 0
+                    else (
+                        f"PEG {peg_for_floor:.3f} — growth rate input is missing or stale. "
+                        f"Treat PEG-derived conclusions as unreliable."
+                    )
+                )
+                red_flags.append(
+                    {
+                        "type": "UNRELIABLE_PEG",
+                        "severity": "WARNING",
+                        "detail": detail,
+                        "action": "RISK_PENALTY",
+                        "risk_penalty": 1.0,
+                        "rationale": (
+                            "A PEG ratio below 0.05 without confirmed high revenue growth "
+                            "means the growth rate input is likely missing or stale. "
+                            "All PEG-derived conclusions should be discounted."
+                        ),
+                    }
+                )
+                logger.info(
+                    "red_flag_unreliable_peg",
+                    ticker=ticker,
+                    peg=peg_for_floor,
+                )
 
         # --- RED FLAG 9: Segment Deterioration ---
         # Dominant business segment showing significant profit decline
@@ -1116,6 +1163,67 @@ class RedFlagDetector:
                 ticker=ticker,
                 total_est=total_est,
             )
+
+        # --- STRICT MODE ONLY: REIT/ETF Exclusion ---
+        # REITs are pass-through vehicles with poor capital allocation discipline;
+        # not appropriate for GARP growth-transition strategy.
+        # Developer/builder exclusion: real estate developers have operating businesses.
+        if strict_mode:
+            sector_str = (metrics.get("sector") or "").lower()
+            industry_str = (metrics.get("industry") or "").lower()
+            is_reit = (
+                "reit" in industry_str
+                or "real estate investment trust" in industry_str
+                or (
+                    sector == Sector.REAL_ESTATE
+                    and "developer" not in industry_str
+                    and "builder" not in industry_str
+                    and industry_str  # Only fire if we actually have industry data
+                )
+            )
+            if is_reit:
+                red_flags.append(
+                    {
+                        "type": "STRICT_REIT_ETF",
+                        "severity": "CRITICAL",
+                        "detail": f"REIT/ETF excluded in strict mode (sector: {sector_str or sector.value}, industry: {industry_str or 'N/A'})",
+                        "action": "AUTO_REJECT",
+                        "rationale": "REITs are pass-through vehicles; not compatible with GARP growth-transition strategy",
+                    }
+                )
+                logger.info(
+                    "strict_reit_etf_rejected",
+                    ticker=ticker,
+                    industry=industry_str,
+                    sector=sector_str,
+                )
+
+        # --- STRICT MODE ONLY: OCF/NI Earnings Quality ---
+        # Tighter than the existing FCF/NI check: requires OCF (operating cash flow) ≥ 80% of NI.
+        # Accrual-heavy accounting (OCF < 0.8x NI) is a leading indicator of earnings overstatement.
+        # Guard: explicitly check `is not None` (not truthiness) so OCF=0 is correctly caught.
+        if strict_mode:
+            ocf = metrics.get("ocf")
+            ni = metrics.get("net_income")
+            if ocf is not None and ni is not None and ni > 0:
+                ratio = ocf / ni
+                if ratio < 0.8:
+                    red_flags.append(
+                        {
+                            "type": "STRICT_EARNINGS_QUALITY",
+                            "severity": "CRITICAL",
+                            "detail": f"OCF/NI ratio {ratio:.2f} < 0.8 (accrual-heavy accounting; OCF={ocf:,.0f}, NI={ni:,.0f})",
+                            "action": "AUTO_REJECT",
+                            "rationale": "Operating cash flow well below net income — earnings likely overstated via accruals",
+                        }
+                    )
+                    logger.info(
+                        "strict_earnings_quality_rejected",
+                        ticker=ticker,
+                        ocf_ni_ratio=ratio,
+                        ocf=ocf,
+                        net_income=ni,
+                    )
 
         # Determine result
         has_auto_reject = any(flag["action"] == "AUTO_REJECT" for flag in red_flags)
