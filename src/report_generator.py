@@ -872,7 +872,15 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
                     f"{self._clean_text(normalized, demote_headers=True)}\n\n"
                 )
 
-        add_section("trader_investment_plan", "Trading Strategy")
+        _verdict = self.extract_decision(final_decision_raw)
+        if _verdict in ("DO NOT INITIATE", "SELL"):
+            report_parts.append("## Trading Strategy\n\n")
+            report_parts.append(
+                f"*Entry/exit parameters not applicable — "
+                f"Portfolio Manager verdict: **{_verdict}**.*\n\n"
+            )
+        else:
+            add_section("trader_investment_plan", "Trading Strategy")
 
         # Risk Assessment (if present)
         risk_state = result.get("risk_debate_state", {})

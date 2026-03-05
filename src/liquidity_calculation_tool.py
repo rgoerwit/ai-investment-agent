@@ -181,7 +181,7 @@ Avg Daily Turnover (USD): N/A
         avg_turnover_usd = avg_turnover_local * fx_rate
 
         # Thresholds (Aligned with Portfolio Manager Prompt)
-        THRESHOLD_PASS = 500_000
+        THRESHOLD_PASS = 250_000
         THRESHOLD_MARGINAL = 100_000
 
         # Failure Conditions
@@ -222,7 +222,7 @@ Avg Daily Volume (3mo): {int(avg_volume):,}
 Avg Daily Turnover (USD): ${int(avg_turnover_usd):,}
 Trading Regularity: {pct_zero:.0f}% zero-volume days, {pct_flat:.0f}% flat-price days (last 3mo)
 Details: {currency} turnover converted at FX rate {fx_rate:.6f} (source: {fx_source})
-Thresholds: $100,000 USD minimum (MARGINAL), $500,000 USD recommended (PASS), <15% zero-volume days, <30% flat-price days
+Thresholds: $100,000 USD minimum (MARGINAL), $250,000 USD recommended (PASS), <15% zero-volume days, <30% flat-price days
 """
 
     except Exception as e:

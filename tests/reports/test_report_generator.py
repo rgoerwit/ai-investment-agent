@@ -1127,3 +1127,65 @@ class TestRedFlagPreScreening:
         # Should use defaults
         assert "UNKNOWN" in report  # type
         # Missing fields should use fallbacks from code
+
+
+class TestTraderSectionVerdictGating:
+    """Trading Strategy section must be suppressed for DO NOT INITIATE / SELL verdicts."""
+
+    _TRADER_CONTENT = (
+        "Entry: 6.00 NZD\nStop Loss: 5.72 NZD\nTarget: 6.40 NZD\nScaled entry approach."
+    )
+
+    def _result(self, verdict_text: str) -> dict:
+        return {
+            "final_trade_decision": verdict_text,
+            "trader_investment_plan": self._TRADER_CONTENT,
+        }
+
+    def test_do_not_initiate_suppresses_entry_levels(self):
+        reporter = QuietModeReporter("SCL.NZ", "Scales Corporation")
+        report = reporter.generate_report(
+            self._result(
+                "#### PORTFOLIO MANAGER VERDICT: DO NOT INITIATE\n\nRationale."
+            )
+        )
+        assert "Trading Strategy" in report
+        assert "not applicable" in report
+        assert "DO NOT INITIATE" in report
+        # Trader's actual entry data must not bleed through
+        assert "6.00 NZD" not in report
+        assert "Stop Loss" not in report
+
+    def test_sell_suppresses_entry_levels(self):
+        reporter = QuietModeReporter("TEST.NZ")
+        report = reporter.generate_report(
+            self._result("VERDICT: SELL\n\nDeterioration detected.")
+        )
+        assert "Trading Strategy" in report
+        assert "not applicable" in report
+        assert "SELL" in report
+        assert "6.00 NZD" not in report
+
+    def test_buy_includes_full_trader_section(self):
+        reporter = QuietModeReporter("TEST.NZ")
+        report = reporter.generate_report(self._result("Action: BUY\n\nStrong thesis."))
+        assert "Trading Strategy" in report
+        assert "6.00 NZD" in report
+        assert "not applicable" not in report
+
+    def test_hold_includes_full_trader_section(self):
+        reporter = QuietModeReporter("TEST.NZ")
+        report = reporter.generate_report(
+            self._result("Action: HOLD\n\nWait for clarity.")
+        )
+        assert "Trading Strategy" in report
+        assert "6.00 NZD" in report
+        assert "not applicable" not in report
+
+    def test_heading_always_present_on_dni(self):
+        """Section heading must appear even when body is suppressed."""
+        reporter = QuietModeReporter("TEST.NZ")
+        report = reporter.generate_report(
+            self._result("VERDICT: DO_NOT_INITIATE\n\nFails thesis.")
+        )
+        assert "## Trading Strategy" in report
