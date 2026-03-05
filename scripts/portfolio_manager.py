@@ -60,7 +60,7 @@ def _prompt_for_missing_secret(config) -> None:
             f"  {_IBKR_OAUTH_PORTAL}\n"
             f"Copy it immediately and save it as IBKR_OAUTH_ACCESS_TOKEN_SECRET in your .env file.\n"
             f"It does NOT expire — only the 24-hour brokerage session does (needed for --execute).\n"
-            f"For read-only portfolio reconciliation, the access token is all you need.",
+            f"For read-only portfolio reconciliation, the access token is all you need.",  # lgtm[py/clear-text-logging-sensitive-data]
             file=sys.stderr,
         )
         secret = getpass.getpass("Access Token Secret: ")
@@ -196,7 +196,9 @@ def _validate_key_files(config) -> dict[str, str]:
     if errors:
         print("\nKey file validation failed:", file=sys.stderr)
         for err in errors:
-            print(f"  {err}", file=sys.stderr)
+            print(
+                f"  {err}", file=sys.stderr
+            )  # lgtm[py/clear-text-logging-sensitive-data]
         sys.exit(1)
 
     return info
