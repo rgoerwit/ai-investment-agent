@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.3] - 2026-03-04
+
+### Fixed
+- **Consultant C1/C2 Scope** — C1/C2 penalties now apply only to NUMERICAL metric discrepancies. Qualitative governance claims (affiliates, related-party relationships, M&A history) documented in `VALUE_TRAP_BLOCK` (CROSS_HOLDINGS, MAJORITY_HOLDER, M&A_HISTORY) are pre-verified by the Value Trap Detector and must not attract C1/C2 charges (`consultant.json` v2.5).
+- **PFIC Asset Test False Pass** — When Cash, STI, or Total Assets are unavailable, the fundamentals analyst now sets `PFIC_ASSET_RATIO = N/A` and writes `QUANTITATIVE_TEST: INSUFFICIENT_DATA` instead of claiming "asset test passed" without a computed ratio (`fundamentals_analyst.json` v9.8).
+- **DATA_BLOCK Authority Inversion** — Bull, Bear, and Risky analysts no longer frame DATA_BLOCK figures as "the claim" when a conflicting news/annual figure appears. All three now cite both figures with explicit periods (e.g., "DATA_BLOCK: -33.6% [TTM]; news: -6.7% [FY2024]") and anchor analysis on the DATA_BLOCK value (`bull_researcher.json` v2.7, `bear_researcher.json` v2.9, `risky_analyst.json` v5.3).
+
 ## [3.9.2] - 2026-03-04
 
 ### Fixed

@@ -20,8 +20,12 @@ from src.liquidity_calculation_tool import calculate_liquidity_metrics
 
 
 def _mock_hist(mean_price: float, volume: int, n: int = 60) -> pd.DataFrame:
-    """Return a price/volume DataFrame with slight price variation to avoid flat-price flag."""
-    prices = mean_price + np.random.uniform(-mean_price * 0.005, mean_price * 0.005, n)
+    """Return a price/volume DataFrame with deterministic alternating variation.
+
+    Uses ±0.5% alternating prices so the mean is always exactly mean_price and
+    no two consecutive prices are equal (avoids the flat-price irregularity flag).
+    """
+    prices = np.array([mean_price * (1.005 if i % 2 == 0 else 0.995) for i in range(n)])
     return pd.DataFrame({"Close": prices, "Volume": [volume] * n})
 
 
