@@ -67,7 +67,22 @@ def _save_cache(cache: dict) -> None:
         logger.warning("conid_cache_save_failed", error=str(e))
 
 
-def ibkr_symbol_to_yf(symbol: str, exchange: str) -> str:
+_CURRENCY_TO_SUFFIX: dict[str, str] = {
+    "HKD": ".HK",
+    "JPY": ".T",
+    "TWD": ".TW",
+    "KRW": ".KS",
+    "SGD": ".SI",
+    "AUD": ".AX",
+    "NZD": ".NZ",
+    "BRL": ".SA",
+    "MXN": ".MX",
+    "MYR": ".KL",  # Malaysian Ringgit → Bursa Malaysia
+    # EUR, GBP, CHF omitted — ambiguous multi-country currencies
+}
+
+
+def ibkr_symbol_to_yf(symbol: str, exchange: str, currency: str = "") -> str:
     """
     Convert an IBKR symbol + exchange to yfinance ticker format.
 
@@ -77,11 +92,25 @@ def ibkr_symbol_to_yf(symbol: str, exchange: str) -> str:
     Args:
         symbol: IBKR symbol (e.g., "5", "7203", "ASML")
         exchange: IBKR exchange code (e.g., "SEHK", "TSE", "AEB")
+        currency: IBKR currency code (e.g., "HKD", "JPY") — used as fallback
+                  when exchange is unknown. Unambiguous single-exchange currencies only.
 
     Returns:
         yfinance ticker string (e.g., "0005.HK", "7203.T", "ASML.AS")
     """
     suffix = TickerFormatter.IBKR_TO_YFINANCE.get(exchange, "")
+
+    # Fallback: derive suffix from unambiguous currency when exchange is unknown
+    if not suffix and currency:
+        suffix = _CURRENCY_TO_SUFFIX.get(currency.upper(), "")
+        if suffix:
+            logger.debug(
+                "exchange_suffix_from_currency",
+                symbol=symbol,
+                exchange=exchange,
+                currency=currency,
+                suffix=suffix,
+            )
 
     if suffix == ".HK":
         # HK stocks: pad to 4 digits (IBKR strips leading zeros)
@@ -90,6 +119,16 @@ def ibkr_symbol_to_yf(symbol: str, exchange: str) -> str:
 
     if suffix:
         return f"{symbol}{suffix}"
+
+    # Returning bare symbol — warn if exchange was specified but unrecognised
+    if exchange and exchange not in ("", "SMART", "NASDAQ", "NYSE", "ARCA", "AMEX"):
+        logger.warning(
+            "ibkr_exchange_unmapped",
+            symbol=symbol,
+            exchange=exchange,
+            currency=currency,
+            note="No yfinance suffix found; position will use bare ticker (may be incorrect for non-US stocks)",
+        )
     return symbol
 
 
@@ -204,6 +243,7 @@ def resolve_yf_ticker_from_position(position: dict) -> str:
     """
     symbol = position.get("contractDesc", "") or position.get("ticker", "")
     exchange = position.get("listingExchange", "") or position.get("exchange", "")
+    currency = position.get("currency", "")
 
     # Clean up symbol (remove trailing spaces, exchange suffixes)
     symbol = symbol.strip()
@@ -217,7 +257,7 @@ def resolve_yf_ticker_from_position(position: dict) -> str:
     if not symbol:
         return ""
 
-    return ibkr_symbol_to_yf(symbol, exchange)
+    return ibkr_symbol_to_yf(symbol, exchange, currency)
 
 
 def parse_trade_block_price(price_str: str) -> float | None:

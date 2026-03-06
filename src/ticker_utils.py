@@ -151,6 +151,7 @@ class TickerFormatter:
         "BVLP": ".LS",
         "BVME": ".MI",
         "BM": ".MC",
+        "SIBE": ".MC",  # Bolsa Madrid electronic order book (Sistema de Interconexión Bursátil Español)
         "LSE": ".L",
         "TSE": ".T",
         "SEHK": ".HK",
@@ -170,6 +171,7 @@ class TickerFormatter:
         "MEXI": ".MX",
         "IDX": ".JK",
         "KLSE": ".KL",
+        "WBAG": ".VI",  # Wiener Börse AG (Vienna Stock Exchange)
         "SET": ".BK",
         "NASDAQ": "",
         "NYSE": "",

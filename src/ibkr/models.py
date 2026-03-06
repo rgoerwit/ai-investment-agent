@@ -79,7 +79,7 @@ class ReconciliationItem(BaseModel):
     """A single reconciliation item comparing IBKR position vs evaluator recommendation."""
 
     ticker: str
-    action: Literal["BUY", "SELL", "TRIM", "ADD", "HOLD", "REVIEW"]
+    action: Literal["BUY", "SELL", "TRIM", "ADD", "HOLD", "REVIEW", "REMOVE"]
     reason: str
     urgency: Literal["HIGH", "MEDIUM", "LOW"]
     ibkr_position: NormalizedPosition | None = None
@@ -89,6 +89,7 @@ class ReconciliationItem(BaseModel):
     suggested_order_type: str = "LMT"  # LMT or MKT
     cash_impact_usd: float = 0.0  # negative = cost, positive = proceeds
     settlement_date: str | None = None  # for sells/trims: "YYYY-MM-DD"
+    is_watchlist: bool = False  # True when sourced from IBKR watchlist (zero holdings)
 
 
 class PortfolioSummary(BaseModel):

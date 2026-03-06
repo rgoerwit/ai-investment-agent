@@ -12,11 +12,14 @@ Strategy:
 """
 
 import asyncio
+import json
 import re
 import statistics
+import time
 from collections import namedtuple
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -277,6 +280,11 @@ class SmartMarketDataFetcher(FinancialFetcher):
 
     REQUIRED_BASICS = ["symbol", "currentPrice", "currency"]
 
+    # Exchanges where IBKR mnemonics ≠ yfinance numeric codes (confirmed cases only)
+    _MNEMONIC_EXCHANGES = frozenset({".KL"})
+    _MNEMONIC_CACHE_FILE = Path("scratch/ticker_mnemonic_map.json")
+    _MNEMONIC_CACHE_TTL = 30 * 24 * 3600  # 30 days
+
     IMPORTANT_FIELDS = [
         "sector",  # Prevents sector hallucination (e.g., industrial classified as tech)
         "industry",  # Sub-classification for sector-specific thresholds
@@ -307,6 +315,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
     def __init__(self):
         self.fx_cache = {}
         self.fx_cache_expiry_time = {}
+        self._mnemonic_cache: dict[str, str] = self._load_mnemonic_cache()
 
         self.fmp_fetcher = get_fmp_fetcher() if FMP_AVAILABLE else None
         self.eodhd_fetcher = get_eodhd_fetcher() if EODHD_AVAILABLE else None
@@ -2019,6 +2028,80 @@ class SmartMarketDataFetcher(FinancialFetcher):
 
         return quality
 
+    def _load_mnemonic_cache(self) -> dict[str, str]:
+        """Load the mnemonic→numeric cache, discarding entries older than TTL."""
+        if not self._MNEMONIC_CACHE_FILE.exists():
+            return {}
+        try:
+            with open(self._MNEMONIC_CACHE_FILE) as f:
+                raw = json.load(f)
+            now = time.time()
+            return {
+                k: v["resolved"]
+                for k, v in raw.items()
+                if now - v.get("ts", 0) < self._MNEMONIC_CACHE_TTL
+            }
+        except (json.JSONDecodeError, OSError, KeyError):
+            return {}
+
+    def _save_mnemonic_cache(self, original: str, resolved: str) -> None:
+        """Persist a new mnemonic→numeric mapping to the file cache."""
+        self._mnemonic_cache[original] = resolved
+        raw = {
+            k: {"resolved": v, "ts": time.time()}
+            for k, v in self._mnemonic_cache.items()
+        }
+        self._MNEMONIC_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(self._MNEMONIC_CACHE_FILE, "w") as f:
+                json.dump(raw, f, indent=2)
+        except OSError as e:
+            logger.warning("mnemonic_cache_save_failed", error=str(e))
+
+    async def _pre_resolve_ticker(self, ticker: str) -> str:
+        """
+        Map mnemonic tickers (e.g. SCIENTX.KL) to numeric yfinance equivalents
+        (e.g. 4731.KL) before any data source is called.
+
+        Only fires for exchanges in _MNEMONIC_EXCHANGES when the base symbol
+        contains alphabetic characters. Uses yahooquery.search() with a 30-day
+        file-backed cache. Falls through silently on any error — the existing
+        Tavily fallback in _resolve_ticker_via_search() still active downstream.
+        """
+        suffix = next((s for s in self._MNEMONIC_EXCHANGES if ticker.endswith(s)), None)
+        if not suffix:
+            return ticker
+
+        base = ticker[: -len(suffix)]
+        if base.isdigit():  # already numeric — nothing to do
+            return ticker
+
+        if ticker in self._mnemonic_cache:
+            resolved = self._mnemonic_cache[ticker]
+            logger.debug("mnemonic_cache_hit", original=ticker, resolved=resolved)
+            return resolved
+
+        try:
+            from yahooquery import search as yq_search
+
+            result = await asyncio.to_thread(yq_search, base)
+            quotes = result.get("quotes", []) if isinstance(result, dict) else []
+            for q in quotes:
+                sym = q.get("symbol", "")
+                # Accept only results on the same exchange whose base is all-digits
+                if (
+                    sym.endswith(suffix)
+                    and sym[: -len(suffix)].isdigit()
+                    and sym != ticker
+                ):
+                    logger.info("mnemonic_pre_resolved", original=ticker, resolved=sym)
+                    self._save_mnemonic_cache(ticker, sym)
+                    return sym
+        except Exception as e:
+            logger.warning("mnemonic_pre_resolve_failed", ticker=ticker, error=str(e))
+
+        return ticker  # original ticker; Tavily fallback still active
+
     async def _resolve_ticker_via_search(self, symbol: str) -> str | None:
         """
         Recover from a failed yfinance lookup by searching for the numeric ticker.
@@ -2082,6 +2165,9 @@ class SmartMarketDataFetcher(FinancialFetcher):
         self.stats["fetches"] += 1
 
         try:
+            # PHASE 0: Proactive mnemonic→numeric pre-resolution (e.g. SCIENTX.KL → 4731.KL)
+            ticker = await self._pre_resolve_ticker(ticker)
+
             # PHASE 1: Parallel source execution
             source_results = await self._fetch_all_sources_parallel(ticker)
 

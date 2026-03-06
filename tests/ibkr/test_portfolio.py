@@ -94,6 +94,89 @@ class TestNormalizePositions:
         assert positions[0].avg_cost_local == 150.0
         assert positions[0].current_price_local == 156.0
 
+    def test_jpy_market_value_converted_to_usd(self):
+        """JPY mktValue is converted to USD using FALLBACK_RATES_TO_USD (0.0067)."""
+        raw = [
+            {
+                "conid": 1,
+                "contractDesc": "7203",
+                "listingExchange": "TSE",
+                "position": 100,
+                "mktValue": 210_000.0,  # ¥210,000
+                "currency": "JPY",
+            }
+        ]
+        positions = normalize_positions(raw)
+        # ¥210,000 × 0.0067 = $1,407
+        assert positions[0].market_value_usd == pytest.approx(1407.0, rel=0.01)
+
+    def test_usd_market_value_unchanged(self):
+        """USD positions are not double-converted (rate = 1.0)."""
+        raw = [
+            {
+                "conid": 2,
+                "contractDesc": "AAPL",
+                "listingExchange": "SMART",
+                "position": 10,
+                "mktValue": 1800.0,
+                "currency": "USD",
+            }
+        ]
+        positions = normalize_positions(raw)
+        assert positions[0].market_value_usd == pytest.approx(1800.0)
+
+    def test_unknown_currency_falls_back_to_1x(self):
+        """Unknown currency code is treated as 1.0 (no conversion)."""
+        raw = [
+            {
+                "conid": 3,
+                "contractDesc": "XYZ",
+                "listingExchange": "SMART",
+                "position": 1,
+                "mktValue": 500.0,
+                "currency": "ZZZ",  # fictitious currency
+            }
+        ]
+        positions = normalize_positions(raw)
+        assert positions[0].market_value_usd == pytest.approx(500.0)
+
+    def test_lse_price_converted_gbp_to_gbx(self):
+        """IBKR reports .L prices in GBP; normalize_positions multiplies by 100 → GBX."""
+        raw = [
+            {
+                "conid": 101,
+                "contractDesc": "GAMA",
+                "listingExchange": "LSE",
+                "position": 200,
+                "mktValue": 1788.0,
+                "currency": "GBP",
+                "mktPrice": 8.94,  # IBKR: £8.94 GBP
+            }
+        ]
+        positions = normalize_positions(raw)
+        assert positions[0].yf_ticker == "GAMA.L"
+        # current_price_local must be 894.0 GBX so stop comparisons work correctly
+        assert positions[0].current_price_local == pytest.approx(894.0)
+
+    def test_lse_currency_defaults_to_gbp(self):
+        """When IBKR omits currency for a .L ticker, it defaults to 'GBP' (not 'USD')."""
+        raw = [
+            {
+                "conid": 102,
+                "contractDesc": "KLR",
+                "listingExchange": "LSE",
+                "position": 50,
+                "mktValue": 1101.0,
+                # currency field intentionally absent
+                "mktPrice": 22.02,
+            }
+        ]
+        positions = normalize_positions(raw)
+        assert positions[0].yf_ticker == "KLR.L"
+        assert positions[0].currency == "GBP"
+        # Price should still be multiplied by 100
+        assert positions[0].current_price_local == pytest.approx(2202.0)
+
 
 class TestBuildPortfolioSummary:
     """Test portfolio summary construction."""

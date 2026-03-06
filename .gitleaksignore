@@ -14,3 +14,4 @@
 # portfolio_manager.py quotes the expected PEM format in a user-facing error
 # message explaining key configuration — no actual private key present
 40e833e7900b515688443651c3efde27e2640ab1:scripts/portfolio_manager.py:private-key:111
+c8ab4d6765ea0e7490273c3fde9e0be6e3859d0e:scripts/portfolio_manager.py:private-key:116

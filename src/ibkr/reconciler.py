@@ -59,6 +59,11 @@ _EXCHANGE_LONG_NAMES: dict[str, str] = {
     "SZ": "Shenzhen",
     "SI": "Singapore",
     "US": "United States",
+    "MX": "Mexico",
+    "MC": "Madrid",
+    "AX": "Australia",
+    "KL": "Malaysia",
+    "VI": "Vienna",
 }
 
 
@@ -121,10 +126,10 @@ def load_latest_analyses(results_dir: Path) -> dict[str, AnalysisRecord]:
             verdict=snapshot.get("verdict", "") or "",
             health_adj=snapshot.get("health_adj"),
             growth_adj=snapshot.get("growth_adj"),
-            zone=snapshot.get("zone", ""),
+            zone=snapshot.get("zone") or "",
             position_size=snapshot.get("position_size"),
             current_price=snapshot.get("current_price"),
-            currency=snapshot.get("currency", "USD"),
+            currency=snapshot.get("currency") or "USD",
             fx_rate_to_usd=snapshot.get("fx_rate_to_usd"),
             trade_block=trade_block,
             # Structured TRADE_BLOCK fields from snapshot (if present)
@@ -132,10 +137,10 @@ def load_latest_analyses(results_dir: Path) -> dict[str, AnalysisRecord]:
             stop_price=snapshot.get("stop_price") or trade_block.stop_price,
             target_1_price=snapshot.get("target_1_price") or trade_block.target_1_price,
             target_2_price=snapshot.get("target_2_price") or trade_block.target_2_price,
-            conviction=snapshot.get("conviction", "") or trade_block.conviction,
+            conviction=snapshot.get("conviction") or trade_block.conviction,
             # Concentration metadata (sector may be absent in older snapshots)
-            sector=snapshot.get("sector", ""),
-            exchange=snapshot.get("exchange", "") or _exchange_from_ticker(ticker),
+            sector=snapshot.get("sector") or "",
+            exchange=snapshot.get("exchange") or _exchange_from_ticker(ticker),
         )
 
         analyses[ticker] = record
@@ -184,7 +189,8 @@ def check_staleness(
 
     # Age check
     if analysis.age_days > max_age_days:
-        reasons.append(f"age {analysis.age_days}d > {max_age_days}d limit")
+        age_str = "no date" if analysis.age_days >= 9999 else f"{analysis.age_days}d"
+        reasons.append(f"age {age_str} > {max_age_days}d limit")
 
     # Price drift check (requires both analysis price and current price)
     entry_price = analysis.entry_price or analysis.current_price
@@ -254,6 +260,7 @@ def reconcile(
     underweight_threshold_pct: float = 20.0,
     sector_limit_pct: float = 30.0,
     exchange_limit_pct: float = 40.0,
+    watchlist_tickers: set[str] | None = None,
 ) -> list[ReconciliationItem]:
     """
     Compare IBKR positions against evaluator recommendations.
@@ -273,6 +280,9 @@ def reconcile(
         underweight_threshold_pct: % shortfall vs target before suggesting ADD
         sector_limit_pct: Warn when an ADD/BUY would push any sector above this %
         exchange_limit_pct: Warn when an ADD/BUY would push any exchange above this %
+        watchlist_tickers: Optional set of yfinance tickers from the IBKR watchlist.
+            Tickers not currently held are evaluated in Phase 1.5 and surfaced as
+            BUY/HOLD/REMOVE/REVIEW based on their analysis verdict.
 
     Returns:
         List of ReconciliationItems with position-aware actions
@@ -284,9 +294,12 @@ def reconcile(
 
     # ── Pre-compute concentration weights from currently held positions ──
     # These are stored on the portfolio object for use by format_report().
+    # Use sum of position values as denominator so weights always sum to 100%,
+    # even when IBKR ledger total and position market values use different FX rates.
     _sector_weights: dict[str, float] = {}
     _exchange_weights: dict[str, float] = {}
-    if portfolio.portfolio_value_usd > 0:
+    _total_pos_value = sum(p.market_value_usd for p in positions)
+    if _total_pos_value > 0:
         for pos in positions:
             _analysis = analyses.get(pos.yf_ticker)
             _sector = (_analysis.sector if _analysis else "") or "Unknown"
@@ -296,7 +309,7 @@ def reconcile(
                 or pos.exchange
                 or "Unknown"
             )
-            _w = pos.market_value_usd / portfolio.portfolio_value_usd * 100
+            _w = pos.market_value_usd / _total_pos_value * 100
             _sector_weights[_sector] = _sector_weights.get(_sector, 0.0) + _w
             _exchange_weights[_exchange] = _exchange_weights.get(_exchange, 0.0) + _w
     portfolio.sector_weights = _sector_weights
@@ -528,6 +541,148 @@ def reconcile(
             )
         )
 
+    # ── Phase 1.5: Watchlist tickers not currently held ──
+    # Evaluates each watchlist ticker that isn't an open position.
+    # After processing, all watchlist tickers are added to held_tickers so that
+    # Phase 2 doesn't surface them a second time as plain BUY recommendations.
+    watchlist_set = (watchlist_tickers or set()) - held_tickers
+    for ticker in sorted(watchlist_set):
+        analysis = analyses.get(ticker)
+
+        if analysis is None:
+            items.append(
+                ReconciliationItem(
+                    ticker=ticker,
+                    action="REVIEW",
+                    reason="Watchlist: no analysis found",
+                    urgency="MEDIUM",
+                    is_watchlist=True,
+                )
+            )
+            continue
+
+        is_stale, stale_reason = check_staleness(
+            analysis, None, max_age_days, drift_threshold_pct
+        )
+        if is_stale:
+            items.append(
+                ReconciliationItem(
+                    ticker=ticker,
+                    action="REVIEW",
+                    reason=f"Watchlist: stale analysis ({stale_reason})",
+                    urgency="MEDIUM",
+                    analysis=analysis,
+                    is_watchlist=True,
+                )
+            )
+            continue
+
+        verdict_upper = (analysis.verdict or "").upper()
+
+        if verdict_upper in ("DO_NOT_INITIATE", "SELL", "REJECT"):
+            items.append(
+                ReconciliationItem(
+                    ticker=ticker,
+                    action="REMOVE",
+                    reason=f"Remove from watchlist — verdict → {analysis.verdict}  ({analysis.analysis_date})",
+                    urgency="MEDIUM",
+                    analysis=analysis,
+                    is_watchlist=True,
+                )
+            )
+
+        elif verdict_upper == "BUY":
+            has_portfolio = portfolio.portfolio_value_usd > 0
+            if has_portfolio and remaining_cash <= 0:
+                # No cash — still surface the BUY as informational
+                items.append(
+                    ReconciliationItem(
+                        ticker=ticker,
+                        action="BUY",
+                        reason=f"Watchlist BUY ({analysis.analysis_date}) — no cash available",
+                        urgency="MEDIUM",
+                        analysis=analysis,
+                        is_watchlist=True,
+                    )
+                )
+            else:
+                entry_price = analysis.entry_price or analysis.current_price
+                conviction = (
+                    analysis.conviction or analysis.trade_block.conviction or ""
+                )
+                size_pct = analysis.trade_block.size_pct or (
+                    analysis.position_size or 0
+                )
+                buy_qty = calculate_quantity(
+                    available_cash_usd=remaining_cash,
+                    entry_price_local=entry_price or 0.0,
+                    fx_rate_to_usd=analysis.fx_rate_to_usd,
+                    size_pct=size_pct,
+                    portfolio_value_usd=portfolio.portfolio_value_usd,
+                    yf_ticker=ticker,
+                )
+                buy_cost_usd = (
+                    buy_qty * (entry_price or 0.0) * (analysis.fx_rate_to_usd or 1.0)
+                )
+                if buy_qty > 0 and buy_cost_usd < _MIN_ORDER_USD:
+                    # Too small to place; skip (same rule as Phase 2)
+                    pass
+                else:
+                    remaining_cash -= buy_cost_usd
+                    buy_reason = f"Watchlist BUY ({analysis.analysis_date}) — {conviction} conviction, target {size_pct:.1f}%"
+                    if portfolio.portfolio_value_usd > 0:
+                        exch = analysis.exchange or _exchange_from_ticker(ticker)
+                        sect = analysis.sector or "Unknown"
+                        proj_exch = (
+                            _exchange_weights.get(exch, 0.0)
+                            + buy_cost_usd / portfolio.portfolio_value_usd * 100
+                        )
+                        proj_sect = (
+                            _sector_weights.get(sect, 0.0)
+                            + buy_cost_usd / portfolio.portfolio_value_usd * 100
+                        )
+                        conc_warns = []
+                        if proj_exch > exchange_limit_pct:
+                            conc_warns.append(
+                                f"⚠ {exch} → {proj_exch:.0f}% (limit {exchange_limit_pct:.0f}%)"
+                            )
+                        if proj_sect > sector_limit_pct:
+                            conc_warns.append(
+                                f"⚠ {sect} sector → {proj_sect:.0f}% (limit {sector_limit_pct:.0f}%)"
+                            )
+                        if conc_warns:
+                            buy_reason += "  " + "; ".join(conc_warns)
+                    items.append(
+                        ReconciliationItem(
+                            ticker=ticker,
+                            action="BUY",
+                            reason=buy_reason,
+                            urgency="MEDIUM",
+                            analysis=analysis,
+                            suggested_quantity=buy_qty if buy_qty > 0 else None,
+                            suggested_price=entry_price,
+                            suggested_order_type="LMT",
+                            cash_impact_usd=-buy_cost_usd if buy_cost_usd > 0 else 0.0,
+                            is_watchlist=True,
+                        )
+                    )
+
+        else:
+            # HOLD or any other verdict: keep watching, no position action
+            items.append(
+                ReconciliationItem(
+                    ticker=ticker,
+                    action="HOLD",
+                    reason=f"Watchlist: monitoring — verdict {analysis.verdict}  ({analysis.analysis_date})",
+                    urgency="LOW",
+                    analysis=analysis,
+                    is_watchlist=True,
+                )
+            )
+
+    # Prevent Phase 2 from re-processing watchlist tickers
+    held_tickers.update(watchlist_set)
+
     # ── Phase 2: Find BUY recommendations not yet held ──
     for ticker, analysis in analyses.items():
         if ticker in held_tickers:
@@ -624,6 +779,7 @@ def reconcile(
         buys=sum(1 for i in items if i.action == "BUY"),
         holds=sum(1 for i in items if i.action == "HOLD"),
         reviews=sum(1 for i in items if i.action == "REVIEW"),
+        removes=sum(1 for i in items if i.action == "REMOVE"),
     )
 
     return items
@@ -663,35 +819,62 @@ def compute_portfolio_health(
     growth_count = 0
     stale_count = 0
     currency_weights: dict[str, float] = {}
+    # Per-position scores for detail lines: (ticker, score, is_stale)
+    scored_health: list[tuple[str, float, bool]] = []
+    scored_growth: list[tuple[str, float, bool]] = []
 
     for pos in positions:
         weight = pos.market_value_usd / portfolio.portfolio_value_usd
         total_weight += weight
 
         analysis = analyses.get(pos.yf_ticker)
+        is_stale = analysis is not None and analysis.age_days > max_age_days
         if analysis:
             if analysis.health_adj is not None:
                 weighted_health += analysis.health_adj * weight
                 health_count += 1
+                scored_health.append((pos.yf_ticker, analysis.health_adj, is_stale))
             if analysis.growth_adj is not None:
                 weighted_growth += analysis.growth_adj * weight
                 growth_count += 1
-            if analysis.age_days > max_age_days:
+                scored_growth.append((pos.yf_ticker, analysis.growth_adj, is_stale))
+            if is_stale:
                 stale_count += 1
 
         ccy = (pos.currency or "USD").upper()
         currency_weights[ccy] = currency_weights.get(ccy, 0.0) + weight * 100
 
+    def _worst_detail(
+        scored: list[tuple[str, float, bool]],
+        max_age_days: int,
+        n: int = 5,
+    ) -> str:
+        """Build a detail sub-line showing the N lowest-scoring positions."""
+        worst = sorted(scored, key=lambda x: x[1])[:n]
+        items_str = "  ".join(f"{t}({s:.0f}{'†' if st else ''})" for t, s, st in worst)
+        stale_n = sum(1 for _, _, st in scored if st)
+        lines = [f"       Lowest: {items_str}"]
+        if stale_n > 0:
+            lines.append(
+                f"       (†= stale >{max_age_days}d — {stale_n}/{len(scored)} scored"
+                f" analyses; scores may not reflect recent conditions)"
+            )
+        return "\n".join(lines)
+
     if total_weight > 0:
         if health_count > 0 and (weighted_health / total_weight) < 60:
+            detail = _worst_detail(scored_health, max_age_days)
             flags.append(
                 f"LOW_HEALTH_AVERAGE: weighted avg health {weighted_health / total_weight:.0f} < 60"
                 " — portfolio skewing toward distressed names"
+                f"\n{detail}"
             )
         if growth_count > 0 and (weighted_growth / total_weight) < 55:
+            detail = _worst_detail(scored_growth, max_age_days)
             flags.append(
                 f"LOW_GROWTH_AVERAGE: weighted avg growth {weighted_growth / total_weight:.0f} < 55"
                 " — GARP thesis eroding"
+                f"\n{detail}"
             )
 
     for ccy, pct in sorted(currency_weights.items(), key=lambda x: -x[1]):
@@ -708,6 +891,7 @@ def compute_portfolio_health(
                 f"STALE_ANALYSIS_RATIO: {stale_count}/{len(positions)} positions"
                 f" ({stale_pct:.0f}%) have analyses older than {max_age_days}d"
                 " — flying blind on significant chunk of portfolio"
+                " (re-run with --refresh-stale to update)"
             )
 
     # Geography concentration is already surfaced via portfolio.exchange_weights;

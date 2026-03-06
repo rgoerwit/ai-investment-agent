@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import structlog
 
+from src.fx_normalization import FALLBACK_RATES_TO_USD
 from src.ibkr.client import IbkrClient
 from src.ibkr.models import NormalizedPosition, PortfolioSummary
 from src.ibkr.ticker_mapper import resolve_yf_ticker_from_position
@@ -41,6 +42,18 @@ def normalize_positions(raw_positions: list[dict]) -> list[NormalizedPosition]:
             )
             continue
 
+        currency = raw.get("currency") or ("GBP" if yf_ticker.endswith(".L") else "USD")
+        raw_market_value = float(raw.get("mktValue", 0) or raw.get("marketValue", 0))
+        fx_rate = FALLBACK_RATES_TO_USD.get(currency.upper(), 1.0)
+        market_value_usd = raw_market_value * fx_rate
+
+        # IBKR reports LSE (.L) prices in GBP; yfinance and analysis stop/target
+        # prices use GBX (pence). Multiply by 100 so all downstream comparisons
+        # (stop breach, target hit, drift) use consistent GBX units.
+        current_price_local = float(raw.get("mktPrice", 0) or raw.get("lastPrice", 0))
+        if yf_ticker.endswith(".L"):
+            current_price_local *= 100
+
         position = NormalizedPosition(
             conid=raw.get("conid", 0),
             yf_ticker=yf_ticker,
@@ -48,12 +61,10 @@ def normalize_positions(raw_positions: list[dict]) -> list[NormalizedPosition]:
             exchange=raw.get("listingExchange", ""),
             quantity=float(raw.get("position", 0) or raw.get("qty", 0)),
             avg_cost_local=float(raw.get("avgCost", 0) or raw.get("avgPrice", 0)),
-            market_value_usd=float(raw.get("mktValue", 0) or raw.get("marketValue", 0)),
+            market_value_usd=market_value_usd,
             unrealized_pnl_usd=float(raw.get("unrealizedPnl", 0)),
-            currency=raw.get("currency", "USD"),
-            current_price_local=float(
-                raw.get("mktPrice", 0) or raw.get("lastPrice", 0)
-            ),
+            currency=currency,
+            current_price_local=current_price_local,
         )
         positions.append(position)
 
@@ -118,6 +129,57 @@ def build_portfolio_summary(
         position_count=len(positions),
         available_cash_usd=available_cash,
     )
+
+
+def read_watchlist(
+    client: IbkrClient | None,
+    name_hint: str = "default watchlist",
+) -> set[str] | None:
+    """
+    Read IBKR watchlist and return a set of yfinance tickers.
+
+    Maps each watchlist row through the same symbol→yf-ticker resolver used
+    for live positions.  Rows that cannot be mapped are skipped with a debug log.
+
+    Args:
+        client: Connected IbkrClient (returns empty set if None)
+        name_hint: Passed to client.get_watchlist()
+
+    Returns:
+        Set of yfinance ticker strings (e.g. {"0005.HK", "7203.T"}).
+        None if the named watchlist was not found (distinct from an empty watchlist).
+        Empty set if client is None, watchlist exists but is empty, or API error.
+    """
+    if client is None:
+        return set()
+
+    rows = client.get_watchlist(name_hint)
+    if rows is None:
+        return None  # watchlist not found
+    if not rows:
+        return set()  # watchlist found but empty
+
+    tickers: set[str] = set()
+    for row in rows:
+        # Map watchlist row to the same dict shape that resolve_yf_ticker_from_position
+        # understands ("contractDesc" + "listingExchange").
+        mapped = {
+            "contractDesc": row.get("symbol", ""),
+            "listingExchange": row.get("exchange", ""),
+            "currency": row.get("currency", ""),
+        }
+        yf_ticker = resolve_yf_ticker_from_position(mapped)
+        if yf_ticker:
+            tickers.add(yf_ticker)
+        else:
+            logger.debug(
+                "watchlist_row_unmapped",
+                symbol=row.get("symbol", "?"),
+                exchange=row.get("exchange", "?"),
+            )
+
+    logger.info("watchlist_tickers_resolved", count=len(tickers), total_rows=len(rows))
+    return tickers
 
 
 def read_portfolio(

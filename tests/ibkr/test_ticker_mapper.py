@@ -74,6 +74,44 @@ class TestIbkrSymbolToYf:
         # Unknown exchange → symbol only (no suffix)
         assert ibkr_symbol_to_yf("WEIRD", "UNKNOWN") == "WEIRD"
 
+    # --- Currency fallback tests ---
+
+    def test_currency_fallback_hkd(self):
+        # Unknown exchange + HKD → .HK suffix
+        assert ibkr_symbol_to_yf("1681", "UNKNOWN", "HKD") == "1681.HK"
+
+    def test_currency_fallback_jpy(self):
+        # Empty exchange + JPY → .T suffix
+        assert ibkr_symbol_to_yf("7203", "", "JPY") == "7203.T"
+
+    def test_currency_fallback_hk_zero_padding(self):
+        # Currency fallback also applies HK zero-padding
+        assert ibkr_symbol_to_yf("5", "", "HKD") == "0005.HK"
+
+    def test_currency_fallback_ambiguous_eur_no_change(self):
+        # EUR is deliberately omitted (multi-country) — bare symbol returned
+        assert ibkr_symbol_to_yf("ASML", "UNKNOWN", "EUR") == "ASML"
+
+    def test_exchange_takes_precedence_over_currency(self):
+        # Known exchange wins even when currency would suggest different suffix
+        assert ibkr_symbol_to_yf("5", "SEHK", "USD") == "0005.HK"
+
+    def test_currency_fallback_myr(self):
+        # Unknown exchange + MYR → Bursa Malaysia .KL suffix
+        assert ibkr_symbol_to_yf("PADINI", "UNKNOWN", "MYR") == "PADINI.KL"
+
+    def test_currency_fallback_myr_scientx(self):
+        # Another MYR stock; exchange absent
+        assert ibkr_symbol_to_yf("SCIENTX", "", "MYR") == "SCIENTX.KL"
+
+    def test_madrid_sibe_exchange(self):
+        # SIBE is IBKR's code for Bolsa Madrid electronic order book
+        assert ibkr_symbol_to_yf("VID", "SIBE") == "VID.MC"
+
+    def test_madrid_bm_exchange_unchanged(self):
+        # BM mapping must remain intact
+        assert ibkr_symbol_to_yf("ITX", "BM") == "ITX.MC"
+
 
 class TestYfToIbkrFormat:
     """Test yfinance ticker → IBKR symbol+exchange conversion."""
@@ -181,6 +219,11 @@ class TestResolveYfTickerFromPosition:
 
     def test_empty_position(self):
         assert resolve_yf_ticker_from_position({}) == ""
+
+    def test_currency_fallback_for_missing_exchange(self):
+        # listingExchange absent but currency present → suffix derived from currency
+        pos = {"contractDesc": "1681", "listingExchange": "", "currency": "HKD"}
+        assert resolve_yf_ticker_from_position(pos) == "1681.HK"
 
 
 class TestParseTradeBlockPrice:

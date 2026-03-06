@@ -682,6 +682,10 @@ poetry run python scripts/portfolio_manager.py --refresh-stale --quick
 
 # Concentration limits — warn when a BUY/ADD would breach a threshold
 poetry run python scripts/portfolio_manager.py --recommend --sector-limit 25 --exchange-limit 35
+
+# Evaluate IBKR watchlist items against existing analyses
+# (default looks for a watchlist named "default watchlist"; override with --watchlist-name)
+poetry run python scripts/portfolio_manager.py --recommend --watchlist-name "my watchlist"
 ```
 
 The tool compares live IBKR positions against the latest analysis JSONs in `results/` and produces position-aware actions:
@@ -694,6 +698,8 @@ The tool compares live IBKR positions against the latest analysis JSONs in `resu
 | **ADD** | Held but underweight vs target allocation |
 | **HOLD** | Within target range, verdict is BUY |
 | **REVIEW** | Stale analysis, no analysis, or price target hit |
+| **REMOVE** | On watchlist (not held) + evaluator says SELL/DNI/REJECT |
+| **HOLD** *(watchlist)* | On watchlist (not held) + evaluator says HOLD — monitoring only |
 
 The `--recommend` report includes:
 - **CONCENTRATION** — sector and exchange weights as ASCII bar charts; ADD/BUY reasons flag when a trade would push any bucket over its limit (default: sector 30%, exchange 40%)

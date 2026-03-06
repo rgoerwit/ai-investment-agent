@@ -290,6 +290,69 @@ class IbkrClient:
         except Exception as e:
             raise IBKRAPIError(f"Failed to resolve conid for {symbol}: {e}") from e
 
+    def get_watchlist(self, name_hint: str = "default watchlist") -> list[dict] | None:
+        """
+        Fetch watchlist rows from IBKR.
+
+        Finds the watchlist whose name contains name_hint (case-insensitive),
+        falling back to the first watchlist when hint is empty.
+
+        Args:
+            name_hint: Case-insensitive substring to match against watchlist name.
+                       Empty string matches the first watchlist.
+
+        Returns:
+            List of raw watchlist row dicts (may be empty if watchlist exists but
+            has no rows).  Returns None when the named watchlist was not found.
+            Returns [] on API error (treated as transient failure, not "not found").
+        """
+        self._ensure_connected()
+        self._rate_limit()
+        try:
+            result = self._ibind_client.get_all_watchlists(sc="USER_WATCHLIST")
+            data = result.data if hasattr(result, "data") else result
+            watchlists = data if isinstance(data, list) else []
+            if not watchlists:
+                logger.debug("watchlist_none_found")
+                return None if name_hint else []
+
+            # Find by name_hint (case-insensitive substring).
+            # Empty hint → fall back to the first watchlist.
+            # Non-empty hint with no match → return None ("not found").
+            matched = None
+            hint_lower = name_hint.lower()
+            for wl in watchlists:
+                if hint_lower and hint_lower in (wl.get("name", "") or "").lower():
+                    matched = wl
+                    break
+            if matched is None:
+                if hint_lower:
+                    available = [wl.get("name", wl.get("id", "?")) for wl in watchlists]
+                    logger.warning(
+                        "watchlist_not_found",
+                        hint=name_hint,
+                        available=available,
+                    )
+                    return None
+                matched = watchlists[0]
+
+            wl_id = matched.get("id", "")
+            wl_name = matched.get("name", wl_id)
+            self._rate_limit()
+            info_result = self._ibind_client.get_watchlist_information(wl_id)
+            info_data = (
+                info_result.data if hasattr(info_result, "data") else info_result
+            )
+            info = info_data if isinstance(info_data, dict) else {}
+            rows = info.get("rows", [])
+            if not isinstance(rows, list):
+                rows = []
+            logger.info("watchlist_loaded", name=wl_name, count=len(rows))
+            return rows
+        except Exception as e:
+            logger.warning("watchlist_fetch_failed", error=str(e))
+            return []  # API error — transient failure, distinct from "not found" (None)
+
     # ── Order Placement (brokerage session required) ──
 
     def place_order(self, account_id: str, order: dict) -> dict:

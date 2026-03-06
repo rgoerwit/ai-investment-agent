@@ -305,6 +305,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--json", action="store_true", help="Structured JSON output")
     parser.add_argument("--debug", action="store_true", help="Debug output")
+    parser.add_argument(
+        "--watchlist-name",
+        type=str,
+        default=None,
+        help="Name of the IBKR watchlist to evaluate (case-insensitive substring match). "
+        'If omitted, tries "default watchlist" and silently skips if not found. '
+        "If explicitly provided and not found, aborts.",
+    )
 
     args = parser.parse_args()
 
@@ -326,6 +334,7 @@ ACTION_SYMBOLS = {
     "ADD": "ADD",
     "HOLD": " ",
     "REVIEW": "?",
+    "REMOVE": "REMOVE",
 }
 
 _DIVIDER = "═" * 54
@@ -424,9 +433,11 @@ def format_report(
     # Split by action
     sells = [i for i in items if i.action == "SELL"]
     trims = [i for i in items if i.action == "TRIM"]
+    removes = [i for i in items if i.action == "REMOVE"]
     adds = [i for i in items if i.action == "ADD"]
     buys = [i for i in items if i.action == "BUY" and i.ibkr_position is None]
-    holds = [i for i in items if i.action == "HOLD"]
+    holds_real = [i for i in items if i.action == "HOLD" and not i.is_watchlist]
+    holds_watch = [i for i in items if i.action == "HOLD" and i.is_watchlist]
     reviews = [i for i in items if i.action == "REVIEW"]
 
     def _section(title: str, subtitle: str = "") -> None:
@@ -503,6 +514,13 @@ def format_report(
                 lines.append(pl)
             lines.append("")
 
+    # ── WATCHLIST REMOVE ─────────────────────────────────────────────────────
+    if removes:
+        _section("WATCHLIST — REMOVE", "verdict changed — remove from IBKR watchlist")
+        for item in removes:
+            lines.append(f"   [REMOVE]  {item.ticker:<12}  {item.reason}")
+        lines.append("")
+
     # ── ADDS ─────────────────────────────────────────────────────────────────
     if adds:
         _section("ADDS", "increase underweight positions")
@@ -539,9 +557,9 @@ def format_report(
             lines.append("")
 
     # ── HOLDS ────────────────────────────────────────────────────────────────
-    if holds:
+    if holds_real:
         _section("HOLDS", "no action")
-        for item in holds:
+        for item in holds_real:
             pos = item.ibkr_position
             a = item.analysis
             ccy = _item_currency(item)
@@ -568,6 +586,17 @@ def format_report(
             row_parts = [p for p in [weight_str, price_str, stop_str, t1_str] if p]
             lines.append(f"     [ ]    {item.ticker:<12}  {'  '.join(row_parts)}")
 
+        lines.append("")
+
+    # ── WATCHLIST MONITORING ──────────────────────────────────────────────────
+    if holds_watch:
+        _section("WATCHLIST — MONITORING", "on watchlist, not yet a buy")
+        for item in holds_watch:
+            a = item.analysis
+            verdict_str = (
+                f"Verdict: {a.verdict}  ({a.analysis_date})" if a else "no analysis"
+            )
+            lines.append(f"     [~]    {item.ticker:<12}  {verdict_str}")
         lines.append("")
 
     # ── REVIEWS ───────────────────────────────────────────────────────────────
@@ -612,7 +641,10 @@ def format_report(
     if portfolio_health_flags:
         _section("PORTFOLIO HEALTH", "cross-portfolio signals")
         for flag in portfolio_health_flags:
-            lines.append(f"  !! {flag}")
+            flag_lines = flag.split("\n")
+            lines.append(f"  !! {flag_lines[0]}")
+            for continuation in flag_lines[1:]:
+                lines.append(f"  {continuation}")
         lines.append("")
 
     # ── CASH SUMMARY ──────────────────────────────────────────────────────────
@@ -694,12 +726,12 @@ def format_report(
             settle_groups[i.settlement_date] = (
                 settle_groups.get(i.settlement_date, 0.0) + i.cash_impact_usd
             )
-    # Upcoming review deadlines: HOLDs / items with analysis nearing max_age_days
+    # Upcoming review deadlines: real HOLD positions (not watchlist) nearing max_age_days
     upcoming_reviews: list[
         tuple[str, str, int]
     ] = []  # (ticker, expires_date, days_left)
     for item in items:
-        if item.action == "HOLD" and item.analysis:
+        if item.action == "HOLD" and not item.is_watchlist and item.analysis:
             remaining_days = max_age_days - item.analysis.age_days
             if 0 < remaining_days <= 7:
                 try:
@@ -770,7 +802,7 @@ def format_report(
     action_counts: dict[str, int] = {}
     for item in items:
         action_counts[item.action] = action_counts.get(item.action, 0) + 1
-    order = ["SELL", "TRIM", "ADD", "BUY", "HOLD", "REVIEW"]
+    order = ["SELL", "REMOVE", "TRIM", "ADD", "BUY", "HOLD", "REVIEW"]
     summary_parts = [f"{action_counts[a]} {a}" for a in order if a in action_counts]
     lines.append(f"  Summary:  {'  ·  '.join(summary_parts) or 'empty'}")
 
@@ -883,8 +915,32 @@ def cmd_test_auth(args) -> None:
     print()
 
 
+def _configure_logging(debug: bool) -> None:
+    """Configure structlog and stdlib logging for the script.
+
+    Default level is INFO (human-readable progress lines only).
+    Pass --debug to get per-record DEBUG output.
+    """
+    import logging
+
+    import structlog
+
+    level = logging.DEBUG if debug else logging.INFO
+    logging.basicConfig(
+        format="%(asctime)s [%(levelname)-8s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        level=level,
+    )
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(level),
+        logger_factory=structlog.PrintLoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
+
+
 def main() -> None:
     args = parse_args()
+    _configure_logging(args.debug)
 
     # --test-auth exits immediately after credential check — no analyses needed.
     if args.test_auth:
@@ -917,6 +973,8 @@ def main() -> None:
     positions: list[NormalizedPosition] = []
     portfolio = PortfolioSummary()
 
+    watchlist_tickers: set[str] = set()
+
     if args.read_only:
         print("Read-only mode: no IBKR connection", file=sys.stderr)
         # In read-only mode, just show analyses status
@@ -928,7 +986,7 @@ def main() -> None:
     else:
         try:
             from src.ibkr.client import IbkrClient
-            from src.ibkr.portfolio import read_portfolio
+            from src.ibkr.portfolio import read_portfolio, read_watchlist
             from src.ibkr_config import ibkr_config
 
             _prompt_for_missing_secret(ibkr_config)
@@ -941,6 +999,49 @@ def main() -> None:
                 account_id,
                 args.cash_buffer,
             )
+
+            # args.watchlist_name is None  → user didn't pass the flag; try the default
+            #                                name but don't abort if missing.
+            # args.watchlist_name is a str → explicitly requested; abort if not found.
+            wl_name_hint = (
+                args.watchlist_name
+                if args.watchlist_name is not None
+                else "default watchlist"
+            )
+            wl_explicitly_requested = args.watchlist_name is not None
+
+            wl_result = read_watchlist(client, wl_name_hint)
+            if wl_result is None:
+                # Confirmed not found: we successfully fetched the watchlist index
+                # and the name wasn't in it.
+                if wl_explicitly_requested:
+                    print(
+                        f"Error: watchlist '{wl_name_hint}' not found in IBKR.\n"
+                        f"Use --watchlist-name with a substring that matches one of your IBKR watchlist names.",
+                        file=sys.stderr,
+                    )
+                    client.close()
+                    sys.exit(1)
+                # Not explicitly requested — silently skip
+            elif len(wl_result) == 0:
+                # Empty set: either a transient API error (e.g. "no bridge" — see
+                # the watchlist_fetch_failed warning above) or a genuinely empty
+                # watchlist.  Either way, continue without watchlist filtering.
+                if wl_explicitly_requested:
+                    print(
+                        f"Warning: could not load watchlist '{wl_name_hint}' "
+                        f"(API error or watchlist is empty — see log above). "
+                        f"Continuing without watchlist filtering.",
+                        file=sys.stderr,
+                    )
+                # Not explicitly requested — silently skip
+            else:
+                watchlist_tickers = wl_result
+                print(
+                    f"Loaded {len(watchlist_tickers)} watchlist tickers from '{wl_name_hint}'",
+                    file=sys.stderr,
+                )
+
             client.close()
 
         except ImportError:
@@ -967,6 +1068,7 @@ def main() -> None:
         drift_threshold_pct=args.drift_pct,
         sector_limit_pct=args.sector_limit,
         exchange_limit_pct=args.exchange_limit,
+        watchlist_tickers=watchlist_tickers if watchlist_tickers else None,
     )
 
     # Compute portfolio-level health flags (uses weights populated by reconcile())
@@ -986,6 +1088,7 @@ def main() -> None:
             and (
                 "stale" in (item.reason or "").lower()
                 or "no evaluator analysis found" in (item.reason or "").lower()
+                or "no analysis found" in (item.reason or "").lower()
             )
         ]
         if stale_tickers:
@@ -1005,6 +1108,7 @@ def main() -> None:
                 drift_threshold_pct=args.drift_pct,
                 sector_limit_pct=args.sector_limit,
                 exchange_limit_pct=args.exchange_limit,
+                watchlist_tickers=watchlist_tickers if watchlist_tickers else None,
             )
             health_flags = compute_portfolio_health(
                 positions=positions,

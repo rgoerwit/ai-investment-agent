@@ -441,7 +441,12 @@ class TestConcentration:
     """Test sector/exchange concentration tracking."""
 
     def test_exchange_weights_populated_after_reconcile(self):
-        """reconcile() populates portfolio.exchange_weights from held positions."""
+        """reconcile() populates portfolio.exchange_weights from held positions.
+
+        Weights are % of deployed equity (sum of position values), not % of
+        total portfolio value (which includes cash and may use a different FX rate).
+        Positions: HK=$40k, JP=$20k → total $60k → HK=66.7%, JP=33.3%.
+        """
         pos_hk = _make_position(
             ticker="0005.HK", market_value_usd=40000, currency="HKD"
         )
@@ -455,8 +460,11 @@ class TestConcentration:
 
         assert "HK" in portfolio.exchange_weights
         assert "T" in portfolio.exchange_weights
-        assert abs(portfolio.exchange_weights["HK"] - 40.0) < 0.5
-        assert abs(portfolio.exchange_weights["T"] - 20.0) < 0.5
+        # Denominator is sum of positions ($60k), not ledger value ($100k)
+        assert abs(portfolio.exchange_weights["HK"] - 66.7) < 0.5
+        assert abs(portfolio.exchange_weights["T"] - 33.3) < 0.5
+        # Weights must sum to 100%
+        assert abs(sum(portfolio.exchange_weights.values()) - 100.0) < 0.1
 
     def test_concentration_warning_in_buy_reason(self):
         """BUY reason includes ⚠ when projected exchange weight exceeds limit."""
@@ -488,6 +496,55 @@ class TestConcentration:
         reconcile([], {}, portfolio)
         assert portfolio.exchange_weights == {}
         assert portfolio.sector_weights == {}
+
+    def test_concentration_sums_to_100(self):
+        """
+        Sector and exchange weights always sum to ~100% even when position market
+        values and the ledger portfolio_value_usd use different FX rates (stale rates
+        vs live rates). The denominator is now sum-of-positions, not ledger total.
+        """
+        # Simulate stale-FX scenario: positions sum to $60k but ledger says $71k
+        pos_hk = _make_position(
+            ticker="0005.HK", market_value_usd=40000, currency="HKD", conid=1
+        )
+        pos_jp = _make_position(
+            ticker="7203.T", market_value_usd=20000, currency="JPY", conid=2
+        )
+        analyses = {
+            "0005.HK": _make_analysis(ticker="0005.HK", verdict="BUY", size_pct=5.0),
+            "7203.T": _make_analysis(ticker="7203.T", verdict="BUY", size_pct=5.0),
+        }
+        # Ledger value intentionally higher than sum of positions (simulates FX drift)
+        portfolio = _make_portfolio(value=71000, cash=15000)
+        reconcile([pos_hk, pos_jp], analyses, portfolio)
+
+        total_exchange = sum(portfolio.exchange_weights.values())
+        total_sector = sum(portfolio.sector_weights.values())
+        assert total_exchange == pytest.approx(100.0, abs=0.1)
+        assert total_sector == pytest.approx(100.0, abs=0.1)
+
+
+class TestStalenessDisplay:
+    """Test that staleness reason strings are human-readable."""
+
+    def test_normal_age_shows_days(self):
+        analysis = _make_analysis(age_days=20)
+        is_stale, reason = check_staleness(analysis, max_age_days=14)
+        assert is_stale
+        assert "20d" in reason
+        assert "9999" not in reason
+
+    def test_missing_date_shows_no_date(self):
+        """age_days=9999 sentinel (missing/malformed analysis_date) → 'no date'."""
+        analysis = AnalysisRecord(
+            ticker="TEST.T",
+            analysis_date="",  # missing date → age_days = 9999
+        )
+        assert analysis.age_days >= 9999
+        is_stale, reason = check_staleness(analysis, max_age_days=14)
+        assert is_stale
+        assert "no date" in reason
+        assert "9999" not in reason
 
 
 # ── Portfolio Health Tests ──
@@ -563,3 +620,36 @@ class TestComputePortfolioHealth:
         portfolio = _make_portfolio(value=0)
         flags = compute_portfolio_health([], {}, portfolio)
         assert flags == []
+
+    def test_low_health_flag_includes_worst_contributors(self):
+        """LOW_HEALTH_AVERAGE flag lists the tickers with the lowest health scores."""
+        pos1 = _make_position(ticker="7203.T", market_value_usd=5000, conid=1)
+        pos2 = _make_position(ticker="0005.HK", market_value_usd=5000, conid=2)
+        a1 = _make_analysis(ticker="7203.T", age_days=3)
+        a1.health_adj = 20.0  # very low
+        a2 = _make_analysis(ticker="0005.HK", age_days=3)
+        a2.health_adj = 30.0  # also low
+        portfolio = _make_portfolio(value=100000)
+        portfolio.exchange_weights = {}
+        flags = compute_portfolio_health(
+            [pos1, pos2], {"7203.T": a1, "0005.HK": a2}, portfolio
+        )
+        health_flag = next(f for f in flags if "LOW_HEALTH" in f)
+        # Flag must be multi-line with ticker scores embedded
+        assert "7203.T" in health_flag
+        assert "0005.HK" in health_flag
+        assert "Lowest:" in health_flag
+
+    def test_stale_positions_marked_in_health_flag(self):
+        """Stale analyses are marked with † and a caveat is appended."""
+        pos = _make_position(ticker="7203.T", market_value_usd=10000, conid=1)
+        analysis = _make_analysis(ticker="7203.T", age_days=20)  # stale
+        analysis.health_adj = 25.0
+        portfolio = _make_portfolio(value=100000)
+        portfolio.exchange_weights = {}
+        flags = compute_portfolio_health(
+            [pos], {"7203.T": analysis}, portfolio, max_age_days=14
+        )
+        health_flag = next(f for f in flags if "LOW_HEALTH" in f)
+        assert "†" in health_flag
+        assert "stale" in health_flag
