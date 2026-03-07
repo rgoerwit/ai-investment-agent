@@ -297,6 +297,34 @@ class IbkrClient:
         except Exception as e:
             raise IBKRAPIError(f"Failed to resolve conid for {symbol}: {e}") from e
 
+    def initialize_brokerage_session(self, compete: bool = True) -> bool:
+        """
+        Initialize the IBKR brokerage session (POST /iserver/auth/ssodh/init).
+
+        Required before calling any /iserver/ endpoint (watchlists, market data,
+        orders, contract info).  The portfolio /portfolio/ endpoints work without
+        this; the brokerage session is an additional step on top of the OAuth
+        live session token.
+
+        Args:
+            compete: When True (default), disconnects competing brokerage sessions.
+                     When False, fails if another brokerage session is already active.
+
+        Returns:
+            True on success, False on failure (logs a warning on failure).
+        """
+        self._ensure_connected()
+        self._rate_limit()
+        try:
+            self._ibind_client.initialize_brokerage_session(compete=compete)
+            logger.info("brokerage_session_initialized", compete=compete)
+            return True
+        except Exception as e:
+            logger.warning(
+                "brokerage_session_init_failed", error=str(e), compete=compete
+            )
+            return False
+
     def get_watchlist(self, name_hint: str = "default watchlist") -> list[dict] | None:
         """
         Fetch watchlist rows from IBKR.
@@ -314,11 +342,50 @@ class IbkrClient:
             Returns [] on API error (treated as transient failure, not "not found").
         """
         self._ensure_connected()
+        # /iserver/ endpoints require a brokerage session on top of the OAuth
+        # live session token.  Initialize it here; this is a no-op if already active.
+        self.initialize_brokerage_session()
         self._rate_limit()
         try:
             result = self._ibind_client.get_all_watchlists(sc="USER_WATCHLIST")
             data = result.data if hasattr(result, "data") else result
-            watchlists = data if isinstance(data, list) else []
+
+            # Log raw shape for diagnostics
+            if isinstance(data, dict):
+                logger.debug("watchlists_raw_dict", keys=sorted(data.keys()))
+            elif isinstance(data, list):
+                logger.debug("watchlists_raw_list", length=len(data))
+            else:
+                logger.debug("watchlists_raw_other", data_type=type(data).__name__)
+
+            def _extract_watchlist_list(payload, depth: int = 0) -> list:
+                """Recursively find the list of watchlist entries in the response.
+
+                IBKR response shapes observed:
+                  [...]                                          — bare list
+                  {"data": [...]}                                — one level of wrapping
+                  {"MID":…, "action":…, "data": {"user_lists": [...]}}
+                                                                 — two levels of wrapping
+                """
+                if isinstance(payload, list):
+                    return payload
+                if not isinstance(payload, dict) or depth > 3:
+                    return []
+                for key in ("data", "user_lists", "lists", "watchlists"):
+                    val = payload.get(key)
+                    if isinstance(val, list):
+                        return val
+                    if isinstance(val, dict):
+                        nested = _extract_watchlist_list(val, depth + 1)
+                        if nested:
+                            return nested
+                return []
+
+            watchlists = _extract_watchlist_list(data)
+            if not watchlists and isinstance(data, dict) and data:
+                logger.warning("watchlists_unexpected_shape", keys=sorted(data.keys()))
+
+            logger.info("watchlists_fetched", count=len(watchlists))
             if not watchlists:
                 logger.debug("watchlist_none_found")
                 return None if name_hint else []
@@ -350,8 +417,20 @@ class IbkrClient:
             info_data = (
                 info_result.data if hasattr(info_result, "data") else info_result
             )
+            # Unwrap MID/action envelope: {"MID":…, "action":…, "data": {watchlist dict}}
+            if isinstance(info_data, dict):
+                inner = info_data.get("data")
+                if isinstance(inner, dict):
+                    info_data = inner
+                elif isinstance(inner, list):
+                    info_data = {"rows": inner}
             info = info_data if isinstance(info_data, dict) else {}
-            rows = info.get("rows", [])
+            logger.debug(
+                "watchlist_info_keys",
+                keys=sorted(info.keys()),
+                rows_type=type(info.get("rows")).__name__,
+            )
+            rows = info.get("rows") or info.get("instruments") or []
             if not isinstance(rows, list):
                 rows = []
             logger.info("watchlist_loaded", name=wl_name, count=len(rows))
@@ -359,6 +438,46 @@ class IbkrClient:
         except Exception as e:
             logger.warning("watchlist_fetch_failed", error=str(e))
             return []  # API error — transient failure, distinct from "not found" (None)
+
+    def get_live_orders(self, account_id: str | None = None) -> list[dict]:
+        """
+        Fetch open/pending orders from IBKR.
+
+        Returns list of raw order dicts (may be empty).
+        Requires a brokerage session — initializes one if not already active.
+        """
+        self._ensure_connected()
+        self.initialize_brokerage_session()
+        self._rate_limit()
+        acct = account_id or self._settings.ibkr_account_id
+        try:
+            result = self._ibind_client.live_orders(account_id=acct)
+            data = result.data if hasattr(result, "data") else result
+            if isinstance(data, dict):
+                return data.get("orders", [])
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning("live_orders_fetch_failed", error=str(e))
+            return []
+
+    def get_contract_info(self, conid: int) -> dict:
+        """
+        Get contract details (symbol, exchange, currency) for a given conid.
+
+        Used to resolve watchlist conids to yfinance tickers.
+
+        Returns raw contract info dict, or {} on failure.
+        """
+        self._ensure_connected()
+        self.initialize_brokerage_session()
+        self._rate_limit()
+        try:
+            result = self._ibind_client.contract_information_by_conid(str(conid))
+            data = result.data if hasattr(result, "data") else result
+            return data if isinstance(data, dict) else {}
+        except Exception as e:
+            logger.debug("contract_info_failed", conid=conid, error=str(e))
+            return {}
 
     # ── Order Placement (brokerage session required) ──
 

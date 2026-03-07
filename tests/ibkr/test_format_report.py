@@ -648,3 +648,213 @@ class TestPnlLine:
         report = format_report([item], _make_portfolio(), show_recommendations=False)
         assert "SELLS — FUNDAMENTAL FAILURE" in report
         assert "est. gain:" in report
+
+
+def _make_sell_item_with_analysis(
+    sell_type: str = "STOP_BREACH",
+    reason: str = "Stop breached: price 2700.00 < stop 2780.00",
+    health: float = 75.0,
+    growth: float = 68.0,
+    zone: str = "MODERATE",
+    verdict: str = "BUY",
+    conviction: str = "High",
+    analysis_date: str = "2026-01-15",
+) -> ReconciliationItem:
+    """SELL item with a fully-populated AnalysisRecord for score-line testing."""
+    item = _make_sell_item(sell_type=sell_type, reason=reason)
+    item = item.model_copy(
+        update={
+            "analysis": AnalysisRecord(
+                ticker="9201.T",
+                analysis_date=analysis_date,
+                verdict=verdict,
+                health_adj=health,
+                growth_adj=growth,
+                zone=zone,
+                conviction=conviction,
+            )
+        }
+    )
+    return item
+
+
+class TestScoreLine:
+    """Tests for the _score_line fundamentals helper embedded in format_report()."""
+
+    def _report_for(self, item: ReconciliationItem) -> str:
+        return format_report([item], _make_portfolio(), show_recommendations=False)
+
+    def test_stop_breach_shows_health_and_growth(self):
+        """STOP_BREACH SELL includes health and growth scores in output."""
+        item = _make_sell_item_with_analysis(health=75.0, growth=68.0)
+        report = self._report_for(item)
+        assert "Health:75" in report
+        assert "Growth:68" in report
+
+    def test_stop_breach_shows_zone_and_verdict(self):
+        """STOP_BREACH SELL includes zone and original verdict."""
+        item = _make_sell_item_with_analysis(
+            zone="MODERATE", verdict="BUY", conviction="High"
+        )
+        report = self._report_for(item)
+        assert "Risk zone:MODERATE" in report
+        assert "BUY (High)" in report
+
+    def test_hard_reject_shows_scores(self):
+        """HARD_REJECT SELL shows scores — helps confirm it genuinely failed."""
+        item = _make_sell_item_with_analysis(
+            sell_type="HARD_REJECT",
+            reason="Verdict → DO_NOT_INITIATE  (2026-03-05)",
+            health=38.0,
+            growth=32.0,
+            zone="HIGH",
+            verdict="DO_NOT_INITIATE",
+            conviction="Low",
+        )
+        report = self._report_for(item)
+        assert "Health:38" in report
+        assert "Growth:32" in report
+        assert "Risk zone:HIGH" in report
+
+    def test_score_line_shows_analysis_date(self):
+        """Score line includes analysis date so operator knows how stale the scores are."""
+        item = _make_sell_item_with_analysis(analysis_date="2026-01-15")
+        report = self._report_for(item)
+        assert "Last analysis (2026-01-15):" in report
+
+    def test_score_line_suppressed_when_no_analysis(self):
+        """Item with no analysis → no score line (no Health/Growth in output)."""
+        item = _make_sell_item()  # no analysis attached
+        report = self._report_for(item)
+        assert "Health:" not in report
+        assert "Growth:" not in report
+
+    def test_score_line_suppressed_when_no_scores(self):
+        """Analysis with no health_adj/growth_adj → score line suppressed."""
+        item = _make_sell_item()
+        item = item.model_copy(
+            update={
+                "analysis": AnalysisRecord(
+                    ticker="9201.T",
+                    analysis_date="2026-01-15",
+                    verdict="BUY",
+                    # health_adj and growth_adj deliberately omitted
+                )
+            }
+        )
+        report = self._report_for(item)
+        assert "Health:" not in report
+        assert "Growth:" not in report
+
+    def test_score_line_before_pnl_line(self):
+        """Score line appears before the P&L line in output."""
+        item = _make_sell_item_with_analysis(health=75.0, growth=68.0)
+        # Give it a valid cost basis so pnl_line also appears
+        pos = item.ibkr_position.model_copy(
+            update={"avg_cost_local": 2000.0, "current_price_local": 2300.0}
+        )
+        item = item.model_copy(update={"ibkr_position": pos})
+        report = self._report_for(item)
+        health_pos = report.index("Health:75")
+        pnl_pos = report.index("est. gain:")
+        assert health_pos < pnl_pos
+
+    def test_macro_review_uses_display_data_line_not_score_line(self):
+        """Demoted SOFT_REJECT (macro review) uses _display_data_line, not _score_line.
+        Scores appear via the existing macro-review data display path."""
+        item = _make_dip_item(
+            ticker="9201.T",
+            health=75,
+            growth=68,
+            entry=2800,
+            current_price=2700,
+            stop=2600,
+            target=3200,
+        )
+        report = format_report(
+            [item], _make_portfolio(), portfolio_health_flags=[_CORR_FLAG]
+        )
+        # Health/Growth appear (via _display_data_line), but not the analysis date
+        # that _score_line would add (since _display_data_line doesn't add it)
+        assert "Health:75" in report
+        assert "Growth:68" in report
+
+
+# ── Order annotation helpers ──────────────────────────────────────────────────
+
+
+def _make_order(
+    conid: int | None = None,
+    ticker: str | None = None,
+    side: str = "S",
+    remaining_size: int = 100,
+    price: float = 2780.0,
+    order_type: str = "LMT",
+    status: str = "Submitted",
+) -> dict:
+    """Build a minimal IBKR live-order dict."""
+    order: dict = {
+        "side": side,
+        "remainingSize": remaining_size,
+        "price": price,
+        "orderType": order_type,
+        "status": status,
+    }
+    if conid is not None:
+        order["conid"] = conid
+    if ticker is not None:
+        order["ticker"] = ticker
+    return order
+
+
+class TestOrderAnnotation:
+    """format_report() live-order annotation via live_orders parameter."""
+
+    def test_sell_with_matching_open_order_shows_note(self):
+        """SELL item with matching open SELL order (by conid) → 'open order:' note shown."""
+        item = _make_sell_item(
+            ticker="9201.T",
+            sell_type="STOP_BREACH",
+            reason="Stop breached: price 2700.00 < stop 2780.00",
+        )
+        # Position conid = 99999 (set by _make_sell_item via NormalizedPosition)
+        order = _make_order(conid=99999, side="S", remaining_size=100, price=2780.0)
+        report = format_report([item], _make_portfolio(), live_orders=[order])
+        assert "open order:" in report
+        assert "SELL" in report
+        assert "2780.00" in report
+
+    def test_buy_with_matching_open_order_shows_note(self):
+        """BUY item (no position) with open BUY order matched by symbol → note shown."""
+        item = ReconciliationItem(
+            ticker="9201.T",
+            action="BUY",
+            urgency="LOW",
+            reason="BUY signal",
+            ibkr_position=None,
+        )
+        # No conid on a BUY with no position — match by symbol "9201"
+        order = _make_order(ticker="9201", side="B", remaining_size=50, price=2750.0)
+        report = format_report([item], _make_portfolio(), live_orders=[order])
+        assert "open order:" in report
+        assert "BUY" in report
+
+    def test_no_orders_no_note(self):
+        """Empty live_orders list → no 'open order:' annotation anywhere in report."""
+        item = _make_sell_item()
+        report = format_report([item], _make_portfolio(), live_orders=[])
+        assert "open order:" not in report
+
+    def test_order_for_different_ticker_not_shown(self):
+        """Order with a different conid and non-matching symbol → not annotated."""
+        item = _make_sell_item(ticker="9201.T")
+        # item.ibkr_position.conid == 99999; order has conid 11111 and ticker "XXXX"
+        order = _make_order(conid=11111, ticker="XXXX", side="S", remaining_size=100)
+        report = format_report([item], _make_portfolio(), live_orders=[order])
+        assert "open order:" not in report
+
+    def test_live_orders_none_no_annotation(self):
+        """live_orders omitted (default None) → no annotation."""
+        item = _make_sell_item()
+        report = format_report([item], _make_portfolio())
+        assert "open order:" not in report

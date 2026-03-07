@@ -338,6 +338,37 @@ def resolve_conid(yf_ticker: str, client: object | None = None) -> int | None:
         raise IBKRTickerResolutionError(yf_ticker, str(e)) from e
 
 
+def yf_ticker_from_conid(conid: int) -> str | None:
+    """Reverse-lookup: find yf_ticker for a known conid from the local cache.
+
+    Checks entries stored by resolve_conid() (key = yf_ticker, value has "conid" field).
+    Ignores yfinance.Search cache entries (key prefix "ibkr:").
+
+    Returns yf_ticker string, or None if not found.
+    """
+    cache = _get_cache()
+    for key, entry in cache.items():
+        if (
+            not key.startswith("ibkr:")
+            and isinstance(entry, dict)
+            and entry.get("conid") == conid
+        ):
+            return key
+    return None
+
+
+def cache_conid_mapping(yf_ticker: str, conid: int, symbol: str, exchange: str) -> None:
+    """Store a conid↔yf_ticker mapping so future lookups skip the API call."""
+    cache = _get_cache()
+    cache[yf_ticker.upper()] = {
+        "conid": conid,
+        "symbol": symbol,
+        "exchange": exchange,
+        "ts": time.time(),
+    }
+    _flush_cache()
+
+
 def resolve_yf_ticker_from_position(position: dict) -> str:
     """
     Extract yfinance ticker from an IBKR position dict.

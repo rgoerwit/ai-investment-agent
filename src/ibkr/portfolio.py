@@ -12,7 +12,12 @@ import structlog
 from src.fx_normalization import FALLBACK_RATES_TO_USD
 from src.ibkr.client import IbkrClient
 from src.ibkr.models import NormalizedPosition, PortfolioSummary
-from src.ibkr.ticker_mapper import resolve_yf_ticker_from_position
+from src.ibkr.ticker_mapper import (
+    cache_conid_mapping,
+    ibkr_symbol_to_yf,
+    resolve_yf_ticker_from_position,
+    yf_ticker_from_conid,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -133,19 +138,68 @@ def build_portfolio_summary(
     )
 
 
+def _resolve_watchlist_conid(conid: int, client: IbkrClient | None) -> str:
+    """Resolve a watchlist conid to a yfinance ticker.
+
+    Checks the local conid cache first (instant, no API call).  On a miss,
+    calls /iserver/contract/{conid}/info via the client, maps to a yfinance
+    ticker using the same IBKR→yfinance table as live positions, and caches
+    the result so subsequent runs are instant.
+
+    Returns the yfinance ticker string, or "" if resolution fails.
+    """
+    # Fast path: reverse-lookup in local cache
+    cached = yf_ticker_from_conid(conid)
+    if cached:
+        logger.debug("watchlist_conid_cache_hit", conid=conid, yf_ticker=cached)
+        return cached
+
+    # Slow path: ask IBKR for contract details
+    if client is None:
+        return ""
+
+    info = client.get_contract_info(conid)
+    if not info:
+        logger.debug("watchlist_conid_no_info", conid=conid)
+        return ""
+
+    symbol = info.get("symbol", "") or info.get("ticker", "")
+    exchange = info.get("listingExchange", "") or info.get("exchange", "")
+    currency = info.get("currency", "")
+
+    if not symbol:
+        logger.debug("watchlist_conid_no_symbol", conid=conid, info=info)
+        return ""
+
+    yf_ticker = ibkr_symbol_to_yf(symbol, exchange, currency)
+    if yf_ticker:
+        cache_conid_mapping(yf_ticker, conid, symbol, exchange)
+        logger.info(
+            "watchlist_conid_resolved",
+            conid=conid,
+            symbol=symbol,
+            exchange=exchange,
+            yf_ticker=yf_ticker,
+        )
+    return yf_ticker
+
+
 def read_watchlist(
     client: IbkrClient | None,
-    name_hint: str = "default watchlist",
+    name_hint: str = "",
 ) -> set[str] | None:
     """
     Read IBKR watchlist and return a set of yfinance tickers.
 
-    Maps each watchlist row through the same symbol→yf-ticker resolver used
-    for live positions.  Rows that cannot be mapped are skipped with a debug log.
+    IBKR watchlist rows contain only the conid (field "C").  This function
+    resolves each conid to a yfinance ticker via the local cache (fast) or
+    the /iserver/contract/{conid}/info API (on first encounter), then caches
+    the result for subsequent runs.
 
     Args:
         client: Connected IbkrClient (returns empty set if None)
-        name_hint: Passed to client.get_watchlist()
+        name_hint: Case-insensitive substring of the watchlist name to load.
+            Empty string (default) → uses the first watchlist found.
 
     Returns:
         Set of yfinance ticker strings (e.g. {"0005.HK", "7203.T"}).
@@ -162,25 +216,35 @@ def read_watchlist(
         return set()  # watchlist found but empty
 
     tickers: set[str] = set()
+    skipped = 0
+    if rows:
+        logger.debug("watchlist_first_row", row=rows[0])
     for row in rows:
-        # Map watchlist row to the same dict shape that resolve_yf_ticker_from_position
-        # understands ("contractDesc" + "listingExchange").
-        mapped = {
-            "contractDesc": row.get("symbol", ""),
-            "listingExchange": row.get("exchange", ""),
-            "currency": row.get("currency", ""),
-        }
-        yf_ticker = resolve_yf_ticker_from_position(mapped)
+        # IBKR watchlist rows: {"C": conid} for securities, {"H": "1"} for blank spacers
+        # Some API versions use "conid" instead of "C"
+        raw_conid = row.get("C") or row.get("conid") or row.get("conId")
+        if not raw_conid:
+            continue  # blank spacer row or unexpected format
+
+        try:
+            conid = int(raw_conid)
+        except (TypeError, ValueError):
+            logger.debug("watchlist_bad_conid", raw=raw_conid)
+            continue
+
+        yf_ticker = _resolve_watchlist_conid(conid, client)
         if yf_ticker:
             tickers.add(yf_ticker)
         else:
-            logger.debug(
-                "watchlist_row_unmapped",
-                symbol=row.get("symbol", "?"),
-                exchange=row.get("exchange", "?"),
-            )
+            skipped += 1
+            logger.debug("watchlist_row_unresolved", conid=conid)
 
-    logger.info("watchlist_tickers_resolved", count=len(tickers), total_rows=len(rows))
+    logger.info(
+        "watchlist_tickers_resolved",
+        count=len(tickers),
+        skipped=skipped,
+        total_rows=len(rows),
+    )
     return tickers
 
 

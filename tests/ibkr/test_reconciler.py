@@ -14,6 +14,7 @@ from src.ibkr.models import (
     TradeBlockData,
 )
 from src.ibkr.reconciler import (
+    _parse_scores_from_final_decision,
     check_staleness,
     check_stop_breach,
     check_target_hit,
@@ -913,3 +914,79 @@ class TestCorrelatedSellDetection:
             [pos], {"7203.T": analysis}, portfolio, reconciliation_items=None
         )
         assert isinstance(flags, list)
+
+
+class TestParseScoresFromFinalDecision:
+    """Unit tests for the legacy analysis text extractor."""
+
+    def test_structured_fields(self):
+        """Mid-era format: HEALTH_ADJ / GROWTH_ADJ / VERDICT / ZONE structured fields."""
+        text = """
+=== DECISION LOGIC ===
+ZONE: LOW (< 1.0)
+HEALTH_ADJ: 79
+GROWTH_ADJ: 83
+VERDICT: BUY
+"""
+        result = _parse_scores_from_final_decision(text)
+        assert result["health_adj"] == 79.0
+        assert result["growth_adj"] == 83.0
+        assert result["verdict"] == "BUY"
+        assert result["zone"] == "LOW"
+
+    def test_narrative_format(self):
+        """Old-era format: prose Financial Health / Growth Transition percentages."""
+        text = """
+**Action**: **BUY**
+
+- **Financial Health**: 70.8% (Adjusted) - **PASS**
+- **Growth Transition**: 66.7% (Adjusted) - **PASS**
+"""
+        result = _parse_scores_from_final_decision(text)
+        assert result["health_adj"] == 70.8
+        assert result["growth_adj"] == 66.7
+        assert result["verdict"] == "BUY"
+
+    def test_pm_verdict_header(self):
+        """PORTFOLIO MANAGER VERDICT header pattern."""
+        text = "### PORTFOLIO MANAGER VERDICT: HOLD\nHEALTH_ADJ: 55\nGROWTH_ADJ: 60"
+        result = _parse_scores_from_final_decision(text)
+        assert result["verdict"] == "HOLD"
+        assert result["health_adj"] == 55.0
+
+    def test_structured_takes_precedence_over_narrative(self):
+        """Structured HEALTH_ADJ wins over the prose Financial Health value."""
+        text = "Financial Health: 60.0% (Adjusted)\nHEALTH_ADJ: 79"
+        result = _parse_scores_from_final_decision(text)
+        assert result["health_adj"] == 79.0
+
+    def test_missing_fields_return_empty_dict(self):
+        """Text with no recognisable patterns → empty dict (no KeyError)."""
+        result = _parse_scores_from_final_decision("Nothing useful here.")
+        assert result == {}
+
+    def test_do_not_initiate_verdict(self):
+        """DO_NOT_INITIATE verdict parsed correctly (underscore in name)."""
+        text = "VERDICT: DO_NOT_INITIATE\nHEALTH_ADJ: 38\nGROWTH_ADJ: 32"
+        result = _parse_scores_from_final_decision(text)
+        assert result["verdict"] == "DO_NOT_INITIATE"
+
+    def test_load_latest_analyses_uses_fallback(self, tmp_path):
+        """load_latest_analyses fills health/growth from final_decision text."""
+        analysis_json = {
+            "prediction_snapshot": {},
+            "investment_analysis": {"trader_plan": ""},
+            "final_decision": {
+                "decision": ("HEALTH_ADJ: 79\nGROWTH_ADJ: 83\nVERDICT: BUY\nZONE: LOW")
+            },
+        }
+        f = tmp_path / "9201.T_20260210_220052_analysis.json"
+        f.write_text(json.dumps(analysis_json))
+
+        analyses = load_latest_analyses(tmp_path)
+        r = analyses.get("9201.T") or analyses.get("9201_T")
+        assert r is not None, "9201.T should be loaded"
+        assert r.health_adj == 79.0
+        assert r.growth_adj == 83.0
+        assert r.verdict == "BUY"
+        assert r.zone == "LOW"

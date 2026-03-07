@@ -79,6 +79,62 @@ def _exchange_from_ticker(ticker: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+def _parse_scores_from_final_decision(text: str) -> dict:
+    """Extract health_adj, growth_adj, verdict, zone from a PM final_decision narrative.
+
+    Handles two legacy text formats for analyses that predate prediction_snapshot:
+
+    Mid-era (structured fields in text):
+        HEALTH_ADJ: 79  /  GROWTH_ADJ: 83  /  VERDICT: BUY  /  ZONE: MODERATE
+
+    Old-era (prose narrative):
+        Financial Health: 70.8% (Adjusted)  /  Growth Transition: 66.7% (Adjusted)
+        **Action**: **BUY**
+    """
+    result: dict = {}
+
+    # ── Health score ──────────────────────────────────────────────────────────
+    m = re.search(r"\bHEALTH_ADJ[:\s]+([0-9.]+)", text, re.IGNORECASE)
+    if not m:
+        # Handles "Financial Health: 70.8%" and "**Financial Health**: 70.8%"
+        # [^0-9\n]+ stops at the first digit so the number isn't partially consumed
+        m = re.search(r"Financial Health[^0-9\n]+([\d.]+)%", text, re.IGNORECASE)
+    if m:
+        try:
+            result["health_adj"] = float(m.group(1))
+        except ValueError:
+            pass
+
+    # ── Growth score ──────────────────────────────────────────────────────────
+    m = re.search(r"\bGROWTH_ADJ[:\s]+([0-9.]+)", text, re.IGNORECASE)
+    if not m:
+        m = re.search(r"Growth Transition[^0-9\n]+([\d.]+)%", text, re.IGNORECASE)
+    if m:
+        try:
+            result["growth_adj"] = float(m.group(1))
+        except ValueError:
+            pass
+
+    # ── Verdict ───────────────────────────────────────────────────────────────
+    # Try structured field, then PM header, then action markdown
+    for pat in (
+        r"\bVERDICT[:\s]+([A-Z][A-Z_]*)",
+        r"PORTFOLIO MANAGER VERDICT:\s*([A-Z][A-Z_]*)",
+        r"\*\*Action\*\*:\s*\*\*(\w[\w_]*)\*\*",
+    ):
+        m = re.search(pat, text)
+        if m:
+            result["verdict"] = m.group(1).upper()
+            break
+
+    # ── Risk zone ─────────────────────────────────────────────────────────────
+    m = re.search(r"\bZONE[:\s]+(HIGH|MODERATE|LOW)\b", text, re.IGNORECASE)
+    if m:
+        result["zone"] = m.group(1).upper()
+
+    return result
+
+
 def load_latest_analyses(results_dir: Path) -> dict[str, AnalysisRecord]:
     """
     Load the most recent analysis JSON for each ticker from results_dir.
@@ -100,6 +156,22 @@ def load_latest_analyses(results_dir: Path) -> dict[str, AnalysisRecord]:
             continue
 
         snapshot = data.get("prediction_snapshot", {})
+
+        # For analyses that predate prediction_snapshot, extract scores from the
+        # PM final_decision text so that health/growth appear in the SELL output.
+        if snapshot.get("health_adj") is None or not snapshot.get("verdict"):
+            fd_text = (data.get("final_decision") or {}).get("decision", "") or ""
+            if fd_text:
+                fb = _parse_scores_from_final_decision(fd_text)
+                if snapshot.get("health_adj") is None:
+                    snapshot = {**snapshot, "health_adj": fb.get("health_adj")}
+                if snapshot.get("growth_adj") is None:
+                    snapshot = {**snapshot, "growth_adj": fb.get("growth_adj")}
+                if not snapshot.get("verdict"):
+                    snapshot = {**snapshot, "verdict": fb.get("verdict") or ""}
+                if not snapshot.get("zone"):
+                    snapshot = {**snapshot, "zone": fb.get("zone") or ""}
+
         ticker = snapshot.get("ticker") or data.get("ticker", "")
         if not ticker:
             # Try to extract from filename: TICKER_YYYY-MM-DD_analysis.json

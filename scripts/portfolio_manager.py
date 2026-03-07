@@ -423,6 +423,7 @@ def format_report(
     show_recommendations: bool = False,
     portfolio_health_flags: list[str] | None = None,
     max_age_days: int = 14,
+    live_orders: list[dict] | None = None,
 ) -> str:
     """Format reconciliation results as sectioned human-readable text."""
     lines: list[str] = []
@@ -515,11 +516,7 @@ def format_report(
         if not show_recommendations or not item.cash_impact_usd:
             return None
         amount = item.cash_impact_usd
-        settle = (
-            f"settles {item.settlement_date}  ·  not spendable until then"
-            if item.settlement_date
-            else ""
-        )
+        settle = f"spendable on {item.settlement_date}" if item.settlement_date else ""
         parts = [f"Proceeds: ~${amount:,.0f} USD"]
         if settle:
             parts.append(settle)
@@ -645,6 +642,43 @@ def format_report(
             return f"analyzed {normed[paren + 1:-1]}"
         return normed  # fallback: show full reason
 
+    def _score_line(item: ReconciliationItem) -> str | None:
+        """Return an indented fundamentals line (health/growth/zone/verdict) for a SELL item.
+
+        Gives the operator enough context to judge whether a stop breach or
+        fundamental failure warrants execution or a macro-event hold.
+        """
+        a = item.analysis
+        if not a:
+            return None
+        if a.health_adj is None and a.growth_adj is None:
+            return None
+
+        date_label = (
+            f"Last analysis ({a.analysis_date}):"
+            if a.analysis_date and a.age_days < 9999
+            else "Last analysis:"
+        )
+
+        parts: list[str] = []
+        if a.health_adj is not None and a.growth_adj is not None:
+            parts.append(f"Health:{a.health_adj:.0f}  Growth:{a.growth_adj:.0f}")
+        elif a.health_adj is not None:
+            parts.append(f"Health:{a.health_adj:.0f}")
+        else:
+            parts.append(f"Growth:{a.growth_adj:.0f}")
+
+        if a.zone:
+            parts.append(f"Risk zone:{a.zone}")
+
+        verdict_str = a.verdict or ""
+        if a.conviction:
+            verdict_str += f" ({a.conviction})" if verdict_str else a.conviction
+        if verdict_str:
+            parts.append(verdict_str)
+
+        return f"             {date_label}  " + "  ·  ".join(parts)
+
     def _pnl_line(item: ReconciliationItem) -> str | None:
         """Return an indented gain/loss estimate line for a SELL/TRIM item, or None if unavailable."""
         pos = item.ibkr_position
@@ -671,6 +705,55 @@ def format_report(
         gain_or_loss = "est. gain:" if pnl_local >= 0 else "est. loss:"
         tax_note = "  ·  verify holding period in IBKR" if pnl_local > 0 else ""
         return f"             {gain_or_loss}  {sign}{ccy_sym}{abs(pnl_local):,.0f}  ({pct:+.1f}%){tax_note}"
+
+    def _append_pnl_proceeds(item: ReconciliationItem, ccy: str) -> None:
+        """Append combined gain/loss + proceeds on one line, or each separately if only one exists."""
+        pnl = _pnl_line(item)
+        pl = _proceeds_line(item)
+        if pnl and pl:
+            lines.append(pnl + "  ·  " + pl.lstrip())
+        elif pnl:
+            lines.append(pnl)
+        elif pl:
+            lines.append(pl)
+
+    # ── Live-order lookup ─────────────────────────────────────────────────────
+    _live_orders: list[dict] = live_orders or []
+
+    def _order_note(item: ReconciliationItem) -> str | None:
+        """Return a compact order-status note if an open order exists for this ticker."""
+        if not _live_orders:
+            return None
+        pos = item.ibkr_position
+        conid = pos.conid if pos else None
+        ticker_symbol = item.ticker.split(".")[0].upper()
+
+        for order in _live_orders:
+            matched = False
+            order_conid = order.get("conid")
+            order_symbol = (order.get("ticker") or order.get("symbol") or "").upper()
+            if conid and order_conid is not None:
+                try:
+                    if int(order_conid) == int(conid):
+                        matched = True
+                except (TypeError, ValueError):
+                    pass
+            if not matched and order_symbol == ticker_symbol:
+                matched = True
+            if not matched:
+                continue
+
+            side = "SELL" if order.get("side", "").upper() in ("S", "SELL") else "BUY"
+            qty = order.get("remainingSize") or order.get("totalSize") or "?"
+            price = order.get("price") or order.get("auxPrice")
+            otype = order.get("orderType", "LMT")
+            status = order.get("status", "")
+            price_str = f" @ {price:.2f}" if price else ""
+            return (
+                f"             open order: {side} {qty}{price_str} {otype} ({status})"
+            )
+
+        return None
 
     # ── MACRO ALERT BANNER (if correlated sell event detected) ───────────────
     _correlated_flag = next(
@@ -704,12 +787,13 @@ def format_report(
         for item in stop_sells:
             ccy = _item_currency(item)
             lines.append(f"{_order_line(item, ccy)}  {_norm_reason(item.reason)}")
-            pnl = _pnl_line(item)
-            if pnl:
-                lines.append(pnl)
-            pl = _proceeds_line(item)
-            if pl:
-                lines.append(pl)
+            sl = _score_line(item)
+            if sl:
+                lines.append(sl)
+            _append_pnl_proceeds(item, ccy)
+            note = _order_note(item)
+            if note:
+                lines.append(note)
             lines.append("")
 
     # ── SELLS — FUNDAMENTAL FAILURE (hard reject — execute) ──────────────────
@@ -718,12 +802,13 @@ def format_report(
         for item in hard_sells:
             ccy = _item_currency(item)
             lines.append(f"{_order_line(item, ccy)}  {_as_of_date(item.reason)}")
-            pnl = _pnl_line(item)
-            if pnl:
-                lines.append(pnl)
-            pl = _proceeds_line(item)
-            if pl:
-                lines.append(pl)
+            sl = _score_line(item)
+            if sl:
+                lines.append(sl)
+            _append_pnl_proceeds(item, ccy)
+            note = _order_note(item)
+            if note:
+                lines.append(note)
             lines.append("")
 
     # ── SELLS — SOFT REJECTION / MACRO REVIEWS ───────────────────────────────
@@ -743,13 +828,17 @@ def format_report(
             _display_reason = _norm_reason(item.reason.split("  [MACRO_WATCH:")[0])
             lines.append(f"{_order_line(item, ccy)}  {_display_reason}")
             if item in macro_reviews:
-                _display_data_line(item)
-            pnl = _pnl_line(item)
-            if pnl:
-                lines.append(pnl)
-            pl = _proceeds_line(item)
-            if pl:
-                lines.append(pl)
+                _display_data_line(
+                    item
+                )  # already shows health/growth + entry/current price
+            else:
+                sl = _score_line(item)
+                if sl:
+                    lines.append(sl)
+            _append_pnl_proceeds(item, ccy)
+            note = _order_note(item)
+            if note:
+                lines.append(note)
             lines.append("")
 
     # ── DIP WATCH ────────────────────────────────────────────────────────────
@@ -776,12 +865,10 @@ def format_report(
         for item in trims:
             ccy = _item_currency(item)
             lines.append(f"{_order_line(item, ccy)}  {_norm_reason(item.reason)}")
-            pnl = _pnl_line(item)
-            if pnl:
-                lines.append(pnl)
-            pl = _proceeds_line(item)
-            if pl:
-                lines.append(pl)
+            _append_pnl_proceeds(item, ccy)
+            note = _order_note(item)
+            if note:
+                lines.append(note)
             lines.append("")
 
     # ── WATCHLIST REMOVE ─────────────────────────────────────────────────────
@@ -800,6 +887,9 @@ def format_report(
             cl = _cost_line(item)
             if cl:
                 lines.append(cl)
+            note = _order_note(item)
+            if note:
+                lines.append(note)
             lines.append("")
 
     # ── NEW BUYS ──────────────────────────────────────────────────────────────
@@ -823,6 +913,9 @@ def format_report(
             cl = _cost_line(item)
             if cl:
                 lines.append(cl)
+            note = _order_note(item)
+            if note:
+                lines.append(note)
             lines.append("")
 
     # ── HOLDS ────────────────────────────────────────────────────────────────
@@ -1268,6 +1361,7 @@ def main() -> None:
     portfolio = PortfolioSummary()
 
     watchlist_tickers: set[str] = set()
+    _live_orders_data: list[dict] = []
 
     if args.read_only:
         print("Read-only mode: no IBKR connection", file=sys.stderr)
@@ -1300,7 +1394,7 @@ def main() -> None:
             wl_name_hint = (
                 args.watchlist_name
                 if args.watchlist_name is not None
-                else "default watchlist"
+                else ""  # empty → first available watchlist
             )
             wl_explicitly_requested = args.watchlist_name is not None
 
@@ -1335,6 +1429,13 @@ def main() -> None:
                     f"Loaded {len(watchlist_tickers)} watchlist tickers from '{wl_name_hint}'",
                     file=sys.stderr,
                 )
+
+            # Fetch live orders before closing — used by format_report() annotations
+            if args.recommend:
+                try:
+                    _live_orders_data = client.get_live_orders()
+                except Exception:
+                    pass  # fail-safe: annotation omitted if unavailable
 
             client.close()
 
@@ -1427,6 +1528,7 @@ def main() -> None:
             show_recommendations=show_recs,
             portfolio_health_flags=health_flags,
             max_age_days=args.max_age,
+            live_orders=_live_orders_data,
         )
 
     if args.output:
