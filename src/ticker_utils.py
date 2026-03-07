@@ -172,6 +172,8 @@ class TickerFormatter:
         "IDX": ".JK",
         "KLSE": ".KL",
         "WBAG": ".VI",  # Wiener Börse AG (Vienna Stock Exchange)
+        "VSE": ".VI",  # Vienna Stock Exchange (alternative IBKR code for WBAG)
+        "WSE": ".WA",  # Warsaw Stock Exchange (Giełda Papierów Wartościowych)
         "SET": ".BK",
         "NASDAQ": "",
         "NYSE": "",

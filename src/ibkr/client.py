@@ -275,16 +275,23 @@ class IbkrClient:
         except Exception as e:
             raise IBKRAPIError(f"Failed to fetch ledger: {e}") from e
 
-    def stock_conid_by_symbol(self, symbol: str) -> dict:
+    def stock_conid_by_symbol(
+        self, symbol: str, default_filtering: bool = False
+    ) -> dict:
         """
         Resolve stock conid from symbol.
 
         Returns dict of {symbol: [{conid, exchange, ...}]}.
+
+        Note: default_filtering=False is the correct default for this system — ibind's
+        built-in default applies {isUS: True} which silently drops all non-US contracts.
         """
         self._ensure_connected()
         self._rate_limit()
         try:
-            result = self._ibind_client.stock_conid_by_symbol(symbol)
+            result = self._ibind_client.stock_conid_by_symbol(
+                symbol, default_filtering=default_filtering
+            )
             data = result.data if hasattr(result, "data") else result
             return data if isinstance(data, dict) else {}
         except Exception as e:

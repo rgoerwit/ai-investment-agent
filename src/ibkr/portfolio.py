@@ -49,10 +49,12 @@ def normalize_positions(raw_positions: list[dict]) -> list[NormalizedPosition]:
 
         # IBKR reports LSE (.L) prices in GBP; yfinance and analysis stop/target
         # prices use GBX (pence). Multiply by 100 so all downstream comparisons
-        # (stop breach, target hit, drift) use consistent GBX units.
+        # (stop breach, target hit, drift, P&L) use consistent GBX units.
         current_price_local = float(raw.get("mktPrice", 0) or raw.get("lastPrice", 0))
+        avg_cost_local = float(raw.get("avgCost", 0) or raw.get("avgPrice", 0))
         if yf_ticker.endswith(".L"):
             current_price_local *= 100
+            avg_cost_local *= 100  # GBP → GBX, consistent with current_price_local
 
         position = NormalizedPosition(
             conid=raw.get("conid", 0),
@@ -60,7 +62,7 @@ def normalize_positions(raw_positions: list[dict]) -> list[NormalizedPosition]:
             symbol=raw.get("contractDesc", ""),
             exchange=raw.get("listingExchange", ""),
             quantity=float(raw.get("position", 0) or raw.get("qty", 0)),
-            avg_cost_local=float(raw.get("avgCost", 0) or raw.get("avgPrice", 0)),
+            avg_cost_local=avg_cost_local,
             market_value_usd=market_value_usd,
             unrealized_pnl_usd=float(raw.get("unrealizedPnl", 0)),
             currency=currency,
@@ -202,6 +204,15 @@ def read_portfolio(
         Tuple of (normalized_positions, portfolio_summary)
     """
     acct = account_id or client.account_id
+
+    # IBKR CP API requires portfolio_accounts() to be called before any /portfolio/
+    # endpoints to initialise the session for that account. Without it, positions and
+    # ledger calls may return empty results. Failure is logged but non-fatal — the
+    # subsequent calls may still succeed (e.g. in certain OAuth configurations).
+    try:
+        client.get_accounts()
+    except Exception as e:
+        logger.warning("portfolio_accounts_preflight_failed", error=str(e))
 
     raw_positions = client.get_positions(acct)
     positions = normalize_positions(raw_positions)

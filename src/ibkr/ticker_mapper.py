@@ -78,8 +78,15 @@ _CURRENCY_TO_SUFFIX: dict[str, str] = {
     "BRL": ".SA",
     "MXN": ".MX",
     "MYR": ".KL",  # Malaysian Ringgit → Bursa Malaysia
+    "PLN": ".WA",  # Polish złoty → Warsaw Stock Exchange
+    "SEK": ".ST",  # Swedish krona → OMX Stockholm
+    "NOK": ".OL",  # Norwegian krone → Oslo Børs
+    "DKK": ".CO",  # Danish krone → OMX Copenhagen
     # EUR, GBP, CHF omitted — ambiguous multi-country currencies
 }
+
+# Venues that should be excluded from yfinance.Search fallback results
+_OTC_VENUES: frozenset[str] = frozenset({"PNK", "OTC", "PINX", "GREY"})
 
 
 def ibkr_symbol_to_yf(symbol: str, exchange: str, currency: str = "") -> str:
@@ -122,6 +129,10 @@ def ibkr_symbol_to_yf(symbol: str, exchange: str, currency: str = "") -> str:
 
     # Returning bare symbol — warn if exchange was specified but unrecognised
     if exchange and exchange not in ("", "SMART", "NASDAQ", "NYSE", "ARCA", "AMEX"):
+        # Final fallback: search yfinance before giving up
+        yf_ticker = _yf_search_ticker(symbol, exchange, currency)
+        if yf_ticker:
+            return yf_ticker
         logger.warning(
             "ibkr_exchange_unmapped",
             symbol=symbol,
@@ -130,6 +141,105 @@ def ibkr_symbol_to_yf(symbol: str, exchange: str, currency: str = "") -> str:
             note="No yfinance suffix found; position will use bare ticker (may be incorrect for non-US stocks)",
         )
     return symbol
+
+
+def _yf_search_ticker(symbol: str, exchange: str, currency: str) -> str:
+    """
+    Resolve an unmapped (symbol, exchange) pair via yfinance.Search.
+
+    Filters out OTC/pink-sheet results.  If the IBKR-reported currency maps
+    unambiguously to a yfinance suffix (via _CURRENCY_TO_SUFFIX), only
+    candidates with that suffix are accepted.  Otherwise the first remaining
+    equity result is used and logged as a best-guess warning.
+
+    Result is cached in conid_map.json (positive and negative) to avoid
+    repeat network calls.
+
+    Args:
+        symbol:   IBKR symbol (e.g. "ANDR")
+        exchange: IBKR exchange code not in IBKR_TO_YFINANCE (e.g. "VSE")
+        currency: IBKR-reported currency (e.g. "EUR", "PLN")
+
+    Returns:
+        yfinance ticker string (e.g. "ANDR.VI"), or "" if unresolvable.
+    """
+    cache_key = f"ibkr:{symbol.upper()}:{exchange.upper()}"
+    cache = _get_cache()
+    if cache_key in cache:
+        cached = cache[cache_key].get("yf_ticker", "")
+        logger.debug(
+            "yf_search_cache_hit",
+            symbol=symbol,
+            exchange=exchange,
+            yf_ticker=cached or "(none)",
+        )
+        return cached  # "" = negative cache (previous search found nothing)
+
+    try:
+        import yfinance as yf
+
+        results = yf.Search(symbol, max_results=10)
+        quotes = getattr(results, "quotes", []) or []
+
+        # Keep only equities from non-OTC venues
+        candidates = [
+            q
+            for q in quotes
+            if q.get("quoteType") == "EQUITY"
+            and q.get("exchange", "") not in _OTC_VENUES
+        ]
+
+        matched = ""
+        if candidates:
+            # If currency maps unambiguously to a suffix, prefer that suffix
+            expected_suffix = _CURRENCY_TO_SUFFIX.get(currency.upper(), "")
+            if expected_suffix:
+                suffix_matches = [
+                    q
+                    for q in candidates
+                    if q.get("symbol", "").endswith(expected_suffix)
+                ]
+                if suffix_matches:
+                    matched = suffix_matches[0].get("symbol", "")
+
+            # No unambiguous suffix match — take first remaining equity (may be ambiguous
+            # for multi-country currencies like EUR).  Logged as a best-guess warning so
+            # the operator can override via the static table if wrong.
+            if not matched:
+                matched = candidates[0].get("symbol", "")
+                if matched:
+                    logger.warning(
+                        "yf_search_best_guess",
+                        symbol=symbol,
+                        exchange=exchange,
+                        yf_ticker=matched,
+                        note="Ambiguous currency; verify this mapping or add exchange to IBKR_TO_YFINANCE",
+                    )
+
+        # Cache result — empty string is a negative cache entry (don't re-search)
+        cache[cache_key] = {"yf_ticker": matched, "ts": time.time()}
+        _flush_cache()
+
+        if matched:
+            logger.info(
+                "yf_search_resolved",
+                symbol=symbol,
+                exchange=exchange,
+                yf_ticker=matched,
+                currency=currency,
+            )
+        else:
+            logger.debug(
+                "yf_search_no_match",
+                symbol=symbol,
+                exchange=exchange,
+                currency=currency,
+            )
+        return matched
+
+    except Exception as e:
+        logger.debug("yf_search_failed", symbol=symbol, exchange=exchange, error=str(e))
+        return ""
 
 
 def yf_to_ibkr_format(yf_ticker: str) -> tuple[str, str]:
@@ -184,8 +294,10 @@ def resolve_conid(yf_ticker: str, client: object | None = None) -> int | None:
     symbol, exchange = yf_to_ibkr_format(yf_ticker)
 
     try:
-        # IBind's stock_conid_by_symbol returns {symbol: [{conid, exchange, ...}]}
-        result = client.stock_conid_by_symbol(symbol)
+        # IBind's stock_conid_by_symbol returns {symbol: [{conid, exchange, ...}]}.
+        # default_filtering=False required: the library default applies {isUS: True}
+        # which drops all non-US listed contracts (i.e. every stock this system trades).
+        result = client.stock_conid_by_symbol(symbol, default_filtering=False)
         if not result or symbol.upper() not in result:
             raise IBKRTickerResolutionError(yf_ticker)
 

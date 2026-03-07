@@ -8,6 +8,7 @@ import pytest
 
 from src.ibkr.exceptions import IBKRTickerResolutionError
 from src.ibkr.ticker_mapper import (
+    _yf_search_ticker,
     ibkr_symbol_to_yf,
     parse_trade_block_price,
     resolve_conid,
@@ -71,8 +72,9 @@ class TestIbkrSymbolToYf:
         assert ibkr_symbol_to_yf("VALE3", "BVMF") == "VALE3.SA"
 
     def test_unknown_exchange(self):
-        # Unknown exchange → symbol only (no suffix)
-        assert ibkr_symbol_to_yf("WEIRD", "UNKNOWN") == "WEIRD"
+        # Unknown exchange with no search result → bare symbol returned
+        with patch("src.ibkr.ticker_mapper._yf_search_ticker", return_value=""):
+            assert ibkr_symbol_to_yf("WEIRD", "UNKNOWN") == "WEIRD"
 
     # --- Currency fallback tests ---
 
@@ -89,8 +91,10 @@ class TestIbkrSymbolToYf:
         assert ibkr_symbol_to_yf("5", "", "HKD") == "0005.HK"
 
     def test_currency_fallback_ambiguous_eur_no_change(self):
-        # EUR is deliberately omitted (multi-country) — bare symbol returned
-        assert ibkr_symbol_to_yf("ASML", "UNKNOWN", "EUR") == "ASML"
+        # EUR is deliberately omitted from _CURRENCY_TO_SUFFIX (multi-country).
+        # When yfinance.Search also finds nothing, bare symbol is returned.
+        with patch("src.ibkr.ticker_mapper._yf_search_ticker", return_value=""):
+            assert ibkr_symbol_to_yf("ASML", "UNKNOWN", "EUR") == "ASML"
 
     def test_exchange_takes_precedence_over_currency(self):
         # Known exchange wins even when currency would suggest different suffix
@@ -111,6 +115,92 @@ class TestIbkrSymbolToYf:
     def test_madrid_bm_exchange_unchanged(self):
         # BM mapping must remain intact
         assert ibkr_symbol_to_yf("ITX", "BM") == "ITX.MC"
+
+
+class TestYfSearchTicker:
+    """Tests for the yfinance.Search fallback resolver."""
+
+    def _make_quote(
+        self, symbol: str, exchange: str, quote_type: str = "EQUITY"
+    ) -> dict:
+        return {"symbol": symbol, "exchange": exchange, "quoteType": quote_type}
+
+    def _mock_search(self, quotes: list[dict]):
+        mock = MagicMock()
+        mock.quotes = quotes
+        return mock
+
+    def test_resolves_by_currency_suffix(self):
+        """PLN currency → prefers .WA result over other equities."""
+        quotes = [
+            self._make_quote("KTY.WA", "WSE"),
+            self._make_quote("KTYFOO", "GER"),
+        ]
+        with patch("yfinance.Search", return_value=self._mock_search(quotes)):
+            with patch("src.ibkr.ticker_mapper._get_cache", return_value={}):
+                with patch("src.ibkr.ticker_mapper._flush_cache"):
+                    assert _yf_search_ticker("KTY", "NEWEXCH", "PLN") == "KTY.WA"
+
+    def test_best_guess_for_ambiguous_currency(self):
+        """EUR (ambiguous) → returns first non-OTC equity."""
+        quotes = [
+            self._make_quote("ANDR", "PNK"),  # filtered out (OTC)
+            self._make_quote("ANDR.VI", "VIE"),  # first non-OTC equity
+            self._make_quote("AZ2.DE", "GER"),
+        ]
+        with patch("yfinance.Search", return_value=self._mock_search(quotes)):
+            with patch("src.ibkr.ticker_mapper._get_cache", return_value={}):
+                with patch("src.ibkr.ticker_mapper._flush_cache"):
+                    assert _yf_search_ticker("ANDR", "VSE", "EUR") == "ANDR.VI"
+
+    def test_returns_empty_when_only_otc(self):
+        """All results are OTC → returns empty string."""
+        quotes = [self._make_quote("FOO", "PNK"), self._make_quote("FOO", "OTC")]
+        with patch("yfinance.Search", return_value=self._mock_search(quotes)):
+            with patch("src.ibkr.ticker_mapper._get_cache", return_value={}):
+                with patch("src.ibkr.ticker_mapper._flush_cache"):
+                    assert _yf_search_ticker("FOO", "WEIRD", "USD") == ""
+
+    def test_returns_empty_on_exception(self):
+        """Exception during Search → returns empty string (graceful degradation)."""
+        with patch("yfinance.Search", side_effect=Exception("network error")):
+            with patch("src.ibkr.ticker_mapper._get_cache", return_value={}):
+                assert _yf_search_ticker("FOO", "WEIRD", "EUR") == ""
+
+    def test_cache_hit_returns_cached(self):
+        """Cache hit skips the network call entirely."""
+        cache = {"ibkr:KTY:WSE": {"yf_ticker": "KTY.WA", "ts": time.time()}}
+        with patch("src.ibkr.ticker_mapper._get_cache", return_value=cache):
+            assert _yf_search_ticker("KTY", "WSE", "PLN") == "KTY.WA"
+
+    def test_negative_cache_skips_search(self):
+        """Negative cache entry (empty yf_ticker) prevents repeat search."""
+        cache = {"ibkr:NOMATCH:WEIRD": {"yf_ticker": "", "ts": time.time()}}
+        with patch("src.ibkr.ticker_mapper._get_cache", return_value=cache):
+            with patch("yfinance.Search") as mock_search:
+                result = _yf_search_ticker("NOMATCH", "WEIRD", "EUR")
+        assert result == ""
+        mock_search.assert_not_called()
+
+    def test_ibkr_symbol_to_yf_uses_search_fallback(self):
+        """ibkr_symbol_to_yf calls _yf_search_ticker for unknown exchanges."""
+        with patch(
+            "src.ibkr.ticker_mapper._yf_search_ticker", return_value="ANDR.VI"
+        ) as mock_fn:
+            result = ibkr_symbol_to_yf("ANDR", "NEWEXCH", "EUR")
+        assert result == "ANDR.VI"
+        mock_fn.assert_called_once_with("ANDR", "NEWEXCH", "EUR")
+
+    def test_filters_non_equity_quote_types(self):
+        """FUTURE and MUTUALFUND results are filtered out."""
+        quotes = [
+            self._make_quote("CL=F", "NYM", quote_type="FUTURE"),
+            self._make_quote("APR.WA", "WSE", quote_type="EQUITY"),
+        ]
+        with patch("yfinance.Search", return_value=self._mock_search(quotes)):
+            with patch("src.ibkr.ticker_mapper._get_cache", return_value={}):
+                with patch("src.ibkr.ticker_mapper._flush_cache"):
+                    assert _yf_search_ticker("APR", "NEWEXCH", "PLN") == "APR.WA"
 
 
 class TestYfToIbkrFormat:
