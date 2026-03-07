@@ -791,6 +791,49 @@ def _make_multi_sell_scenario(
     return positions, analyses, portfolio
 
 
+def _make_sell_item_on_date(
+    ticker: str,
+    date_str: str,
+    conid: int = 99999,
+    sell_type: str = "SOFT_REJECT",
+) -> ReconciliationItem:
+    """Build a SELL ReconciliationItem with a specific analysis_date."""
+    pos = _make_position(ticker=ticker, market_value_usd=1000, conid=conid)
+    a = _make_analysis(ticker=ticker, verdict="DO_NOT_INITIATE", age_days=0)
+    a.analysis_date = date_str
+    if sell_type == "SOFT_REJECT":
+        a.health_adj = 65.0
+        a.growth_adj = 60.0
+    else:
+        a.health_adj = 35.0
+        a.growth_adj = 40.0
+    return ReconciliationItem(
+        ticker=ticker,
+        action="SELL",
+        reason="Verdict → DO_NOT_INITIATE",
+        urgency="HIGH",
+        ibkr_position=pos,
+        analysis=a,
+        sell_type=sell_type,
+    )
+
+
+def _make_hold_item_for_health(ticker: str, conid: int = 88888) -> ReconciliationItem:
+    """Build a HOLD ReconciliationItem (counts toward total_held)."""
+    pos = _make_position(ticker=ticker, market_value_usd=1000, conid=conid)
+    a = _make_analysis(ticker=ticker, verdict="BUY", age_days=0)
+    a.health_adj = 70.0
+    a.growth_adj = 65.0
+    return ReconciliationItem(
+        ticker=ticker,
+        action="HOLD",
+        reason="Within targets",
+        urgency="LOW",
+        ibkr_position=pos,
+        analysis=a,
+    )
+
+
 class TestCorrelatedSellDetection:
     """Test CORRELATED_SELL_EVENT detection and SOFT_REJECT demotion."""
 
@@ -990,3 +1033,150 @@ VERDICT: BUY
         assert r.growth_adj == 83.0
         assert r.verdict == "BUY"
         assert r.zone == "LOW"
+
+
+# ── Window-Based Correlated Sell Detection Tests ──
+
+
+class TestCorrelatedSellDetectionWindow:
+    """
+    Test that the sliding date window correctly groups sells from nearby dates.
+
+    Scenario that motivated the fix:
+        22:07 run — 22 sells all dated 2026-03-05 → 22/49 = 45% → event fires,
+            24 positions demoted to MACRO_WATCH
+        23:10 run — same portfolio, ~4 analyses re-run with new date 2026-03-06
+            → 2026-03-05 cluster drops from 22 to 18, still 18/49 = 37% but with
+            exact-date matching the Counter only sees 18 on 03-05 vs 4 on 03-06,
+            which still fires.  In practice, enough re-runs fragmented the cluster
+            below the threshold.  The 7-day window prevents this fragility.
+    """
+
+    def test_sells_within_window_grouped_as_correlated(self):
+        """
+        3 sells on 2026-03-05 + 3 sells on 2026-03-10 (5 days apart, within 7-day
+        window) + 2 holds = 8 total held.
+        6 within window / 8 held = 75% and ≥5 → fires.
+        Without the window fix the per-date max is 3 < 5 → would NOT fire.
+        """
+        items = (
+            [
+                _make_sell_item_on_date(f"S{i}.T", "2026-03-05", conid=100 + i)
+                for i in range(3)
+            ]
+            + [
+                _make_sell_item_on_date(f"T{i}.T", "2026-03-10", conid=200 + i)
+                for i in range(3)
+            ]
+            + [_make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(2)]
+        )
+        positions = [i.ibkr_position for i in items if i.ibkr_position]
+        portfolio = _make_portfolio(value=len(positions) * 1000, cash=0)
+        portfolio.exchange_weights = {}
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        assert any("CORRELATED_SELL_EVENT" in f for f in flags)
+
+    def test_sells_beyond_window_not_grouped(self):
+        """
+        3 sells on 2026-03-05 + 3 sells on 2026-03-13 (8 days apart, beyond
+        7-day window) + 2 holds = 8 total held.
+        Neither window contains ≥5 sells → does NOT fire.
+        """
+        items = (
+            [
+                _make_sell_item_on_date(f"S{i}.T", "2026-03-05", conid=100 + i)
+                for i in range(3)
+            ]
+            + [
+                _make_sell_item_on_date(f"T{i}.T", "2026-03-13", conid=200 + i)
+                for i in range(3)
+            ]
+            + [_make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(2)]
+        )
+        positions = [i.ibkr_position for i in items if i.ibkr_position]
+        portfolio = _make_portfolio(value=len(positions) * 1000, cash=0)
+        portfolio.exchange_weights = {}
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        assert not any("CORRELATED_SELL_EVENT" in f for f in flags)
+
+    def test_reanalysis_date_shift_does_not_suppress_alarm(self):
+        """
+        Real-world regression: 22 sells on 2026-03-05, then 4 re-analysed on
+        2026-03-06 (same SELL verdict, new date) — should still fire.
+        With exact-date matching: 18 on 03-05, 4 on 03-06, peak=18, 18/49=37% → fires.
+        With window: 22 within [03-05, 03-11], 22/49=45% → fires.
+        Both methods agree here; test documents expected behaviour.
+        """
+        sells_d0 = [
+            _make_sell_item_on_date(f"A{i}.T", "2026-03-05", conid=100 + i)
+            for i in range(18)
+        ]
+        sells_d1 = [
+            _make_sell_item_on_date(f"B{i}.T", "2026-03-06", conid=200 + i)
+            for i in range(4)
+        ]
+        holds = [
+            _make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(27)
+        ]
+        items = sells_d0 + sells_d1 + holds
+        positions = [i.ibkr_position for i in items if i.ibkr_position]
+        portfolio = _make_portfolio(value=len(positions) * 1000, cash=0)
+        portfolio.exchange_weights = {}
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        assert any("CORRELATED_SELL_EVENT" in f for f in flags)
+
+    def test_custom_window_days_respected(self):
+        """correlated_window_days=3: sells 2 days apart group; 4 days apart do not."""
+        # 3 sells on day 0 + 3 sells on day 2 = within 3-day window → 6 total
+        items_close = (
+            [
+                _make_sell_item_on_date(f"S{i}.T", "2026-03-05", conid=100 + i)
+                for i in range(3)
+            ]
+            + [
+                _make_sell_item_on_date(f"T{i}.T", "2026-03-07", conid=200 + i)
+                for i in range(3)
+            ]
+            + [_make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(2)]
+        )
+        positions_close = [i.ibkr_position for i in items_close if i.ibkr_position]
+        portfolio_close = _make_portfolio(value=len(positions_close) * 1000, cash=0)
+        portfolio_close.exchange_weights = {}
+        flags_close = compute_portfolio_health(
+            positions_close,
+            {},
+            portfolio_close,
+            reconciliation_items=items_close,
+            correlated_window_days=3,
+        )
+        assert any("CORRELATED_SELL_EVENT" in f for f in flags_close)
+
+        # 3 sells on day 0 + 3 sells on day 4 = outside 3-day window → max 3 < 5
+        items_far = (
+            [
+                _make_sell_item_on_date(f"S{i}.T", "2026-03-05", conid=400 + i)
+                for i in range(3)
+            ]
+            + [
+                _make_sell_item_on_date(f"T{i}.T", "2026-03-09", conid=500 + i)
+                for i in range(3)
+            ]
+            + [_make_hold_item_for_health(f"H{i}.T", conid=600 + i) for i in range(2)]
+        )
+        positions_far = [i.ibkr_position for i in items_far if i.ibkr_position]
+        portfolio_far = _make_portfolio(value=len(positions_far) * 1000, cash=0)
+        portfolio_far.exchange_weights = {}
+        flags_far = compute_portfolio_health(
+            positions_far,
+            {},
+            portfolio_far,
+            reconciliation_items=items_far,
+            correlated_window_days=3,
+        )
+        assert not any("CORRELATED_SELL_EVENT" in f for f in flags_far)

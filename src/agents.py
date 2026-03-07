@@ -1247,6 +1247,43 @@ def create_analyst_node(
                         message="Legal Counsel data not yet available - proceeding without legal context",
                     )
 
+            # News Analyst: inject active portfolio-detected macro events from ChromaDB
+            if agent_key == "news_analyst":
+                try:
+                    from src.memory import create_macro_events_store
+                    from src.retrospective import _get_ticker_suffix
+
+                    _mstore = create_macro_events_store()
+                    if _mstore.available:
+                        _region = _get_ticker_suffix(ticker)
+                        _events = _mstore.get_active_events(
+                            region_filter=_region or None
+                        )
+                        if _events:
+                            _lines = ["### MACRO EVENT CONTEXT (portfolio-detected)"]
+                            for _ev in _events[:2]:  # cap at 2 to keep prompt compact
+                                _lines.append(
+                                    f"- {_ev.event_date} | {_ev.impact} | "
+                                    f"{_ev.scope}: {_ev.news_headline}"
+                                )
+                                if _ev.news_detail:
+                                    _lines.append(f"  {_ev.news_detail}")
+                            _lines.append(
+                                "Instruction: Determine if this equity is an "
+                                "'Innocent Bystander' (dropped due to the macro event, "
+                                "fundamentals intact \u2192 OPPORTUNITY) or "
+                                "'Structurally Impaired' (business model affected \u2192 EXIT). "
+                                "Ignore if event is inapplicable to this region/sector."
+                            )
+                            extra_context += "\n\n" + "\n".join(_lines) + "\n"
+                            logger.info(
+                                "macro_events_injected",
+                                ticker=ticker,
+                                count=len(_events[:2]),
+                            )
+                except Exception as e:
+                    logger.debug("macro_events_injection_failed", error=str(e))
+
             # CRITICAL FIX: Include verified company name to prevent hallucination
             full_system_instruction = f"{agent_prompt.system_message}\n\nDate: {_format_date_with_fy_hint(current_date)}\nTicker: {ticker}\n{_company_line(company_name, company_resolved)}\n{get_analysis_context(ticker)}{extra_context}"
             invocation_messages = [

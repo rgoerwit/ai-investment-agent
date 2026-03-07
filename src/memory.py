@@ -731,3 +731,210 @@ def get_all_memory_stats() -> dict[str, dict[str, Any]]:
         logger.error("get_all_stats_failed", error=str(e))
 
     return stats
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Macro Events Store
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+from dataclasses import dataclass  # noqa: E402 — after existing imports
+
+
+@dataclass
+class MacroEvent:
+    """Represents a portfolio-detected macro event stored in ChromaDB."""
+
+    event_date: str  # YYYY-MM-DD (peak_anchor from CORRELATED_SELL_EVENT)
+    detected_date: str  # YYYY-MM-DD
+    expiry: str  # YYYY-MM-DD — event considered stale/priced-in after this date
+    impact: str  # "TRANSIENT" | "STRUCTURAL" | "UNCERTAIN"
+    event_type: str  # TARIFF_TRADE | LIQUIDITY_PANIC | ... | UNKNOWN
+    scope: str  # "GLOBAL" | "REGIONAL" | "SECTOR"
+    primary_region: str  # most-common exchange suffix, e.g. ".T", ".HK", or "GLOBAL"
+    primary_sector: str  # most-common sector string, or ""
+    severity: str  # "HIGH" (≥40%), "MEDIUM" (25-40%)
+    correlation_pct: float
+    peak_count: int
+    total_held: int
+    news_headline: str  # ≤120 chars
+    news_detail: str  # ≤300 chars
+    forced_reanalysis: bool = (
+        False  # True → STRUCTURAL events that immediately invalidate
+    )
+
+
+MACRO_EVENTS_COLLECTION = "macro_events"
+
+
+def _meta_to_macro_event(meta: dict) -> "MacroEvent":
+    """Deserialize a ChromaDB metadata dict back into a MacroEvent."""
+    return MacroEvent(
+        event_date=meta["event_date"],
+        detected_date=meta.get("detected_date", ""),
+        expiry=meta.get("expiry", ""),
+        impact=meta.get("impact", "UNCERTAIN"),
+        event_type=meta.get("event_type", "UNKNOWN"),
+        scope=meta.get("scope", "GLOBAL"),
+        primary_region=meta.get("primary_region", "GLOBAL"),
+        primary_sector=meta.get("primary_sector", ""),
+        severity=meta.get("severity", "MEDIUM"),
+        correlation_pct=float(meta.get("correlation_pct", 0)),
+        peak_count=int(meta.get("peak_count", 0)),
+        total_held=int(meta.get("total_held", 0)),
+        news_headline=meta.get("news_headline", ""),
+        news_detail=meta.get("news_detail", ""),
+        forced_reanalysis=bool(meta.get("forced_reanalysis", False)),
+    )
+
+
+class MacroEventsStore:
+    """
+    Global ChromaDB collection for portfolio-detected macro events.
+    Uses dummy embeddings ([0.0]*768) — queries are metadata-only.
+    Non-ticker-isolated (like lessons_learned in retrospective.py).
+    """
+
+    def __init__(self) -> None:
+        self.available = False
+        self.collection = None
+        self._init()
+
+    def _init(self) -> None:
+        try:
+            import chromadb
+            from chromadb.config import Settings
+
+            client = chromadb.PersistentClient(
+                path=str(config.chroma_persist_directory),
+                settings=Settings(anonymized_telemetry=False, allow_reset=True),
+            )
+            self.collection = client.get_or_create_collection(
+                name=MACRO_EVENTS_COLLECTION,
+                metadata={
+                    "description": "Portfolio macro events",
+                    "embedding_model": "dummy",
+                },
+            )
+            self.available = True
+        except Exception as e:
+            logger.warning("macro_events_store_init_failed", error=str(e))
+
+    def store_event(self, event: "MacroEvent") -> bool:
+        """Store with 7-day dedup on event_date. Returns True if stored."""
+        if not self.available:
+            return False
+        try:
+            from datetime import date as _date
+            from datetime import timedelta as _td
+
+            anchor = _date.fromisoformat(event.event_date)
+            window_start = (anchor - _td(days=7)).isoformat()
+            window_end = (anchor + _td(days=7)).isoformat()
+            existing = self.collection.get(
+                where={
+                    "$and": [
+                        {"event_date": {"$gte": window_start}},
+                        {"event_date": {"$lte": window_end}},
+                    ]
+                }
+            )
+            if existing and existing.get("ids"):
+                logger.info("macro_event_dedup_skipped", event_date=event.event_date)
+                return False
+
+            event_id = f"macro_{event.event_date}_{event.detected_date}"
+            self.collection.add(
+                ids=[event_id],
+                embeddings=[[0.0] * 768],
+                documents=[f"{event.event_date} {event.news_headline}"],
+                metadatas=[
+                    {
+                        "event_date": event.event_date,
+                        "detected_date": event.detected_date,
+                        "expiry": event.expiry,
+                        "impact": event.impact,
+                        "event_type": event.event_type,
+                        "scope": event.scope,
+                        "primary_region": event.primary_region,
+                        "primary_sector": event.primary_sector,
+                        "severity": event.severity,
+                        "correlation_pct": float(event.correlation_pct),
+                        "peak_count": int(event.peak_count),
+                        "total_held": int(event.total_held),
+                        "news_headline": event.news_headline[:120],
+                        "news_detail": event.news_detail[:300],
+                        "forced_reanalysis": event.forced_reanalysis,
+                    }
+                ],
+            )
+            logger.info(
+                "macro_event_stored",
+                event_date=event.event_date,
+                impact=event.impact,
+                scope=event.scope,
+                headline=event.news_headline[:60],
+            )
+            return True
+        except Exception as e:
+            logger.warning("macro_event_store_failed", error=str(e))
+            return False
+
+    def get_active_events(
+        self,
+        region_filter: str | None = None,
+    ) -> list["MacroEvent"]:
+        """Return events where expiry > today, optionally filtered by region."""
+        if not self.available:
+            return []
+        try:
+            from datetime import date as _date
+
+            today = _date.today().isoformat()
+            where_clause: dict = {"expiry": {"$gt": today}}
+            results = self.collection.get(
+                where=where_clause,
+                include=["metadatas"],
+            )
+            events: list[MacroEvent] = []
+            for meta in results.get("metadatas") or []:
+                if region_filter:
+                    primary = meta.get("primary_region", "GLOBAL")
+                    if primary != "GLOBAL" and primary != region_filter:
+                        continue
+                events.append(_meta_to_macro_event(meta))
+            events.sort(key=lambda e: e.event_date, reverse=True)
+            return events
+        except Exception as e:
+            logger.warning("macro_events_get_failed", error=str(e))
+            return []
+
+    def get_structural_events_since(self, since_date: str) -> list["MacroEvent"]:
+        """Return STRUCTURAL events detected after since_date (for staleness check)."""
+        if not self.available:
+            return []
+        try:
+            from datetime import date as _date
+
+            today = _date.today().isoformat()
+            results = self.collection.get(
+                where={
+                    "$and": [
+                        {"impact": {"$eq": "STRUCTURAL"}},
+                        {"event_date": {"$gte": since_date}},
+                        {"expiry": {"$gt": today}},
+                    ]
+                },
+                include=["metadatas"],
+            )
+            events = [_meta_to_macro_event(m) for m in results.get("metadatas") or []]
+            events.sort(key=lambda e: e.event_date, reverse=True)
+            return events
+        except Exception as e:
+            logger.warning("macro_structural_events_get_failed", error=str(e))
+            return []
+
+
+def create_macro_events_store() -> MacroEventsStore:
+    """Create a global MacroEventsStore instance backed by ChromaDB."""
+    return MacroEventsStore()

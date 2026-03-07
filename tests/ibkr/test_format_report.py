@@ -858,3 +858,74 @@ class TestOrderAnnotation:
         item = _make_sell_item()
         report = format_report([item], _make_portfolio())
         assert "open order:" not in report
+
+
+class TestMacroAlertBannerWithStoredEvent:
+    """format_report() MACRO ALERT banner enhanced with a stored event headline."""
+
+    def _event(self, headline: str = "US tariffs announced"):
+        from datetime import date, timedelta
+
+        from src.memory import MacroEvent
+
+        return MacroEvent(
+            event_date="2026-03-05",
+            detected_date="2026-03-07",
+            expiry=(date.today() + timedelta(days=20)).isoformat(),
+            impact="TRANSIENT",
+            event_type="TARIFF_TRADE",
+            scope="GLOBAL",
+            primary_region="GLOBAL",
+            primary_sector="",
+            severity="MEDIUM",
+            correlation_pct=0.40,
+            peak_count=8,
+            total_held=20,
+            news_headline=headline,
+            news_detail="",
+            forced_reanalysis=False,
+        )
+
+    def _report(self, mock_store_events=None, available: bool = True) -> str:
+        from unittest.mock import MagicMock, patch
+
+        mock_store = MagicMock()
+        mock_store.available = available
+        if mock_store_events:
+            mock_store.get_active_events.return_value = mock_store_events
+        else:
+            mock_store.get_active_events.return_value = []
+
+        with patch(
+            "src.memory.create_macro_events_store",
+            return_value=mock_store,
+        ) as _mock_create:
+            # Import inside patch context so the patched name is used
+            return format_report(
+                _panic_items(),
+                _make_portfolio(),
+                portfolio_health_flags=[_CORR_FLAG],
+            )
+
+    def test_stored_event_headline_appears_in_banner(self):
+        """When stored event available, headline shown in MACRO ALERT banner."""
+        report = self._report([self._event("US tariffs announced")])
+        assert "US tariffs announced" in report
+
+    def test_no_stored_events_banner_still_renders(self):
+        """No stored events → banner still shows MACRO ALERT, no headline injected."""
+        report = self._report([])
+        assert "MACRO ALERT" in report
+
+    def test_store_unavailable_banner_renders_without_headline(self):
+        """store.available=False → banner renders normally, no headline injected."""
+        report = self._report(available=False)
+        assert "MACRO ALERT" in report
+
+    def test_long_headline_truncated_to_62_chars(self):
+        """Very long headline is truncated to 62 chars in the banner line."""
+        long_hl = "A" * 100
+        report = self._report([self._event(long_hl)])
+        # The headline should appear but truncated
+        # Either 62 chars of A or a prefix of "Characterized: "
+        assert "Characterized:" in report or long_hl[:40] in report

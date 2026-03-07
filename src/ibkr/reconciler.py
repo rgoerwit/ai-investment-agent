@@ -244,6 +244,7 @@ def check_staleness(
     current_price_local: float | None = None,
     max_age_days: int = 14,
     drift_threshold_pct: float = 15.0,
+    structural_macro_events: list | None = None,
 ) -> tuple[bool, str]:
     """
     Check if an analysis is stale and should be reviewed.
@@ -253,6 +254,9 @@ def check_staleness(
         current_price_local: Live price from IBKR (in local currency)
         max_age_days: Maximum age before considered stale
         drift_threshold_pct: Price movement threshold for staleness
+        structural_macro_events: Optional list of MacroEvent (STRUCTURAL only).
+            If an event occurred AFTER this analysis was written, the analysis
+            is considered stale (thesis may no longer be valid).
 
     Returns:
         Tuple of (is_stale, reason)
@@ -271,6 +275,28 @@ def check_staleness(
         if drift_pct > drift_threshold_pct:
             direction = "up" if current_price_local > entry_price else "down"
             reasons.append(f"price drift {drift_pct:.1f}% {direction}")
+
+    # Structural macro event check: if a STRUCTURAL event occurred AFTER this
+    # analysis was written, the thesis may no longer be valid — force re-analysis.
+    if structural_macro_events and analysis.analysis_date:
+        for event in structural_macro_events:
+            if event.event_date > analysis.analysis_date:
+                if event.scope == "GLOBAL":
+                    reasons.append(
+                        f"STRUCTURAL macro event ({event.news_headline[:40]!r}) "
+                        f"detected after analysis"
+                    )
+                    break
+                # For REGIONAL: check if this analysis ticker matches the event region
+                ticker = getattr(analysis, "ticker", "") or ""
+                dot = ticker.rfind(".")
+                suffix = ticker[dot:] if dot >= 0 else ""
+                if suffix and suffix == event.primary_region:
+                    reasons.append(
+                        f"STRUCTURAL macro event ({event.news_headline[:40]!r}) "
+                        f"in your region ({suffix}) after analysis"
+                    )
+                    break
 
     if reasons:
         return True, "; ".join(reasons)
@@ -398,6 +424,22 @@ def reconcile(
     # Track remaining settled cash across Phase 1 ADDs and Phase 2 BUYs
     remaining_cash = portfolio.available_cash_usd
 
+    # Pre-fetch structural macro events for staleness invalidation (fail-safe).
+    _structural_events: list = []
+    try:
+        from datetime import datetime as _dt
+        from datetime import timedelta
+
+        from src.memory import create_macro_events_store
+
+        _mstore = create_macro_events_store()
+        if _mstore.available:
+            _structural_events = _mstore.get_structural_events_since(
+                (_dt.now() - timedelta(days=180)).strftime("%Y-%m-%d")
+            )
+    except Exception:
+        pass
+
     # ── Pre-compute concentration weights from currently held positions ──
     # These are stored on the portfolio object for use by format_report().
     # Use sum of position values as denominator so weights always sum to 100%,
@@ -499,7 +541,11 @@ def reconcile(
 
         # Check staleness (after target hit, which is more specific)
         is_stale, stale_reason = check_staleness(
-            analysis, current_price, max_age_days, drift_threshold_pct
+            analysis,
+            current_price,
+            max_age_days,
+            drift_threshold_pct,
+            structural_macro_events=_structural_events,
         )
         if is_stale:
             items.append(
@@ -670,7 +716,11 @@ def reconcile(
             continue
 
         is_stale, stale_reason = check_staleness(
-            analysis, None, max_age_days, drift_threshold_pct
+            analysis,
+            None,
+            max_age_days,
+            drift_threshold_pct,
+            structural_macro_events=_structural_events,
         )
         if is_stale:
             items.append(
@@ -802,7 +852,11 @@ def reconcile(
 
         # Skip stale analyses for new buys
         is_stale, stale_reason = check_staleness(
-            analysis, None, max_age_days, drift_threshold_pct
+            analysis,
+            None,
+            max_age_days,
+            drift_threshold_pct,
+            structural_macro_events=_structural_events,
         )
         if is_stale:
             continue
@@ -904,6 +958,7 @@ def compute_portfolio_health(
     portfolio: PortfolioSummary,
     max_age_days: int = 14,
     reconciliation_items: list | None = None,
+    correlated_window_days: int = 7,
 ) -> list[str]:
     """
     Compute portfolio-level health flags using data already in held analyses.
@@ -914,12 +969,19 @@ def compute_portfolio_health(
     When reconciliation_items is provided, also detects CORRELATED_SELL_EVENT
     and demotes SOFT_REJECT SELLs to REVIEW in-place on correlated days.
 
+    Args:
+        correlated_window_days: Window width for grouping nearby sell dates.
+            Sells whose analysis_date falls within this many days of an anchor date
+            are counted as a single correlated event.  Default 7 prevents batch
+            re-analyses run over consecutive nights from fragmenting the same event.
+
     Flags:
         LOW_HEALTH_AVERAGE      Weighted avg health_adj < 60 across holdings
         LOW_GROWTH_AVERAGE      Weighted avg growth_adj < 55 across holdings
         CURRENCY_CONCENTRATION  >50% of portfolio in a single currency
         STALE_ANALYSIS_RATIO    >30% of positions have analyses older than max_age_days
-        CORRELATED_SELL_EVENT   ≥5 and ≥25% of held positions flipped verdict same date
+        CORRELATED_SELL_EVENT   ≥5 and ≥25% of held positions flipped verdict within
+                                correlated_window_days of the same anchor date
     """
     if not positions or portfolio.portfolio_value_usd <= 0:
         return []
@@ -1018,12 +1080,16 @@ def compute_portfolio_health(
             )
 
     # ── CORRELATED_SELL_EVENT ─────────────────────────────────────────────────
-    # Detect when many held positions flip verdict on the same date — a sign of
-    # macro noise rather than company-specific thesis failures.  Only verdict-
-    # driven SELLs (HARD_REJECT + SOFT_REJECT) are counted; mechanical stop
-    # breaches are excluded.
+    # Detect when many held positions change verdict within a short window — a
+    # sign of macro noise rather than company-specific thesis failures.  Uses a
+    # sliding date window (correlated_window_days, default 7) so that batch
+    # re-analyses spread over consecutive nights don't fragment the same macro
+    # event across multiple exact dates.  Only verdict-driven SELLs
+    # (HARD_REJECT + SOFT_REJECT) are counted; mechanical stop breaches are
+    # excluded.
     if reconciliation_items is not None:
-        from collections import Counter
+        from datetime import date as _date
+        from datetime import timedelta as _td
 
         verdict_sells = [
             item
@@ -1036,22 +1102,40 @@ def compute_portfolio_health(
         )
 
         if verdict_sells:
-            date_counts = Counter(
-                item.analysis.analysis_date
-                for item in verdict_sells
-                if item.analysis and item.analysis.analysis_date
-            )
-            if date_counts:
-                peak_date, peak_count = date_counts.most_common(1)[0]
+            # Parse analysis dates; skip sells with unparseable dates.
+            dated: list[tuple] = []
+            for item in verdict_sells:
+                if item.analysis and item.analysis.analysis_date:
+                    try:
+                        d = _date.fromisoformat(item.analysis.analysis_date)
+                        dated.append((item, d))
+                    except ValueError:
+                        pass
+
+            if dated:
+                all_dates = [d for _, d in dated]
+                peak_count = 0
+                peak_anchor = None
+
+                # Sliding window: for each sell date as anchor, count sells
+                # whose date falls within [anchor, anchor + window).
+                for anchor in all_dates:
+                    window_end = anchor + _td(days=correlated_window_days - 1)
+                    count = sum(1 for d in all_dates if anchor <= d <= window_end)
+                    if count > peak_count:
+                        peak_count = count
+                        peak_anchor = anchor
+
                 correlated_event = (
                     peak_count >= 5
                     and total_held > 0
                     and peak_count / total_held >= 0.25
                 )
-                if correlated_event:
+                if correlated_event and peak_anchor is not None:
                     flags.append(
                         f"CORRELATED_SELL_EVENT: {peak_count} positions changed verdict"
-                        f" on {peak_date} ({peak_count / total_held:.0%} of held"
+                        f" within {correlated_window_days}d of {peak_anchor.isoformat()}"
+                        f" ({peak_count / total_held:.0%} of held"
                         f" positions) — probable macro event. Execute stop-breach SELLs"
                         f" only; review verdict-change SELLs before acting."
                     )
@@ -1068,7 +1152,8 @@ def compute_portfolio_health(
                             )
                     logger.info(
                         "correlated_sell_event_detected",
-                        peak_date=peak_date,
+                        peak_date=peak_anchor.isoformat(),
+                        window_days=correlated_window_days,
                         peak_count=peak_count,
                         total_held=total_held,
                         pct=f"{peak_count / total_held:.0%}",

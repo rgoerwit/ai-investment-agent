@@ -98,14 +98,20 @@ class TestPipelineCoherence:
         assert not any("CORRELATED_SELL_EVENT" in f for f in flags)
 
     def test_same_count_different_dates_does_not_trigger(self):
-        """5 SOFT_REJECT SELLs each on a different analysis date → peak_count=1 → no event."""
+        """5 SOFT_REJECT SELLs each 10+ days apart → peak_count=1 per window → no event.
+
+        Uses dates 10 days apart so no sliding window (7-day default) captures > 1
+        position at a time. This verifies the algorithm doesn't false-fire on positions
+        that genuinely changed verdict at different macro episodes.
+        """
         positions = []
         items_list = []
         portfolio = _make_portfolio(value=50000, cash=0)
         portfolio.exchange_weights = {}
 
         for i in range(5):
-            date = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
+            # Space dates 10 days apart — well beyond the 7-day sliding window.
+            date = (datetime.now() - timedelta(days=i * 10)).strftime("%Y-%m-%d")
             a = _make_analysis(ticker=f"SPREAD{i:02d}.T", verdict="DO_NOT_INITIATE")
             a.analysis_date = date
             a.health_adj = 65.0

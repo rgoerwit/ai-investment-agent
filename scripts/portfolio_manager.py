@@ -324,6 +324,514 @@ def parse_args() -> argparse.Namespace:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Macro Event Detection
+# ══════════════════════════════════════════════════════════════════════════════
+
+import re as _re  # noqa: E402 — used by _store_macro_event_if_detected
+
+import structlog as _structlog
+
+logger = _structlog.get_logger(__name__)
+
+# Keyword → (event_type, impact, opportunity_prior)
+# First match wins (checked in order); UNKNOWN is the fallback.
+_EVENT_TYPE_RULES: list[tuple[frozenset, str, str, str]] = [
+    (
+        frozenset(
+            [
+                "tariff",
+                "trade war",
+                "import duty",
+                "export ban",
+                "trade spat",
+                "customs duty",
+                "trade deal",
+                "trade negotiation",
+                "trade tension",
+                "trade restriction",
+                "section 301",
+                "section 232",
+            ]
+        ),
+        "TARIFF_TRADE",
+        "TRANSIENT",
+        "HIGH",
+    ),
+    (
+        frozenset(
+            [
+                "margin call",
+                "forced selling",
+                "redemption",
+                "deleveraging",
+                "liquidity crunch",
+                "market maker",
+                "flash crash",
+                "circuit breaker",
+                "panic selling",
+                "fire sale",
+                "repo stress",
+                "collateral call",
+            ]
+        ),
+        "LIQUIDITY_PANIC",
+        "TRANSIENT",
+        "HIGH",
+    ),
+    (
+        frozenset(
+            [
+                "contagion",
+                "spillover",
+                "sentiment contagion",
+                "risk-off",
+                "flight to safety",
+                "flight to quality",
+                "sell everything",
+                "risk aversion",
+                "global risk-off",
+            ]
+        ),
+        "CONTAGION_SPREAD",
+        "TRANSIENT",
+        "MEDIUM",
+    ),
+    (
+        frozenset(
+            [
+                "election",
+                "election result",
+                "cabinet",
+                "government collapse",
+                "political uncertainty",
+                "referendum",
+                "coup",
+                "prime minister",
+                "president",
+                "parliament dissolved",
+                "snap election",
+                "policy statement",
+            ]
+        ),
+        "POLITICAL_EVENT",
+        "TRANSIENT",
+        "MEDIUM",
+    ),
+    (
+        frozenset(
+            [
+                "rate hike",
+                "rate cut",
+                "interest rate",
+                "federal reserve",
+                "fed",
+                "ecb",
+                "boj",
+                "bank of japan",
+                "yield curve control",
+                "ycc",
+                "quantitative tightening",
+                "qt",
+                "quantitative easing",
+                "qe",
+                "monetary policy",
+                "rate decision",
+                "central bank",
+                "hawkish",
+                "dovish",
+                "inflation target",
+            ]
+        ),
+        "MONETARY_PIVOT",
+        "MEDIUM",
+        "LOW",
+    ),
+    (
+        frozenset(
+            [
+                "oil price",
+                "crude oil",
+                "brent",
+                "commodity",
+                "metal price",
+                "copper",
+                "iron ore",
+                "supply disruption",
+                "opec",
+                "oil production",
+                "energy crisis",
+                "resource nationalism",
+                "natural gas",
+                "lng",
+                "wheat",
+                "food prices",
+                "supply chain",
+            ]
+        ),
+        "COMMODITY_SHOCK",
+        "MEDIUM",
+        "LOW",
+    ),
+    (
+        frozenset(
+            [
+                "war",
+                "conflict",
+                "military",
+                "invasion",
+                "sanctions",
+                "taiwan",
+                "ukraine",
+                "russia",
+                "north korea",
+                "missile",
+                "geopolitical",
+                "territorial dispute",
+                "strait",
+                "blockade",
+                "nato",
+                "arms",
+                "escalation",
+                "ceasefire",
+            ]
+        ),
+        "GEOPOLITICAL",
+        "STRUCTURAL",
+        "NEGATIVE",
+    ),
+    (
+        frozenset(
+            [
+                "regulation",
+                "ban",
+                "law",
+                "legislation",
+                "overhaul",
+                "reform",
+                "compliance",
+                "regulator",
+                "antitrust",
+                "competition law",
+                "data protection",
+                "gdpr",
+                "pharmaceutical regulation",
+                "drug approval",
+                "fda",
+                "cfius",
+                "foreign investment review",
+                "carbon tax",
+                "environmental regulation",
+                "decoupling",
+                "framework",
+                "prohibited",
+                "compulsory",
+                "mandate",
+            ]
+        ),
+        "REGULATORY_SHIFT",
+        "STRUCTURAL",
+        "NEGATIVE",
+    ),
+    (
+        frozenset(
+            [
+                "bank failure",
+                "bank run",
+                "credit crunch",
+                "sovereign default",
+                "debt crisis",
+                "credit rating downgrade",
+                "svb",
+                "lehman",
+                "systemic risk",
+                "financial crisis",
+                "bailout",
+                "insolvency",
+                "refinancing risk",
+                "credit spread",
+                "bond yield spike",
+                "debt ceiling",
+                "high yield stress",
+            ]
+        ),
+        "CREDIT_CONTAGION",
+        "STRUCTURAL",
+        "NEGATIVE",
+    ),
+    (
+        frozenset(
+            [
+                "recession",
+                "gdp contraction",
+                "economic slowdown",
+                "stagflation",
+                "earnings downturn",
+                "profit warning",
+                "guidance cut",
+                "downgrade",
+                "unemployment",
+                "layoffs",
+                "industrial output",
+                "pmi contraction",
+                "consumer confidence",
+                "deflation",
+                "debt deflation",
+            ]
+        ),
+        "MACRO_RECESSION",
+        "STRUCTURAL",
+        "NEGATIVE",
+    ),
+    (
+        frozenset(
+            [
+                "pandemic",
+                "epidemic",
+                "covid",
+                "lockdown",
+                "earthquake",
+                "tsunami",
+                "hurricane",
+                "natural disaster",
+                "cyber attack",
+                "infrastructure attack",
+                "black swan",
+                "force majeure",
+                "act of god",
+                "biosecurity",
+            ]
+        ),
+        "EXOGENOUS_SHOCK",
+        "UNCERTAIN",
+        "UNCERTAIN",
+    ),
+]
+
+# Per-event-type expiry window in days.
+_EXPIRY_DAYS: dict[str, int] = {
+    "TARIFF_TRADE": 28,
+    "LIQUIDITY_PANIC": 14,
+    "CONTAGION_SPREAD": 21,
+    "POLITICAL_EVENT": 30,
+    "MONETARY_PIVOT": 90,
+    "COMMODITY_SHOCK": 90,
+    "GEOPOLITICAL": 180,
+    "REGULATORY_SHIFT": 180,
+    "CREDIT_CONTAGION": 120,
+    "MACRO_RECESSION": 180,
+    "EXOGENOUS_SHOCK": 60,
+    "UNKNOWN": 60,
+}
+
+
+def _characterize_macro_event(
+    event_date: str,
+    sell_items: list,
+    correlation_pct: float,
+    peak_count: int = 0,
+) -> tuple[str, str, str, str, str, str, str]:
+    """
+    Derive event metadata from sell items + Tavily news + Gemini Flash classification.
+
+    Returns: (scope, primary_region, primary_sector, impact, event_type, headline, detail)
+    Fails gracefully — returns ("GLOBAL", "GLOBAL", "", "UNCERTAIN", "UNKNOWN", "unknown", "")
+    """
+    from collections import Counter
+
+    region_counts: Counter = Counter()
+    sector_counts: Counter = Counter()
+    for item in sell_items:
+        ticker = item.ticker or ""
+        dot = ticker.rfind(".")
+        region_counts[ticker[dot:] if dot >= 0 else ".US"] += 1
+        if item.analysis:
+            s = (getattr(item.analysis, "sector", None) or "").strip()
+            if s:
+                sector_counts[s] += 1
+
+    total = len(sell_items) or 1
+    top_region, top_region_n = (
+        region_counts.most_common(1)[0] if region_counts else (".US", 0)
+    )
+    top_sector, top_sector_n = (
+        sector_counts.most_common(1)[0] if sector_counts else ("", 0)
+    )
+    top_region_pct = top_region_n / total
+    top_sector_pct = top_sector_n / total
+
+    scope = (
+        "SECTOR"
+        if top_sector_pct >= 0.60 and top_region_pct < 0.60
+        else "REGIONAL"
+        if top_region_pct >= 0.60
+        else "GLOBAL"
+    )
+    primary_region = top_region if scope == "REGIONAL" else "GLOBAL"
+    primary_sector = top_sector if scope == "SECTOR" else ""
+
+    # News search
+    headline, detail = "unknown", ""
+    try:
+        from src.config import config as _cfg
+
+        api_key = _cfg.get_tavily_api_key()
+        if api_key:
+            from tavily import TavilyClient
+
+            _region_map = {
+                "T": "Japan",
+                "HK": "Hong Kong",
+                "KS": "Korea",
+                "TW": "Taiwan",
+                "L": "UK",
+                "DE": "Germany",
+                "AS": "Netherlands",
+                "PA": "France",
+            }
+            region_hint = (
+                _region_map.get(top_region.lstrip("."), "")
+                if scope == "REGIONAL"
+                else ""
+            )
+            query = (
+                f"stock market shock {event_date} {region_hint} cause reason".strip()
+            )
+            result = TavilyClient(api_key=api_key).search(
+                query=query, max_results=3, search_depth="basic"
+            )
+            top = (result.get("results", [{}]) if isinstance(result, dict) else [{}])[0]
+            headline = (top.get("title") or "")[:120] or "unknown"
+            raw_detail = top.get("content") or ""
+            sentences = [s.strip() for s in raw_detail.split(".") if s.strip()]
+            detail = ". ".join(sentences[:2]) + ("." if sentences else "")
+    except Exception as e:
+        logger.warning("macro_news_search_failed", error=str(e))
+
+    # Primary: Gemini Flash LLM classification
+    impact, event_type = "UNCERTAIN", "UNKNOWN"
+    if headline != "unknown":
+        try:
+            import json as _json
+
+            from langchain_core.messages import HumanMessage as _HM
+
+            from src.llms import create_quick_thinking_llm
+
+            _llm = create_quick_thinking_llm()
+            _valid_types = (
+                "TARIFF_TRADE|LIQUIDITY_PANIC|CONTAGION_SPREAD|POLITICAL_EVENT|"
+                "MONETARY_PIVOT|COMMODITY_SHOCK|GEOPOLITICAL|REGULATORY_SHIFT|"
+                "CREDIT_CONTAGION|MACRO_RECESSION|EXOGENOUS_SHOCK|UNKNOWN"
+            )
+            _prompt = (
+                f"A correlated sell-off across {peak_count} portfolio positions occurred "
+                f"on {event_date}. Scope: {scope} ({primary_region or 'mixed regions'}).\n\n"
+                f"Headline: {headline}\nDetail: {detail}\n\n"
+                f"Classify the macro event. Respond with JSON only, no explanation outside JSON:\n"
+                f'{{"event_type": "{_valid_types}", '
+                f'"impact": "TRANSIENT|MEDIUM|STRUCTURAL|UNCERTAIN", '
+                f'"opportunity_prior": "HIGH|MEDIUM|LOW|NEGATIVE|UNCERTAIN", '
+                f'"reasoning": "one sentence max"}}'
+            )
+            _resp = _llm.invoke([_HM(content=_prompt)])
+            _text = (_resp.content if hasattr(_resp, "content") else str(_resp)).strip()
+            _text = _text.strip("`").lstrip("json").strip()
+            _classified = _json.loads(_text)
+            event_type = _classified.get("event_type", "UNKNOWN")
+            impact = _classified.get("impact", "UNCERTAIN")
+            logger.info(
+                "macro_event_llm_classified",
+                event_type=event_type,
+                impact=impact,
+                reasoning=_classified.get("reasoning", ""),
+            )
+        except Exception as e:
+            logger.warning("macro_event_llm_classification_failed", error=str(e))
+            # Fallback: keyword rules
+            text = (headline + " " + detail).lower()
+            for keywords, etype, eimp, _opp in _EVENT_TYPE_RULES:
+                if any(kw in text for kw in keywords):
+                    event_type = etype
+                    impact = eimp
+                    break
+
+    return scope, primary_region, primary_sector, impact, event_type, headline, detail
+
+
+def _store_macro_event_if_detected(
+    health_flags: list[str],
+    reconciliation_items: list,
+) -> None:
+    """Parse CORRELATED_SELL_EVENT, characterize it, store in ChromaDB. Fail-safe."""
+    from datetime import date as _date
+    from datetime import timedelta as _td
+
+    correlated_flag = next(
+        (f for f in health_flags if "CORRELATED_SELL_EVENT" in f), None
+    )
+    if not correlated_flag:
+        return
+
+    m = _re.search(
+        r"CORRELATED_SELL_EVENT:\s*(\d+) positions.*?(\d+)d of (\d{4}-\d{2}-\d{2})"
+        r".*?\((\d+\.?\d*)%",
+        correlated_flag,
+    )
+    if not m:
+        logger.warning("macro_event_flag_parse_failed", flag=correlated_flag)
+        return
+
+    peak_count = int(m.group(1))
+    event_date = m.group(3)
+    correlation_pct = float(m.group(4)) / 100.0
+    severity = "HIGH" if correlation_pct >= 0.40 else "MEDIUM"
+
+    total_held = sum(
+        1 for item in reconciliation_items if item.ibkr_position is not None
+    )
+    sell_items = [
+        item
+        for item in reconciliation_items
+        if item.action == "SELL" and item.ibkr_position is not None
+    ]
+
+    scope, primary_region, primary_sector, impact, event_type, headline, detail = (
+        _characterize_macro_event(event_date, sell_items, correlation_pct, peak_count)
+    )
+
+    anchor = _date.fromisoformat(event_date)
+    expiry = (anchor + _td(days=_EXPIRY_DAYS.get(event_type, 60))).isoformat()
+
+    try:
+        from src.memory import MacroEvent, create_macro_events_store
+
+        store = create_macro_events_store()
+        if not store.available:
+            return
+        store.store_event(
+            MacroEvent(
+                event_date=event_date,
+                detected_date=_date.today().isoformat(),
+                expiry=expiry,
+                impact=impact,
+                event_type=event_type,
+                scope=scope,
+                primary_region=primary_region,
+                primary_sector=primary_sector,
+                severity=severity,
+                correlation_pct=correlation_pct,
+                peak_count=peak_count,
+                total_held=total_held,
+                news_headline=headline,
+                news_detail=detail,
+                forced_reanalysis=(impact == "STRUCTURAL" and correlation_pct >= 0.40),
+            )
+        )
+    except Exception as e:
+        logger.warning("macro_event_storage_failed", error=str(e))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Report Formatting
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -748,7 +1256,10 @@ def format_report(
             price = order.get("price") or order.get("auxPrice")
             otype = order.get("orderType", "LMT")
             status = order.get("status", "")
-            price_str = f" @ {price:.2f}" if price else ""
+            try:
+                price_str = f" @ {float(price):.2f}" if price else ""
+            except (TypeError, ValueError):
+                price_str = f" @ {price}" if price else ""
             return (
                 f"             open order: {side} {qty}{price_str} {otype} ({status})"
             )
@@ -777,6 +1288,17 @@ def format_report(
             f"║  {'Execute STOP-BREACH SELLs; review others first.':<{_W}}║",
             "╚" + "═" * 54 + "╝",
         ]
+        try:
+            from src.memory import create_macro_events_store as _cms
+
+            _mstore = _cms()
+            if _mstore.available:
+                _ev = (_mstore.get_active_events() or [None])[0]
+                if _ev and _ev.news_headline != "unknown":
+                    _headline_line = f"Characterized: {_ev.news_headline[:62]}"
+                    _banner_lines.insert(-1, f"║  {_headline_line:<{_W}}║")
+        except Exception:
+            pass
         for bl in _banner_lines:
             lines.append(bl)
         lines.append("")
@@ -1515,6 +2037,9 @@ def main() -> None:
                 max_age_days=args.max_age,
                 reconciliation_items=items,
             )
+
+    # Detect and store macro events (fail-safe — errors caught internally).
+    _store_macro_event_if_detected(health_flags, items)
 
     # Output
     show_recs = args.recommend
