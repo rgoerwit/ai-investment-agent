@@ -90,6 +90,7 @@ class ReconciliationItem(BaseModel):
     cash_impact_usd: float = 0.0  # negative = cost, positive = proceeds
     settlement_date: str | None = None  # for sells/trims: "YYYY-MM-DD"
     is_watchlist: bool = False  # True when sourced from IBKR watchlist (zero holdings)
+    sell_type: str | None = None  # "STOP_BREACH" | "HARD_REJECT" | "SOFT_REJECT" | None
 
 
 class PortfolioSummary(BaseModel):

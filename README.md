@@ -2,7 +2,7 @@
 
 > **An open-source agentic AI system that democratizes sophisticated equity research for international markets**
 
-**If you're concerned about US political instability, rising federal debt, dollar depreciation, or an AI-driven market bubble**, this system offers a way to diversify by evaluating transitional value-to-GARP (Value → Growth at a Reasonable Price) opportunities in ex-US markets. It uses the same multi-perspective analysis patterns employed by institutional research teams, but is powered by free- or cheap-tier AI and financial data APIs and can be run from a basic MacBook or other laptop.
+If you're concerned about US political instability, rising federal debt, dollar depreciation, or an AI-driven market bubble, this system offers a way to diversify by evaluating transitional value-to-GARP (Value → Growth at a Reasonable Price) opportunities in ex-US markets. It uses the same multi-perspective analysis patterns employed by institutional research teams, but is powered by free- or cheap-tier AI and financial data APIs and can be run from a basic MacBook or other laptop.
 
 **What you need:** Python 3.12+, a Google Gemini API key (free tier), and basic command-line familiarity. Optional: Additional API keys for enhanced data (FMP, Tavily, EODHD). Everything runs locally on your machine—no cloud subscription required.
 
@@ -14,7 +14,7 @@
 
 ## What Makes This Different
 
-**Most "AI trading bots" are simple scripts.** This is a **thesis-driven fundamental analysis engine** with institutional-grade architecture.
+Most "AI trading bots" are simple scripts. This is a **thesis-driven fundamental analysis engine** with institutional-grade architecture.
 
 ### The Problem This Solves
 
@@ -125,21 +125,21 @@ graph TB
 
 ### How Agents Collaborate
 
-1. **Parallel Data Gathering (Fan-Out)** - Seven analyst branches (plus optional Auditor) run **simultaneously** to maximize speed. In `graph.py`, a conditional edge from the Dispatcher fans out to all branches at once — each branch is a `workflow.add_node()` call with its own tool-calling loop (agent node + tool node pair connected by a `route_tools` conditional edge):
+1. **Parallel Data Gathering (Fan-Out)** - Seven analyst branches (plus optional Auditor) run simultaneously to maximize speed. In `graph.py`, a conditional edge from the Dispatcher fans out to all branches at once — each branch is a `workflow.add_node()` call with its own tool-calling loop (agent node + tool node pair connected by a `route_tools` conditional edge):
    - Market Analyst — calls `get_technical_indicators`, `calculate_liquidity_metrics` via `toolkit.get_market_tools()`
    - Sentiment Analyst — calls `get_social_media_sentiment`, `get_multilingual_sentiment_search`
    - News Analyst — calls `get_news`, `get_macroeconomic_news`
    - Junior Fundamentals — calls `get_financial_metrics`, `get_fundamental_analysis` (raw API data only)
    - Foreign Language Analyst — calls `search_foreign_sources` (Tavily + DuckDuckGo in parallel) and `get_official_filings` (EDINET/DART structured filing data when available)
-   - **Legal Counsel** — calls `search_legal_tax_disclosures` (PFIC/VIE risk, withholding rates)
-   - **Value Trap Detector** — calls `get_ownership_structure`, `get_news`, `search_foreign_sources`, `get_official_filings` for governance analysis. Uses native terminology (持ち合い, 재벌, etc.) for jurisdiction-specific searches.
-   - **Forensic Auditor** (optional, OpenAI-powered) — uses the same tools as FLA + Junior combined. Retrieves primary financial documents and flags accounting anomalies. Output is available to External Consultant via `auditor_report` in shared state.
+   - Legal Counsel — calls `search_legal_tax_disclosures` (PFIC/VIE risk, withholding rates)
+   - Value Trap Detector — calls `get_ownership_structure`, `get_news`, `search_foreign_sources`, `get_official_filings` for governance analysis. Uses native terminology (持ち合い, 재벌, etc.) for jurisdiction-specific searches.
+   - Forensic Auditor (optional, OpenAI-powered) — uses the same tools as FLA + Junior combined. Retrieves primary financial documents and flags accounting anomalies. Output is available to External Consultant via `auditor_report` in shared state.
 
    Each branch has its own tool-calling loop (`agent_node` → `route_tools` → `tool_node` → back to `agent_node`). This parallel architecture reduces analysis time by ~60% compared to sequential execution.
 
-2. **Sync Check (Fan-In Barrier)** - All branches converge at synchronization points implemented as barrier nodes in `graph.py`. The Fundamentals Sync waits for **Junior + Foreign Language + Legal Counsel** (3 edges converge) before Senior processes their combined data. The main Sync Check waits for all 7+ branches before proceeding. Each barrier uses a state-counting router that checks whether all expected reports are present before advancing.
+2. **Sync Check (Fan-In Barrier)** - All branches converge at synchronization points implemented as barrier nodes in `graph.py`. The Fundamentals Sync waits for Junior + Foreign Language + Legal Counsel (3 edges converge) before Senior processes their combined data. The main Sync Check waits for all 7+ branches before proceeding. Each barrier uses a state-counting router that checks whether all expected reports are present before advancing.
 
-3. **Junior/Senior/Foreign/Legal Fundamentals Split** - The Junior Fundamentals Analyst calls data tools (get_financial_metrics, get_fundamental_analysis) and returns raw API data. The Foreign Language Analyst searches native-language sources for segment breakdowns, parent-subsidiary ownership, and filing-level cash flow statements — high-value data that API-only tools miss. The **Legal Counsel** identifies specific jurisdictional risks (e.g., PFIC status for US taxpayers, VIE structure risks in China). The Senior Fundamentals Analyst receives all three data streams, cross-validates operating cash flow against filing data, flags segment deterioration and ownership concentration, and produces scored analysis with a structured DATA_BLOCK.
+3. **Junior/Senior/Foreign/Legal Fundamentals Split** - The Junior Fundamentals Analyst calls data tools (get_financial_metrics, get_fundamental_analysis) and returns raw API data. The Foreign Language Analyst searches native-language sources for segment breakdowns, parent-subsidiary ownership, and filing-level cash flow statements — high-value data that API-only tools miss. The Legal Counsel identifies specific jurisdictional risks (e.g., PFIC status for US taxpayers, VIE structure risks in China). The Senior Fundamentals Analyst receives all three data streams, cross-validates operating cash flow against filing data, flags segment deterioration and ownership concentration, and produces scored analysis with a structured DATA_BLOCK.
 
 4. **Red-Flag Pre-Screening** - The Financial Validator (`validators/red_flag_detector.py`) is pure Python, not an LLM — it parses the DATA_BLOCK with exact thresholds for catastrophic risks (extreme leverage >500% D/E, earnings quality issues, refinancing risk, unsustainable distributions, cyclical peak signals) and warning-level flags (segment deterioration, OCF discrepancy, value trap indicators, PFIC/VIE risks). A conditional edge in `graph.py` reads `pre_screening_result`: **REJECT** routes directly to PM Fast-Fail (skipping debate entirely); **PASS** continues to adversarial debate (warnings add risk penalty but don't block).
 
@@ -416,7 +416,7 @@ for your `QUICK_MODEL`, not Gemini 2.x models.
 - Data gathering agents may fail to fetch financial data correctly
 - The entire analysis pipeline depends on clean data from these agents, so results will degrade
 
-### Recommended configuration** (in your environment or code)
+### Recommended configuration (in your environment or code)
 
 ```bash
 # For best results with Gemini models:
@@ -573,7 +573,7 @@ Versions of the codebase have varied in their strictness, but in general, from a
 - **HOLD recommendations:** 5-50 stocks (interesting but flawed or uncertain equities)
 - **SELL recommendations:** 200+ stocks (thesis violations, poor fundamentals)
 
-The system is **intentionally conservative** - it's designed to find the best candidates, not to give you 100 "buys."
+The system is intentionally conservative — it's designed to find the best candidates, not to give you 100 "buys."
 
 ### Example Output Structure
 
@@ -924,7 +924,7 @@ This repository is an educational resource for understanding **production-grade 
 
 ### The Vision
 
-**Institutional research is a luxury good.** A single Bloomberg Terminal costs $24,000/year. A hedge fund analyst team costs $500k-$2M annually. This system provides:
+Institutional research is a luxury good. A single Bloomberg Terminal costs $24,000/year. A hedge fund analyst team costs $500k-$2M annually. This system provides:
 
 - **Institutional-quality analysis** for $0 marginal cost
 - **Global market access** without multilingual analysts

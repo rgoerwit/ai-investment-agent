@@ -212,6 +212,17 @@ def check_stop_breach(
     """Check if current price has breached the stop-loss level."""
     stop = analysis.stop_price
     if stop and current_price_local > 0:
+        ratio = stop / current_price_local
+        if ratio > 50 or ratio < 0.02:
+            logger.warning(
+                "stop_price_ratio_suspicious",
+                ticker=analysis.ticker,
+                stop=stop,
+                current_price=current_price_local,
+                ratio=f"{ratio:.1f}x",
+                hint="Possible currency-unit mismatch or stale stop from different analysis",
+            )
+            return False  # suppress — don't trigger a stop on a likely data error
         return current_price_local < stop
     return False
 
@@ -243,6 +254,29 @@ def _settlement_date(business_days: int) -> str:
         if d.weekday() < 5:  # Mon–Fri
             added += 1
     return d.isoformat()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Sell Classification
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _classify_sell_type(analysis: AnalysisRecord | None, stop_breached: bool) -> str:
+    """
+    Classify why a position is being sold.
+
+    Returns:
+        "STOP_BREACH"  — mechanical stop-loss trigger
+        "HARD_REJECT"  — fundamental failure (health_adj < 50 OR growth_adj < 50)
+        "SOFT_REJECT"  — passed hard checks, rejected on soft tally / macro fear
+    """
+    if stop_breached:
+        return "STOP_BREACH"
+    if analysis is None:
+        return "HARD_REJECT"  # no data → treat conservatively
+    health_ok = (analysis.health_adj or 0.0) >= 50.0
+    growth_ok = (analysis.growth_adj or 0.0) >= 50.0
+    return "SOFT_REJECT" if (health_ok and growth_ok) else "HARD_REJECT"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -351,6 +385,7 @@ def reconcile(
                     suggested_order_type="LMT",
                     cash_impact_usd=pos.market_value_usd,
                     settlement_date=_settlement_date(2),
+                    sell_type="STOP_BREACH",
                 )
             )
             continue
@@ -371,6 +406,7 @@ def reconcile(
                     suggested_price=current_price,
                     cash_impact_usd=pos.market_value_usd,
                     settlement_date=_settlement_date(2),
+                    sell_type=_classify_sell_type(analysis, stop_breached=False),
                 )
             )
             continue
@@ -381,7 +417,7 @@ def reconcile(
                 ReconciliationItem(
                     ticker=ticker,
                     action="REVIEW",
-                    reason=f"Target hit: price {current_price:.2f} >= T1 {analysis.target_1_price:.2f}",
+                    reason=f"Target hit: price {current_price:.2f} >= target {analysis.target_1_price:.2f}",
                     urgency="LOW",
                     ibkr_position=pos,
                     analysis=analysis,
@@ -526,7 +562,7 @@ def reconcile(
         if analysis.stop_price:
             status_parts.append(f"stop {analysis.stop_price:.2f}")
         if analysis.target_1_price:
-            status_parts.append(f"T1 {analysis.target_1_price:.2f}")
+            status_parts.append(f"target {analysis.target_1_price:.2f}")
 
         items.append(
             ReconciliationItem(
@@ -795,6 +831,7 @@ def compute_portfolio_health(
     analyses: dict[str, AnalysisRecord],
     portfolio: PortfolioSummary,
     max_age_days: int = 14,
+    reconciliation_items: list | None = None,
 ) -> list[str]:
     """
     Compute portfolio-level health flags using data already in held analyses.
@@ -802,11 +839,15 @@ def compute_portfolio_health(
     Returns a list of human-readable flag strings. Empty list = no flags.
     Call AFTER reconcile() so that portfolio.exchange_weights is already set.
 
+    When reconciliation_items is provided, also detects CORRELATED_SELL_EVENT
+    and demotes SOFT_REJECT SELLs to REVIEW in-place on correlated days.
+
     Flags:
-        LOW_HEALTH_AVERAGE    Weighted avg health_adj < 60 across holdings
-        LOW_GROWTH_AVERAGE    Weighted avg growth_adj < 55 across holdings
+        LOW_HEALTH_AVERAGE      Weighted avg health_adj < 60 across holdings
+        LOW_GROWTH_AVERAGE      Weighted avg growth_adj < 55 across holdings
         CURRENCY_CONCENTRATION  >50% of portfolio in a single currency
-        STALE_ANALYSIS_RATIO  >30% of positions have analyses older than max_age_days
+        STALE_ANALYSIS_RATIO    >30% of positions have analyses older than max_age_days
+        CORRELATED_SELL_EVENT   ≥5 and ≥25% of held positions flipped verdict same date
     """
     if not positions or portfolio.portfolio_value_usd <= 0:
         return []
@@ -903,5 +944,62 @@ def compute_portfolio_health(
                 f"GEOGRAPHY_CONCENTRATION: {pct:.1f}% in {exch} ({long_name})"
                 " — single-exchange concentration"
             )
+
+    # ── CORRELATED_SELL_EVENT ─────────────────────────────────────────────────
+    # Detect when many held positions flip verdict on the same date — a sign of
+    # macro noise rather than company-specific thesis failures.  Only verdict-
+    # driven SELLs (HARD_REJECT + SOFT_REJECT) are counted; mechanical stop
+    # breaches are excluded.
+    if reconciliation_items is not None:
+        from collections import Counter
+
+        verdict_sells = [
+            item
+            for item in reconciliation_items
+            if item.action == "SELL"
+            and item.sell_type in ("HARD_REJECT", "SOFT_REJECT")
+        ]
+        total_held = sum(
+            1 for item in reconciliation_items if item.ibkr_position is not None
+        )
+
+        if verdict_sells:
+            date_counts = Counter(
+                item.analysis.analysis_date
+                for item in verdict_sells
+                if item.analysis and item.analysis.analysis_date
+            )
+            if date_counts:
+                peak_date, peak_count = date_counts.most_common(1)[0]
+                correlated_event = (
+                    peak_count >= 5
+                    and total_held > 0
+                    and peak_count / total_held >= 0.25
+                )
+                if correlated_event:
+                    flags.append(
+                        f"CORRELATED_SELL_EVENT: {peak_count} positions changed verdict"
+                        f" on {peak_date} ({peak_count / total_held:.0%} of held"
+                        f" positions) — probable macro event. Execute stop-breach SELLs"
+                        f" only; review verdict-change SELLs before acting."
+                    )
+                    # Demote SOFT_REJECT from SELL to REVIEW — these passed all hard
+                    # fundamental checks; the SELL verdict came from the soft-tally
+                    # (geopolitical/macro points), not from a thesis failure.
+                    for item in reconciliation_items:
+                        if item.action == "SELL" and item.sell_type == "SOFT_REJECT":
+                            item.action = "REVIEW"
+                            item.urgency = "MEDIUM"
+                            item.reason += (
+                                "  [MACRO_WATCH: demoted from SELL — correlated"
+                                " event detected]"
+                            )
+                    logger.info(
+                        "correlated_sell_event_detected",
+                        peak_date=peak_date,
+                        peak_count=peak_count,
+                        total_held=total_held,
+                        pct=f"{peak_count / total_held:.0%}",
+                    )
 
     return flags

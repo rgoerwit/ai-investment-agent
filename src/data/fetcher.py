@@ -2193,15 +2193,16 @@ class SmartMarketDataFetcher(FinancialFetcher):
                 source_results, ticker
             )
 
-            # Panic Mode for Asian tickers
+            # Panic Mode: full vacuum (any market) OR basics missing for fragile exchanges
             basics_failed = not all(k in merged for k in self.REQUIRED_BASICS)
-            is_asian = ticker.endswith((".HK", ".TW", ".KS", ".T"))
+            is_fragile_exchange = ticker.endswith((".HK", ".TW", ".KS", ".T", ".L"))
 
-            if not merged or (is_asian and basics_failed):
+            if not merged or (is_fragile_exchange and basics_failed):
+                panic_reason = "total data vacuum" if not merged else "basics missing"
                 logger.warning(
                     "data_vacuum_detected",
                     symbol=ticker,
-                    msg="Triggering Panic Mode for Asian ticker",
+                    msg=f"Triggering Panic Mode ({panic_reason})",
                 )
                 all_critical = self.IMPORTANT_FIELDS + self.REQUIRED_BASICS
                 tavily_rescue = await self._fetch_tavily_gaps(ticker, all_critical)

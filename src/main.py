@@ -794,6 +794,65 @@ def save_results_to_file(result: dict, ticker: str, quick_mode: bool = False) ->
     return filepath
 
 
+_BENCH_NAMES: dict[str, str] = {
+    "^N225": "Nikkei-225",
+    "^HSI": "Hang Seng",
+    "^TWII": "Taiwan Weighted",
+    "^KS11": "KOSPI",
+    "^AEX": "AEX",
+    "^GDAXI": "DAX",
+    "^FTSE": "FTSE 100",
+    "^FCHI": "CAC 40",
+    "^GSPTSE": "TSX",
+    "^AXJO": "ASX 200",
+    "^STI": "STI",
+    "^FTSEMIB": "FTSE MIB",
+    "^OMX": "OMX Stockholm",
+    "^GSPC": "S&P 500",
+}
+
+
+async def _fetch_market_context(ticker: str, trade_date: str) -> str:
+    """
+    Return a one-line benchmark performance note for the ticker's home market.
+
+    Example: "MARKET NOTE: Nikkei-225 down 4.2% on 2026-03-05."
+
+    Returns empty string on any error so callers never need to handle exceptions.
+    """
+    try:
+        import yfinance as yf
+
+        from src.retrospective import (
+            EXCHANGE_BENCHMARK,
+            FALLBACK_BENCHMARK,
+            _get_ticker_suffix,
+        )
+
+        suffix = _get_ticker_suffix(ticker)
+        benchmark = EXCHANGE_BENCHMARK.get(suffix, FALLBACK_BENCHMARK)
+        hist = await asyncio.to_thread(
+            lambda: yf.Ticker(benchmark).history(period="2d")
+        )
+        if len(hist) >= 2:
+            pct = (
+                (hist["Close"].iloc[-1] - hist["Close"].iloc[0])
+                / hist["Close"].iloc[0]
+                * 100
+            )
+            direction = "up" if pct >= 0 else "down"
+            name = _BENCH_NAMES.get(benchmark, benchmark.lstrip("^"))
+            actual_date = (
+                hist.index[-1].strftime("%Y-%m-%d")
+                if hasattr(hist.index[-1], "strftime")
+                else trade_date
+            )
+            return f"MARKET NOTE: {name} {direction} {abs(pct):.1f}% on {actual_date}."
+    except Exception as e:
+        logger.debug("market_context_fetch_failed", error=str(e))
+    return ""
+
+
 async def run_analysis(
     ticker: str,
     quick_mode: bool,
@@ -846,6 +905,10 @@ async def run_analysis(
                 message="No source could resolve company name — LLM hallucination risk",
             )
 
+        # Fetch benchmark context once (non-blocking) before graph starts.
+        # Prepended to the HumanMessage so every agent receives it as session context.
+        market_context = await _fetch_market_context(ticker, real_date)
+
         graph = create_trading_graph(
             ticker=ticker,  # BUG FIX #1: Pass ticker for isolation
             cleanup_previous=True,  # BUG FIX #1: Cleanup to prevent contamination
@@ -862,12 +925,11 @@ async def run_analysis(
             skip_charts=skip_charts,
         )
 
+        _base_msg = f"Analyze {ticker} ({company_name}) for investment decision. Current Date: {real_date}."
+        if market_context:
+            _base_msg += f" {market_context}"
         initial_state = AgentState(
-            messages=[
-                HumanMessage(
-                    content=f"Analyze {ticker} ({company_name}) for investment decision. Current Date: {real_date}"
-                )
-            ],
+            messages=[HumanMessage(content=_base_msg)],
             company_of_interest=ticker,
             company_name=company_name,  # ADDED: Anchor verified company name in state
             company_name_resolved=name_result.is_resolved,

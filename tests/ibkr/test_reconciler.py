@@ -653,3 +653,263 @@ class TestComputePortfolioHealth:
         health_flag = next(f for f in flags if "LOW_HEALTH" in f)
         assert "†" in health_flag
         assert "stale" in health_flag
+
+
+# ── Sell Type Classification Tests ──
+
+
+class TestSellTypeTagging:
+    """Test that SELL items are tagged with the correct sell_type."""
+
+    def test_stop_breach_tagged_stop_breach(self):
+        """Price below stop → sell_type=STOP_BREACH."""
+        pos = _make_position(current_price=1700)
+        analysis = _make_analysis(stop_price=1900)
+        items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
+        assert items[0].action == "SELL"
+        assert items[0].sell_type == "STOP_BREACH"
+
+    def test_fundamental_failure_tagged_hard_reject(self):
+        """Verdict DO_NOT_INITIATE + health_adj=40 → HARD_REJECT (fails hard check)."""
+        pos = _make_position(current_price=2100)
+        analysis = _make_analysis(verdict="DO_NOT_INITIATE")
+        analysis.health_adj = 40.0  # below 50 → hard fail
+        analysis.growth_adj = 60.0
+        items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
+        sell = next(i for i in items if i.action == "SELL")
+        assert sell.sell_type == "HARD_REJECT"
+
+    def test_soft_failure_tagged_soft_reject(self):
+        """Verdict DO_NOT_INITIATE + health_adj=65 + growth_adj=60 → SOFT_REJECT."""
+        pos = _make_position(current_price=2100)
+        analysis = _make_analysis(verdict="DO_NOT_INITIATE")
+        analysis.health_adj = 65.0  # passes hard check
+        analysis.growth_adj = 60.0  # passes hard check
+        items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
+        sell = next(i for i in items if i.action == "SELL")
+        assert sell.sell_type == "SOFT_REJECT"
+
+    def test_no_analysis_tagged_hard_reject(self):
+        """Held position with no analysis → REVIEW (not SELL), so no sell_type."""
+        pos = _make_position(current_price=2100)
+        items = reconcile([pos], {}, _make_portfolio())
+        # No analysis means REVIEW, not SELL
+        assert items[0].action == "REVIEW"
+        assert items[0].sell_type is None
+
+    def test_hold_has_no_sell_type(self):
+        """HOLD items have sell_type=None."""
+        pos = _make_position(current_price=2100)
+        analysis = _make_analysis(verdict="BUY")
+        items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
+        assert items[0].action == "HOLD"
+        assert items[0].sell_type is None
+
+
+# ── Correlated Sell Event Detection Tests ──
+
+
+def _make_multi_sell_scenario(
+    n_soft_sells: int,
+    n_stop_breaches: int,
+    n_hard_rejects: int,
+    n_holds: int,
+    sell_date: str = "2026-03-05",
+) -> tuple[list, dict, "PortfolioSummary"]:
+    """
+    Build positions + analyses for a correlated-sell scenario.
+
+    Returns (positions, analyses, portfolio) ready for reconcile().
+    """
+    from datetime import datetime, timedelta
+
+    positions = []
+    analyses = {}
+    conid = 1
+
+    # SOFT_REJECT SELLs — passed both hard checks, rejected on soft tally
+    for i in range(n_soft_sells):
+        ticker = f"SOFT{i:02d}.T"
+        pos = _make_position(
+            ticker=ticker, current_price=2100, market_value_usd=1000, conid=conid
+        )
+        a = _make_analysis(ticker=ticker, verdict="DO_NOT_INITIATE", age_days=0)
+        a.analysis_date = sell_date
+        a.health_adj = 65.0
+        a.growth_adj = 60.0
+        positions.append(pos)
+        analyses[ticker] = a
+        conid += 1
+
+    # STOP_BREACH SELLs
+    for i in range(n_stop_breaches):
+        ticker = f"STOP{i:02d}.T"
+        pos = _make_position(
+            ticker=ticker, current_price=1500, market_value_usd=1000, conid=conid
+        )
+        a = _make_analysis(ticker=ticker, verdict="BUY", stop_price=1800, age_days=0)
+        a.analysis_date = sell_date
+        a.health_adj = 70.0
+        a.growth_adj = 65.0
+        positions.append(pos)
+        analyses[ticker] = a
+        conid += 1
+
+    # HARD_REJECT SELLs — failed fundamental checks
+    for i in range(n_hard_rejects):
+        ticker = f"HARD{i:02d}.T"
+        pos = _make_position(
+            ticker=ticker, current_price=2100, market_value_usd=1000, conid=conid
+        )
+        a = _make_analysis(ticker=ticker, verdict="DO_NOT_INITIATE", age_days=0)
+        a.analysis_date = sell_date
+        a.health_adj = 35.0  # fails hard check
+        a.growth_adj = 40.0
+        positions.append(pos)
+        analyses[ticker] = a
+        conid += 1
+
+    # HOLDs — normal positions
+    for i in range(n_holds):
+        ticker = f"HOLD{i:02d}.T"
+        pos = _make_position(
+            ticker=ticker, current_price=2100, market_value_usd=1000, conid=conid
+        )
+        a = _make_analysis(ticker=ticker, verdict="BUY", age_days=0)
+        a.analysis_date = sell_date
+        a.health_adj = 70.0
+        a.growth_adj = 65.0
+        positions.append(pos)
+        analyses[ticker] = a
+        conid += 1
+
+    total_value = len(positions) * 1000.0
+    portfolio = _make_portfolio(value=total_value, cash=0)
+    portfolio.exchange_weights = {}
+    portfolio.sector_weights = {}
+    return positions, analyses, portfolio
+
+
+class TestCorrelatedSellDetection:
+    """Test CORRELATED_SELL_EVENT detection and SOFT_REJECT demotion."""
+
+    def test_correlated_sell_event_triggered(self):
+        """6 verdict-change SELLs, 8 total held → 75% → CORRELATED_SELL_EVENT fires."""
+        positions, analyses, portfolio = _make_multi_sell_scenario(
+            n_soft_sells=6, n_stop_breaches=0, n_hard_rejects=0, n_holds=2
+        )
+        items = reconcile(positions, analyses, portfolio)
+        flags = compute_portfolio_health(
+            positions, analyses, portfolio, reconciliation_items=items
+        )
+        assert any("CORRELATED_SELL_EVENT" in f for f in flags)
+
+    def test_correlated_sell_event_not_triggered_when_sparse(self):
+        """3 verdict-change SELLs, 20 held → 15% → no correlated event."""
+        positions, analyses, portfolio = _make_multi_sell_scenario(
+            n_soft_sells=3, n_stop_breaches=0, n_hard_rejects=0, n_holds=17
+        )
+        items = reconcile(positions, analyses, portfolio)
+        flags = compute_portfolio_health(
+            positions, analyses, portfolio, reconciliation_items=items
+        )
+        assert not any("CORRELATED_SELL_EVENT" in f for f in flags)
+
+    def test_correlated_sell_event_not_triggered_when_fewer_than_5(self):
+        """4 verdict-change SELLs on same date, 4 held → 100% but count < 5 → no event."""
+        positions, analyses, portfolio = _make_multi_sell_scenario(
+            n_soft_sells=4, n_stop_breaches=0, n_hard_rejects=0, n_holds=0
+        )
+        items = reconcile(positions, analyses, portfolio)
+        flags = compute_portfolio_health(
+            positions, analyses, portfolio, reconciliation_items=items
+        )
+        assert not any("CORRELATED_SELL_EVENT" in f for f in flags)
+
+    def test_stop_breach_not_counted_in_correlation(self):
+        """10 stop-breach SELLs should NOT trigger correlated-sell flag."""
+        positions, analyses, portfolio = _make_multi_sell_scenario(
+            n_soft_sells=0, n_stop_breaches=10, n_hard_rejects=0, n_holds=2
+        )
+        items = reconcile(positions, analyses, portfolio)
+        flags = compute_portfolio_health(
+            positions, analyses, portfolio, reconciliation_items=items
+        )
+        assert not any("CORRELATED_SELL_EVENT" in f for f in flags)
+
+    def test_soft_reject_demoted_to_review_on_correlated_day(self):
+        """On a correlated day, SOFT_REJECT SELLs are demoted to REVIEW."""
+        positions, analyses, portfolio = _make_multi_sell_scenario(
+            n_soft_sells=6, n_stop_breaches=0, n_hard_rejects=0, n_holds=2
+        )
+        items = reconcile(positions, analyses, portfolio)
+        # Before health check: SOFT_REJECT items are still SELL
+        soft_sells_before = [
+            i for i in items if i.sell_type == "SOFT_REJECT" and i.action == "SELL"
+        ]
+        assert len(soft_sells_before) == 6
+
+        compute_portfolio_health(
+            positions, analyses, portfolio, reconciliation_items=items
+        )
+
+        # After: demoted to REVIEW
+        soft_sells_after = [
+            i for i in items if i.sell_type == "SOFT_REJECT" and i.action == "SELL"
+        ]
+        soft_reviews_after = [
+            i for i in items if i.sell_type == "SOFT_REJECT" and i.action == "REVIEW"
+        ]
+        assert len(soft_sells_after) == 0
+        assert len(soft_reviews_after) == 6
+        # Reason string annotated
+        assert all("MACRO_WATCH" in i.reason for i in soft_reviews_after)
+
+    def test_hard_reject_stays_sell_on_correlated_day(self):
+        """HARD_REJECT SELLs remain SELL even when correlated event fires."""
+        positions, analyses, portfolio = _make_multi_sell_scenario(
+            n_soft_sells=5,  # enough to trigger event
+            n_stop_breaches=0,
+            n_hard_rejects=3,
+            n_holds=3,
+        )
+        items = reconcile(positions, analyses, portfolio)
+        compute_portfolio_health(
+            positions, analyses, portfolio, reconciliation_items=items
+        )
+
+        hard_sells = [
+            i for i in items if i.sell_type == "HARD_REJECT" and i.action == "SELL"
+        ]
+        assert len(hard_sells) == 3  # unchanged
+
+    def test_stop_breach_stays_sell_on_correlated_day(self):
+        """STOP_BREACH SELLs are never demoted, regardless of correlated event."""
+        positions, analyses, portfolio = _make_multi_sell_scenario(
+            n_soft_sells=5,  # triggers event
+            n_stop_breaches=2,
+            n_hard_rejects=0,
+            n_holds=3,
+        )
+        items = reconcile(positions, analyses, portfolio)
+        compute_portfolio_health(
+            positions, analyses, portfolio, reconciliation_items=items
+        )
+
+        stop_sells = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
+        ]
+        assert len(stop_sells) == 2  # unchanged
+
+    def test_no_reconciliation_items_no_crash(self):
+        """compute_portfolio_health with reconciliation_items=None doesn't crash."""
+        pos = _make_position(market_value_usd=10000)
+        analysis = _make_analysis()
+        analysis.health_adj = 70.0
+        portfolio = _make_portfolio(value=100000)
+        portfolio.exchange_weights = {}
+        # Should not raise
+        flags = compute_portfolio_health(
+            [pos], {"7203.T": analysis}, portfolio, reconciliation_items=None
+        )
+        assert isinstance(flags, list)

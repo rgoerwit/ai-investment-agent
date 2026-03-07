@@ -332,8 +332,8 @@ ACTION_SYMBOLS = {
     "SELL": "SELL",
     "TRIM": "TRIM",
     "ADD": "ADD",
-    "HOLD": " ",
-    "REVIEW": "?",
+    "HOLD": "HOLD",
+    "REVIEW": "REVIEW",
     "REMOVE": "REMOVE",
 }
 
@@ -357,6 +357,8 @@ _CURRENCY_SYMBOLS: dict[str, str] = {
     "DKK": "kr",
 }
 
+_MAX_DIP_CANDIDATES = 7
+
 
 def _ccy(currency: str) -> str:
     """Get currency symbol for a currency code."""
@@ -374,7 +376,7 @@ def _item_currency(item: ReconciliationItem) -> str:
 
 
 def _urgency_prefix(item: ReconciliationItem) -> str:
-    return {"HIGH": "  !!", "MEDIUM": "   !", "LOW": "    "}.get(item.urgency, "    ")
+    return {"HIGH": "⚠ ", "MEDIUM": "△ ", "LOW": "  "}.get(item.urgency, "  ")
 
 
 def _bar_chart(pct: float, limit: float, width: int = 14) -> str:
@@ -383,6 +385,36 @@ def _bar_chart(pct: float, limit: float, width: int = 14) -> str:
     bar = "█" * filled + "░" * (width - filled)
     warn = " ⚠" if pct >= limit * 0.9 else ""
     return f"{bar}{warn}"
+
+
+def _compute_dip_score(item: ReconciliationItem) -> float:
+    """Composite dip quality score [0–100]. Higher = better dip opportunity."""
+    a = item.analysis
+    pos = item.ibkr_position
+    if not a:
+        return 0.0
+
+    health = a.health_adj or 0.0
+    growth = a.growth_adj or 0.0
+    base = health * 0.4 + growth * 0.4  # 0–80 pts from fundamentals
+
+    # Dip-below-entry bonus: more attractive if current price < analyst's entry recommendation
+    price_bonus = 0.0
+    if a.entry_price and pos and pos.current_price_local and a.entry_price > 0:
+        dip_pct = (a.entry_price - pos.current_price_local) / a.entry_price * 100
+        if dip_pct > 0:
+            price_bonus = min(dip_pct * 1.5, 12.0)  # max 12 pts
+
+    # R/R bonus: high upside-to-downside ratio improves ranking
+    rr_bonus = 0.0
+    if a.target_1_price and a.stop_price and pos and pos.current_price_local:
+        current = pos.current_price_local
+        if current > 0 and current > a.stop_price:
+            upside = (a.target_1_price - current) / current
+            downside = max((current - a.stop_price) / current, 0.001)
+            rr_bonus = min((upside / downside) * 2.5, 8.0)  # max 8 pts
+
+    return base + price_bonus + rr_bonus
 
 
 def format_report(
@@ -410,7 +442,7 @@ def format_report(
     if nlv > 0:
         lines.append(
             f"  Cash (total):     ${cash:>10,.0f}   ({cash / nlv * 100:.1f}%)"
-            "  includes unsettled T+2 proceeds"
+            "  includes sale proceeds not yet settled"
         )
         lines.append(
             f"  Settled cash:     ${settled:>10,.0f}   ({settled / nlv * 100:.1f}%)"
@@ -430,15 +462,30 @@ def format_report(
         lines.append(f"  Available:        ${available:,.0f}")
     lines.append("")
 
-    # Split by action
-    sells = [i for i in items if i.action == "SELL"]
+    # Split by action — sells are further categorised by sell_type
+    stop_sells = [
+        i for i in items if i.action == "SELL" and i.sell_type == "STOP_BREACH"
+    ]
+    hard_sells = [
+        i for i in items if i.action == "SELL" and i.sell_type in (None, "HARD_REJECT")
+    ]
+    soft_sells = [
+        i for i in items if i.action == "SELL" and i.sell_type == "SOFT_REJECT"
+    ]
+    # SOFT_REJECT items demoted to REVIEW by compute_portfolio_health on correlated days
+    macro_reviews = [
+        i for i in items if i.action == "REVIEW" and i.sell_type == "SOFT_REJECT"
+    ]
     trims = [i for i in items if i.action == "TRIM"]
     removes = [i for i in items if i.action == "REMOVE"]
     adds = [i for i in items if i.action == "ADD"]
     buys = [i for i in items if i.action == "BUY" and i.ibkr_position is None]
     holds_real = [i for i in items if i.action == "HOLD" and not i.is_watchlist]
     holds_watch = [i for i in items if i.action == "HOLD" and i.is_watchlist]
-    reviews = [i for i in items if i.action == "REVIEW"]
+    # Exclude macro_reviews from regular REVIEW section (they get their own block below)
+    reviews = [
+        i for i in items if i.action == "REVIEW" and i.sell_type != "SOFT_REJECT"
+    ]
 
     def _section(title: str, subtitle: str = "") -> None:
         lines.append(_DIVIDER)
@@ -453,10 +500,10 @@ def format_report(
         """Build the first line: urgency + action + ticker + qty + price + order type."""
         pfx = _urgency_prefix(item)
         sym = ACTION_SYMBOLS.get(item.action, item.action)
-        parts = [f"{pfx} [{sym}]", f"  {item.ticker:<12}"]
+        parts = [f"{pfx}{sym:<6}  {item.ticker:<12}"]
         if show_recommendations:
             if item.suggested_quantity:
-                parts.append(f"  {abs(item.suggested_quantity)} sh")
+                parts.append(f"  {abs(item.suggested_quantity)} shares")
             if item.suggested_price:
                 parts.append(f"  @ {_ccy(ccy)}{item.suggested_price:,.2f}")
             if item.suggested_order_type:
@@ -490,25 +537,248 @@ def format_report(
         )
         return f"             {label}: ~${cost:,.0f} USD  ·  {funded}"
 
-    # ── SELLS ────────────────────────────────────────────────────────────────
-    if sells:
-        _section("SELLS", "action needed — verdict changed or stop breached")
-        for item in sells:
+    def _display_data_line(item: ReconciliationItem) -> None:
+        """Append compact fundamentals + dip line for a MACRO_WATCH item."""
+        a = item.analysis
+        pos = item.ibkr_position
+        if not a:
+            return
+        ccy = _item_currency(item)
+        sym = _ccy(ccy)
+        h = f"{a.health_adj:.0f}" if a.health_adj is not None else "?"
+        g = f"{a.growth_adj:.0f}" if a.growth_adj is not None else "?"
+        parts: list[str] = [f"Health:{h}%  Growth:{g}%"]
+        if a.zone:
+            parts.append(f"Risk:{a.zone}")
+        if a.entry_price and pos and pos.current_price_local and a.entry_price > 0:
+            chg = (pos.current_price_local - a.entry_price) / a.entry_price * 100
+            if abs(chg) >= 90.0:
+                parts.append(
+                    f"entry {sym}{a.entry_price:,.2f}  now {sym}{pos.current_price_local:,.2f}"
+                    f"  (⚠ unit mismatch?)"
+                )
+            else:
+                parts.append(
+                    f"entry {sym}{a.entry_price:,.2f}  now {sym}{pos.current_price_local:,.2f}"
+                    f"  ({chg:+.1f}%)"
+                )
+        lines.append("             " + "  |  ".join(parts))
+
+    def _render_dip_watch_section(candidates: list[ReconciliationItem]) -> None:
+        """Render the DIP WATCH section for macro-dip candidates."""
+        dw = "═" * 54
+        lines.append(dw)
+        lines.append("  DIP WATCH  (top candidates to buy once sale proceeds settle)")
+        lines.append(dw)
+        lines.append("")
+        lines.append("  Ranked by fundamental quality × dip depth × risk/reward:")
+        lines.append("")
+        for item in candidates:
+            a = item.analysis
+            pos = item.ibkr_position
+            score = _compute_dip_score(item)
+            if score >= 75:
+                stars = "★★★"
+            elif score >= 60:
+                stars = "★★ "
+            else:
+                stars = "★  "
             ccy = _item_currency(item)
-            lines.append(_order_line(item, ccy))
-            lines.append(f"             {item.reason}")
+            sym = _ccy(ccy)
+            h = f"{a.health_adj:.0f}" if a and a.health_adj is not None else "?"
+            g = f"{a.growth_adj:.0f}" if a and a.growth_adj is not None else "?"
+            hg_str = f"Health:{h}%  Growth:{g}%"
+            if (
+                a
+                and a.entry_price
+                and pos
+                and pos.current_price_local
+                and a.entry_price > 0
+            ):
+                chg = (pos.current_price_local - a.entry_price) / a.entry_price * 100
+                if abs(chg) >= 90.0:
+                    entry_str = (
+                        f"entry {sym}{a.entry_price:,.2f}  now {sym}{pos.current_price_local:,.2f}"
+                        f"  (⚠ unit mismatch?)"
+                    )
+                else:
+                    entry_str = (
+                        f"entry {sym}{a.entry_price:,.2f}  now {sym}{pos.current_price_local:,.2f}"
+                        f"  ({chg:+.1f}%)"
+                    )
+            else:
+                entry_str = "(no entry price recorded)"
+            rr_str = "—"
+            if (
+                a
+                and a.target_1_price
+                and a.stop_price
+                and pos
+                and pos.current_price_local
+            ):
+                cur = pos.current_price_local
+                if cur > 0 and cur > a.stop_price:
+                    up = (a.target_1_price - cur) / cur * 100
+                    dn = max((cur - a.stop_price) / cur * 100, 0.001)
+                    rr = up / dn
+                    rr_str = f"R/R {rr:.1f}×  (target +{up:.0f}% / stop -{dn:.0f}%)"
+            lines.append(
+                f"  {stars}  {item.ticker:<12}  {hg_str}  |  {entry_str}  |  {rr_str}"
+            )
+        lines.append("")
+        lines.append(
+            "  → Re-run before acting: poetry run python -m src.main --ticker <TICKER>"
+        )
+        lines.append("")
+
+    def _norm_reason(r: str) -> str:
+        """Translate internal verdict labels to user-facing display text."""
+        return r.replace("DO_NOT_INITIATE", "REJECT").replace("Verdict → ", "Verdict: ")
+
+    def _as_of_date(r: str) -> str:
+        """Extract just the analysis date from a reason string, e.g. 'analyzed 2026-03-05'.
+        Used in sections where the section header already explains the action — the date
+        tells the user when this recommendation was generated so they can judge staleness."""
+        normed = _norm_reason(r)
+        paren = normed.rfind("(")
+        if paren != -1 and normed.endswith(")"):
+            return f"analyzed {normed[paren + 1:-1]}"
+        return normed  # fallback: show full reason
+
+    def _pnl_line(item: ReconciliationItem) -> str | None:
+        """Return an indented gain/loss estimate line for a SELL/TRIM item, or None if unavailable."""
+        pos = item.ibkr_position
+        if not pos or pos.avg_cost_local <= 0 or pos.current_price_local <= 0:
+            return None
+        if pos.quantity == 0:
+            return None
+
+        # Gain/loss percentage (currency-neutral — both values in local currency)
+        pct = (pos.current_price_local - pos.avg_cost_local) / pos.avg_cost_local * 100
+
+        # Guard: ≥90% swing likely a MEGP-style currency-unit mismatch in cost basis
+        if abs(pct) >= 90.0:
+            return (
+                "             est. P&L: (⚠ cost basis may have currency-unit mismatch)"
+            )
+
+        # Gain/loss in LOCAL currency — avoids FX conversion errors from unrealized_pnl_usd
+        sell_qty = abs(item.suggested_quantity or pos.quantity)
+        pnl_local = (pos.current_price_local - pos.avg_cost_local) * sell_qty
+        ccy_sym = _ccy(pos.currency)
+
+        sign = "+" if pnl_local >= 0 else "-"
+        gain_or_loss = "est. gain:" if pnl_local >= 0 else "est. loss:"
+        tax_note = "  ·  verify holding period in IBKR" if pnl_local > 0 else ""
+        return f"             {gain_or_loss}  {sign}{ccy_sym}{abs(pnl_local):,.0f}  ({pct:+.1f}%){tax_note}"
+
+    # ── MACRO ALERT BANNER (if correlated sell event detected) ───────────────
+    _correlated_flag = next(
+        (f for f in (portfolio_health_flags or []) if "CORRELATED_SELL_EVENT" in f),
+        None,
+    )
+    if _correlated_flag:
+        # Parse "CORRELATED_SELL_EVENT: N positions changed verdict on DATE (P% …"
+        try:
+            _words = _correlated_flag.split(":", 1)[1].strip().split()
+            _cnt, _dt, _pct = _words[0], _words[5], _words[6].lstrip("(")
+        except (IndexError, AttributeError):
+            _cnt, _dt, _pct = "?", "?", "?%"
+        _W = 52  # inner text width (54 inner box chars minus 2-space left indent)
+        _banner_lines = [
+            "╔" + "═" * 54 + "╗",
+            f"║  {'!! MACRO ALERT':<{_W}}║",
+            f"║  {f'{_cnt} positions changed verdict on {_dt}':<{_W}}║",
+            f"║  {f'({_pct} of portfolio) — probable macro event':<{_W}}║",
+            f"║  {'Likely macro event, not individual thesis failure.':<{_W}}║",
+            f"║  {'Execute STOP-BREACH SELLs; review others first.':<{_W}}║",
+            "╚" + "═" * 54 + "╝",
+        ]
+        for bl in _banner_lines:
+            lines.append(bl)
+        lines.append("")
+
+    # ── SELLS — STOP BREACHED (mechanical — execute) ─────────────────────────
+    if stop_sells:
+        _section("SELLS — STOP BREACHED", "mechanical — execute these")
+        for item in stop_sells:
+            ccy = _item_currency(item)
+            lines.append(f"{_order_line(item, ccy)}  {_norm_reason(item.reason)}")
+            pnl = _pnl_line(item)
+            if pnl:
+                lines.append(pnl)
             pl = _proceeds_line(item)
             if pl:
                 lines.append(pl)
             lines.append("")
+
+    # ── SELLS — FUNDAMENTAL FAILURE (hard reject — execute) ──────────────────
+    if hard_sells:
+        _section("SELLS — FUNDAMENTAL FAILURE", "hard checks failed — execute")
+        for item in hard_sells:
+            ccy = _item_currency(item)
+            lines.append(f"{_order_line(item, ccy)}  {_as_of_date(item.reason)}")
+            pnl = _pnl_line(item)
+            if pnl:
+                lines.append(pnl)
+            pl = _proceeds_line(item)
+            if pl:
+                lines.append(pl)
+            lines.append("")
+
+    # ── SELLS — SOFT REJECTION / MACRO REVIEWS ───────────────────────────────
+    # soft_sells: on normal days (no correlated event) — show as SELL
+    # macro_reviews: demoted from SELL on correlated days — show as REVIEW
+    if soft_sells or macro_reviews:
+        if macro_reviews and not soft_sells:
+            subtitle = (
+                "passed hard checks — review before acting (macro event detected)"
+            )
+        else:
+            subtitle = "passed hard checks — review before acting"
+        _section("SELLS — SOFT REJECTION", subtitle)
+        for item in soft_sells + macro_reviews:
+            ccy = _item_currency(item)
+            # Strip internal MACRO_WATCH annotation — section header already contextualises it
+            _display_reason = _norm_reason(item.reason.split("  [MACRO_WATCH:")[0])
+            lines.append(f"{_order_line(item, ccy)}  {_display_reason}")
+            if item in macro_reviews:
+                _display_data_line(item)
+            pnl = _pnl_line(item)
+            if pnl:
+                lines.append(pnl)
+            pl = _proceeds_line(item)
+            if pl:
+                lines.append(pl)
+            lines.append("")
+
+    # ── DIP WATCH ────────────────────────────────────────────────────────────
+    dip_candidates: list[ReconciliationItem] = []
+    if _correlated_flag and macro_reviews:
+        dip_candidates = sorted(
+            [
+                i
+                for i in macro_reviews
+                if i.analysis
+                and (i.analysis.health_adj or 0) >= 55
+                and (i.analysis.growth_adj or 0) >= 55
+                and _compute_dip_score(i) >= 50
+            ],
+            key=_compute_dip_score,
+            reverse=True,
+        )[:_MAX_DIP_CANDIDATES]
+        if dip_candidates:
+            _render_dip_watch_section(dip_candidates)
 
     # ── TRIMS ────────────────────────────────────────────────────────────────
     if trims:
         _section("TRIMS", "reduce to target weight")
         for item in trims:
             ccy = _item_currency(item)
-            lines.append(_order_line(item, ccy))
-            lines.append(f"             {item.reason}")
+            lines.append(f"{_order_line(item, ccy)}  {_norm_reason(item.reason)}")
+            pnl = _pnl_line(item)
+            if pnl:
+                lines.append(pnl)
             pl = _proceeds_line(item)
             if pl:
                 lines.append(pl)
@@ -518,7 +788,7 @@ def format_report(
     if removes:
         _section("WATCHLIST — REMOVE", "verdict changed — remove from IBKR watchlist")
         for item in removes:
-            lines.append(f"   [REMOVE]  {item.ticker:<12}  {item.reason}")
+            lines.append(f"  {'REMOVE':<6}  {item.ticker:<12}  {item.reason}")
         lines.append("")
 
     # ── ADDS ─────────────────────────────────────────────────────────────────
@@ -526,8 +796,7 @@ def format_report(
         _section("ADDS", "increase underweight positions")
         for item in adds:
             ccy = _item_currency(item)
-            lines.append(_order_line(item, ccy))
-            lines.append(f"             {item.reason}")
+            lines.append(f"{_order_line(item, ccy)}  {_norm_reason(item.reason)}")
             cl = _cost_line(item)
             if cl:
                 lines.append(cl)
@@ -574,17 +843,17 @@ def format_report(
             if a and pos and a.entry_price and pos.current_price_local:
                 gain = (pos.current_price_local - a.entry_price) / a.entry_price * 100
                 price_str = (
-                    f"entry {sym}{a.entry_price:,.2f} → {sym}{pos.current_price_local:,.2f}"
-                    f" ({gain:+.1f}%)"
+                    f"entry {sym}{a.entry_price:,.2f}  now {sym}{pos.current_price_local:,.2f}"
+                    f"  ({gain:+.1f}%)"
                 )
 
             stop_str = f"stop {sym}{a.stop_price:,.2f}" if a and a.stop_price else ""
             t1_str = (
-                f"T1 {sym}{a.target_1_price:,.2f}" if a and a.target_1_price else ""
+                f"target {sym}{a.target_1_price:,.2f}" if a and a.target_1_price else ""
             )
 
             row_parts = [p for p in [weight_str, price_str, stop_str, t1_str] if p]
-            lines.append(f"     [ ]    {item.ticker:<12}  {'  '.join(row_parts)}")
+            lines.append(f"  {'HOLD':<6}  {item.ticker:<12}  {'  '.join(row_parts)}")
 
         lines.append("")
 
@@ -596,7 +865,7 @@ def format_report(
             verdict_str = (
                 f"Verdict: {a.verdict}  ({a.analysis_date})" if a else "no analysis"
             )
-            lines.append(f"     [~]    {item.ticker:<12}  {verdict_str}")
+            lines.append(f"  {'WATCH':<6}  {item.ticker:<12}  {verdict_str}")
         lines.append("")
 
     # ── REVIEWS ───────────────────────────────────────────────────────────────
@@ -607,7 +876,9 @@ def format_report(
                 "Position held but no evaluator analysis found", "no analysis found"
             )
             run_cmd = f"python -m src.main --ticker {item.ticker}"
-            lines.append(f"     [?]    {item.ticker:<12}  {reason_short}  →  {run_cmd}")
+            lines.append(
+                f"  {'REVIEW':<6}  {item.ticker:<12}  {reason_short}  →  {run_cmd}"
+            )
         lines.append("")
 
     if not items:
@@ -634,7 +905,7 @@ def format_report(
             for exch, pct in sorted(exchange_weights.items(), key=lambda x: -x[1]):
                 long_name = _EXCHANGE_LONG_NAMES.get(exch, exch)
                 bar = _bar_chart(pct, 40.0)
-                lines.append(f"    {exch:<5} ({long_name:<12}) {pct:>5.1f}%  {bar}")
+                lines.append(f"    {exch:<5} ({long_name:<13}) {pct:>5.1f}%  {bar}")
             lines.append("")
 
     # ── PORTFOLIO HEALTH ───────────────────────────────────────────────────────
@@ -686,8 +957,10 @@ def format_report(
             settle_dates = [
                 i.settlement_date for i in sell_proceed_items if i.settlement_date
             ]
-            settle_date_str = settle_dates[0] if settle_dates else "T+2"
-            lines.append(f"  Pending inflows (T+2, settles {settle_date_str}):")
+            settle_date_str = settle_dates[0] if settle_dates else "in 2 business days"
+            lines.append(
+                f"  Pending inflows (sale proceeds, clears {settle_date_str}):"
+            )
             total_proceeds = 0.0
             for item in sell_proceed_items:
                 proceeds = item.cash_impact_usd
@@ -708,8 +981,8 @@ def format_report(
             lines.append("     Consider additional BUYs only after settlement date.")
             lines.append("")
 
-    # ── DEFERRED ACTIONS ──────────────────────────────────────────────────────
-    # Show a sequenced action plan: what to do today vs after T+2 settlement,
+    # ── ACTION PLAN ───────────────────────────────────────────────────────────
+    # Show a sequenced action plan: what to do today vs after 2-day settlement,
     # and which HOLD positions are approaching their staleness deadline.
     from datetime import date, timedelta
     from datetime import datetime as _dt
@@ -745,13 +1018,18 @@ def format_report(
                     pass
 
     if action_today or funded_today or settle_groups or upcoming_reviews:
-        _section("DEFERRED ACTIONS", "pending settlement & upcoming deadlines")
+        _section(
+            "ACTION PLAN",
+            "execution orders · when proceeds clear · re-analysis deadlines",
+        )
 
         if action_today or funded_today:
             lines.append(f"  TODAY ({today_str}):")
             for i in action_today:
                 qty_str = (
-                    f"  {abs(i.suggested_quantity)} sh" if i.suggested_quantity else ""
+                    f"  {abs(i.suggested_quantity)} shares"
+                    if i.suggested_quantity
+                    else ""
                 )
                 price_str = (
                     f"  @ {_ccy(_item_currency(i))}{i.suggested_price:,.2f}"
@@ -763,7 +1041,9 @@ def format_report(
                 )
             for i in funded_today:
                 qty_str = (
-                    f"  {abs(i.suggested_quantity)} sh" if i.suggested_quantity else ""
+                    f"  {abs(i.suggested_quantity)} shares"
+                    if i.suggested_quantity
+                    else ""
                 )
                 price_str = (
                     f"  @ {_ccy(_item_currency(i))}{i.suggested_price:,.2f}"
@@ -779,8 +1059,16 @@ def format_report(
             lines.append("")
 
         for settle_date, proceeds in sorted(settle_groups.items()):
-            lines.append(f"  {settle_date} (T+2 proceeds from today's sell/trim):")
-            lines.append(f"    → ${proceeds:,.0f} clears on this date")
+            lines.append(
+                f"  {settle_date} — sale proceeds from today's sells/trims clear:"
+            )
+            lines.append(f"    → ${proceeds:,.0f} available on this date")
+            if dip_candidates:
+                top_tickers = "  ".join(i.ticker for i in dip_candidates[:3])
+                lines.append(
+                    f"    → Top dip candidates for deployment: {top_tickers}"
+                    "  (see DIP WATCH above)"
+                )
             lines.append("    → Run before placing any additional buys:")
             lines.append(
                 "        poetry run python scripts/portfolio_manager.py --recommend"
@@ -800,9 +1088,15 @@ def format_report(
 
     # ── Summary line ──────────────────────────────────────────────────────────
     action_counts: dict[str, int] = {}
+    macro_watch_count = 0
     for item in items:
-        action_counts[item.action] = action_counts.get(item.action, 0) + 1
-    order = ["SELL", "REMOVE", "TRIM", "ADD", "BUY", "HOLD", "REVIEW"]
+        if item.action == "REVIEW" and item.sell_type == "SOFT_REJECT":
+            macro_watch_count += 1
+        else:
+            action_counts[item.action] = action_counts.get(item.action, 0) + 1
+    if macro_watch_count:
+        action_counts["MACRO_WATCH"] = macro_watch_count
+    order = ["SELL", "REMOVE", "TRIM", "ADD", "BUY", "HOLD", "REVIEW", "MACRO_WATCH"]
     summary_parts = [f"{action_counts[a]} {a}" for a in order if a in action_counts]
     lines.append(f"  Summary:  {'  ·  '.join(summary_parts) or 'empty'}")
 
@@ -1071,12 +1365,15 @@ def main() -> None:
         watchlist_tickers=watchlist_tickers if watchlist_tickers else None,
     )
 
-    # Compute portfolio-level health flags (uses weights populated by reconcile())
+    # Compute portfolio-level health flags (uses weights populated by reconcile()).
+    # Pass reconciliation_items so CORRELATED_SELL_EVENT can be detected and
+    # SOFT_REJECT SELLs demoted to REVIEW in-place.
     health_flags = compute_portfolio_health(
         positions=positions,
         analyses=analyses,
         portfolio=portfolio,
         max_age_days=args.max_age,
+        reconciliation_items=items,
     )
 
     # Handle stale refreshes — also picks up positions with no analysis at all
@@ -1115,6 +1412,7 @@ def main() -> None:
                 analyses=analyses,
                 portfolio=portfolio,
                 max_age_days=args.max_age,
+                reconciliation_items=items,
             )
 
     # Output
