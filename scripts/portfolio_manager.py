@@ -113,10 +113,9 @@ def _validate_key_files(config) -> dict[str, str]:
         errors.append(
             "IBKR_OAUTH_SIGNATURE_KEY_FP and IBKR_OAUTH_ENCRYPTION_KEY_FP both point "
             "to the same file. IBKR requires two separate RSA private key files:\n"
-            "  - Signature key:   your private signing key (RSA or PKCS8 PEM format)\n"
-            "  - Encryption key:  your private encryption key (same PEM format, different key pair)\n"
-            "  The matching PUBLIC keys are what you upload to the IBKR portal — do not use\n"
-            "  those here."
+            "  - Signature key:   your RSA signing key in PEM format (PKCS8)\n"
+            "  - Encryption key:  your RSA encryption key in PEM format (separate key pair)\n"
+            "  Upload the matching public keys to the IBKR portal — not the PEM files here."
         )
 
     # PEM headers that indicate a public key or certificate (not a private key).
