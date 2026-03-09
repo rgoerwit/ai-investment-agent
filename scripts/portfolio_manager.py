@@ -113,9 +113,8 @@ def _validate_key_files(config) -> dict[str, str]:
         errors.append(
             "IBKR_OAUTH_SIGNATURE_KEY_FP and IBKR_OAUTH_ENCRYPTION_KEY_FP both point "
             "to the same file. IBKR requires two separate RSA private key files:\n"
-            "  - Signature key:   your private signing key (-----BEGIN RSA PRIVATE KEY----- or\n"
-            "                     -----BEGIN PRIVATE KEY-----)\n"
-            "  - Encryption key:  your private encryption key (same format, different key pair)\n"
+            "  - Signature key:   your private signing key (RSA or PKCS8 PEM format)\n"
+            "  - Encryption key:  your private encryption key (same PEM format, different key pair)\n"
             "  The matching PUBLIC keys are what you upload to the IBKR portal — do not use\n"
             "  those here."
         )
@@ -151,7 +150,7 @@ def _validate_key_files(config) -> dict[str, str]:
                 f"  contains a public key or certificate (header: {first_line.decode()})\n"
                 f"  but IBKR requires the *private* key here — the one you kept locally.\n"
                 f"  (The public key is what you uploaded to the IBKR portal.)\n"
-                f"  Expected header: -----BEGIN RSA PRIVATE KEY----- or -----BEGIN PRIVATE KEY-----"
+                f"  Expected: RSA or PKCS8 PEM private key format"
             )
             return None
 
@@ -641,9 +640,9 @@ def _characterize_macro_event(
     region_counts: Counter = Counter()
     sector_counts: Counter = Counter()
     for item in sell_items:
-        ticker = item.ticker or ""
-        dot = ticker.rfind(".")
-        region_counts[ticker[dot:] if dot >= 0 else ".US"] += 1
+        _yf = item.ticker.yf
+        dot = _yf.rfind(".")
+        region_counts[_yf[dot:] if dot >= 0 else ".US"] += 1
         if item.analysis:
             s = (getattr(item.analysis, "sector", None) or "").strip()
             if s:
@@ -925,6 +924,35 @@ def _compute_dip_score(item: ReconciliationItem) -> float:
     return base + price_bonus + rr_bonus
 
 
+def _display_ticker(item: ReconciliationItem) -> str:
+    """Return the display symbol for a reconciliation item.
+
+    Held positions (ibkr_position set) show the IBKR native symbol — what
+    traders see in the IBKR UI (e.g. "7203", "MEGP").
+
+    Watchlist / new-buy items have no ibkr_position, so we show the yfinance
+    ticker which already contains the exchange suffix and is unambiguous.
+    """
+    if item.ibkr_position:
+        return item.ticker.ibkr
+    return item.ticker.yf
+
+
+def _run_ticker_for(item: ReconciliationItem) -> str:
+    """Return yfinance ticker for --ticker run commands.
+
+    item.ticker.yf is canonical when exchange is known (the common case).
+    Fall back to the analysis record ticker when the position's exchange was
+    unresolvable (e.g. SMART for a XETRA stock at ingestion time).
+    """
+    if item.ticker.has_suffix:
+        return item.ticker.yf
+    # Fallback: analysis record may carry the canonical suffixed form
+    if item.analysis and "." in item.analysis.ticker:
+        return item.analysis.ticker
+    return item.ticker.yf  # US/ADR or genuinely unresolvable
+
+
 def format_report(
     items: list[ReconciliationItem],
     portfolio: PortfolioSummary,
@@ -932,6 +960,8 @@ def format_report(
     portfolio_health_flags: list[str] | None = None,
     max_age_days: int = 14,
     live_orders: list[dict] | None = None,
+    watchlist_name: str | None = None,
+    watchlist_total: int | None = None,
 ) -> str:
     """Format reconciliation results as sectioned human-readable text."""
     lines: list[str] = []
@@ -951,11 +981,11 @@ def format_report(
     if nlv > 0:
         lines.append(
             f"  Cash (total):     ${cash:>10,.0f}   ({cash / nlv * 100:.1f}%)"
-            "  includes sale proceeds not yet settled"
+            "  includes unsettled sale proceeds (not yet spendable)"
         )
         lines.append(
             f"  Settled cash:     ${settled:>10,.0f}   ({settled / nlv * 100:.1f}%)"
-            "  spendable today"
+            "  spend this today"
         )
         lines.append(
             f"  Buffer reserve:   ${buffer_amt:>10,.0f}   ({buffer_amt / nlv * 100:.1f}%)"
@@ -988,7 +1018,11 @@ def format_report(
     trims = [i for i in items if i.action == "TRIM"]
     removes = [i for i in items if i.action == "REMOVE"]
     adds = [i for i in items if i.action == "ADD"]
-    buys = [i for i in items if i.action == "BUY" and i.ibkr_position is None]
+    buys = [
+        i
+        for i in items
+        if i.action == "BUY" and i.ibkr_position is None and i.is_watchlist
+    ]
     holds_real = [i for i in items if i.action == "HOLD" and not i.is_watchlist]
     holds_watch = [i for i in items if i.action == "HOLD" and i.is_watchlist]
     # Exclude macro_reviews from regular REVIEW section (they get their own block below)
@@ -1009,7 +1043,7 @@ def format_report(
         """Build the first line: urgency + action + ticker + qty + price + order type."""
         pfx = _urgency_prefix(item)
         sym = ACTION_SYMBOLS.get(item.action, item.action)
-        parts = [f"{pfx}{sym:<6}  {item.ticker:<12}"]
+        parts = [f"{pfx}{sym:<6}  {_display_ticker(item):<12}"]
         if show_recommendations:
             if item.suggested_quantity:
                 parts.append(f"  {abs(item.suggested_quantity)} shares")
@@ -1017,6 +1051,8 @@ def format_report(
                 parts.append(f"  @ {_ccy(ccy)}{item.suggested_price:,.2f}")
             if item.suggested_order_type:
                 parts.append(f"  {item.suggested_order_type}")
+                if not item.suggested_price and not item.suggested_quantity:
+                    parts.append("  (no entry price — re-run analysis)")
         return "".join(parts)
 
     def _proceeds_line(item: ReconciliationItem) -> str | None:
@@ -1036,9 +1072,9 @@ def format_report(
             return None
         cost = abs(item.cash_impact_usd)
         funded = (
-            f"funded from settled cash (${settled:,.0f})"
+            f"use already-settled cash (${settled:,.0f} available)"
             if settled > 0
-            else "funded from settled cash"
+            else "use already-settled cash"
         )
         return f"             {label}: ~${cost:,.0f} USD  ·  {funded}"
 
@@ -1073,7 +1109,7 @@ def format_report(
         """Render the DIP WATCH section for macro-dip candidates."""
         dw = "═" * 54
         lines.append(dw)
-        lines.append("  DIP WATCH  (top candidates to buy once sale proceeds settle)")
+        lines.append("  DIP WATCH  (buy these after sale proceeds settle)")
         lines.append(dw)
         lines.append("")
         lines.append("  Ranked by fundamental quality × dip depth × risk/reward:")
@@ -1093,22 +1129,23 @@ def format_report(
             h = f"{a.health_adj:.0f}" if a and a.health_adj is not None else "?"
             g = f"{a.growth_adj:.0f}" if a and a.growth_adj is not None else "?"
             hg_str = f"Health:{h}%  Growth:{g}%"
-            if (
-                a
-                and a.entry_price
-                and pos
-                and pos.current_price_local
-                and a.entry_price > 0
-            ):
-                chg = (pos.current_price_local - a.entry_price) / a.entry_price * 100
+            # Prefer analysis entry price; fall back to IBKR avg cost basis.
+            # Both pos.avg_cost_local and pos.current_price_local come from IBKR
+            # (same currency unit), so their comparison is reliable.
+            _dip_entry = (a.entry_price if a and a.entry_price else None) or (
+                pos.avg_cost_local if pos and pos.avg_cost_local else None
+            )
+            _dip_entry_label = "entry" if (a and a.entry_price) else "cost"
+            if _dip_entry and pos and pos.current_price_local and _dip_entry > 0:
+                chg = (pos.current_price_local - _dip_entry) / _dip_entry * 100
                 if abs(chg) >= 90.0:
                     entry_str = (
-                        f"entry {sym}{a.entry_price:,.2f}  now {sym}{pos.current_price_local:,.2f}"
+                        f"{_dip_entry_label} {sym}{_dip_entry:,.2f}  now {sym}{pos.current_price_local:,.2f}"
                         f"  (⚠ unit mismatch?)"
                     )
                 else:
                     entry_str = (
-                        f"entry {sym}{a.entry_price:,.2f}  now {sym}{pos.current_price_local:,.2f}"
+                        f"{_dip_entry_label} {sym}{_dip_entry:,.2f}  now {sym}{pos.current_price_local:,.2f}"
                         f"  ({chg:+.1f}%)"
                     )
             else:
@@ -1128,12 +1165,20 @@ def format_report(
                     rr = up / dn
                     rr_str = f"R/R {rr:.1f}×  (target +{up:.0f}% / stop -{dn:.0f}%)"
             lines.append(
-                f"  {stars}  {item.ticker:<12}  {hg_str}  |  {entry_str}  |  {rr_str}"
+                f"  {stars}  {_display_ticker(item):<12}  {hg_str}  |  {entry_str}  |  {rr_str}"
             )
         lines.append("")
-        lines.append(
-            "  → Re-run before acting: poetry run python -m src.main --ticker <TICKER>"
-        )
+        lines.append("  → Re-run before acting:")
+        for _c in candidates:
+            _run_t = _run_ticker_for(_c)
+            _sfx_warn = (
+                "  ← ⚠ verify exchange suffix (no '.' in ticker)"
+                if "." not in _run_t
+                else ""
+            )
+            lines.append(
+                f"      poetry run python -m src.main --ticker {_run_t}{_sfx_warn}"
+            )
         lines.append("")
 
     def _norm_reason(r: str) -> str:
@@ -1228,43 +1273,108 @@ def format_report(
     # ── Live-order lookup ─────────────────────────────────────────────────────
     _live_orders: list[dict] = live_orders or []
 
-    def _order_note(item: ReconciliationItem) -> str | None:
-        """Return a compact order-status note if an open order exists for this ticker."""
+    def _find_live_order(item: ReconciliationItem) -> tuple[dict, str] | None:
+        """Return (order_dict, order_side) for the first live order matching this item, or None.
+
+        Matching strategy (first match wins):
+
+        1. conid — most reliable; used whenever a held position exists and the
+           order dict contains a conid field.
+
+        2. Symbol — best-effort fallback for new BUY items with no position.
+           IBKR's order symbol format can differ from the yfinance ticker in two ways:
+             a. No exchange suffix: "7203" not "7203.T" — handled by splitting on "."
+             b. No zero-padding for HK codes: "5" not "0005" — handled below
+             c. (Rare) Different base entirely: e.g. IBKR "BRK B" vs yf "BRK-B".
+                When a position exists, pos.symbol (the IBKR-native code) is used
+                as the authoritative candidate, avoiding the guessing entirely.
+                For new BUYs with no position, symbol matching is best-effort only;
+                if it misses, the report simply won't annotate the duplicate order.
+        """
         if not _live_orders:
             return None
         pos = item.ibkr_position
         conid = pos.conid if pos else None
-        ticker_symbol = item.ticker.split(".")[0].upper()
+
+        # Build the set of symbol strings we'd expect IBKR to use for this ticker.
+        # • pos.symbol is the authoritative IBKR-native symbol (available for held positions).
+        # • yf_base is the suffix-stripped yfinance base (e.g. "0005" from "0005.HK").
+        # • ibkr_base strips HK zero-padding from yf_base (e.g. "5" from "0005"),
+        #   since IBKR does not zero-pad HK 4-digit codes.
+        yf_base = (
+            item.ticker.ibkr.upper()
+        )  # IBKR bare symbol (no suffix, no zero-padding)
+        hk_padded = item.ticker.yf.split(".")[0].upper()  # e.g. "0005" for HK
+        symbol_candidates: set[str] = {yf_base, hk_padded}
+        if pos and pos.symbol:
+            symbol_candidates.add(pos.symbol.upper())  # authoritative IBKR symbol
 
         for order in _live_orders:
             matched = False
             order_conid = order.get("conid")
             order_symbol = (order.get("ticker") or order.get("symbol") or "").upper()
+            # Priority 1: conid match (exact, reliable for held positions)
             if conid and order_conid is not None:
                 try:
                     if int(order_conid) == int(conid):
                         matched = True
                 except (TypeError, ValueError):
                     pass
-            if not matched and order_symbol == ticker_symbol:
+            # Priority 2: symbol match (best-effort; may miss if IBKR base differs)
+            if not matched and order_symbol in symbol_candidates:
                 matched = True
             if not matched:
                 continue
-
-            side = "SELL" if order.get("side", "").upper() in ("S", "SELL") else "BUY"
-            qty = order.get("remainingSize") or order.get("totalSize") or "?"
-            price = order.get("price") or order.get("auxPrice")
-            otype = order.get("orderType", "LMT")
-            status = order.get("status", "")
-            try:
-                price_str = f" @ {float(price):.2f}" if price else ""
-            except (TypeError, ValueError):
-                price_str = f" @ {price}" if price else ""
-            return (
-                f"             open order: {side} {qty}{price_str} {otype} ({status})"
+            order_side = (
+                "SELL" if order.get("side", "").upper() in ("S", "SELL") else "BUY"
             )
-
+            return (order, order_side)
         return None
+
+    def _order_note(item: ReconciliationItem) -> str | None:
+        """Return a compact order-status note if an open order exists for this ticker.
+
+        When the live order is the SAME side as the recommendation (SELL+SELL or BUY+BUY),
+        warns explicitly that the order is already submitted. When the sides differ,
+        flags as a conflict.
+        """
+        result = _find_live_order(item)
+        if result is None:
+            return None
+        order, order_side = result
+        qty = order.get("remainingSize") or order.get("totalSize") or "?"
+        price = order.get("price") or order.get("auxPrice")
+        otype = order.get("orderType", "LMT")
+        status = order.get("status", "")
+        try:
+            price_str = f" @ {float(price):.2f}" if price else ""
+        except (TypeError, ValueError):
+            price_str = f" @ {price}" if price else ""
+
+        rec_side = "SELL" if item.action in ("SELL", "TRIM") else "BUY"
+        if order_side == rec_side:
+            live_qty: int | None = None
+            try:
+                if qty != "?":
+                    live_qty = int(qty)
+            except (TypeError, ValueError):
+                pass
+            rec_qty = item.suggested_quantity
+            if live_qty is not None and rec_qty is not None and live_qty < rec_qty:
+                need = rec_qty - live_qty
+                return (
+                    f"             [PARTIAL ORDER: {live_qty} of {rec_qty} shares already submitted"
+                    f" — enter {need} more]"
+                )
+            return (
+                f"             [ORDER ALREADY SUBMITTED: {order_side} {qty}{price_str}"
+                f" {otype} ({status}) — do not re-enter]"
+            )
+        # Opposite-side conflict (e.g., recommending SELL but live BUY pending)
+        return (
+            f"             [CONFLICT: live {order_side} order {qty}{price_str}"
+            f" {otype} ({status}) while recommending {rec_side}]"
+        )
 
     # ── MACRO ALERT BANNER (if correlated sell event detected) ───────────────
     _correlated_flag = next(
@@ -1272,18 +1382,24 @@ def format_report(
         None,
     )
     if _correlated_flag:
-        # Parse "CORRELATED_SELL_EVENT: N positions changed verdict on DATE (P% …"
-        try:
-            _words = _correlated_flag.split(":", 1)[1].strip().split()
-            _cnt, _dt, _pct = _words[0], _words[5], _words[6].lstrip("(")
-        except (IndexError, AttributeError):
+        # Parse "CORRELATED_SELL_EVENT: N positions changed verdict within Xd of DATE (P% …"
+        # Flag format (from compute_portfolio_health):
+        #   "CORRELATED_SELL_EVENT: 30 positions changed verdict within 7d of 2026-02-28 (61% …"
+        import re as _re
+
+        _bm = _re.search(
+            r"(\d+) positions.*?of (\d{4}-\d{2}-\d{2}) \((\d+)%", _correlated_flag
+        )
+        if _bm:
+            _cnt, _dt, _pct = _bm.group(1), _bm.group(2), f"{_bm.group(3)}%"
+        else:
             _cnt, _dt, _pct = "?", "?", "?%"
         _W = 52  # inner text width (54 inner box chars minus 2-space left indent)
         _banner_lines = [
             "╔" + "═" * 54 + "╗",
             f"║  {'!! MACRO ALERT':<{_W}}║",
             f"║  {f'{_cnt} positions changed verdict on {_dt}':<{_W}}║",
-            f"║  {f'({_pct} of portfolio) — probable macro event':<{_W}}║",
+            f"║  {f'({_pct} of held positions) — probable macro event':<{_W}}║",
             f"║  {'Likely macro event, not individual thesis failure.':<{_W}}║",
             f"║  {'Execute STOP-BREACH SELLs; review others first.':<{_W}}║",
             "╚" + "═" * 54 + "╝",
@@ -1397,7 +1513,7 @@ def format_report(
     if removes:
         _section("WATCHLIST — REMOVE", "verdict changed — remove from IBKR watchlist")
         for item in removes:
-            lines.append(f"  {'REMOVE':<6}  {item.ticker:<12}  {item.reason}")
+            lines.append(f"  {'REMOVE':<6}  {_display_ticker(item):<12}  {item.reason}")
         lines.append("")
 
     # ── ADDS ─────────────────────────────────────────────────────────────────
@@ -1415,8 +1531,15 @@ def format_report(
             lines.append("")
 
     # ── NEW BUYS ──────────────────────────────────────────────────────────────
+    # Only shown when items originate from the IBKR watchlist (is_watchlist=True).
+    # Section is intentionally absent when no watchlist was loaded.
     if buys:
-        _section("NEW BUYS")
+        _count_str = (
+            f"{len(buys)}/{watchlist_total} " if watchlist_total is not None else ""
+        )
+        _name_str = f"watchlist '{watchlist_name}'" if watchlist_name else "watchlist"
+        _wl_subtitle = f"{_count_str}from {_name_str} selected for BUY"
+        _section("NEW BUYS", _wl_subtitle)
         for item in buys:
             ccy = _item_currency(item)
             lines.append(_order_line(item, ccy))
@@ -1455,12 +1578,18 @@ def format_report(
                 weight_str = f"{wt:.1f}%"
 
             price_str = ""
-            if a and pos and a.entry_price and pos.current_price_local:
-                gain = (pos.current_price_local - a.entry_price) / a.entry_price * 100
-                price_str = (
-                    f"entry {sym}{a.entry_price:,.2f}  now {sym}{pos.current_price_local:,.2f}"
-                    f"  ({gain:+.1f}%)"
+            if pos and pos.current_price_local:
+                # Prefer analysis entry price; fall back to IBKR avg cost basis
+                _entry = (a.entry_price if a and a.entry_price else None) or (
+                    pos.avg_cost_local if pos.avg_cost_local else None
                 )
+                _entry_label = "entry" if (a and a.entry_price) else "cost"
+                if _entry:
+                    gain = (pos.current_price_local - _entry) / _entry * 100
+                    price_str = (
+                        f"{_entry_label} {sym}{_entry:,.2f}  now {sym}{pos.current_price_local:,.2f}"
+                        f"  ({gain:+.1f}%)"
+                    )
 
             stop_str = f"stop {sym}{a.stop_price:,.2f}" if a and a.stop_price else ""
             t1_str = (
@@ -1468,7 +1597,13 @@ def format_report(
             )
 
             row_parts = [p for p in [weight_str, price_str, stop_str, t1_str] if p]
-            lines.append(f"  {'HOLD':<6}  {item.ticker:<12}  {'  '.join(row_parts)}")
+            # Use position's ticker for suffix check — it carries accurate currency info
+            # from the IBKR API, making currency-fallback suffix resolution reliable.
+            _sfx_src = item.ibkr_position.ticker if item.ibkr_position else item.ticker
+            sfx_warn = "  ⚠ no exchange suffix" if not _sfx_src.has_suffix else ""
+            lines.append(
+                f"  {'HOLD':<6}  {_display_ticker(item):<12}  {'  '.join(row_parts)}{sfx_warn}"
+            )
 
         lines.append("")
 
@@ -1477,10 +1612,17 @@ def format_report(
         _section("WATCHLIST — MONITORING", "on watchlist, not yet a buy")
         for item in holds_watch:
             a = item.analysis
+            # Use "Last analysis:" to make clear this is the model's verdict, not a
+            # positional hold instruction (the ticker is not held).
             verdict_str = (
-                f"Verdict: {a.verdict}  ({a.analysis_date})" if a else "no analysis"
+                f"Last analysis ({a.analysis_date}): {a.verdict} — not initiated"
+                if a
+                else "no analysis"
             )
-            lines.append(f"  {'WATCH':<6}  {item.ticker:<12}  {verdict_str}")
+            sfx_warn = "  ⚠ no exchange suffix" if not item.ticker.has_suffix else ""
+            lines.append(
+                f"  {'WATCH':<6}  {_display_ticker(item):<12}  {verdict_str}{sfx_warn}"
+            )
         lines.append("")
 
     # ── REVIEWS ───────────────────────────────────────────────────────────────
@@ -1490,9 +1632,9 @@ def format_report(
             reason_short = item.reason.replace("Stale analysis: ", "").replace(
                 "Position held but no evaluator analysis found", "no analysis found"
             )
-            run_cmd = f"python -m src.main --ticker {item.ticker}"
+            run_cmd = f"python -m src.main --ticker {_run_ticker_for(item)}"
             lines.append(
-                f"  {'REVIEW':<6}  {item.ticker:<12}  {reason_short}  →  {run_cmd}"
+                f"  {'REVIEW':<6}  {_display_ticker(item):<12}  {reason_short}  →  {run_cmd}"
             )
         lines.append("")
 
@@ -1545,7 +1687,7 @@ def format_report(
         ]
 
         lines.append(
-            f"  Settled cash today:                          ${settled:>7,.0f}"
+            f"  Already-settled cash (spend now):            ${settled:>7,.0f}"
         )
 
         total_cost = 0.0
@@ -1557,7 +1699,7 @@ def format_report(
                 if item.suggested_quantity
                 else ""
             )
-            label = f"  {item.action}  {item.ticker}  {qty_str}:"
+            label = f"  {item.action}  {_display_ticker(item)}  {qty_str}:"
             lines.append(f"{label:<46}- ${cost:>6,.0f}")
 
         if buy_cost_items:
@@ -1585,15 +1727,17 @@ def format_report(
                     if item.suggested_quantity
                     else ""
                 )
-                label = f"    {item.action}  {item.ticker}  {qty_str}:"
+                label = f"    {item.action}  {_display_ticker(item)}  {qty_str}:"
                 lines.append(f"{label:<46}+ ${proceeds:>6,.0f}")
             lines.append(f"{'  Total pending:':<46}  ${total_proceeds:>6,.0f}")
             lines.append("")
-            lines.append("  ⚠  Sell/trim proceeds are NOT spendable today.")
             lines.append(
-                f"     If orders fill by market close, funds available {settle_date_str}."
+                "  ⚠  Do NOT spend sale proceeds today — they have not settled yet."
             )
-            lines.append("     Consider additional BUYs only after settlement date.")
+            lines.append(
+                f"     If orders fill by market close, funds clear {settle_date_str}."
+            )
+            lines.append("     Place additional BUYs only after that settlement date.")
             lines.append("")
 
     # ── ACTION PLAN ───────────────────────────────────────────────────────────
@@ -1616,8 +1760,8 @@ def format_report(
             )
     # Upcoming review deadlines: real HOLD positions (not watchlist) nearing max_age_days
     upcoming_reviews: list[
-        tuple[str, str, int]
-    ] = []  # (ticker, expires_date, days_left)
+        tuple[str, str, str, int]
+    ] = []  # (disp_sym, run_ticker, expires_date, days_left)
     for item in items:
         if item.action == "HOLD" and not item.is_watchlist and item.analysis:
             remaining_days = max_age_days - item.analysis.age_days
@@ -1627,7 +1771,12 @@ def format_report(
                         item.analysis.analysis_date, "%Y-%m-%d"
                     ) + timedelta(days=max_age_days)
                     upcoming_reviews.append(
-                        (item.ticker, expires_dt.date().isoformat(), remaining_days)
+                        (
+                            _display_ticker(item),
+                            _run_ticker_for(item),
+                            expires_dt.date().isoformat(),
+                            remaining_days,
+                        )
                     )
                 except (ValueError, TypeError):
                     pass
@@ -1651,9 +1800,35 @@ def format_report(
                     if i.suggested_price
                     else ""
                 )
-                lines.append(
-                    f"    → {i.action}  {i.ticker}{qty_str}{price_str}  {i.suggested_order_type or 'LMT'}"
-                )
+                existing = _find_live_order(i)
+                _rec_side = "SELL" if i.action in ("SELL", "TRIM") else "BUY"
+                if existing and existing[1] == _rec_side:
+                    _order_qty_raw = existing[0].get("remainingSize") or existing[
+                        0
+                    ].get("totalSize")
+                    try:
+                        _order_qty: int | None = int(_order_qty_raw)
+                    except (TypeError, ValueError):
+                        _order_qty = None
+                    if (
+                        _order_qty is not None
+                        and i.suggested_quantity is not None
+                        and _order_qty < i.suggested_quantity
+                    ):
+                        _need = i.suggested_quantity - _order_qty
+                        lines.append(
+                            f"    → {i.action}  {_display_ticker(i)}  {_need} more shares{price_str}  {i.suggested_order_type or 'LMT'}"
+                            f"  ({_order_qty} of {i.suggested_quantity} already submitted)"
+                        )
+                    else:
+                        lines.append(
+                            f"    ✓ {i.action}  {_display_ticker(i)}{qty_str}{price_str}  {i.suggested_order_type or 'LMT'}"
+                            f"  (order already submitted — verify in IBKR)"
+                        )
+                else:
+                    lines.append(
+                        f"    → {i.action}  {_display_ticker(i)}{qty_str}{price_str}  {i.suggested_order_type or 'LMT'}"
+                    )
             for i in funded_today:
                 qty_str = (
                     f"  {abs(i.suggested_quantity)} shares"
@@ -1668,9 +1843,34 @@ def format_report(
                 cost_str = (
                     f"  (~${abs(i.cash_impact_usd):,.0f})" if i.cash_impact_usd else ""
                 )
-                lines.append(
-                    f"    → {i.action}  {i.ticker}{qty_str}{price_str}{cost_str}  — funded from settled cash"
-                )
+                existing = _find_live_order(i)
+                if existing and existing[1] == "BUY":
+                    _order_qty_raw2 = existing[0].get("remainingSize") or existing[
+                        0
+                    ].get("totalSize")
+                    try:
+                        _order_qty2: int | None = int(_order_qty_raw2)
+                    except (TypeError, ValueError):
+                        _order_qty2 = None
+                    if (
+                        _order_qty2 is not None
+                        and i.suggested_quantity is not None
+                        and _order_qty2 < i.suggested_quantity
+                    ):
+                        _need2 = i.suggested_quantity - _order_qty2
+                        lines.append(
+                            f"    → {i.action}  {_display_ticker(i)}  {_need2} more shares{price_str}{cost_str}  — use already-settled cash"
+                            f"  ({_order_qty2} of {i.suggested_quantity} already submitted)"
+                        )
+                    else:
+                        lines.append(
+                            f"    ✓ {i.action}  {_display_ticker(i)}{qty_str}{price_str}{cost_str}  — use already-settled cash"
+                            f"  (order already submitted — verify in IBKR)"
+                        )
+                else:
+                    lines.append(
+                        f"    → {i.action}  {_display_ticker(i)}{qty_str}{price_str}{cost_str}  — use already-settled cash"
+                    )
             lines.append("")
 
         for settle_date, proceeds in sorted(settle_groups.items()):
@@ -1679,7 +1879,7 @@ def format_report(
             )
             lines.append(f"    → ${proceeds:,.0f} available on this date")
             if dip_candidates:
-                top_tickers = "  ".join(i.ticker for i in dip_candidates[:3])
+                top_tickers = "  ".join(_display_ticker(i) for i in dip_candidates[:3])
                 lines.append(
                     f"    → Top dip candidates for deployment: {top_tickers}"
                     "  (see DIP WATCH above)"
@@ -1692,12 +1892,12 @@ def format_report(
 
         if upcoming_reviews:
             lines.append("  Upcoming review deadlines:")
-            for ticker, expires, days_left in sorted(
-                upcoming_reviews, key=lambda x: x[2]
+            for disp_sym, yf_t, expires, days_left in sorted(
+                upcoming_reviews, key=lambda x: x[3]
             ):
                 lines.append(
-                    f"    → {ticker:<14} expires {expires}  ({days_left}d remaining)"
-                    f"  →  poetry run python -m src.main --ticker {ticker}"
+                    f"    → {disp_sym:<14} expires {expires}  ({days_left}d remaining)"
+                    f"  →  poetry run python -m src.main --ticker {yf_t}"
                 )
             lines.append("")
 
@@ -1707,6 +1907,15 @@ def format_report(
     for item in items:
         if item.action == "REVIEW" and item.sell_type == "SOFT_REJECT":
             macro_watch_count += 1
+        elif (
+            item.action == "BUY"
+            and not item.is_watchlist
+            and item.ibkr_position is None
+        ):
+            # Phase 2 non-watchlist BUYs: computed but never shown in output sections
+            # (NEW BUYS only shows is_watchlist items).  Omit from displayed summary so
+            # the count matches what is visible on-screen.
+            pass
         else:
             action_counts[item.action] = action_counts.get(item.action, 0) + 1
     if macro_watch_count:
@@ -1883,6 +2092,8 @@ def main() -> None:
     portfolio = PortfolioSummary()
 
     watchlist_tickers: set[str] = set()
+    _loaded_watchlist_name: str | None = None  # set when watchlist loads successfully
+    _loaded_watchlist_total: int | None = None  # total tickers on the watchlist
     _live_orders_data: list[dict] = []
 
     if args.read_only:
@@ -1947,6 +2158,10 @@ def main() -> None:
                 # Not explicitly requested — silently skip
             else:
                 watchlist_tickers = wl_result
+                _loaded_watchlist_name = (
+                    wl_name_hint or None
+                )  # None when auto-discovered with no hint
+                _loaded_watchlist_total = len(wl_result)
                 print(
                     f"Loaded {len(watchlist_tickers)} watchlist tickers from '{wl_name_hint}'",
                     file=sys.stderr,
@@ -2002,7 +2217,7 @@ def main() -> None:
     # Handle stale refreshes — also picks up positions with no analysis at all
     if args.refresh_stale:
         stale_tickers = [
-            item.ticker
+            _run_ticker_for(item)
             for item in items
             if item.action == "REVIEW"
             and (
@@ -2054,6 +2269,8 @@ def main() -> None:
             portfolio_health_flags=health_flags,
             max_age_days=args.max_age,
             live_orders=_live_orders_data,
+            watchlist_name=_loaded_watchlist_name,
+            watchlist_total=_loaded_watchlist_total,
         )
 
     if args.output:

@@ -4,6 +4,7 @@ import pytest
 
 from src.ibkr.models import NormalizedPosition, PortfolioSummary
 from src.ibkr.portfolio import build_portfolio_summary, normalize_positions
+from src.ibkr.ticker import Ticker
 
 
 class TestNormalizePositions:
@@ -141,7 +142,8 @@ class TestNormalizePositions:
         assert positions[0].market_value_usd == pytest.approx(500.0)
 
     def test_lse_price_converted_gbp_to_gbx(self):
-        """IBKR reports .L prices in GBP; normalize_positions multiplies by 100 → GBX."""
+        """IBKR reports .L prices in GBP; normalize_positions multiplies by 100 → GBX
+        and updates currency field to 'GBX' to reflect the actual denomination."""
         raw = [
             {
                 "conid": 101,
@@ -157,9 +159,12 @@ class TestNormalizePositions:
         assert positions[0].yf_ticker == "GAMA.L"
         # current_price_local must be 894.0 GBX so stop comparisons work correctly
         assert positions[0].current_price_local == pytest.approx(894.0)
+        # currency field updated to reflect actual denomination of *_local fields
+        assert positions[0].currency == "GBX"
 
-    def test_lse_currency_defaults_to_gbp(self):
-        """When IBKR omits currency for a .L ticker, it defaults to 'GBP' (not 'USD')."""
+    def test_lse_currency_defaults_to_gbx(self):
+        """When IBKR omits currency for a .L ticker, it defaults to 'GBP' initially,
+        but normalize_positions converts prices to GBX (pence) and updates currency to 'GBX'."""
         raw = [
             {
                 "conid": 102,
@@ -173,9 +178,35 @@ class TestNormalizePositions:
         ]
         positions = normalize_positions(raw)
         assert positions[0].yf_ticker == "KLR.L"
-        assert positions[0].currency == "GBP"
-        # Price should still be multiplied by 100
+        # After GBP→GBX conversion, currency field reflects actual denomination
+        assert positions[0].currency == "GBX"
+        # Price must be in pence (×100) to match analysis/yfinance convention
         assert positions[0].current_price_local == pytest.approx(2202.0)
+
+    def test_lse_currency_field_is_gbx_after_normalisation(self):
+        """NormalizedPosition.currency must be 'GBX' (not 'GBP') for .L stocks so that
+        any code calling _resolve_fx(analysis) or displaying the price symbol gets GBX."""
+        raw = [
+            {
+                "conid": 103,
+                "contractDesc": "GAMA",
+                "listingExchange": "LSE",
+                "position": 100,
+                "mktValue": 894.0,
+                "currency": "GBP",
+                "mktPrice": 8.94,
+            }
+        ]
+        positions = normalize_positions(raw)
+        p = positions[0]
+        # Currency must reflect the unit of current_price_local (GBX = pence)
+        assert p.currency == "GBX", (
+            "currency should be GBX after GBP→GBX conversion so downstream "
+            "FX lookups use the correct pence rate (0.0127) not the pound rate (1.27)"
+        )
+        assert p.current_price_local == pytest.approx(894.0)
+        # market_value_usd computed from GBP mktValue before ×100 — must NOT be affected
+        assert p.market_value_usd == pytest.approx(894.0 * 1.27, rel=0.05)
 
 
 class TestBuildPortfolioSummary:
@@ -191,7 +222,7 @@ class TestBuildPortfolioSummary:
         positions = [
             NormalizedPosition(
                 conid=1,
-                yf_ticker="7203.T",
+                ticker=Ticker.from_yf("7203.T", currency="JPY"),
                 quantity=100,
                 market_value_usd=14000,
                 currency="JPY",
@@ -209,10 +240,10 @@ class TestBuildPortfolioSummary:
         ledger = {}  # No ledger data
         positions = [
             NormalizedPosition(
-                conid=1, yf_ticker="A", quantity=10, market_value_usd=5000
+                conid=1, ticker=Ticker.from_yf("A"), quantity=10, market_value_usd=5000
             ),
             NormalizedPosition(
-                conid=2, yf_ticker="B", quantity=20, market_value_usd=8000
+                conid=2, ticker=Ticker.from_yf("B"), quantity=20, market_value_usd=8000
             ),
         ]
         summary = build_portfolio_summary(ledger, positions, "U999")

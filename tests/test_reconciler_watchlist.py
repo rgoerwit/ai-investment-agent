@@ -12,6 +12,7 @@ import pytest
 
 from src.ibkr.models import AnalysisRecord, NormalizedPosition, PortfolioSummary
 from src.ibkr.reconciler import reconcile
+from src.ibkr.ticker import Ticker
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -63,7 +64,7 @@ def test_watchlist_buy_verdict_surfaces_as_buy():
     )
     assert len(items) == 1
     item = items[0]
-    assert item.ticker == ticker
+    assert item.ticker.yf == ticker
     assert item.action == "BUY"
     assert item.is_watchlist is True
 
@@ -80,7 +81,7 @@ def test_watchlist_dni_verdict_surfaces_as_remove():
     )
     assert len(items) == 1
     item = items[0]
-    assert item.ticker == ticker
+    assert item.ticker.yf == ticker
     assert item.action == "REMOVE"
     assert item.is_watchlist is True
     assert "DO_NOT_INITIATE" in item.reason
@@ -128,7 +129,7 @@ def test_watchlist_hold_verdict_surfaces_as_monitoring():
     )
     assert len(items) == 1
     item = items[0]
-    assert item.ticker == ticker
+    assert item.ticker.yf == ticker
     assert item.action == "HOLD"
     assert item.is_watchlist is True
     assert item.ibkr_position is None
@@ -146,7 +147,7 @@ def test_watchlist_no_analysis_surfaces_as_review():
     )
     assert len(items) == 1
     item = items[0]
-    assert item.ticker == ticker
+    assert item.ticker.yf == ticker
     assert item.action == "REVIEW"
     assert item.is_watchlist is True
     assert "no analysis" in item.reason.lower()
@@ -165,7 +166,7 @@ def test_watchlist_stale_analysis_surfaces_as_review():
     )
     assert len(items) == 1
     item = items[0]
-    assert item.ticker == ticker
+    assert item.ticker.yf == ticker
     assert item.action == "REVIEW"
     assert item.is_watchlist is True
     assert "stale" in item.reason.lower()
@@ -180,11 +181,10 @@ def test_watchlist_ticker_also_held_uses_phase1():
     ticker = "0005.HK"
     pos = NormalizedPosition(
         conid=12345,
-        yf_ticker=ticker,
-        symbol="5",
-        exchange="SEHK",
+        ticker=Ticker.from_yf(ticker, currency="HKD"),
         quantity=1000.0,
         market_value_usd=12000.0,
+        currency="HKD",
         current_price_local=9.50,
     )
     analyses = {ticker: _fresh_analysis(ticker, "BUY")}
@@ -201,7 +201,7 @@ def test_watchlist_ticker_also_held_uses_phase1():
     # Phase 1 should handle it; there should be exactly one item
     assert len(items) == 1
     item = items[0]
-    assert item.ticker == ticker
+    assert item.ticker.yf == ticker
     assert item.is_watchlist is False  # Phase 1 item, not Phase 1.5
 
 
@@ -264,7 +264,7 @@ def test_watchlist_buy_not_duplicated_in_phase2():
         portfolio=_empty_portfolio(),
         watchlist_tickers={ticker},
     )
-    buy_items = [i for i in items if i.ticker == ticker]
+    buy_items = [i for i in items if i.ticker.yf == ticker]
     assert len(buy_items) == 1
     assert buy_items[0].is_watchlist is True
 

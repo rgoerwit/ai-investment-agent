@@ -197,7 +197,8 @@ class TestCalculateQuantity:
     def test_no_cash(self):
         assert calculate_quantity(0, 100, 1.0, 5.0, 100000, "AAPL") == 0
 
-    def test_none_fx_defaults_to_1(self):
+    def test_none_fx_returns_zero(self):
+        """None FX rate must return 0 — not silently use 1.0 and over-order."""
         qty = calculate_quantity(
             available_cash_usd=5000,
             entry_price_local=50,
@@ -206,7 +207,24 @@ class TestCalculateQuantity:
             portfolio_value_usd=100000,
             yf_ticker="AAPL",
         )
-        assert qty == 100  # 5000 / 50
+        # Previously defaulted to 1.0 (wrong for non-USD stocks).
+        # Now returns 0 to force the caller to supply a resolved FX rate.
+        assert qty == 0
+
+    def test_none_fx_returns_zero_for_jpy_stock(self):
+        """Regression: JPY stock with None FX would have been 150× over-sized."""
+        qty = calculate_quantity(
+            available_cash_usd=10000,
+            entry_price_local=2000,  # ¥2000/share ≈ $13.40 — reasonable
+            fx_rate_to_usd=None,  # Missing rate — must NOT assume 1.0
+            size_pct=5.0,
+            portfolio_value_usd=100000,
+            yf_ticker="7203.T",
+        )
+        # With fx=1.0 (old behaviour): 5000 / 2000 = 2 shares ≈ OK coincidentally
+        # but the COST would be 2 * 2000 * 1.0 = $4,000 (should be ~$26.80)
+        # New behaviour: 0 — refuse to guess
+        assert qty == 0
 
 
 class TestBuildOrderDict:

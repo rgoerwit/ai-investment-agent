@@ -9,6 +9,23 @@ Strategy:
 2. Enhance yfinance with financial statement extraction
 3. Smart merge with quality scoring (Statements > EODHD > Alpha Vantage/yfinance > FMP > Yahoo Info)
 4. Mandatory Tavily gap-fill if coverage <70%
+
+## Currency Convention for Returned Data
+----------------------------------------------------------------------
+get_financial_metrics() returns a merged dict where:
+
+  PRICE / ABSOLUTE fields (currentPrice, 52w_high, 52w_low, market_cap,
+  revenue, operating_cash_flow, free_cash_flow, moving averages, …)
+      → LOCAL TRADING CURRENCY of the stock (JPY for .T, HKD for .HK, …).
+        The 'currency' key in the dict identifies which local currency.
+
+  RATIO / PERCENTAGE fields (pe_ratio, pb_ratio, peg_ratio, profit_margin,
+  roa, roe, debt_to_equity, revenue_growth, eps_growth, …)
+      → CURRENCY-NEUTRAL (dimensionless; safe to compare across markets).
+
+This dict is consumed by LLM agents for analysis.  The IBKR order-sizing
+pipeline (src/ibkr/reconciler.py) does NOT use prices from this dict —
+it reads fx_rate_to_usd from analysis snapshots and src/fx_normalization.py.
 """
 
 import asyncio

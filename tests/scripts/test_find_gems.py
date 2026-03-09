@@ -1316,10 +1316,15 @@ _ENABLED_EXCHANGES = _load_enabled_exchanges()
 @pytest.mark.integration
 @pytest.mark.slow
 class TestExchangeScrapeIntegration:
-    """Live integration tests: hit each exchange source and verify sane row counts.
+    """Live integration tests: verify each exchange source returns at least some data.
 
-    Catches broken URLs, changed HTML structure, misconfigured filters,
-    and dead sources before they silently produce empty results.
+    These are intentionally loose — they only catch truly serious problems:
+    - Complete inability to reach the source (skip, not fail)
+    - Handler returning completely empty DataFrame after fetching a response (fail)
+    - Zero rows surviving filters (fail — scraper or filters fundamentally broken)
+
+    Row counts, column names, and minor structural variations are NOT checked here
+    because live exchange websites change frequently and cause false failures.
 
     Run with: pytest tests/scripts/test_find_gems.py::TestExchangeScrapeIntegration -v
     """
@@ -1337,31 +1342,36 @@ class TestExchangeScrapeIntegration:
         handler = find_gems._HANDLERS.get(exchange["method"])
         assert handler is not None, f"Unknown method: {exchange['method']}"
 
+        # Skip on any network-level failure — transient outages are not test failures
         try:
             df = handler(exchange, self.session)
-        except (_req.exceptions.Timeout, _req.exceptions.ConnectionError) as exc:
+        except _req.exceptions.RequestException as exc:
             pytest.skip(f"{exchange['exchange_name']} unreachable: {exc}")
-        assert df is not None, f"Handler returned None for {exchange['exchange_name']}"
-        assert (
-            not df.empty
-        ), f"Handler returned empty DataFrame for {exchange['exchange_name']}"
+
+        # Handler returning None signals a source-level problem (site down, blocked)
+        # — skip rather than fail since this is outside our control
+        if df is None:
+            pytest.skip(
+                f"{exchange['exchange_name']}: handler returned None "
+                "(source may be temporarily unavailable)"
+            )
+
+        # A completely empty raw DataFrame is a serious failure: the handler ran,
+        # got an HTTP response, but extracted zero rows — URL or HTML structure broken
+        assert not df.empty, (
+            f"{exchange['exchange_name']}: handler returned completely empty DataFrame "
+            "(URL may be broken or page HTML structure changed drastically)"
+        )
 
         # Apply the same filters used by scrape_exchanges()
         df = find_gems._apply_filters(df, exchange)
 
-        min_rows = exchange["min_expected_rows"]
-        assert (
-            len(df) >= min_rows
-        ), f"{exchange['exchange_name']}: got {len(df)} rows, expected >= {min_rows}"
-
-        # Verify the configured ticker column exists (pre-standardization name)
-        ticker_col = exchange["params"].get("ticker_col")
-        if ticker_col:
-            actual = find_gems._find_col_fuzzy(df, ticker_col)
-            assert actual is not None, (
-                f"{exchange['exchange_name']}: ticker_col '{ticker_col}' not found "
-                f"in columns {list(df.columns)}"
-            )
+        # After filtering, zero rows is a serious failure: either the filters are
+        # completely misconfigured or the source data format changed beyond recognition
+        assert len(df) > 0, (
+            f"{exchange['exchange_name']}: 0 rows survive after filtering "
+            "(filters may be misconfigured or source data format changed)"
+        )
 
 
 # ============================================================

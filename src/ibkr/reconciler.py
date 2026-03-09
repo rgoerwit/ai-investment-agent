@@ -25,6 +25,7 @@ from pathlib import Path
 
 import structlog
 
+from src.fx_normalization import get_fx_rate_fallback
 from src.ibkr.models import (
     AnalysisRecord,
     NormalizedPosition,
@@ -37,8 +38,64 @@ from src.ibkr.order_builder import (
     parse_trade_block,
     round_to_lot_size,
 )
+from src.ibkr.ticker import Ticker
+from src.ticker_utils import TickerFormatter
 
 logger = structlog.get_logger(__name__)
+
+
+def _resolve_fx(analysis: AnalysisRecord) -> float:
+    """Return FX rate (local → USD) for an analysis, with fallback chain.
+
+    Priority:
+    1. Saved fx_rate_to_usd from the analysis snapshot — UNLESS it equals exactly
+       1.0 for a non-USD currency, which indicates the legacy bogus fallback that was
+       stored before SEK/NOK/PLN/etc. were added to FALLBACK_RATES_TO_USD.  In that
+       case, fall through to the fallback table so old snapshots are self-healing.
+    2. Hardcoded fallback table (get_fx_rate_fallback) keyed by analysis.currency.
+    3. 1.0 (last resort — logs an error so the user knows cost figures may be wrong).
+    """
+    currency = (analysis.currency or "USD").strip().upper()
+    saved = analysis.fx_rate_to_usd
+
+    if saved is not None:
+        # Guard against legacy bogus rate: before the fix, unknown currencies (SEK,
+        # NOK, PLN, etc.) were saved as 1.0 via `or 1.0` in retrospective.py.
+        # For any non-USD currency, 1.0 is implausible — prefer the fallback table.
+        if saved == 1.0 and currency not in ("USD", ""):
+            fallback = get_fx_rate_fallback(currency)
+            if fallback is not None:
+                logger.warning(
+                    "fx_rate_saved_1_overridden",
+                    ticker=analysis.ticker,
+                    currency=currency,
+                    fallback_rate=fallback,
+                    msg="Saved fx_rate=1.0 for non-USD currency replaced with fallback "
+                    "(legacy snapshot; re-run analysis to persist correct rate)",
+                )
+                return fallback
+        return saved
+
+    if currency in ("USD", ""):
+        return 1.0
+    rate = get_fx_rate_fallback(currency)
+    if rate is not None:
+        logger.warning(
+            "fx_rate_missing_using_fallback",
+            ticker=analysis.ticker,
+            currency=currency,
+            fallback_rate=rate,
+            msg="Analysis snapshot missing fx_rate_to_usd — cost/quantity estimates approximate",
+        )
+        return rate
+    logger.error(
+        "fx_rate_unknown",
+        ticker=analysis.ticker,
+        currency=currency,
+        msg="No FX rate available; cost/quantity will be wrong — re-run analysis to fix",
+    )
+    return 1.0
+
 
 # Minimum USD order value — orders below this are not worth recommending.
 _MIN_ORDER_USD: float = 200.0
@@ -64,6 +121,24 @@ _EXCHANGE_LONG_NAMES: dict[str, str] = {
     "AX": "Australia",
     "KL": "Malaysia",
     "VI": "Vienna",
+    "WA": "Poland",
+    "ST": "Sweden",
+    "OL": "Norway",
+    "CO": "Denmark",
+    "SA": "Brazil",
+    "JK": "Indonesia",
+    "BK": "Thailand",
+    "BO": "India BSE",
+    "NS": "India NSE",
+    "TO": "Canada",
+    "V": "Canada TSXV",
+    "NZ": "New Zealand",
+    "SW": "Switzerland",
+    "F": "Frankfurt",
+    "BR": "Belgium",
+    "LS": "Lisbon",
+    "MI": "Milan",
+    "EUR": "Europe (EUR)",
 }
 
 
@@ -74,9 +149,85 @@ def _exchange_from_ticker(ticker: str) -> str:
     return ticker.rsplit(".", 1)[-1].upper()
 
 
+def _exchange_from_position(pos: NormalizedPosition) -> str:
+    """
+    Derive a short exchange code (e.g. 'T', 'HK', 'KL') from a NormalizedPosition.
+
+    Priority:
+    1. ticker.yf suffix — always correct when normalize_positions() set it via
+       Ticker.from_ibkr() (which already consulted IBKR_TO_YFINANCE).
+    2. IBKR listingExchange (ticker.exchange) via TickerFormatter.IBKR_TO_YFINANCE —
+       corrects cases where an analysis was run without an exchange suffix, causing
+       the ticker-based inference to fall through to the wrong "US" default.
+    3. Currency heuristic — handles IBKR exchanges not in the static map (e.g. some
+       regional venues) when the currency is unambiguous (SEK→ST, MYR→KL, etc.).
+    4. "US" fallback.
+
+    No network calls are made.
+    """
+    yf_str = pos.ticker.yf
+    # 1. Suffix present on ticker.yf — most positions satisfy this condition
+    if "." in yf_str:
+        return yf_str.rsplit(".", 1)[-1].upper()
+
+    # 2. IBKR listingExchange via static map
+    if pos.ticker.exchange:
+        ibkr_suffix = TickerFormatter.IBKR_TO_YFINANCE.get(pos.ticker.exchange, None)
+        if ibkr_suffix is not None:
+            # Empty string means a US venue (NASDAQ, NYSE, etc.)
+            return ibkr_suffix.lstrip(".") if ibkr_suffix else "US"
+
+    # 3. Currency heuristic.
+    #    Single-exchange currencies (HKD, JPY, etc.) are truly unambiguous.
+    #    Regionally-specific currencies (GBP, CAD, CHF) have multiple exchanges
+    #    within the same country but are geographically unambiguous — far better
+    #    to label them as UK/Canada/Switzerland than to miscount them as US.
+    #    EUR is multi-country but unmistakably non-US; grouped as "EUR".
+    _CURRENCY_TO_EXCHANGE: dict[str, str] = {
+        "HKD": "HK",
+        "JPY": "T",
+        "TWD": "TW",
+        "KRW": "KS",
+        "SGD": "SI",
+        "AUD": "AX",
+        "NZD": "NZ",
+        "BRL": "SA",
+        "MXN": "MX",
+        "MYR": "KL",
+        "PLN": "WA",
+        "SEK": "ST",
+        "NOK": "OL",
+        "DKK": "CO",
+        # Regionally-specific (non-US) currencies — group by country/region
+        "GBP": "L",  # UK (LSE / AIM)
+        "GBX": "L",  # UK pence
+        "CAD": "TO",  # Canada (TSX / TSXV)
+        "CHF": "SW",  # Switzerland (SIX)
+        "EUR": "EUR",  # Europe (multi-country; better than "US")
+    }
+    if pos.currency:
+        code = _CURRENCY_TO_EXCHANGE.get(pos.currency.upper(), "")
+        if code:
+            return code
+
+    return "US"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Analysis Loading
 # ══════════════════════════════════════════════════════════════════════════════
+
+
+def _normalize_verdict(raw: str) -> str:
+    """Normalise a verdict string to canonical UPPER_SNAKE_CASE.
+
+    The PM occasionally outputs "DO NOT INITIATE" (spaces) instead of
+    "DO_NOT_INITIATE".  Both forms must compare equal in Phase 1.5 checks.
+    """
+    return raw.strip().replace(" ", "_").upper()
+
+
+_REJECT_VERDICTS = frozenset({"DO_NOT_INITIATE", "SELL", "REJECT"})
 
 
 def _parse_scores_from_final_decision(text: str) -> dict:
@@ -116,15 +267,18 @@ def _parse_scores_from_final_decision(text: str) -> dict:
             pass
 
     # ── Verdict ───────────────────────────────────────────────────────────────
-    # Try structured field, then PM header, then action markdown
+    # Capture 1-to-4 uppercase/underscore tokens separated by spaces or tabs
+    # (NOT newlines) so that "DO NOT INITIATE" is captured whole rather than
+    # truncated to "DO".  After capture, spaces are normalised to underscores.
+    _VERDICT_TOKEN = r"[A-Z_]+(?:[ \t][A-Z_]+)*"
     for pat in (
-        r"\bVERDICT[:\s]+([A-Z][A-Z_]*)",
-        r"PORTFOLIO MANAGER VERDICT:\s*([A-Z][A-Z_]*)",
-        r"\*\*Action\*\*:\s*\*\*(\w[\w_]*)\*\*",
+        rf"\bVERDICT[:\s]+({_VERDICT_TOKEN})",
+        rf"PORTFOLIO MANAGER VERDICT:\s*({_VERDICT_TOKEN})",
+        r"\*\*Action\*\*:\s*\*\*(\w[\w_ ]*)\*\*",
     ):
         m = re.search(pat, text)
         if m:
-            result["verdict"] = m.group(1).upper()
+            result["verdict"] = m.group(1).strip().replace(" ", "_").upper()
             break
 
     # ── Risk zone ─────────────────────────────────────────────────────────────
@@ -168,7 +322,10 @@ def load_latest_analyses(results_dir: Path) -> dict[str, AnalysisRecord]:
                 if snapshot.get("growth_adj") is None:
                     snapshot = {**snapshot, "growth_adj": fb.get("growth_adj")}
                 if not snapshot.get("verdict"):
-                    snapshot = {**snapshot, "verdict": fb.get("verdict") or ""}
+                    snapshot = {
+                        **snapshot,
+                        "verdict": _normalize_verdict(fb.get("verdict") or ""),
+                    }
                 if not snapshot.get("zone"):
                     snapshot = {**snapshot, "zone": fb.get("zone") or ""}
 
@@ -195,7 +352,7 @@ def load_latest_analyses(results_dir: Path) -> dict[str, AnalysisRecord]:
             analysis_date=snapshot.get("analysis_date", "")
             or _extract_date_from_filename(filepath.name),
             file_path=str(filepath),
-            verdict=snapshot.get("verdict", "") or "",
+            verdict=_normalize_verdict(snapshot.get("verdict", "") or ""),
             health_adj=snapshot.get("health_adj"),
             growth_adj=snapshot.get("growth_adj"),
             zone=snapshot.get("zone") or "",
@@ -402,8 +559,11 @@ def reconcile(
     positions — this function does.
 
     Args:
-        positions: Live IBKR positions (normalized)
-        analyses: Latest analysis per ticker (from load_latest_analyses)
+        positions: Live IBKR positions (normalized). Each NormalizedPosition has
+            a yf_ticker (yfinance format, e.g. "7203.T") and a symbol (IBKR raw, e.g. "7203").
+        analyses: dict keyed by **yfinance ticker** (e.g. "7203.T", "0005.HK") →
+            AnalysisRecord. All keys must be in yf format — this is what
+            load_latest_analyses() returns and what watchlist_tickers contains.
         portfolio: Portfolio summary (cash, value); sector_weights and
             exchange_weights fields are populated as a side-effect.
         max_age_days: Max analysis age for staleness
@@ -412,7 +572,9 @@ def reconcile(
         underweight_threshold_pct: % shortfall vs target before suggesting ADD
         sector_limit_pct: Warn when an ADD/BUY would push any sector above this %
         exchange_limit_pct: Warn when an ADD/BUY would push any exchange above this %
-        watchlist_tickers: Optional set of yfinance tickers from the IBKR watchlist.
+        watchlist_tickers: Optional set of **yfinance tickers** from the IBKR watchlist.
+            Conversion from IBKR watchlist format to yf format is the caller's
+            responsibility (see ibkr_symbol_to_yf in ticker_mapper.py).
             Tickers not currently held are evaluated in Phase 1.5 and surfaced as
             BUY/HOLD/REMOVE/REVIEW based on their analysis verdict.
 
@@ -423,6 +585,30 @@ def reconcile(
     held_tickers: set[str] = set()
     # Track remaining settled cash across Phase 1 ADDs and Phase 2 BUYs
     remaining_cash = portfolio.available_cash_usd
+
+    # ── Secondary lookup: base symbol → AnalysisRecord (alphabetic tickers only) ──
+    # Enables cross-format matching when a position's yf_ticker doesn't find an
+    # exact key in analyses, in either direction:
+    #   "MEGP" pos   → analysis stored as "MEGP.L"   (ibkr_symbol_to_yf failed)
+    #   "MEGP.L" pos → analysis stored as "MEGP"     (was re-run without suffix)
+    # Purely numeric bases (e.g. "7203", "0005") are excluded because the same
+    # number exists on Tokyo, HK, and TW — we cannot safely cross-match them.
+    #
+    # Suffixed analyses always win over bare ones in this lookup, so even when
+    # both "CEK" and "CEK.DE" exist in analyses (different run dates), the lookup
+    # always returns the canonical suffixed form "CEK.DE".
+    _alpha_base_lookup: dict[str, AnalysisRecord] = {}
+    for _yf_t, _rec in analyses.items():
+        _base = (_yf_t.rsplit(".", 1)[0] if "." in _yf_t else _yf_t).upper()
+        if re.match(
+            r"^[A-Z][A-Z0-9]*$", _base
+        ):  # starts with a letter → not purely numeric
+            if "." in _yf_t:
+                # Suffixed entry is more specific — always overwrite any bare entry
+                _alpha_base_lookup[_base] = _rec
+            else:
+                # Bare (no suffix) — only use if no suffixed entry exists yet
+                _alpha_base_lookup.setdefault(_base, _rec)
 
     # Pre-fetch structural macro events for staleness invalidation (fail-safe).
     _structural_events: list = []
@@ -444,19 +630,30 @@ def reconcile(
     # These are stored on the portfolio object for use by format_report().
     # Use sum of position values as denominator so weights always sum to 100%,
     # even when IBKR ledger total and position market values use different FX rates.
+    # Use pos.ticker.yf (with alpha-base fallback) so bare-ticker positions (e.g. "CEK")
+    # find the right analysis (e.g. "CEK.DE") for sector classification.
     _sector_weights: dict[str, float] = {}
     _exchange_weights: dict[str, float] = {}
     _total_pos_value = sum(p.market_value_usd for p in positions)
     if _total_pos_value > 0:
         for pos in positions:
-            _analysis = analyses.get(pos.yf_ticker)
+            _cticker = pos.ticker.yf
+            _analysis = analyses.get(_cticker)
+            # Alpha-base fallback: bare ticker position (e.g. "CEK") → suffixed analysis
+            if (
+                _analysis is None
+                and not pos.ticker.has_suffix
+                and not pos.ticker.ibkr.isdigit()
+            ):
+                _best = _alpha_base_lookup.get(pos.ticker.ibkr.upper())
+                if _best and "." in _best.ticker:
+                    _cticker = _best.ticker
+                    _analysis = _best
             _sector = (_analysis.sector if _analysis else "") or "Unknown"
-            _exchange = (
-                (_analysis.exchange if _analysis else "")
-                or _exchange_from_ticker(pos.yf_ticker)
-                or pos.exchange
-                or "Unknown"
-            )
+            # Use IBKR-authoritative exchange inference: yf_ticker suffix → IBKR
+            # listingExchange → currency heuristic.  Avoids misclassifying stocks
+            # that were analysed without an exchange suffix as "US".
+            _exchange = _exchange_from_position(pos)
             _w = pos.market_value_usd / _total_pos_value * 100
             _sector_weights[_sector] = _sector_weights.get(_sector, 0.0) + _w
             _exchange_weights[_exchange] = _exchange_weights.get(_exchange, 0.0) + _w
@@ -465,15 +662,59 @@ def reconcile(
 
     # ── Phase 1: Evaluate existing positions ──
     for pos in positions:
-        ticker = pos.yf_ticker
+        # Resolve canonical yfinance ticker BEFORE the analyses.get() call.
+        # For bare tickers (no exchange suffix), consult _alpha_base_lookup first:
+        # it always returns the suffixed analysis when one exists, so a bare "CEK"
+        # position finds "CEK.DE" analysis rather than the bare "CEK" one.
+        # Numeric symbols excluded — same number appears on multiple exchanges.
+        yf_key = pos.ticker.yf
+        analysis: AnalysisRecord | None = None
+
+        if (
+            not pos.ticker.has_suffix
+            and pos.ticker.ibkr
+            and not pos.ticker.ibkr.isdigit()
+        ):
+            # Bare ticker: alpha-base lookup wins over exact-match to prefer suffixed form
+            _best = _alpha_base_lookup.get(pos.ticker.ibkr.upper())
+            if _best:
+                yf_key = (
+                    _best.ticker
+                )  # e.g. "CEK.DE" or bare "MEGP" if no suffixed version
+                analysis = _best
+                logger.debug(
+                    "analysis_found_via_alpha_base",
+                    pos_yf=pos.ticker.yf,
+                    ibkr_symbol=pos.ticker.ibkr,
+                    found_as=_best.ticker,
+                )
+
+        # Direct lookup: suffixed tickers, or bare tickers with no alpha-base match
+        if analysis is None:
+            analysis = analyses.get(yf_key)
+
+        # Fallback B: suffixed pos but analysis stored under bare ticker
+        # (e.g. pos.ticker.yf = "MEGP.L" but analysis stored as "MEGP").
+        if analysis is None and pos.ticker.ibkr and not pos.ticker.ibkr.isdigit():
+            analysis = _alpha_base_lookup.get(pos.ticker.ibkr.upper())
+            if analysis:
+                logger.debug(
+                    "analysis_found_via_base_symbol",
+                    yf_ticker=pos.ticker.yf,
+                    ibkr_symbol=pos.ticker.ibkr,
+                    found_as=analysis.ticker,
+                )
+
+        # Canonical Ticker for the item (upgraded if fallback fired):
+        item_ticker = Ticker.from_yf(yf_key) if yf_key != pos.ticker.yf else pos.ticker
+        ticker = yf_key
         held_tickers.add(ticker)
-        analysis = analyses.get(ticker)
 
         if analysis is None:
             # Position held but NO analysis exists → needs review
             items.append(
                 ReconciliationItem(
-                    ticker=ticker,
+                    ticker=item_ticker,
                     action="REVIEW",
                     reason="Position held but no evaluator analysis found",
                     urgency="MEDIUM",
@@ -488,7 +729,7 @@ def reconcile(
         if check_stop_breach(analysis, current_price):
             items.append(
                 ReconciliationItem(
-                    ticker=ticker,
+                    ticker=item_ticker,
                     action="SELL",
                     reason=f"Stop breached: price {current_price:.2f} < stop {analysis.stop_price:.2f}",
                     urgency="HIGH",
@@ -505,11 +746,11 @@ def reconcile(
             continue
 
         # Check verdict conflict: we hold but evaluator says don't
-        verdict_upper = (analysis.verdict or "").upper()
-        if verdict_upper in ("DO_NOT_INITIATE", "SELL", "REJECT"):
+        verdict_upper = _normalize_verdict(analysis.verdict or "")
+        if verdict_upper in _REJECT_VERDICTS:
             items.append(
                 ReconciliationItem(
-                    ticker=ticker,
+                    ticker=item_ticker,
                     action="SELL",
                     reason=f"Verdict → {analysis.verdict}  ({analysis.analysis_date})",
                     urgency="HIGH",
@@ -529,7 +770,7 @@ def reconcile(
         if check_target_hit(analysis, current_price):
             items.append(
                 ReconciliationItem(
-                    ticker=ticker,
+                    ticker=item_ticker,
                     action="REVIEW",
                     reason=f"Target hit: price {current_price:.2f} >= target {analysis.target_1_price:.2f}",
                     urgency="LOW",
@@ -550,7 +791,7 @@ def reconcile(
         if is_stale:
             items.append(
                 ReconciliationItem(
-                    ticker=ticker,
+                    ticker=item_ticker,
                     action="REVIEW",
                     reason=f"Stale analysis: {stale_reason}",
                     urgency="MEDIUM",
@@ -581,7 +822,7 @@ def reconcile(
                 )
                 items.append(
                     ReconciliationItem(
-                        ticker=ticker,
+                        ticker=item_ticker,
                         action="TRIM",
                         reason=f"Overweight: {actual_pct:.1f}% vs target {target_size_pct:.1f}% (+{excess_pct:.1f}%)",
                         urgency="MEDIUM",
@@ -598,7 +839,7 @@ def reconcile(
 
             # Check underweight — only for BUY-verdict positions with sufficient shortfall
             shortfall_pct = target_size_pct - actual_pct
-            verdict_upper = (analysis.verdict or "").upper()
+            verdict_upper = _normalize_verdict(analysis.verdict or "")
             if (
                 shortfall_pct > underweight_threshold_pct
                 and verdict_upper == "BUY"
@@ -652,7 +893,7 @@ def reconcile(
                             add_reason += "  " + "; ".join(conc_warns)
                     items.append(
                         ReconciliationItem(
-                            ticker=ticker,
+                            ticker=item_ticker,
                             action="ADD",
                             reason=add_reason,
                             urgency="LOW",
@@ -684,7 +925,7 @@ def reconcile(
 
         items.append(
             ReconciliationItem(
-                ticker=ticker,
+                ticker=item_ticker,
                 action="HOLD",
                 reason=f"Within targets — {'; '.join(status_parts)}"
                 if status_parts
@@ -735,9 +976,9 @@ def reconcile(
             )
             continue
 
-        verdict_upper = (analysis.verdict or "").upper()
+        verdict_upper = _normalize_verdict(analysis.verdict or "")
 
-        if verdict_upper in ("DO_NOT_INITIATE", "SELL", "REJECT"):
+        if verdict_upper in _REJECT_VERDICTS:
             items.append(
                 ReconciliationItem(
                     ticker=ticker,
@@ -771,17 +1012,16 @@ def reconcile(
                 size_pct = analysis.trade_block.size_pct or (
                     analysis.position_size or 0
                 )
+                _fx = _resolve_fx(analysis)
                 buy_qty = calculate_quantity(
                     available_cash_usd=remaining_cash,
                     entry_price_local=entry_price or 0.0,
-                    fx_rate_to_usd=analysis.fx_rate_to_usd,
+                    fx_rate_to_usd=_fx,
                     size_pct=size_pct,
                     portfolio_value_usd=portfolio.portfolio_value_usd,
                     yf_ticker=ticker,
                 )
-                buy_cost_usd = (
-                    buy_qty * (entry_price or 0.0) * (analysis.fx_rate_to_usd or 1.0)
-                )
+                buy_cost_usd = buy_qty * (entry_price or 0.0) * _fx
                 if buy_qty > 0 and buy_cost_usd < _MIN_ORDER_USD:
                     # Too small to place; skip (same rule as Phase 2)
                     pass
@@ -846,7 +1086,7 @@ def reconcile(
         if ticker in held_tickers:
             continue  # Already handled above
 
-        verdict_upper = (analysis.verdict or "").upper()
+        verdict_upper = _normalize_verdict(analysis.verdict or "")
         if verdict_upper not in ("BUY",):
             continue  # Only surface new BUY recommendations
 
@@ -871,15 +1111,16 @@ def reconcile(
         conviction = analysis.conviction or analysis.trade_block.conviction or ""
         size_pct = analysis.trade_block.size_pct or (analysis.position_size or 0)
 
+        _fx = _resolve_fx(analysis)
         buy_qty = calculate_quantity(
             available_cash_usd=remaining_cash,
             entry_price_local=entry_price or 0.0,
-            fx_rate_to_usd=analysis.fx_rate_to_usd,
+            fx_rate_to_usd=_fx,
             size_pct=size_pct,
             portfolio_value_usd=portfolio.portfolio_value_usd,
             yf_ticker=ticker,
         )
-        buy_cost_usd = buy_qty * (entry_price or 0.0) * (analysis.fx_rate_to_usd or 1.0)
+        buy_cost_usd = buy_qty * (entry_price or 0.0) * _fx
 
         # Skip only when we CAN calculate a quantity but the cost is trivially small.
         # If buy_qty=0 due to lot-size rounding (e.g. can't afford a full lot yet),
@@ -1002,17 +1243,17 @@ def compute_portfolio_health(
         weight = pos.market_value_usd / portfolio.portfolio_value_usd
         total_weight += weight
 
-        analysis = analyses.get(pos.yf_ticker)
+        analysis = analyses.get(pos.ticker.yf)
         is_stale = analysis is not None and analysis.age_days > max_age_days
         if analysis:
             if analysis.health_adj is not None:
                 weighted_health += analysis.health_adj * weight
                 health_count += 1
-                scored_health.append((pos.yf_ticker, analysis.health_adj, is_stale))
+                scored_health.append((pos.ticker.yf, analysis.health_adj, is_stale))
             if analysis.growth_adj is not None:
                 weighted_growth += analysis.growth_adj * weight
                 growth_count += 1
-                scored_growth.append((pos.yf_ticker, analysis.growth_adj, is_stale))
+                scored_growth.append((pos.ticker.yf, analysis.growth_adj, is_stale))
             if is_stale:
                 stale_count += 1
 

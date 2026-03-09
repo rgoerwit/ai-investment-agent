@@ -17,6 +17,7 @@ import structlog
 
 from src.ibkr.exceptions import IBKRTickerResolutionError
 from src.ibkr.order_builder import parse_price
+from src.ibkr.ticker import _CURRENCY_TO_SUFFIX  # noqa: F401 — re-exported for compat
 from src.ticker_utils import TickerFormatter
 
 logger = structlog.get_logger(__name__)
@@ -66,24 +67,6 @@ def _save_cache(cache: dict) -> None:
     except OSError as e:
         logger.warning("conid_cache_save_failed", error=str(e))
 
-
-_CURRENCY_TO_SUFFIX: dict[str, str] = {
-    "HKD": ".HK",
-    "JPY": ".T",
-    "TWD": ".TW",
-    "KRW": ".KS",
-    "SGD": ".SI",
-    "AUD": ".AX",
-    "NZD": ".NZ",
-    "BRL": ".SA",
-    "MXN": ".MX",
-    "MYR": ".KL",  # Malaysian Ringgit → Bursa Malaysia
-    "PLN": ".WA",  # Polish złoty → Warsaw Stock Exchange
-    "SEK": ".ST",  # Swedish krona → OMX Stockholm
-    "NOK": ".OL",  # Norwegian krone → Oslo Børs
-    "DKK": ".CO",  # Danish krone → OMX Copenhagen
-    # EUR, GBP, CHF omitted — ambiguous multi-country currencies
-}
 
 # Venues that should be excluded from yfinance.Search fallback results
 _OTC_VENUES: frozenset[str] = frozenset({"PNK", "OTC", "PINX", "GREY"})

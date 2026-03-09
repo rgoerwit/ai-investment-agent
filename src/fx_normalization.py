@@ -83,27 +83,40 @@ async def get_fx_rate_yfinance(
 # TIER 2: Fallback Rates (Hardcoded, updated quarterly)
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Last updated: Dec 2025
-# Source: ECB reference rates, BoJ, HKMA
+# Last updated: Mar 2026
+# Source: ECB reference rates, BoJ, HKMA, Bloomberg
 FALLBACK_RATES_TO_USD = {
     # Major Asian currencies (your primary use case)
-    "JPY": 0.0067,  # Japanese Yen (¥150 = $1)
+    "JPY": 0.0067,  # Japanese Yen (¥149 = $1)
     "HKD": 0.128,  # Hong Kong Dollar (HK$7.80 = $1)
     "TWD": 0.032,  # Taiwan Dollar (NT$31 = $1)
     "KRW": 0.00075,  # Korean Won (₩1,330 = $1)
     "CNY": 0.14,  # Chinese Yuan (¥7.2 = $1)
     "INR": 0.012,  # Indian Rupee (₹83 = $1)
     "SGD": 0.74,  # Singapore Dollar (S$1.35 = $1)
+    "MYR": 0.23,  # Malaysian Ringgit (MYR 4.35 = $1)
+    "THB": 0.029,  # Thai Baht (THB 34.5 = $1)
+    "IDR": 0.000063,  # Indonesian Rupiah (IDR 15,900 = $1)
+    "PHP": 0.017,  # Philippine Peso (PHP 58 = $1)
     # European currencies
     "EUR": 1.09,  # Euro
     "GBP": 1.27,  # British Pound
+    "GBX": 0.0127,  # British Pence (100 GBX = 1 GBP)
     "CHF": 1.13,  # Swiss Franc
+    "SEK": 0.093,  # Swedish Krona (SEK 10.75 = $1)
+    "NOK": 0.092,  # Norwegian Krone (NOK 10.87 = $1)
+    "DKK": 0.144,  # Danish Krone (DKK 6.94 = $1)
+    "PLN": 0.250,  # Polish Zloty (PLN 4.0 = $1)
+    "CZK": 0.044,  # Czech Koruna (CZK 22.7 = $1)
+    "HUF": 0.0028,  # Hungarian Forint (HUF 357 = $1)
     # Other major currencies
     "CAD": 0.72,  # Canadian Dollar
     "AUD": 0.64,  # Australian Dollar
     "NZD": 0.60,  # New Zealand Dollar
     "MXN": 0.049,  # Mexican Peso
     "BRL": 0.20,  # Brazilian Real
+    "ZAR": 0.055,  # South African Rand (ZAR 18.2 = $1)
+    "ILS": 0.27,  # Israeli Shekel (ILS 3.7 = $1)
     # Identity
     "USD": 1.0,
 }

@@ -9,11 +9,13 @@ from src.ibkr.models import (
     ReconciliationItem,
     TradeBlockData,
 )
+from src.ibkr.ticker import Ticker
 from tests.ibkr.test_reconciler import _make_portfolio, _make_position
 
-# A realistic CORRELATED_SELL_EVENT flag string (matches what compute_portfolio_health emits)
+# A realistic CORRELATED_SELL_EVENT flag string (matches what compute_portfolio_health emits).
+# Format: "CORRELATED_SELL_EVENT: N positions changed verdict within Xd of DATE (P% of held …"
 _CORR_FLAG = (
-    "CORRELATED_SELL_EVENT: 8 positions changed verdict on 2026-03-05"
+    "CORRELATED_SELL_EVENT: 8 positions changed verdict within 7d of 2026-03-05"
     " (80% of held positions) — probable macro event."
     " Execute stop-breach SELLs only; review verdict-change SELLs before acting."
 )
@@ -88,6 +90,13 @@ class TestFormatReportPanicDay:
         """CORRELATED_SELL_EVENT in health_flags → MACRO ALERT banner rendered."""
         assert "MACRO ALERT" in self._report_with_flag()
 
+    def test_macro_banner_shows_count_date_and_pct(self):
+        """MACRO ALERT banner must show the count, date, and percentage parsed from the flag."""
+        report = self._report_with_flag()
+        # All three parsed values must appear in the banner
+        assert "8 positions changed verdict on 2026-03-05" in report
+        assert "80% of held positions" in report
+
     def test_macro_banner_absent_when_no_flag(self):
         """Empty health_flags → no MACRO ALERT banner, even if items are present."""
         assert "MACRO ALERT" not in self._report_without_flag()
@@ -113,7 +122,8 @@ class TestFormatReportPanicDay:
         )
         assert soft_rej_idx is not None, "SELLS — SOFT REJECTION section missing"
         section_content = "\n".join(lines[soft_rej_idx:])
-        assert "SOFT00.T" in section_content
+        # Held positions show IBKR symbol (no exchange suffix) in human-visible sections
+        assert "SOFT00" in section_content
 
     def test_reviews_section_excludes_soft_reject_items(self):
         """SOFT00.T appears only in SOFT REJECTION — not in the regular REVIEWS section.
@@ -188,8 +198,9 @@ class TestFormatReportNormalDay:
         )
         assert soft_rej_idx is not None
         # Check the next ~15 lines for the SELL action label and the ticker
+        # Held positions show IBKR symbol ("7203") not yfinance ("7203.T") in display
         section_lines = lines[soft_rej_idx : soft_rej_idx + 15]
-        assert any("SELL" in ln and "7203.T" in ln for ln in section_lines)
+        assert any("SELL" in ln and "7203" in ln for ln in section_lines)
 
     def test_no_soft_rejection_section_when_no_soft_items(self):
         """Only STOP_BREACH items → SOFT REJECTION section not rendered."""
@@ -510,6 +521,60 @@ class TestDipWatch:
         )
         assert "DIP WATCH" not in report
 
+    def test_dip_watch_run_cmd_uses_analysis_ticker_when_item_ticker_bare(self):
+        """DIP WATCH re-run cmd uses analysis.ticker (with suffix) when item.ticker is bare.
+
+        Scenario: ibkr_symbol_to_yf() failed to resolve the exchange suffix, leaving
+        item.ticker = "BARE" (no suffix).  The analysis was stored as "BARE.L".
+        The re-run command in DIP WATCH must use "BARE.L" not "BARE".
+        """
+        from datetime import datetime, timedelta
+
+        analysis_date = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+        # Override analysis.ticker to have the canonical yf suffix (different from item.ticker)
+        analysis = AnalysisRecord(
+            ticker="BARE.L",  # canonical yfinance ticker found via _alpha_base_lookup
+            analysis_date=analysis_date,
+            verdict="DO_NOT_INITIATE",
+            health_adj=75.0,  # >= 55 → passes DIP WATCH quality filter
+            growth_adj=70.0,  # >= 55 → passes
+            entry_price=200.0,
+            stop_price=170.0,
+            target_1_price=250.0,
+            currency="GBX",
+        )
+        pos = NormalizedPosition(
+            conid=33333,
+            ticker=Ticker.from_yf("BARE"),
+            quantity=100,
+            avg_cost_local=200.0,
+            current_price_local=185.0,  # below entry → dip bonus
+            market_value_usd=2000.0,
+            currency="GBX",
+        )
+        item = ReconciliationItem(
+            ticker="BARE",  # bare — ibkr_symbol_to_yf couldn't resolve exchange
+            ibkr_symbol="BARE",
+            action="REVIEW",
+            urgency="MEDIUM",
+            reason=(
+                f"Verdict → DO_NOT_INITIATE  ({analysis_date})"
+                "  [MACRO_WATCH: demoted from SELL — correlated event detected]"
+            ),
+            ibkr_position=pos,
+            analysis=analysis,
+            sell_type="SOFT_REJECT",
+        )
+        report = format_report(
+            [item],
+            _make_portfolio(),
+            portfolio_health_flags=[_CORR_FLAG],
+        )
+        assert "DIP WATCH" in report
+        # Re-run command must use canonical yf ticker (analysis.ticker), not bare symbol
+        assert "--ticker BARE.L" in report
+        assert "⚠ verify exchange suffix" not in report
+
 
 # ── _pnl_line helpers ─────────────────────────────────────────────────────────
 
@@ -528,8 +593,7 @@ def _make_sell_item(
     """Build a SELL ReconciliationItem with a fully-populated NormalizedPosition."""
     pos = NormalizedPosition(
         conid=99999,
-        yf_ticker=ticker,
-        symbol=ticker.split(".")[0],
+        ticker=Ticker.from_yf(ticker),
         quantity=quantity,
         avg_cost_local=avg_cost_local,
         current_price_local=current_price_local,
@@ -811,7 +875,7 @@ class TestOrderAnnotation:
     """format_report() live-order annotation via live_orders parameter."""
 
     def test_sell_with_matching_open_order_shows_note(self):
-        """SELL item with matching open SELL order (by conid) → 'open order:' note shown."""
+        """SELL item with matching open SELL order (by conid) → 'ORDER ALREADY SUBMITTED' shown."""
         item = _make_sell_item(
             ticker="9201.T",
             sell_type="STOP_BREACH",
@@ -820,7 +884,7 @@ class TestOrderAnnotation:
         # Position conid = 99999 (set by _make_sell_item via NormalizedPosition)
         order = _make_order(conid=99999, side="S", remaining_size=100, price=2780.0)
         report = format_report([item], _make_portfolio(), live_orders=[order])
-        assert "open order:" in report
+        assert "ORDER ALREADY SUBMITTED" in report
         assert "SELL" in report
         assert "2780.00" in report
 
@@ -830,20 +894,35 @@ class TestOrderAnnotation:
             ticker="9201.T",
             action="BUY",
             urgency="LOW",
-            reason="BUY signal",
+            reason="Watchlist BUY",
             ibkr_position=None,
+            is_watchlist=True,
         )
         # No conid on a BUY with no position — match by symbol "9201"
         order = _make_order(ticker="9201", side="B", remaining_size=50, price=2750.0)
-        report = format_report([item], _make_portfolio(), live_orders=[order])
-        assert "open order:" in report
+        report = format_report(
+            [item],
+            _make_portfolio(),
+            live_orders=[order],
+            watchlist_name="TestWatchlist",
+        )
+        assert "ORDER ALREADY SUBMITTED" in report
         assert "BUY" in report
 
-    def test_no_orders_no_note(self):
-        """Empty live_orders list → no 'open order:' annotation anywhere in report."""
+    def test_opposite_side_order_shows_conflict_note(self):
+        """Open BUY order when recommending SELL → CONFLICT warning shown."""
+        item = _make_sell_item(ticker="9201.T", sell_type="STOP_BREACH")
+        order = _make_order(conid=99999, side="B", remaining_size=100, price=2780.0)
+        report = format_report([item], _make_portfolio(), live_orders=[order])
+        assert "CONFLICT" in report
+        assert "ORDER ALREADY SUBMITTED" not in report
+
+    def test_no_orders_no_annotation(self):
+        """Empty live_orders list → no order annotation anywhere in report."""
         item = _make_sell_item()
         report = format_report([item], _make_portfolio(), live_orders=[])
-        assert "open order:" not in report
+        assert "ORDER ALREADY SUBMITTED" not in report
+        assert "CONFLICT" not in report
 
     def test_order_for_different_ticker_not_shown(self):
         """Order with a different conid and non-matching symbol → not annotated."""
@@ -851,13 +930,126 @@ class TestOrderAnnotation:
         # item.ibkr_position.conid == 99999; order has conid 11111 and ticker "XXXX"
         order = _make_order(conid=11111, ticker="XXXX", side="S", remaining_size=100)
         report = format_report([item], _make_portfolio(), live_orders=[order])
-        assert "open order:" not in report
+        assert "ORDER ALREADY SUBMITTED" not in report
+        assert "CONFLICT" not in report
 
     def test_live_orders_none_no_annotation(self):
         """live_orders omitted (default None) → no annotation."""
         item = _make_sell_item()
         report = format_report([item], _make_portfolio())
-        assert "open order:" not in report
+        assert "ORDER ALREADY SUBMITTED" not in report
+
+    def test_partial_fill_sell_shows_remaining(self):
+        """Same-side SELL order for fewer shares than recommended → PARTIAL ORDER note."""
+        item = _make_sell_item(
+            ticker="9201.T",
+            sell_type="STOP_BREACH",
+            reason="Stop breached: price 2700.00 < stop 2780.00",
+            quantity=100,
+            suggested_quantity=100,
+        )
+        # Only 40 shares ordered, but 100 recommended
+        order = _make_order(conid=99999, side="S", remaining_size=40, price=2780.0)
+        report = format_report([item], _make_portfolio(), live_orders=[order])
+        assert "PARTIAL ORDER" in report
+        assert "40 of" in report
+        assert "ORDER ALREADY SUBMITTED" not in report
+
+    def test_full_fill_sell_shows_do_not_reenter(self):
+        """Same-side SELL order covers full recommended quantity → do not re-enter note."""
+        item = _make_sell_item(
+            ticker="9201.T",
+            sell_type="STOP_BREACH",
+            reason="Stop breached: price 2700.00 < stop 2780.00",
+            quantity=100,
+            suggested_quantity=100,
+        )
+        order = _make_order(conid=99999, side="S", remaining_size=100, price=2780.0)
+        report = format_report([item], _make_portfolio(), live_orders=[order])
+        assert "ORDER ALREADY SUBMITTED" in report
+        assert "PARTIAL ORDER" not in report
+
+    def test_hk_sell_matched_by_unpadded_ibkr_symbol(self):
+        """Regression: HK yf ticker '0005.HK' has zero-padded base '0005', but IBKR
+        live orders use unpadded '5'.  Symbol fallback must match both forms."""
+        item = _make_sell_item(ticker="0005.HK", sell_type="HARD_REJECT")
+        # Simulate IBKR live order using its own unpadded symbol "5"
+        order = _make_order(conid=99999, side="S", remaining_size=400, price=55.0)
+        # conid=99999 matches → this works even without symbol fallback
+        report = format_report([item], _make_portfolio(), live_orders=[order])
+        assert "ORDER ALREADY SUBMITTED" in report
+
+    def test_hk_buy_matched_by_unpadded_ibkr_symbol(self):
+        """New BUY for '0005.HK' (no position, no conid): IBKR live order has symbol '5'.
+        Symbol fallback must strip leading zeros to match."""
+        item = ReconciliationItem(
+            ticker="0005.HK",
+            action="BUY",
+            urgency="LOW",
+            reason="Watchlist BUY",
+            ibkr_position=None,
+            is_watchlist=True,
+        )
+        # IBKR order: bare "5", not "0005"
+        order = _make_order(ticker="5", side="B", remaining_size=400, price=55.0)
+        report = format_report(
+            [item],
+            _make_portfolio(),
+            live_orders=[order],
+            watchlist_name="TestWatchlist",
+        )
+        assert (
+            "ORDER ALREADY SUBMITTED" in report
+        ), "HK BUY order with IBKR symbol '5' should match yf ticker '0005.HK'"
+
+    def test_ibkr_symbol_from_position_used_for_sell_match(self):
+        """When a position exists, pos.symbol (IBKR-native) is the authoritative symbol
+        candidate.  Even if the yf base and IBKR base differ, conid matching catches it."""
+        # This test uses conid (most reliable path) — symbol is a secondary candidate
+        pos = NormalizedPosition(
+            conid=77777,
+            ticker=Ticker.from_yf("0700.HK"),
+            quantity=100,
+            currency="HKD",
+            current_price_local=34000,
+            avg_cost_local=30000,
+            market_value_usd=434000,
+        )
+        item = ReconciliationItem(
+            ticker="0700.HK",
+            action="SELL",
+            urgency="HIGH",
+            reason="DO_NOT_INITIATE",
+            ibkr_position=pos,
+            sell_type="HARD_REJECT",
+        )
+        order = _make_order(conid=77777, side="S", remaining_size=100, price=34000.0)
+        report = format_report([item], _make_portfolio(), live_orders=[order])
+        assert "ORDER ALREADY SUBMITTED" in report
+
+    def test_divergent_base_symbols_use_conid_not_symbol(self):
+        """When IBKR and yFinance use different base symbols (rare), conid is the
+        only reliable match.  Symbol fallback will miss — that is documented and acceptable."""
+        pos = NormalizedPosition(
+            conid=55555,
+            ticker=Ticker.from_yf("MELI"),
+            quantity=10,
+            currency="USD",
+            current_price_local=1500,
+            avg_cost_local=1200,
+            market_value_usd=15000,
+        )
+        item = ReconciliationItem(
+            ticker="MELI",
+            action="SELL",
+            urgency="HIGH",
+            reason="STOP_BREACH",
+            ibkr_position=pos,
+            sell_type="STOP_BREACH",
+        )
+        order = _make_order(conid=55555, side="S", remaining_size=10, price=1490.0)
+        report = format_report([item], _make_portfolio(), live_orders=[order])
+        assert "ORDER ALREADY SUBMITTED" in report
 
 
 class TestMacroAlertBannerWithStoredEvent:
@@ -929,3 +1121,409 @@ class TestMacroAlertBannerWithStoredEvent:
         # The headline should appear but truncated
         # Either 62 chars of A or a prefix of "Characterized: "
         assert "Characterized:" in report or long_hl[:40] in report
+
+
+# ── New-buy section helpers ───────────────────────────────────────────────────
+
+
+def _make_buy_item(
+    ticker: str = "7203.T",
+    conviction: str = "High",
+    size_pct: float = 4.0,
+    suggested_quantity: int | None = 100,
+    suggested_price: float | None = 2615.0,
+    cash_impact_usd: float = -1752.0,
+    analysis_date: str = "2026-03-01",
+    analysis: AnalysisRecord | None = None,
+) -> ReconciliationItem:
+    """Build a BUY ReconciliationItem as the reconciler would produce for new buys."""
+    if analysis is None:
+        tb = TradeBlockData(conviction=conviction, size_pct=size_pct)
+        analysis = AnalysisRecord(
+            ticker=ticker,
+            analysis_date=analysis_date,
+            verdict="BUY",
+            health_adj=72.0,
+            growth_adj=65.0,
+            trade_block=tb,
+            conviction=conviction,
+        )
+    return ReconciliationItem(
+        ticker=ticker,
+        action="BUY",
+        urgency="MEDIUM",
+        reason=f"Watchlist BUY ({analysis_date}) — {conviction} conviction, target {size_pct:.1f}%",
+        ibkr_position=None,
+        analysis=analysis,
+        suggested_quantity=suggested_quantity,
+        suggested_price=suggested_price,
+        suggested_order_type="LMT",
+        cash_impact_usd=cash_impact_usd,
+        is_watchlist=True,
+    )
+
+
+class TestNewBuysSection:
+    """format_report() NEW BUYS section rendering and live-order annotation."""
+
+    def _report(
+        self,
+        items: list[ReconciliationItem],
+        live_orders=None,
+        watchlist_name: str | None = "TestWatchlist",
+        watchlist_total: int | None = None,
+    ) -> str:
+        return format_report(
+            items,
+            _make_portfolio(),
+            show_recommendations=True,
+            live_orders=live_orders or [],
+            watchlist_name=watchlist_name,
+            watchlist_total=watchlist_total,
+        )
+
+    # ── Line-count / data-completeness ────────────────────────────────────────
+
+    def test_full_data_shows_conviction_and_cost(self):
+        """BUY with conviction, quantity, and cash_impact_usd → all 3 detail elements shown."""
+        item = _make_buy_item(
+            conviction="High",
+            suggested_quantity=100,
+            suggested_price=2615.0,
+            cash_impact_usd=-1752.0,
+        )
+        report = self._report([item])
+        assert "NEW BUYS" in report
+        assert "High conviction" in report
+        assert "target 4.0%" in report
+        assert "Cost:" in report
+        assert "use already-settled cash" in report
+
+    def test_no_quantity_hides_cost_line(self):
+        """BUY with price but no quantity → no Cost line (can't compute cost without shares)."""
+        item = _make_buy_item(
+            conviction="Medium",
+            suggested_quantity=None,  # no quantity
+            suggested_price=2615.0,
+            cash_impact_usd=0.0,  # no cost when no quantity
+        )
+        report = self._report([item])
+        assert "Medium conviction" in report
+        assert "target 4.0%" in report
+        assert "Cost:" not in report
+
+    def test_no_price_shows_no_entry_price_indicator(self):
+        """BUY with no entry price → '(no entry price' indicator in order line."""
+        item = _make_buy_item(
+            suggested_quantity=None,
+            suggested_price=None,
+            cash_impact_usd=0.0,
+        )
+        report = self._report([item])
+        assert "no entry price" in report
+
+    def test_missing_conviction_shows_target_only(self):
+        """Analysis with empty conviction → target still shown, no 'conviction' label."""
+        tb = TradeBlockData(conviction="", size_pct=2.5)
+        analysis = AnalysisRecord(
+            ticker="6752.T",
+            analysis_date="2026-03-01",
+            verdict="BUY",
+            health_adj=68.0,
+            growth_adj=60.0,
+            trade_block=tb,
+            conviction="",
+        )
+        item = _make_buy_item(
+            ticker="6752.T",
+            conviction="",
+            analysis=analysis,
+            suggested_quantity=None,
+            cash_impact_usd=0.0,
+        )
+        report = self._report([item])
+        assert "conviction" not in report.split("NEW BUYS")[1].split("═")[0]
+        assert "target" in report
+
+    def test_no_analysis_shows_order_line_only(self):
+        """BUY item with no analysis → order line only, no detail line."""
+        item = ReconciliationItem(
+            ticker="9201.T",
+            action="BUY",
+            urgency="MEDIUM",
+            reason="Watchlist BUY",
+            ibkr_position=None,
+            analysis=None,
+            suggested_price=2615.0,
+            suggested_order_type="LMT",
+            cash_impact_usd=0.0,
+            is_watchlist=True,
+        )
+        report = self._report([item])
+        assert "NEW BUYS" in report
+        assert "9201.T" in report
+        assert "conviction" not in report
+
+    def test_header_section_shown(self):
+        """NEW BUYS section header appears when BUY items exist."""
+        item = _make_buy_item()
+        report = self._report([item])
+        assert "NEW BUYS" in report
+
+    def test_title_shows_named_watchlist(self):
+        """When watchlist_name is provided, section subtitle names the watchlist."""
+        item = _make_buy_item()
+        report = self._report([item], watchlist_name="MyWatchlist")
+        assert "from watchlist 'MyWatchlist'" in report
+
+    def test_title_shows_generic_watchlist_when_name_unknown(self):
+        """When watchlist_name is None (auto-discovered), subtitle says 'from watchlist'."""
+        item = _make_buy_item()
+        report = self._report([item], watchlist_name=None)
+        assert "from watchlist" in report
+        # The section still appears because the item has is_watchlist=True
+        assert "NEW BUYS" in report
+
+    def test_title_shows_count_when_watchlist_total_known(self):
+        """watchlist_total provided → subtitle includes 'M/N from watchlist' ratio."""
+        items = [_make_buy_item("7203.T"), _make_buy_item("6752.T")]
+        report = self._report(items, watchlist_name="MyWatchlist", watchlist_total=15)
+        assert "2/15" in report
+        assert "from watchlist 'MyWatchlist'" in report
+
+    def test_title_omits_count_when_watchlist_total_not_provided(self):
+        """watchlist_total not provided → no M/N ratio in subtitle."""
+        item = _make_buy_item()
+        report = self._report(
+            [item], watchlist_name="MyWatchlist", watchlist_total=None
+        )
+        assert "1/" not in report
+        assert "from watchlist 'MyWatchlist'" in report
+
+    def test_section_absent_when_no_watchlist_items(self):
+        """BUY item without is_watchlist=True (e.g. Phase 2) → NEW BUYS section not shown."""
+        item = ReconciliationItem(
+            ticker="9201.T",
+            action="BUY",
+            urgency="MEDIUM",
+            reason="New BUY (2026-03-01) — High conviction, target 4.0%",
+            ibkr_position=None,
+            is_watchlist=False,
+        )
+        report = self._report([item], watchlist_name="MyWatchlist")
+        assert "NEW BUYS" not in report
+
+    # ── Order annotation for BUY items ────────────────────────────────────────
+
+    def test_buy_with_existing_buy_order_shows_already_submitted(self):
+        """BUY item with matching live BUY order → 'ORDER ALREADY SUBMITTED' in report."""
+        item = _make_buy_item(ticker="7203.T")
+        order = _make_order(ticker="7203", side="B", remaining_size=100, price=2615.0)
+        report = self._report([item], live_orders=[order])
+        assert "ORDER ALREADY SUBMITTED" in report
+        assert "BUY" in report
+
+    def test_buy_with_conflicting_sell_order_shows_conflict(self):
+        """BUY recommendation but live SELL order exists → CONFLICT warning."""
+        item = _make_buy_item(ticker="7203.T")
+        order = _make_order(ticker="7203", side="S", remaining_size=100, price=2615.0)
+        report = self._report([item], live_orders=[order])
+        assert "CONFLICT" in report
+        assert "ORDER ALREADY SUBMITTED" not in report
+
+    def test_buy_with_no_live_orders_no_annotation(self):
+        """BUY item with empty live_orders → no order annotation."""
+        item = _make_buy_item(ticker="7203.T")
+        report = self._report([item], live_orders=[])
+        assert "ORDER ALREADY SUBMITTED" not in report
+        assert "CONFLICT" not in report
+
+    def test_action_plan_shows_already_submitted_note_for_buy(self):
+        """ACTION PLAN (TODAY section) shows 'order already submitted' for BUY already in flight."""
+        # A BUY item with settled cash qualifies for funded_today
+        item = _make_buy_item(
+            ticker="7203.T",
+            suggested_quantity=100,
+            suggested_price=2615.0,
+            cash_impact_usd=-1752.0,
+        )
+        order = _make_order(ticker="7203", side="B", remaining_size=100, price=2615.0)
+        report = self._report([item], live_orders=[order])
+        # ACTION PLAN section uses lowercase "order already submitted"
+        assert "order already submitted" in report.lower()
+
+    def test_partial_buy_order_shows_remaining_needed(self):
+        """BUY item with partial live BUY order → annotation shows how many more shares are needed."""
+        item = _make_buy_item(
+            ticker="7203.T",
+            suggested_quantity=100,
+            suggested_price=2615.0,
+            cash_impact_usd=-1752.0,
+        )
+        # Only 50 of 100 shares ordered
+        order = _make_order(ticker="7203", side="B", remaining_size=50, price=2615.0)
+        report = self._report([item], live_orders=[order])
+        assert "PARTIAL ORDER" in report
+        assert "50 of" in report
+        assert "50 more" in report
+        assert "ORDER ALREADY SUBMITTED" not in report
+
+
+# ── IBKR vs yFinance display symbol tests ──
+
+
+class TestIbkrDisplaySymbol:
+    """format_report() shows ibkr_symbol in human-visible sections, yf ticker in run commands."""
+
+    def _held_hold(self, yf_ticker: str, ibkr_symbol: str) -> ReconciliationItem:
+        pos = _make_position(ticker=yf_ticker, current_price=2100)
+        return ReconciliationItem(
+            ticker=yf_ticker,
+            ibkr_symbol=ibkr_symbol,
+            action="HOLD",
+            reason="Position OK",
+            urgency="LOW",
+            ibkr_position=pos,
+        )
+
+    def _held_review(self, yf_ticker: str, ibkr_symbol: str) -> ReconciliationItem:
+        pos = _make_position(ticker=yf_ticker, current_price=2100)
+        return ReconciliationItem(
+            ticker=yf_ticker,
+            ibkr_symbol=ibkr_symbol,
+            action="REVIEW",
+            reason="Stale analysis: age 20d > 14d limit",
+            urgency="MEDIUM",
+            ibkr_position=pos,
+        )
+
+    def test_holds_section_shows_ibkr_symbol(self):
+        """HOLDS section displays the IBKR symbol, not the yfinance ticker."""
+        item = self._held_hold("7203.T", "7203")
+        report = format_report([item], _make_portfolio())
+        assert "7203   " in report or "7203  " in report  # displayed
+        assert "7203.T" not in report.split("HOLDS")[1].split("REVIEWS")[0]
+
+    def test_holds_section_hk_symbol_no_zero_pad(self):
+        """HK positions display IBKR symbol '5' not yfinance '0005.HK'."""
+        item = self._held_hold("0005.HK", "5")
+        report = format_report([item], _make_portfolio())
+        holds_block = report.split("HOLDS")[1] if "HOLDS" in report else report
+        assert "5     " in holds_block or "5  " in holds_block  # IBKR symbol
+
+    def test_reviews_run_cmd_uses_yf_ticker(self):
+        """REVIEWS run command must use yf ticker (with exchange suffix) for --ticker arg."""
+        item = self._held_review("7203.T", "7203")
+        report = format_report([item], _make_portfolio())
+        # Run command in REVIEWS should reference yf ticker
+        assert "--ticker 7203.T" in report
+
+    def test_reviews_display_uses_ibkr_symbol(self):
+        """REVIEWS label shows IBKR symbol, not yfinance ticker."""
+        item = self._held_review("7203.T", "7203")
+        report = format_report([item], _make_portfolio())
+        reviews_block = report.split("REVIEWS")[1] if "REVIEWS" in report else ""
+        # Display part (before the run cmd) uses ibkr symbol
+        assert "REVIEW" in reviews_block
+        # Ensure the display portion shows "7203" not "7203.T"
+        # (the run cmd has "--ticker 7203.T", the label has "7203 ")
+        assert "7203  " in reviews_block or "7203 " in reviews_block
+
+    def test_new_buy_watchlist_shows_yf_ticker(self):
+        """Phase 2 BUY (not held, no ibkr_symbol) still shows yf ticker — no change."""
+        item = ReconciliationItem(
+            ticker="CAG.ST",
+            ibkr_symbol="",  # not held
+            action="BUY",
+            reason="Watchlist BUY",
+            urgency="MEDIUM",
+            is_watchlist=True,
+        )
+        report = format_report([item], _make_portfolio())
+        assert "CAG.ST" in report
+
+    def test_reviews_run_cmd_uses_analysis_ticker_when_item_ticker_bare(self):
+        """When item.ticker has no suffix but analysis.ticker has one, REVIEWS run cmd uses analysis.ticker.
+
+        Scenario: ibkr_symbol_to_yf() couldn't find the IBKR exchange code, so
+        pos.yf_ticker = "MEGP" (bare).  _alpha_base_lookup found the analysis stored
+        as "MEGP.L", so item.analysis.ticker = "MEGP.L".  The run command must use
+        the canonical yfinance ticker, not the bare IBKR-derived one.
+        """
+        from datetime import datetime, timedelta
+
+        pos = NormalizedPosition(
+            conid=22222,
+            ticker=Ticker.from_ibkr("MEGP", currency="GBX"),
+            quantity=100,
+            avg_cost_local=100.0,
+            current_price_local=95.0,
+            market_value_usd=13000.0,
+            currency="GBX",
+        )
+        item = ReconciliationItem(
+            ticker="MEGP",  # bare — ibkr_symbol_to_yf couldn't resolve exchange
+            action="REVIEW",
+            reason="Stale analysis: age 20d > 14d limit",
+            urgency="MEDIUM",
+            ibkr_position=pos,
+            analysis=AnalysisRecord(
+                ticker="MEGP.L",  # canonical yfinance format from analysis file
+                analysis_date=(datetime.now() - timedelta(days=20)).strftime(
+                    "%Y-%m-%d"
+                ),
+                verdict="BUY",
+                health_adj=72.0,
+                growth_adj=65.0,
+            ),
+        )
+        report = format_report([item], _make_portfolio())
+        # Run command must reference the canonical yfinance ticker, not the bare symbol
+        assert "--ticker MEGP.L" in report
+        assert "⚠ verify exchange suffix" not in report
+
+    def test_holds_no_suffix_warning_when_currency_resolves_suffix(self):
+        """HOLDS section suppresses suffix warning when currency unambiguously gives a yfinance suffix."""
+        # Ticker.from_ibkr with currency="GBX" resolves suffix=".L" via _CURRENCY_TO_SUFFIX
+        pos = NormalizedPosition(
+            conid=44444,
+            ticker=Ticker.from_ibkr("MEGP", currency="GBX"),
+            quantity=200,
+            avg_cost_local=100.0,
+            current_price_local=95.0,
+            market_value_usd=13000.0,
+            currency="GBX",  # GBX → .L (unambiguous)
+        )
+        item = ReconciliationItem(
+            ticker="MEGP",
+            action="HOLD",
+            reason="Position OK",
+            urgency="LOW",
+            ibkr_position=pos,
+        )
+        report = format_report([item], _make_portfolio())
+        # pos.ticker.has_suffix=True (GBX → .L) → no exchange suffix warning
+        assert "⚠ no exchange suffix" not in report
+
+    def test_holds_suffix_warning_for_ambiguous_currency(self):
+        """HOLDS section shows suffix warning when currency is ambiguous (EUR covers multiple exchanges)."""
+        # Ticker.from_ibkr with currency="EUR" cannot resolve suffix (EUR is multi-country)
+        pos = NormalizedPosition(
+            conid=55555,
+            ticker=Ticker.from_ibkr("CEK", currency="EUR"),
+            quantity=200,
+            avg_cost_local=50.0,
+            current_price_local=55.0,
+            market_value_usd=15000.0,
+            currency="EUR",  # EUR is ambiguous (.DE/.PA/.AS/etc.) → cannot infer suffix
+        )
+        item = ReconciliationItem(
+            ticker="CEK",
+            action="HOLD",
+            reason="Position OK",
+            urgency="LOW",
+            ibkr_position=pos,
+        )
+        report = format_report([item], _make_portfolio())
+        # pos.ticker.has_suffix=False (EUR not in _CURRENCY_TO_SUFFIX) → warning fires
+        assert "⚠ no exchange suffix" in report

@@ -12,11 +12,17 @@ import structlog
 from src.fx_normalization import FALLBACK_RATES_TO_USD
 from src.ibkr.client import IbkrClient
 from src.ibkr.models import NormalizedPosition, PortfolioSummary
+from src.ibkr.ticker import Ticker
 from src.ibkr.ticker_mapper import (
+    _yf_search_ticker,
     cache_conid_mapping,
     ibkr_symbol_to_yf,
-    resolve_yf_ticker_from_position,
     yf_ticker_from_conid,
+)
+
+# IBKR exchange codes for US venues — these never need a yfinance suffix search
+_US_EXCHANGES: frozenset[str] = frozenset(
+    {"NASDAQ", "NYSE", "ARCA", "AMEX", "SMART", "IEXG", "CBOE", ""}
 )
 
 logger = structlog.get_logger(__name__)
@@ -38,34 +44,64 @@ def normalize_positions(raw_positions: list[dict]) -> list[NormalizedPosition]:
     positions: list[NormalizedPosition] = []
 
     for raw in raw_positions:
-        yf_ticker = resolve_yf_ticker_from_position(raw)
-        if not yf_ticker:
+        # Extract raw IBKR fields
+        raw_symbol = (raw.get("contractDesc", "") or raw.get("ticker", "")).strip()
+        if "-" in raw_symbol:
+            raw_symbol = raw_symbol.split("-")[0]
+        raw_exchange = (
+            raw.get("listingExchange", "") or raw.get("exchange", "")
+        ).strip()
+        raw_currency = (raw.get("currency", "") or "").strip()
+
+        if not raw_symbol:
             logger.warning(
                 "position_unmapped",
-                raw_symbol=raw.get("contractDesc", "?"),
-                exchange=raw.get("listingExchange", "?"),
+                raw_symbol="(empty)",
+                exchange=raw_exchange,
             )
             continue
 
-        currency = raw.get("currency") or ("GBP" if yf_ticker.endswith(".L") else "USD")
+        # Build Ticker from IBKR fields — this is the authoritative conversion point.
+        ticker_obj = Ticker.from_ibkr(raw_symbol, raw_exchange, raw_currency)
+
+        # Network fallback: for non-US positions where the exchange code is unknown
+        # (not in IBKR_TO_YFINANCE), attempt a yfinance.Search to resolve the suffix.
+        # The network call and result caching live in ticker_mapper._yf_search_ticker.
+        if (
+            not ticker_obj.has_suffix
+            and raw_exchange
+            and raw_exchange not in _US_EXCHANGES
+        ):
+            yf_str = _yf_search_ticker(raw_symbol, raw_exchange, raw_currency)
+            if yf_str:
+                ticker_obj = Ticker.from_yf(yf_str, currency=raw_currency)
+
         raw_market_value = float(raw.get("mktValue", 0) or raw.get("marketValue", 0))
+        currency = raw_currency or ("GBP" if ticker_obj.suffix == ".L" else "USD")
         fx_rate = FALLBACK_RATES_TO_USD.get(currency.upper(), 1.0)
         market_value_usd = raw_market_value * fx_rate
 
         # IBKR reports LSE (.L) prices in GBP; yfinance and analysis stop/target
         # prices use GBX (pence). Multiply by 100 so all downstream comparisons
         # (stop breach, target hit, drift, P&L) use consistent GBX units.
+        # NOTE: market_value_usd is computed from IBKR's GBP mktValue (before ×100)
+        # using the GBP FX rate, so it is correct — do NOT re-apply FX on GBX prices.
         current_price_local = float(raw.get("mktPrice", 0) or raw.get("lastPrice", 0))
         avg_cost_local = float(raw.get("avgCost", 0) or raw.get("avgPrice", 0))
-        if yf_ticker.endswith(".L"):
+        if ticker_obj.suffix == ".L" and currency.upper() == "GBP":
             current_price_local *= 100
-            avg_cost_local *= 100  # GBP → GBX, consistent with current_price_local
+            avg_cost_local *= 100  # GBP → GBX, consistent with analysis/yfinance prices
+            currency = "GBX"  # Reflect actual denomination of *_local fields
+            # Re-build Ticker so its currency field is "GBX" (used in suffix fallback)
+            ticker_obj = Ticker(
+                symbol=ticker_obj.symbol,
+                exchange=ticker_obj.exchange,
+                currency="GBX",
+            )
 
         position = NormalizedPosition(
             conid=raw.get("conid", 0),
-            yf_ticker=yf_ticker,
-            symbol=raw.get("contractDesc", ""),
-            exchange=raw.get("listingExchange", ""),
+            ticker=ticker_obj,
             quantity=float(raw.get("position", 0) or raw.get("qty", 0)),
             avg_cost_local=avg_cost_local,
             market_value_usd=market_value_usd,

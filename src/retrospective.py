@@ -298,14 +298,27 @@ def extract_snapshot(
     currency = EXCHANGE_CURRENCY.get(suffix, FALLBACK_CURRENCY)
     benchmark = EXCHANGE_BENCHMARK.get(suffix, FALLBACK_BENCHMARK)
 
-    # FX rate at analysis time (synchronous fallback only — no async in snapshot)
+    # FX rate at analysis time (synchronous fallback only — no async in snapshot).
+    # Saved here so the reconciler has an at-analysis-time rate to use for cost
+    # calculations without needing a live FX fetch.
     fx_rate = None
     try:
         from src.fx_normalization import FALLBACK_RATES_TO_USD
 
-        fx_rate = FALLBACK_RATES_TO_USD.get(currency, 1.0)
+        fx_rate = FALLBACK_RATES_TO_USD.get(currency)
+        if fx_rate is None:
+            logger.warning(
+                "snapshot_fx_rate_unknown",
+                ticker=ticker,
+                currency=currency,
+                msg=(
+                    "Currency not in FALLBACK_RATES_TO_USD — "
+                    "saving fx_rate_to_usd=None. "
+                    "Add to src/fx_normalization.py to fix cost calculations."
+                ),
+            )
     except ImportError:
-        fx_rate = 1.0
+        fx_rate = None
 
     # TRADE_BLOCK extraction from trader plan (zero LLM cost — pure regex)
     trader_plan = result.get("investment_analysis", {}).get("trader_plan", "") or ""
@@ -562,20 +575,29 @@ async def compare_to_reality(snapshot: dict[str, Any]) -> dict[str, Any] | None:
         logger.warning("yfinance_error", ticker=ticker, error=str(e))
         return None
 
-    # Calculate returns
+    # Calculate returns.
+    # Both start_price / end_price are in LOCAL currency (yfinance returns local prices),
+    # and both bench_start / bench_end are in the benchmark index's native unit.
+    # The percentage formula (end-start)/start cancels the currency unit, so
+    # price_return_pct and benchmark_return_pct are currency-neutral percentages
+    # and can be compared directly without FX conversion.
     start_price = data.get("start_adj_close")
     end_price = data.get("end_adj_close")
     if not start_price or not end_price or start_price <= 0:
         logger.debug("insufficient_price_data", ticker=ticker)
         return None
 
-    price_return_pct = ((end_price - start_price) / start_price) * 100.0
+    price_return_pct = (
+        (end_price - start_price) / start_price
+    ) * 100.0  # % in LOCAL ccy
 
     bench_start = data.get("bench_start")
     bench_end = data.get("bench_end")
     benchmark_return_pct = 0.0
     if bench_start and bench_end and bench_start > 0:
-        benchmark_return_pct = ((bench_end - bench_start) / bench_start) * 100.0
+        benchmark_return_pct = (
+            (bench_end - bench_start) / bench_start
+        ) * 100.0  # % unitless
 
     excess_return_pct = price_return_pct - benchmark_return_pct
 

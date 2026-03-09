@@ -161,20 +161,38 @@ def calculate_quantity(
     2. Available cash / entry price
 
     Args:
-        available_cash_usd: Cash available for new buys (after buffer)
-        entry_price_local: Entry price in local currency
-        fx_rate_to_usd: FX rate (local currency → USD), None defaults to 1.0
+        available_cash_usd: Cash available for new buys (after buffer)  [USD]
+        entry_price_local: Entry price in LOCAL currency (JPY, HKD, SEK, …)
+        fx_rate_to_usd: FX conversion rate (1 LOCAL → N USD).
+            Must NOT be None for non-USD stocks — callers should resolve
+            the rate via reconciler._resolve_fx() before calling this
+            function.  If None is received here, returns 0 to avoid
+            silently using 1.0 and producing a quantity that is orders of
+            magnitude too large (e.g. 150× for a JPY stock).
         size_pct: Target position size as percentage of portfolio
         portfolio_value_usd: Total portfolio value in USD
         yf_ticker: Ticker for lot size rounding
 
     Returns:
-        Number of shares (rounded to lot size)
+        Number of shares (rounded to lot size), or 0 if FX rate is unavailable.
     """
     if entry_price_local <= 0 or portfolio_value_usd <= 0:
         return 0
 
-    fx_rate = fx_rate_to_usd or 1.0
+    if fx_rate_to_usd is None:
+        logger.error(
+            "calculate_quantity_missing_fx_rate",
+            yf_ticker=yf_ticker,
+            entry_price_local=entry_price_local,
+            msg=(
+                "fx_rate_to_usd is None — cannot safely convert local price to USD. "
+                "Returning 0 to avoid incorrect order size. "
+                "Re-run analysis or add currency to FALLBACK_RATES_TO_USD."
+            ),
+        )
+        return 0
+
+    fx_rate = fx_rate_to_usd
     entry_price_usd = entry_price_local * fx_rate
 
     if entry_price_usd <= 0:

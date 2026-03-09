@@ -14,7 +14,9 @@ from src.ibkr.models import (
     TradeBlockData,
 )
 from src.ibkr.reconciler import (
+    _exchange_from_position,
     _parse_scores_from_final_decision,
+    _resolve_fx,
     check_staleness,
     check_stop_breach,
     check_target_hit,
@@ -22,6 +24,7 @@ from src.ibkr.reconciler import (
     load_latest_analyses,
     reconcile,
 )
+from src.ibkr.ticker import Ticker
 
 # ── Fixtures ──
 
@@ -35,10 +38,11 @@ def _make_position(
     currency: str = "JPY",
     conid: int = 123456,
 ) -> NormalizedPosition:
+    from src.ibkr.ticker import Ticker
+
     return NormalizedPosition(
         conid=conid,
-        yf_ticker=ticker,
-        symbol=ticker.split(".")[0],
+        ticker=Ticker.from_yf(ticker, currency=currency),
         quantity=quantity,
         avg_cost_local=avg_cost,
         market_value_usd=market_value_usd,
@@ -312,7 +316,7 @@ class TestReconcile:
         }
         items = reconcile([pos_stop, pos_ok], analyses, _make_portfolio())
         assert items[0].urgency == "HIGH"
-        assert items[0].ticker == "0005.HK"
+        assert items[0].ticker.yf == "0005.HK"
 
     def test_mixed_positions_and_recommendations(self):
         """Multiple positions + new buy recs should all appear."""
@@ -322,13 +326,60 @@ class TestReconcile:
             "0005.HK": _make_analysis(ticker="0005.HK", verdict="BUY", age_days=3),
         }
         items = reconcile([held], analyses, _make_portfolio(cash=15000))
-        tickers = {i.ticker for i in items}
+        tickers = {i.ticker.yf for i in items}
         assert "7203.T" in tickers
         assert "0005.HK" in tickers
         # 7203.T should be HOLD (already held), 0005.HK should be BUY (not held)
-        actions = {i.ticker: i.action for i in items}
+        actions = {i.ticker.yf: i.action for i in items}
         assert actions["7203.T"] == "HOLD"
         assert actions["0005.HK"] == "BUY"
+
+
+# ── Watchlist Phase 1.5 verdict routing tests ──
+
+
+class TestWatchlistVerdictRouting:
+    """Watchlist tickers with space-separated verdicts must route to REMOVE, not MONITORING."""
+
+    def _run(self, verdict: str) -> list[ReconciliationItem]:
+        """Reconcile a single watchlist ticker (not held) with the given verdict."""
+        analysis = _make_analysis(ticker="SOP", verdict=verdict, age_days=0)
+        portfolio = _make_portfolio(value=100_000, cash=50_000)
+        portfolio.exchange_weights = {}
+        portfolio.sector_weights = {}
+        return reconcile(
+            positions=[],
+            analyses={"SOP": analysis},
+            portfolio=portfolio,
+            watchlist_tickers={"SOP"},
+        )
+
+    def test_do_not_initiate_with_underscores_routes_to_remove(self):
+        """Canonical 'DO_NOT_INITIATE' → REMOVE action, is_watchlist=True."""
+        items = self._run("DO_NOT_INITIATE")
+        assert len(items) == 1
+        assert items[0].action == "REMOVE"
+        assert items[0].is_watchlist
+
+    def test_do_not_initiate_with_spaces_routes_to_remove(self):
+        """Space-variant 'DO NOT INITIATE' → same REMOVE routing as underscore form."""
+        items = self._run("DO NOT INITIATE")
+        assert len(items) == 1
+        assert items[0].action == "REMOVE"
+        assert items[0].is_watchlist
+
+    def test_do_not_initiate_mixed_case_routes_to_remove(self):
+        """Lowercase variant 'do_not_initiate' → normalised and routed to REMOVE."""
+        items = self._run("do_not_initiate")
+        assert len(items) == 1
+        assert items[0].action == "REMOVE"
+
+    def test_hold_verdict_routes_to_monitoring(self):
+        """HOLD verdict → HOLD action (monitoring), not REMOVE."""
+        items = self._run("HOLD")
+        assert len(items) == 1
+        assert items[0].action == "HOLD"
+        assert items[0].is_watchlist
 
 
 # ── Analysis Loading Tests ──
@@ -473,7 +524,6 @@ class TestConcentration:
         pos_hk = _make_position(
             ticker="0005.HK", market_value_usd=35000, currency="HKD"
         )
-        pos_hk.yf_ticker = "0005.HK"
         analysis_existing = _make_analysis(ticker="0005.HK", verdict="BUY")
         # New BUY candidate also on HK
         analysis_new = _make_analysis(ticker="2388.HK", verdict="BUY", age_days=3)
@@ -486,7 +536,7 @@ class TestConcentration:
             portfolio,
             exchange_limit_pct=40.0,
         )
-        buy_items = [i for i in items if i.action == "BUY" and i.ticker == "2388.HK"]
+        buy_items = [i for i in items if i.action == "BUY" and i.ticker.yf == "2388.HK"]
         if buy_items:
             # If a BUY item was generated, it should have a concentration warning
             assert "⚠" in buy_items[0].reason or "HK" in buy_items[0].reason
@@ -523,6 +573,119 @@ class TestConcentration:
         total_sector = sum(portfolio.sector_weights.values())
         assert total_exchange == pytest.approx(100.0, abs=0.1)
         assert total_sector == pytest.approx(100.0, abs=0.1)
+
+
+class TestExchangeFromPosition:
+    """Unit tests for _exchange_from_position() helper."""
+
+    def _pos(self, yf_ticker: str, ibkr_exchange: str = "", currency: str = "USD"):
+        if "." in yf_ticker:
+            ticker = Ticker.from_yf(yf_ticker, currency=currency)
+        else:
+            ticker = Ticker.from_ibkr(
+                yf_ticker, exchange=ibkr_exchange, currency=currency
+            )
+        return NormalizedPosition(
+            conid=1,
+            ticker=ticker,
+            quantity=1,
+            avg_cost_local=100.0,
+            market_value_usd=100.0,
+            currency=currency,
+            current_price_local=100.0,
+        )
+
+    def test_suffix_present_takes_priority(self):
+        """yf_ticker with .T suffix → 'T', regardless of IBKR exchange field."""
+        pos = self._pos("7203.T", ibkr_exchange="KLSE", currency="MYR")
+        assert _exchange_from_position(pos) == "T"
+
+    def test_ibkr_exchange_used_when_no_suffix(self):
+        """No suffix but IBKR listingExchange=KLSE → 'KL', not 'US'."""
+        pos = self._pos("MEGP", ibkr_exchange="KLSE", currency="MYR")
+        assert _exchange_from_position(pos) == "KL"
+
+    def test_ibkr_tse_maps_to_t(self):
+        """IBKR TSE (Tokyo Stock Exchange) → 'T'."""
+        pos = self._pos("7203", ibkr_exchange="TSE", currency="JPY")
+        assert _exchange_from_position(pos) == "T"
+
+    def test_ibkr_wse_maps_to_wa(self):
+        """IBKR WSE (Warsaw Stock Exchange) → 'WA'."""
+        pos = self._pos("FPE3", ibkr_exchange="WSE", currency="PLN")
+        assert _exchange_from_position(pos) == "WA"
+
+    def test_ibkr_nasdaq_maps_to_us(self):
+        """IBKR NASDAQ → 'US' (US exchange, empty suffix)."""
+        pos = self._pos("AAPL", ibkr_exchange="NASDAQ", currency="USD")
+        assert _exchange_from_position(pos) == "US"
+
+    def test_currency_fallback_sek_maps_to_st(self):
+        """No suffix, no known IBKR exchange, but currency=SEK → 'ST'."""
+        pos = self._pos("KRN", ibkr_exchange="SFB", currency="SEK")
+        # SFB is not in IBKR_TO_YFINANCE; should fall through to currency heuristic
+        assert _exchange_from_position(pos) == "ST"
+
+    def test_currency_fallback_myr_maps_to_kl(self):
+        """No suffix, unknown IBKR exchange, currency=MYR → 'KL'."""
+        pos = self._pos("MEGP", ibkr_exchange="MESDAQ", currency="MYR")
+        assert _exchange_from_position(pos) == "KL"
+
+    def test_unknown_everything_returns_us(self):
+        """No suffix, unknown exchange, USD currency → 'US' as safe default."""
+        pos = self._pos("THING", ibkr_exchange="", currency="USD")
+        assert _exchange_from_position(pos) == "US"
+
+    def test_gbp_maps_to_l(self):
+        """GBP currency → 'L' (UK), not 'US'. MEGP, GAMA, KLR should not appear in US bucket."""
+        pos = self._pos("MEGP", ibkr_exchange="", currency="GBP")
+        assert _exchange_from_position(pos) == "L"
+
+    def test_gbx_maps_to_l(self):
+        """GBX (pence, after LSE conversion) → 'L'."""
+        pos = self._pos("GAMA", ibkr_exchange="", currency="GBX")
+        assert _exchange_from_position(pos) == "L"
+
+    def test_cad_maps_to_to(self):
+        """CAD → 'TO' (Canada TSX). MTL, NWC, TXG must not appear in US bucket."""
+        pos = self._pos("MTL", ibkr_exchange="", currency="CAD")
+        assert _exchange_from_position(pos) == "TO"
+
+    def test_chf_maps_to_sw(self):
+        """CHF → 'SW' (Switzerland SIX)."""
+        pos = self._pos("NESN", ibkr_exchange="", currency="CHF")
+        assert _exchange_from_position(pos) == "SW"
+
+    def test_eur_maps_to_eur(self):
+        """EUR → 'EUR' (European bucket). Better than 'US' for German/French/etc. stocks."""
+        pos = self._pos("FPE3", ibkr_exchange="", currency="EUR")
+        assert _exchange_from_position(pos) == "EUR"
+
+    def test_exchange_weight_no_us_for_myr_position(self):
+        """Regression: suffix-less Malaysian position must NOT count toward 'US' weight.
+
+        Before fix: _analysis.exchange='US' (stored wrong) + no suffix on yf_ticker
+        → misclassified as US.  After fix: currency=MYR → 'KL'.
+        """
+        pos = NormalizedPosition(
+            conid=99,
+            ticker=Ticker.from_ibkr("MEGP", exchange="KLSE", currency="MYR"),
+            quantity=100,
+            avg_cost_local=1.4,
+            market_value_usd=140.0,
+            currency="MYR",
+            current_price_local=1.35,
+        )
+        analysis = _make_analysis(ticker="MEGP")
+        analysis.exchange = "US"  # wrong value stored in snapshot
+
+        portfolio = _make_portfolio(value=1000, cash=860)
+        reconcile([pos], {"MEGP": analysis}, portfolio)
+
+        assert (
+            "KL" in portfolio.exchange_weights
+        ), "Malaysian position must be KL, not US"
+        assert "US" not in portfolio.exchange_weights, "Must not be misclassified as US"
 
 
 class TestStalenessDisplay:
@@ -1014,6 +1177,40 @@ VERDICT: BUY
         result = _parse_scores_from_final_decision(text)
         assert result["verdict"] == "DO_NOT_INITIATE"
 
+    def test_do_not_initiate_with_spaces_normalised(self):
+        """'DO NOT INITIATE' (space-separated PM output) → normalised to 'DO_NOT_INITIATE'."""
+        text = "VERDICT: DO NOT INITIATE\nHEALTH_ADJ: 38\nGROWTH_ADJ: 32"
+        result = _parse_scores_from_final_decision(text)
+        assert result["verdict"] == "DO_NOT_INITIATE"
+
+    def test_verdict_with_trailing_slash_not_captured(self):
+        """Verdict stops before ' / ZONE' — doesn't bleed into next field."""
+        text = "VERDICT: BUY / ZONE: MODERATE"
+        result = _parse_scores_from_final_decision(text)
+        assert result["verdict"] == "BUY"
+
+    def test_load_latest_analyses_normalises_spaced_verdict(self, tmp_path):
+        """Snapshot with 'DO NOT INITIATE' verdict → loaded as 'DO_NOT_INITIATE'."""
+        import json as _json
+
+        from src.ibkr.reconciler import load_latest_analyses
+
+        analysis_json = {
+            "prediction_snapshot": {
+                "ticker": "SOP",
+                "verdict": "DO NOT INITIATE",
+                "analysis_date": "2026-03-07",
+            },
+            "investment_analysis": {"trader_plan": ""},
+            "final_decision": {"decision": ""},
+        }
+        f = tmp_path / "SOP_20260307_120000_analysis.json"
+        f.write_text(_json.dumps(analysis_json))
+        analyses = load_latest_analyses(tmp_path)
+        r = analyses.get("SOP")
+        assert r is not None
+        assert r.verdict == "DO_NOT_INITIATE"
+
     def test_load_latest_analyses_uses_fallback(self, tmp_path):
         """load_latest_analyses fills health/growth from final_decision text."""
         analysis_json = {
@@ -1180,3 +1377,409 @@ class TestCorrelatedSellDetectionWindow:
             correlated_window_days=3,
         )
         assert not any("CORRELATED_SELL_EVENT" in f for f in flags_far)
+
+
+class TestCurrencyAccuracy:
+    """End-to-end tests verifying cost/quantity calculations are plausible for
+    various currencies.  These are regression tests for the bug where a missing
+    fx_rate_to_usd caused local-currency prices to be treated as USD (e.g.
+    kr104.50 SEK reported as Cost ~$314 instead of ~$29-35).
+
+    All 'plausible' bounds assume rough FX rates and round-trip through
+    _resolve_fx → calculate_quantity → buy_cost_usd.
+    """
+
+    def _buy_analysis(
+        self, currency: str, entry_price: float, fx_rate: float | None = None
+    ) -> AnalysisRecord:
+        """Make a BUY AnalysisRecord with the given currency and price."""
+        return AnalysisRecord(
+            ticker="TEST.XX",
+            analysis_date="2026-03-07",
+            verdict="BUY",
+            currency=currency,
+            fx_rate_to_usd=fx_rate,
+            entry_price=entry_price,
+            current_price=entry_price,
+            conviction="Medium",
+            trade_block=TradeBlockData(
+                action="BUY",
+                size_pct=3.0,
+                conviction="Medium",
+                entry_price=entry_price,
+            ),
+        )
+
+    def _run_reconcile(
+        self, ticker: str, analysis: AnalysisRecord
+    ) -> list[ReconciliationItem]:
+        """Run reconciler with no positions and a single watchlist analysis."""
+        portfolio = _make_portfolio(value=100_000, cash=30_000)
+        return reconcile(
+            positions=[],
+            analyses={ticker: analysis},
+            portfolio=portfolio,
+            watchlist_tickers={ticker},
+        )
+
+    def test_sek_cost_is_in_dollars_not_sek(self):
+        """Regression: CAG.ST 3-share buy @ kr104.50/share.
+        Cost must be ~$29 (≈ SEK 313.50 * 0.093) not ~$314 (SEK treated as USD)."""
+        analysis = self._buy_analysis("SEK", entry_price=104.50)  # no saved FX rate
+        items = self._run_reconcile("CAG.ST", analysis)
+        buys = [i for i in items if i.action == "BUY"]
+        assert buys, "Expected a BUY item for SEK stock"
+        cost = abs(buys[0].cash_impact_usd)
+        # 3% of $100k = $3000 target; SEK rate ~0.093 → $3000 / (104.50*0.093) ≈ 309 shares
+        # Lot size 1 → qty ≈ 309; cost ≈ 309 * 104.50 * 0.093 ≈ $3005
+        # Key check: cost must be in dollar range, NOT 100× inflated
+        assert cost < 10_000, (
+            f"Cost ${cost:.0f} is implausibly high — "
+            "FX rate may have defaulted to 1.0 (treating SEK as USD)"
+        )
+        assert cost > 100, f"Cost ${cost:.0f} is implausibly low"
+
+    def test_jpy_cost_is_in_dollars_not_yen(self):
+        """JPY stock: 3% of $100k at ¥2000/share should cost ~$3000 in USD."""
+        analysis = self._buy_analysis("JPY", entry_price=2000.0)
+        items = self._run_reconcile("7203.T", analysis)
+        buys = [i for i in items if i.action == "BUY"]
+        assert buys, "Expected a BUY item for JPY stock"
+        cost = abs(buys[0].cash_impact_usd)
+        assert 500 < cost < 5_000, (
+            f"JPY buy cost ${cost:.0f} is wrong — "
+            "should be ~$3000 (3% of $100k), not ¥3000×1.0"
+        )
+
+    def test_usd_cost_is_plausible(self):
+        """USD stock needs no conversion — cost should be directly proportional."""
+        analysis = self._buy_analysis("USD", entry_price=50.0, fx_rate=1.0)
+        items = self._run_reconcile("AAPL", analysis)
+        buys = [i for i in items if i.action == "BUY"]
+        assert buys, "Expected a BUY item for USD stock"
+        cost = abs(buys[0].cash_impact_usd)
+        # 3% of $100k = $3000 target; $3000 / $50 = 60 shares; 60 * $50 = $3000
+        assert 2000 < cost < 4000, f"USD buy cost ${cost:.0f} is implausible"
+
+    def test_hkd_cost_is_in_dollars_not_hkd(self):
+        """HKD stock: 3% of $100k at HK$58/share → ~$3000, not HK$3000."""
+        analysis = self._buy_analysis("HKD", entry_price=58.0)
+        items = self._run_reconcile("0005.HK", analysis)
+        buys = [i for i in items if i.action == "BUY"]
+        assert buys, "Expected a BUY item for HKD stock"
+        cost = abs(buys[0].cash_impact_usd)
+        # HKD rate ~0.128; $3000 / (58 * 0.128) ≈ 404 shares → round lot 400
+        # cost ≈ 400 * 58 * 0.128 ≈ $2969
+        assert 1000 < cost < 5000, (
+            f"HKD buy cost ${cost:.0f} is wrong — " "should be ~$3000, not HK$3000"
+        )
+
+    def test_saved_fx_rate_takes_precedence_over_fallback(self):
+        """If the analysis snapshot has a saved fx_rate, use it — not the fallback table."""
+        # Use an exotic hypothetical rate to distinguish from table
+        analysis = self._buy_analysis("SEK", entry_price=100.0, fx_rate=0.100)
+        items = self._run_reconcile("TEST.ST", analysis)
+        buys = [i for i in items if i.action == "BUY"]
+        assert buys
+        # With rate=0.100: $3000 / (100 * 0.100) = 300 shares; cost = 300 * 100 * 0.100 = $3000
+        # With fallback ~0.093: $3000 / (100 * 0.093) ≈ 322 shares; cost ≈ $2994
+        cost = abs(buys[0].cash_impact_usd)
+        qty = buys[0].suggested_quantity
+        # Check that the saved rate (0.100) was used: qty should be exactly 300
+        assert (
+            qty == 300
+        ), f"qty={qty} suggests fallback rate was used instead of saved rate 0.100"
+
+
+class TestResolveFx:
+    """Unit tests for _resolve_fx() — FX rate fallback chain."""
+
+    def _analysis(self, currency: str, fx_rate: float | None) -> AnalysisRecord:
+        return AnalysisRecord(
+            ticker="TEST.ST",
+            analysis_date="2026-03-07",
+            verdict="BUY",
+            currency=currency,
+            fx_rate_to_usd=fx_rate,
+        )
+
+    def test_saved_rate_returned_as_is(self):
+        """When fx_rate_to_usd is already set in the snapshot, return it directly."""
+        a = self._analysis("SEK", 0.097)
+        assert _resolve_fx(a) == pytest.approx(0.097)
+
+    def test_usd_currency_no_rate_returns_1(self):
+        """USD with no saved rate should return 1.0 without hitting fallback table."""
+        a = self._analysis("USD", None)
+        assert _resolve_fx(a) == 1.0
+
+    def test_sek_no_rate_uses_fallback(self):
+        """SEK with fx_rate_to_usd=None must hit the fallback table, not return 1.0."""
+        a = self._analysis("SEK", None)
+        rate = _resolve_fx(a)
+        # SEK fallback should be around 0.093 — definitely NOT 1.0
+        assert rate != 1.0, "SEK should not fall back to 1.0 (that's the bug)"
+        assert 0.07 < rate < 0.12, f"SEK fallback rate {rate} looks implausible"
+
+    def test_nok_no_rate_uses_fallback(self):
+        """NOK with no saved rate should use hardcoded fallback."""
+        a = self._analysis("NOK", None)
+        rate = _resolve_fx(a)
+        assert rate != 1.0
+        assert 0.07 < rate < 0.12
+
+    def test_dkk_no_rate_uses_fallback(self):
+        """DKK with no saved rate should use hardcoded fallback."""
+        a = self._analysis("DKK", None)
+        rate = _resolve_fx(a)
+        assert rate != 1.0
+        assert 0.12 < rate < 0.18
+
+    def test_unknown_currency_falls_back_to_1(self):
+        """Truly unknown currency code → 1.0 last resort (same old behaviour,
+        but now logged as an error rather than silent)."""
+        a = self._analysis("ZZZ", None)
+        assert _resolve_fx(a) == 1.0
+
+    def test_sek_cost_calculation_is_plausible(self):
+        """Regression for CAG.ST: 3 shares @ kr104.50 should cost ~$29-35, not ~$314."""
+        a = self._analysis("SEK", None)
+        fx = _resolve_fx(a)
+        cost = 3 * 104.50 * fx
+        assert (
+            cost < 100
+        ), f"Cost ${cost:.2f} is too high — FX rate is wrong (1.0 fallback?)"
+        assert cost > 10, f"Cost ${cost:.2f} is suspiciously low"
+
+    def test_legacy_1_overridden_for_sek(self):
+        """Regression: CAG.ST snapshot stored fx_rate_to_usd=1.0 (legacy bogus fallback).
+
+        Before fix: _resolve_fx returned 1.0 directly (not None, so trusted).
+        After fix: 1.0 for non-USD currency is overridden with fallback table.
+        3 shares @ kr104.50 cost ≈$29, NOT $314.
+        """
+        a = self._analysis("SEK", 1.0)  # legacy snapshot value
+        rate = _resolve_fx(a)
+        assert rate != 1.0, "Legacy 1.0 for SEK must be overridden"
+        cost = 3 * 104.50 * rate
+        assert cost < 100, f"CAG.ST cost ${cost:.2f} — should be ~$29, not ~$314"
+
+    def test_legacy_1_overridden_for_jpy(self):
+        """JPY snapshot with fx_rate_to_usd=1.0 is also a legacy bogus value."""
+        a = self._analysis("JPY", 1.0)
+        rate = _resolve_fx(a)
+        assert rate < 0.05, f"JPY rate {rate} must be ~0.007, not 1.0"
+
+    def test_usd_rate_1_is_trusted(self):
+        """For USD, fx_rate_to_usd=1.0 is correct and must NOT be overridden."""
+        a = self._analysis("USD", 1.0)
+        assert _resolve_fx(a) == 1.0
+
+    def test_plausible_eur_rate_is_trusted(self):
+        """A non-1.0 rate for EUR is trusted as-is (e.g. 1.08 is a real EUR/USD rate)."""
+        a = self._analysis("EUR", 1.08)
+        assert _resolve_fx(a) == pytest.approx(1.08)
+
+
+# ── IBKR Symbol / Alpha Base Lookup Tests ──
+
+
+class TestIbkrSymbol:
+    """Phase 1 ReconciliationItems must carry ibkr_symbol = pos.symbol."""
+
+    def _reconcile_one(self, pos, analysis=None):
+        analyses = {analysis.ticker: analysis} if analysis else {}
+        portfolio = _make_portfolio()
+        return reconcile([pos], analyses, portfolio)
+
+    def test_hold_has_ibkr_symbol(self):
+        """HOLD item carries the IBKR raw symbol from the position."""
+        pos = NormalizedPosition(
+            conid=1,
+            ticker=Ticker.from_yf("7203.T", currency="JPY"),
+            quantity=100,
+            market_value_usd=1400,
+            currency="JPY",
+        )
+        a = _make_analysis(ticker="7203.T", verdict="BUY", age_days=3)
+        items = self._reconcile_one(pos, a)
+        hold = next(i for i in items if i.action == "HOLD")
+        assert hold.ibkr_symbol == "7203"
+        assert hold.ticker.yf == "7203.T"  # yf format preserved
+
+    def test_sell_has_ibkr_symbol(self):
+        """SELL item (stop breach) carries ibkr_symbol."""
+        pos = NormalizedPosition(
+            conid=2,
+            ticker=Ticker.from_yf("MEGP.L", currency="GBX"),
+            quantity=50,
+            market_value_usd=500,
+            currency="GBX",
+            current_price_local=100.0,
+            avg_cost_local=200.0,
+        )
+        a = _make_analysis(
+            ticker="MEGP.L",
+            verdict="BUY",
+            stop_price=150.0,
+            entry_price=200.0,
+            current_price=100.0,
+        )
+        items = self._reconcile_one(pos, a)
+        sell = next(i for i in items if i.action == "SELL")
+        assert sell.ibkr_symbol == "MEGP"
+
+    def test_review_no_analysis_has_ibkr_symbol(self):
+        """REVIEW (no analysis) item carries ibkr_symbol."""
+        pos = NormalizedPosition(
+            conid=3,
+            ticker=Ticker.from_yf("CAG.ST", currency="SEK"),
+            quantity=3,
+            market_value_usd=90,
+            currency="SEK",
+        )
+        items = self._reconcile_one(pos, analysis=None)
+        review = next(i for i in items if i.action == "REVIEW")
+        assert review.ibkr_symbol == "CAG"
+
+    def test_phase2_buy_has_no_ibkr_symbol(self):
+        """Phase 2 BUY (new position, not held) has no ibkr_position."""
+        pos = NormalizedPosition(
+            conid=4,
+            ticker=Ticker.from_yf("EXISTING.T", currency="JPY"),
+            quantity=10,
+            market_value_usd=100,
+            currency="JPY",
+        )
+        a_held = _make_analysis(ticker="EXISTING.T", verdict="BUY", age_days=3)
+        a_new = AnalysisRecord(
+            ticker="NEW.T",
+            analysis_date=a_held.analysis_date,
+            verdict="BUY",
+            currency="JPY",
+            entry_price=500.0,
+            fx_rate_to_usd=0.007,
+            trade_block=TradeBlockData(action="BUY", size_pct=5.0),
+        )
+        analyses = {"EXISTING.T": a_held, "NEW.T": a_new}
+        portfolio = _make_portfolio()
+        items = reconcile([pos], analyses, portfolio)
+        buy = next(
+            (i for i in items if i.action == "BUY" and i.ticker.yf == "NEW.T"), None
+        )
+        if buy:
+            assert buy.ibkr_position is None
+
+
+class TestAlphaBaseLookup:
+    """Reconciler finds analyses via base-symbol fallback when yf_ticker suffix mismatches."""
+
+    def test_held_ticker_with_suffix_finds_analysis_stored_without_suffix(self):
+        """Position yf_ticker='MEGP.L' finds analysis stored under key 'MEGP'."""
+        pos = NormalizedPosition(
+            conid=1,
+            ticker=Ticker.from_yf("MEGP.L", currency="GBX"),
+            quantity=50,
+            market_value_usd=500,
+            currency="GBX",
+            current_price_local=200.0,
+        )
+        a = _make_analysis(
+            ticker="MEGP",
+            verdict="BUY",
+            age_days=3,
+            entry_price=200.0,
+            stop_price=150.0,
+        )
+        analyses = {"MEGP": a}
+        portfolio = _make_portfolio()
+        items = reconcile([pos], analyses, portfolio)
+        # Should NOT be REVIEW with "no evaluator analysis found"
+        non_hold = [i for i in items if i.action != "HOLD"]
+        assert not any(
+            "no evaluator analysis found" in i.reason for i in non_hold
+        ), "Base-symbol fallback should have found the MEGP analysis"
+
+    def test_numeric_ticker_does_not_use_base_lookup(self):
+        """Numeric IBKR symbol (e.g. '7203') must NOT cross-match across exchanges."""
+        pos = NormalizedPosition(
+            conid=2,
+            ticker=Ticker.from_yf("7203.T", currency="JPY"),
+            quantity=100,
+            market_value_usd=1000,
+            currency="JPY",
+            current_price_local=2100.0,
+        )
+        # Analysis stored under HK key with same numeric base — must NOT match
+        a_hk = _make_analysis(ticker="7203.HK", verdict="BUY", age_days=3)
+        analyses = {"7203.HK": a_hk}
+        portfolio = _make_portfolio()
+        items = reconcile([pos], analyses, portfolio)
+        # 7203.T position should get REVIEW "no analysis found", not the HK analysis
+        assert any(
+            i.action == "REVIEW" and "no evaluator analysis found" in i.reason
+            for i in items
+        ), "Numeric ticker must not match cross-exchange analysis via base lookup"
+
+    def test_suffixed_analysis_takes_priority_over_bare(self):
+        """When both 'MEGP.L' and 'MEGP' analyses exist, suffixed one is preferred."""
+        pos = NormalizedPosition(
+            conid=3,
+            ticker=Ticker.from_yf("MEGP.L", currency="GBX"),
+            quantity=50,
+            market_value_usd=500,
+            currency="GBX",
+            current_price_local=200.0,
+        )
+        a_bare = _make_analysis(ticker="MEGP", verdict="SELL", age_days=3)
+        a_suffixed = _make_analysis(
+            ticker="MEGP.L",
+            verdict="BUY",
+            age_days=3,
+            entry_price=200.0,
+            stop_price=150.0,
+        )
+        analyses = {"MEGP": a_bare, "MEGP.L": a_suffixed}
+        portfolio = _make_portfolio()
+        items = reconcile([pos], analyses, portfolio)
+        # Should find the BUY (suffixed) analysis, not the SELL (bare) analysis
+        assert not any(
+            i.action == "SELL" for i in items
+        ), "Suffixed MEGP.L analysis (BUY) should take priority over bare MEGP (SELL)"
+
+    def test_bare_position_with_both_bare_and_suffixed_analyses_uses_suffixed(self):
+        """CEK-style: position yf_ticker='CEK' (bare), analyses has both 'CEK' (bare,
+        most recent) and 'CEK.DE' (suffixed, older).  Alpha-base lookup must resolve
+        to 'CEK.DE' BEFORE analyses.get() is called, so the correct suffixed analysis
+        is used and the reconciled item carries ticker='CEK.DE'."""
+        pos = NormalizedPosition(
+            conid=4,
+            ticker=Ticker.from_ibkr("CEK", currency="EUR"),
+            quantity=100,
+            market_value_usd=2000,
+            currency="EUR",
+            current_price_local=20.0,
+        )
+        # Bare analysis is "newer" (age_days=1); suffixed is "older" (age_days=5).
+        # load_latest_analyses() would return analyses={"CEK": a_bare, "CEK.DE": a_suffixed}.
+        a_bare = _make_analysis(ticker="CEK", verdict="SELL", age_days=1)
+        a_suffixed = _make_analysis(
+            ticker="CEK.DE",
+            verdict="BUY",
+            age_days=5,
+            entry_price=20.0,
+            stop_price=15.0,
+        )
+        analyses = {"CEK": a_bare, "CEK.DE": a_suffixed}
+        portfolio = _make_portfolio()
+        items = reconcile([pos], analyses, portfolio)
+        # Reconciler must use the suffixed analysis (BUY), not the bare one (SELL)
+        assert not any(
+            i.action == "SELL" for i in items
+        ), "Alpha-base lookup must prefer suffixed 'CEK.DE' over bare 'CEK'"
+        # The reconciled item's ticker must be the canonical suffixed form
+        cek_items = [i for i in items if "CEK" in i.ticker.yf]
+        assert cek_items, "Expected a reconciliation item for CEK"
+        assert (
+            cek_items[0].ticker.yf == "CEK.DE"
+        ), f"Expected ticker.yf='CEK.DE', got '{cek_items[0].ticker.yf}'"

@@ -315,7 +315,13 @@ def _sanitize_for_json(data: dict) -> dict:
 
 @tool
 async def get_financial_metrics(ticker: Annotated[str, "Stock ticker symbol"]) -> str:
-    """Get key financial ratios and metrics as a JSON string."""
+    """Get key financial ratios and metrics as a JSON string.
+
+    Currency note: price fields (currentPrice, 52-week range, moving averages) are
+    returned in the stock's LOCAL TRADING CURRENCY (JPY for .T, HKD for .HK, etc.).
+    Ratio/percentage fields (PE, PB, ROA, margins) are currency-neutral.
+    The 'currency' field in the response identifies the local currency code.
+    """
     try:
         normalized_symbol = normalize_ticker(ticker)
         data = await market_data_fetcher.get_financial_metrics(normalized_symbol)
@@ -405,7 +411,7 @@ async def get_news(
 async def get_yfinance_data(
     symbol: str, start_date: str = None, end_date: str = None
 ) -> str:
-    """Get historical stock price data."""
+    """Get historical stock price data in LOCAL TRADING CURRENCY (not USD)."""
     try:
         normalized = normalize_ticker(symbol)
         hist = await market_data_fetcher.get_historical_prices(normalized)
