@@ -1544,11 +1544,10 @@ def format_report(
             lines.append(_order_line(item, ccy))
             a = item.analysis
             if a:
-                conviction = a.conviction or a.trade_block.conviction or ""
+                conviction = a.conviction or a.trade_block.conviction or "Unspecified"
                 size_pct = a.trade_block.size_pct or a.position_size or 0
                 detail_parts: list[str] = []
-                if conviction:
-                    detail_parts.append(f"{conviction} conviction")
+                detail_parts.append(f"{conviction} conviction")
                 if size_pct and nlv > 0:
                     target_usd = nlv * size_pct / 100
                     detail_parts.append(f"target {size_pct:.1f}% (${target_usd:,.0f})")
