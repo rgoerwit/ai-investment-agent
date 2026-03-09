@@ -767,6 +767,15 @@ class MacroEvent:
 MACRO_EVENTS_COLLECTION = "macro_events"
 
 
+def _date_to_int(iso_date: str) -> int:
+    """Convert YYYY-MM-DD to YYYYMMDD integer for ChromaDB numeric range comparisons.
+
+    ChromaDB >= 0.6 requires $gt/$gte/$lt/$lte operands to be int or float.
+    ISO strings are stored alongside these ints for human-readable reconstruction.
+    """
+    return int(iso_date.replace("-", ""))
+
+
 def _meta_to_macro_event(meta: dict) -> "MacroEvent":
     """Deserialize a ChromaDB metadata dict back into a MacroEvent."""
     return MacroEvent(
@@ -829,13 +838,13 @@ class MacroEventsStore:
             from datetime import timedelta as _td
 
             anchor = _date.fromisoformat(event.event_date)
-            window_start = (anchor - _td(days=7)).isoformat()
-            window_end = (anchor + _td(days=7)).isoformat()
+            window_start_ts = _date_to_int((anchor - _td(days=7)).isoformat())
+            window_end_ts = _date_to_int((anchor + _td(days=7)).isoformat())
             existing = self.collection.get(
                 where={
                     "$and": [
-                        {"event_date": {"$gte": window_start}},
-                        {"event_date": {"$lte": window_end}},
+                        {"event_date_ts": {"$gte": window_start_ts}},
+                        {"event_date_ts": {"$lte": window_end_ts}},
                     ]
                 }
             )
@@ -851,8 +860,10 @@ class MacroEventsStore:
                 metadatas=[
                     {
                         "event_date": event.event_date,
+                        "event_date_ts": _date_to_int(event.event_date),
                         "detected_date": event.detected_date,
                         "expiry": event.expiry,
+                        "expiry_ts": _date_to_int(event.expiry),
                         "impact": event.impact,
                         "event_type": event.event_type,
                         "scope": event.scope,
@@ -890,8 +901,8 @@ class MacroEventsStore:
         try:
             from datetime import date as _date
 
-            today = _date.today().isoformat()
-            where_clause: dict = {"expiry": {"$gt": today}}
+            today_ts = _date_to_int(_date.today().isoformat())
+            where_clause: dict = {"expiry_ts": {"$gt": today_ts}}
             results = self.collection.get(
                 where=where_clause,
                 include=["metadatas"],
@@ -916,13 +927,14 @@ class MacroEventsStore:
         try:
             from datetime import date as _date
 
-            today = _date.today().isoformat()
+            today_ts = _date_to_int(_date.today().isoformat())
+            since_date_ts = _date_to_int(since_date)
             results = self.collection.get(
                 where={
                     "$and": [
                         {"impact": {"$eq": "STRUCTURAL"}},
-                        {"event_date": {"$gte": since_date}},
-                        {"expiry": {"$gt": today}},
+                        {"event_date_ts": {"$gte": since_date_ts}},
+                        {"expiry_ts": {"$gt": today_ts}},
                     ]
                 },
                 include=["metadatas"],

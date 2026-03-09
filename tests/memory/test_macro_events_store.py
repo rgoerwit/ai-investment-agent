@@ -5,7 +5,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.memory import MacroEvent, MacroEventsStore, create_macro_events_store
+from src.memory import (
+    MacroEvent,
+    MacroEventsStore,
+    _date_to_int,
+    create_macro_events_store,
+)
 
 
 def _make_event(
@@ -287,3 +292,130 @@ class TestMacroEventsStoreFiltering:
         events = store.get_structural_events_since("2026-01-01")
         dates = [e.event_date for e in events]
         assert dates == sorted(dates, reverse=True), "Expected newest-first ordering"
+
+
+class TestDateToInt:
+    """Unit tests for the _date_to_int helper."""
+
+    def test_converts_iso_to_yyyymmdd_integer(self):
+        assert _date_to_int("2026-03-08") == 20260308
+
+    def test_ordering_preserved(self):
+        """Numeric YYYYMMDD ordering must match ISO string ordering."""
+        dates = ["2026-01-01", "2025-12-31", "2026-03-08", "2024-06-15"]
+        assert sorted(dates, reverse=True) == sorted(
+            dates, key=_date_to_int, reverse=True
+        )
+
+    def test_year_boundary(self):
+        assert _date_to_int("2025-12-31") == 20251231
+        assert _date_to_int("2026-01-01") == 20260101
+        assert _date_to_int("2026-01-01") > _date_to_int("2025-12-31")
+
+
+class TestChromaDbNumericWhereClause:
+    """
+    Regression tests verifying that ChromaDB where-clauses use integer _ts fields.
+
+    ChromaDB >= 0.6 rejects ISO strings in $gt/$gte/$lt/$lte operators.
+    These tests pin the exact field names and value types used in each query.
+    """
+
+    def _mock_store(self, metadatas=None):
+        mock_col = MagicMock()
+        mock_col.get.return_value = {
+            "ids": [],
+            "metadatas": metadatas or [],
+        }
+        store = MacroEventsStore.__new__(MacroEventsStore)
+        store.available = True
+        store.collection = mock_col
+        return store, mock_col
+
+    # --- store_event dedup check ---
+
+    def test_store_dedup_uses_event_date_ts_integer(self):
+        """Dedup where-clause must use event_date_ts (int), not event_date (str)."""
+        store, col = self._mock_store()
+        store.store_event(_make_event(event_date="2026-03-05"))
+        where = col.get.call_args[1]["where"]
+        conditions = where["$and"]
+        keys = {list(c.keys())[0] for c in conditions}
+        assert "event_date_ts" in keys, "dedup must query event_date_ts"
+        assert "event_date" not in keys, "dedup must NOT query string event_date"
+
+    def test_store_dedup_window_values_are_integers(self):
+        """Dedup window values passed to ChromaDB must be integers, not strings."""
+        store, col = self._mock_store()
+        store.store_event(_make_event(event_date="2026-03-05"))
+        where = col.get.call_args[1]["where"]
+        for condition in where["$and"]:
+            for _field, op in condition.items():
+                for _operator, value in op.items():
+                    assert isinstance(
+                        value, int
+                    ), f"Expected int, got {type(value)}: {value}"
+
+    # --- stored metadata ---
+
+    def test_store_metadata_includes_event_date_ts_integer(self):
+        """Stored metadata must contain event_date_ts as an integer."""
+        store, col = self._mock_store()
+        store.store_event(_make_event(event_date="2026-03-05"))
+        stored_meta = col.add.call_args[1]["metadatas"][0]
+        assert "event_date_ts" in stored_meta
+        assert stored_meta["event_date_ts"] == 20260305
+        assert isinstance(stored_meta["event_date_ts"], int)
+
+    def test_store_metadata_includes_expiry_ts_integer(self):
+        """Stored metadata must contain expiry_ts as an integer."""
+        store, col = self._mock_store()
+        store.store_event(_make_event(event_date="2026-03-05"))
+        stored_meta = col.add.call_args[1]["metadatas"][0]
+        assert "expiry_ts" in stored_meta
+        assert isinstance(stored_meta["expiry_ts"], int)
+
+    def test_store_metadata_retains_iso_string_fields_for_reconstruction(self):
+        """Human-readable ISO string fields (event_date, expiry) must still be stored."""
+        store, col = self._mock_store()
+        store.store_event(_make_event(event_date="2026-03-05"))
+        stored_meta = col.add.call_args[1]["metadatas"][0]
+        assert stored_meta["event_date"] == "2026-03-05"
+        assert isinstance(stored_meta["expiry"], str)
+
+    # --- get_active_events ---
+
+    def test_get_active_events_where_uses_expiry_ts_integer(self):
+        """get_active_events() must query expiry_ts (int), not expiry (str)."""
+        store, col = self._mock_store()
+        store.get_active_events()
+        where = col.get.call_args[1]["where"]
+        assert "expiry_ts" in where, "must use expiry_ts"
+        assert "expiry" not in where, "must NOT use string expiry field"
+        value = list(where["expiry_ts"].values())[0]
+        assert isinstance(value, int), f"expiry_ts value must be int, got {type(value)}"
+
+    # --- get_structural_events_since ---
+
+    def test_get_structural_events_where_uses_ts_integers(self):
+        """get_structural_events_since() must use event_date_ts and expiry_ts."""
+        store, col = self._mock_store()
+        store.get_structural_events_since("2026-01-01")
+        where = col.get.call_args[1]["where"]
+        keys = {list(c.keys())[0] for c in where["$and"]}
+        assert "event_date_ts" in keys
+        assert "expiry_ts" in keys
+        assert "event_date" not in keys, "must NOT use string event_date"
+        assert "expiry" not in keys, "must NOT use string expiry"
+
+    def test_get_structural_events_since_date_value_is_integer(self):
+        """The since_date passed to ChromaDB must be an integer (YYYYMMDD)."""
+        store, col = self._mock_store()
+        store.get_structural_events_since("2026-01-01")
+        where = col.get.call_args[1]["where"]
+        for condition in where["$and"]:
+            key = list(condition.keys())[0]
+            if key == "event_date_ts":
+                op_value = list(condition[key].values())[0]
+                assert op_value == 20260101
+                assert isinstance(op_value, int)
