@@ -662,6 +662,13 @@ def reconcile(
 
     # ── Phase 1: Evaluate existing positions ──
     for pos in positions:
+        # IBKR occasionally returns positions with quantity=0 for a short period
+        # after a fill clears (the position is in the process of being removed).
+        # Skip these — they are not held; treating them as held would trigger
+        # spurious stop-breach SELLs or verdict-conflict REVIEWs with no shares.
+        if pos.quantity <= 0:
+            continue
+
         # Resolve canonical yfinance ticker BEFORE the analyses.get() call.
         # For bare tickers (no exchange suffix), consult _alpha_base_lookup first:
         # it always returns the suffixed analysis when one exists, so a bare "CEK"

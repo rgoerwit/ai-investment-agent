@@ -705,7 +705,7 @@ def _characterize_macro_event(
     except Exception as e:
         logger.warning("macro_news_search_failed", error=str(e))
 
-    # Primary: Gemini Flash LLM classification
+    # Primary: Deep LLM classification (reads DEEP_MODEL from env)
     impact, event_type = "UNCERTAIN", "UNKNOWN"
     if headline != "unknown":
         try:
@@ -713,9 +713,10 @@ def _characterize_macro_event(
 
             from langchain_core.messages import HumanMessage as _HM
 
-            from src.llms import create_quick_thinking_llm
+            from src.agents import extract_string_content
+            from src.llms import create_deep_thinking_llm
 
-            _llm = create_quick_thinking_llm()
+            _llm = create_deep_thinking_llm()
             _valid_types = (
                 "TARIFF_TRADE|LIQUIDITY_PANIC|CONTAGION_SPREAD|POLITICAL_EVENT|"
                 "MONETARY_PIVOT|COMMODITY_SHOCK|GEOPOLITICAL|REGULATORY_SHIFT|"
@@ -732,8 +733,10 @@ def _characterize_macro_event(
                 f'"reasoning": "one sentence max"}}'
             )
             _resp = _llm.invoke([_HM(content=_prompt)])
-            _text = (_resp.content if hasattr(_resp, "content") else str(_resp)).strip()
-            _text = _text.strip("`").lstrip("json").strip()
+            _text = extract_string_content(
+                _resp.content if hasattr(_resp, "content") else str(_resp)
+            )
+            _text = _text.strip().strip("`").lstrip("json").strip()
             _classified = _json.loads(_text)
             event_type = _classified.get("event_type", "UNKNOWN")
             impact = _classified.get("impact", "UNCERTAIN")

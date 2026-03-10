@@ -147,6 +147,90 @@ class TestCheckStaleness:
         is_stale, _ = check_staleness(analysis, current_price_local=None)
         assert not is_stale
 
+    def test_global_structural_event_after_analysis_forces_stale(self):
+        """GLOBAL STRUCTURAL event after analysis date → stale."""
+        from src.memory import MacroEvent
+
+        analysis = _make_analysis(ticker="7203.T", age_days=3)
+        # event_date is 1 day after analysis_date → fires
+        from datetime import datetime, timedelta
+
+        event_date = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
+        event = MacroEvent(
+            event_date=event_date,
+            detected_date=event_date,
+            expiry="2026-06-01",
+            impact="STRUCTURAL",
+            event_type="REGULATORY_SHIFT",
+            scope="GLOBAL",
+            primary_region="GLOBAL",
+            primary_sector="",
+            severity="HIGH",
+            correlation_pct=0.45,
+            peak_count=10,
+            total_held=22,
+            news_headline="New legislation enacted",
+            news_detail="",
+        )
+        is_stale, reason = check_staleness(analysis, structural_macro_events=[event])
+        assert is_stale is True
+        assert "STRUCTURAL macro event" in reason
+
+    def test_regional_structural_event_does_not_invalidate_different_exchange(self):
+        """STRUCTURAL event scoped to .T must not invalidate a .HK ticker."""
+        from src.memory import MacroEvent
+
+        analysis = _make_analysis(ticker="0005.HK", age_days=3)
+        from datetime import datetime, timedelta
+
+        event_date = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
+        event = MacroEvent(
+            event_date=event_date,
+            detected_date=event_date,
+            expiry="2026-06-01",
+            impact="STRUCTURAL",
+            event_type="REGULATORY_SHIFT",
+            scope="REGIONAL",
+            primary_region=".T",
+            primary_sector="",
+            severity="HIGH",
+            correlation_pct=0.45,
+            peak_count=8,
+            total_held=20,
+            news_headline="Japan regulation change",
+            news_detail="",
+        )
+        is_stale, _ = check_staleness(analysis, structural_macro_events=[event])
+        assert is_stale is False
+
+    def test_regional_structural_event_invalidates_matching_exchange(self):
+        """STRUCTURAL event scoped to .T invalidates a .T ticker."""
+        from src.memory import MacroEvent
+
+        analysis = _make_analysis(ticker="7203.T", age_days=3)
+        from datetime import datetime, timedelta
+
+        event_date = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
+        event = MacroEvent(
+            event_date=event_date,
+            detected_date=event_date,
+            expiry="2026-06-01",
+            impact="STRUCTURAL",
+            event_type="REGULATORY_SHIFT",
+            scope="REGIONAL",
+            primary_region=".T",
+            primary_sector="",
+            severity="HIGH",
+            correlation_pct=0.45,
+            peak_count=8,
+            total_held=20,
+            news_headline="Japan regulation change",
+            news_detail="",
+        )
+        is_stale, reason = check_staleness(analysis, structural_macro_events=[event])
+        assert is_stale is True
+        assert "STRUCTURAL macro event" in reason
+
 
 class TestCheckStopBreach:
     def test_stop_breached(self):
@@ -227,6 +311,25 @@ class TestReconcile:
         assert "stop" in items[0].reason.lower()
         assert items[0].suggested_order_type == "LMT"
         assert items[0].suggested_price == 1700
+
+    def test_zero_quantity_position_with_stop_breach_ignored(self):
+        """IBKR position with quantity=0 (just sold) must not generate a SELL.
+
+        Regression: IBKR briefly retains zero-quantity positions after a fill.
+        Previously this produced a spurious SELL with no share count or proceeds.
+        Use DO_NOT_INITIATE verdict so Phase 2 does not regenerate a BUY either.
+        """
+        pos = _make_position(quantity=0, current_price=1700)
+        analysis = _make_analysis(verdict="DO_NOT_INITIATE", stop_price=1900)
+        items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
+        assert items == []
+
+    def test_zero_quantity_position_with_verdict_conflict_ignored(self):
+        """IBKR position with quantity=0 must not generate a REVIEW/SELL for verdict conflict."""
+        pos = _make_position(quantity=0)
+        analysis = _make_analysis(verdict="DO_NOT_INITIATE")
+        items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
+        assert items == []
 
     def test_held_target_hit(self):
         """Held + price at target → REVIEW."""

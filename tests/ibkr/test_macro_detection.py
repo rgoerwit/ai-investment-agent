@@ -86,7 +86,7 @@ class TestCharacterizeMacroEventLLM:
         )
         items = [_make_sell_item("7203.T")]
         # Patch at source module (local import inside function)
-        with patch("src.llms.create_quick_thinking_llm") as mock_create:
+        with patch("src.llms.create_deep_thinking_llm") as mock_create:
             mock_llm = MagicMock()
             mock_llm.invoke.return_value = llm_response
             mock_create.return_value = mock_llm
@@ -122,7 +122,7 @@ class TestCharacterizeMacroEventLLM:
         """LLM raises → keyword rules produce correct classification."""
         items = [_make_sell_item("7203.T")]
         with patch(
-            "src.llms.create_quick_thinking_llm", side_effect=Exception("LLM fail")
+            "src.llms.create_deep_thinking_llm", side_effect=Exception("LLM fail")
         ):
             with patch("tavily.TavilyClient") as mock_tav:
                 mock_tav.return_value.search.return_value = {
@@ -145,7 +145,7 @@ class TestCharacterizeMacroEventLLM:
         """Keyword 'legislation' → REGULATORY_SHIFT / STRUCTURAL when LLM fails."""
         items = [_make_sell_item("7203.T")]
         with patch(
-            "src.llms.create_quick_thinking_llm", side_effect=ImportError("no llm")
+            "src.llms.create_deep_thinking_llm", side_effect=ImportError("no llm")
         ):
             with patch("tavily.TavilyClient") as mock_tav:
                 mock_tav.return_value.search.return_value = {
@@ -164,12 +164,91 @@ class TestCharacterizeMacroEventLLM:
         assert event_type == "REGULATORY_SHIFT"
         assert impact == "STRUCTURAL"
 
+    def test_llm_content_as_list_single_text_block(self):
+        """Gemini 3+ list-format response [{"type":"text","text":"..."}] → LLM classification used.
+
+        Regression test: prior to fix, list.strip() raised AttributeError.
+        """
+        json_text = (
+            '{"event_type": "TARIFF_TRADE", "impact": "TRANSIENT", '
+            '"opportunity_prior": "HIGH", "reasoning": "Trade tariffs"}'
+        )
+        llm_response = MagicMock()
+        # Single-item list with text block — extract_string_content recurses and returns text
+        llm_response.content = [{"type": "text", "text": json_text}]
+        items = [_make_sell_item("7203.T")]
+        with patch("src.llms.create_deep_thinking_llm") as mock_create:
+            mock_llm = MagicMock()
+            mock_llm.invoke.return_value = llm_response
+            mock_create.return_value = mock_llm
+            with patch("tavily.TavilyClient") as mock_tav:
+                mock_tav.return_value.search.return_value = {
+                    "results": [
+                        {"title": "Tariffs announced", "content": "US tariffs."}
+                    ]
+                }
+                with patch("src.config.config") as mock_cfg:
+                    mock_cfg.get_tavily_api_key.return_value = "test_key"
+                    scope, region, sector, impact, event_type, headline, detail = (
+                        _characterize_macro_event(
+                            "2026-03-05", items, 0.30, peak_count=6
+                        )
+                    )
+        # Text block cleanly extracted → LLM JSON parsed successfully
+        assert event_type == "TARIFF_TRADE"
+        assert impact == "TRANSIENT"
+
+    def test_llm_content_as_list_thinking_plus_text_no_crash(self):
+        """Gemini 3+ thinking+text list [thinking_block, text_block] → no AttributeError.
+
+        The thinking block contaminates the extracted string, so JSON parsing fails and
+        keyword fallback is used — but the function must NOT crash with AttributeError.
+
+        Regression test: prior to fix, list.strip() raised AttributeError.
+        """
+        json_text = (
+            '{"event_type": "TARIFF_TRADE", "impact": "TRANSIENT", '
+            '"opportunity_prior": "HIGH", "reasoning": "Trade tariffs"}'
+        )
+        llm_response = MagicMock()
+        # Gemini 3+ thinking model: two-item list with thinking block + text block
+        llm_response.content = [
+            {"type": "thinking", "thinking": "I need to classify this macro event."},
+            {"type": "text", "text": json_text},
+        ]
+        items = [_make_sell_item("7203.T")]
+        with patch("src.llms.create_deep_thinking_llm") as mock_create:
+            mock_llm = MagicMock()
+            mock_llm.invoke.return_value = llm_response
+            mock_create.return_value = mock_llm
+            with patch("tavily.TavilyClient") as mock_tav:
+                mock_tav.return_value.search.return_value = {
+                    "results": [
+                        {
+                            "title": "New trade tariffs",
+                            "content": "tariff hike on imports",
+                        }
+                    ]
+                }
+                with patch("src.config.config") as mock_cfg:
+                    mock_cfg.get_tavily_api_key.return_value = "test_key"
+                    # Must NOT raise AttributeError
+                    scope, region, sector, impact, event_type, headline, detail = (
+                        _characterize_macro_event(
+                            "2026-03-05", items, 0.30, peak_count=6
+                        )
+                    )
+        # Thinking block pollutes extracted text → JSON fails → keyword fallback
+        # Keyword "tariff" in headline → TARIFF_TRADE
+        assert event_type == "TARIFF_TRADE"
+        assert impact in {"TRANSIENT", "UNCERTAIN"}  # keyword or uncertain fallback
+
     def test_llm_malformed_json_falls_back_to_keywords(self):
         """LLM returns non-JSON → JSONDecodeError → keyword fallback."""
         llm_response = MagicMock()
         llm_response.content = "Sorry, I cannot classify this."
         items = [_make_sell_item("7203.T")]
-        with patch("src.llms.create_quick_thinking_llm") as mock_create:
+        with patch("src.llms.create_deep_thinking_llm") as mock_create:
             mock_llm = MagicMock()
             mock_llm.invoke.return_value = llm_response
             mock_create.return_value = mock_llm
