@@ -1,9 +1,16 @@
 """Tests for portfolio reading and normalization."""
 
+import logging
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 from src.ibkr.models import NormalizedPosition, PortfolioSummary
-from src.ibkr.portfolio import build_portfolio_summary, normalize_positions
+from src.ibkr.portfolio import (
+    build_portfolio_summary,
+    normalize_positions,
+    read_watchlist,
+)
 from src.ibkr.ticker import Ticker
 
 
@@ -259,3 +266,114 @@ class TestBuildPortfolioSummary:
         summary = build_portfolio_summary(ledger, [], "U1", cash_buffer_pct=0.10)
         # available = 5000 - 10000 = negative → clamped to 0
         assert summary.available_cash_usd == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Helpers for read_watchlist tests
+# ---------------------------------------------------------------------------
+
+
+def _mock_client(rows: list[dict]) -> MagicMock:
+    """Return a MagicMock IBKR client whose get_watchlist() returns `rows`."""
+    client = MagicMock()
+    client.get_watchlist.return_value = rows
+    return client
+
+
+_RESOLVE = "src.ibkr.portfolio._resolve_watchlist_conid"
+
+
+class TestReadWatchlistRowParsing:
+    """read_watchlist must correctly extract conids from all known IBKR row formats
+    and emit actionable warnings for unrecognised formats."""
+
+    def test_legacy_format_plain_int_c_field(self):
+        """Legacy format: {"C": 12345678} — C is an integer conid."""
+        rows = [{"C": 39131511}]
+        with patch(_RESOLVE, return_value="5434.TW"):
+            result = read_watchlist(_mock_client(rows))
+        assert result == {"5434.TW"}
+
+    def test_new_format_c_at_exchange_with_conid_field(self):
+        """New IBKR format: {"C": "39131511@TWSE", "conid": 39131511}.
+
+        The "conid" integer field is preferred; the composite "C" string is not
+        used as the primary source (but must not block resolution).
+        """
+        rows = [
+            {
+                "ST": "STK",
+                "C": "39131511@TWSE",
+                "conid": 39131511,
+                "ticker": "5434",
+                "name": "TOPCO SCIENTIFIC CO LTD",
+            }
+        ]
+        with patch(_RESOLVE, return_value="5434.TW") as mock_resolve:
+            result = read_watchlist(_mock_client(rows))
+        assert result == {"5434.TW"}
+        mock_resolve.assert_called_once_with(39131511, mock_resolve.call_args[0][1])
+
+    def test_new_format_c_at_exchange_without_conid_field(self):
+        """Fallback: {"C": "39131511@TWSE"} with no "conid" field.
+
+        Must strip the @EXCHANGE suffix and parse the numeric part.
+        """
+        rows = [{"C": "39131511@TWSE"}]
+        with patch(_RESOLVE, return_value="5434.TW"):
+            result = read_watchlist(_mock_client(rows))
+        assert result == {"5434.TW"}
+
+    def test_spacer_row_silently_skipped(self):
+        """Spacer rows {"H": "1"} must be skipped without warning."""
+        rows = [{"H": "1"}, {"C": 39131511}]
+        with patch(_RESOLVE, return_value="5434.TW"):
+            result = read_watchlist(_mock_client(rows))
+        assert result == {"5434.TW"}
+
+    def test_mixed_legacy_and_new_format(self):
+        """A watchlist with both legacy and new-format rows resolves all securities."""
+        rows = [
+            {"C": 11111111},  # legacy int
+            {"C": "22222222@TWSE", "conid": 22222222},  # new format
+            {"C": "33333333@SGX"},  # new format, no conid field
+            {"H": "1"},  # spacer
+        ]
+
+        def _resolve(conid, _client):
+            return {11111111: "5334.T", 22222222: "5434.TW", 33333333: "BEC.SI"}.get(
+                conid, ""
+            )
+
+        with patch(_RESOLVE, side_effect=_resolve):
+            result = read_watchlist(_mock_client(rows))
+
+        assert result == {"5334.T", "5434.TW", "BEC.SI"}
+
+    def test_unknown_format_row_emits_warning(self, caplog):
+        """A row with no recognisable conid field emits a WARNING — signals API change."""
+        rows = [{"symbol": "XYZ", "exchange": "NYSE"}]  # hypothetical future format
+        with caplog.at_level(logging.WARNING, logger="src.ibkr.portfolio"):
+            with patch(_RESOLVE, return_value=""):
+                result = read_watchlist(_mock_client(rows))
+        assert result == set()
+        assert any("watchlist_row_unknown_format" in r.message for r in caplog.records)
+
+    def test_unparseable_conid_emits_warning(self, caplog):
+        """A row whose extracted conid cannot be cast to int emits a WARNING."""
+        rows = [{"C": "not-a-number"}]
+        with caplog.at_level(logging.WARNING, logger="src.ibkr.portfolio"):
+            with patch(_RESOLVE, return_value=""):
+                result = read_watchlist(_mock_client(rows))
+        assert result == set()
+        assert any("watchlist_bad_conid" in r.message for r in caplog.records)
+
+    def test_watchlist_none_returns_none(self):
+        """Client returning None (watchlist not found) propagates as None."""
+        client = MagicMock()
+        client.get_watchlist.return_value = None
+        assert read_watchlist(client) is None
+
+    def test_watchlist_empty_returns_empty_set(self):
+        """Client returning [] (empty watchlist) returns an empty set."""
+        assert read_watchlist(_mock_client([])) == set()

@@ -38,6 +38,10 @@ async def get_fx_rate_yfinance(
         JPY → USD returns ~0.0067 (1 JPY = $0.0067)
         HKD → USD returns ~0.128 (1 HKD = $0.128)
     """
+    # Normalize to uppercase so "jpy" → "JPY" works for direct callers
+    from_currency = from_currency.strip().upper()
+    to_currency = to_currency.strip().upper()
+
     if from_currency == to_currency:
         return 1.0
 
@@ -50,9 +54,12 @@ async def get_fx_rate_yfinance(
         # Use async thread pool to avoid blocking
         def _fetch_rate():
             ticker = yf.Ticker(fx_ticker)
-            # Try fast_info first (faster)
+            # Try fast_info first (faster), but fall through when it returns None
+            # (fast_info.last_price can be None before yfinance warms up its cache)
             if hasattr(ticker, "fast_info") and hasattr(ticker.fast_info, "last_price"):
-                return ticker.fast_info.last_price
+                fast_price = ticker.fast_info.last_price
+                if fast_price:
+                    return fast_price
             # Fallback to info dict
             info = ticker.info
             return info.get("regularMarketPrice") or info.get("previousClose")

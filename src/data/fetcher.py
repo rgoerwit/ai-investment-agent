@@ -1936,6 +1936,12 @@ class SmartMarketDataFetcher(FinancialFetcher):
         de = info.get("debtToEquity")
         if de is None:
             return info
+        # Some sources (yfinance, yahooquery) can return numeric fields as strings
+        # for certain tickers/exchanges; convert before any numeric comparison.
+        try:
+            de = float(de)
+        except (TypeError, ValueError):
+            return info
         # Statement-calculated values are already ratios — no correction needed
         if info.get("_debtToEquity_source") == "calculated_from_statements":
             return info
@@ -1959,8 +1965,19 @@ class SmartMarketDataFetcher(FinancialFetcher):
 
         # P/E Normalization with sanity checks
         # Only replace trailing with forward if BOTH values are reasonable
-        trailing = info.get("trailingPE")
-        forward = info.get("forwardPE")
+        # Convert to float defensively — some sources return numeric fields as strings.
+        try:
+            trailing = (
+                float(info["trailingPE"])
+                if info.get("trailingPE") is not None
+                else None
+            )
+            forward = (
+                float(info["forwardPE"]) if info.get("forwardPE") is not None else None
+            )
+        except (TypeError, ValueError):
+            trailing = None
+            forward = None
 
         if trailing and forward and trailing > 0 and forward > 0:
             # Sanity thresholds based on realistic P/E distributions:

@@ -163,11 +163,14 @@ stopwords = [
 # Allowlist for specific commits (to grandfather in pre-existing issues)
 # ══════════════════════════════════════════════════════════════════════════
 
-# If you have specific commits with false positives, add them here
-# commits = [
-#   "commit-sha-1",
-#   "commit-sha-2",
-# ]
+# Commits with false positives (text that looks like secrets but isn't).
+# Using both commits[] here AND .gitleaksignore for belt-and-suspenders coverage.
+commits = [
+  # scripts/portfolio_manager.py contains RSA key validation helper text
+  # that references PEM key terminology. No real keys present.
+  "40e833e7900b515688443651c3efde27e2640ab1",
+  "c8ab4d6765ea0e7490273c3fde9e0be6e3859d0e",
+]
 
 # ══════════════════════════════════════════════════════════════════════════
 # NOTES FOR FUTURE MAINTENANCE

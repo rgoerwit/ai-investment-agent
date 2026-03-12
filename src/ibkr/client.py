@@ -7,8 +7,6 @@ Two-tiered session: read-only (portfolio data) vs brokerage (orders).
 
 from __future__ import annotations
 
-import time
-
 import structlog
 
 from src.ibkr.exceptions import (
@@ -16,6 +14,7 @@ from src.ibkr.exceptions import (
     IBKRAuthError,
     IBKRSessionConflictError,
 )
+from src.ibkr.throttle import IBKRThrottle
 from src.ibkr_config import IbkrSettings
 
 logger = structlog.get_logger(__name__)
@@ -100,8 +99,9 @@ class IbkrClient:
     def __init__(self, settings: IbkrSettings | None = None):
         self._settings = settings or IbkrSettings()
         self._ibind_client = None
-        self._last_request_time: float = 0.0
-        self._min_interval = 1.0 / self._settings.ibkr_rate_limit_per_sec
+        self._throttle = IBKRThrottle(
+            rate_per_sec=self._settings.ibkr_rate_limit_per_sec,
+        )
 
     def connect(self, brokerage_session: bool = False) -> None:
         """
@@ -208,14 +208,6 @@ class IbkrClient:
     def __exit__(self, *args) -> None:
         self.close()
 
-    def _rate_limit(self) -> None:
-        """Enforce rate limit (10 req/sec by default)."""
-        now = time.time()
-        elapsed = now - self._last_request_time
-        if elapsed < self._min_interval:
-            time.sleep(self._min_interval - elapsed)
-        self._last_request_time = time.time()
-
     def _ensure_connected(self) -> None:
         if self._ibind_client is None:
             raise IBKRAuthError("Not connected. Call connect() first.")
@@ -225,9 +217,10 @@ class IbkrClient:
     def get_accounts(self) -> list[str]:
         """Get list of account IDs."""
         self._ensure_connected()
-        self._rate_limit()
         try:
-            result = self._ibind_client.portfolio_accounts()
+            result = self._throttle.call(
+                lambda: self._ibind_client.portfolio_accounts()
+            )
             data = result.data if hasattr(result, "data") else result
             if isinstance(data, list):
                 return [
@@ -250,10 +243,11 @@ class IbkrClient:
         Returns list of raw IBKR position dicts.
         """
         self._ensure_connected()
-        self._rate_limit()
         acct = account_id or self._settings.ibkr_account_id
         try:
-            result = self._ibind_client.positions(account_id=acct)
+            result = self._throttle.call(
+                lambda: self._ibind_client.positions(account_id=acct)
+            )
             data = result.data if hasattr(result, "data") else result
             return data if isinstance(data, list) else []
         except Exception as e:
@@ -266,10 +260,11 @@ class IbkrClient:
         Returns raw IBKR ledger dict.
         """
         self._ensure_connected()
-        self._rate_limit()
         acct = account_id or self._settings.ibkr_account_id
         try:
-            result = self._ibind_client.get_ledger(account_id=acct)
+            result = self._throttle.call(
+                lambda: self._ibind_client.get_ledger(account_id=acct)
+            )
             data = result.data if hasattr(result, "data") else result
             return data if isinstance(data, dict) else {}
         except Exception as e:
@@ -287,10 +282,11 @@ class IbkrClient:
         built-in default applies {isUS: True} which silently drops all non-US contracts.
         """
         self._ensure_connected()
-        self._rate_limit()
         try:
-            result = self._ibind_client.stock_conid_by_symbol(
-                symbol, default_filtering=default_filtering
+            result = self._throttle.call(
+                lambda: self._ibind_client.stock_conid_by_symbol(
+                    symbol, default_filtering=default_filtering
+                )
             )
             data = result.data if hasattr(result, "data") else result
             return data if isinstance(data, dict) else {}
@@ -314,9 +310,10 @@ class IbkrClient:
             True on success, False on failure (logs a warning on failure).
         """
         self._ensure_connected()
-        self._rate_limit()
         try:
-            self._ibind_client.initialize_brokerage_session(compete=compete)
+            self._throttle.call(
+                lambda: self._ibind_client.initialize_brokerage_session(compete=compete)
+            )
             logger.info("brokerage_session_initialized", compete=compete)
             return True
         except Exception as e:
@@ -345,9 +342,10 @@ class IbkrClient:
         # /iserver/ endpoints require a brokerage session on top of the OAuth
         # live session token.  Initialize it here; this is a no-op if already active.
         self.initialize_brokerage_session()
-        self._rate_limit()
         try:
-            result = self._ibind_client.get_all_watchlists(sc="USER_WATCHLIST")
+            result = self._throttle.call(
+                lambda: self._ibind_client.get_all_watchlists(sc="USER_WATCHLIST")
+            )
             data = result.data if hasattr(result, "data") else result
 
             # Log raw shape for diagnostics
@@ -412,8 +410,9 @@ class IbkrClient:
 
             wl_id = matched.get("id", "")
             wl_name = matched.get("name", wl_id)
-            self._rate_limit()
-            info_result = self._ibind_client.get_watchlist_information(wl_id)
+            info_result = self._throttle.call(
+                lambda: self._ibind_client.get_watchlist_information(wl_id)
+            )
             info_data = (
                 info_result.data if hasattr(info_result, "data") else info_result
             )
@@ -462,16 +461,18 @@ class IbkrClient:
             return data if isinstance(data, list) else []
 
         try:
-            # Pre-flight: wakes up the IBKR orders engine (always returns empty).
-            # force=True clears IBKR's cached state, ensuring the subsequent call
-            # returns fresh order data (per ibind/IBKR docs).
-            self._rate_limit()
-            _extract(self._ibind_client.live_orders(account_id=acct, force=True))
-            # Real call: returns actual orders after the engine is ready
-            self._rate_limit()
-            result = self._ibind_client.live_orders(account_id=acct)
-            orders = _extract(result)
-            logger.debug("live_orders_fetched", count=len(orders))
+            # Pre-flight wakes IBKR's orders engine; real call returns actual orders.
+            # call_with_warmup encodes the engine-init pattern: pre-flight → sleep → call.
+            raw = self._throttle.call_with_warmup(
+                preflight=lambda: self._ibind_client.live_orders(
+                    account_id=acct, force=True
+                ),
+                request=lambda: self._ibind_client.live_orders(account_id=acct),
+                warm_up_secs=1.0,
+                label="live_orders",
+            )
+            orders = _extract(raw)
+            logger.info("live_orders_fetched", count=len(orders))
             return orders
         except Exception as e:
             logger.warning("live_orders_fetch_failed", error=str(e))
@@ -487,9 +488,10 @@ class IbkrClient:
         """
         self._ensure_connected()
         self.initialize_brokerage_session()
-        self._rate_limit()
         try:
-            result = self._ibind_client.contract_information_by_conid(str(conid))
+            result = self._throttle.call(
+                lambda: self._ibind_client.contract_information_by_conid(str(conid))
+            )
             data = result.data if hasattr(result, "data") else result
             return data if isinstance(data, dict) else {}
         except Exception as e:
@@ -512,7 +514,6 @@ class IbkrClient:
             IBKR order response dict
         """
         self._ensure_connected()
-        self._rate_limit()
         try:
             from ibind.client.ibkr_utils import OrderRequest, QuestionType
 
@@ -527,10 +528,12 @@ class IbkrClient:
             )
             # Auto-confirm all IBKR pre-trade confirmation questions.
             answers = dict.fromkeys(QuestionType, True)
-            result = self._ibind_client.place_order(
-                order_request=order_request,
-                answers=answers,
-                account_id=account_id,
+            result = self._throttle.call(
+                lambda: self._ibind_client.place_order(
+                    order_request=order_request,
+                    answers=answers,
+                    account_id=account_id,
+                )
             )
             data = result.data if hasattr(result, "data") else result
             logger.info(

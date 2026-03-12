@@ -268,16 +268,41 @@ def read_watchlist(
     if rows:
         logger.debug("watchlist_first_row", row=rows[0])
     for row in rows:
-        # IBKR watchlist rows: {"C": conid} for securities, {"H": "1"} for blank spacers
-        # Some API versions use "conid" instead of "C"
-        raw_conid = row.get("C") or row.get("conid") or row.get("conId")
+        # IBKR watchlist rows — two known formats:
+        #   Legacy: {"C": conid_int}  e.g. {"C": 12345678}
+        #   New:    {"C": "conid@EXCHANGE", "conid": conid_int}  e.g. {"C": "39131511@TWSE", "conid": 39131511}
+        #   Spacer: {"H": "1"}  — no conid, skip
+        #
+        # Priority: "conid" (clean int) > "conId" > numeric part of "C" (strip @exchange suffix)
+        raw_conid = (
+            row.get("conid") or row.get("conId") or str(row.get("C", "")).split("@")[0]
+        )
         if not raw_conid:
-            continue  # blank spacer row or unexpected format
+            # Known spacers: {"H": "1"} or similar header rows with no security data.
+            # Anything else is an unexpected format — warn so API changes are visible.
+            if "H" not in row and row:
+                logger.warning(
+                    "watchlist_row_unknown_format",
+                    row=row,
+                    note=(
+                        "No 'conid', 'conId', or 'C' field found; row skipped. "
+                        "IBKR may have changed the watchlist API response format."
+                    ),
+                )
+            continue
 
         try:
             conid = int(raw_conid)
         except (TypeError, ValueError):
-            logger.debug("watchlist_bad_conid", raw=raw_conid)
+            logger.warning(
+                "watchlist_bad_conid",
+                raw=raw_conid,
+                row=row,
+                note=(
+                    "Could not parse conid as integer; row skipped. "
+                    "IBKR may have changed the watchlist API response format."
+                ),
+            )
             continue
 
         yf_ticker = _resolve_watchlist_conid(conid, client)
