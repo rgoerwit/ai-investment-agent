@@ -110,19 +110,32 @@ def ibkr_symbol_to_yf(symbol: str, exchange: str, currency: str = "") -> str:
     if suffix:
         return f"{symbol}{suffix}"
 
-    # Returning bare symbol — warn if exchange was specified but unrecognised
-    if exchange and exchange not in ("", "SMART", "NASDAQ", "NYSE", "ARCA", "AMEX"):
-        # Final fallback: search yfinance before giving up
+    # Returning bare symbol — try yfinance search as a last resort.
+    #
+    # Two cases trigger the search:
+    # 1. Unrecognised exchange code (existing behaviour).
+    # 2. IBKR reported exchange="SMART" (its smart-routing alias) but the
+    #    currency indicates a non-US stock (CAD, EUR, GBP, etc.).  IBKR
+    #    consistently returns "SMART" for watchlist contracts via the
+    #    /iserver/contract/{conid}/info endpoint, so we cannot rely on the
+    #    exchange field to determine the real listing exchange.  yfinance
+    #    search is the reliable fallback here.
+    _is_known_us = exchange in ("", "NASDAQ", "NYSE", "ARCA", "AMEX")
+    _is_smart_non_usd = (
+        exchange == "SMART" and bool(currency) and currency.upper() not in ("USD", "")
+    )
+    if exchange and (not _is_known_us) and (exchange != "SMART" or _is_smart_non_usd):
         yf_ticker = _yf_search_ticker(symbol, exchange, currency)
         if yf_ticker:
             return yf_ticker
-        logger.warning(
-            "ibkr_exchange_unmapped",
-            symbol=symbol,
-            exchange=exchange,
-            currency=currency,
-            note="No yfinance suffix found; position will use bare ticker (may be incorrect for non-US stocks)",
-        )
+        if exchange not in ("SMART",):
+            logger.warning(
+                "ibkr_exchange_unmapped",
+                symbol=symbol,
+                exchange=exchange,
+                currency=currency,
+                note="No yfinance suffix found; position will use bare ticker (may be incorrect for non-US stocks)",
+            )
     return symbol
 
 
@@ -341,8 +354,26 @@ def yf_ticker_from_conid(conid: int) -> str | None:
 
 
 def cache_conid_mapping(yf_ticker: str, conid: int, symbol: str, exchange: str) -> None:
-    """Store a conid↔yf_ticker mapping so future lookups skip the API call."""
+    """Store a conid↔yf_ticker mapping so future lookups skip the API call.
+
+    When storing a suffixed ticker (e.g. "WDO.TO"), any existing bare-symbol
+    entry for the same conid (e.g. "WDO") is removed.  Bare entries can arise
+    when the IBKR API returns exchange="SMART" and the currency is ambiguous;
+    the suffixed entry is always more accurate and must take precedence.
+    """
     cache = _get_cache()
+    # Evict stale bare-symbol entries for this conid when we have a better result
+    if "." in yf_ticker:
+        stale = [
+            k
+            for k, v in cache.items()
+            if not k.startswith("ibkr:")
+            and isinstance(v, dict)
+            and v.get("conid") == conid
+            and "." not in k
+        ]
+        for k in stale:
+            del cache[k]
     cache[yf_ticker.upper()] = {
         "conid": conid,
         "symbol": symbol,

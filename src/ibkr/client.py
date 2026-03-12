@@ -445,17 +445,34 @@ class IbkrClient:
 
         Returns list of raw order dicts (may be empty).
         Requires a brokerage session — initializes one if not already active.
+
+        IBKR's /iserver/account/orders endpoint requires a "pre-flight" call:
+        the first request always returns an empty list while the server wakes
+        up the orders engine.  A second request made shortly after returns the
+        actual orders.  This method makes both calls automatically.
         """
         self._ensure_connected()
         self.initialize_brokerage_session()
-        self._rate_limit()
         acct = account_id or self._settings.ibkr_account_id
-        try:
-            result = self._ibind_client.live_orders(account_id=acct)
+
+        def _extract(result) -> list[dict]:
             data = result.data if hasattr(result, "data") else result
             if isinstance(data, dict):
                 return data.get("orders", [])
             return data if isinstance(data, list) else []
+
+        try:
+            # Pre-flight: wakes up the IBKR orders engine (always returns empty).
+            # force=True clears IBKR's cached state, ensuring the subsequent call
+            # returns fresh order data (per ibind/IBKR docs).
+            self._rate_limit()
+            _extract(self._ibind_client.live_orders(account_id=acct, force=True))
+            # Real call: returns actual orders after the engine is ready
+            self._rate_limit()
+            result = self._ibind_client.live_orders(account_id=acct)
+            orders = _extract(result)
+            logger.debug("live_orders_fetched", count=len(orders))
+            return orders
         except Exception as e:
             logger.warning("live_orders_fetch_failed", error=str(e))
             return []

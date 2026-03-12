@@ -184,11 +184,23 @@ def _resolve_watchlist_conid(conid: int, client: IbkrClient | None) -> str:
 
     Returns the yfinance ticker string, or "" if resolution fails.
     """
-    # Fast path: reverse-lookup in local cache
+    # Fast path: reverse-lookup in local cache.
+    # A bare cached value (no ".") may be a correctly-resolved US ticker OR a
+    # previously failed resolution for a non-US stock where the exchange was
+    # "SMART" and the currency was ambiguous.  If a client is available, bypass
+    # the cache for bare entries so ibkr_symbol_to_yf can try the yfinance
+    # search fallback (which is now enabled for SMART + non-USD currency).
     cached = yf_ticker_from_conid(conid)
-    if cached:
+    if cached and ("." in cached or client is None):
         logger.debug("watchlist_conid_cache_hit", conid=conid, yf_ticker=cached)
         return cached
+    if cached:
+        logger.debug(
+            "watchlist_conid_bare_cache_bypass",
+            conid=conid,
+            cached=cached,
+            reason="retrying to resolve exchange suffix",
+        )
 
     # Slow path: ask IBKR for contract details
     if client is None:
@@ -197,7 +209,7 @@ def _resolve_watchlist_conid(conid: int, client: IbkrClient | None) -> str:
     info = client.get_contract_info(conid)
     if not info:
         logger.debug("watchlist_conid_no_info", conid=conid)
-        return ""
+        return cached or ""  # fall back to bare cached value if API fails
 
     symbol = info.get("symbol", "") or info.get("ticker", "")
     exchange = info.get("listingExchange", "") or info.get("exchange", "")
@@ -205,7 +217,7 @@ def _resolve_watchlist_conid(conid: int, client: IbkrClient | None) -> str:
 
     if not symbol:
         logger.debug("watchlist_conid_no_symbol", conid=conid, info=info)
-        return ""
+        return cached or ""
 
     yf_ticker = ibkr_symbol_to_yf(symbol, exchange, currency)
     if yf_ticker:
@@ -217,7 +229,7 @@ def _resolve_watchlist_conid(conid: int, client: IbkrClient | None) -> str:
             exchange=exchange,
             yf_ticker=yf_ticker,
         )
-    return yf_ticker
+    return yf_ticker or cached or ""
 
 
 def read_watchlist(

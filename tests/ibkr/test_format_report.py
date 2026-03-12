@@ -1261,7 +1261,7 @@ class TestNewBuysSection:
         )
         report = self._report([item])
         assert "NEW BUYS" in report
-        assert "9201.T" in report
+        assert "9201" in report  # IBKR format (no exchange suffix)
         assert "conviction" not in report
 
     def test_header_section_shown(self):
@@ -1429,18 +1429,17 @@ class TestIbkrDisplaySymbol:
         # (the run cmd has "--ticker 7203.T", the label has "7203 ")
         assert "7203  " in reviews_block or "7203 " in reviews_block
 
-    def test_new_buy_watchlist_shows_yf_ticker(self):
-        """Phase 2 BUY (not held, no ibkr_symbol) still shows yf ticker — no change."""
+    def test_new_buy_watchlist_shows_ibkr_ticker(self):
+        """Phase 2 BUY (not held) displays IBKR format (no exchange suffix)."""
         item = ReconciliationItem(
             ticker="CAG.ST",
-            ibkr_symbol="",  # not held
             action="BUY",
             reason="Watchlist BUY",
             urgency="MEDIUM",
             is_watchlist=True,
         )
         report = format_report([item], _make_portfolio())
-        assert "CAG.ST" in report
+        assert "CAG" in report  # IBKR format: "CAG" not "CAG.ST"
 
     def test_reviews_run_cmd_uses_analysis_ticker_when_item_ticker_bare(self):
         """When item.ticker has no suffix but analysis.ticker has one, REVIEWS run cmd uses analysis.ticker.
@@ -1482,48 +1481,244 @@ class TestIbkrDisplaySymbol:
         assert "--ticker MEGP.L" in report
         assert "⚠ verify exchange suffix" not in report
 
-    def test_holds_no_suffix_warning_when_currency_resolves_suffix(self):
-        """HOLDS section suppresses suffix warning when currency unambiguously gives a yfinance suffix."""
-        # Ticker.from_ibkr with currency="GBX" resolves suffix=".L" via _CURRENCY_TO_SUFFIX
-        pos = NormalizedPosition(
-            conid=44444,
-            ticker=Ticker.from_ibkr("MEGP", currency="GBX"),
-            quantity=200,
-            avg_cost_local=100.0,
-            current_price_local=95.0,
-            market_value_usd=13000.0,
-            currency="GBX",  # GBX → .L (unambiguous)
-        )
-        item = ReconciliationItem(
-            ticker="MEGP",
-            action="HOLD",
-            reason="Position OK",
-            urgency="LOW",
-            ibkr_position=pos,
-        )
-        report = format_report([item], _make_portfolio())
-        # pos.ticker.has_suffix=True (GBX → .L) → no exchange suffix warning
-        assert "⚠ no exchange suffix" not in report
+    def test_holds_no_suffix_warning_regardless_of_currency(self):
+        """HOLDS section never shows an exchange-suffix warning — IBKR tickers don't have suffixes."""
+        for currency in ("GBX", "EUR", "JPY"):
+            pos = NormalizedPosition(
+                conid=44444,
+                ticker=Ticker.from_ibkr("MEGP", currency=currency),
+                quantity=200,
+                avg_cost_local=100.0,
+                current_price_local=95.0,
+                market_value_usd=13000.0,
+                currency=currency,
+            )
+            item = ReconciliationItem(
+                ticker="MEGP",
+                action="HOLD",
+                reason="Position OK",
+                urgency="LOW",
+                ibkr_position=pos,
+            )
+            report = format_report([item], _make_portfolio())
+            assert (
+                "exchange" not in report.lower() or "exchange" not in report
+            ), f"Unexpected exchange warning in HOLDS for currency={currency}"
 
-    def test_holds_suffix_warning_for_ambiguous_currency(self):
-        """HOLDS section shows suffix warning when currency is ambiguous (EUR covers multiple exchanges)."""
-        # Ticker.from_ibkr with currency="EUR" cannot resolve suffix (EUR is multi-country)
-        pos = NormalizedPosition(
-            conid=55555,
-            ticker=Ticker.from_ibkr("CEK", currency="EUR"),
-            quantity=200,
-            avg_cost_local=50.0,
-            current_price_local=55.0,
-            market_value_usd=15000.0,
-            currency="EUR",  # EUR is ambiguous (.DE/.PA/.AS/etc.) → cannot infer suffix
-        )
+    def test_review_suffix_warning_when_ticker_bare(self):
+        """REVIEWS run command shows suffix warning when the ticker has no exchange suffix."""
         item = ReconciliationItem(
-            ticker="CEK",
-            action="HOLD",
-            reason="Position OK",
-            urgency="LOW",
-            ibkr_position=pos,
+            ticker="CEK",  # no suffix — exchange unknown
+            action="REVIEW",
+            reason="Stale analysis: age 20d > 14d limit",
+            urgency="MEDIUM",
         )
         report = format_report([item], _make_portfolio())
-        # pos.ticker.has_suffix=False (EUR not in _CURRENCY_TO_SUFFIX) → warning fires
-        assert "⚠ no exchange suffix" in report
+        # Warning appears in the run command, not on the display ticker line
+        assert "exchange unknown" in report
+        assert "--ticker CEK" in report
+
+    def test_review_no_suffix_warning_when_ticker_has_suffix(self):
+        """REVIEWS run command omits the suffix warning when exchange is known."""
+        item = ReconciliationItem(
+            ticker="CEK.DE",
+            action="REVIEW",
+            reason="Stale analysis: age 20d > 14d limit",
+            urgency="MEDIUM",
+        )
+        report = format_report([item], _make_portfolio())
+        assert "exchange unknown" not in report
+        assert "--ticker CEK.DE" in report
+
+
+def _make_offwatch_buy(
+    ticker: str = "WDO.TO", conviction: str = "High"
+) -> ReconciliationItem:
+    """Build a Phase-2 off-watchlist BUY item (is_watchlist=False)."""
+    tb = TradeBlockData(conviction=conviction, size_pct=3.0)
+    analysis = AnalysisRecord(
+        ticker=ticker,
+        analysis_date="2026-03-01",
+        verdict="BUY",
+        health_adj=70.0,
+        growth_adj=62.0,
+        trade_block=tb,
+        conviction=conviction,
+    )
+    return ReconciliationItem(
+        ticker=ticker,
+        action="BUY",
+        urgency="MEDIUM",
+        reason="Off-watchlist BUY",
+        ibkr_position=None,
+        analysis=analysis,
+        suggested_quantity=100,
+        suggested_price=15.0,
+        cash_impact_usd=-1500.0,
+        is_watchlist=False,
+    )
+
+
+class TestWatchlistCandidatesInFlight:
+    """WATCHLIST CANDIDATES section hides items that already have a live BUY order."""
+
+    def _report(self, items, live_orders=None) -> str:
+        return format_report(
+            items,
+            _make_portfolio(),
+            show_recommendations=True,
+            live_orders=live_orders or [],
+        )
+
+    def test_candidate_with_live_buy_order_hidden_from_section(self):
+        """Off-watchlist BUY with an open order is excluded from WATCHLIST CANDIDATES."""
+        item = _make_offwatch_buy("WDO.TO")
+        live_order = {"ticker": "WDO", "side": "B", "remainingSize": "100"}
+        report = self._report([item], live_orders=[live_order])
+        # WDO removed from candidates display (no entry in WATCHLIST CANDIDATES body)
+        cands_block = (
+            report.split("WATCHLIST CANDIDATES")[1]
+            if "WATCHLIST CANDIDATES" in report
+            else ""
+        )
+        # Should show the in-flight note, not a regular candidate entry
+        assert "already in flight" in cands_block
+        assert "WDO" in cands_block
+        # The normal "[not on watchlist" detail line should not appear for in-flight items
+        assert "[not on watchlist" not in cands_block
+
+    def test_candidate_without_live_order_shown_normally(self):
+        """Off-watchlist BUY with no live order appears in WATCHLIST CANDIDATES as usual."""
+        item = _make_offwatch_buy("WDO.TO")
+        report = self._report([item], live_orders=[])
+        assert "WATCHLIST CANDIDATES" in report
+        assert "WDO" in report
+        assert "not on watchlist" in report
+
+    def test_in_flight_candidate_excluded_from_watchlist_moves(self):
+        """In-flight candidates must not appear in WATCHLIST MOVES (ADDED TO WATCHLIST)."""
+        item = _make_offwatch_buy("WDO.TO", conviction="High")
+        live_order = {"ticker": "WDO", "side": "B", "remainingSize": "50"}
+        report = self._report([item], live_orders=[live_order])
+        # WATCHLIST MOVES should be absent entirely (no strong candidates remain)
+        assert "ADDED TO WATCHLIST" not in report
+
+    def test_two_candidates_one_in_flight_other_shown(self):
+        """When one candidate is in-flight and another is not, only the latter appears."""
+        inflight = _make_offwatch_buy("WDO.TO", conviction="High")
+        pending = _make_offwatch_buy("TOTL.TO", conviction="Medium")
+        live_order = {"ticker": "WDO", "side": "B", "remainingSize": "100"}
+        report = self._report([inflight, pending], live_orders=[live_order])
+        assert "WATCHLIST CANDIDATES" in report
+        # TOTL shown as normal candidate
+        assert "TOTL" in report
+        assert "not on watchlist" in report
+        # WDO shown only in the in-flight note, not as a candidate entry
+        cands_block = report.split("WATCHLIST CANDIDATES")[1].split("HOLDS")[0]
+        assert "already in flight" in cands_block
+        assert "WDO" in cands_block
+
+
+class TestSellBaseExcludesCandidate:
+    """WATCHLIST CANDIDATES suppresses same-base BUY when a SELL exists for that symbol."""
+
+    def _make_sell_item(
+        self, ticker: str, sell_type: str | None = "HARD_REJECT"
+    ) -> ReconciliationItem:
+        pos = _make_position(ticker=ticker, current_price=35.50)
+        return ReconciliationItem(
+            ticker=ticker,
+            action="SELL",
+            reason="Verdict → DO_NOT_INITIATE",
+            urgency="HIGH",
+            ibkr_position=pos,
+            sell_type=sell_type,
+            suggested_quantity=20,
+            suggested_price=35.50,
+        )
+
+    def test_sell_base_blocks_same_base_candidate(self):
+        """SELL DLG → DLG.MI BUY candidate suppressed from WATCHLIST CANDIDATES."""
+        sell = self._make_sell_item("DLG")
+        buy_cand = _make_offwatch_buy("DLG.MI")
+        report = format_report(
+            [sell, buy_cand], _make_portfolio(), show_recommendations=True
+        )
+        # DLG appears in SELLs section
+        assert "SELL" in report
+        # DLG.MI must NOT appear as a watchlist candidate
+        assert "WATCHLIST CANDIDATES" not in report
+
+    def test_stop_breach_sell_also_blocks_candidate(self):
+        """STOP_BREACH sell also suppresses same-base candidate."""
+        sell = self._make_sell_item("DLG", sell_type="STOP_BREACH")
+        buy_cand = _make_offwatch_buy("DLG.MI")
+        report = format_report(
+            [sell, buy_cand], _make_portfolio(), show_recommendations=True
+        )
+        assert "WATCHLIST CANDIDATES" not in report
+
+    def test_different_base_candidate_not_blocked(self):
+        """SELL DLG does not suppress a candidate with a different base symbol."""
+        sell = self._make_sell_item("DLG")
+        buy_cand = _make_offwatch_buy("WDO.TO")
+        report = format_report(
+            [sell, buy_cand], _make_portfolio(), show_recommendations=True
+        )
+        assert "WATCHLIST CANDIDATES" in report
+        assert "WDO" in report
+
+
+class TestWatchlistTickersExcludesCandidate:
+    """WATCHLIST CANDIDATES suppresses BUY candidates already on the IBKR watchlist.
+
+    Belt-and-suspenders against conid resolution failures: if Phase 1.5 silently
+    drops a watchlist ticker (API error on first encounter), the format_report
+    _watchlist_bases filter catches it here.
+    """
+
+    def test_suffixed_watchlist_ticker_blocks_same_candidate(self):
+        """watchlist_tickers={'5434.TW'} → '5434.TW' BUY suppressed from WATCHLIST CANDIDATES."""
+        buy_cand = _make_offwatch_buy("5434.TW")
+        report = format_report(
+            [buy_cand],
+            _make_portfolio(),
+            show_recommendations=True,
+            watchlist_tickers={"5434.TW"},
+        )
+        assert "WATCHLIST CANDIDATES" not in report
+
+    def test_bare_watchlist_ticker_blocks_suffixed_candidate(self):
+        """watchlist_tickers={'5434'} (bare, failed resolution) → '5434.TW' BUY suppressed."""
+        buy_cand = _make_offwatch_buy("5434.TW")
+        report = format_report(
+            [buy_cand],
+            _make_portfolio(),
+            show_recommendations=True,
+            watchlist_tickers={"5434"},
+        )
+        assert "WATCHLIST CANDIDATES" not in report
+
+    def test_none_watchlist_does_not_suppress(self):
+        """watchlist_tickers=None → no watchlist filter applied."""
+        buy_cand = _make_offwatch_buy("5434.TW")
+        report = format_report(
+            [buy_cand],
+            _make_portfolio(),
+            show_recommendations=True,
+            watchlist_tickers=None,
+        )
+        assert "WATCHLIST CANDIDATES" in report
+        assert "5434" in report
+
+    def test_different_base_not_blocked(self):
+        """watchlist_tickers={'5434'} does not suppress a different base candidate."""
+        buy_cand = _make_offwatch_buy("WDO.TO")
+        report = format_report(
+            [buy_cand],
+            _make_portfolio(),
+            show_recommendations=True,
+            watchlist_tickers={"5434"},
+        )
+        assert "WATCHLIST CANDIDATES" in report
+        assert "WDO" in report

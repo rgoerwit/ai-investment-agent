@@ -175,6 +175,7 @@ class AnalysisRecord(BaseModel):
     conviction: str = ""
     sector: str = ""  # GICS sector (e.g. "Industrials"), if available in snapshot
     exchange: str = ""  # Exchange suffix (e.g. "HK", "T"), inferred from ticker
+    is_quick_mode: bool = False  # True if analysis was run with --quick (less thorough)
 
     @property
     def age_days(self) -> int:

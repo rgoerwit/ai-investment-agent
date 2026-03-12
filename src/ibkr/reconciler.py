@@ -223,8 +223,15 @@ def _normalize_verdict(raw: str) -> str:
 
     The PM occasionally outputs "DO NOT INITIATE" (spaces) instead of
     "DO_NOT_INITIATE".  Both forms must compare equal in Phase 1.5 checks.
+
+    It also sometimes writes "DO\nNOT INITIATE" (newline between words),
+    causing the verdict regex to capture only the first word "DO".  Map that
+    truncation back to the full form so routing and display stay correct.
     """
-    return raw.strip().replace(" ", "_").upper()
+    normed = raw.strip().replace(" ", "_").upper()
+    if normed == "DO":
+        return "DO_NOT_INITIATE"
+    return normed
 
 
 _REJECT_VERDICTS = frozenset({"DO_NOT_INITIATE", "SELL", "REJECT"})
@@ -370,6 +377,7 @@ def load_latest_analyses(results_dir: Path) -> dict[str, AnalysisRecord]:
             # Concentration metadata (sector may be absent in older snapshots)
             sector=snapshot.get("sector") or "",
             exchange=snapshot.get("exchange") or _exchange_from_ticker(ticker),
+            is_quick_mode=bool(snapshot.get("is_quick_mode", False)),
         )
 
         analyses[ticker] = record
@@ -598,6 +606,7 @@ def reconcile(
     # both "CEK" and "CEK.DE" exist in analyses (different run dates), the lookup
     # always returns the canonical suffixed form "CEK.DE".
     _alpha_base_lookup: dict[str, AnalysisRecord] = {}
+    _alpha_base_to_key: dict[str, str] = {}  # base → the analyses key that was chosen
     for _yf_t, _rec in analyses.items():
         _base = (_yf_t.rsplit(".", 1)[0] if "." in _yf_t else _yf_t).upper()
         if re.match(
@@ -606,9 +615,11 @@ def reconcile(
             if "." in _yf_t:
                 # Suffixed entry is more specific — always overwrite any bare entry
                 _alpha_base_lookup[_base] = _rec
+                _alpha_base_to_key[_base] = _yf_t
             else:
                 # Bare (no suffix) — only use if no suffixed entry exists yet
                 _alpha_base_lookup.setdefault(_base, _rec)
+                _alpha_base_to_key.setdefault(_base, _yf_t)
 
     # Pre-fetch structural macro events for staleness invalidation (fail-safe).
     _structural_events: list = []
@@ -716,6 +727,19 @@ def reconcile(
         item_ticker = Ticker.from_yf(yf_key) if yf_key != pos.ticker.yf else pos.ticker
         ticker = yf_key
         held_tickers.add(ticker)
+
+        # For bare tickers (no exchange suffix), also block every suffixed
+        # analysis key with the same base symbol so Phase 2 doesn't surface
+        # them as untracked BUY candidates.  The alpha_base_lookup above handles
+        # alphabetic tickers when an analysis exists, but numeric tickers are
+        # explicitly excluded from that lookup — this covers the gap.
+        # Example: holding bare "5434" while the analysis is "5434.TW" would
+        # otherwise produce a false WATCHLIST CANDIDATE for the held position.
+        if "." not in ticker:
+            _held_base = ticker.upper()
+            for _ak in analyses:
+                if "." in _ak and _ak.split(".")[0].upper() == _held_base:
+                    held_tickers.add(_ak)
 
         if analysis is None:
             # Position held but NO analysis exists → needs review
@@ -948,8 +972,44 @@ def reconcile(
     # After processing, all watchlist tickers are added to held_tickers so that
     # Phase 2 doesn't surface them a second time as plain BUY recommendations.
     watchlist_set = (watchlist_tickers or set()) - held_tickers
+    # Collects the analyses keys (e.g. "WDO.TO") resolved via base-symbol lookup
+    # for watchlist entries stored without a suffix (e.g. "WDO").  These must also
+    # be added to held_tickers after Phase 1.5 so Phase 2 doesn't re-surface them
+    # as untracked BUY candidates.
+    _watchlist_resolved_keys: set[str] = set()
+
     for ticker in sorted(watchlist_set):
         analysis = analyses.get(ticker)
+
+        # ALWAYS check _alpha_base_to_key for the base symbol — even when the bare
+        # analysis was found directly (e.g. analyses holds both "WDO" DNI and
+        # "WDO.TO" BUY).  Two goals:
+        # (a) Add the suffixed key to _watchlist_resolved_keys so Phase 2 doesn't
+        #     re-surface it as an untracked BUY candidate.
+        # (b) Prefer the more-specific suffixed analysis and ticker form so that
+        #     run commands (`--ticker WDO.TO`) are generated correctly.
+        _wl_base = (ticker.rsplit(".", 1)[0] if "." in ticker else ticker).upper()
+        if re.match(r"^[A-Z][A-Z0-9]*$", _wl_base):
+            _resolved_key = _alpha_base_to_key.get(_wl_base)
+            if _resolved_key and _resolved_key != ticker:
+                _watchlist_resolved_keys.add(_resolved_key)
+                _resolved_analysis = analyses.get(_resolved_key)
+                if _resolved_analysis:
+                    # Prefer the more-specific suffixed form
+                    analysis = _resolved_analysis
+                    ticker = _resolved_key  # e.g. upgrade "WDO" → "WDO.TO"
+        else:
+            # Numeric base (e.g. "5434"): _alpha_base_to_key skips numeric symbols.
+            # Manually cross-reference all suffixed analysis keys so Phase 2 doesn't
+            # re-surface them as untracked BUY candidates.
+            for _ak in analyses:
+                if "." in _ak and _ak.split(".")[0].upper() == _wl_base:
+                    _watchlist_resolved_keys.add(_ak)
+                    if analysis is None:
+                        _resolved_analysis = analyses.get(_ak)
+                        if _resolved_analysis:
+                            analysis = _resolved_analysis
+                            ticker = _ak
 
         if analysis is None:
             items.append(
@@ -1085,8 +1145,11 @@ def reconcile(
                 )
             )
 
-    # Prevent Phase 2 from re-processing watchlist tickers
+    # Prevent Phase 2 from re-processing watchlist tickers.
+    # Also block any suffixed keys resolved via base-symbol lookup (e.g. "WDO.TO"
+    # when the watchlist entry was "WDO") so Phase 2 doesn't surface them again.
     held_tickers.update(watchlist_set)
+    held_tickers.update(_watchlist_resolved_keys)
 
     # ── Phase 2: Find BUY recommendations not yet held ──
     for ticker, analysis in analyses.items():

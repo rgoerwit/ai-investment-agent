@@ -105,6 +105,18 @@ class Ticker:
         """True when the ticker has a non-empty yfinance exchange suffix."""
         return bool(self.suffix)
 
+    @property
+    def exchange_resolved(self) -> bool:
+        """True when the exchange code is explicitly in the IBKR→yfinance map.
+
+        A US ticker (SMART / NASDAQ / NYSE) resolves to suffix "" — that is a
+        *known* result, not a missing one.  This property distinguishes between
+        "intentionally no suffix (US stock)" and "suffix unknown (unrecognised
+        exchange code)".  Use it to suppress false ⚠ suffix warnings for US
+        equities.
+        """
+        return TickerFormatter.IBKR_TO_YFINANCE.get(self.exchange) is not None
+
     def __str__(self) -> str:
         return self.yf
 

@@ -485,6 +485,181 @@ class TestWatchlistVerdictRouting:
         assert items[0].is_watchlist
 
 
+class TestWatchlistSuffixDedup:
+    """Phase 1.5: bare watchlist ticker must block the suffixed form from Phase 2."""
+
+    def _make_port(self) -> PortfolioSummary:
+        p = _make_portfolio(value=100_000, cash=50_000)
+        p.exchange_weights = {}
+        p.sector_weights = {}
+        return p
+
+    def test_bare_watchlist_blocks_suffixed_when_both_analyses_exist(self):
+        """Watchlist 'WDO' + analyses {'WDO': DNI, 'WDO.TO': BUY}.
+
+        'WDO.TO' must NOT appear as a Phase 2 untracked BUY candidate.
+        The watchlist item should prefer the suffixed BUY analysis.
+        """
+        bare_dni = _make_analysis(ticker="WDO", verdict="DO_NOT_INITIATE", age_days=5)
+        suffixed_buy = _make_analysis(ticker="WDO.TO", verdict="BUY", age_days=1)
+        items = reconcile(
+            positions=[],
+            analyses={"WDO": bare_dni, "WDO.TO": suffixed_buy},
+            portfolio=self._make_port(),
+            watchlist_tickers={"WDO"},
+        )
+        # Must NOT produce a Phase 2 (non-watchlist) BUY for "WDO.TO"
+        phase2_buys = [i for i in items if i.action == "BUY" and not i.is_watchlist]
+        assert (
+            not phase2_buys
+        ), f"Unexpected Phase 2 BUY: {[i.ticker.yf for i in phase2_buys]}"
+        # Watchlist item must use the suffixed ticker and BUY verdict
+        wl = [i for i in items if i.is_watchlist]
+        assert len(wl) == 1
+        assert wl[0].action == "BUY"
+        assert wl[0].ticker.yf == "WDO.TO"
+        assert wl[0].ticker.ibkr == "WDO"
+
+    def test_bare_watchlist_blocks_suffixed_when_only_suffixed_analysis_exists(self):
+        """Watchlist 'WDO' + analyses {'WDO.TO': BUY}.
+
+        Regression: the existing fallback path must still work when only the
+        suffixed analysis exists (bare analysis absent).
+        """
+        suffixed_buy = _make_analysis(ticker="WDO.TO", verdict="BUY", age_days=1)
+        items = reconcile(
+            positions=[],
+            analyses={"WDO.TO": suffixed_buy},
+            portfolio=self._make_port(),
+            watchlist_tickers={"WDO"},
+        )
+        phase2_buys = [i for i in items if i.action == "BUY" and not i.is_watchlist]
+        assert (
+            not phase2_buys
+        ), f"Unexpected Phase 2 BUY: {[i.ticker.yf for i in phase2_buys]}"
+        wl = [i for i in items if i.is_watchlist and i.action == "BUY"]
+        assert len(wl) == 1
+        assert wl[0].ticker.yf == "WDO.TO"
+
+    def test_suffixed_watchlist_ticker_not_duplicated_in_phase2(self):
+        """Watchlist 'WDO.TO' (already suffixed) must not produce a Phase 2 BUY."""
+        buy = _make_analysis(ticker="WDO.TO", verdict="BUY", age_days=1)
+        items = reconcile(
+            positions=[],
+            analyses={"WDO.TO": buy},
+            portfolio=self._make_port(),
+            watchlist_tickers={"WDO.TO"},
+        )
+        phase2_buys = [i for i in items if i.action == "BUY" and not i.is_watchlist]
+        assert not phase2_buys
+
+    def test_numeric_bare_watchlist_blocks_suffixed_candidate(self):
+        """Watchlist '5434' (numeric base, no exchange suffix) must block '5434.TW' in Phase 2.
+
+        _alpha_base_to_key skips numeric symbols so the 'else' branch must handle this.
+        """
+        buy = _make_analysis(ticker="5434.TW", verdict="BUY", age_days=1)
+        items = reconcile(
+            positions=[],
+            analyses={"5434.TW": buy},
+            portfolio=self._make_port(),
+            watchlist_tickers={"5434"},
+        )
+        phase2_buys = [i for i in items if i.action == "BUY" and not i.is_watchlist]
+        assert not phase2_buys, f"Numeric watchlist produced false candidate: {[i.ticker.yf for i in phase2_buys]}"
+        wl = [i for i in items if i.is_watchlist and i.action == "BUY"]
+        assert len(wl) == 1
+        assert wl[0].ticker.yf == "5434.TW"
+
+    def test_numeric_bare_watchlist_does_not_block_different_exchange(self):
+        """Watchlist '5434' must NOT block a different stock like '5400.TW'."""
+        buy = _make_analysis(ticker="5400.TW", verdict="BUY", age_days=1)
+        items = reconcile(
+            positions=[],
+            analyses={"5400.TW": buy},
+            portfolio=self._make_port(),
+            watchlist_tickers={"5434"},
+        )
+        phase2_buys = [i for i in items if i.action == "BUY" and not i.is_watchlist]
+        assert len(phase2_buys) == 1
+        assert phase2_buys[0].ticker.yf == "5400.TW"
+
+
+class TestHeldPositionBlocksCandidate:
+    """Phase 1 held position must prevent the same ticker from appearing as a Phase 2 BUY candidate."""
+
+    def _make_port(self) -> PortfolioSummary:
+        p = _make_portfolio(value=100_000, cash=50_000)
+        p.exchange_weights = {}
+        p.sector_weights = {}
+        return p
+
+    def test_numeric_held_bare_blocks_suffixed_candidate(self):
+        """Held bare '5434' (IBKR numeric, no exchange resolved) must block '5434.TW' in Phase 2.
+
+        The alpha_base_lookup is explicitly skipped for numeric tickers, so the
+        bare-ticker cross-reference added after held_tickers.add() must cover this gap.
+        """
+        pos = _make_position(
+            ticker="5434", quantity=1000, currency="TWD", current_price=334.5
+        )
+        buy_analysis = _make_analysis(ticker="5434.TW", verdict="BUY", age_days=1)
+        items = reconcile(
+            positions=[pos],
+            analyses={"5434.TW": buy_analysis},
+            portfolio=self._make_port(),
+        )
+        phase2_buys = [i for i in items if i.action == "BUY" and not i.is_watchlist]
+        assert not phase2_buys, f"Held position produced false candidate: {[i.ticker.yf for i in phase2_buys]}"
+
+    def test_alpha_held_bare_blocks_suffixed_candidate(self):
+        """Held bare 'WDO' (alphabetic, no exchange resolved) must block 'WDO.TO' in Phase 2.
+
+        alpha_base_lookup handles this when the analysis exists, but the bare-ticker
+        cross-reference provides a safety net when the lookup misses.
+        """
+        pos = _make_position(
+            ticker="WDO", quantity=100, currency="CAD", current_price=22.95
+        )
+        buy_analysis = _make_analysis(ticker="WDO.TO", verdict="BUY", age_days=1)
+        items = reconcile(
+            positions=[pos],
+            analyses={"WDO.TO": buy_analysis},
+            portfolio=self._make_port(),
+        )
+        phase2_buys = [i for i in items if i.action == "BUY" and not i.is_watchlist]
+        assert not phase2_buys, f"Held position produced false candidate: {[i.ticker.yf for i in phase2_buys]}"
+
+    def test_suffixed_held_still_blocks_same_key(self):
+        """Held '5434.TW' (suffix already resolved) blocks the same analysis normally."""
+        pos = _make_position(
+            ticker="5434.TW", quantity=1000, currency="TWD", current_price=334.5
+        )
+        buy_analysis = _make_analysis(ticker="5434.TW", verdict="BUY", age_days=1)
+        items = reconcile(
+            positions=[pos],
+            analyses={"5434.TW": buy_analysis},
+            portfolio=self._make_port(),
+        )
+        phase2_buys = [i for i in items if i.action == "BUY" and not i.is_watchlist]
+        assert not phase2_buys
+
+    def test_different_base_candidate_not_blocked(self):
+        """Holding '5434' does not block a candidate with a different base (e.g. 'WDO.TO')."""
+        pos = _make_position(
+            ticker="5434", quantity=1000, currency="TWD", current_price=334.5
+        )
+        buy_analysis = _make_analysis(ticker="WDO.TO", verdict="BUY", age_days=1)
+        items = reconcile(
+            positions=[pos],
+            analyses={"WDO.TO": buy_analysis},
+            portfolio=self._make_port(),
+        )
+        phase2_buys = [i for i in items if i.action == "BUY" and not i.is_watchlist]
+        assert len(phase2_buys) == 1
+        assert phase2_buys[0].ticker.yf == "WDO.TO"
+
+
 # ── Analysis Loading Tests ──
 
 
@@ -587,6 +762,36 @@ class TestLoadLatestAnalyses:
         (tmp_path / "0005_HK_2026-02-20_analysis.json").write_text(json.dumps(data))
         result = load_latest_analyses(tmp_path)
         assert result["0005.HK"].exchange == "HK"
+
+    def test_is_quick_mode_loaded_from_snapshot(self, tmp_path):
+        """is_quick_mode is extracted from prediction_snapshot when present."""
+        data = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-03-01",
+                "verdict": "BUY",
+                "is_quick_mode": True,
+            },
+            "investment_analysis": {},
+        }
+        (tmp_path / "7203_T_2026-03-01_analysis.json").write_text(json.dumps(data))
+        result = load_latest_analyses(tmp_path)
+        assert result["7203.T"].is_quick_mode is True
+
+    def test_is_quick_mode_defaults_false_when_absent(self, tmp_path):
+        """is_quick_mode defaults to False for analyses predating the field."""
+        data = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-03-01",
+                "verdict": "BUY",
+                # no is_quick_mode field — older snapshot
+            },
+            "investment_analysis": {},
+        }
+        (tmp_path / "7203_T_2026-03-01_analysis.json").write_text(json.dumps(data))
+        result = load_latest_analyses(tmp_path)
+        assert result["7203.T"].is_quick_mode is False
 
 
 # ── Concentration Tests ──

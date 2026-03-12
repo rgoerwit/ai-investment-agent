@@ -927,17 +927,13 @@ def _compute_dip_score(item: ReconciliationItem) -> float:
 
 
 def _display_ticker(item: ReconciliationItem) -> str:
-    """Return the display symbol for a reconciliation item.
+    """Return IBKR-format symbol for all user-visible tickers.
 
-    Held positions (ibkr_position set) show the IBKR native symbol — what
-    traders see in the IBKR UI (e.g. "7203", "MEGP").
-
-    Watchlist / new-buy items have no ibkr_position, so we show the yfinance
-    ticker which already contains the exchange suffix and is unambiguous.
+    IBKR format (no exchange suffix, e.g. "WDO", "7203", "MEGP") is what the
+    user sees and types in the IBKR UI.  Run commands use _run_ticker_for()
+    which returns yFinance format with exchange suffix (e.g. "WDO.TO").
     """
-    if item.ibkr_position:
-        return item.ticker.ibkr
-    return item.ticker.yf
+    return item.ticker.ibkr
 
 
 def _run_ticker_for(item: ReconciliationItem) -> str:
@@ -964,6 +960,7 @@ def format_report(
     live_orders: list[dict] | None = None,
     watchlist_name: str | None = None,
     watchlist_total: int | None = None,
+    watchlist_tickers: set[str] | None = None,
 ) -> str:
     """Format reconciliation results as sectioned human-readable text."""
     lines: list[str] = []
@@ -1024,6 +1021,11 @@ def format_report(
         i
         for i in items
         if i.action == "BUY" and i.ibkr_position is None and i.is_watchlist
+    ]
+    buys_offwatch = [
+        i
+        for i in items
+        if i.action == "BUY" and i.ibkr_position is None and not i.is_watchlist
     ]
     holds_real = [i for i in items if i.action == "HOLD" and not i.is_watchlist]
     holds_watch = [i for i in items if i.action == "HOLD" and i.is_watchlist]
@@ -1111,7 +1113,7 @@ def format_report(
         """Render the DIP WATCH section for macro-dip candidates."""
         dw = "═" * 54
         lines.append(dw)
-        lines.append("  DIP WATCH  (buy these after sale proceeds settle)")
+        lines.append("  DIP WATCH  (existing positions — consider adding)")
         lines.append(dw)
         lines.append("")
         lines.append("  Ranked by fundamental quality × dip depth × risk/reward:")
@@ -1275,6 +1277,31 @@ def format_report(
     # ── Live-order lookup ─────────────────────────────────────────────────────
     _live_orders: list[dict] = live_orders or []
 
+    def _candidate_conviction(item: ReconciliationItem) -> str:
+        """Return normalised conviction string ('high', 'medium', 'low', '')."""
+        a = item.analysis
+        if not a:
+            return ""
+        raw = a.conviction or (a.trade_block.conviction if a.trade_block else "") or ""
+        return raw.strip().lower()
+
+    def _candidate_score(item: ReconciliationItem) -> float:
+        """Composite score for ranking watchlist candidates: health + growth (0–200)."""
+        a = item.analysis
+        if not a:
+            return 0.0
+        return (a.health_adj or 0.0) + (a.growth_adj or 0.0)
+
+    def _buy_pos_tag(item: ReconciliationItem) -> str:
+        """Short inline tag for BUY/ADD lines in the action plan."""
+        if item.action == "ADD":
+            pos = item.ibkr_position
+            qty_str = f"{pos.quantity:,.0f} sh" if (pos and pos.quantity) else "held"
+            return f"[up position — {qty_str}]"
+        if item.is_watchlist:
+            return "[watchlist — new position]"
+        return "[untracked — new position]"
+
     def _find_live_order(item: ReconciliationItem) -> tuple[dict, str] | None:
         """Return (order_dict, order_side) for the first live order matching this item, or None.
 
@@ -1413,8 +1440,38 @@ def format_report(
             if _mstore.available:
                 _ev = (_mstore.get_active_events() or [None])[0]
                 if _ev and _ev.news_headline != "unknown":
-                    _headline_line = f"Characterized: {_ev.news_headline[:62]}"
-                    _banner_lines.insert(-1, f"║  {_headline_line:<{_W}}║")
+                    import re as _re
+                    import textwrap as _tw
+
+                    _prefix = "Characterized: "
+                    _headline = _ev.news_headline
+                    _wrap_kwargs = {
+                        "width": _W,
+                        "initial_indent": _prefix,
+                        "subsequent_indent": " " * len(_prefix),
+                    }
+                    _wrapped_all = _tw.wrap(_headline, **_wrap_kwargs)
+                    if len(_wrapped_all) <= 2:
+                        # Fits cleanly — show as-is
+                        _shown = _wrapped_all
+                    else:
+                        # Too long — find the last sentence boundary that fits in ≤ 2 lines
+                        _boundaries = [
+                            _m.end() for _m in _re.finditer(r"[.!?](?:\s|$)", _headline)
+                        ]
+                        _chosen = None
+                        for _pos in reversed(_boundaries):
+                            _candidate = _headline[:_pos].rstrip()
+                            if len(_tw.wrap(_candidate, **_wrap_kwargs)) <= 2:
+                                _chosen = _candidate
+                                break
+                        if _chosen:
+                            _shown = _tw.wrap(_chosen, **_wrap_kwargs)
+                        else:
+                            # No complete sentence fits in 2 lines — show first line only
+                            _shown = _wrapped_all[:1]
+                    for _wline in _shown:
+                        _banner_lines.insert(-1, f"║  {_wline:<{_W}}║")
         except Exception:
             pass
         for bl in _banner_lines:
@@ -1524,9 +1581,18 @@ def format_report(
         for item in adds:
             ccy = _item_currency(item)
             lines.append(f"{_order_line(item, ccy)}  {_norm_reason(item.reason)}")
+            pos = item.ibkr_position
+            if pos and pos.quantity:
+                sym = _ccy(ccy)
+                avg_str = (
+                    f" @ avg {sym}{pos.avg_cost_local:,.2f}"
+                    if pos.avg_cost_local
+                    else ""
+                )
+                lines.append(
+                    f"             [upping position — currently hold {pos.quantity:,.0f} shares{avg_str}]"
+                )
             cl = _cost_line(item)
-            if cl:
-                lines.append(cl)
             note = _order_note(item)
             if note:
                 lines.append(note)
@@ -1554,14 +1620,118 @@ def format_report(
                 if size_pct and nlv > 0:
                     target_usd = nlv * size_pct / 100
                     detail_parts.append(f"target {size_pct:.1f}% (${target_usd:,.0f})")
-                if detail_parts:
-                    lines.append(f"             {'  ·  '.join(detail_parts)}")
+                detail_parts.append("[watchlist — new position]")
+                if a.is_quick_mode:
+                    detail_parts.append(
+                        "⚠ quick mode — re-run full analysis before buying"
+                    )
+                lines.append(f"             {'  ·  '.join(detail_parts)}")
             cl = _cost_line(item)
             if cl:
                 lines.append(cl)
             note = _order_note(item)
             if note:
                 lines.append(note)
+            lines.append("")
+
+    # ── WATCHLIST CANDIDATES ──────────────────────────────────────────────────
+    # Phase 2 BUYs from past analysis runs not yet on the watchlist.
+    # Must be reviewed and added to watchlist before executing — not actionable orders.
+    #
+    # Exclude candidates whose base symbol already appears in an actionable
+    # context — SELL/REMOVE (contradictory) or any held position (already owned).
+    # Held-position check is belt-and-suspenders: the reconciler's Phase 1 should
+    # block these in Phase 2, but ticker-format mismatches (bare "5434" position
+    # vs "5434.TW" analysis) can still slip through.
+    _action_bases: frozenset[str] = frozenset(
+        i.ticker.yf.split(".")[0].upper()
+        for i in removes + stop_sells + hard_sells + soft_sells
+    )
+    _held_bases: frozenset[str] = frozenset(
+        i.ticker.yf.split(".")[0].upper() for i in items if i.ibkr_position is not None
+    )
+    # Belt-and-suspenders: exclude candidates whose base symbol is already on
+    # the IBKR watchlist.  The reconciler's Phase 1.5 should have converted
+    # these to is_watchlist=True items already, but if conid resolution fails
+    # (API error on first encounter) the ticker can silently fall through as
+    # a Phase 2 BUY.  Filtering here prevents that leakage.
+    _watchlist_bases: frozenset[str] = frozenset(
+        t.split(".")[0].upper() for t in (watchlist_tickers or set())
+    )
+    _cands_deduped = [
+        i
+        for i in buys_offwatch
+        if i.ticker.yf.split(".")[0].upper()
+        not in (_action_bases | _held_bases | _watchlist_bases)
+    ]
+    # Split candidates: exclude any that already have a live BUY order so the
+    # ":10" slice is filled with real candidates, not orders already placed.
+    _cands_in_flight: list[ReconciliationItem] = []
+    _cands_actionable: list[ReconciliationItem] = []
+    for _c in _cands_deduped:
+        _clo = _find_live_order(_c)
+        if _clo and _clo[1] == "BUY":
+            _cands_in_flight.append(_c)
+        else:
+            _cands_actionable.append(_c)
+
+    if _cands_actionable or _cands_in_flight:
+        _CONVICTION_RANK = {"high": 0, "medium": 1, "low": 2}
+        _top_candidates = sorted(
+            _cands_actionable,
+            key=lambda i: (
+                _CONVICTION_RANK.get(_candidate_conviction(i), 3),
+                -_candidate_score(i),
+            ),
+        )[:10]
+        _hidden = len(_cands_actionable) - len(_top_candidates)
+        _cand_subtitle = (
+            "analysis says BUY — inspect and add to watchlist before acting"
+        )
+        if _hidden:
+            _cand_subtitle += f"  (showing top 10 of {len(_cands_actionable)})"
+        _section("WATCHLIST CANDIDATES", _cand_subtitle)
+        for item in _top_candidates:
+            ccy = _item_currency(item)
+            # Append "(yf_ticker)" when the exchange suffix disambiguates the IBKR
+            # base symbol — e.g. "DLG (DLG.MI)" vs a bare US ticker "AAPL".
+            _yf_hint = f" ({item.ticker.yf})" if "." in item.ticker.yf else ""
+            _pfx = _urgency_prefix(item)
+            _act = ACTION_SYMBOLS.get(item.action, item.action)
+            _sym = f"{_display_ticker(item)}{_yf_hint}"
+            _cand_parts = [f"{_pfx}{_act:<6}  {_sym}"]
+            if show_recommendations:
+                if item.suggested_price:
+                    _cand_parts.append(f"  @ {_ccy(ccy)}{item.suggested_price:,.2f}")
+                if item.suggested_order_type:
+                    _cand_parts.append(f"  {item.suggested_order_type}")
+                    if not item.suggested_price:
+                        _cand_parts.append("  (no entry price — re-run analysis)")
+            lines.append("".join(_cand_parts))
+            a = item.analysis
+            if a:
+                conviction = a.conviction or a.trade_block.conviction or "Unspecified"
+                size_pct = a.trade_block.size_pct or a.position_size or 0
+                offwatch_parts = [f"{conviction} conviction"]
+                if size_pct and nlv > 0:
+                    target_usd = nlv * size_pct / 100
+                    offwatch_parts.append(
+                        f"target {size_pct:.1f}% (${target_usd:,.0f})"
+                    )
+                offwatch_parts.append("[not on watchlist — new position]")
+                if a.is_quick_mode:
+                    offwatch_parts.append("⚠ quick mode — re-run full before adding")
+                lines.append(f"             {'  ·  '.join(offwatch_parts)}")
+            cl = _cost_line(item)
+            if cl:
+                lines.append(cl)
+            lines.append("")
+        if _cands_in_flight:
+            _if_syms = ", ".join(_display_ticker(i) for i in _cands_in_flight)
+            lines.append(
+                f"  ✓ {len(_cands_in_flight)} order{'s' if len(_cands_in_flight) > 1 else ''}"
+                f" already in flight ({_if_syms}) — verify in IBKR"
+            )
             lines.append("")
 
     # ── HOLDS ────────────────────────────────────────────────────────────────
@@ -1598,12 +1768,8 @@ def format_report(
             )
 
             row_parts = [p for p in [weight_str, price_str, stop_str, t1_str] if p]
-            # Use position's ticker for suffix check — it carries accurate currency info
-            # from the IBKR API, making currency-fallback suffix resolution reliable.
-            _sfx_src = item.ibkr_position.ticker if item.ibkr_position else item.ticker
-            sfx_warn = "  ⚠ no exchange suffix" if not _sfx_src.has_suffix else ""
             lines.append(
-                f"  {'HOLD':<6}  {_display_ticker(item):<12}  {'  '.join(row_parts)}{sfx_warn}"
+                f"  {'HOLD':<6}  {_display_ticker(item):<12}  {'  '.join(row_parts)}"
             )
 
         lines.append("")
@@ -1620,10 +1786,7 @@ def format_report(
                 if a
                 else "no analysis"
             )
-            sfx_warn = "  ⚠ no exchange suffix" if not item.ticker.has_suffix else ""
-            lines.append(
-                f"  {'WATCH':<6}  {_display_ticker(item):<12}  {verdict_str}{sfx_warn}"
-            )
+            lines.append(f"  {'WATCH':<6}  {_display_ticker(item):<12}  {verdict_str}")
         lines.append("")
 
     # ── REVIEWS ───────────────────────────────────────────────────────────────
@@ -1633,7 +1796,11 @@ def format_report(
             reason_short = item.reason.replace("Stale analysis: ", "").replace(
                 "Position held but no evaluator analysis found", "no analysis found"
             )
-            run_cmd = f"python -m src.main --ticker {_run_ticker_for(item)}"
+            _run_t = _run_ticker_for(item)
+            _sfx_warn = (
+                "  ← ⚠ exchange unknown, verify suffix" if "." not in _run_t else ""
+            )
+            run_cmd = f"python -m src.main --ticker {_run_t}{_sfx_warn}"
             lines.append(
                 f"  {'REVIEW':<6}  {_display_ticker(item):<12}  {reason_short}  →  {run_cmd}"
             )
@@ -1681,7 +1848,11 @@ def format_report(
         _section("CASH SUMMARY")
 
         buy_cost_items = [
-            i for i in items if i.action in ("ADD", "BUY") and i.cash_impact_usd < 0
+            i
+            for i in items
+            if i.action in ("ADD", "BUY")
+            and i.cash_impact_usd < 0
+            and (i.action != "BUY" or i.is_watchlist)  # exclude unvetted candidates
         ]
         sell_proceed_items = [
             i for i in items if i.action in ("SELL", "TRIM") and i.cash_impact_usd > 0
@@ -1750,7 +1921,13 @@ def format_report(
     today_str = date.today().isoformat()
     action_today = [i for i in items if i.action in ("SELL", "TRIM")]
     funded_today = [
-        i for i in items if i.action in ("ADD", "BUY") and i.cash_impact_usd < 0
+        i
+        for i in items
+        if i.action in ("ADD", "BUY")
+        and i.cash_impact_usd < 0
+        and (
+            i.action != "BUY" or i.is_watchlist
+        )  # unvetted BUYs go to WATCHLIST CANDIDATES, not here
     ]
     # Sell proceeds grouped by settlement date
     settle_groups: dict[str, float] = {}
@@ -1782,10 +1959,18 @@ def format_report(
                 except (ValueError, TypeError):
                     pass
 
-    if action_today or funded_today or settle_groups or upcoming_reviews:
+    if (
+        action_today
+        or funded_today
+        or dip_candidates
+        or settle_groups
+        or upcoming_reviews
+        or _cands_deduped
+        or removes
+    ):
         _section(
             "ACTION PLAN",
-            "execution orders · when proceeds clear · re-analysis deadlines",
+            "execution orders · watchlist moves · when proceeds clear · re-analysis deadlines",
         )
 
         if action_today or funded_today:
@@ -1830,7 +2015,12 @@ def format_report(
                     lines.append(
                         f"    → {i.action}  {_display_ticker(i)}{qty_str}{price_str}  {i.suggested_order_type or 'LMT'}"
                     )
+            _buys_in_flight: list[str] = []  # display tickers already placed
             for i in funded_today:
+                existing = _find_live_order(i)
+                if existing and existing[1] == "BUY":
+                    _buys_in_flight.append(_display_ticker(i))
+                    continue  # already placed — exclude from action list
                 qty_str = (
                     f"  {abs(i.suggested_quantity)} shares"
                     if i.suggested_quantity
@@ -1844,34 +2034,87 @@ def format_report(
                 cost_str = (
                     f"  (~${abs(i.cash_impact_usd):,.0f})" if i.cash_impact_usd else ""
                 )
-                existing = _find_live_order(i)
-                if existing and existing[1] == "BUY":
-                    _order_qty_raw2 = existing[0].get("remainingSize") or existing[
-                        0
-                    ].get("totalSize")
-                    try:
-                        _order_qty2: int | None = int(_order_qty_raw2)
-                    except (TypeError, ValueError):
-                        _order_qty2 = None
-                    if (
-                        _order_qty2 is not None
-                        and i.suggested_quantity is not None
-                        and _order_qty2 < i.suggested_quantity
-                    ):
-                        _need2 = i.suggested_quantity - _order_qty2
-                        lines.append(
-                            f"    → {i.action}  {_display_ticker(i)}  {_need2} more shares{price_str}{cost_str}  — use already-settled cash"
-                            f"  ({_order_qty2} of {i.suggested_quantity} already submitted)"
-                        )
-                    else:
-                        lines.append(
-                            f"    ✓ {i.action}  {_display_ticker(i)}{qty_str}{price_str}{cost_str}  — use already-settled cash"
-                            f"  (order already submitted — verify in IBKR)"
-                        )
-                else:
-                    lines.append(
-                        f"    → {i.action}  {_display_ticker(i)}{qty_str}{price_str}{cost_str}  — use already-settled cash"
-                    )
+                lines.append(
+                    f"    → {i.action}  {_display_ticker(i)}{qty_str}{price_str}{cost_str}  {_buy_pos_tag(i)}  — use already-settled cash"
+                )
+            if _buys_in_flight:
+                lines.append(
+                    f"    ✓ {len(_buys_in_flight)} already in flight"
+                    f" ({', '.join(_buys_in_flight)}) — verify in IBKR"
+                )
+            lines.append("")
+
+        if dip_candidates:
+            lines.append(f"  DIP OPPORTUNITIES ({today_str}):")
+            _dips_in_flight: list[str] = []
+            for _di in dip_candidates:
+                _dexisting = _find_live_order(_di)
+                if _dexisting and _dexisting[1] == "BUY":
+                    _dips_in_flight.append(_display_ticker(_di))
+                    continue  # already placed — exclude from action list
+                _da = _di.analysis
+                _dp = _di.ibkr_position
+                _dscore = _compute_dip_score(_di)
+                _dstars = (
+                    "★★★" if _dscore >= 75 else ("★★ " if _dscore >= 60 else "★  ")
+                )
+                _dqty = (
+                    f"{_dp.quantity:,.0f} sh held" if (_dp and _dp.quantity) else "held"
+                )
+                _dh = (
+                    f"{_da.health_adj:.0f}"
+                    if (_da and _da.health_adj is not None)
+                    else "?"
+                )
+                _dg = (
+                    f"{_da.growth_adj:.0f}"
+                    if (_da and _da.growth_adj is not None)
+                    else "?"
+                )
+                lines.append(
+                    f"    → DIP ADD  {_display_ticker(_di)}"
+                    f"  {_dstars}  score {_dscore:.0f}"
+                    f"  H:{_dh}% G:{_dg}%"
+                    f"  [{_dqty}]"
+                    f"  →  poetry run python -m src.main --ticker {_run_ticker_for(_di)}"
+                )
+            if _dips_in_flight:
+                lines.append(
+                    f"    ✓ {len(_dips_in_flight)} already in flight"
+                    f" ({', '.join(_dips_in_flight)}) — verify in IBKR"
+                )
+            lines.append("")
+
+        strong_candidates = sorted(
+            [i for i in _cands_actionable if _candidate_conviction(i) == "high"],
+            key=_candidate_score,
+            reverse=True,
+        )[:5]
+        if strong_candidates or removes:
+            lines.append(f"  WATCHLIST MOVES ({today_str}):")
+            for i in strong_candidates:
+                _quick_note = (
+                    "  ⚠ quick — run full first"
+                    if (i.analysis and i.analysis.is_quick_mode)
+                    else ""
+                )
+                lines.append(
+                    f"    → ADDED TO WATCHLIST  {_display_ticker(i)}"
+                    f"  — analysis {i.analysis.analysis_date if i.analysis else '?'} says BUY{_quick_note}"
+                    f"  →  poetry run python -m src.main --ticker {_run_ticker_for(i)}"
+                )
+            skipped = len(_cands_actionable) - len(strong_candidates)
+            if skipped > 0:
+                lines.append(
+                    f"    ({skipped} lower-conviction candidate{'s' if skipped > 1 else ''}"
+                    f" in WATCHLIST CANDIDATES above — review before adding)"
+                )
+            for i in removes:
+                verdict = i.analysis.verdict if i.analysis else "DO_NOT_INITIATE"
+                lines.append(
+                    f"    → REMOVE FROM WATCHLIST  {_display_ticker(i)}"
+                    f"  — verdict: {verdict}"
+                )
             lines.append("")
 
         for settle_date, proceeds in sorted(settle_groups.items()):
@@ -1883,7 +2126,7 @@ def format_report(
                 top_tickers = "  ".join(_display_ticker(i) for i in dip_candidates[:3])
                 lines.append(
                     f"    → Top dip candidates for deployment: {top_tickers}"
-                    "  (see DIP WATCH above)"
+                    "  (see DIP OPPORTUNITIES above)"
                 )
             lines.append("    → Run before placing any additional buys:")
             lines.append(
@@ -1896,9 +2139,12 @@ def format_report(
             for disp_sym, yf_t, expires, days_left in sorted(
                 upcoming_reviews, key=lambda x: x[3]
             ):
+                _sfx_warn = (
+                    "  ← ⚠ exchange unknown, verify suffix" if "." not in yf_t else ""
+                )
                 lines.append(
                     f"    → {disp_sym:<14} expires {expires}  ({days_left}d remaining)"
-                    f"  →  poetry run python -m src.main --ticker {yf_t}"
+                    f"  →  poetry run python -m src.main --ticker {yf_t}{_sfx_warn}"
                 )
             lines.append("")
 
@@ -1913,15 +2159,26 @@ def format_report(
             and not item.is_watchlist
             and item.ibkr_position is None
         ):
-            # Phase 2 non-watchlist BUYs: computed but never shown in output sections
-            # (NEW BUYS only shows is_watchlist items).  Omit from displayed summary so
-            # the count matches what is visible on-screen.
+            # Phase 2 non-watchlist BUYs: counted only if not suppressed by a
+            # same-base-symbol REMOVE or SELL (those are excluded from _cands_deduped).
             pass
         else:
             action_counts[item.action] = action_counts.get(item.action, 0) + 1
+    if _cands_deduped:
+        action_counts["CANDIDATES"] = len(_cands_deduped)
     if macro_watch_count:
         action_counts["MACRO_WATCH"] = macro_watch_count
-    order = ["SELL", "REMOVE", "TRIM", "ADD", "BUY", "HOLD", "REVIEW", "MACRO_WATCH"]
+    order = [
+        "SELL",
+        "REMOVE",
+        "TRIM",
+        "ADD",
+        "BUY",
+        "CANDIDATES",
+        "HOLD",
+        "REVIEW",
+        "MACRO_WATCH",
+    ]
     summary_parts = [f"{action_counts[a]} {a}" for a in order if a in action_counts]
     lines.append(f"  Summary:  {'  ·  '.join(summary_parts) or 'empty'}")
 
@@ -2272,6 +2529,7 @@ def main() -> None:
             live_orders=_live_orders_data,
             watchlist_name=_loaded_watchlist_name,
             watchlist_total=_loaded_watchlist_total,
+            watchlist_tickers=watchlist_tickers if watchlist_tickers else None,
         )
 
     if args.output:
