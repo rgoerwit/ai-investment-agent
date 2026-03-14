@@ -1,9 +1,14 @@
 """Tests for portfolio-manager progress output while loading saved analyses."""
 
 import json
+import logging
 from argparse import Namespace
 
-from scripts.portfolio_manager import _load_analyses_with_progress, _load_ibkr_context
+from scripts.portfolio_manager import (
+    _configure_external_loggers,
+    _load_analyses_with_progress,
+    _load_ibkr_context,
+)
 from src.ibkr.models import PortfolioSummary
 
 
@@ -102,3 +107,25 @@ def test_load_ibkr_context_emits_phase_status_and_returns_live_state(capsys):
     assert loaded_watchlist_name == "watchlist-2026"
     assert loaded_watchlist_total == 2
     assert live_orders == [{"ticker": "7203", "side": "BUY"}]
+
+
+def test_configure_external_loggers_suppresses_transport_noise_in_normal_mode():
+    """Normal mode keeps noisy third-party transport loggers off the console."""
+    _configure_external_loggers(debug=False)
+
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("src.llms").level == logging.WARNING
+    assert logging.getLogger("ibind.ibkr_client").level == logging.WARNING
+    assert logging.getLogger("ibind_fh").level == logging.WARNING
+    assert logging.getLogger("ibind_fh").propagate is False
+
+
+def test_configure_external_loggers_restores_debug_visibility():
+    """Debug mode re-enables noisy loggers for transport-level diagnosis."""
+    _configure_external_loggers(debug=True)
+
+    assert logging.getLogger("httpx").level == logging.DEBUG
+    assert logging.getLogger("src.llms").level == logging.DEBUG
+    assert logging.getLogger("ibind.ibkr_client").level == logging.DEBUG
+    assert logging.getLogger("ibind_fh").level == logging.DEBUG
+    assert logging.getLogger("ibind_fh").propagate is False

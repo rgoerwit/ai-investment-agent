@@ -12,7 +12,7 @@ from src import toolkit
 @pytest.fixture
 def mock_fetcher():
     """Mock the singleton market_data_fetcher."""
-    with patch("src.toolkit.market_data_fetcher") as mock:
+    with patch("src.tools.market.market_data_fetcher") as mock:
         yield mock
 
 
@@ -24,7 +24,7 @@ def mock_tavily():
     which wraps the tavily_tool with timeout protection. We mock this wrapper directly.
     """
     with patch(
-        "src.toolkit._tavily_search_with_timeout", new_callable=AsyncMock
+        "src.tools.shared._tavily_search_with_timeout", new_callable=AsyncMock
     ) as mock:
         yield mock
 
@@ -34,7 +34,7 @@ def mock_stocktwits():
     """
     Mock stocktwits_api.
     """
-    with patch("src.toolkit.stocktwits_api") as mock:
+    with patch("src.tools.news.stocktwits_api") as mock:
         # Setup get_sentiment to be awaitable (AsyncMock)
         mock.get_sentiment = AsyncMock()
         yield mock

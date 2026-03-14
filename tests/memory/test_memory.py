@@ -18,6 +18,7 @@ Focus:
 - Statistics (per-instance)
 """
 
+import socket
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -104,6 +105,33 @@ class TestFinancialSituationMemoryInitialization:
                     assert memory.available
                     assert memory.embeddings is not None
                     assert memory.situation_collection is not None
+
+    def test_init_with_embedding_healthcheck_failure_is_degraded(self):
+        """Memory should not report available when embedding healthcheck fails."""
+        with patch("src.memory.config") as mock_config:
+            mock_config.get_google_api_key.return_value = "test-key"
+
+            with patch(
+                "src.memory.GoogleGenerativeAIEmbeddings"
+            ) as mock_embeddings_class:
+                mock_embeddings = MagicMock()
+                mock_embeddings.embed_query.side_effect = socket.gaierror(
+                    8, "nodename nor servname provided, or not known"
+                )
+                mock_embeddings_class.return_value = mock_embeddings
+
+                with patch("chromadb.PersistentClient") as mock_client_class:
+                    mock_client = MagicMock()
+                    mock_collection = MagicMock()
+                    mock_collection.count.return_value = 0
+                    mock_client.get_or_create_collection.return_value = mock_collection
+                    mock_client_class.return_value = mock_client
+
+                    memory = FinancialSituationMemory("test_memory")
+
+                    assert memory.chroma_available is True
+                    assert memory.embeddings_available is False
+                    assert memory.available is False
 
 
 class TestSituationStorage:

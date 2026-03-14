@@ -8,6 +8,7 @@ import argparse
 import asyncio
 import json
 import logging
+import socket
 import sys
 import uuid
 from datetime import datetime
@@ -22,6 +23,7 @@ from rich.table import Table
 # Import config FIRST to set telemetry/system env vars before any library imports
 from src.config import config, validate_environment_variables
 from src.report_generator import QuietModeReporter
+from src.runtime_diagnostics import build_analysis_validity, is_publishable_analysis
 
 # IMPORTANT: Don't import get_tracker here - it instantiates the singleton immediately
 # Import it lazily in functions that need it, after quiet mode is set
@@ -334,6 +336,41 @@ def resolve_article_path(args, ticker: str) -> Path | None:
             return config.results_dir / f"{safe_ticker}_article.md"
     else:
         return None
+
+
+def run_provider_preflight() -> None:
+    """Log a concise provider/network preflight in verbose mode."""
+    provider_hosts = [
+        ("google_gemini", "generativelanguage.googleapis.com"),
+        ("anthropic", "api.anthropic.com"),
+        ("openai", "api.openai.com"),
+        ("yahoo", "guce.yahoo.com"),
+    ]
+    for provider, host in provider_hosts:
+        try:
+            socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+            logger.info("provider_preflight", provider=provider, host=host, dns="ok")
+        except Exception as exc:
+            logger.warning(
+                "provider_preflight",
+                provider=provider,
+                host=host,
+                dns="failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+
+
+def configure_tool_audit_logging(enabled: bool) -> None:
+    """Install or remove verbose tool audit hooks for this CLI run."""
+    from src.tooling.audit import LoggingToolAuditHook
+    from src.tooling.runtime import TOOL_SERVICE
+
+    if enabled:
+        TOOL_SERVICE.set_hooks([LoggingToolAuditHook()])
+        logger.info("tool_audit_logging_enabled")
+    else:
+        TOOL_SERVICE.clear_hooks()
 
 
 async def handle_article_generation(
@@ -765,6 +802,8 @@ def save_results_to_file(result: dict, ticker: str, quick_mode: bool = False) ->
             "decision": result.get("final_trade_decision", ""),
             "processed_signal": None,
         },
+        "analysis_validity": result.get("analysis_validity", {}),
+        "artifact_statuses": result.get("artifact_statuses", {}),
     }
 
     # Extract prediction snapshot for future retrospective evaluation (zero LLM cost)
@@ -965,6 +1004,7 @@ async def run_analysis(
             final_trade_decision="",
             tools_called={},
             prompts_used={},
+            artifact_statuses={},
             red_flags=[],
             pre_screening_result="",
             legal_report="",
@@ -1019,6 +1059,9 @@ async def run_analysis(
 
         tracker = get_tracker()
         tracker.print_summary()
+
+        if isinstance(result, dict):
+            result["analysis_validity"] = build_analysis_validity(result)
 
         return result
 
@@ -1124,6 +1167,10 @@ async def main():
             logging.getLogger().setLevel(logging.DEBUG)
             for name in logging.root.manager.loggerDict:
                 logging.getLogger(name).setLevel(logging.DEBUG)
+            configure_tool_audit_logging(True)
+            run_provider_preflight()
+        else:
+            configure_tool_audit_logging(False)
 
         try:
             validate_environment_variables()
@@ -1327,57 +1374,68 @@ async def main():
 
             # Generate article if --article flag is set
             if args.article:
-                # Warn if article will lack images (stdout mode disables charts)
-                # Use stderr so warning is visible even in quiet mode
-                if args.no_charts and not output_file and not args.imagedir:
-                    print(
-                        "Warning: Article generated without images (stdout mode).",
-                        file=sys.stderr,
+                if not is_publishable_analysis(result):
+                    logger.warning(
+                        "article_generation_skipped_invalid_analysis",
+                        ticker=args.ticker,
+                        analysis_validity=result.get("analysis_validity", {}),
                     )
-                # Get trade_date from result or current date
-                trade_date = result.get("trade_date") or datetime.now().strftime(
-                    "%Y-%m-%d"
-                )
-
-                # Generate report text for article if not already done
-                if not use_markdown:
-                    # Need to generate markdown report for article
-                    if company_name is None:
-                        try:
-                            import yfinance as yf
-
-                            ticker_obj = yf.Ticker(args.ticker)
-                            info = ticker_obj.info
-                            company_name = (
-                                info.get("longName")
-                                or info.get("shortName")
-                                or args.ticker
-                            )
-                        except Exception:
-                            company_name = args.ticker
-
-                    reporter = QuietModeReporter(
-                        args.ticker,
-                        company_name,
-                        quick_mode=args.quick,
-                        chart_format="svg" if args.svg else "png",
-                        transparent_charts=args.transparent,
-                        skip_charts=args.no_charts,
-                        image_dir=image_dir,
-                        report_dir=output_dir,
-                        report_stem=Path(args.output).stem if args.output else None,
+                    if not args.quiet and not args.brief:
+                        console.print(
+                            "[yellow]Skipping article generation because the analysis is incomplete or invalid.[/yellow]"
+                        )
+                else:
+                    # Warn if article will lack images (stdout mode disables charts)
+                    # Use stderr so warning is visible even in quiet mode
+                    if args.no_charts and not output_file and not args.imagedir:
+                        print(
+                            "Warning: Article generated without images (stdout mode).",
+                            file=sys.stderr,
+                        )
+                    # Get trade_date from result or current date
+                    trade_date = result.get("trade_date") or datetime.now().strftime(
+                        "%Y-%m-%d"
                     )
-                    report = reporter.generate_report(result, brief_mode=False)
 
-                await handle_article_generation(
-                    args=args,
-                    ticker=args.ticker,
-                    company_name=company_name or args.ticker,
-                    report_text=report,
-                    trade_date=trade_date,
-                    valuation_context=reporter.get_valuation_context(),
-                    analysis_result=result,
-                )
+                    # Generate report text for article if not already done
+                    if not use_markdown:
+                        # Need to generate markdown report for article
+                        if company_name is None:
+                            try:
+                                import yfinance as yf
+
+                                ticker_obj = yf.Ticker(args.ticker)
+                                info = ticker_obj.info
+                                company_name = (
+                                    info.get("longName")
+                                    or info.get("shortName")
+                                    or args.ticker
+                                )
+                            except Exception:
+                                company_name = args.ticker
+
+                        reporter = QuietModeReporter(
+                            args.ticker,
+                            company_name,
+                            quick_mode=args.quick,
+                            chart_format="svg" if args.svg else "png",
+                            transparent_charts=args.transparent,
+                            skip_charts=args.no_charts,
+                            image_dir=image_dir,
+                            report_dir=output_dir,
+                            report_stem=Path(args.output).stem if args.output else None,
+                        )
+                        report = reporter.generate_report(result, brief_mode=False)
+
+                    await handle_article_generation(
+                        args=args,
+                        ticker=args.ticker,
+                        company_name=company_name or args.ticker,
+                        report_text=report,
+                        trade_date=trade_date,
+                        valuation_context=reporter.get_valuation_context(),
+                        analysis_result=result,
+                    )
 
             sys.exit(0)
         else:

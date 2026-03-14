@@ -24,7 +24,7 @@ from src import toolkit
 @pytest.fixture
 def mock_fetcher():
     """Mock the singleton market_data_fetcher used in toolkit."""
-    with patch("src.toolkit.market_data_fetcher") as mock:
+    with patch("src.tools.market.market_data_fetcher") as mock:
         yield mock
 
 
@@ -36,7 +36,7 @@ def mock_tavily():
     which wraps the tavily_tool with timeout protection. We mock this wrapper directly.
     """
     with patch(
-        "src.toolkit._tavily_search_with_timeout", new_callable=AsyncMock
+        "src.tools.shared._tavily_search_with_timeout", new_callable=AsyncMock
     ) as mock:
         yield mock
 
@@ -44,7 +44,7 @@ def mock_tavily():
 @pytest.fixture
 def mock_stocktwits():
     """Mock the stocktwits_api instance."""
-    with patch("src.toolkit.stocktwits_api") as mock:
+    with patch("src.tools.news.stocktwits_api") as mock:
         yield mock
 
 
@@ -196,7 +196,7 @@ class TestGetNews:
         """Test that news is split into General and Local sections when both exist."""
         # Mocking extract_company_name_async internal call
         with patch(
-            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+            "src.tools.shared.extract_company_name_async", new_callable=AsyncMock
         ) as mock_name:
             mock_name.return_value = "Toyota"
 
@@ -222,7 +222,7 @@ class TestGetNews:
     async def test_news_no_results(self, mock_tavily):
         """Test handling of zero results from news search."""
         with patch(
-            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+            "src.tools.shared.extract_company_name_async", new_callable=AsyncMock
         ) as mock_name:
             mock_name.return_value = "Ghost Corp"
             mock_tavily.return_value = None  # No results
@@ -234,7 +234,7 @@ class TestGetNews:
     async def test_news_general_only(self, mock_tavily):
         """Test news when only general search returns results (no local)."""
         with patch(
-            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+            "src.tools.shared.extract_company_name_async", new_callable=AsyncMock
         ) as mock_name:
             mock_name.return_value = "Apple"
 
@@ -257,7 +257,7 @@ class TestGetNews:
     async def test_news_tavily_error(self, mock_tavily):
         """Test handling of Tavily API errors."""
         with patch(
-            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+            "src.tools.shared.extract_company_name_async", new_callable=AsyncMock
         ) as mock_name:
             mock_name.return_value = "FailCorp"
             mock_tavily.side_effect = Exception("Tavily API Error: Rate limit exceeded")
@@ -270,9 +270,9 @@ class TestGetNews:
     async def test_news_ticker_normalization(self, mock_tavily):
         """Test that tickers are properly normalized before searching."""
         with patch(
-            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+            "src.tools.shared.extract_company_name_async", new_callable=AsyncMock
         ) as mock_name:
-            with patch("src.toolkit.normalize_ticker") as mock_normalize:
+            with patch("src.tools.news.normalize_ticker") as mock_normalize:
                 mock_normalize.return_value = "AAPL"
                 mock_name.return_value = "Apple Inc."
                 mock_tavily.return_value = "Apple news content"
@@ -392,7 +392,7 @@ class TestFundamentalAnalysis:
     async def test_primary_search_success(self, mock_tavily):
         """Test simple success path with adequate primary search results."""
         with patch(
-            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+            "src.tools.shared.extract_company_name_async", new_callable=AsyncMock
         ) as mock_name:
             mock_name.return_value = "Samsung"
 
@@ -423,7 +423,7 @@ class TestFundamentalAnalysis:
         triggering a secondary 'surgical' search.
         """
         with patch(
-            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+            "src.tools.shared.extract_company_name_async", new_callable=AsyncMock
         ) as mock_name:
             mock_name.return_value = "Samsung"
 
@@ -464,7 +464,7 @@ class TestFundamentalAnalysis:
         it falls back to a full company name search.
         """
         with patch(
-            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+            "src.tools.shared.extract_company_name_async", new_callable=AsyncMock
         ) as mock_name:
             mock_name.return_value = "HSBC Holdings"
 
@@ -497,7 +497,7 @@ class TestFundamentalAnalysis:
     async def test_both_searches_fail(self, mock_tavily):
         """Test handling when both primary and fallback searches return nothing."""
         with patch(
-            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+            "src.tools.shared.extract_company_name_async", new_callable=AsyncMock
         ) as mock_name:
             mock_name.return_value = "Unknown Corp"
 
@@ -513,7 +513,7 @@ class TestFundamentalAnalysis:
     async def test_adr_detection_nyse(self, mock_tavily):
         """Test detection of NYSE-listed ADRs (most common type)."""
         with patch(
-            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+            "src.tools.shared.extract_company_name_async", new_callable=AsyncMock
         ) as mock_name:
             mock_name.return_value = "Alibaba"
 
@@ -535,7 +535,7 @@ class TestFundamentalAnalysis:
     async def test_adr_detection_otc(self, mock_tavily):
         """Test detection of OTC-traded ADRs (less liquid, unsponsored)."""
         with patch(
-            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+            "src.tools.shared.extract_company_name_async", new_callable=AsyncMock
         ) as mock_name:
             mock_name.return_value = "Sony"
 
@@ -556,7 +556,7 @@ class TestFundamentalAnalysis:
     async def test_search_with_very_long_response(self, mock_tavily):
         """Test handling of extremely long search responses (>5000 chars)."""
         with patch(
-            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+            "src.tools.shared.extract_company_name_async", new_callable=AsyncMock
         ) as mock_name:
             mock_name.return_value = "MegaCorp"
 
@@ -718,7 +718,7 @@ class TestIntegration:
 
         # Setup news
         with patch(
-            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+            "src.tools.shared.extract_company_name_async", new_callable=AsyncMock
         ) as mock_name:
             mock_name.return_value = "Samsung"
             mock_tavily.return_value = "Samsung reports strong Q4 results."
@@ -779,7 +779,7 @@ class TestIntegration:
         )
 
         with patch(
-            "src.toolkit.extract_company_name_async", new_callable=AsyncMock
+            "src.tools.shared.extract_company_name_async", new_callable=AsyncMock
         ) as mock_name:
             mock_name.return_value = "TestCorp"
 

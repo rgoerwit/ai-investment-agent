@@ -461,6 +461,26 @@ class TestCreateEditorLLM:
             result = create_editor_llm()
             assert result is None
 
+    def test_create_editor_llm_uses_openai_responses_mode(self):
+        """Editor should use the OpenAI Responses API via ChatOpenAI."""
+        from src.llms import create_editor_llm
+
+        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+            mock_chatgpt.return_value = MagicMock()
+            with patch("src.llms.config") as mock_config:
+                mock_config.enable_consultant = True
+                mock_config.get_openai_api_key.return_value = "test-key"
+                mock_config.editor_model = "gpt-4o"
+                mock_config.consultant_model = "gpt-4o"
+
+                result = create_editor_llm()
+
+        assert result is not None
+        call_kwargs = mock_chatgpt.call_args.kwargs
+        assert call_kwargs["api_key"] == "test-key"
+        assert call_kwargs["use_responses_api"] is True
+        assert call_kwargs["output_version"] == "responses/v1"
+
 
 # =============================================================================
 # Integration Tests

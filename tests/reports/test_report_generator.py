@@ -795,7 +795,8 @@ class TestEdgeCases:
 
         # Should still generate basic structure
         assert "ORCL" in report
-        assert "HOLD" in report  # Default decision
+        assert "ANALYSIS FAILED" in report
+        assert "publishable analysis" in report
 
     def test_empty_result_dict_brief_mode(self):
         """Test empty result dict in brief mode."""
@@ -805,7 +806,7 @@ class TestEdgeCases:
         report = reporter.generate_report(result_dict, brief_mode=True)
 
         assert "ORCL" in report
-        assert "HOLD" in report
+        assert "ANALYSIS FAILED" in report
         assert "Brief Mode" in report
 
     def test_malformed_pm_verdict_formats(self):

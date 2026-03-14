@@ -17,6 +17,8 @@ from typing import Any
 
 import structlog
 
+from src.runtime_diagnostics import is_publishable_analysis
+
 logger = structlog.get_logger(__name__)
 
 # Local import for utility function to avoid circular dependency at module level
@@ -680,7 +682,12 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
 
         # Get final decision with comprehensive error handling
         final_decision_raw = self._get_final_decision_text(result)
-        decision = self.extract_decision(final_decision_raw)
+        publishable = is_publishable_analysis(result)
+        decision = (
+            self.extract_decision(final_decision_raw)
+            if publishable
+            else "ANALYSIS FAILED"
+        )
 
         # Build title
         if self.company_name:
@@ -690,6 +697,14 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
 
         # Build report sections
         report_parts = [title, f"\n**Analysis Date:** {self.timestamp}\n", "---\n"]
+
+        if not publishable:
+            report_parts.append(
+                "\n## Analysis Validity\n\n"
+                "This run did not produce a publishable analysis. Required LLM or "
+                "data artifacts were missing or invalid, so verdict-dependent output "
+                "should be treated as diagnostics only.\n"
+            )
 
         # Red Flag Pre-Screening (if applicable)
         red_flags = result.get("red_flags", [])

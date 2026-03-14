@@ -337,10 +337,12 @@ def create_consultant_llm(
         "model": model_name,
         "timeout": timeout,
         "max_retries": max_retries,
-        "openai_api_key": api_key,
+        "api_key": api_key,
         "callbacks": callbacks or [],
-        "max_tokens": 16384,
+        "max_completion_tokens": 16384,
         "streaming": False,
+        "use_responses_api": True,
+        "output_version": "responses/v1",
     }
 
     llm = ChatOpenAI(**kwargs)
@@ -390,10 +392,12 @@ def create_auditor_llm(
         "model": model_name,
         "timeout": 120,
         "max_retries": 3,
-        "openai_api_key": api_key,
+        "api_key": api_key,
         "callbacks": callbacks or [],
-        "max_tokens": 16384,
+        "max_completion_tokens": 16384,
         "streaming": False,
+        "use_responses_api": True,
+        "output_version": "responses/v1",
     }
 
     return ChatOpenAI(**kwargs)
@@ -539,10 +543,12 @@ def create_editor_llm(
         temperature=0.3,  # Slightly creative for style suggestions
         timeout=120,
         max_retries=3,
-        openai_api_key=api_key,
+        api_key=api_key,
         callbacks=callbacks or [],
-        max_tokens=8192,  # Editor feedback is concise JSON
+        max_completion_tokens=8192,  # Editor feedback is concise JSON
         streaming=False,
+        use_responses_api=True,
+        output_version="responses/v1",
     )
 
 

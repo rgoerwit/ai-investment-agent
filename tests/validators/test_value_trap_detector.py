@@ -137,7 +137,7 @@ class TestGetOwnershipStructureTool:
         assert insider_trend in ["NET_BUYER", "NET_SELLER", "NEUTRAL", "UNKNOWN"]
 
     @pytest.mark.asyncio
-    @patch("src.toolkit.yf.Ticker")
+    @patch("src.tools.ownership.yf.Ticker")
     async def test_tool_handles_yfinance_exception(self, mock_ticker):
         """Test tool handles yfinance exceptions gracefully."""
         from src.toolkit import get_ownership_structure
@@ -150,7 +150,7 @@ class TestGetOwnershipStructureTool:
         assert "error" in data or data.get("data_quality") == "ERROR"
 
     @pytest.mark.asyncio
-    @patch("src.toolkit.yf.Ticker")
+    @patch("src.tools.ownership.yf.Ticker")
     async def test_tool_handles_partial_data(self, mock_ticker):
         """Test tool handles partial data availability."""
         from src.toolkit import get_ownership_structure

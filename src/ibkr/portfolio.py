@@ -265,8 +265,7 @@ def read_watchlist(
 
     tickers: set[str] = set()
     skipped = 0
-    if rows:
-        logger.debug("watchlist_first_row", row=rows[0])
+    logger.debug("watchlist_first_row", row=rows[0])
     for row in rows:
         # IBKR watchlist rows — two known formats:
         #   Legacy: {"C": conid_int}  e.g. {"C": 12345678}

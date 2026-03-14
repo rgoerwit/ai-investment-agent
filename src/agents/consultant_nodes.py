@@ -11,6 +11,7 @@ from langchain_core.messages import ToolMessage as TM
 from langgraph.prebuilt import create_react_agent
 from langgraph.types import RunnableConfig
 
+from src.runtime_diagnostics import failure_artifact, success_artifact
 from src.tooling.runtime import TOOL_SERVICE, ToolInvocation
 
 from . import message_utils, support
@@ -18,6 +19,28 @@ from . import runtime as agent_runtime
 from .state import AgentState
 
 logger = structlog.get_logger(__name__)
+
+
+def _build_legal_fallback_report(
+    *,
+    ticker: str,
+    country: str,
+    sector: str,
+    reason: str,
+) -> str:
+    return json.dumps(
+        {
+            "pfic_status": "UNCERTAIN",
+            "pfic_evidence": f"Legal counsel unavailable for {ticker}: {reason}",
+            "vie_structure": "N/A",
+            "vie_evidence": None,
+            "cmic_status": "N/A",
+            "cmic_evidence": None,
+            "other_regulatory_risks": [],
+            "country": country,
+            "sector": sector,
+        }
+    )
 
 
 def create_consultant_node(
@@ -40,9 +63,11 @@ def create_consultant_node(
         agent_prompt = get_prompt(agent_key)
         if not agent_prompt:
             logger.error("missing_prompt", agent=agent_key)
-            return {
-                "consultant_review": "Error: Missing consultant prompt configuration"
-            }
+            return failure_artifact(
+                "consultant_review",
+                "Missing consultant prompt configuration",
+                provider="unknown",
+            )
 
         ticker = state.get("company_of_interest", "UNKNOWN")
         company_name = state.get("company_name", ticker)
@@ -133,7 +158,11 @@ Provide your independent consultant review."""
 
             for iteration in range(max_tool_iterations + 1):
                 response = await agent_runtime.invoke_with_rate_limit_handling(
-                    active_llm, messages, context=agent_prompt.agent_name
+                    active_llm,
+                    messages,
+                    context=agent_prompt.agent_name,
+                    provider=support.infer_provider_name(active_llm),
+                    model_name=support.get_model_name(active_llm),
                 )
                 tool_calls = getattr(response, "tool_calls", None)
                 if (
@@ -193,7 +222,11 @@ Provide your independent consultant review."""
 
             if not content_str:
                 response = await agent_runtime.invoke_with_rate_limit_handling(
-                    llm, messages, context=agent_prompt.agent_name
+                    llm,
+                    messages,
+                    context=agent_prompt.agent_name,
+                    provider=support.infer_provider_name(llm),
+                    model_name=support.get_model_name(llm),
                 )
                 content_str = message_utils.extract_string_content(response.content)
 
@@ -219,15 +252,18 @@ Provide your independent consultant review."""
                 or "FAIL" in content_str.upper(),
                 truncated=trunc_info["truncated"],
             )
-            return {"consultant_review": content_str}
+            return success_artifact(
+                "consultant_review",
+                content_str,
+                provider=support.infer_provider_name(llm),
+            )
         except Exception as exc:
             logger.error("consultant_node_error", ticker=ticker, error=str(exc))
-            return {
-                "consultant_review": (
-                    f"Consultant Review Error: {str(exc)}\n\n"
-                    "Note: Analysis will proceed without external validation."
-                )
-            }
+            return failure_artifact(
+                "consultant_review",
+                exc,
+                provider=support.infer_provider_name(llm),
+            )
 
     return consultant_node
 
@@ -245,9 +281,11 @@ def create_legal_counsel_node(llm, tools: list) -> Callable:
         agent_prompt = get_prompt("legal_counsel")
         if not agent_prompt:
             logger.error("missing_prompt", agent="legal_counsel")
-            return {
-                "legal_report": json.dumps({"error": "Missing legal_counsel prompt"})
-            }
+            return failure_artifact(
+                "legal_report",
+                "Missing legal_counsel prompt",
+                provider="unknown",
+            )
 
         ticker = state.get("company_of_interest", "UNKNOWN")
         company_name = state.get("company_name", ticker)
@@ -295,7 +333,13 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
                     pfic_status=parsed.get("pfic_status"),
                     vie_structure=parsed.get("vie_structure"),
                 )
-                return {"legal_report": response_str, "sender": "legal_counsel"}
+                result = success_artifact(
+                    "legal_report",
+                    response_str,
+                    provider=support.infer_provider_name(llm),
+                )
+                result["sender"] = "legal_counsel"
+                return result
             except json.JSONDecodeError:
                 json_match = re.search(
                     r'\{[^{}]*"pfic_status"[^{}]*\}', response_str, re.DOTALL
@@ -305,7 +349,13 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
                     try:
                         json.loads(extracted)
                         logger.info("legal_counsel_extracted_json", ticker=ticker)
-                        return {"legal_report": extracted, "sender": "legal_counsel"}
+                        result = success_artifact(
+                            "legal_report",
+                            extracted,
+                            provider=support.infer_provider_name(llm),
+                        )
+                        result["sender"] = "legal_counsel"
+                        return result
                     except json.JSONDecodeError:
                         pass
 
@@ -314,29 +364,36 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
                     ticker=ticker,
                     response_preview=response_str[:200],
                 )
-                return {
-                    "legal_report": json.dumps(
-                        {
-                            "error": "Invalid JSON response",
-                            "raw_response": response_str[:500],
-                            "pfic_status": "UNCERTAIN",
-                            "vie_structure": "N/A",
-                        }
-                    ),
-                    "sender": "legal_counsel",
-                }
+                fallback_report = _build_legal_fallback_report(
+                    ticker=ticker,
+                    country=country,
+                    sector=sector,
+                    reason="Invalid JSON response from legal counsel",
+                )
+                result = failure_artifact(
+                    "legal_report",
+                    "Invalid JSON response from legal counsel",
+                    provider=support.infer_provider_name(llm),
+                    fallback_content=fallback_report,
+                )
+                result["sender"] = "legal_counsel"
+                return result
         except Exception as exc:
             logger.error("legal_counsel_error", ticker=ticker, error=str(exc))
-            return {
-                "legal_report": json.dumps(
-                    {
-                        "error": str(exc),
-                        "pfic_status": "UNCERTAIN",
-                        "vie_structure": "N/A",
-                    }
-                ),
-                "sender": "legal_counsel",
-            }
+            fallback_report = _build_legal_fallback_report(
+                ticker=ticker,
+                country=country,
+                sector=sector,
+                reason=str(exc),
+            )
+            result = failure_artifact(
+                "legal_report",
+                exc,
+                provider=support.infer_provider_name(llm),
+                fallback_content=fallback_report,
+            )
+            result["sender"] = "legal_counsel"
+            return result
 
     return legal_counsel_node
 
@@ -394,7 +451,11 @@ def create_auditor_node(llm, tools: list) -> Callable:
         agent_prompt = get_prompt("global_forensic_auditor")
         if not agent_prompt:
             logger.error("missing_prompt", agent="global_forensic_auditor")
-            return {"auditor_report": "Error: Missing prompt"}
+            return failure_artifact(
+                "auditor_report",
+                "Missing prompt",
+                provider="unknown",
+            )
 
         ticker = state.get("company_of_interest", "UNKNOWN")
         company_name = state.get("company_name", ticker)
@@ -437,7 +498,13 @@ Perform a forensic audit using your tools."""
             response_str = message_utils.extract_string_content(response)
 
             logger.info("auditor_complete", ticker=ticker, length=len(response_str))
-            return {"auditor_report": response_str, "sender": "global_forensic_auditor"}
+            result = success_artifact(
+                "auditor_report",
+                response_str,
+                provider=support.infer_provider_name(llm),
+            )
+            result["sender"] = "global_forensic_auditor"
+            return result
         except Exception as exc:
             error_str = str(exc)
             logger.error("auditor_error", ticker=ticker, error=error_str)
@@ -469,10 +536,15 @@ META: CONTEXT_LIMIT_EXCEEDED
 REASON: Data volume exceeded 128k token limit
 VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
 """
-                return {
-                    "auditor_report": graceful_msg,
-                    "sender": "global_forensic_auditor",
-                }
+                result = failure_artifact(
+                    "auditor_report",
+                    "Auditor context limit exceeded",
+                    provider=support.infer_provider_name(llm),
+                    fallback_content=graceful_msg,
+                    error_kind="application_error",
+                )
+                result["sender"] = "global_forensic_auditor"
+                return result
 
             if is_param_error:
                 logger.warning(
@@ -488,6 +560,8 @@ VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
                         timeout=120,
                         max_retries=3,
                         streaming=False,
+                        use_responses_api=True,
+                        output_version="responses/v1",
                     )
                     agent = create_react_agent(
                         fallback_llm,
@@ -510,10 +584,13 @@ VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
                         ticker=ticker,
                         length=len(response_str),
                     )
-                    return {
-                        "auditor_report": response_str,
-                        "sender": "global_forensic_auditor",
-                    }
+                    result = success_artifact(
+                        "auditor_report",
+                        response_str,
+                        provider=support.infer_provider_name(fallback_llm),
+                    )
+                    result["sender"] = "global_forensic_auditor"
+                    return result
                 except Exception as retry_exc:
                     logger.error(
                         "auditor_retry_failed",
@@ -521,9 +598,12 @@ VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
                         error=str(retry_exc),
                     )
 
-            return {
-                "auditor_report": f"Auditor Error: {error_str}",
-                "sender": "global_forensic_auditor",
-            }
+            result = failure_artifact(
+                "auditor_report",
+                exc,
+                provider=support.infer_provider_name(llm),
+            )
+            result["sender"] = "global_forensic_auditor"
+            return result
 
     return auditor_node

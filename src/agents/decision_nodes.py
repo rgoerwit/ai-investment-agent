@@ -7,6 +7,13 @@ import structlog
 from langchain_core.messages import HumanMessage
 from langgraph.types import RunnableConfig
 
+from src.runtime_diagnostics import (
+    failure_artifact,
+    get_artifact_status,
+    get_valid_artifact_content,
+    success_artifact,
+)
+
 from . import message_utils, support
 from . import runtime as agent_runtime
 from .state import AgentState
@@ -51,9 +58,13 @@ def create_trader_node(llm, memory: Any | None) -> Callable:
 
         agent_prompt = get_prompt("trader")
         if not agent_prompt:
-            return {"trader_investment_plan": "Error: Missing prompt"}
+            return failure_artifact(
+                "trader_investment_plan",
+                "Missing trader prompt",
+                provider="unknown",
+            )
 
-        consultant = state.get("consultant_review", "")
+        consultant = get_valid_artifact_content(state, "consultant_review")
         consultant_section = (
             "\n\nEXTERNAL CONSULTANT REVIEW (Cross-Validation):\n"
             f"{consultant if consultant else 'N/A (consultant disabled or unavailable)'}"
@@ -84,14 +95,20 @@ RESEARCH MANAGER PLAN:
                 llm,
                 [HumanMessage(content=prompt)],
                 context=agent_prompt.agent_name,
+                provider=support.infer_provider_name(llm),
+                model_name=support.get_model_name(llm),
             )
-            return {
-                "trader_investment_plan": message_utils.extract_string_content(
-                    response.content
-                )
-            }
+            return success_artifact(
+                "trader_investment_plan",
+                message_utils.extract_string_content(response.content),
+                provider=support.infer_provider_name(llm),
+            )
         except Exception as exc:
-            return {"trader_investment_plan": f"Error: {str(exc)}"}
+            return failure_artifact(
+                "trader_investment_plan",
+                exc,
+                provider=support.infer_provider_name(llm),
+            )
 
     return trader_node
 
@@ -161,16 +178,20 @@ def create_portfolio_manager_node(
 
         agent_prompt = get_prompt("portfolio_manager")
         if not agent_prompt:
-            return {"final_trade_decision": "Error: Missing prompt"}
+            return failure_artifact(
+                "final_trade_decision",
+                "Missing portfolio_manager prompt",
+                provider="unknown",
+            )
 
-        market = state.get("market_report", "")
-        sentiment = state.get("sentiment_report", "")
-        news = state.get("news_report", "")
-        fundamentals = state.get("fundamentals_report", "")
-        value_trap = state.get("value_trap_report", "")
-        inv_plan = state.get("investment_plan", "")
-        consultant = state.get("consultant_review", "")
-        trader = state.get("trader_investment_plan", "")
+        market = get_valid_artifact_content(state, "market_report")
+        sentiment = get_valid_artifact_content(state, "sentiment_report")
+        news = get_valid_artifact_content(state, "news_report")
+        fundamentals = get_valid_artifact_content(state, "fundamentals_report")
+        value_trap = get_valid_artifact_content(state, "value_trap_report")
+        inv_plan = get_valid_artifact_content(state, "investment_plan")
+        consultant = get_valid_artifact_content(state, "consultant_review")
+        trader = get_valid_artifact_content(state, "trader_investment_plan")
 
         risk_state = state.get("risk_debate_state", {})
         risky_view = risk_state.get("current_risky_response", "")
@@ -258,17 +279,35 @@ NEUTRAL ANALYST (Balanced):
 
         logger.info(
             "pm_inputs",
-            has_market=bool(market),
-            has_sentiment=bool(sentiment),
-            has_news=bool(news),
-            has_fundamentals=bool(fundamentals),
-            has_value_trap=bool(value_trap),
-            has_consultant=bool(consultant),
+            market_present=bool(state.get("market_report")),
+            market_valid=get_artifact_status(state, "market_report").ok,
+            sentiment_present=bool(state.get("sentiment_report")),
+            sentiment_valid=get_artifact_status(state, "sentiment_report").ok,
+            news_present=bool(state.get("news_report")),
+            news_valid=get_artifact_status(state, "news_report").ok,
+            fundamentals_present=bool(state.get("fundamentals_report")),
+            fundamentals_valid=get_artifact_status(state, "fundamentals_report").ok,
+            value_trap_present=bool(state.get("value_trap_report")),
+            value_trap_valid=get_artifact_status(state, "value_trap_report").ok,
+            consultant_valid=get_artifact_status(state, "consultant_review").ok,
             has_datablock="DATA_BLOCK" in fundamentals if fundamentals else False,
             fund_len=len(fundamentals) if fundamentals else 0,
             value_trap_len=len(value_trap) if value_trap else 0,
             red_flags_count=len(red_flags),
         )
+
+        if not fundamentals or "DATA_BLOCK" not in fundamentals:
+            logger.error(
+                "pm_skipped_invalid_fundamentals",
+                ticker=ticker,
+                fundamentals_valid=get_artifact_status(state, "fundamentals_report").ok,
+                has_datablock="DATA_BLOCK" in fundamentals if fundamentals else False,
+            )
+            return failure_artifact(
+                "final_trade_decision",
+                "Portfolio Manager skipped due to invalid fundamentals input",
+                provider=support.infer_provider_name(llm),
+            )
 
         field_sources = support.extract_field_sources_from_messages(
             state.get("messages", [])
@@ -329,6 +368,8 @@ RISK TEAM DEBATE:
                 llm,
                 [HumanMessage(content=prompt)],
                 context=agent_prompt.agent_name,
+                provider=support.infer_provider_name(llm),
+                model_name=support.get_model_name(llm),
             )
             content_str = message_utils.extract_string_content(response.content)
 
@@ -346,10 +387,18 @@ RISK TEAM DEBATE:
                     output_len=len(content_str),
                 )
 
-            return {"final_trade_decision": content_str}
+            return success_artifact(
+                "final_trade_decision",
+                content_str,
+                provider=support.infer_provider_name(llm),
+            )
         except Exception as exc:
             logger.error("pm_error", error=str(exc))
-            return {"final_trade_decision": f"Error: {str(exc)}"}
+            return failure_artifact(
+                "final_trade_decision",
+                exc,
+                provider=support.infer_provider_name(llm),
+            )
 
     return pm_node
 

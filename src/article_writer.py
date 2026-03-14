@@ -15,6 +15,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from src.config import config
 from src.llms import create_deep_thinking_llm, create_writer_llm
+from src.runtime_diagnostics import classify_failure, get_model_name, infer_provider
 from src.token_tracker import TokenTrackingCallback, get_tracker
 from src.tooling.runtime import TOOL_SERVICE, ToolInvocation
 
@@ -456,10 +457,43 @@ class ArticleWriter:
 
     def _invoke_with_fallback(self, messages: list):
         """Invoke LLM with automatic Claude → Gemini fallback on API errors."""
+        primary_model = get_model_name(self.llm)
+        primary_provider = infer_provider(
+            model_name=primary_model, class_name=type(self.llm).__name__
+        )
         try:
-            return self.llm.invoke(messages)
+            logger.info(
+                "llm_call_start",
+                context="article_writer_primary",
+                provider=primary_provider,
+                model=primary_model,
+                runnable_class=type(self.llm).__name__,
+                max_attempts=1,
+            )
+            response = self.llm.invoke(messages)
+            logger.info(
+                "llm_call_success",
+                context="article_writer_primary",
+                provider=primary_provider,
+                model=primary_model,
+                runnable_class=type(self.llm).__name__,
+                attempt=1,
+            )
+            return response
         except Exception as e:
             error_str = str(e)
+            primary_failure = classify_failure(
+                e,
+                provider=primary_provider,
+                model_name=primary_model,
+                class_name=type(self.llm).__name__,
+            )
+            get_tracker().record_failure(
+                agent_name="Article Writer",
+                provider=primary_failure.provider,
+                failure_kind=primary_failure.kind,
+                model_name=primary_model or "",
+            )
             # Only fall back for Claude-specific API errors, not all exceptions
             is_anthropic_error = any(
                 marker in error_str
@@ -471,15 +505,86 @@ class ArticleWriter:
                 is_anthropic_error = "anthropic" in mod
 
             if not is_anthropic_error:
+                logger.error(
+                    "llm_call_failed",
+                    context="article_writer_primary",
+                    provider=primary_failure.provider,
+                    model=primary_model,
+                    runnable_class=type(self.llm).__name__,
+                    attempt=1,
+                    max_attempts=1,
+                    failure_kind=primary_failure.kind,
+                    host=primary_failure.host,
+                    retryable=primary_failure.retryable,
+                    error_type=primary_failure.error_type,
+                    root_cause_type=primary_failure.root_cause_type,
+                    error_message=primary_failure.message,
+                )
                 raise  # Not a Claude error — propagate
 
             logger.warning(
                 "Claude writer failed, falling back to Gemini",
-                error=error_str[:200],
+                failure_kind=primary_failure.kind,
+                host=primary_failure.host,
+                error_type=primary_failure.error_type,
+                root_cause_type=primary_failure.root_cause_type,
+                error=primary_failure.message,
             )
             fallback_llm = create_deep_thinking_llm()
             self.llm = fallback_llm  # Cache for subsequent calls (e.g., retry)
-            return fallback_llm.invoke(messages)
+            fallback_model = get_model_name(fallback_llm)
+            fallback_provider = infer_provider(
+                model_name=fallback_model, class_name=type(fallback_llm).__name__
+            )
+            try:
+                logger.info(
+                    "llm_call_start",
+                    context="article_writer_fallback",
+                    provider=fallback_provider,
+                    model=fallback_model,
+                    runnable_class=type(fallback_llm).__name__,
+                    max_attempts=1,
+                )
+                response = fallback_llm.invoke(messages)
+                logger.info(
+                    "llm_call_success",
+                    context="article_writer_fallback",
+                    provider=fallback_provider,
+                    model=fallback_model,
+                    runnable_class=type(fallback_llm).__name__,
+                    attempt=1,
+                )
+                return response
+            except Exception as fallback_exc:
+                fallback_failure = classify_failure(
+                    fallback_exc,
+                    provider=fallback_provider,
+                    model_name=fallback_model,
+                    class_name=type(fallback_llm).__name__,
+                )
+                get_tracker().record_failure(
+                    agent_name="Article Writer Fallback",
+                    provider=fallback_failure.provider,
+                    failure_kind=fallback_failure.kind,
+                    model_name=fallback_model or "",
+                )
+                logger.error(
+                    "llm_call_failed",
+                    context="article_writer_fallback",
+                    provider=fallback_failure.provider,
+                    model=fallback_model,
+                    runnable_class=type(fallback_llm).__name__,
+                    attempt=1,
+                    max_attempts=1,
+                    failure_kind=fallback_failure.kind,
+                    host=fallback_failure.host,
+                    retryable=fallback_failure.retryable,
+                    error_type=fallback_failure.error_type,
+                    root_cause_type=fallback_failure.root_cause_type,
+                    error_message=fallback_failure.message,
+                    same_failure_kind=fallback_failure.kind == primary_failure.kind,
+                )
+                raise
 
     def _invoke_writer(self, messages: list) -> str:
         """

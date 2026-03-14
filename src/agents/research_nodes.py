@@ -7,6 +7,8 @@ import structlog
 from langchain_core.messages import HumanMessage
 from langgraph.types import RunnableConfig
 
+from src.runtime_diagnostics import failure_artifact, success_artifact
+
 from . import message_utils, support
 from . import runtime as agent_runtime
 from .state import AgentState
@@ -172,6 +174,8 @@ Only use data explicitly related to {ticker} ({company_name}).
                 llm,
                 [HumanMessage(content=prompt)],
                 context=f"{agent_prompt.agent_name} R{round_num}",
+                provider=support.infer_provider_name(llm),
+                model_name=support.get_model_name(llm),
             )
             content_str = message_utils.extract_string_content(response.content)
             argument = f"{agent_prompt.agent_name} (Round {round_num}): {content_str}"
@@ -243,6 +247,8 @@ def create_research_manager_node(
                 llm,
                 [HumanMessage(content=prompt)],
                 context=agent_prompt.agent_name,
+                provider=support.infer_provider_name(llm),
+                model_name=support.get_model_name(llm),
             )
             content_str = message_utils.extract_string_content(response.content)
 
@@ -260,8 +266,16 @@ def create_research_manager_node(
                     output_len=len(content_str),
                 )
 
-            return {"investment_plan": content_str}
+            return success_artifact(
+                "investment_plan",
+                content_str,
+                provider=support.infer_provider_name(llm),
+            )
         except Exception as exc:
-            return {"investment_plan": f"Error: {str(exc)}"}
+            return failure_artifact(
+                "investment_plan",
+                exc,
+                provider=support.infer_provider_name(llm),
+            )
 
     return research_manager_node

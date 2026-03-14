@@ -121,6 +121,38 @@ class TestSyncCheckRouter:
         assert result == "__end__"
 
     @patch("src.graph.config")
+    def test_sync_check_proceeds_when_required_branch_failed_but_completed(
+        self, mock_config
+    ):
+        """Router should wait for completion, not success, at the sync barrier."""
+        from src.graph import sync_check_router
+
+        mock_config.enable_consultant = False
+
+        state = {
+            "market_report": "Error: DNS failure",
+            "sentiment_report": "done",
+            "news_report": "done",
+            "value_trap_report": "done",
+            "pre_screening_result": "PASS",
+            "artifact_statuses": {
+                "market_report": {
+                    "complete": True,
+                    "ok": False,
+                    "error_kind": "dns_resolution",
+                    "provider": "google",
+                },
+                "sentiment_report": {"ok": True, "content": "done"},
+                "news_report": {"ok": True, "content": "done"},
+                "value_trap_report": {"ok": True, "content": "done"},
+            },
+        }
+
+        result = sync_check_router(state, {})
+        assert isinstance(result, list)
+        assert "Bull Researcher R1" in result
+
+    @patch("src.graph.config")
     def test_sync_check_returns_pm_fast_fail_on_reject(self, mock_config):
         """Test router returns PM Fast-Fail on REJECT (separate node to avoid edge conflicts)."""
         from src.graph import sync_check_router
@@ -237,6 +269,36 @@ class TestAuditorIntegration:
 
         result = sync_check_router(state, {})
         assert result == "__end__"  # Should wait
+
+    @patch("src.graph._is_auditor_enabled")
+    def test_sync_check_proceeds_when_auditor_failed_but_completed(
+        self, mock_auditor_enabled
+    ):
+        """A failed enabled auditor branch should still satisfy sync completion."""
+        from src.graph import sync_check_router
+
+        mock_auditor_enabled.return_value = True
+
+        state = {
+            "market_report": "done",
+            "sentiment_report": "done",
+            "news_report": "done",
+            "value_trap_report": "done",
+            "pre_screening_result": "PASS",
+            "auditor_report": "",
+            "artifact_statuses": {
+                "auditor_report": {
+                    "complete": True,
+                    "ok": False,
+                    "error_kind": "timeout",
+                    "provider": "openai",
+                }
+            },
+        }
+
+        result = sync_check_router(state, {})
+        assert isinstance(result, list)
+        assert "Bull Researcher R1" in result
 
     @patch("src.graph._is_auditor_enabled")
     def test_sync_check_proceeds_when_auditor_complete(self, mock_auditor_enabled):

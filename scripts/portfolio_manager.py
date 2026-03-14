@@ -878,6 +878,27 @@ def _ccy(currency: str) -> str:
     )
 
 
+def _normalize_sector_label(sector: str) -> str:
+    """Normalize sector labels so equivalent names aggregate cleanly."""
+    normalized = " ".join((sector or "").split()).strip()
+    if not normalized:
+        return "Unknown"
+    if normalized.casefold() in {"healthcare", "health care"}:
+        return "Health Care"
+    return normalized
+
+
+def _aggregate_sector_weights(
+    sector_weights: dict[str, float] | None,
+) -> dict[str, float]:
+    """Merge sector buckets that differ only by benign label variants."""
+    aggregated: dict[str, float] = {}
+    for sector, pct in (sector_weights or {}).items():
+        label = _normalize_sector_label(sector)
+        aggregated[label] = aggregated.get(label, 0.0) + pct
+    return aggregated
+
+
 def _item_currency(item: ReconciliationItem) -> str:
     if item.analysis and item.analysis.currency:
         return item.analysis.currency
@@ -1057,8 +1078,10 @@ def format_report(
                 parts.append(f"  @ {_ccy(ccy)}{item.suggested_price:,.2f}")
             if item.suggested_order_type:
                 parts.append(f"  {item.suggested_order_type}")
-                if not item.suggested_price and not item.suggested_quantity:
-                    parts.append("  (no entry price — re-run analysis)")
+            if item.action == "BUY" and not item.suggested_quantity:
+                parts.append("  (quantity unavailable — inspect before placing order)")
+            if not item.suggested_price:
+                parts.append("  (no entry price — re-run analysis)")
         return "".join(parts)
 
     def _proceeds_line(item: ReconciliationItem) -> str | None:
@@ -1101,12 +1124,12 @@ def format_report(
             chg = (pos.current_price_local - a.entry_price) / a.entry_price * 100
             if abs(chg) >= 90.0:
                 parts.append(
-                    f"entry {sym}{a.entry_price:,.2f}  now {sym}{pos.current_price_local:,.2f}"
+                    f"analysis entry {sym}{a.entry_price:,.2f}  now {sym}{pos.current_price_local:,.2f}"
                     f"  (⚠ unit mismatch?)"
                 )
             else:
                 parts.append(
-                    f"entry {sym}{a.entry_price:,.2f}  now {sym}{pos.current_price_local:,.2f}"
+                    f"analysis entry {sym}{a.entry_price:,.2f}  now {sym}{pos.current_price_local:,.2f}"
                     f"  ({chg:+.1f}%)"
                 )
         lines.append("             " + "  |  ".join(parts))
@@ -1141,7 +1164,9 @@ def format_report(
             _dip_entry = (a.entry_price if a and a.entry_price else None) or (
                 pos.avg_cost_local if pos and pos.avg_cost_local else None
             )
-            _dip_entry_label = "entry" if (a and a.entry_price) else "cost"
+            _dip_entry_label = (
+                "analysis entry" if (a and a.entry_price) else "IBKR cost basis"
+            )
             if _dip_entry and pos and pos.current_price_local and _dip_entry > 0:
                 chg = (pos.current_price_local - _dip_entry) / _dip_entry * 100
                 if abs(chg) >= 90.0:
@@ -1263,7 +1288,11 @@ def format_report(
         sign = "+" if pnl_local >= 0 else "-"
         gain_or_loss = "est. gain:" if pnl_local >= 0 else "est. loss:"
         tax_note = "  ·  verify holding period in IBKR" if pnl_local > 0 else ""
-        return f"             {gain_or_loss}  {sign}{ccy_sym}{abs(pnl_local):,.0f}  ({pct:+.1f}%){tax_note}"
+        return (
+            f"             {gain_or_loss}  {sign}{ccy_sym}{abs(pnl_local):,.0f}"
+            f"  ({pct:+.1f}% vs IBKR cost basis {ccy_sym}{pos.avg_cost_local:,.2f})"
+            f"{tax_note}"
+        )
 
     def _append_pnl_proceeds(item: ReconciliationItem, ccy: str) -> None:
         """Append combined gain/loss + proceeds on one line, or each separately if only one exists."""
@@ -1707,8 +1736,12 @@ def format_report(
                     _cand_parts.append(f"  @ {_ccy(ccy)}{item.suggested_price:,.2f}")
                 if item.suggested_order_type:
                     _cand_parts.append(f"  {item.suggested_order_type}")
-                    if not item.suggested_price:
-                        _cand_parts.append("  (no entry price — re-run analysis)")
+                if not item.suggested_quantity:
+                    _cand_parts.append(
+                        "  (quantity unavailable — inspect before placing order)"
+                    )
+                if not item.suggested_price:
+                    _cand_parts.append("  (no entry price — re-run analysis)")
             lines.append("".join(_cand_parts))
             a = item.analysis
             if a:
@@ -1756,7 +1789,9 @@ def format_report(
                 _entry = (a.entry_price if a and a.entry_price else None) or (
                     pos.avg_cost_local if pos.avg_cost_local else None
                 )
-                _entry_label = "entry" if (a and a.entry_price) else "cost"
+                _entry_label = (
+                    "analysis entry" if (a and a.entry_price) else "IBKR cost basis"
+                )
                 if _entry:
                     gain = (pos.current_price_local - _entry) / _entry * 100
                     price_str = (
@@ -1813,7 +1848,7 @@ def format_report(
         lines.append("")
 
     # ── CONCENTRATION ──────────────────────────────────────────────────────────
-    sector_weights = portfolio.sector_weights
+    sector_weights = _aggregate_sector_weights(portfolio.sector_weights)
     exchange_weights = portfolio.exchange_weights
     if sector_weights or exchange_weights:
         _section("CONCENTRATION")
@@ -2036,8 +2071,14 @@ def format_report(
                 cost_str = (
                     f"  (~${abs(i.cash_impact_usd):,.0f})" if i.cash_impact_usd else ""
                 )
+                qty_note = (
+                    ""
+                    if i.suggested_quantity
+                    else "  [quantity unavailable — inspect before placing order]"
+                )
                 lines.append(
-                    f"    → {i.action}  {_display_ticker(i)}{qty_str}{price_str}{cost_str}  {_buy_pos_tag(i)}  — use already-settled cash"
+                    f"    → {i.action}  {_display_ticker(i)}{qty_str}{price_str}{cost_str}"
+                    f"{qty_note}  {_buy_pos_tag(i)}  — use already-settled cash"
                 )
             if _buys_in_flight:
                 lines.append(
@@ -2101,7 +2142,7 @@ def format_report(
                     else ""
                 )
                 lines.append(
-                    f"    → ADDED TO WATCHLIST  {_display_ticker(i)}"
+                    f"    → ADD TO WATCHLIST  {_display_ticker(i)}"
                     f"  — analysis {i.analysis.analysis_date if i.analysis else '?'} says BUY{_quick_note}"
                     f"  →  poetry run python -m src.main --ticker {_run_ticker_for(i)}"
                 )
@@ -2314,6 +2355,32 @@ def _configure_logging(debug: bool) -> None:
         logger_factory=structlog.PrintLoggerFactory(),
         cache_logger_on_first_use=True,
     )
+    _configure_external_loggers(debug)
+
+
+def _configure_external_loggers(debug: bool) -> None:
+    """Keep normal runs operator-focused by suppressing noisy transport loggers."""
+    import logging
+
+    noisy_info_loggers = [
+        "httpx",
+        "httpcore",
+        "openai",
+        "anthropic",
+        "google",
+        "google_genai",
+        "src.llms",
+        "ibind.ibkr_client",
+    ]
+    level = logging.DEBUG if debug else logging.WARNING
+    for logger_name in noisy_info_loggers:
+        logging.getLogger(logger_name).setLevel(level)
+
+    # ibind file-handler loggers emit per-request GET/POST lines; keep them off the
+    # console in normal mode so only the higher-level retry summary remains visible.
+    ibind_file_logger = logging.getLogger("ibind_fh")
+    ibind_file_logger.propagate = False
+    ibind_file_logger.setLevel(logging.DEBUG if debug else logging.WARNING)
 
 
 def _print_status(message: str) -> None:

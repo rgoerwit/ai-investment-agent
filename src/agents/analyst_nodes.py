@@ -10,6 +10,8 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.types import RunnableConfig
 
+from src.runtime_diagnostics import failure_artifact, success_artifact
+
 from . import message_utils, support
 from . import runtime as agent_runtime
 from .state import AgentState
@@ -35,7 +37,11 @@ def create_analyst_node(
         agent_prompt = get_prompt(agent_key)
         if not agent_prompt:
             logger.error("missing_prompt", agent=agent_key)
-            return {output_field: f"Error: Could not load prompt for {agent_key}."}
+            return failure_artifact(
+                output_field,
+                f"Could not load prompt for {agent_key}.",
+                provider="unknown",
+            )
 
         messages_template = [MessagesPlaceholder(variable_name="messages")]
         prompt_template = ChatPromptTemplate.from_messages(messages_template)
@@ -222,6 +228,8 @@ def create_analyst_node(
                 runnable,
                 {"messages": invocation_messages},
                 context=agent_prompt.agent_name,
+                provider=support.infer_provider_name(llm),
+                model_name=support.get_model_name(llm),
             )
             response.name = agent_key
 
@@ -272,6 +280,8 @@ def create_analyst_node(
                             retry_runnable,
                             {"messages": invocation_messages},
                             context=f"{agent_prompt.agent_name} (RETRY-HIGH)",
+                            provider=support.infer_provider_name(retry_llm),
+                            model_name=support.get_model_name(retry_llm),
                         )
                     )
                     retry_response.name = agent_key
@@ -314,7 +324,13 @@ def create_analyst_node(
                         error=str(retry_error),
                     )
 
-            new_state[output_field] = content_str
+            new_state.update(
+                success_artifact(
+                    output_field,
+                    content_str,
+                    provider=support.infer_provider_name(llm),
+                )
+            )
 
             if agent_key == "fundamentals_analyst":
                 logger.info(
@@ -327,10 +343,15 @@ def create_analyst_node(
             logger.error(
                 "analyst_node_error", output_field=output_field, error=str(exc)
             )
-            return {
-                "messages": [AIMessage(content=f"Error: {str(exc)}")],
-                output_field: f"Error: {str(exc)}",
-            }
+            error_message = AIMessage(content=f"Error: {str(exc)}")
+            error_message.name = agent_key
+            result = failure_artifact(
+                output_field,
+                exc,
+                provider=support.infer_provider_name(llm),
+            )
+            result["messages"] = [error_message]
+            return result
 
     return analyst_node
 
@@ -348,7 +369,11 @@ def create_valuation_calculator_node(llm) -> Callable:
         agent_prompt = get_prompt("valuation_calculator")
         if not agent_prompt:
             logger.error("missing_prompt", agent="valuation_calculator")
-            return {"valuation_params": ""}
+            return failure_artifact(
+                "valuation_params",
+                "Missing valuation_calculator prompt",
+                provider="unknown",
+            )
 
         ticker = state.get("company_of_interest", "UNKNOWN")
         company_name = state.get("company_name", ticker)
@@ -365,7 +390,11 @@ def create_valuation_calculator_node(llm) -> Callable:
                 ticker=ticker,
                 message="No DATA_BLOCK found - skipping valuation params extraction",
             )
-            return {"valuation_params": ""}
+            return failure_artifact(
+                "valuation_params",
+                "DATA_BLOCK missing",
+                provider=support.infer_provider_name(llm),
+            )
 
         data_block_pattern = (
             r"### --- START DATA_BLOCK[^\n]*---(.+?)### --- END DATA_BLOCK ---"
@@ -377,7 +406,11 @@ def create_valuation_calculator_node(llm) -> Callable:
                 ticker=ticker,
                 message="DATA_BLOCK text present but regex extraction failed",
             )
-            return {"valuation_params": ""}
+            return failure_artifact(
+                "valuation_params",
+                "DATA_BLOCK regex extraction failed",
+                provider=support.infer_provider_name(llm),
+            )
         data_block = blocks[-1].group(0)
 
         prompt = f"""{agent_prompt.system_message}
@@ -395,6 +428,8 @@ Extract valuation parameters and output in the required format."""
                 llm,
                 [HumanMessage(content=prompt)],
                 context=agent_prompt.agent_name,
+                provider=support.infer_provider_name(llm),
+                model_name=support.get_model_name(llm),
             )
             content_str = message_utils.extract_string_content(response.content)
             logger.info(
@@ -403,9 +438,17 @@ Extract valuation parameters and output in the required format."""
                 has_params_block="VALUATION_PARAMS" in content_str,
                 content_length=len(content_str),
             )
-            return {"valuation_params": content_str}
+            return success_artifact(
+                "valuation_params",
+                content_str,
+                provider=support.infer_provider_name(llm),
+            )
         except Exception as exc:
             logger.error("valuation_calculator_error", ticker=ticker, error=str(exc))
-            return {"valuation_params": ""}
+            return failure_artifact(
+                "valuation_params",
+                exc,
+                provider=support.infer_provider_name(llm),
+            )
 
     return valuation_calculator_node

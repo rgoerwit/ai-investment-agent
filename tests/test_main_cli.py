@@ -4,6 +4,8 @@ Tests for src.main CLI argument parsing.
 Covers --strict flag parsing and composability with other flags.
 """
 
+from unittest.mock import patch
+
 import pytest
 
 
@@ -99,6 +101,27 @@ class TestStrictAddendaContent:
         from src.agents import _STRICT_RM_ADDENDUM
 
         assert "bear" in _STRICT_RM_ADDENDUM.lower()
+
+
+class TestToolAuditLogging:
+    def test_configure_tool_audit_logging_is_opt_in(self):
+        from src.main import configure_tool_audit_logging
+        from src.tooling.runtime import TOOL_SERVICE
+
+        configure_tool_audit_logging(False)
+        assert TOOL_SERVICE.hooks == []
+
+        configure_tool_audit_logging(True)
+        try:
+            assert len(TOOL_SERVICE.hooks) == 1
+        finally:
+            configure_tool_audit_logging(False)
+
+    @patch("src.main.socket.getaddrinfo", side_effect=OSError("dns down"))
+    def test_provider_preflight_logs_failures(self, _mock_dns):
+        from src.main import run_provider_preflight
+
+        run_provider_preflight()
 
 
 if __name__ == "__main__":

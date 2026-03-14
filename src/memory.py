@@ -26,6 +26,7 @@ from tenacity import (
 )
 
 from src.config import config
+from src.runtime_diagnostics import classify_failure
 
 logger = structlog.get_logger(__name__)
 
@@ -54,6 +55,8 @@ class FinancialSituationMemory:
         self.available = False
         self.situation_collection = None
         self.embeddings = None
+        self.embeddings_available = False
+        self.chroma_available = False
 
         # Check for API key via config
         api_key = config.get_google_api_key()
@@ -77,13 +80,31 @@ class FinancialSituationMemory:
                 test_embedding = self.embeddings.embed_query("initialization test")
                 if not test_embedding or len(test_embedding) == 0:
                     raise ValueError("Embedding test returned empty result")
+                self.embeddings_available = True
+                logger.info(
+                    "embeddings_initialized",
+                    model="gemini-embedding-001",
+                    collection=name,
+                )
             except Exception as e:
-                logger.warning(f"Embedding initialization test failed: {e}")
-                # Don't fail completely, might be transient
-
-            logger.info(
-                "embeddings_initialized", model="gemini-embedding-001", collection=name
-            )
+                details = classify_failure(
+                    e,
+                    provider="google",
+                    model_name="gemini-embedding-001",
+                    class_name=type(self.embeddings).__name__,
+                )
+                logger.warning(
+                    "embeddings_healthcheck_failed",
+                    collection=name,
+                    provider=details.provider,
+                    model="gemini-embedding-001",
+                    failure_kind=details.kind,
+                    host=details.host,
+                    error_type=details.error_type,
+                    root_cause_type=details.root_cause_type,
+                    retryable=details.retryable,
+                    error_message=details.message,
+                )
 
         except Exception as e:
             logger.warning("embeddings_init_failed", error=str(e), collection=name)
@@ -137,7 +158,8 @@ class FinancialSituationMemory:
                 },
             )
 
-            self.available = True
+            self.chroma_available = True
+            self.available = self.embeddings_available and self.chroma_available
 
             # Log collection stats
             count = self.situation_collection.count()
@@ -147,6 +169,13 @@ class FinancialSituationMemory:
                 persist_dir=str(config.chroma_persist_directory),
                 existing_documents=count,
             )
+            if not self.available:
+                logger.warning(
+                    "memory_degraded",
+                    collection=self.name,
+                    embeddings_available=self.embeddings_available,
+                    chroma_available=self.chroma_available,
+                )
 
         except Exception as e:
             logger.warning("chromadb_init_failed", error=str(e), collection=name)

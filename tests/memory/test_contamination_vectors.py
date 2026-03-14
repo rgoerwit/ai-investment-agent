@@ -15,7 +15,7 @@ from src.memory import (
     create_memory_instances,
     sanitize_ticker_for_collection,
 )
-from src.toolkit import extract_company_name_async
+from src.tools.shared import extract_company_name_async
 
 
 class TestCompanyNameExtraction:
@@ -265,7 +265,8 @@ class TestLLMHallucinationPrevention:
         }
 
         with patch(
-            "src.toolkit.market_data_fetcher.get_financial_metrics", new=AsyncMock()
+            "src.tools.market.market_data_fetcher.get_financial_metrics",
+            new=AsyncMock(),
         ) as fetch_mock:
             fetch_mock.return_value = mocked_data
             # Tools are LangChain StructuredTool objects, use ainvoke method

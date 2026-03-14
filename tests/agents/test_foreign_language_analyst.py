@@ -118,8 +118,8 @@ class TestSearchForeignSourcesTool:
         from src.toolkit import search_foreign_sources
 
         # Mock tavily_tool as None AND DDG returning empty
-        with patch("src.toolkit.tavily_tool", None):
-            with patch("src.toolkit._ddg_search", return_value=[]):
+        with patch("src.tools.shared.tavily_tool", None):
+            with patch("src.tools.shared._ddg_search", return_value=[]):
                 result = await search_foreign_sources.ainvoke(
                     {"ticker": "7203.T", "search_query": "Toyota 決算短信"}
                 )
@@ -246,6 +246,27 @@ class TestFundamentalsSyncRouter:
         }
         result = fundamentals_sync_router(state_with_none, {})
         assert result == "__end__"
+
+    def test_router_proceeds_when_legal_failed_but_completed(self):
+        """A failed legal branch should still satisfy the fundamentals barrier."""
+        from src.graph import fundamentals_sync_router
+
+        state = {
+            "raw_fundamentals_data": "junior data",
+            "foreign_language_report": "foreign data",
+            "legal_report": "",
+            "artifact_statuses": {
+                "legal_report": {
+                    "complete": True,
+                    "ok": False,
+                    "error_kind": "timeout",
+                    "provider": "google",
+                }
+            },
+        }
+
+        result = fundamentals_sync_router(state, {})
+        assert result == "Fundamentals Analyst"
 
 
 class TestGraphStructure:

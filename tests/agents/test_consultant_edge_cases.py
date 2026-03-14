@@ -274,8 +274,10 @@ class TestErrorPropagation:
                 result = await consultant_node(state, config)
 
                 assert "consultant_review" in result
-                assert "Error" in result["consultant_review"]
-                assert "Analysis will proceed" in result["consultant_review"]
+                assert result["consultant_review"] == ""
+                status = result["artifact_statuses"]["consultant_review"]
+                assert status["ok"] is False
+                assert status["error_kind"] == "timeout"
 
     @pytest.mark.asyncio
     async def test_consultant_rate_limit_error(self):
@@ -315,8 +317,10 @@ class TestErrorPropagation:
                 result = await consultant_node(state, config)
 
                 assert "consultant_review" in result
-                assert "Error" in result["consultant_review"]
-                assert "Rate limit" in result["consultant_review"]
+                assert result["consultant_review"] == ""
+                status = result["artifact_statuses"]["consultant_review"]
+                assert status["ok"] is False
+                assert status["error_kind"] == "rate_limit"
 
 
 class TestReportGeneration:

@@ -8,6 +8,9 @@ import structlog
 from langchain_core.messages import ToolMessage
 from langgraph.types import RunnableConfig
 
+from src.runtime_diagnostics import get_model_name as _get_model_name
+from src.runtime_diagnostics import infer_provider
+
 logger = structlog.get_logger(__name__)
 
 _UNRESOLVED_NAME_WARNING = (
@@ -16,6 +19,19 @@ _UNRESOLVED_NAME_WARNING = (
     "this ticker belongs to. If you cannot confirm the identity from your tool "
     "results, state that the company identity is unverified."
 )
+
+
+def infer_provider_name(runnable: Any) -> str:
+    """Infer provider name from model instance for diagnostics logging."""
+    return infer_provider(
+        model_name=_get_model_name(runnable),
+        class_name=type(runnable).__name__,
+    )
+
+
+def get_model_name(runnable: Any) -> str | None:
+    """Return model name for diagnostics logging when available."""
+    return _get_model_name(runnable)
 
 
 def get_context_from_config(config: RunnableConfig) -> Any | None:

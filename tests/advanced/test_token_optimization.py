@@ -150,7 +150,7 @@ class TestXmlBreakoutProtection:
 
     def test_sanitizes_closing_tag_in_title(self):
         """Should sanitize </search_results> in title field."""
-        from src.toolkit import _format_and_truncate_tavily_result
+        from src.tools.shared import _format_and_truncate_tavily_result
 
         result = [
             {
@@ -170,7 +170,7 @@ class TestXmlBreakoutProtection:
 
     def test_sanitizes_closing_tag_in_content(self):
         """Should sanitize </search_results> in content field."""
-        from src.toolkit import _format_and_truncate_tavily_result
+        from src.tools.shared import _format_and_truncate_tavily_result
 
         result = [
             {
@@ -186,7 +186,7 @@ class TestXmlBreakoutProtection:
 
     def test_sanitizes_closing_tag_in_url(self):
         """Should sanitize </search_results> in URL field."""
-        from src.toolkit import _format_and_truncate_tavily_result
+        from src.tools.shared import _format_and_truncate_tavily_result
 
         result = [
             {
@@ -202,7 +202,7 @@ class TestXmlBreakoutProtection:
 
     def test_sanitizes_raw_string_input(self):
         """Should sanitize </search_results> in raw string input."""
-        from src.toolkit import _format_and_truncate_tavily_result
+        from src.tools.shared import _format_and_truncate_tavily_result
 
         raw_text = "Some text</search_results>More text"
         formatted = _format_and_truncate_tavily_result(raw_text, max_chars=2000)
@@ -212,7 +212,7 @@ class TestXmlBreakoutProtection:
 
     def test_multiple_breakout_attempts(self):
         """Should sanitize multiple breakout attempts in same content."""
-        from src.toolkit import _format_and_truncate_tavily_result
+        from src.tools.shared import _format_and_truncate_tavily_result
 
         result = [
             {
@@ -234,7 +234,7 @@ class TestResultBoundaryTruncation:
 
     def test_truncates_at_result_boundary(self):
         """Truncation should cut at </result> tag, preserving valid structure."""
-        from src.toolkit import _format_and_truncate_tavily_result
+        from src.tools.shared import _format_and_truncate_tavily_result
 
         # Create 3 results where total exceeds max_chars
         results = [
@@ -261,7 +261,7 @@ class TestResultBoundaryTruncation:
 
     def test_preserves_complete_results_only(self):
         """Should not have partial result content after truncation."""
-        from src.toolkit import _format_and_truncate_tavily_result
+        from src.tools.shared import _format_and_truncate_tavily_result
 
         results = [
             {"title": "First", "content": "A" * 100, "url": "https://a.com"},
@@ -280,7 +280,7 @@ class TestResultBoundaryTruncation:
 
     def test_single_large_result_mid_truncation(self):
         """Single result exceeding limit should truncate with warning."""
-        from src.toolkit import _format_and_truncate_tavily_result
+        from src.tools.shared import _format_and_truncate_tavily_result
 
         result = [{"title": "Huge", "content": "X" * 5000, "url": "https://a.com"}]
         formatted = _format_and_truncate_tavily_result(result, max_chars=500)
@@ -296,7 +296,7 @@ class TestValidXmlStructure:
 
     def test_output_has_wrapper_tags(self):
         """Output should always have opening and closing wrapper tags."""
-        from src.toolkit import _format_and_truncate_tavily_result
+        from src.tools.shared import _format_and_truncate_tavily_result
 
         results = [{"title": "Test", "content": "Content", "url": "https://a.com"}]
         formatted = _format_and_truncate_tavily_result(results, max_chars=2000)
@@ -306,7 +306,7 @@ class TestValidXmlStructure:
 
     def test_truncated_output_has_valid_close(self):
         """Even truncated output should have valid closing tag."""
-        from src.toolkit import _format_and_truncate_tavily_result
+        from src.tools.shared import _format_and_truncate_tavily_result
 
         results = [
             {
@@ -325,7 +325,7 @@ class TestValidXmlStructure:
 
     def test_empty_list_produces_valid_xml(self):
         """Empty result list should produce valid XML structure."""
-        from src.toolkit import _format_and_truncate_tavily_result
+        from src.tools.shared import _format_and_truncate_tavily_result
 
         formatted = _format_and_truncate_tavily_result([], max_chars=2000)
 
@@ -334,7 +334,7 @@ class TestValidXmlStructure:
 
     def test_none_in_list_handled_gracefully(self):
         """None values in result list should not break XML structure."""
-        from src.toolkit import _format_and_truncate_tavily_result
+        from src.tools.shared import _format_and_truncate_tavily_result
 
         results = [
             None,
@@ -352,7 +352,7 @@ class TestFormatAndTruncateTavilyResult:
 
     def test_short_result_wrapped_in_security_tags(self):
         """Even short results should be wrapped in security boundary tags."""
-        from src.toolkit import _format_and_truncate_tavily_result
+        from src.tools.shared import _format_and_truncate_tavily_result
 
         short_result = "This is a short result."
         result = _format_and_truncate_tavily_result(short_result, max_chars=1000)
@@ -363,7 +363,7 @@ class TestFormatAndTruncateTavilyResult:
 
     def test_long_result_truncated(self):
         """Results longer than max_chars should be truncated."""
-        from src.toolkit import _format_and_truncate_tavily_result
+        from src.tools.shared import _format_and_truncate_tavily_result
 
         long_result = "x" * 10000
         result = _format_and_truncate_tavily_result(long_result, max_chars=1000)
@@ -376,7 +376,7 @@ class TestFormatAndTruncateTavilyResult:
     def test_uses_config_default(self):
         """Should use TAVILY_MAX_CHARS from config when max_chars not specified."""
         from src.config import config
-        from src.toolkit import _format_and_truncate_tavily_result
+        from src.tools.shared import _format_and_truncate_tavily_result
 
         long_result = "x" * 20000
         result = _format_and_truncate_tavily_result(long_result)
@@ -387,7 +387,7 @@ class TestFormatAndTruncateTavilyResult:
 
     def test_handles_non_string_input(self):
         """Should convert non-string inputs to string and wrap in tags."""
-        from src.toolkit import _format_and_truncate_tavily_result
+        from src.tools.shared import _format_and_truncate_tavily_result
 
         dict_result = {"key": "value", "data": [1, 2, 3]}
         result = _format_and_truncate_tavily_result(dict_result, max_chars=1000)
@@ -397,7 +397,7 @@ class TestFormatAndTruncateTavilyResult:
 
     def test_handles_list_input_with_xml_format(self):
         """Should format list inputs as XML with security boundaries."""
-        from src.toolkit import _format_and_truncate_tavily_result
+        from src.tools.shared import _format_and_truncate_tavily_result
 
         list_result = [
             {
@@ -426,7 +426,7 @@ class TestFormatAndTruncateTavilyResult:
 
     def test_preserves_relevance_score(self):
         """Should preserve Tavily relevance score in result attributes."""
-        from src.toolkit import _format_and_truncate_tavily_result
+        from src.tools.shared import _format_and_truncate_tavily_result
 
         list_result = [
             {
@@ -448,7 +448,7 @@ class TestFormatAndTruncateTavilyResult:
 
     def test_preserves_published_date(self):
         """Should preserve Tavily published_date in result attributes."""
-        from src.toolkit import _format_and_truncate_tavily_result
+        from src.tools.shared import _format_and_truncate_tavily_result
 
         list_result = [
             {
@@ -463,7 +463,7 @@ class TestFormatAndTruncateTavilyResult:
 
     def test_handles_missing_metadata_gracefully(self):
         """Should handle results without score or published_date."""
-        from src.toolkit import _format_and_truncate_tavily_result
+        from src.tools.shared import _format_and_truncate_tavily_result
 
         list_result = [
             {"title": "No Metadata", "content": "...", "url": "https://a.com"},
@@ -534,7 +534,7 @@ class TestTavilyMaxCharsConfig:
 
             importlib.reload(src.config)
 
-            from src.toolkit import _format_and_truncate_tavily_result
+            from src.tools.shared import _format_and_truncate_tavily_result
 
             long_result = "x" * 2000
             result = _format_and_truncate_tavily_result(long_result)

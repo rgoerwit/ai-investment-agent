@@ -71,7 +71,9 @@ class TestConsultantNodeCreation:
                 mock_chatgpt.assert_called_once()
                 call_kwargs = mock_chatgpt.call_args[1]
                 assert call_kwargs["model"] == "gpt-4o"
-                assert call_kwargs["openai_api_key"] == "test-key"
+                assert call_kwargs["api_key"] == "test-key"
+                assert call_kwargs["use_responses_api"] is True
+                assert call_kwargs["output_version"] == "responses/v1"
                 # Temperature is intentionally omitted — many OpenAI model
                 # families (o-series, gpt-5.x) reject non-default temperature.
                 assert "temperature" not in call_kwargs
@@ -148,11 +150,12 @@ class TestConsultantNodeExecution:
             result = await consultant_node(state, config)
 
             assert "consultant_review" in result
-            assert "Error" in result["consultant_review"]
+            assert result["consultant_review"] == ""
+            assert result["artifact_statuses"]["consultant_review"]["ok"] is False
 
     @pytest.mark.asyncio
     async def test_consultant_node_handles_llm_error(self):
-        """Test that consultant node returns error message on LLM failure."""
+        """Test that consultant node records invalid artifact metadata on LLM failure."""
         mock_llm = Mock()
 
         async def mock_invoke_error(*args, **kwargs):
@@ -187,8 +190,10 @@ class TestConsultantNodeExecution:
                 result = await consultant_node(state, config)
 
                 assert "consultant_review" in result
-                assert "Error" in result["consultant_review"]
-                assert "OpenAI API timeout" in result["consultant_review"]
+                assert result["consultant_review"] == ""
+                status = result["artifact_statuses"]["consultant_review"]
+                assert status["ok"] is False
+                assert status["message"] == "OpenAI API timeout"
 
     @pytest.mark.asyncio
     async def test_consultant_tool_loop_routes_through_tool_service(self):

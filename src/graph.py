@@ -53,6 +53,10 @@ from src.memory import (
     create_memory_instances,
     sanitize_ticker_for_collection,
 )
+from src.runtime_diagnostics import (
+    get_artifact_status,
+    is_artifact_complete,
+)
 from src.token_tracker import TokenTrackingCallback, get_tracker
 from src.tooling.runtime import TOOL_SERVICE, ToolInvocation
 from src.toolkit import toolkit
@@ -362,9 +366,9 @@ def fundamentals_sync_router(
     - If not all complete: Return __end__ to terminate THIS branch
       (the other branches will eventually complete and trigger the router)
     """
-    junior_done = bool(state.get("raw_fundamentals_data"))
-    foreign_done = bool(state.get("foreign_language_report"))
-    legal_done = bool(state.get("legal_report"))
+    junior_done = is_artifact_complete(state, "raw_fundamentals_data")
+    foreign_done = is_artifact_complete(state, "foreign_language_report")
+    legal_done = is_artifact_complete(state, "legal_report")
 
     logger.info(
         "fundamentals_sync_status",
@@ -406,10 +410,10 @@ def sync_check_router(
 
     The LAST branch to complete will see all reports and proceed to the next phase.
     """
-    market_done = bool(state.get("market_report"))
-    sentiment_done = bool(state.get("sentiment_report"))
-    news_done = bool(state.get("news_report"))
-    value_trap_done = bool(state.get("value_trap_report"))
+    market_done = is_artifact_complete(state, "market_report")
+    sentiment_done = is_artifact_complete(state, "sentiment_report")
+    news_done = is_artifact_complete(state, "news_report")
+    value_trap_done = is_artifact_complete(state, "value_trap_report")
 
     # Validator completion check
     pre_screening = state.get("pre_screening_result")
@@ -419,7 +423,7 @@ def sync_check_router(
     # Uses same helper as fan_out_to_analysts for consistency
     auditor_done = True
     if _is_auditor_enabled():
-        auditor_done = bool(state.get("auditor_report"))
+        auditor_done = is_artifact_complete(state, "auditor_report")
 
     all_done = all(
         [
@@ -440,6 +444,10 @@ def sync_check_router(
         value_trap_done=value_trap_done,
         validator_done=validator_done,
         auditor_done=auditor_done,
+        market_error=get_artifact_status(state, "market_report").error_kind,
+        sentiment_error=get_artifact_status(state, "sentiment_report").error_kind,
+        news_error=get_artifact_status(state, "news_report").error_kind,
+        fundamentals_error=get_artifact_status(state, "fundamentals_report").error_kind,
         pre_screening=pre_screening,
         all_done=all_done,
     )

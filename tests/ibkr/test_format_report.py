@@ -1722,3 +1722,48 @@ class TestWatchlistTickersExcludesCandidate:
         )
         assert "WATCHLIST CANDIDATES" in report
         assert "WDO" in report
+
+
+class TestPortfolioManagerOutputTightening:
+    def test_buy_without_quantity_is_labeled_as_incomplete(self):
+        item = _make_buy_item(
+            suggested_quantity=None,
+            suggested_price=2615.0,
+            cash_impact_usd=0.0,
+        )
+        report = format_report([item], _make_portfolio(), show_recommendations=True)
+        assert "quantity unavailable — inspect before placing order" in report
+
+    def test_macro_review_labels_analysis_entry_and_ibkr_cost_basis(self):
+        item = _make_dip_item(
+            ticker="9201.T",
+            health=75,
+            growth=68,
+            entry=2800,
+            current_price=2700,
+            stop=2600,
+            target=3200,
+        )
+        report = format_report(
+            [item], _make_portfolio(), portfolio_health_flags=[_CORR_FLAG]
+        )
+        assert "analysis entry ¥2,800.00  now ¥2,700.00" in report
+        assert "vs IBKR cost basis ¥2,000.00" in report
+
+    def test_concentration_merges_healthcare_labels(self):
+        portfolio = _make_portfolio()
+        portfolio.sector_weights = {
+            "Healthcare": 10.1,
+            "Health Care": 1.5,
+            "Industrials": 21.7,
+        }
+        report = format_report([], portfolio)
+        assert "Healthcare" not in report
+        assert "Health Care" in report
+        assert "11.6%" in report
+
+    def test_watchlist_moves_are_advisory_not_past_tense(self):
+        high = _make_offwatch_buy("TOTL.JK", conviction="High")
+        report = format_report([high], _make_portfolio(), show_recommendations=True)
+        assert "ADD TO WATCHLIST  TOTL" in report
+        assert "ADDED TO WATCHLIST" not in report

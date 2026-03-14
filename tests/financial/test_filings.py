@@ -444,7 +444,7 @@ class TestSearchMerge:
 
     def test_merge_tavily_only(self):
         """Tavily-only results should pass through."""
-        from src.toolkit import _merge_search_results
+        from src.tools.shared import _merge_search_results
 
         tavily = [
             {"title": "Result 1", "url": "https://example.com/1", "content": "..."},
@@ -455,7 +455,7 @@ class TestSearchMerge:
 
     def test_merge_ddg_only(self):
         """DDG-only results should be normalized to Tavily format."""
-        from src.toolkit import _merge_search_results
+        from src.tools.shared import _merge_search_results
 
         ddg = [
             {"title": "DDG Result", "href": "https://ddg.example.com", "body": "text"},
@@ -467,7 +467,7 @@ class TestSearchMerge:
 
     def test_merge_deduplicates_by_url(self):
         """Same URL from both sources should only appear once."""
-        from src.toolkit import _merge_search_results
+        from src.tools.shared import _merge_search_results
 
         tavily = [
             {
@@ -486,7 +486,7 @@ class TestSearchMerge:
 
     def test_merge_dedup_trailing_slash(self):
         """Trailing slash difference should not create duplicates."""
-        from src.toolkit import _merge_search_results
+        from src.tools.shared import _merge_search_results
 
         tavily = [
             {"title": "T", "url": "https://example.com/page/", "content": "t"},
@@ -499,7 +499,7 @@ class TestSearchMerge:
 
     def test_merge_unique_urls_kept(self):
         """Different URLs from DDG should be added after Tavily."""
-        from src.toolkit import _merge_search_results
+        from src.tools.shared import _merge_search_results
 
         tavily = [
             {"title": "T", "url": "https://example.com/a", "content": "ta"},
@@ -512,7 +512,7 @@ class TestSearchMerge:
 
     def test_merge_handles_dict_wrapper(self):
         """Tavily sometimes returns {'results': [...]}."""
-        from src.toolkit import _merge_search_results
+        from src.tools.shared import _merge_search_results
 
         tavily = {
             "results": [
@@ -527,7 +527,7 @@ class TestSearchMerge:
 
     def test_merge_handles_exceptions(self):
         """Exception objects from gather should not crash merge."""
-        from src.toolkit import _merge_search_results
+        from src.tools.shared import _merge_search_results
 
         # These would be caught before merge in the actual code, but test robustness
         merged = _merge_search_results(None, None)
@@ -545,7 +545,7 @@ class TestDdgSearch:
     @pytest.mark.asyncio
     async def test_ddg_search_import_failure(self):
         """Should return empty list if ddgs not installed."""
-        from src.toolkit import _ddg_search
+        from src.tools.shared import _ddg_search
 
         with patch.dict("sys.modules", {"ddgs": None}):
             result = await _ddg_search("test query")
@@ -554,7 +554,7 @@ class TestDdgSearch:
     @pytest.mark.asyncio
     async def test_ddg_search_returns_results(self):
         """Should return results when DDG search succeeds."""
-        from src.toolkit import _ddg_search
+        from src.tools.shared import _ddg_search
 
         mock_results = [
             {"title": "Test", "href": "https://example.com", "body": "test body"},

@@ -132,6 +132,7 @@ class AgentState(MessagesState):
     final_trade_decision: Annotated[str, take_last]
     tools_called: Annotated[dict[str, set[str]], merge_dicts]
     prompts_used: Annotated[dict[str, dict[str, str]], merge_dicts]
+    artifact_statuses: Annotated[dict[str, dict[str, Any]], merge_dicts]
     red_flags: Annotated[list[dict[str, Any]], take_last]
     pre_screening_result: Annotated[str, take_last]
     chart_paths: Annotated[dict[str, str], take_last]
