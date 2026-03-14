@@ -40,6 +40,28 @@ class BlockingHook:
         return result
 
 
+class PassThroughHook:
+    def __init__(self, label: str, events: list[str]) -> None:
+        self.label = label
+        self.events = events
+
+    async def before(self, call: ToolInvocation) -> ToolInvocation:
+        self.events.append(f"before:{self.label}")
+        return call
+
+    async def after(self, call: ToolInvocation, result: ToolResult) -> ToolResult:
+        self.events.append(f"after:{self.label}")
+        return result
+
+
+class ExplodingBeforeHook:
+    async def before(self, call: ToolInvocation) -> ToolInvocation:
+        raise ValueError("unexpected before failure")
+
+    async def after(self, call: ToolInvocation, result: ToolResult) -> ToolResult:
+        return result
+
+
 @pytest.mark.asyncio
 async def test_execute_runs_hooks_in_order_and_mutates_args():
     events: list[str] = []
@@ -90,3 +112,56 @@ async def test_execute_returns_blocked_result_without_running_runner():
     assert result.blocked is True
     assert result.value == "TOOL_BLOCKED: policy rejected input"
     assert result.findings == ["policy rejected input"]
+
+
+@pytest.mark.asyncio
+async def test_execute_runs_before_hooks_forward_and_after_hooks_reverse():
+    events: list[str] = []
+    service = ToolExecutionService(
+        hooks=[PassThroughHook("first", events), PassThroughHook("second", events)]
+    )
+    runner = AsyncMock(return_value="ok")
+
+    result = await service.execute(
+        ToolInvocation(name="get_news", args={"ticker": "AAPL"}, source="toolnode"),
+        runner=runner,
+    )
+
+    runner.assert_awaited_once_with({"ticker": "AAPL"})
+    assert events == [
+        "before:first",
+        "before:second",
+        "after:second",
+        "after:first",
+    ]
+    assert result == ToolResult(value="ok", blocked=False, findings=None)
+
+
+@pytest.mark.asyncio
+async def test_execute_propagates_unexpected_before_hook_failures():
+    service = ToolExecutionService(hooks=[ExplodingBeforeHook()])
+    runner = AsyncMock(return_value="should-not-run")
+
+    with pytest.raises(ValueError, match="unexpected before failure"):
+        await service.execute(
+            ToolInvocation(name="get_news", args={"ticker": "AAPL"}, source="editor"),
+            runner=runner,
+        )
+
+    runner.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_execute_does_not_run_after_hooks_when_runner_fails():
+    events: list[str] = []
+    service = ToolExecutionService(hooks=[PassThroughHook("audit", events)])
+    runner = AsyncMock(side_effect=RuntimeError("runner boom"))
+
+    with pytest.raises(RuntimeError, match="runner boom"):
+        await service.execute(
+            ToolInvocation(name="get_news", args={"ticker": "AAPL"}, source="editor"),
+            runner=runner,
+        )
+
+    runner.assert_awaited_once_with({"ticker": "AAPL"})
+    assert events == ["before:audit"]

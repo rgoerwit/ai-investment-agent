@@ -50,7 +50,7 @@ class TestAnalystNode:
     """Test analyst node creation."""
 
     @pytest.mark.asyncio
-    @patch("src.agents.filter_messages_for_gemini")
+    @patch("src.agents.message_utils.filter_messages_for_gemini")
     async def test_create_analyst_node(self, mock_filter):
         """Test analyst node creation and execution."""
         from src.agents import create_analyst_node

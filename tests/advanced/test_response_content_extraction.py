@@ -500,9 +500,12 @@ class TestRegressionDetection:
 
         # Also need to mock the pipe operator result
         with (
-            patch("src.agents.filter_messages_for_gemini", return_value=[]),
             patch(
-                "src.agents.invoke_with_rate_limit_handling", new_callable=AsyncMock
+                "src.agents.message_utils.filter_messages_for_gemini", return_value=[]
+            ),
+            patch(
+                "src.agents.runtime.invoke_with_rate_limit_handling",
+                new_callable=AsyncMock,
             ) as mock_invoke,
         ):
             mock_invoke.return_value = mock_response

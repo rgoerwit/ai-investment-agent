@@ -99,7 +99,9 @@ class TestConsultantNodeExecution:
         async def mock_invoke(*args, **kwargs):
             return mock_response
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
@@ -156,7 +158,9 @@ class TestConsultantNodeExecution:
         async def mock_invoke_error(*args, **kwargs):
             raise Exception("OpenAI API timeout")
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke_error):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke_error
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
@@ -220,10 +224,12 @@ class TestConsultantNodeExecution:
 
         mock_invoke.calls = 0
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 with patch(
-                    "src.agents.TOOL_SERVICE.execute", new=AsyncMock()
+                    "src.agents.consultant_nodes.TOOL_SERVICE.execute", new=AsyncMock()
                 ) as exec_mock:
                     mock_prompt = Mock()
                     mock_prompt.system_message = "You are a consultant."
@@ -305,7 +311,9 @@ Status: ⚠ BIASES IDENTIFIED
         async def mock_invoke(*args, **kwargs):
             return mock_response
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
@@ -357,7 +365,9 @@ Material Errors:
         async def mock_invoke(*args, **kwargs):
             return mock_response
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."

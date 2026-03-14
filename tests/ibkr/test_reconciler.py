@@ -3,6 +3,7 @@
 import json
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -14,6 +15,7 @@ from src.ibkr.models import (
     TradeBlockData,
 )
 from src.ibkr.reconciler import (
+    AnalysisLoadProgress,
     _exchange_from_position,
     _parse_scores_from_final_decision,
     _resolve_fx,
@@ -792,6 +794,157 @@ class TestLoadLatestAnalyses:
         (tmp_path / "7203_T_2026-03-01_analysis.json").write_text(json.dumps(data))
         result = load_latest_analyses(tmp_path)
         assert result["7203.T"].is_quick_mode is False
+
+    def test_progress_callback_receives_discovered_and_complete_events(self, tmp_path):
+        """Progress callback gets start/end events plus parsing updates."""
+        events: list[AnalysisLoadProgress] = []
+
+        for ticker in ("7203.T", "0005.HK"):
+            data = {
+                "prediction_snapshot": {
+                    "ticker": ticker,
+                    "analysis_date": "2026-03-01",
+                    "verdict": "BUY",
+                },
+                "investment_analysis": {},
+            }
+            filename = ticker.replace(".", "_")
+            (tmp_path / f"{filename}_2026-03-01_analysis.json").write_text(
+                json.dumps(data)
+            )
+
+        analyses = load_latest_analyses(tmp_path, progress=events.append)
+
+        assert analyses.keys() == {"7203.T", "0005.HK"}
+        assert events[0] == AnalysisLoadProgress(
+            phase="discovered",
+            total_files=2,
+            processed_files=0,
+            loaded_analyses=0,
+            current_file=None,
+        )
+        assert any(event.phase == "parsing" for event in events)
+        assert events[-1] == AnalysisLoadProgress(
+            phase="complete",
+            total_files=2,
+            processed_files=2,
+            loaded_analyses=2,
+            current_file="0005_HK_2026-03-01_analysis.json",
+        )
+
+    def test_progress_callback_reports_duplicate_history_scans(self, tmp_path):
+        """Older duplicate files still advance progress, even if they are skipped."""
+        events: list[AnalysisLoadProgress] = []
+
+        for date in ("2026-03-01", "2026-02-20"):
+            data = {
+                "prediction_snapshot": {
+                    "ticker": "7203.T",
+                    "analysis_date": date,
+                    "verdict": "BUY",
+                },
+                "investment_analysis": {},
+            }
+            (tmp_path / f"7203_T_{date}_analysis.json").write_text(json.dumps(data))
+
+        load_latest_analyses(tmp_path, progress=events.append)
+
+        parsing_events = [event for event in events if event.phase == "parsing"]
+        assert [event.processed_files for event in parsing_events] == [1, 2]
+
+    def test_large_scan_progress_is_coarse_grained(self, tmp_path):
+        """Large directories emit sparse progress updates to avoid stderr spam."""
+        events: list[AnalysisLoadProgress] = []
+
+        for i in range(30):
+            data = {
+                "prediction_snapshot": {
+                    "ticker": f"TICK{i:02d}.TO",
+                    "analysis_date": "2026-03-01",
+                    "verdict": "BUY",
+                },
+                "investment_analysis": {},
+            }
+            (tmp_path / f"TICK{i:02d}_TO_2026-03-01_analysis.json").write_text(
+                json.dumps(data)
+            )
+
+        load_latest_analyses(tmp_path, progress=events.append)
+
+        parsing_events = [event for event in events if event.phase == "parsing"]
+        assert [event.processed_files for event in parsing_events] == [25, 30]
+
+    def test_default_loader_logging_is_aggregate_not_per_file(self, tmp_path):
+        """Default load path emits one aggregate debug summary, not one log per file."""
+        for ticker in ("7203.T", "0005.HK"):
+            data = {
+                "prediction_snapshot": {
+                    "ticker": ticker,
+                    "analysis_date": "2026-03-01",
+                    "verdict": "BUY",
+                },
+                "investment_analysis": {},
+            }
+            filename = ticker.replace(".", "_")
+            (tmp_path / f"{filename}_2026-03-01_analysis.json").write_text(
+                json.dumps(data)
+            )
+
+        with patch("src.ibkr.reconciler.logger", new=MagicMock()) as mock_logger:
+            load_latest_analyses(tmp_path)
+
+        debug_events = [call.args[0] for call in mock_logger.debug.call_args_list]
+        assert "analysis_loaded" not in debug_events
+        assert "analyses_scan_complete" in debug_events
+
+    def test_filename_duplicate_history_is_skipped_before_json_load(self, tmp_path):
+        """Older files with the same filename-level ticker key are skipped early."""
+        newest = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-03-02",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        older = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-03-01",
+                "verdict": "SELL",
+            },
+            "investment_analysis": {},
+        }
+        (tmp_path / "7203_T_2026-03-02_analysis.json").write_text(json.dumps(newest))
+        (tmp_path / "7203_T_2026-03-01_analysis.json").write_text(json.dumps(older))
+
+        original_json_load = json.load
+
+        with patch("src.ibkr.reconciler.json.load") as mock_json_load:
+            mock_json_load.side_effect = original_json_load
+            analyses = load_latest_analyses(tmp_path)
+
+        assert mock_json_load.call_count == 1
+        assert analyses["7203.T"].verdict == "BUY"
+
+    def test_filename_dedupe_does_not_hide_older_valid_file_when_newest_is_bad(
+        self, tmp_path
+    ):
+        """A malformed newest file must not block a valid older file with the same key."""
+        valid = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-03-01",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        (tmp_path / "7203_T_2026-03-02_analysis.json").write_text("not json{{{")
+        (tmp_path / "7203_T_2026-03-01_analysis.json").write_text(json.dumps(valid))
+
+        analyses = load_latest_analyses(tmp_path)
+
+        assert analyses["7203.T"].verdict == "BUY"
 
 
 # ── Concentration Tests ──

@@ -32,7 +32,7 @@ class Test429Detection:
         )
 
         with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-            with patch("src.agents.random.uniform", return_value=FIXED_JITTER):
+            with patch("src.agents.runtime.random.uniform", return_value=FIXED_JITTER):
                 result = await invoke_with_rate_limit_handling(
                     runnable, {"input": "test"}, max_attempts=2
                 )
@@ -53,7 +53,7 @@ class Test429Detection:
         )
 
         with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-            with patch("src.agents.random.uniform", return_value=FIXED_JITTER):
+            with patch("src.agents.runtime.random.uniform", return_value=FIXED_JITTER):
                 result = await invoke_with_rate_limit_handling(
                     runnable, {"input": "test"}, max_attempts=2
                 )
@@ -135,7 +135,7 @@ class TestExponentialBackoff:
         )
 
         with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-            with patch("src.agents.random.uniform", return_value=FIXED_JITTER):
+            with patch("src.agents.runtime.random.uniform", return_value=FIXED_JITTER):
                 result = await invoke_with_rate_limit_handling(
                     runnable, {"input": "test"}, max_attempts=3
                 )
@@ -241,9 +241,9 @@ class TestQuietMode:
         )
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
-            with patch("src.agents.settings_config") as mock_config:
+            with patch("src.agents.runtime.settings_config") as mock_config:
                 mock_config.quiet_mode = True
-                with patch("src.agents.logger") as mock_logger:
+                with patch("src.agents.runtime.logger") as mock_logger:
                     result = await invoke_with_rate_limit_handling(
                         runnable,
                         {"input": "test"},
@@ -266,10 +266,10 @@ class TestQuietMode:
         )
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
-            with patch("src.agents.random.uniform", return_value=FIXED_JITTER):
-                with patch("src.agents.settings_config") as mock_config:
+            with patch("src.agents.runtime.random.uniform", return_value=FIXED_JITTER):
+                with patch("src.agents.runtime.settings_config") as mock_config:
                     mock_config.quiet_mode = False
-                    with patch("src.agents.logger") as mock_logger:
+                    with patch("src.agents.runtime.logger") as mock_logger:
                         result = await invoke_with_rate_limit_handling(
                             runnable,
                             {"input": "test"},
@@ -301,7 +301,7 @@ class TestContextLogging:
         )
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
-            with patch("src.agents.logger") as mock_logger:
+            with patch("src.agents.runtime.logger") as mock_logger:
                 await invoke_with_rate_limit_handling(
                     runnable,
                     {"input": "test"},
@@ -331,7 +331,7 @@ class TestContextLogging:
         )
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
-            with patch("src.agents.logger") as mock_logger:
+            with patch("src.agents.runtime.logger") as mock_logger:
                 await invoke_with_rate_limit_handling(
                     runnable, {"input": "test"}, max_attempts=2
                 )
@@ -387,7 +387,7 @@ class TestEdgeCases:
         )
 
         with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-            with patch("src.agents.random.uniform", return_value=FIXED_JITTER):
+            with patch("src.agents.runtime.random.uniform", return_value=FIXED_JITTER):
                 result = await invoke_with_rate_limit_handling(
                     runnable, {"input": "test"}, max_attempts=2
                 )
@@ -406,7 +406,7 @@ class TestEdgeCases:
         )
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
-            with patch("src.agents.logger") as mock_logger:
+            with patch("src.agents.runtime.logger") as mock_logger:
                 await invoke_with_rate_limit_handling(
                     runnable, {"input": "test"}, max_attempts=2
                 )

@@ -919,6 +919,7 @@ class ArticleEditor:
         )
         self.tools = get_editor_tools()
         self.prompt_config = self._load_prompt_config()
+        self._url_cache: dict[str, str] = {}
 
         # Build tool lookup and bind tools to LLM for agentic reference checking
         self._tools_by_name = {t.name: t for t in self.tools}

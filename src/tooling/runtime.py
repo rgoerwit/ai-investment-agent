@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol, TypeAlias
 
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+ToolSource: TypeAlias = Literal["toolnode", "consultant", "editor"]
 
 
 class ToolCallBlocked(RuntimeError):
@@ -21,7 +23,7 @@ class ToolInvocation:
 
     name: str
     args: dict[str, Any]
-    source: str
+    source: ToolSource
     agent_key: str | None = None
 
 
@@ -86,6 +88,9 @@ class ToolExecutionService:
         try:
             result = ToolResult(value=await runner(call.args))
         except Exception:
+            # after() hooks only run for successfully produced tool outputs.
+            # Failed executions propagate immediately so callers keep the original
+            # stack and error semantics.
             logger.error(
                 "tool_call_runner_failed",
                 tool=call.name,
@@ -100,6 +105,4 @@ class ToolExecutionService:
         return result
 
 
-from src.tooling.audit import LoggingToolAuditHook
-
-TOOL_SERVICE = ToolExecutionService(hooks=[LoggingToolAuditHook()])
+TOOL_SERVICE = ToolExecutionService()

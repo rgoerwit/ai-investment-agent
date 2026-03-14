@@ -27,7 +27,9 @@ class TestDataFormatEdgeCases:
         async def mock_invoke(*args, **kwargs):
             return mock_response
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
@@ -73,9 +75,11 @@ class TestDataFormatEdgeCases:
             invoke_calls.append(args)
             return mock_response
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
-                with patch("src.agents.logger") as mock_logger:
+                with patch("src.agents.consultant_nodes.logger") as mock_logger:
                     mock_prompt = Mock()
                     mock_prompt.system_message = "You are a consultant."
                     mock_prompt.agent_name = "External Consultant"
@@ -130,7 +134,9 @@ class TestDataFormatEdgeCases:
         async def mock_invoke(*args, **kwargs):
             return mock_response
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
@@ -239,7 +245,8 @@ class TestErrorPropagation:
             raise TimeoutError("OpenAI API request timed out after 120s")
 
         with patch(
-            "src.agents.invoke_with_rate_limit_handling", new=mock_invoke_timeout
+            "src.agents.runtime.invoke_with_rate_limit_handling",
+            new=mock_invoke_timeout,
         ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
@@ -279,7 +286,8 @@ class TestErrorPropagation:
             raise Exception("Rate limit exceeded. Please retry after 60s.")
 
         with patch(
-            "src.agents.invoke_with_rate_limit_handling", new=mock_invoke_rate_limit
+            "src.agents.runtime.invoke_with_rate_limit_handling",
+            new=mock_invoke_rate_limit,
         ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
@@ -487,7 +495,9 @@ class TestLargeContextHandling:
         async def mock_invoke(*args, **kwargs):
             return mock_response
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."

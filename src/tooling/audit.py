@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
+
+if TYPE_CHECKING:
+    from src.tooling.runtime import ToolInvocation, ToolResult
 
 logger = structlog.get_logger(__name__)
 
@@ -13,7 +16,7 @@ logger = structlog.get_logger(__name__)
 def _safe_len(value: Any) -> int:
     try:
         return len(value)
-    except Exception:
+    except TypeError:
         return len(str(value))
 
 
@@ -28,7 +31,7 @@ def _serialize_preview(value: Any, limit: int = 200) -> str:
 class LoggingToolAuditHook:
     """Log tool start/end events without mutating calls or results."""
 
-    async def before(self, call):
+    async def before(self, call: ToolInvocation) -> ToolInvocation:
         logger.info(
             "tool_call_start",
             tool=call.name,
@@ -39,7 +42,7 @@ class LoggingToolAuditHook:
         )
         return call
 
-    async def after(self, call, result):
+    async def after(self, call: ToolInvocation, result: ToolResult) -> ToolResult:
         logger.debug(
             "tool_call_end",
             tool=call.name,

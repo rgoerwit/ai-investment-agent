@@ -107,7 +107,7 @@ class TestStatePropagationTypes:
 
         # CRITICAL: Mock the invoke_with_rate_limit_handling to bypass the chain
         with patch(
-            "src.agents.invoke_with_rate_limit_handling",
+            "src.agents.runtime.invoke_with_rate_limit_handling",
             new=AsyncMock(return_value=mock_response),
         ):
             # Create fundamentals analyst node
@@ -180,7 +180,7 @@ class TestStatePropagationTypes:
 
             # CRITICAL: Mock the invoke_with_rate_limit_handling to bypass the chain
             with patch(
-                "src.agents.invoke_with_rate_limit_handling",
+                "src.agents.runtime.invoke_with_rate_limit_handling",
                 new=AsyncMock(return_value=mock_response),
             ):
                 node = create_analyst_node(mock_llm, agent_name, [], output_field)

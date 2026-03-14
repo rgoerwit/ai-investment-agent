@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import structlog
@@ -42,6 +44,17 @@ from src.ibkr.ticker import Ticker
 from src.ticker_utils import TickerFormatter
 
 logger = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisLoadProgress:
+    """Progress update emitted while scanning/parsing saved analysis snapshots."""
+
+    phase: str
+    total_files: int
+    processed_files: int
+    loaded_analyses: int
+    current_file: str | None = None
 
 
 def _resolve_fx(analysis: AnalysisRecord) -> float:
@@ -235,6 +248,10 @@ def _normalize_verdict(raw: str) -> str:
 
 
 _REJECT_VERDICTS = frozenset({"DO_NOT_INITIATE", "SELL", "REJECT"})
+_FILENAME_DASH_DATE_RE = re.compile(
+    r"^(?P<ticker>.+?)_(\d{4}-\d{2}-\d{2})_analysis\.json$"
+)
+_FILENAME_TIMESTAMP_RE = re.compile(r"^(?P<ticker>.+?)_(\d{8})_(\d{6})_analysis\.json$")
 
 
 def _parse_scores_from_final_decision(text: str) -> dict:
@@ -296,7 +313,36 @@ def _parse_scores_from_final_decision(text: str) -> dict:
     return result
 
 
-def load_latest_analyses(results_dir: Path) -> dict[str, AnalysisRecord]:
+def _should_emit_analysis_progress(processed_files: int, total_files: int) -> bool:
+    """Return True when a user-facing progress update is worth emitting."""
+    if total_files <= 0:
+        return False
+    if total_files <= 20:
+        return True
+    if total_files <= 200:
+        step = 25
+    elif total_files <= 1000:
+        step = 100
+    else:
+        step = 500
+    return processed_files == total_files or processed_files % step == 0
+
+
+def _extract_filename_analysis_key(filename: str) -> str | None:
+    """Extract the filename-level ticker segment from an analysis snapshot filename."""
+    match = _FILENAME_DASH_DATE_RE.match(filename) or _FILENAME_TIMESTAMP_RE.match(
+        filename
+    )
+    if not match:
+        return None
+    return match.group("ticker")
+
+
+def load_latest_analyses(
+    results_dir: Path,
+    *,
+    progress: Callable[[AnalysisLoadProgress], None] | None = None,
+) -> dict[str, AnalysisRecord]:
     """
     Load the most recent analysis JSON for each ticker from results_dir.
 
@@ -307,13 +353,57 @@ def load_latest_analyses(results_dir: Path) -> dict[str, AnalysisRecord]:
         return {}
 
     analyses: dict[str, AnalysisRecord] = {}
+    filepaths = sorted(results_dir.glob("*_analysis.json"), reverse=True)
+    total_files = len(filepaths)
+    failed_files = 0
+    duplicate_files = 0
+    filename_duplicates_skipped = 0
+    missing_ticker_files = 0
+    seen_filename_keys: set[str] = set()
 
-    for filepath in sorted(results_dir.glob("*_analysis.json"), reverse=True):
+    if progress is not None:
+        progress(
+            AnalysisLoadProgress(
+                phase="discovered",
+                total_files=total_files,
+                processed_files=0,
+                loaded_analyses=0,
+            )
+        )
+
+    for processed_files, filepath in enumerate(filepaths, start=1):
+        filename_key = _extract_filename_analysis_key(filepath.name)
+
+        def emit_progress(
+            processed_files_: int = processed_files,
+            current_file: str = filepath.name,
+        ) -> None:
+            if progress is None or not _should_emit_analysis_progress(
+                processed_files_, total_files
+            ):
+                return
+            progress(
+                AnalysisLoadProgress(
+                    phase="parsing",
+                    total_files=total_files,
+                    processed_files=processed_files_,
+                    loaded_analyses=len(analyses),
+                    current_file=current_file,
+                )
+            )
+
+        if filename_key is not None and filename_key in seen_filename_keys:
+            filename_duplicates_skipped += 1
+            emit_progress()
+            continue
+
         try:
             with open(filepath) as f:
                 data = json.load(f)
         except (json.JSONDecodeError, OSError) as e:
+            failed_files += 1
             logger.debug("analysis_load_failed", file=filepath.name, error=str(e))
+            emit_progress()
             continue
 
         snapshot = data.get("prediction_snapshot", {})
@@ -343,10 +433,14 @@ def load_latest_analyses(results_dir: Path) -> dict[str, AnalysisRecord]:
             if len(parts) >= 3:
                 ticker = parts[0].replace("_", ".")
             if not ticker:
+                missing_ticker_files += 1
+                emit_progress()
                 continue
 
         # Skip if we already have a more recent analysis for this ticker
         if ticker in analyses:
+            duplicate_files += 1
+            emit_progress()
             continue
 
         # Parse TRADE_BLOCK from trader output
@@ -381,15 +475,30 @@ def load_latest_analyses(results_dir: Path) -> dict[str, AnalysisRecord]:
         )
 
         analyses[ticker] = record
-        logger.debug(
-            "analysis_loaded",
-            ticker=ticker,
-            verdict=record.verdict,
-            date=record.analysis_date,
-            age_days=record.age_days,
-        )
+        if filename_key is not None:
+            seen_filename_keys.add(filename_key)
+        emit_progress()
 
+    logger.debug(
+        "analyses_scan_complete",
+        total_files=total_files,
+        loaded=len(analyses),
+        failed=failed_files,
+        duplicates_skipped=duplicate_files,
+        filename_duplicates_skipped=filename_duplicates_skipped,
+        missing_ticker=missing_ticker_files,
+    )
     logger.info("analyses_loaded", count=len(analyses))
+    if progress is not None:
+        progress(
+            AnalysisLoadProgress(
+                phase="complete",
+                total_files=total_files,
+                processed_files=total_files,
+                loaded_analyses=len(analyses),
+                current_file=filepaths[-1].name if filepaths else None,
+            )
+        )
     return analyses
 
 

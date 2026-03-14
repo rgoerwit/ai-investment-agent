@@ -381,6 +381,12 @@ Each analysis creates a Langfuse session (e.g., `0005.HK-2026-01-28-a3f7b2c1`) w
 for mode, models, and memory status. Both Langfuse and LangSmith can be enabled simultaneously
 -- they use independent tracing mechanisms.
 
+### AI Security / Tool Auditing (Advanced)
+
+The runtime includes a shared interception layer for external tool calls. Advanced users can use it to add audit logging or content-inspection hooks around tool inputs and results before those results are fed back into agents.
+
+This is mainly useful for reviewing prompt-injection or context-contamination risk from search, filing, and other external data sources. See `src/tooling/` if you want to extend that behavior.
+
 ### AI Model Configuration and Thinking Levels (IMPORTANT - Dec 2025)
 
 The system uses a **two-tier thinking level architecture** optimized for both performance and reasoning depth. Understanding this is crucial for reliable operation, especially with
@@ -868,8 +874,8 @@ This repository is an educational resource for understanding **production-grade 
 ├── src/
 │   ├── main.py               # CLI entry point — parses args, calls run_analysis(), optional article generation
 │   ├── graph.py              # LangGraph StateGraph — wires nodes, edges, fan-out/fan-in barriers, conditional routing
-│   ├── agents.py             # Node factories — create_analyst_node(), create_researcher_node(), etc.
-│   │                         #   Each factory returns a callable that graph.py registers via workflow.add_node()
+│   ├── agents/               # Agent package — node factories, shared state, reducers, runtime helpers
+│   │   └── __init__.py       # Public re-exports used by graph.py and the rest of the app
 │   ├── toolkit.py            # @tool functions — get_financial_metrics, search_foreign_sources, get_official_filings, etc.
 │   │                         #   Toolkit class groups tools by agent role (get_foreign_language_tools(), etc.)
 │   ├── prompts.py            # Loads versioned JSON prompts, injects ticker/date context into system messages
@@ -910,7 +916,7 @@ This repository is an educational resource for understanding **production-grade 
 │           └── edinet_fetcher.py  # Japan EDINET: shareholders, segments, cash flow from 有価証券報告書
 ```
 
-**How the pieces connect:** `main.py` calls `create_graph()` in `graph.py`, which builds a `StateGraph` by registering nodes from `agents.py` factories, binding tools from `toolkit.py`, and wiring edges (including conditional fan-out/fan-in barriers). Each agent node receives a system prompt from `prompts.py`, calls an LLM from `llms.py`, and writes results to typed state fields. The `data/` layer provides financial data to tools; `validators/` pre-screens before debate; `charts/` visualizes after the PM decides. The `article_writer.py` is entirely outside the graph — a post-analysis step triggered by `--article`.
+**How the pieces connect:** `main.py` calls `create_graph()` in `graph.py`, which builds a `StateGraph` by registering nodes from the `agents/` package, binding tools from `toolkit.py`, and wiring edges (including conditional fan-out/fan-in barriers). Each agent node receives a system prompt from `prompts.py`, calls an LLM from `llms.py`, and writes results to typed state fields. The `data/` layer provides financial data to tools; `validators/` pre-screens before debate; `charts/` visualizes after the PM decides. The `article_writer.py` is entirely outside the graph — a post-analysis step triggered by `--article`.
 
 **Why This Matters for Practitioners:**
 

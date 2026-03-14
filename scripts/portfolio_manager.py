@@ -34,11 +34,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.ibkr.exceptions import IBKRAuthError, IBKRError
 from src.ibkr.models import (
+    AnalysisRecord,
     NormalizedPosition,
     PortfolioSummary,
     ReconciliationItem,
 )
 from src.ibkr.reconciler import (
+    AnalysisLoadProgress,
     compute_portfolio_health,
     load_latest_analyses,
     reconcile,
@@ -2314,6 +2316,147 @@ def _configure_logging(debug: bool) -> None:
     )
 
 
+def _print_status(message: str) -> None:
+    """Emit immediate human-readable progress to stderr."""
+    print(message, file=sys.stderr, flush=True)
+
+
+def _load_analyses_with_progress(
+    results_dir: Path,
+    *,
+    label: str = "Loading analyses",
+) -> dict[str, AnalysisRecord]:
+    """Load analyses with user-visible progress for large result directories."""
+
+    def report(update: AnalysisLoadProgress) -> None:
+        if update.phase == "discovered":
+            _print_status(
+                f"Found {update.total_files} analysis file"
+                f"{'' if update.total_files == 1 else 's'} in {results_dir}/; "
+                "loading latest result per ticker..."
+            )
+            return
+        if update.phase == "parsing":
+            _print_status(
+                f"  Progress: {update.processed_files}/{update.total_files} files scanned; "
+                f"{update.loaded_analyses} latest analyses loaded"
+            )
+            return
+        if update.phase == "complete":
+            _print_status(
+                f"Loaded {update.loaded_analyses} analyses from {results_dir}/"
+            )
+
+    _print_status(f"{label} from {results_dir}/...")
+    return load_latest_analyses(results_dir, progress=report)
+
+
+def _load_ibkr_context(
+    args: argparse.Namespace,
+    *,
+    client_cls=None,
+    read_portfolio_fn=None,
+    read_watchlist_fn=None,
+    config=None,
+) -> tuple[
+    list[NormalizedPosition],
+    PortfolioSummary,
+    set[str],
+    str | None,
+    int | None,
+    list[dict],
+]:
+    """Load live IBKR state with explicit user-visible phase status."""
+    if client_cls is None or read_portfolio_fn is None or read_watchlist_fn is None:
+        from src.ibkr.client import IbkrClient
+        from src.ibkr.portfolio import read_portfolio, read_watchlist
+
+        client_cls = IbkrClient
+        read_portfolio_fn = read_portfolio
+        read_watchlist_fn = read_watchlist
+
+    if config is None:
+        from src.ibkr_config import ibkr_config
+
+        config = ibkr_config
+
+    _print_status("Preparing IBKR client...")
+    _prompt_for_missing_secret(config)
+    client = client_cls(config)
+
+    _print_status("Connecting to IBKR...")
+    client.connect(brokerage_session=False)
+
+    account_id = args.account_id or config.ibkr_account_id
+
+    _print_status("Loading portfolio from IBKR...")
+    positions, portfolio = read_portfolio_fn(
+        client,
+        account_id,
+        args.cash_buffer,
+    )
+
+    watchlist_tickers: set[str] = set()
+    loaded_watchlist_name: str | None = None
+    loaded_watchlist_total: int | None = None
+
+    # args.watchlist_name is None  → user didn't pass the flag; try the default
+    #                                name but don't abort if missing.
+    # args.watchlist_name is a str → explicitly requested; abort if not found.
+    wl_name_hint = (
+        args.watchlist_name
+        if args.watchlist_name is not None
+        else ""  # empty → first available watchlist
+    )
+    wl_explicitly_requested = args.watchlist_name is not None
+
+    _print_status("Loading watchlist from IBKR...")
+    wl_result = read_watchlist_fn(client, wl_name_hint)
+    if wl_result is None:
+        if wl_explicitly_requested:
+            print(
+                f"Error: watchlist '{wl_name_hint}' not found in IBKR.\n"
+                f"Use --watchlist-name with a substring that matches one of your IBKR watchlist names.",
+                file=sys.stderr,
+            )
+            client.close()
+            sys.exit(1)
+    elif len(wl_result) == 0:
+        if wl_explicitly_requested:
+            print(
+                f"Warning: could not load watchlist '{wl_name_hint}' "
+                f"(API error or watchlist is empty — see log above). "
+                f"Continuing without watchlist filtering.",
+                file=sys.stderr,
+            )
+    else:
+        watchlist_tickers = wl_result
+        loaded_watchlist_name = wl_name_hint or None
+        loaded_watchlist_total = len(wl_result)
+        print(
+            f"Loaded {len(watchlist_tickers)} watchlist tickers from '{wl_name_hint}'",
+            file=sys.stderr,
+        )
+
+    live_orders_data: list[dict] = []
+    if args.recommend:
+        _print_status("Loading live orders from IBKR...")
+        try:
+            live_orders_data = client.get_live_orders()
+        except Exception:
+            pass  # fail-safe: annotation omitted if unavailable
+
+    client.close()
+    return (
+        positions,
+        portfolio,
+        watchlist_tickers,
+        loaded_watchlist_name,
+        loaded_watchlist_total,
+        live_orders_data,
+    )
+
+
 def main() -> None:
     args = parse_args()
     _configure_logging(args.debug)
@@ -2334,7 +2477,7 @@ def main() -> None:
     results_dir = Path(args.results_dir)
 
     # Load analyses from disk (always works, no IBKR needed)
-    analyses = load_latest_analyses(results_dir)
+    analyses = _load_analyses_with_progress(results_dir)
     if not analyses:
         print(f"No analysis JSONs found in {results_dir}/", file=sys.stderr)
         print(
@@ -2342,8 +2485,6 @@ def main() -> None:
             file=sys.stderr,
         )
         sys.exit(1)
-
-    print(f"Loaded {len(analyses)} analyses from {results_dir}/", file=sys.stderr)
 
     # Read IBKR portfolio (or use empty if --read-only)
     positions: list[NormalizedPosition] = []
@@ -2364,75 +2505,14 @@ def main() -> None:
         )
     else:
         try:
-            from src.ibkr.client import IbkrClient
-            from src.ibkr.portfolio import read_portfolio, read_watchlist
-            from src.ibkr_config import ibkr_config
-
-            _prompt_for_missing_secret(ibkr_config)
-            client = IbkrClient(ibkr_config)
-            client.connect(brokerage_session=False)
-
-            account_id = args.account_id or ibkr_config.ibkr_account_id
-            positions, portfolio = read_portfolio(
-                client,
-                account_id,
-                args.cash_buffer,
-            )
-
-            # args.watchlist_name is None  → user didn't pass the flag; try the default
-            #                                name but don't abort if missing.
-            # args.watchlist_name is a str → explicitly requested; abort if not found.
-            wl_name_hint = (
-                args.watchlist_name
-                if args.watchlist_name is not None
-                else ""  # empty → first available watchlist
-            )
-            wl_explicitly_requested = args.watchlist_name is not None
-
-            wl_result = read_watchlist(client, wl_name_hint)
-            if wl_result is None:
-                # Confirmed not found: we successfully fetched the watchlist index
-                # and the name wasn't in it.
-                if wl_explicitly_requested:
-                    print(
-                        f"Error: watchlist '{wl_name_hint}' not found in IBKR.\n"
-                        f"Use --watchlist-name with a substring that matches one of your IBKR watchlist names.",
-                        file=sys.stderr,
-                    )
-                    client.close()
-                    sys.exit(1)
-                # Not explicitly requested — silently skip
-            elif len(wl_result) == 0:
-                # Empty set: either a transient API error (e.g. "no bridge" — see
-                # the watchlist_fetch_failed warning above) or a genuinely empty
-                # watchlist.  Either way, continue without watchlist filtering.
-                if wl_explicitly_requested:
-                    print(
-                        f"Warning: could not load watchlist '{wl_name_hint}' "
-                        f"(API error or watchlist is empty — see log above). "
-                        f"Continuing without watchlist filtering.",
-                        file=sys.stderr,
-                    )
-                # Not explicitly requested — silently skip
-            else:
-                watchlist_tickers = wl_result
-                _loaded_watchlist_name = (
-                    wl_name_hint or None
-                )  # None when auto-discovered with no hint
-                _loaded_watchlist_total = len(wl_result)
-                print(
-                    f"Loaded {len(watchlist_tickers)} watchlist tickers from '{wl_name_hint}'",
-                    file=sys.stderr,
-                )
-
-            # Fetch live orders before closing — used by format_report() annotations
-            if args.recommend:
-                try:
-                    _live_orders_data = client.get_live_orders()
-                except Exception:
-                    pass  # fail-safe: annotation omitted if unavailable
-
-            client.close()
+            (
+                positions,
+                portfolio,
+                watchlist_tickers,
+                _loaded_watchlist_name,
+                _loaded_watchlist_total,
+                _live_orders_data,
+            ) = _load_ibkr_context(args)
 
         except ImportError:
             print(
@@ -2492,7 +2572,10 @@ def main() -> None:
                 asyncio.run(refresh_stale_analysis(ticker, quick=args.quick))
 
             # Reload and re-reconcile
-            analyses = load_latest_analyses(results_dir)
+            analyses = _load_analyses_with_progress(
+                results_dir,
+                label="Reloading analyses after refresh",
+            )
             items = reconcile(
                 positions=positions,
                 analyses=analyses,
