@@ -32,6 +32,7 @@ from langgraph.types import RunnableConfig
 from typing_extensions import TypedDict
 
 from src.config import config as settings_config
+from src.tooling.runtime import TOOL_SERVICE, ToolInvocation
 
 logger = structlog.get_logger(__name__)
 
@@ -2320,7 +2321,16 @@ Provide your independent consultant review."""
                     tool_fn = tools_by_name.get(tc["name"])
                     if tool_fn:
                         try:
-                            result = await tool_fn.ainvoke(tc["args"])
+                            tool_result = await TOOL_SERVICE.execute(
+                                ToolInvocation(
+                                    name=tc["name"],
+                                    args=tc["args"],
+                                    source="consultant",
+                                    agent_key=agent_key,
+                                ),
+                                runner=lambda args, tool=tool_fn: tool.ainvoke(args),
+                            )
+                            result = tool_result.value
                         except Exception as tool_err:
                             result = f"TOOL_ERROR: {str(tool_err)}"
                     else:

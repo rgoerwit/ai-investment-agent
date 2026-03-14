@@ -1505,6 +1505,39 @@ class TestEditorToolCalling:
         assert "TOOL_ERROR" in results[0].content
         assert "Connection reset" in results[0].content
 
+    @pytest.mark.asyncio
+    async def test_execute_tool_calls_routes_through_tool_service(self):
+        """_execute_tool_calls should use the shared tool execution service."""
+        from src.article_writer import ArticleEditor
+        from src.tooling.runtime import ToolResult
+
+        editor = ArticleEditor()
+
+        mock_tool = AsyncMock()
+        mock_tool.ainvoke = AsyncMock(return_value="direct-result")
+        mock_tool.name = "fetch_reference_content"
+        editor._tools_by_name = {"fetch_reference_content": mock_tool}
+
+        with patch(
+            "src.article_writer.TOOL_SERVICE.execute", new=AsyncMock()
+        ) as exec_mock:
+            exec_mock.return_value = ToolResult(value="hooked-result")
+
+            results = await editor._execute_tool_calls(
+                [
+                    {
+                        "name": "fetch_reference_content",
+                        "args": {"url": "https://example.com"},
+                        "id": "call_1",
+                    }
+                ]
+            )
+
+        exec_mock.assert_awaited_once()
+        mock_tool.ainvoke.assert_not_called()
+        assert len(results) == 1
+        assert results[0].content == "hooked-result"
+
 
 # =============================================================================
 # URL Cache Tests

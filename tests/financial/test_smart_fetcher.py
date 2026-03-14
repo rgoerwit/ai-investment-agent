@@ -16,6 +16,10 @@ from src.data.fetcher import SmartMarketDataFetcher
 from src.data.validator import FineGrainedValidator
 
 
+def _fmt_pct(value) -> str:
+    return f"{value:.1f}%" if isinstance(value, int | float) else "N/A"
+
+
 @pytest.mark.asyncio
 async def test_basic_fetch():
     """Test that basics are always present."""
@@ -38,7 +42,7 @@ async def test_basic_fetch():
     quality = data.get("_quality", {})
     print("\nQuality Check:")
     print(f"  Basics OK: {quality.get('basics_ok')}")
-    print(f"  Coverage: {quality.get('coverage_pct'):.1f}%")
+    print(f"  Coverage: {_fmt_pct(quality.get('coverage_pct'))}")
     print(f"  Sources: {', '.join(quality.get('sources_used', []))}")
     print(f"  Gaps Filled: {quality.get('gaps_filled_this_fetch')}")
 
@@ -78,6 +82,8 @@ async def test_basic_fetch():
     print(f"  Sources Used: {stats['sources']}")
     print(f"  Total Gaps Filled: {stats['gaps_filled']}")
 
+    assert isinstance(data, dict)
+    assert "symbol" in data
     return data
 
 
@@ -105,8 +111,11 @@ async def test_hsbc_currency_bug():
 
     quality = data.get("_quality", {})
     print("\nQuality:")
-    print(f"  Coverage: {quality.get('coverage_pct'):.1f}%")
+    print(f"  Coverage: {_fmt_pct(quality.get('coverage_pct'))}")
     print(f"  Gaps Filled: {quality.get('gaps_filled_this_fetch')}")
+
+    assert isinstance(data, dict)
+    assert data.get("symbol") == "0005.HK"
 
 
 @pytest.mark.asyncio
@@ -140,7 +149,7 @@ async def test_gap_filling():
 
     quality = data.get("_quality", {})
     print("\nBRK-B Quality:")
-    print(f"  Coverage: {quality.get('coverage_pct'):.1f}%")
+    print(f"  Coverage: {_fmt_pct(quality.get('coverage_pct'))}")
     print(f"  Sources: {', '.join(quality.get('sources_used', []))}")
     print(f"  Gaps Filled: {quality.get('gaps_filled_this_fetch')}")
 
@@ -172,6 +181,9 @@ async def test_gap_filling():
         print(f"\nMetrics Missing ({len(missing)}/{len(important)}):")
         for field in missing:
             print(f"  ✗ {field}")
+
+    assert isinstance(data, dict)
+    assert data.get("symbol") == "BRK-B"
 
 
 async def main():

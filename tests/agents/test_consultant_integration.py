@@ -5,7 +5,7 @@ Tests both the functionality of the consultant node and non-regression
 of existing system behavior when consultant is enabled/disabled.
 """
 
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from langgraph.types import RunnableConfig
@@ -185,6 +185,75 @@ class TestConsultantNodeExecution:
                 assert "consultant_review" in result
                 assert "Error" in result["consultant_review"]
                 assert "OpenAI API timeout" in result["consultant_review"]
+
+    @pytest.mark.asyncio
+    async def test_consultant_tool_loop_routes_through_tool_service(self):
+        """Consultant verification tools should use the shared tool service."""
+        from src.tooling.runtime import ToolResult
+
+        mock_tool_bound_llm = Mock()
+        mock_llm = Mock()
+        mock_llm.bind_tools.return_value = mock_tool_bound_llm
+
+        tool_call_response = Mock()
+        tool_call_response.content = ""
+        tool_call_response.tool_calls = [
+            {
+                "name": "spot_check_metric",
+                "args": {"ticker": "0005.HK"},
+                "id": "tool_1",
+            }
+        ]
+        final_response = Mock()
+        final_response.content = "CONSULTANT REVIEW: VERIFIED"
+        final_response.tool_calls = []
+
+        mock_tool = Mock()
+        mock_tool.name = "spot_check_metric"
+        mock_tool.ainvoke = AsyncMock(return_value="direct-tool-result")
+
+        async def mock_invoke(*args, **kwargs):
+            if mock_invoke.calls == 0:
+                mock_invoke.calls += 1
+                return tool_call_response
+            return final_response
+
+        mock_invoke.calls = 0
+
+        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                with patch(
+                    "src.agents.TOOL_SERVICE.execute", new=AsyncMock()
+                ) as exec_mock:
+                    mock_prompt = Mock()
+                    mock_prompt.system_message = "You are a consultant."
+                    mock_prompt.agent_name = "External Consultant"
+                    mock_get_prompt.return_value = mock_prompt
+                    exec_mock.return_value = ToolResult(value="hooked-tool-result")
+
+                    consultant_node = create_consultant_node(
+                        mock_llm, "consultant", tools=[mock_tool]
+                    )
+
+                    state = {
+                        "company_of_interest": "0005.HK",
+                        "company_name": "HSBC Holdings",
+                        "market_report": "Report",
+                        "sentiment_report": "Report",
+                        "news_report": "Report",
+                        "fundamentals_report": "Report",
+                        "investment_debate_state": {"history": "Debate"},
+                        "investment_plan": "Plan",
+                    }
+                    config = RunnableConfig(
+                        configurable={"context": Mock(trade_date="2025-12-13")}
+                    )
+
+                    result = await consultant_node(state, config)
+
+        exec_mock.assert_awaited_once()
+        mock_tool.ainvoke.assert_not_called()
+        assert result["consultant_review"] == "CONSULTANT REVIEW: VERIFIED"
 
 
 class TestGraphIntegration:

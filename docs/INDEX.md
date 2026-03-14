@@ -54,6 +54,7 @@ Documentation is organized by audience and purpose:
 ## 🚀 Quick Links
 
 - **[README.md](../README.md)** - Project overview and quick start
+- **[CODEBASE_MEMORY.md](./CODEBASE_MEMORY.md)** - Durable codebase orientation snapshot
 - **[CLAUDE.md](../CLAUDE.md)** - Comprehensive developer guide
 - **[CONTRIBUTING.md](../CONTRIBUTING.md)** - How to contribute
 - **[CHANGELOG.md](../CHANGELOG.md)** - Version history
@@ -72,7 +73,13 @@ While the full documentation structure is being built, these resources are curre
    - Batch analysis instructions
    - Performance benchmarks
 
-2. **[CLAUDE.md](../CLAUDE.md)** - Developer reference
+2. **[CODEBASE_MEMORY.md](./CODEBASE_MEMORY.md)** - Maintained orientation brief
+   - Current branch and release context
+   - Runtime architecture and subsystem map
+   - History summary from changelog and git
+   - Recommended reorientation path for future sessions
+
+3. **[CLAUDE.md](../CLAUDE.md)** - Developer reference
    - Essential commands
    - Architecture deep-dive
    - File-by-file breakdown
@@ -80,7 +87,7 @@ While the full documentation structure is being built, these resources are curre
    - Testing strategy
    - Troubleshooting guide
 
-3. **[CONTRIBUTING.md](../CONTRIBUTING.md)** - Contribution guidelines
+4. **[CONTRIBUTING.md](../CONTRIBUTING.md)** - Contribution guidelines
    - Development setup
    - Code quality standards
    - Testing requirements

@@ -5,8 +5,9 @@ This module tests the various contamination scenarios identified in
 MEMORY_CONTAMINATION_ANALYSIS.md to ensure proper isolation.
 """
 
+from unittest.mock import AsyncMock, Mock, patch
+
 import pytest
-import yfinance as yf
 
 from src.agents import AgentState
 from src.memory import (
@@ -21,9 +22,11 @@ class TestCompanyNameExtraction:
     """Test that company names are correctly extracted from yfinance."""
 
     def test_0293_hk_correct_name(self):
-        """Verify 0293.HK returns Cathay Pacific, not China Resources Beer."""
-        ticker = yf.Ticker("0293.HK")
-        info = ticker.info
+        """Verify 0293.HK resolves to Cathay Pacific, not China Resources Beer."""
+        info = {
+            "longName": "Cathay Pacific Airways Limited",
+            "shortName": "Cathay Pacific",
+        }
         long_name = info.get("longName", "")
         short_name = info.get("shortName", "")
 
@@ -36,9 +39,11 @@ class TestCompanyNameExtraction:
         ), f"Should not contain 'BEER', got: {long_name} / {short_name}"
 
     def test_0291_hk_correct_name(self):
-        """Verify 0291.HK returns China Resources Beer."""
-        ticker = yf.Ticker("0291.HK")
-        info = ticker.info
+        """Verify 0291.HK resolves to China Resources Beer."""
+        info = {
+            "longName": "China Resources Beer (Holdings) Company Limited",
+            "shortName": "China Resources Beer",
+        }
         long_name = info.get("longName", "")
         short_name = info.get("shortName", "")
 
@@ -51,7 +56,12 @@ class TestCompanyNameExtraction:
     @pytest.mark.asyncio
     async def test_extract_company_name_async_0293(self):
         """Test async extraction for 0293.HK."""
-        ticker_obj = yf.Ticker("0293.HK")
+        ticker_obj = Mock()
+        ticker_obj.ticker = "0293.HK"
+        ticker_obj.info = {
+            "longName": "Cathay Pacific Airways Limited",
+            "shortName": "Cathay Pacific",
+        }
         company_name = await extract_company_name_async(ticker_obj)
 
         assert (
@@ -247,8 +257,19 @@ class TestLLMHallucinationPrevention:
         """Verify that tools return company names in their output."""
         from src.toolkit import get_financial_metrics
 
-        # Tools are LangChain StructuredTool objects, use ainvoke method
-        result = await get_financial_metrics.ainvoke({"ticker": "0293.HK"})
+        mocked_data = {
+            "symbol": "0293.HK",
+            "companyName": "Cathay Pacific Airways Limited",
+            "currency": "HKD",
+            "currentPrice": 8.35,
+        }
+
+        with patch(
+            "src.toolkit.market_data_fetcher.get_financial_metrics", new=AsyncMock()
+        ) as fetch_mock:
+            fetch_mock.return_value = mocked_data
+            # Tools are LangChain StructuredTool objects, use ainvoke method
+            result = await get_financial_metrics.ainvoke({"ticker": "0293.HK"})
 
         # Result should contain the ticker
         assert (

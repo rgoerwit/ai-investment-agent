@@ -1064,6 +1064,27 @@ async def main():
         if args.trace_langfuse:
             config.langfuse_enabled = True
 
+        # --- Flag Compatibility Checks ---
+        # --quick skips chart generation entirely, so chart-only flags are no-ops
+        # that could mislead the user into thinking charts were produced.
+        if args.quick:
+            chart_flags = [
+                f
+                for f, v in [("--transparent", args.transparent), ("--svg", args.svg)]
+                if v
+            ]
+            if chart_flags:
+                flags_str = " and ".join(chart_flags)
+                verb = "has" if len(chart_flags) == 1 else "have"
+                noun = "that flag" if len(chart_flags) == 1 else "those flags"
+                print(
+                    f"error: {flags_str} {verb} no effect with --quick "
+                    f"(chart generation is skipped in quick mode). "
+                    f"Remove {noun} or drop --quick.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+
         # --- Output and Image Directory Logic ---
         output_file, image_dir = resolve_output_paths(args)
         output_dir = output_file.parent if output_file else Path.cwd()

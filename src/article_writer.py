@@ -16,6 +16,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from src.config import config
 from src.llms import create_deep_thinking_llm, create_writer_llm
 from src.token_tracker import TokenTrackingCallback, get_tracker
+from src.tooling.runtime import TOOL_SERVICE, ToolInvocation
 
 # Maximum characters for fact-check context (controls token usage)
 MAX_FACT_CHECK_CHARS = 1500
@@ -1047,8 +1048,16 @@ class ArticleEditor:
                     tool=tool_name,
                     args_preview=str(tool_args)[:100],
                 )
-                result = await tool_fn.ainvoke(tool_args)
-                content = str(result)
+                tool_result = await TOOL_SERVICE.execute(
+                    ToolInvocation(
+                        name=tool_name,
+                        args=tool_args,
+                        source="editor",
+                        agent_key="article_editor",
+                    ),
+                    runner=lambda args, tool=tool_fn: tool.ainvoke(args),
+                )
+                content = str(tool_result.value)
 
                 # Cache URL fetch results for this editorial session
                 if tool_name == "fetch_reference_content":

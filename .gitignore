@@ -5,6 +5,7 @@ CLAUDE.md
 .gemini
 .gemini/*
 GEMINI.md
+AGENTS.md
 
 # Local things we ignore
 examples/~*
