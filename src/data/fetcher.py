@@ -2386,10 +2386,50 @@ class SmartMarketDataFetcher(FinancialFetcher):
         self.fx_cache_expiry_time = {}
 
 
-# Singleton instance
-fetcher = SmartMarketDataFetcher()
+_fetcher_instance: SmartMarketDataFetcher | None = None
+
+
+def get_fetcher() -> SmartMarketDataFetcher:
+    """Return the process-wide market data fetcher, initializing lazily."""
+    global _fetcher_instance
+    if _fetcher_instance is None:
+        _fetcher_instance = SmartMarketDataFetcher()
+    return _fetcher_instance
+
+
+class _LazyFetcherProxy:
+    """Proxy that defers SmartMarketDataFetcher construction until first use."""
+
+    async def get_financial_metrics(self, *args, **kwargs):
+        return await get_fetcher().get_financial_metrics(*args, **kwargs)
+
+    async def get_historical_prices(self, *args, **kwargs):
+        return await get_fetcher().get_historical_prices(*args, **kwargs)
+
+    async def get_price_history(self, *args, **kwargs):
+        return await get_fetcher().get_price_history(*args, **kwargs)
+
+    def get_stats(self, *args, **kwargs):
+        return get_fetcher().get_stats(*args, **kwargs)
+
+    def clear_fx_cache(self, *args, **kwargs):
+        return get_fetcher().clear_fx_cache(*args, **kwargs)
+
+    def is_available(self, *args, **kwargs):
+        return get_fetcher().is_available(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(get_fetcher(), name)
+
+    def __repr__(self) -> str:
+        status = "initialized" if _fetcher_instance is not None else "lazy"
+        return f"<_LazyFetcherProxy {status}>"
+
+
+# Singleton proxy
+fetcher = _LazyFetcherProxy()
 
 
 # Backward compatibility
 async def fetch_ticker_data(ticker: str) -> dict[str, Any]:
-    return await fetcher.get_financial_metrics(ticker)
+    return await get_fetcher().get_financial_metrics(ticker)

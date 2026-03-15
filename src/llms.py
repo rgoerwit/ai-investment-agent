@@ -98,6 +98,26 @@ _llm_instances: dict = {}
 _llm_instance_counter: int = 0
 
 
+class _LazyLLMProxy:
+    """Lazily construct a default LLM on first use."""
+
+    def __init__(self, factory):
+        self._factory = factory
+        self._instance = None
+
+    def _get_instance(self):
+        if self._instance is None:
+            self._instance = self._factory()
+        return self._instance
+
+    def __getattr__(self, name):
+        return getattr(self._get_instance(), name)
+
+    def __repr__(self) -> str:
+        status = "initialized" if self._instance is not None else "lazy"
+        return f"<_LazyLLMProxy {status}>"
+
+
 def is_openai_consultant_available() -> bool:
     """Return whether OpenAI-backed consultant/auditor nodes can be enabled."""
     if not config.enable_consultant:
@@ -249,9 +269,10 @@ def create_deep_thinking_llm(
     )
 
 
-# Initialize default instances (automatically tracked by create_gemini_model)
-quick_thinking_llm = create_quick_thinking_llm()
-deep_thinking_llm = create_deep_thinking_llm()
+# Lazily initialize default instances so importing src.llms does not construct
+# network-capable clients during test collection or light-weight CLI paths.
+quick_thinking_llm = _LazyLLMProxy(create_quick_thinking_llm)
+deep_thinking_llm = _LazyLLMProxy(create_deep_thinking_llm)
 
 
 # ... (rest of the file is the same)
