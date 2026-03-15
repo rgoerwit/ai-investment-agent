@@ -8,11 +8,13 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import socket
 import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 import structlog
 from rich import box
@@ -30,6 +32,21 @@ from src.runtime_diagnostics import build_analysis_validity, is_publishable_anal
 
 logger = structlog.get_logger(__name__)
 console = Console()
+
+CLI_APP_DEBUG_LOGGERS = ("__main__", "src")
+CLI_NOISY_DEPENDENCY_LOGGERS: dict[str, int] = {
+    "anthropic": logging.WARNING,
+    "google": logging.INFO,
+    "google_genai": logging.WARNING,
+    "hpack": logging.WARNING,
+    "httpcore": logging.WARNING,
+    "httpx": logging.WARNING,
+    "langchain": logging.INFO,
+    "langgraph": logging.INFO,
+    "openai": logging.WARNING,
+    "urllib3": logging.WARNING,
+}
+HTTP_TRACE_LOGGERS = ("openai", "httpx", "httpcore", "hpack")
 
 
 def _cost_suffix() -> str:
@@ -72,6 +89,20 @@ def suppress_all_logging():
     import warnings
 
     warnings.filterwarnings("ignore")
+
+
+def _cli_logging_mode(
+    args,
+) -> Literal["quiet", "brief", "normal", "verbose", "debug"]:
+    if getattr(args, "quiet", False):
+        return "quiet"
+    if getattr(args, "brief", False):
+        return "brief"
+    if getattr(args, "debug", False):
+        return "debug"
+    if getattr(args, "verbose", False):
+        return "verbose"
+    return "normal"
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -165,7 +196,20 @@ Examples:
         help=f"Model to use for deep analysis (default: {config.deep_think_llm})",
     )
 
-    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable high-signal application diagnostics",
+    )
+
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "Enable developer debug logging; use INVESTMENT_AGENT_TRACE_HTTP=1 "
+            "for raw transport traces"
+        ),
+    )
 
     parser.add_argument(
         "--no-memory", action="store_true", help="Disable persistent memory (ChromaDB)"
@@ -242,6 +286,9 @@ def parse_arguments() -> argparse.Namespace:
     # Validate: --ticker is required unless --retrospective-only
     if not args.retrospective_only and not args.ticker:
         parser.error("--ticker is required unless --retrospective-only is specified")
+
+    if args.debug:
+        args.verbose = True
 
     return args
 
@@ -338,8 +385,9 @@ def resolve_article_path(args, ticker: str) -> Path | None:
         return None
 
 
-def run_provider_preflight() -> None:
-    """Log a concise provider/network preflight in verbose mode."""
+def run_provider_preflight() -> dict[str, dict[str, str]]:
+    """Log and return a concise provider/network preflight summary."""
+    results: dict[str, dict[str, str]] = {}
     provider_hosts = [
         ("google_gemini", "generativelanguage.googleapis.com"),
         ("anthropic", "api.anthropic.com"),
@@ -349,8 +397,15 @@ def run_provider_preflight() -> None:
     for provider, host in provider_hosts:
         try:
             socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+            results[provider] = {"host": host, "dns": "ok"}
             logger.info("provider_preflight", provider=provider, host=host, dns="ok")
         except Exception as exc:
+            results[provider] = {
+                "host": host,
+                "dns": "failed",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
             logger.warning(
                 "provider_preflight",
                 provider=provider,
@@ -359,6 +414,7 @@ def run_provider_preflight() -> None:
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
+    return results
 
 
 def configure_tool_audit_logging(enabled: bool) -> None:
@@ -371,6 +427,87 @@ def configure_tool_audit_logging(enabled: bool) -> None:
         logger.info("tool_audit_logging_enabled")
     else:
         TOOL_SERVICE.clear_hooks()
+
+
+def configure_cli_logging(args) -> dict[str, dict[str, str]]:
+    """Configure CLI logging without globally enabling dependency debug output."""
+    mode = _cli_logging_mode(args)
+    if mode in {"quiet", "brief"}:
+        configure_tool_audit_logging(False)
+        suppress_all_logging()
+        return {}
+
+    logging.getLogger().setLevel(logging.INFO)
+
+    app_level = logging.DEBUG if mode in {"verbose", "debug"} else logging.INFO
+    for name in CLI_APP_DEBUG_LOGGERS:
+        logging.getLogger(name).setLevel(app_level)
+
+    for name, level in CLI_NOISY_DEPENDENCY_LOGGERS.items():
+        logging.getLogger(name).setLevel(level)
+
+    if mode == "debug" and os.getenv("INVESTMENT_AGENT_TRACE_HTTP") == "1":
+        for name in HTTP_TRACE_LOGGERS:
+            logging.getLogger(name).setLevel(logging.DEBUG)
+
+    enable_diagnostics = mode in {"verbose", "debug"}
+    configure_tool_audit_logging(enable_diagnostics)
+    return run_provider_preflight() if enable_diagnostics else {}
+
+
+def build_run_summary(
+    result: dict,
+    *,
+    quick_mode: bool,
+    article_requested: bool,
+    provider_preflight: dict[str, dict[str, str]] | None = None,
+) -> dict[str, object]:
+    """Build a compact summary for saved artifacts and end-of-run logs."""
+    from langchain_core.messages import ToolMessage
+
+    from src.token_tracker import get_tracker
+
+    tracker_stats = get_tracker().get_total_stats()
+    messages = result.get("messages", []) or []
+    tool_messages = [msg for msg in messages if isinstance(msg, ToolMessage)]
+    tool_failures = sum(
+        1 for msg in tool_messages if getattr(msg, "status", None) == "error"
+    )
+    artifact_statuses = result.get("artifact_statuses", {}) or {}
+    consultant_status = artifact_statuses.get("consultant_review") or {}
+    auditor_status = artifact_statuses.get("auditor_report") or {}
+    consultant_finished = bool(consultant_status.get("complete"))
+    auditor_finished = bool(auditor_status.get("complete"))
+
+    return {
+        "quick_mode": quick_mode,
+        "provider_preflight": provider_preflight or {},
+        "pre_screening_result": result.get("pre_screening_result", ""),
+        "debate_rounds": result.get("investment_debate_state", {}).get("count", 0),
+        # Backward-compatible aliases: "completed" here means "finished", not "succeeded".
+        "consultant_completed": consultant_finished,
+        "auditor_completed": auditor_finished,
+        "consultant_finished": consultant_finished,
+        "auditor_finished": auditor_finished,
+        "consultant_successful": bool(consultant_status.get("ok")),
+        "auditor_successful": bool(auditor_status.get("ok")),
+        "article_requested": article_requested,
+        "llm_attempts": tracker_stats["total_calls"] + tracker_stats["failed_attempts"],
+        "llm_failures": tracker_stats["failed_attempts"],
+        "tool_calls": len(tool_messages),
+        "tool_failures": tool_failures,
+        "publishable": result.get("analysis_validity", {}).get("publishable", False),
+        "required_failures": sorted(
+            (result.get("analysis_validity", {}) or {})
+            .get("required_failures", {})
+            .keys()
+        ),
+        "optional_failures": sorted(
+            (result.get("analysis_validity", {}) or {})
+            .get("optional_failures", {})
+            .keys()
+        ),
+    }
 
 
 async def handle_article_generation(
@@ -802,6 +939,8 @@ def save_results_to_file(result: dict, ticker: str, quick_mode: bool = False) ->
             "decision": result.get("final_trade_decision", ""),
             "processed_signal": None,
         },
+        "pre_screening_result": result.get("pre_screening_result", ""),
+        "run_summary": result.get("run_summary", {}),
         "analysis_validity": result.get("analysis_validity", {}),
         "artifact_statuses": result.get("artifact_statuses", {}),
     }
@@ -1074,6 +1213,7 @@ async def run_analysis(
 async def main():
     """Main entry point for the application."""
     args = None
+    provider_preflight: dict[str, dict[str, str]] = {}
     try:
         args = parse_arguments()
 
@@ -1163,14 +1303,7 @@ async def main():
                     "Report will contain absolute paths to images, which may not render correctly on other systems."
                 )
 
-        if args.verbose and not args.quiet and not args.brief:
-            logging.getLogger().setLevel(logging.DEBUG)
-            for name in logging.root.manager.loggerDict:
-                logging.getLogger(name).setLevel(logging.DEBUG)
-            configure_tool_audit_logging(True)
-            run_provider_preflight()
-        else:
-            configure_tool_audit_logging(False)
+        provider_preflight = configure_cli_logging(args)
 
         try:
             validate_environment_variables()
@@ -1272,6 +1405,12 @@ async def main():
         )
 
         if result:
+            result["run_summary"] = build_run_summary(
+                result,
+                quick_mode=args.quick,
+                article_requested=bool(args.article),
+                provider_preflight=provider_preflight,
+            )
             # Auto-detect non-TTY stdout (e.g., output redirected to file)
             # Use markdown output instead of Rich formatting to avoid box-drawing characters
             use_markdown = (
@@ -1373,6 +1512,7 @@ async def main():
                 logger.debug("rejection_record_save_skipped", error=str(e))
 
             # Generate article if --article flag is set
+            article_generated = False
             if args.article:
                 if not is_publishable_analysis(result):
                     logger.warning(
@@ -1436,6 +1576,16 @@ async def main():
                         valuation_context=reporter.get_valuation_context(),
                         analysis_result=result,
                     )
+                    article_generated = True
+
+            logger.info(
+                "analysis_run_summary",
+                ticker=args.ticker,
+                **{
+                    **result.get("run_summary", {}),
+                    "article_generated": article_generated,
+                },
+            )
 
             sys.exit(0)
         else:

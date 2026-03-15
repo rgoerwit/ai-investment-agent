@@ -99,6 +99,17 @@ DEBT_EQUITY_PERCENTAGE_THRESHOLD = 10.0
 PRICE_TO_BOOK_CURRENCY_MISMATCH_THRESHOLD = 5.0
 FX_CACHE_TTL_SECONDS = 3600
 PER_SOURCE_TIMEOUT = 15
+# These fields are safely comparable with the simple "fraction vs percent" heuristic
+# used in _normalize_percent_pair(). Growth/return metrics are intentionally excluded:
+# values > 1.0 can be legitimate in decimal form, so blind scaling creates false conflicts.
+PERCENT_LIKE_FIELDS = frozenset(
+    {
+        "dividendYield",
+        "trailingAnnualDividendYield",
+        "fiveYearAvgDividendYield",
+        "regularMarketChangePercent",
+    }
+)
 
 # Source quality rankings (higher = more reliable)
 SOURCE_QUALITY = {
@@ -118,6 +129,15 @@ SOURCE_QUALITY = {
 }
 
 MergeResult = namedtuple("MergeResult", ["data", "gaps_filled"])
+
+
+def _normalize_percent_pair(old_val: float, new_val: float) -> tuple[float, float]:
+    """Normalize decimal-vs-percent representations before comparison."""
+    if abs(old_val) < 1 and abs(new_val) > 1:
+        old_val *= 100
+    elif abs(new_val) < 1 and abs(old_val) > 1:
+        new_val *= 100
+    return old_val, new_val
 
 
 @dataclass
@@ -1647,26 +1667,16 @@ class SmartMarketDataFetcher(FinancialFetcher):
                         except (ValueError, TypeError):
                             pass
 
-                    # Record source conflicts when replacing with >20% variance
-                    # Normalize decimal-vs-percentage fields before comparison
-                    _PCT_FIELDS = frozenset(
-                        {
-                            "dividendYield",
-                            "trailingAnnualDividendYield",
-                            "fiveYearAvgDividendYield",
-                        }
-                    )
+                    # Record source conflicts when replacing with >20% variance.
+                    # Normalize decimal-vs-percentage fields before comparison.
                     if key in merged and merged[key] is not None and value is not None:
                         try:
                             old_val = float(merged[key])
                             new_val = float(value)
-                            # Normalize: if one looks like decimal (<1) and
-                            # the other like percentage (>1), scale up
-                            if key in _PCT_FIELDS:
-                                if old_val < 1 and new_val > 1:
-                                    old_val *= 100
-                                elif new_val < 1 and old_val > 1:
-                                    new_val *= 100
+                            if key in PERCENT_LIKE_FIELDS:
+                                old_val, new_val = _normalize_percent_pair(
+                                    old_val, new_val
+                                )
                             if (
                                 old_val != 0
                                 and abs(new_val - old_val) / abs(old_val) > 0.20

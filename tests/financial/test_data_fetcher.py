@@ -88,6 +88,30 @@ class TestSmartMerge:
         assert merged["trailingPE"] == 30.0
         assert meta["field_sources"]["trailingPE"] == "fmp"
 
+    def test_percent_like_conflicts_normalize_decimal_and_percent(self, fetcher):
+        source_results = {
+            "yfinance": {"regularMarketChangePercent": -1.4177},
+            "yahooquery": {"regularMarketChangePercent": -0.0142},
+        }
+
+        merged, meta = fetcher._smart_merge_with_quality(source_results, "6083.T")
+
+        assert merged["regularMarketChangePercent"] == -1.4177
+        assert "regularMarketChangePercent" not in meta["source_conflicts"]
+
+    def test_return_on_equity_conflicts_are_not_blindly_rescaled(self, fetcher):
+        source_results = {
+            "yfinance": {"returnOnEquity": 2.0},
+            "yahooquery": {"returnOnEquity": 0.20},
+        }
+
+        merged, meta = fetcher._smart_merge_with_quality(source_results, "TEST")
+
+        assert merged["returnOnEquity"] == 2.0
+        assert "returnOnEquity" in meta["source_conflicts"]
+        conflict = meta["source_conflicts"]["returnOnEquity"]
+        assert {conflict["old"], conflict["new"]} == {2.0, 0.2}
+
 
 class TestTavilyGapFilling:
     """Verify mandatory gap filling logic."""

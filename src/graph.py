@@ -687,6 +687,16 @@ def create_trading_graph(
         callbacks=[TokenTrackingCallback("Global Forensic Auditor", tracker)]
     )
 
+    logger.info(
+        "graph_llm_plan",
+        quick_mode=quick_mode,
+        quick_model_name=config.quick_think_llm,
+        deep_model_name=config.deep_think_llm,
+        retry_llm_enabled=allow_retry,
+        consultant_enabled=bool(consultant_llm),
+        auditor_enabled=bool(auditor_llm),
+    )
+
     # --- Node Creation ---
 
     # Data gathering analysts (parallel)

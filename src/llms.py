@@ -143,7 +143,7 @@ def create_gemini_model(
 
     if thinking_level and _is_gemini_v3_or_greater(model_name):
         kwargs["thinking_level"] = thinking_level
-        logger.info(f"Applying thinking_level={thinking_level} to {model_name}")
+        logger.debug(f"Applying thinking_level={thinking_level} to {model_name}")
 
     llm = ChatGoogleGenerativeAI(**kwargs)
 
@@ -175,7 +175,7 @@ def create_quick_thinking_llm(
     thinking_level = None
     if _is_gemini_v3_or_greater(model_name):
         thinking_level = "low"
-        logger.info(
+        logger.debug(
             f"Quick LLM ({model_name}) is Gemini 3+ - applying thinking_level=low"
         )
     elif model_name.startswith("gemini-"):
@@ -187,7 +187,7 @@ def create_quick_thinking_llm(
             f"Gemini 3+ models use thinking_level='low' for data gathering."
         )
 
-    logger.info(
+    logger.debug(
         f"Initializing Quick LLM: {model_name} "
         f"(timeout={final_timeout}, retries={final_retries})"
     )
@@ -221,11 +221,11 @@ def create_deep_thinking_llm(
     thinking_level = None
     if _is_gemini_v3_or_greater(model_name):
         thinking_level = "high"
-        logger.info(
+        logger.debug(
             f"Deep LLM ({model_name}) is Gemini 3+ - applying thinking_level=high"
         )
 
-    logger.info(
+    logger.debug(
         f"Initializing Deep LLM: {model_name} "
         f"(timeout={final_timeout}, retries={final_retries})"
     )
