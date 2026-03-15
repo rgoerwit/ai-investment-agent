@@ -274,7 +274,9 @@ class TestMemoryContaminationPrevention:
         """Test that graph.py creates ticker-specific memories when given a ticker."""
         from src.graph import create_trading_graph
 
-        with patch("src.graph.create_memory_instances") as mock_create_memories:
+        with patch(
+            "src.graph.components.create_memory_instances"
+        ) as mock_create_memories:
             # Setup mock memories
             mock_memories = {}
             for name in [
@@ -298,8 +300,8 @@ class TestMemoryContaminationPrevention:
         """Test that graph cleans up previous memories when cleanup_previous=True."""
         from src.graph import create_trading_graph
 
-        with patch("src.graph.cleanup_all_memories") as mock_cleanup:
-            with patch("src.graph.create_memory_instances") as mock_create:
+        with patch("src.graph.components.cleanup_all_memories") as mock_cleanup:
+            with patch("src.graph.components.create_memory_instances") as mock_create:
                 # Setup mock memories
                 mock_memories = {}
                 for name in [

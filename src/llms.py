@@ -8,6 +8,7 @@ UPDATED: Added OpenAI consultant LLM for cross-validation (Dec 2025).
 
 import logging
 import re
+from importlib.util import find_spec
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
@@ -95,6 +96,15 @@ GLOBAL_RATE_LIMITER = _create_rate_limiter_from_rpm(config.gemini_rpm_limit)
 # Track LLM instances for cleanup
 _llm_instances: dict = {}
 _llm_instance_counter: int = 0
+
+
+def is_openai_consultant_available() -> bool:
+    """Return whether OpenAI-backed consultant/auditor nodes can be enabled."""
+    if not config.enable_consultant:
+        return False
+    if not config.get_openai_api_key():
+        return False
+    return find_spec("langchain_openai") is not None
 
 
 def get_all_llm_instances() -> dict:

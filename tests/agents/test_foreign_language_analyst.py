@@ -272,7 +272,7 @@ class TestFundamentalsSyncRouter:
 class TestGraphStructure:
     """Tests for graph structure with Foreign Language Analyst."""
 
-    @patch("src.graph._is_auditor_enabled")
+    @patch("src.graph.routing._is_auditor_enabled")
     def test_fan_out_includes_foreign_analyst(self, mock_auditor_enabled):
         """Test that fan_out_to_analysts includes Foreign Language Analyst."""
         from src.graph import fan_out_to_analysts

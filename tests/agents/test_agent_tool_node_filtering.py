@@ -199,6 +199,36 @@ class TestAgentToolNodeFiltering:
             assert isinstance(msg, ToolMessage)
             assert msg.additional_kwargs.get("agent_key") == "news_analyst"
 
+    @pytest.mark.asyncio
+    async def test_error_tool_messages_include_default_block_metadata(self, mock_tools):
+        """Error-path ToolMessages should expose the same metadata keys as success."""
+        mock_tools[0].ainvoke.side_effect = RuntimeError("boom")
+        agent_tool_node = create_agent_tool_node(mock_tools, "news_analyst")
+
+        state = {
+            "messages": [
+                HumanMessage(content="Analyze"),
+                AIMessage(
+                    name="news_analyst",
+                    content="",
+                    tool_calls=[
+                        {"name": "get_news", "args": {}, "id": "1", "type": "tool_call"}
+                    ],
+                ),
+            ]
+        }
+
+        result = await agent_tool_node(state, {"configurable": {}})
+
+        assert len(result["messages"]) == 1
+        msg = result["messages"][0]
+        assert isinstance(msg, ToolMessage)
+        assert msg.additional_kwargs == {
+            "agent_key": "news_analyst",
+            "blocked": False,
+            "findings": [],
+        }
+
 
 class TestCrossAgentToolUsage:
     """

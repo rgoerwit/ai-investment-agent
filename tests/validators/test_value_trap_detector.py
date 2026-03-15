@@ -455,7 +455,7 @@ class TestGraphIntegration:
 
         assert result == "Value Trap Detector"
 
-    @patch("src.graph._is_auditor_enabled")
+    @patch("src.graph.routing._is_auditor_enabled")
     def test_fan_out_includes_value_trap_detector(self, mock_auditor):
         """Test fan_out_to_analysts includes Value Trap Detector."""
         from src.graph import fan_out_to_analysts
@@ -465,7 +465,7 @@ class TestGraphIntegration:
 
         assert "Value Trap Detector" in destinations
 
-    @patch("src.graph._is_auditor_enabled")
+    @patch("src.graph.routing._is_auditor_enabled")
     def test_sync_check_waits_for_value_trap(self, mock_auditor):
         """Test sync_check_router waits for value_trap_report."""
         from src.graph import sync_check_router
@@ -484,7 +484,7 @@ class TestGraphIntegration:
         result = sync_check_router(state, {})
         assert result == "__end__"  # Should wait
 
-    @patch("src.graph._is_auditor_enabled")
+    @patch("src.graph.routing._is_auditor_enabled")
     def test_sync_check_proceeds_with_value_trap(self, mock_auditor):
         """Test sync_check_router proceeds when value_trap_report present."""
         from src.graph import sync_check_router
