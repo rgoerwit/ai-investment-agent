@@ -8,11 +8,13 @@ UPDATED: Added OpenAI consultant LLM for cross-validation (Dec 2025).
 
 import logging
 import re
+from collections.abc import Callable
 from importlib.util import find_spec
+from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
-from langchain_core.rate_limiters import InMemoryRateLimiter
+from langchain_core.rate_limiters import BaseRateLimiter, InMemoryRateLimiter
 from langchain_google_genai import (
     ChatGoogleGenerativeAI,
     HarmBlockThreshold,
@@ -91,7 +93,35 @@ def _create_rate_limiter_from_rpm(rpm: int) -> InMemoryRateLimiter:
     )
 
 
-GLOBAL_RATE_LIMITER = _create_rate_limiter_from_rpm(config.gemini_rpm_limit)
+class _LazyRateLimiterProxy(BaseRateLimiter):
+    """Lazily construct the shared Gemini rate limiter on first use."""
+
+    def __init__(self, factory: Callable[[], InMemoryRateLimiter]):
+        self._factory = factory
+        self._instance: InMemoryRateLimiter | None = None
+
+    def _get_instance(self) -> InMemoryRateLimiter:
+        if self._instance is None:
+            self._instance = self._factory()
+        return self._instance
+
+    def acquire(self, *, blocking: bool = True) -> bool:
+        return self._get_instance().acquire(blocking=blocking)
+
+    async def aacquire(self, *, blocking: bool = True) -> bool:
+        return await self._get_instance().aacquire(blocking=blocking)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._get_instance(), name)
+
+    def __repr__(self) -> str:
+        status = "initialized" if self._instance is not None else "lazy"
+        return f"<_LazyRateLimiterProxy {status}>"
+
+
+GLOBAL_RATE_LIMITER = _LazyRateLimiterProxy(
+    lambda: _create_rate_limiter_from_rpm(config.gemini_rpm_limit)
+)
 
 # Track LLM instances for cleanup
 _llm_instances: dict = {}

@@ -1,5 +1,7 @@
 """Fixed test_graph_execution.py - removed pytestmark from non-async tests."""
 
+import sys
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -428,6 +430,48 @@ class TestAuditorLLMConfiguration:
         finally:
             # Clean up singleton for other tests
             src.llms._consultant_llm_instance = None
+
+
+class TestAuditorEnablementContract:
+    """Ensure routing and LLM creation stay aligned on auditor availability."""
+
+    def test_auditor_disabled_contract_stays_aligned(self, monkeypatch):
+        import src.graph.routing as routing
+        import src.llms as llms
+
+        monkeypatch.setattr(routing, "is_openai_consultant_available", lambda: False)
+        monkeypatch.setattr(routing.config, "enable_consultant", False)
+        monkeypatch.setattr(llms.config, "enable_consultant", False)
+
+        assert routing._is_auditor_enabled() is False
+        assert llms.create_auditor_llm() is None
+
+    def test_auditor_enabled_contract_stays_aligned(self, monkeypatch):
+        import src.graph.routing as routing
+        import src.llms as llms
+
+        stub_module = ModuleType("langchain_openai")
+
+        class StubChatOpenAI:
+            def __init__(self, **kwargs):
+                self.model_name = kwargs["model"]
+
+        stub_module.ChatOpenAI = StubChatOpenAI
+
+        monkeypatch.setitem(sys.modules, "langchain_openai", stub_module)
+        monkeypatch.setattr(routing, "is_openai_consultant_available", lambda: True)
+        monkeypatch.setattr(routing.config, "enable_consultant", True)
+        monkeypatch.setattr(llms.config, "enable_consultant", True)
+        monkeypatch.setattr(
+            type(llms.config), "get_openai_api_key", lambda self: "fake-key"
+        )
+        monkeypatch.setattr(llms.config, "auditor_model", "gpt-5-mini")
+        monkeypatch.setattr(llms.config, "consultant_model", "gpt-5")
+
+        assert routing._is_auditor_enabled() is True
+        llm = llms.create_auditor_llm()
+        assert llm is not None
+        assert llm.model_name == "gpt-5-mini"
 
 
 class TestTradingContext:

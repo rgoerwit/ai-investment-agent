@@ -29,6 +29,39 @@ def test_src_llms_import_does_not_construct_default_models(monkeypatch):
     assert len(init_calls) == 1
 
 
+def test_src_llms_import_does_not_construct_global_rate_limiter(monkeypatch):
+    rate_limiters = importlib.import_module("langchain_core.rate_limiters")
+    init_calls = []
+
+    class StubInMemoryRateLimiter:
+        def __init__(self, **kwargs):
+            init_calls.append(kwargs)
+            self.requests_per_second = kwargs["requests_per_second"]
+            self.check_every_n_seconds = kwargs["check_every_n_seconds"]
+            self.max_bucket_size = kwargs["max_bucket_size"]
+
+        def acquire(self, *, blocking=True):
+            return True
+
+        async def aacquire(self, *, blocking=True):
+            return True
+
+    monkeypatch.setattr(
+        rate_limiters,
+        "InMemoryRateLimiter",
+        StubInMemoryRateLimiter,
+    )
+
+    llms = importlib.import_module("src.llms")
+    llms = importlib.reload(llms)
+
+    assert init_calls == []
+    assert "lazy" in repr(llms.GLOBAL_RATE_LIMITER)
+
+    _ = llms.GLOBAL_RATE_LIMITER.requests_per_second
+    assert len(init_calls) == 1
+
+
 def test_src_data_fetcher_import_does_not_construct_singleton(monkeypatch):
     init_calls = []
 

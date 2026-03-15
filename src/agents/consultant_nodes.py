@@ -258,7 +258,12 @@ Provide your independent consultant review."""
                 provider=support.infer_provider_name(llm),
             )
         except Exception as exc:
-            logger.error("consultant_node_error", ticker=ticker, error=str(exc))
+            logger.error(
+                "consultant_node_error",
+                ticker=ticker,
+                error=str(exc),
+                exc_info=True,
+            )
             return failure_artifact(
                 "consultant_review",
                 exc,
@@ -379,7 +384,12 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
                 result["sender"] = "legal_counsel"
                 return result
         except Exception as exc:
-            logger.error("legal_counsel_error", ticker=ticker, error=str(exc))
+            logger.error(
+                "legal_counsel_error",
+                ticker=ticker,
+                error=str(exc),
+                exc_info=True,
+            )
             fallback_report = _build_legal_fallback_report(
                 ticker=ticker,
                 country=country,
@@ -507,7 +517,12 @@ Perform a forensic audit using your tools."""
             return result
         except Exception as exc:
             error_str = str(exc)
-            logger.error("auditor_error", ticker=ticker, error=error_str)
+            logger.error(
+                "auditor_error",
+                ticker=ticker,
+                error=error_str,
+                exc_info=True,
+            )
 
             is_context_error = (
                 "context_length_exceeded" in error_str
@@ -596,6 +611,7 @@ VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
                         "auditor_retry_failed",
                         ticker=ticker,
                         error=str(retry_exc),
+                        exc_info=True,
                     )
 
             result = failure_artifact(

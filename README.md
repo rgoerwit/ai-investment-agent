@@ -786,7 +786,7 @@ graph TD
 
 Read it this way:
 
-- `src/main.py` is the CLI/runtime entry point.
+- `src/main.py` is the staged CLI/runtime entry point: setup, mode dispatch, analysis execution, persistence, and article/output handling.
 - `src/graph/` owns graph assembly, routing, and graph-scoped tool-node behavior.
 - `src/agents/` owns node logic and prompt-driven analysis behavior.
 - `src/toolkit.py` and `src/tools/` form the agent tool surface over market, news, search, filing, and ownership data.

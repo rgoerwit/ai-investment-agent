@@ -4,12 +4,23 @@ Tests for src.main CLI argument parsing.
 Covers --strict flag parsing and composability with other flags.
 """
 
+import asyncio
 import json
 import logging
 import sys
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+
+
+async def _async_none():
+    return None
+
+
+async def _async_result(value):
+    return value
 
 
 @pytest.fixture(autouse=True)
@@ -207,6 +218,303 @@ class TestToolAuditLogging:
         assert logging.getLogger("openai").level == logging.DEBUG
         assert logging.getLogger("httpx").level == logging.DEBUG
         assert logging.getLogger("httpcore").level == logging.DEBUG
+
+
+class TestRuntimeOverrides:
+    def test_apply_runtime_overrides_updates_config(self, monkeypatch):
+        from src.main import _apply_runtime_overrides, config
+
+        monkeypatch.setattr(config, "quick_think_llm", "old-quick")
+        monkeypatch.setattr(config, "deep_think_llm", "old-deep")
+        monkeypatch.setattr(config, "enable_memory", True)
+        monkeypatch.setattr(config, "langfuse_enabled", False)
+
+        args = SimpleNamespace(
+            quick_model="new-quick",
+            deep_model="new-deep",
+            no_memory=True,
+            trace_langfuse=True,
+        )
+
+        _apply_runtime_overrides(args)
+
+        assert config.quick_think_llm == "new-quick"
+        assert config.deep_think_llm == "new-deep"
+        assert config.enable_memory is False
+        assert config.langfuse_enabled is True
+
+
+class TestValidateCliArgs:
+    def test_quick_with_svg_exits_2(self, capsys):
+        from src.main import _validate_cli_args
+
+        args = SimpleNamespace(quick=True, transparent=False, svg=True)
+
+        with pytest.raises(SystemExit) as exc_info:
+            _validate_cli_args(args)
+
+        assert exc_info.value.code == 2
+        assert "--svg" in capsys.readouterr().err
+
+    def test_quick_with_transparent_exits_2(self, capsys):
+        from src.main import _validate_cli_args
+
+        args = SimpleNamespace(quick=True, transparent=True, svg=False)
+
+        with pytest.raises(SystemExit) as exc_info:
+            _validate_cli_args(args)
+
+        assert exc_info.value.code == 2
+        assert "--transparent" in capsys.readouterr().err
+
+
+class TestResolveOutputTargets:
+    def test_stdout_without_imagedir_disables_charts(self):
+        from src.main import _resolve_output_targets
+
+        args = SimpleNamespace(output=None, imagedir=None, no_charts=False)
+
+        targets = _resolve_output_targets(args)
+
+        assert targets.output_file is None
+        assert targets.image_dir == Path("images")
+        assert targets.skip_charts is True
+
+    def test_stdout_with_imagedir_preserves_chart_generation(self):
+        from src.main import _resolve_output_targets
+
+        args = SimpleNamespace(output=None, imagedir="assets/charts", no_charts=False)
+
+        targets = _resolve_output_targets(args)
+
+        assert targets.output_file is None
+        assert targets.image_dir == Path("assets/charts")
+        assert targets.skip_charts is False
+
+    def test_file_output_keeps_charts_enabled_by_default(self):
+        from src.main import _resolve_output_targets
+
+        args = SimpleNamespace(
+            output="results/report.md", imagedir=None, no_charts=False
+        )
+
+        targets = _resolve_output_targets(args)
+
+        assert targets.output_file == Path("results/report.md")
+        assert targets.image_dir == Path("results/images")
+        assert targets.skip_charts is False
+
+
+class TestMainOrchestration:
+    def test_run_retrospective_only_returns_one_on_failure(self, monkeypatch):
+        from src.main import _run_retrospective_only
+
+        async def fake_run_retrospective(*_args, **_kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(
+            "src.retrospective.run_retrospective",
+            fake_run_retrospective,
+        )
+
+        args = SimpleNamespace(quiet=True, brief=False)
+
+        assert asyncio.run(_run_retrospective_only(args)) == 1
+
+    def test_retrospective_only_returns_early(self, monkeypatch):
+        from src.main import OutputTargets, main
+
+        calls = []
+        args = SimpleNamespace(retrospective_only=True)
+
+        async def fake_retrospective_only(passed_args):
+            calls.append(("retrospective_only", passed_args))
+            return 0
+
+        monkeypatch.setattr("src.main.parse_arguments", lambda: args)
+        monkeypatch.setattr(
+            "src.main._apply_runtime_overrides", lambda passed_args: None
+        )
+        monkeypatch.setattr("src.main._validate_cli_args", lambda passed_args: None)
+        monkeypatch.setattr(
+            "src.main._resolve_output_targets",
+            lambda passed_args: OutputTargets(None, Path("images"), True),
+        )
+        monkeypatch.setattr("src.main._setup_runtime", lambda passed_args, targets: {})
+        monkeypatch.setattr("src.main._run_retrospective_only", fake_retrospective_only)
+        monkeypatch.setattr(
+            "src.cleanup.cleanup_async_resources", lambda: _async_none()
+        )
+
+        assert asyncio.run(main()) == 0
+        assert calls == [("retrospective_only", args)]
+
+    def test_main_success_path_returns_zero(self, monkeypatch):
+        from src.main import OutputTargets, main
+
+        call_order = []
+        args = SimpleNamespace(
+            retrospective_only=False,
+            ticker="6083.T",
+            quick=True,
+            strict=False,
+            article=False,
+            quiet=False,
+            brief=False,
+            svg=False,
+            transparent=False,
+            imagedir=None,
+        )
+
+        async def fake_async(label, value=None):
+            call_order.append(label)
+            return value
+
+        monkeypatch.setattr("src.main.parse_arguments", lambda: args)
+        monkeypatch.setattr(
+            "src.main._apply_runtime_overrides",
+            lambda passed_args: call_order.append("apply"),
+        )
+        monkeypatch.setattr(
+            "src.main._validate_cli_args",
+            lambda passed_args: call_order.append("validate"),
+        )
+        monkeypatch.setattr(
+            "src.main._resolve_output_targets",
+            lambda passed_args: OutputTargets(
+                Path("results/report.md"), Path("results/images"), False
+            ),
+        )
+        monkeypatch.setattr(
+            "src.main._setup_runtime",
+            lambda passed_args, targets: call_order.append("setup")
+            or {"google": {"dns": "ok"}},
+        )
+        monkeypatch.setattr(
+            "src.main._maybe_run_ticker_retrospective",
+            lambda passed_args: fake_async("retrospective"),
+        )
+        monkeypatch.setattr(
+            "src.main._emit_start_banner",
+            lambda passed_args, targets: call_order.append("banner") or "banner",
+        )
+        monkeypatch.setattr(
+            "src.main._execute_analysis",
+            lambda passed_args, targets: fake_async(
+                "execute", {"analysis_validity": {"publishable": True}}
+            ),
+        )
+        monkeypatch.setattr(
+            "src.main._attach_run_summary",
+            lambda result, passed_args, preflight: call_order.append("summary"),
+        )
+        monkeypatch.setattr(
+            "src.main._render_primary_output",
+            lambda result, passed_args, targets, banner: call_order.append("render")
+            or (None, None, None),
+        )
+        monkeypatch.setattr(
+            "src.main._persist_analysis_outputs",
+            lambda result, passed_args: call_order.append("persist"),
+        )
+        monkeypatch.setattr(
+            "src.main._maybe_save_rejection_record",
+            lambda result, passed_args: fake_async("rejection"),
+        )
+        monkeypatch.setattr(
+            "src.main._maybe_generate_article",
+            lambda result,
+            passed_args,
+            targets,
+            company_name,
+            report,
+            reporter: fake_async("article", False),
+        )
+        monkeypatch.setattr(
+            "src.main._log_final_summary",
+            lambda result, passed_args, article_generated: call_order.append("final"),
+        )
+        monkeypatch.setattr(
+            "src.cleanup.cleanup_async_resources", lambda: _async_none()
+        )
+
+        assert asyncio.run(main()) == 0
+        assert call_order == [
+            "apply",
+            "validate",
+            "setup",
+            "retrospective",
+            "banner",
+            "execute",
+            "summary",
+            "render",
+            "persist",
+            "rejection",
+            "article",
+            "final",
+        ]
+
+    def test_main_returns_two_for_cli_usage_error(self, monkeypatch):
+        from src.main import main
+
+        args = SimpleNamespace(retrospective_only=False)
+
+        monkeypatch.setattr("src.main.parse_arguments", lambda: args)
+        monkeypatch.setattr(
+            "src.main._apply_runtime_overrides", lambda passed_args: None
+        )
+        monkeypatch.setattr(
+            "src.main._validate_cli_args",
+            lambda passed_args: (_ for _ in ()).throw(SystemExit(2)),
+        )
+        monkeypatch.setattr(
+            "src.cleanup.cleanup_async_resources", lambda: _async_none()
+        )
+
+        assert asyncio.run(main()) == 2
+
+    def test_main_returns_one_when_analysis_fails(self, monkeypatch):
+        from src.main import OutputTargets, main
+
+        args = SimpleNamespace(
+            retrospective_only=False,
+            ticker="6083.T",
+            quick=False,
+            strict=False,
+            article=False,
+            quiet=True,
+            brief=False,
+            svg=False,
+            transparent=False,
+            imagedir=None,
+        )
+
+        monkeypatch.setattr("src.main.parse_arguments", lambda: args)
+        monkeypatch.setattr(
+            "src.main._apply_runtime_overrides", lambda passed_args: None
+        )
+        monkeypatch.setattr("src.main._validate_cli_args", lambda passed_args: None)
+        monkeypatch.setattr(
+            "src.main._resolve_output_targets",
+            lambda passed_args: OutputTargets(None, Path("images"), True),
+        )
+        monkeypatch.setattr("src.main._setup_runtime", lambda passed_args, targets: {})
+        monkeypatch.setattr(
+            "src.main._maybe_run_ticker_retrospective",
+            lambda passed_args: _async_none(),
+        )
+        monkeypatch.setattr(
+            "src.main._emit_start_banner", lambda passed_args, targets: "banner"
+        )
+        monkeypatch.setattr(
+            "src.main._execute_analysis",
+            lambda passed_args, targets: _async_result(None),
+        )
+        monkeypatch.setattr(
+            "src.cleanup.cleanup_async_resources", lambda: _async_none()
+        )
+
+        assert asyncio.run(main()) == 1
 
 
 class TestSavedDiagnostics:
