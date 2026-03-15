@@ -1102,25 +1102,43 @@ class TestMacroAlertBannerWithStoredEvent:
     def test_stored_event_headline_appears_in_banner(self):
         """When stored event available, headline shown in MACRO ALERT banner."""
         report = self._report([self._event("US tariffs announced")])
+        assert "Macro driver: TARIFF_TRADE" in report
+        assert "Impact: TRANSIENT" in report
+        assert "Headline:" in report
         assert "US tariffs announced" in report
 
     def test_no_stored_events_banner_still_renders(self):
         """No stored events → banner still shows MACRO ALERT, no headline injected."""
         report = self._report([])
         assert "MACRO ALERT" in report
+        assert "Headline:" not in report
 
     def test_store_unavailable_banner_renders_without_headline(self):
         """store.available=False → banner renders normally, no headline injected."""
         report = self._report(available=False)
         assert "MACRO ALERT" in report
+        assert "Headline:" not in report
 
-    def test_long_headline_truncated_to_62_chars(self):
-        """Very long headline is truncated to 62 chars in the banner line."""
+    def test_long_headline_marked_as_truncated(self):
+        """Very long banner headline is truncated explicitly, not with a fragmentary ellipsis."""
         long_hl = "A" * 100
         report = self._report([self._event(long_hl)])
-        # The headline should appear but truncated
-        # Either 62 chars of A or a prefix of "Characterized: "
-        assert "Characterized:" in report or long_hl[:40] in report
+        assert "Headline:" in report
+        assert "[truncated]" in report
+        assert "Characterized:" not in report
+
+    def test_banner_lines_fit_box_width(self):
+        """Injected event metadata should stay within the banner width."""
+        report = self._report(
+            [
+                self._event(
+                    "Stock Market News, March 3, 2026: Dow Pares Early as Middle East Conflict Escalates Further"
+                )
+            ]
+        )
+        for line in report.splitlines():
+            if line.startswith("║"):
+                assert len(line) <= 58
 
 
 # ── New-buy section helpers ───────────────────────────────────────────────────
@@ -1747,8 +1765,42 @@ class TestPortfolioManagerOutputTightening:
         report = format_report(
             [item], _make_portfolio(), portfolio_health_flags=[_CORR_FLAG]
         )
-        assert "analysis entry ¥2,800.00  now ¥2,700.00" in report
-        assert "vs IBKR cost basis ¥2,000.00" in report
+        assert "thesis: entry ¥2,800.00 -> now ¥2,700.00" in report
+        assert "P/L vs IBKR:" in report
+        assert "vs ¥2,000.00" in report
+
+    def test_soft_rejection_detail_lines_stay_readable_width(self):
+        item = _make_dip_item(
+            ticker="9201.T",
+            health=95,
+            growth=88,
+            entry=2800,
+            current_price=2700,
+            stop=2600,
+            target=3600,
+        )
+        item.suggested_quantity = 350
+        item.suggested_price = 2700.0
+        item.suggested_order_type = "LMT"
+        item.cash_impact_usd = 1907.0
+        item.settlement_date = "2026-03-17"
+
+        report = format_report(
+            [item],
+            _make_portfolio(),
+            portfolio_health_flags=[_CORR_FLAG],
+            show_recommendations=True,
+        )
+
+        in_soft_section = False
+        for line in report.splitlines():
+            if "SELLS — SOFT REJECTION" in line:
+                in_soft_section = True
+                continue
+            if in_soft_section and line.startswith("═" * 54):
+                break
+            if in_soft_section and line.startswith("             "):
+                assert len(line) <= 96
 
     def test_concentration_merges_healthcare_labels(self):
         portfolio = _make_portfolio()

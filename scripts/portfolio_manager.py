@@ -26,6 +26,7 @@ import asyncio
 import getpass
 import json
 import sys
+import textwrap
 from datetime import datetime
 from pathlib import Path
 
@@ -849,6 +850,8 @@ ACTION_SYMBOLS = {
 }
 
 _DIVIDER = "═" * 54
+_DETAIL_INDENT = "             "
+_DETAIL_WRAP_WIDTH = 96
 
 _CURRENCY_SYMBOLS: dict[str, str] = {
     "USD": "$",
@@ -1066,6 +1069,66 @@ def format_report(
         lines.append(_DIVIDER)
         lines.append("")
 
+    def _append_wrapped_segments(
+        segments: list[str],
+        *,
+        indent: str = _DETAIL_INDENT,
+        separator: str = "  ·  ",
+        width: int = _DETAIL_WRAP_WIDTH,
+    ) -> None:
+        """Append one or more wrapped detail lines for dense sections."""
+        clean_segments = [
+            segment.strip() for segment in segments if segment and segment.strip()
+        ]
+        if not clean_segments:
+            return
+
+        current = indent
+        for segment in clean_segments:
+            addition = segment if current == indent else f"{separator}{segment}"
+            if len(current) + len(addition) <= width:
+                current += addition
+                continue
+            if current != indent:
+                lines.append(current)
+            current = indent + segment
+
+        if current != indent:
+            lines.append(current)
+
+    def _wrap_banner_value(
+        label: str,
+        value: str,
+        *,
+        width: int,
+        max_lines: int = 2,
+    ) -> list[str]:
+        """Wrap a banner field cleanly, marking truncation explicitly when needed."""
+        if not value:
+            return []
+
+        subsequent = " " * len(label)
+        wrapped = textwrap.wrap(
+            value,
+            width=width - len(subsequent),
+            initial_indent=label,
+            subsequent_indent=subsequent,
+            break_long_words=True,
+            break_on_hyphens=False,
+        )
+        if len(wrapped) <= max_lines:
+            return wrapped
+
+        retained = wrapped[: max_lines - 1]
+        remaining = " ".join(line.strip() for line in wrapped[max_lines - 1 :])
+        truncated_tail = textwrap.shorten(
+            remaining,
+            width=width - len(subsequent),
+            placeholder=" [truncated]",
+        )
+        retained.append(subsequent + truncated_tail)
+        return retained
+
     def _order_line(item: ReconciliationItem, ccy: str) -> str:
         """Build the first line: urgency + action + ticker + qty + price + order type."""
         pfx = _urgency_prefix(item)
@@ -1132,7 +1195,7 @@ def format_report(
                     f"analysis entry {sym}{a.entry_price:,.2f}  now {sym}{pos.current_price_local:,.2f}"
                     f"  ({chg:+.1f}%)"
                 )
-        lines.append("             " + "  |  ".join(parts))
+        _append_wrapped_segments(parts, separator="  |  ")
 
     def _render_dip_watch_section(candidates: list[ReconciliationItem]) -> None:
         """Render the DIP WATCH section for macro-dip candidates."""
@@ -1293,6 +1356,67 @@ def format_report(
             f"  ({pct:+.1f}% vs IBKR cost basis {ccy_sym}{pos.avg_cost_local:,.2f})"
             f"{tax_note}"
         )
+
+    def _soft_rejection_score_segments(item: ReconciliationItem) -> list[str]:
+        """Compact health/growth/risk summary for soft-rejection items."""
+        a = item.analysis
+        if not a:
+            return []
+
+        segments: list[str] = []
+        if a.health_adj is not None:
+            segments.append(f"H:{a.health_adj:.0f}%")
+        if a.growth_adj is not None:
+            segments.append(f"G:{a.growth_adj:.0f}%")
+        if a.zone:
+            segments.append(f"Risk:{a.zone}")
+        return segments
+
+    def _soft_rejection_thesis_segment(item: ReconciliationItem) -> str | None:
+        """Short thesis-drift segment for soft-rejection items."""
+        a = item.analysis
+        pos = item.ibkr_position
+        if not a or not a.entry_price or not pos or not pos.current_price_local:
+            return None
+
+        sym = _ccy(_item_currency(item))
+        chg = (pos.current_price_local - a.entry_price) / a.entry_price * 100
+        if abs(chg) >= 90.0:
+            return (
+                f"thesis: entry {sym}{a.entry_price:,.2f} -> now {sym}{pos.current_price_local:,.2f}"
+                " (unit mismatch?)"
+            )
+        return (
+            f"thesis: entry {sym}{a.entry_price:,.2f} -> now {sym}{pos.current_price_local:,.2f}"
+            f" ({chg:+.1f}%)"
+        )
+
+    def _soft_rejection_pnl_segments(item: ReconciliationItem) -> list[str]:
+        """Compact P/L and settlement segments for soft-rejection items."""
+        pos = item.ibkr_position
+        if not pos or pos.avg_cost_local <= 0 or pos.current_price_local <= 0:
+            return []
+        if pos.quantity == 0:
+            return []
+
+        pct = (pos.current_price_local - pos.avg_cost_local) / pos.avg_cost_local * 100
+        if abs(pct) >= 90.0:
+            return ["P/L: cost basis may have currency-unit mismatch"]
+
+        sell_qty = abs(item.suggested_quantity or pos.quantity)
+        pnl_local = (pos.current_price_local - pos.avg_cost_local) * sell_qty
+        ccy_sym = _ccy(pos.currency)
+        sign = "+" if pnl_local >= 0 else "-"
+        segments = [
+            f"P/L vs IBKR: {sign}{ccy_sym}{abs(pnl_local):,.0f} ({pct:+.1f}% vs {ccy_sym}{pos.avg_cost_local:,.2f})"
+        ]
+        if pnl_local > 0:
+            segments.append("holding period: verify in IBKR")
+        if show_recommendations and item.cash_impact_usd:
+            segments.append(f"proceeds ~${item.cash_impact_usd:,.0f} USD")
+        if show_recommendations and item.settlement_date:
+            segments.append(f"settles {item.settlement_date}")
+        return segments
 
     def _append_pnl_proceeds(item: ReconciliationItem, ccy: str) -> None:
         """Append combined gain/loss + proceeds on one line, or each separately if only one exists."""
@@ -1471,37 +1595,18 @@ def format_report(
             if _mstore.available:
                 _ev = (_mstore.get_active_events() or [None])[0]
                 if _ev and _ev.news_headline != "unknown":
-                    import re as _re
-                    import textwrap as _tw
-
-                    _prefix = "Characterized: "
-                    _headline = _ev.news_headline
-                    _wrap_kwargs = {
-                        "width": _W,
-                        "initial_indent": _prefix,
-                        "subsequent_indent": " " * len(_prefix),
-                    }
-                    _wrapped_all = _tw.wrap(_headline, **_wrap_kwargs)
-                    if len(_wrapped_all) <= 2:
-                        # Fits cleanly — show as-is
-                        _shown = _wrapped_all
-                    else:
-                        # Too long — find the last sentence boundary that fits in ≤ 2 lines
-                        _boundaries = [
-                            _m.end() for _m in _re.finditer(r"[.!?](?:\s|$)", _headline)
-                        ]
-                        _chosen = None
-                        for _pos in reversed(_boundaries):
-                            _candidate = _headline[:_pos].rstrip()
-                            if len(_tw.wrap(_candidate, **_wrap_kwargs)) <= 2:
-                                _chosen = _candidate
-                                break
-                        if _chosen:
-                            _shown = _tw.wrap(_chosen, **_wrap_kwargs)
-                        else:
-                            # No complete sentence fits in 2 lines — show first line only
-                            _shown = _wrapped_all[:1]
-                    for _wline in _shown:
+                    _banner_fields = [
+                        f"Macro driver: {_ev.event_type}",
+                        f"Impact: {_ev.impact}",
+                    ]
+                    for _field in _banner_fields:
+                        _banner_lines.insert(-1, f"║  {_field:<{_W}}║")
+                    for _wline in _wrap_banner_value(
+                        "Headline: ",
+                        _ev.news_headline,
+                        width=_W,
+                        max_lines=2,
+                    ):
                         _banner_lines.insert(-1, f"║  {_wline:<{_W}}║")
         except Exception:
             pass
@@ -1555,15 +1660,12 @@ def format_report(
             # Strip internal MACRO_WATCH annotation — section header already contextualises it
             _display_reason = _norm_reason(item.reason.split("  [MACRO_WATCH:")[0])
             lines.append(f"{_order_line(item, ccy)}  {_display_reason}")
-            if item in macro_reviews:
-                _display_data_line(
-                    item
-                )  # already shows health/growth + entry/current price
-            else:
-                sl = _score_line(item)
-                if sl:
-                    lines.append(sl)
-            _append_pnl_proceeds(item, ccy)
+            _detail_segments = _soft_rejection_score_segments(item)
+            _thesis_segment = _soft_rejection_thesis_segment(item)
+            if _thesis_segment:
+                _detail_segments.append(_thesis_segment)
+            _append_wrapped_segments(_detail_segments)
+            _append_wrapped_segments(_soft_rejection_pnl_segments(item))
             note = _order_note(item)
             if note:
                 lines.append(note)
