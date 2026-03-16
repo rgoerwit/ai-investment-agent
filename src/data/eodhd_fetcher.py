@@ -13,16 +13,16 @@ Error Codes Handled (per EODHD Docs):
 - 429: Too Many Requests (Daily limit reached)
 """
 
-import logging
 from typing import Any
 
 import aiohttp
 import pandas as pd
+import structlog
 
 from src.config import config
 from src.data.interfaces import FinancialFetcher
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # Default timeout for HTTP requests (session-level safety net + per-request)
 _TIMEOUT = aiohttp.ClientTimeout(total=10)
@@ -95,7 +95,9 @@ class EODHDFetcher(FinancialFetcher):
                             return data.get("Name")
                     return None
         except Exception as e:
-            logger.debug(f"EODHD company name fetch failed for {eod_symbol}: {e}")
+            logger.debug(
+                "eodhd_company_name_fetch_failed", symbol=eod_symbol, error=str(e)
+            )
             return None
 
     async def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
@@ -129,43 +131,46 @@ class EODHDFetcher(FinancialFetcher):
                         try:
                             data = await response.json()
                         except (ValueError, aiohttp.ContentTypeError) as e:
-                            logger.debug(f"EODHD malformed JSON for {eod_symbol}: {e}")
+                            logger.debug(
+                                "eodhd_malformed_json", symbol=eod_symbol, error=str(e)
+                            )
                             return None
                         return self._parse_fundamentals(data)
 
                     elif response.status == 429:
+                        preview = await self._response_preview(response)
                         logger.error(
-                            "EODHD API Limit Exceeded (429) for %s. Disabling EODHD for this session. response_preview=%s",
-                            eod_symbol,
-                            await self._response_preview(response),
+                            "eodhd_rate_limit_429", symbol=eod_symbol, preview=preview
                         )
                         self._is_exhausted = True
                         return None
 
                     elif response.status == 402:
+                        preview = await self._response_preview(response)
                         logger.warning(
-                            "EODHD Payment Required (402) for %s. response_preview=%s",
-                            eod_symbol,
-                            await self._response_preview(response),
+                            "eodhd_payment_required_402",
+                            symbol=eod_symbol,
+                            preview=preview,
                         )
                         # Don't disable globally, might just be this specific exchange
                         return None
 
                     elif response.status == 404:
-                        logger.debug(f"EODHD data not found for {eod_symbol}")
+                        logger.debug("eodhd_not_found", symbol=eod_symbol)
                         return None
 
                     else:
+                        preview = await self._response_preview(response)
                         logger.warning(
-                            "EODHD API error %s for %s. response_preview=%s",
-                            response.status,
-                            eod_symbol,
-                            await self._response_preview(response),
+                            "eodhd_api_error",
+                            status=response.status,
+                            symbol=eod_symbol,
+                            preview=preview,
                         )
                         return None
 
         except Exception as e:
-            logger.debug(f"EODHD request failed: {e}")
+            logger.debug("eodhd_request_failed", error=str(e))
             return None
 
     async def verify_anchor_metrics(self, symbol: str) -> dict | None:
@@ -196,7 +201,9 @@ class EODHDFetcher(FinancialFetcher):
                             data = await response.json()
                         except (ValueError, aiohttp.ContentTypeError) as e:
                             logger.debug(
-                                f"EODHD anchor malformed JSON for {eod_symbol}: {e}"
+                                "eodhd_anchor_malformed_json",
+                                symbol=eod_symbol,
+                                error=str(e),
                             )
                             return None
 
@@ -214,43 +221,46 @@ class EODHDFetcher(FinancialFetcher):
                     # CASE 2: Unpaid/Restricted License (402)
                     # Common for international data on free/low-tier plans
                     elif response.status == 402:
+                        preview = await self._response_preview(response)
                         logger.info(
-                            "EODHD Paywall (402) for %s. Cannot verify. response_preview=%s",
-                            eod_symbol,
-                            await self._response_preview(response),
+                            "eodhd_anchor_paywall_402",
+                            symbol=eod_symbol,
+                            preview=preview,
                         )
                         return None
 
                     # CASE 3: Rate limit (429) - disable future calls
                     elif response.status == 429:
                         self._is_exhausted = True
+                        preview = await self._response_preview(response)
                         logger.error(
-                            "EODHD API Limit (429) for %s. Disabling EODHD anchor checks. response_preview=%s",
-                            eod_symbol,
-                            await self._response_preview(response),
+                            "eodhd_anchor_rate_limit_429",
+                            symbol=eod_symbol,
+                            preview=preview,
                         )
                         return None
 
                     # CASE 4: Auth Error (401/403)
                     elif response.status in [401, 403]:
                         self._is_exhausted = True
+                        preview = await self._response_preview(response)
                         logger.warning(
-                            "EODHD Auth Error (%s) for %s. Disabling. response_preview=%s",
-                            response.status,
-                            eod_symbol,
-                            await self._response_preview(response),
+                            "eodhd_anchor_auth_error",
+                            status=response.status,
+                            symbol=eod_symbol,
+                            preview=preview,
                         )
                         return None
 
                     # CASE 5: Not found
                     elif response.status == 404:
-                        logger.debug(f"EODHD anchor data not found for {eod_symbol}")
+                        logger.debug("eodhd_anchor_not_found", symbol=eod_symbol)
                         return None
 
                     return None
 
         except Exception as e:
-            logger.debug(f"EODHD anchor check failed: {e}")
+            logger.debug("eodhd_anchor_check_failed", error=str(e))
             return None
 
     def _parse_fundamentals(self, data: dict) -> dict[str, float | None]:
@@ -345,7 +355,7 @@ class EODHDFetcher(FinancialFetcher):
                     )
 
         except Exception as e:
-            logger.warning(f"Error parsing EODHD data structure: {e}")
+            logger.warning("eodhd_parse_error", error=str(e))
 
         return output
 

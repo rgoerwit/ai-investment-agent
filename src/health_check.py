@@ -12,6 +12,8 @@ import logging
 import sys
 from pathlib import Path
 
+import structlog
+
 # Add the repository root to Python path
 repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(repo_root))
@@ -23,7 +25,7 @@ logging.basicConfig(
     stream=sys.stderr,
     force=True,
 )
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # Suppress noisy library logs
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -55,10 +57,10 @@ def check_python_version() -> tuple[bool, list[str]]:
 
     if (major, minor) < (3, 10):
         issues.append(f"Python {major}.{minor} detected. Requires Python 3.10+")
-        logger.error(f"Python version: {major}.{minor} (✗)")
+        logger.error("python_version_fail", version=f"{major}.{minor}")
         return False, issues
 
-    logger.info(f"Python version: {major}.{minor} (✓)")
+    logger.info("python_version_ok", version=f"{major}.{minor}")
     return True, []
 
 
@@ -84,22 +86,22 @@ def check_environment_variables() -> bool:
 
     for var_name, getter in required_checks:
         if getter():
-            logger.info(f"{var_name}: Present (✓)")
+            logger.info("env_var_present", var=var_name)
         else:
             missing_vars.append(var_name)
 
     if missing_vars:
-        logger.error(f"Missing environment variables: {missing_vars}")
-        logger.info("Please copy .env.example to .env and add your API keys")
+        logger.error("env_vars_missing", vars=missing_vars)
+        logger.info("env_setup_hint")
         return False
 
-    logger.info("All required environment variables are set")
+    logger.info("env_vars_ok")
     return True
 
 
 def check_imports() -> bool:
     """Check if core modules can be imported."""
-    logger.info("Checking core module imports...")
+    logger.info("checking_imports")
     critical_failures = []
 
     # Core Logic Imports
@@ -119,21 +121,21 @@ def check_imports() -> bool:
         try:
             __import__(mod_name)
             version = get_package_version(mod_name, pkg_name)
-            logger.info(f"Import successful: {pkg_name} {version} (✓)")
+            logger.info("import_ok", package=pkg_name, version=version)
         except ImportError as e:
-            logger.error(f"Import failed: {pkg_name} - {e}")
+            logger.error("import_failed", package=pkg_name, error=str(e))
             critical_failures.append(pkg_name)
 
     # Check for ChromaDB (Optional but recommended)
     try:
         import chromadb
 
-        logger.info("Import successful: chromadb (✓)")
+        logger.info("import_ok", package="chromadb")
     except ImportError:
-        logger.warning("Import failed: chromadb (Memory will be disabled)")
+        logger.warning("chromadb_missing")
 
     if critical_failures:
-        logger.error(f"Critical import failures: {critical_failures}")
+        logger.error("critical_import_failures", failures=critical_failures)
         return False
 
     return True
@@ -147,7 +149,7 @@ async def check_llm_connectivity() -> bool:
 
         from src.config import config
 
-        logger.info(f"Testing Gemini connectivity with model: {config.quick_think_llm}")
+        logger.info("testing_llm_connectivity", model=config.quick_think_llm)
 
         llm = ChatGoogleGenerativeAI(
             model=config.quick_think_llm, temperature=0, timeout=10, max_retries=1
@@ -168,26 +170,26 @@ async def check_llm_connectivity() -> bool:
         content = content.strip()
 
         if "OK" in content or "ok" in content.lower():
-            logger.info("Gemini LLM connectivity: OK (✓)")
+            logger.info("llm_connectivity_ok")
             return True
         else:
-            logger.warning(f"LLM responded but unexpected content: {content}")
+            logger.warning("llm_unexpected_response", content=content)
             return False
 
     except asyncio.TimeoutError:
-        logger.error("LLM connectivity: TIMEOUT (API too slow)")
+        logger.error("llm_connectivity_timeout")
         return False
     except ImportError as e:
-        logger.error(f"LLM connectivity: Import error - {e}")
+        logger.error("llm_connectivity_import_error", error=str(e))
         return False
     except Exception as e:
-        logger.error(f"LLM connectivity error: {e}")
+        logger.error("llm_connectivity_error", error=str(e))
         return False
 
 
 async def run_comprehensive_health_check() -> bool:
     """Run all health checks."""
-    logger.info("Starting Gemini System Health Check...")
+    logger.info("health_check_started")
 
     python_ok, _ = check_python_version()
     env_ok = check_environment_variables()
@@ -199,9 +201,9 @@ async def run_comprehensive_health_check() -> bool:
     try:
         from src.llms import quick_thinking_llm
 
-        logger.info("Project module 'src.llms' imported successfully (✓)")
+        logger.info("llms_import_ok")
     except ImportError as e:
-        logger.error(f"Failed to import src.llms: {e}")
+        logger.error("llms_import_failed", error=str(e))
         return False
 
     llm_ok = await check_llm_connectivity()
@@ -209,9 +211,9 @@ async def run_comprehensive_health_check() -> bool:
     all_passed = all([python_ok, env_ok, llm_ok])
 
     if all_passed:
-        logger.info("✅ OVERALL HEALTH CHECK: PASSED")
+        logger.info("health_check_passed")
     else:
-        logger.error("❌ OVERALL HEALTH CHECK: FAILED")
+        logger.error("health_check_failed")
 
     return all_passed
 

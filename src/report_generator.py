@@ -254,10 +254,10 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
             return chart_path
 
         except ImportError as e:
-            logger.warning(f"Chart generation dependencies not available: {e}")
+            logger.warning("chart_deps_unavailable", error=str(e))
             return None
         except Exception as e:
-            logger.warning(f"Chart generation failed: {e}")
+            logger.warning("chart_generation_failed", error=str(e))
             return None
 
     def _generate_radar_chart(self, result: dict) -> Path | None:
@@ -506,7 +506,7 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
             return chart_path
 
         except Exception as e:
-            logger.warning(f"Radar chart generation failed: {e}")
+            logger.warning("radar_chart_generation_failed", error=str(e))
             return None
 
     def _normalize_string(self, content: Any) -> str:

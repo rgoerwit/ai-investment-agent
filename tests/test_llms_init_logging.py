@@ -37,11 +37,11 @@ def test_consultant_llm_init_failure_logs_stack_trace():
         mock_logger.error.assert_called_once()
         args = mock_logger.error.call_args.args
         kwargs = mock_logger.error.call_args.kwargs
-        assert "consultant_llm_init_failed" in args[0]
-        assert args[1] == "gpt-5.2"
-        assert args[2] is False
-        assert args[3] == "RuntimeError"
-        assert args[4] == "boom"
+        assert args[0] == "consultant_llm_init_failed"
+        assert kwargs["model"] == "gpt-5.2"
+        assert kwargs["quick_mode"] is False
+        assert kwargs["error_type"] == "RuntimeError"
+        assert kwargs["error"] == "boom"
         assert kwargs["exc_info"] is True
     finally:
         src.llms._consultant_llm_instance = None

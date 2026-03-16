@@ -21,17 +21,17 @@ Usage:
         data = await fmp.get_financial_metrics("005930.KS")
 """
 
-import logging
 from datetime import datetime, timedelta
 from typing import Any
 
 import aiohttp
 import pandas as pd
+import structlog
 
 from src.config import config
 from src.data.interfaces import FinancialFetcher
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # Default timeout for HTTP requests (session-level safety net + per-request)
 _TIMEOUT = aiohttp.ClientTimeout(total=10)
@@ -64,9 +64,9 @@ class FMPFetcher(FinancialFetcher):
             return False
         if self._cooldown_until and datetime.now() < self._cooldown_until:
             logger.debug(
-                "fmp_unavailable reason=%s cooldown_until=%s",
-                "cooldown_active",
-                self._cooldown_until.isoformat(),
+                "fmp_unavailable",
+                reason="cooldown_active",
+                cooldown_until=self._cooldown_until.isoformat(),
             )
             return False
         return True
@@ -74,11 +74,11 @@ class FMPFetcher(FinancialFetcher):
     def _start_cooldown(self, status: int, endpoint: str) -> None:
         self._cooldown_until = datetime.now() + timedelta(minutes=_COOLDOWN_MINUTES)
         logger.warning(
-            "fmp_cooldown_started status=%s endpoint=%s cooldown_minutes=%s cooldown_until=%s",
-            status,
-            endpoint,
-            _COOLDOWN_MINUTES,
-            self._cooldown_until.isoformat(),
+            "fmp_cooldown_started",
+            status=status,
+            endpoint=endpoint,
+            cooldown_minutes=_COOLDOWN_MINUTES,
+            cooldown_until=self._cooldown_until.isoformat(),
         )
 
     async def _response_preview(self, response: aiohttp.ClientResponse) -> str:
@@ -118,12 +118,13 @@ class FMPFetcher(FinancialFetcher):
                         try:
                             data = await response.json()
                         except (ValueError, aiohttp.ContentTypeError) as e:
+                            preview = await self._response_preview(response)
                             logger.warning(
-                                "fmp_malformed_json endpoint=%s status=%s error=%s response_preview=%s",
-                                endpoint,
-                                response.status,
-                                e,
-                                await self._response_preview(response),
+                                "fmp_malformed_json",
+                                endpoint=endpoint,
+                                status=response.status,
+                                error=str(e),
+                                preview=preview,
                             )
                             return None
                         self._key_validated = True
@@ -134,11 +135,11 @@ class FMPFetcher(FinancialFetcher):
                         if not self._key_validated:
                             # Key is invalid - this is a configuration error
                             logger.error(
-                                "fmp_auth_error endpoint=%s status=%s key_state=%s response_preview=%s",
-                                endpoint,
-                                response.status,
-                                "unvalidated",
-                                response_preview,
+                                "fmp_auth_error",
+                                endpoint=endpoint,
+                                status=response.status,
+                                key_state="unvalidated",
+                                preview=response_preview,
                             )
                             raise ValueError(
                                 "FMP_API_KEY is invalid or expired. Check your configuration."
@@ -147,11 +148,11 @@ class FMPFetcher(FinancialFetcher):
                             # Key was valid before, might be rate limit
                             self._start_cooldown(403, endpoint)
                             logger.warning(
-                                "fmp_request_denied endpoint=%s status=%s reason=%s response_preview=%s",
-                                endpoint,
-                                response.status,
-                                "possible_rate_limit_or_policy_change",
-                                response_preview,
+                                "fmp_request_denied",
+                                endpoint=endpoint,
+                                status=response.status,
+                                reason="possible_rate_limit_or_policy_change",
+                                preview=response_preview,
                             )
                             return None
 
@@ -159,21 +160,22 @@ class FMPFetcher(FinancialFetcher):
                         response_preview = await self._response_preview(response)
                         self._start_cooldown(response.status, endpoint)
                         logger.warning(
-                            "fmp_request_limited endpoint=%s status=%s reason=%s response_preview=%s",
-                            endpoint,
-                            response.status,
-                            "quota_or_rate_limit",
-                            response_preview,
+                            "fmp_request_limited",
+                            endpoint=endpoint,
+                            status=response.status,
+                            reason="quota_or_rate_limit",
+                            preview=response_preview,
                         )
                         return None
 
                     else:
                         # Other HTTP errors - log at debug level
+                        preview = await self._response_preview(response)
                         logger.debug(
-                            "fmp_http_error endpoint=%s status=%s response_preview=%s",
-                            endpoint,
-                            response.status,
-                            await self._response_preview(response),
+                            "fmp_http_error",
+                            endpoint=endpoint,
+                            status=response.status,
+                            preview=preview,
                         )
                         return None
 
@@ -183,19 +185,19 @@ class FMPFetcher(FinancialFetcher):
         except aiohttp.ClientError as e:
             # Network errors - log at debug level
             logger.debug(
-                "fmp_network_error endpoint=%s error_type=%s error=%s",
-                endpoint,
-                type(e).__name__,
-                e,
+                "fmp_network_error",
+                endpoint=endpoint,
+                error_type=type(e).__name__,
+                error=str(e),
             )
             return None
         except Exception as e:
             # Unexpected errors - log at debug level
             logger.warning(
-                "fmp_request_failed endpoint=%s error_type=%s error=%s",
-                endpoint,
-                type(e).__name__,
-                e,
+                "fmp_request_failed",
+                endpoint=endpoint,
+                error_type=type(e).__name__,
+                error=str(e),
             )
             return None
 
@@ -265,7 +267,7 @@ class FMPFetcher(FinancialFetcher):
 
         # Log if we got no data at all
         if not result:
-            logger.debug(f"FMP returned no data for {symbol}")
+            logger.debug("fmp_no_data", symbol=symbol)
             return None
 
         result["_source"] = "fmp"

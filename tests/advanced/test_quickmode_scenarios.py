@@ -148,15 +148,15 @@ def test_create_gemini_model_logs_thinking_level_at_debug(caplog):
     info_messages = [
         record.message
         for record in caplog.records
-        if record.levelno == logging.INFO
-        and "Applying thinking_level=" in record.message
+        if record.levelno == logging.INFO and "thinking_level_applied" in record.message
     ]
-    debug_messages = [
-        record.message
-        for record in caplog.records
-        if record.levelno == logging.DEBUG
-        and "Applying thinking_level=high to gemini-3-pro-preview" in record.message
+    debug_records = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.DEBUG and "thinking_level_applied" in r.message
     ]
 
     assert info_messages == []
-    assert debug_messages
+    assert debug_records
+    assert "high" in debug_records[0].message
+    assert "gemini-3-pro-preview" in debug_records[0].message
