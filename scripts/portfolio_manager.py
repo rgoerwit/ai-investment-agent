@@ -2505,6 +2505,16 @@ def _load_analyses_with_progress(
                 "loading latest result per ticker..."
             )
             return
+        if update.phase == "indexed":
+            _print_status(
+                f"Loaded {update.loaded_analyses} analyses from cache index for {results_dir}/"
+            )
+            return
+        if update.phase == "rebuilding_index":
+            _print_status(
+                f"Analysis index {update.current_file or ''} is invalid; reconstructing from analysis files..."
+            )
+            return
         if update.phase == "parsing":
             _print_status(
                 f"  Progress: {update.processed_files}/{update.total_files} files scanned; "
@@ -2737,7 +2747,10 @@ def main() -> None:
             print(
                 f"\nRefreshing {len(stale_tickers)} stale analyses...", file=sys.stderr
             )
-            for ticker in stale_tickers:
+            for index, ticker in enumerate(stale_tickers, start=1):
+                _print_status(
+                    f"Refreshing stale analysis {index}/{len(stale_tickers)}: {ticker}"
+                )
                 asyncio.run(refresh_stale_analysis(ticker, quick=args.quick))
 
             # Reload and re-reconcile

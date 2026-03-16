@@ -838,6 +838,9 @@ def save_results_to_file(result: dict, ticker: str, quick_mode: bool = False) ->
 
     results_dir = Path(config.results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
+    previous_dir_mtime_ns = (
+        results_dir.stat().st_mtime_ns if results_dir.exists() else None
+    )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"{ticker}_{timestamp}_analysis.json"
@@ -969,6 +972,22 @@ def save_results_to_file(result: dict, ticker: str, quick_mode: bool = False) ->
 
     with open(filepath, "w") as f:
         json.dump(save_data, f, indent=2)
+
+    try:
+        from src.ibkr.reconciler import (
+            _build_analysis_record_from_data,
+            update_latest_analyses_index,
+        )
+
+        record = _build_analysis_record_from_data(filepath, save_data)
+        if record is not None:
+            update_latest_analyses_index(
+                results_dir,
+                record,
+                previous_dir_mtime_ns=previous_dir_mtime_ns,
+            )
+    except Exception as exc:
+        logger.debug("analysis_index_update_skipped", error=str(exc))
 
     logger.info(
         f"Results saved to {filepath} ({len(prompts_used)} prompts tracked, {len(custom_prompts_loaded)} custom)"
@@ -1339,7 +1358,32 @@ def _setup_runtime(
 async def _run_retrospective_only(args: argparse.Namespace) -> int:
     """Run retrospective-only mode and return the process exit code."""
     try:
-        from src.retrospective import run_retrospective
+        from src.retrospective import SnapshotLoadProgress, run_retrospective
+
+        def report(update: SnapshotLoadProgress) -> None:
+            if update.phase == "discovered":
+                if update.total_files:
+                    print(
+                        f"Scanning {update.total_files} saved analysis file"
+                        f"{'' if update.total_files == 1 else 's'} for retrospective snapshots...",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                return
+            if update.phase == "parsing":
+                print(
+                    f"  Snapshot load progress: {update.processed_files}/{update.total_files} "
+                    f"files scanned; {update.loaded_snapshots} snapshots across {update.loaded_tickers} tickers",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return
+            if update.phase == "complete":
+                print(
+                    f"Loaded {update.loaded_snapshots} retrospective snapshots from {update.total_files} files.",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
         results_dir = Path(config.results_dir)
         if not args.quiet and not args.brief:
@@ -1347,7 +1391,11 @@ async def _run_retrospective_only(args: argparse.Namespace) -> int:
                 "[cyan]Running retrospective evaluation on all past analyses...[/cyan]"
             )
 
-        lessons = await run_retrospective(ticker=None, results_dir=results_dir)
+        lessons = await run_retrospective(
+            ticker=None,
+            results_dir=results_dir,
+            progress=report if not (args.quiet or args.brief) else None,
+        )
 
         if lessons:
             if not args.quiet and not args.brief:
@@ -1387,10 +1435,24 @@ async def _maybe_run_ticker_retrospective(args: argparse.Namespace) -> None:
         return
 
     try:
-        from src.retrospective import run_retrospective
+        from src.retrospective import SnapshotLoadProgress, run_retrospective
+
+        def report(update: SnapshotLoadProgress) -> None:
+            if update.phase != "parsing" or args.quiet or args.brief:
+                return
+            print(
+                f"  Retrospective scan: {update.processed_files}/{update.total_files} "
+                f"files; {update.loaded_snapshots} candidate snapshots",
+                file=sys.stderr,
+                flush=True,
+            )
 
         results_dir = Path(config.results_dir)
-        lessons = await run_retrospective(ticker=args.ticker, results_dir=results_dir)
+        lessons = await run_retrospective(
+            ticker=args.ticker,
+            results_dir=results_dir,
+            progress=report,
+        )
         if lessons and not args.quiet and not args.brief:
             console.print(
                 f"\n[green]Generated {len(lessons)} new lesson(s) from past analyses[/green]"

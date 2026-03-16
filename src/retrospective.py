@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -27,6 +29,19 @@ import structlog
 from src.config import config
 
 logger = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotLoadProgress:
+    """Progress update emitted while scanning saved prediction snapshots."""
+
+    phase: str
+    total_files: int
+    processed_files: int
+    loaded_tickers: int
+    loaded_snapshots: int
+    current_file: str | None = None
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Constants
@@ -384,8 +399,28 @@ def extract_snapshot(
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+def _should_emit_snapshot_progress(processed_files: int, total_files: int) -> bool:
+    """Return True when snapshot-scan progress should be surfaced."""
+    if total_files <= 0:
+        return False
+    if total_files > 20 and processed_files in {1, 5, 10, 25, 50, 100}:
+        return True
+    if total_files <= 20:
+        return True
+    if total_files <= 200:
+        step = 25
+    elif total_files <= 1000:
+        step = 100
+    else:
+        step = 250
+    return processed_files == total_files or processed_files % step == 0
+
+
 def load_past_snapshots(
-    ticker: str | None, results_dir: Path
+    ticker: str | None,
+    results_dir: Path,
+    *,
+    progress: Callable[[SnapshotLoadProgress], None] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """
     Load prediction snapshots from saved analysis JSON files.
@@ -426,7 +461,41 @@ def load_past_snapshots(
             unique_files.append(f)
     files = unique_files
 
-    for filepath in files:
+    total_files = len(files)
+    if progress is not None:
+        progress(
+            SnapshotLoadProgress(
+                phase="discovered",
+                total_files=total_files,
+                processed_files=0,
+                loaded_tickers=0,
+                loaded_snapshots=0,
+                current_file=None,
+            )
+        )
+
+    for processed_files, filepath in enumerate(files, start=1):
+
+        def emit_progress(
+            processed_files_: int = processed_files,
+            current_file: str = filepath.name,
+        ) -> None:
+            if progress is None or not _should_emit_snapshot_progress(
+                processed_files_, total_files
+            ):
+                return
+            loaded_snapshots = sum(len(items) for items in snapshots.values())
+            progress(
+                SnapshotLoadProgress(
+                    phase="parsing",
+                    total_files=total_files,
+                    processed_files=processed_files_,
+                    loaded_tickers=len(snapshots),
+                    loaded_snapshots=loaded_snapshots,
+                    current_file=current_file,
+                )
+            )
+
         try:
             with open(filepath) as f:
                 data = json.load(f)
@@ -438,6 +507,7 @@ def load_past_snapshots(
                     file=filepath.name,
                     reason="predates retrospective feature",
                 )
+                emit_progress()
                 continue
 
             snap_ticker = snapshot.get("ticker", "UNKNOWN")
@@ -446,11 +516,26 @@ def load_past_snapshots(
             # Attach source file for deduplication
             snapshot["_source_file"] = filepath.name
             snapshots[snap_ticker].append(snapshot)
+            emit_progress()
 
         except json.JSONDecodeError:
             logger.warning("malformed_json", file=filepath.name)
+            emit_progress()
         except Exception as e:
             logger.warning("snapshot_load_error", file=filepath.name, error=str(e))
+            emit_progress()
+
+    if progress is not None:
+        progress(
+            SnapshotLoadProgress(
+                phase="complete",
+                total_files=total_files,
+                processed_files=total_files,
+                loaded_tickers=len(snapshots),
+                loaded_snapshots=sum(len(items) for items in snapshots.values()),
+                current_file=files[-1].name if files else None,
+            )
+        )
 
     return snapshots
 
@@ -1247,6 +1332,7 @@ async def run_retrospective(
     ticker: str | None,
     results_dir: Path,
     lessons_memory: Any = None,
+    progress: Callable[[SnapshotLoadProgress], None] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Orchestrate retrospective: load snapshots → compare → generate → store.
@@ -1271,7 +1357,7 @@ async def run_retrospective(
             return []
 
     # Load snapshots
-    all_snapshots = load_past_snapshots(ticker, results_dir)
+    all_snapshots = load_past_snapshots(ticker, results_dir, progress=progress)
 
     if not all_snapshots:
         msg = f"for {ticker}" if ticker else "in results directory"

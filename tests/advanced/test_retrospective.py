@@ -22,6 +22,7 @@ from src.retrospective import (
     LESSONS_COLLECTION_NAME,
     MAX_LESSONS_PER_TICKER,
     MINIMUM_DAYS_ELAPSED,
+    SnapshotLoadProgress,
     _extract_bear_risks,
     _extract_data_block_field,
     _extract_data_block_float,
@@ -572,6 +573,37 @@ class TestLoadPastSnapshots:
 
         result = load_past_snapshots(None, tmp_path)
         assert result == {}
+
+    def test_progress_callback_receives_discovered_parsing_and_complete(self, tmp_path):
+        """Snapshot loading emits visible progress events for callers."""
+        events: list[SnapshotLoadProgress] = []
+
+        for ticker, prefix in [("2767.T", "2767_T"), ("0005.HK", "0005_HK")]:
+            data = {"prediction_snapshot": _make_snapshot(ticker=ticker)}
+            (tmp_path / f"{prefix}_20260101_120000_analysis.json").write_text(
+                json.dumps(data)
+            )
+
+        snapshots = load_past_snapshots(None, tmp_path, progress=events.append)
+
+        assert set(snapshots) == {"2767.T", "0005.HK"}
+        assert events[0] == SnapshotLoadProgress(
+            phase="discovered",
+            total_files=2,
+            processed_files=0,
+            loaded_tickers=0,
+            loaded_snapshots=0,
+            current_file=None,
+        )
+        assert any(event.phase == "parsing" for event in events)
+        assert events[-1] == SnapshotLoadProgress(
+            phase="complete",
+            total_files=2,
+            processed_files=2,
+            loaded_tickers=2,
+            loaded_snapshots=2,
+            current_file="0005_HK_20260101_120000_analysis.json",
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════

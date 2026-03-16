@@ -1,7 +1,9 @@
 """Tests for the reconciler — position-aware action generation."""
 
 import json
+import multiprocessing
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -16,6 +18,10 @@ from src.ibkr.models import (
 )
 from src.ibkr.reconciler import (
     AnalysisLoadProgress,
+    _analysis_index_lock,
+    _analysis_index_lock_path,
+    _analysis_index_path,
+    _build_analysis_record_from_data,
     _exchange_from_position,
     _parse_scores_from_final_decision,
     _resolve_fx,
@@ -25,6 +31,7 @@ from src.ibkr.reconciler import (
     compute_portfolio_health,
     load_latest_analyses,
     reconcile,
+    update_latest_analyses_index,
 )
 from src.ibkr.ticker import Ticker
 
@@ -103,6 +110,13 @@ def _make_portfolio(
         cash_pct=cash / value if value > 0 else 0,
         available_cash_usd=cash - (value * cash_buffer_pct),
     )
+
+
+def _hold_analysis_index_lock(results_dir: str, hold_seconds: float, ready) -> None:
+    """Helper process that holds the index lock long enough to test blocking."""
+    with _analysis_index_lock(Path(results_dir)):
+        ready.set()
+        time.sleep(hold_seconds)
 
 
 # ── Staleness Tests ──
@@ -853,7 +867,7 @@ class TestLoadLatestAnalyses:
         assert [event.processed_files for event in parsing_events] == [1, 2]
 
     def test_large_scan_progress_is_coarse_grained(self, tmp_path):
-        """Large directories emit sparse progress updates to avoid stderr spam."""
+        """Larger directories emit early heartbeat updates, then coarse progress."""
         events: list[AnalysisLoadProgress] = []
 
         for i in range(30):
@@ -872,7 +886,36 @@ class TestLoadLatestAnalyses:
         load_latest_analyses(tmp_path, progress=events.append)
 
         parsing_events = [event for event in events if event.phase == "parsing"]
-        assert [event.processed_files for event in parsing_events] == [25, 30]
+        assert [event.processed_files for event in parsing_events] == [1, 5, 10, 25, 30]
+
+    def test_very_large_scan_progress_stays_visible(self, tmp_path):
+        """Very large directories emit early and periodic heartbeat updates."""
+        events: list[AnalysisLoadProgress] = []
+
+        for i in range(1001):
+            data = {
+                "prediction_snapshot": {
+                    "ticker": f"TICK{i:04d}.TO",
+                    "analysis_date": "2026-03-01",
+                    "verdict": "BUY",
+                },
+                "investment_analysis": {},
+            }
+            (tmp_path / f"TICK{i:04d}_TO_2026-03-01_analysis.json").write_text(
+                json.dumps(data)
+            )
+
+        load_latest_analyses(tmp_path, progress=events.append)
+
+        parsing_events = [
+            event.processed_files for event in events if event.phase == "parsing"
+        ]
+        assert parsing_events[:6] == [1, 5, 10, 25, 50, 100]
+        assert 250 in parsing_events
+        assert 500 in parsing_events
+        assert 750 in parsing_events
+        assert 1000 in parsing_events
+        assert parsing_events[-1] == 1001
 
     def test_default_loader_logging_is_aggregate_not_per_file(self, tmp_path):
         """Default load path emits one aggregate debug summary, not one log per file."""
@@ -896,6 +939,420 @@ class TestLoadLatestAnalyses:
         debug_events = [call.args[0] for call in mock_logger.debug.call_args_list]
         assert "analysis_loaded" not in debug_events
         assert "analyses_scan_complete" in debug_events
+
+    def test_load_latest_analyses_creates_index_automatically(self, tmp_path):
+        """First full scan writes a sibling latest-analyses index automatically."""
+        data = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-03-01",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        (tmp_path / "7203_T_2026-03-01_analysis.json").write_text(json.dumps(data))
+
+        analyses = load_latest_analyses(tmp_path)
+
+        index_path = _analysis_index_path(tmp_path)
+        assert "7203.T" in analyses
+        assert index_path.exists()
+
+    def test_load_latest_analyses_uses_index_when_results_unchanged(
+        self, tmp_path, monkeypatch
+    ):
+        """Second load reuses the cache index instead of reparsing analysis files."""
+        data = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-03-01",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        (tmp_path / "7203_T_2026-03-01_analysis.json").write_text(json.dumps(data))
+
+        first = load_latest_analyses(tmp_path)
+        assert "7203.T" in first
+
+        monkeypatch.setattr(
+            "src.ibkr.reconciler._build_analysis_record_from_file",
+            lambda filepath: (_ for _ in ()).throw(AssertionError("should use index")),
+        )
+
+        second = load_latest_analyses(tmp_path)
+        assert second["7203.T"].ticker == "7203.T"
+
+    def test_load_latest_analyses_rebuilds_when_index_missing(self, tmp_path):
+        """If the cache index is removed, the loader rescans and recreates it."""
+        data = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-03-01",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        (tmp_path / "7203_T_2026-03-01_analysis.json").write_text(json.dumps(data))
+
+        load_latest_analyses(tmp_path)
+        index_path = _analysis_index_path(tmp_path)
+        index_path.unlink()
+
+        analyses = load_latest_analyses(tmp_path)
+        assert analyses["7203.T"].ticker == "7203.T"
+        assert index_path.exists()
+
+    def test_load_latest_analyses_rebuilds_when_index_is_corrupt(self, tmp_path):
+        """Corrupt cache index falls back to a full scan and is rewritten."""
+        events: list[AnalysisLoadProgress] = []
+        data = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-03-01",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        (tmp_path / "7203_T_2026-03-01_analysis.json").write_text(json.dumps(data))
+
+        load_latest_analyses(tmp_path)
+        index_path = _analysis_index_path(tmp_path)
+        index_path.write_text("{not valid json")
+
+        analyses = load_latest_analyses(tmp_path, progress=events.append)
+        assert analyses["7203.T"].ticker == "7203.T"
+        payload = json.loads(index_path.read_text())
+        assert payload["version"] >= 1
+        assert any(event.phase == "rebuilding_index" for event in events)
+
+    def test_load_latest_analyses_rebuilds_when_index_is_truncated(self, tmp_path):
+        """Truncated index file is treated as corrupt and rebuilt automatically."""
+        data = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-03-01",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        (tmp_path / "7203_T_2026-03-01_analysis.json").write_text(json.dumps(data))
+
+        load_latest_analyses(tmp_path)
+        index_path = _analysis_index_path(tmp_path)
+        index_path.write_text('{"version": 1, "results_dir": ')
+
+        analyses = load_latest_analyses(tmp_path)
+        assert analyses["7203.T"].ticker == "7203.T"
+        assert json.loads(index_path.read_text())["version"] >= 1
+
+    def test_load_latest_analyses_rebuilds_when_index_entry_source_changes(
+        self, tmp_path
+    ):
+        """If a cached entry's source file changes, the whole index is rebuilt."""
+        events: list[AnalysisLoadProgress] = []
+        data = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-03-01",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        filepath = tmp_path / "7203_T_2026-03-01_analysis.json"
+        filepath.write_text(json.dumps(data))
+        load_latest_analyses(tmp_path)
+
+        data["prediction_snapshot"]["verdict"] = "SELL"
+        filepath.write_text(json.dumps(data))
+
+        analyses = load_latest_analyses(tmp_path, progress=events.append)
+        assert analyses["7203.T"].verdict == "SELL"
+        assert any(event.phase == "rebuilding_index" for event in events)
+
+    def test_load_latest_analyses_rebuilds_when_index_entry_source_missing(
+        self, tmp_path
+    ):
+        """If an indexed source file disappears, the cache is rebuilt from remaining files."""
+        events: list[AnalysisLoadProgress] = []
+        first = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-03-01",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        second = {
+            "prediction_snapshot": {
+                "ticker": "6758.T",
+                "analysis_date": "2026-03-02",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        first_path = tmp_path / "7203_T_2026-03-01_analysis.json"
+        second_path = tmp_path / "6758_T_2026-03-02_analysis.json"
+        first_path.write_text(json.dumps(first))
+        second_path.write_text(json.dumps(second))
+        load_latest_analyses(tmp_path)
+
+        first_path.unlink()
+
+        analyses = load_latest_analyses(tmp_path, progress=events.append)
+        assert set(analyses) == {"6758.T"}
+        assert any(event.phase == "rebuilding_index" for event in events)
+
+    def test_load_latest_analyses_rebuilds_when_index_entry_metadata_missing(
+        self, tmp_path
+    ):
+        """Missing per-entry source metadata invalidates the cache cleanly."""
+        events: list[AnalysisLoadProgress] = []
+        data = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-03-01",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        filepath = tmp_path / "7203_T_2026-03-01_analysis.json"
+        filepath.write_text(json.dumps(data))
+        load_latest_analyses(tmp_path)
+
+        index_path = _analysis_index_path(tmp_path)
+        payload = json.loads(index_path.read_text())
+        payload["analyses"]["7203.T"].pop("source_mtime_ns")
+        index_path.write_text(json.dumps(payload))
+
+        analyses = load_latest_analyses(tmp_path, progress=events.append)
+        assert analyses["7203.T"].ticker == "7203.T"
+        assert any(event.phase == "rebuilding_index" for event in events)
+
+    def test_load_latest_analyses_rebuilds_when_index_entry_source_size_mismatches(
+        self, tmp_path
+    ):
+        """Wrong cached source_size invalidates the index entry and forces rebuild."""
+        events: list[AnalysisLoadProgress] = []
+        data = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-03-01",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        filepath = tmp_path / "7203_T_2026-03-01_analysis.json"
+        filepath.write_text(json.dumps(data))
+        load_latest_analyses(tmp_path)
+
+        index_path = _analysis_index_path(tmp_path)
+        payload = json.loads(index_path.read_text())
+        payload["analyses"]["7203.T"]["source_size"] += 1
+        index_path.write_text(json.dumps(payload))
+
+        analyses = load_latest_analyses(tmp_path, progress=events.append)
+        assert analyses["7203.T"].ticker == "7203.T"
+        assert any(event.phase == "rebuilding_index" for event in events)
+
+    def test_load_latest_analyses_ignores_stale_index_after_results_change(
+        self, tmp_path
+    ):
+        """Adding a new analysis invalidates the old index and rebuilds it."""
+        events: list[AnalysisLoadProgress] = []
+        first = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-03-01",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        second = {
+            "prediction_snapshot": {
+                "ticker": "6758.T",
+                "analysis_date": "2026-03-02",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        (tmp_path / "7203_T_2026-03-01_analysis.json").write_text(json.dumps(first))
+        initial = load_latest_analyses(tmp_path)
+        assert set(initial) == {"7203.T"}
+
+        (tmp_path / "6758_T_2026-03-02_analysis.json").write_text(json.dumps(second))
+        rebuilt = load_latest_analyses(tmp_path, progress=events.append)
+        assert set(rebuilt) == {"7203.T", "6758.T"}
+        assert any(
+            event.phase == "rebuilding_index"
+            and "stale_directory_state" in (event.current_file or "")
+            for event in events
+        )
+
+    def test_load_latest_analyses_rebuilds_when_index_path_mismatches(self, tmp_path):
+        """Path mismatch in the index payload is treated as untrusted and rebuilt."""
+        events: list[AnalysisLoadProgress] = []
+        data = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-03-01",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        filepath = tmp_path / "7203_T_2026-03-01_analysis.json"
+        filepath.write_text(json.dumps(data))
+        load_latest_analyses(tmp_path)
+
+        index_path = _analysis_index_path(tmp_path)
+        payload = json.loads(index_path.read_text())
+        payload["results_dir"] = "/tmp/not-the-same-results-dir"
+        index_path.write_text(json.dumps(payload))
+
+        analyses = load_latest_analyses(tmp_path, progress=events.append)
+        assert analyses["7203.T"].ticker == "7203.T"
+        assert any(
+            event.phase == "rebuilding_index"
+            and "path_mismatch" in (event.current_file or "")
+            for event in events
+        )
+
+    def test_load_latest_analyses_rebuilds_when_index_has_mixed_valid_and_invalid_entries(
+        self, tmp_path
+    ):
+        """A single invalid entry invalidates the cache and full rebuild restores all entries."""
+        events: list[AnalysisLoadProgress] = []
+        for ticker, prefix in [("7203.T", "7203_T"), ("6758.T", "6758_T")]:
+            data = {
+                "prediction_snapshot": {
+                    "ticker": ticker,
+                    "analysis_date": "2026-03-01",
+                    "verdict": "BUY",
+                },
+                "investment_analysis": {},
+            }
+            (tmp_path / f"{prefix}_2026-03-01_analysis.json").write_text(
+                json.dumps(data)
+            )
+
+        load_latest_analyses(tmp_path)
+        index_path = _analysis_index_path(tmp_path)
+        payload = json.loads(index_path.read_text())
+        payload["analyses"]["6758.T"]["source_file"] = str(tmp_path / "missing.json")
+        index_path.write_text(json.dumps(payload))
+
+        analyses = load_latest_analyses(tmp_path, progress=events.append)
+        assert set(analyses) == {"7203.T", "6758.T"}
+        assert any(event.phase == "rebuilding_index" for event in events)
+
+    def test_incremental_index_update_after_save(self, tmp_path):
+        """A valid cache index can be updated atomically after one new save."""
+        first = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-03-01",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        first_path = tmp_path / "7203_T_2026-03-01_analysis.json"
+        first_path.write_text(json.dumps(first))
+        load_latest_analyses(tmp_path)
+
+        previous_dir_mtime_ns = tmp_path.stat().st_mtime_ns
+
+        second = {
+            "prediction_snapshot": {
+                "ticker": "6758.T",
+                "analysis_date": "2026-03-02",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        second_path = tmp_path / "6758_T_2026-03-02_analysis.json"
+        second_path.write_text(json.dumps(second))
+
+        record = _build_analysis_record_from_data(second_path, second)
+        assert record is not None
+        assert (
+            update_latest_analyses_index(
+                tmp_path,
+                record,
+                previous_dir_mtime_ns=previous_dir_mtime_ns,
+            )
+            is True
+        )
+
+        rebuilt = load_latest_analyses(tmp_path)
+        assert set(rebuilt) == {"7203.T", "6758.T"}
+
+    def test_leftover_lock_file_does_not_block_index_use(self, tmp_path):
+        """An empty leftover lock file is harmless when no process holds the lock."""
+        data = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-03-01",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        (tmp_path / "7203_T_2026-03-01_analysis.json").write_text(json.dumps(data))
+        load_latest_analyses(tmp_path)
+
+        lock_path = _analysis_index_lock_path(tmp_path)
+        lock_path.write_text("")
+
+        analyses = load_latest_analyses(tmp_path)
+        assert analyses["7203.T"].ticker == "7203.T"
+
+    def test_incremental_index_update_waits_for_existing_lock(self, tmp_path):
+        """Concurrent writers serialize on the whole-index lock."""
+        first = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-03-01",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        second = {
+            "prediction_snapshot": {
+                "ticker": "6758.T",
+                "analysis_date": "2026-03-02",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        (tmp_path / "7203_T_2026-03-01_analysis.json").write_text(json.dumps(first))
+        load_latest_analyses(tmp_path)
+
+        previous_dir_mtime_ns = tmp_path.stat().st_mtime_ns
+        second_path = tmp_path / "6758_T_2026-03-02_analysis.json"
+        second_path.write_text(json.dumps(second))
+        record = _build_analysis_record_from_data(second_path, second)
+        assert record is not None
+
+        ctx = multiprocessing.get_context("spawn")
+        ready = ctx.Event()
+        proc = ctx.Process(
+            target=_hold_analysis_index_lock,
+            args=(str(tmp_path), 0.4, ready),
+        )
+        proc.start()
+        assert ready.wait(2.0)
+
+        start = time.perf_counter()
+        updated = update_latest_analyses_index(
+            tmp_path,
+            record,
+            previous_dir_mtime_ns=previous_dir_mtime_ns,
+        )
+        elapsed = time.perf_counter() - start
+
+        proc.join(timeout=2.0)
+        assert proc.exitcode == 0
+        assert updated is True
+        assert elapsed >= 0.25
 
     def test_filename_duplicate_history_is_skipped_before_json_load(self, tmp_path):
         """Older files with the same filename-level ticker key are skipped early."""

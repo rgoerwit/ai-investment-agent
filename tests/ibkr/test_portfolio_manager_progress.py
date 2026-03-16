@@ -34,6 +34,54 @@ def test_load_analyses_with_progress_emits_stderr_updates(tmp_path, capsys):
     assert "7203.T" in analyses
 
 
+def test_load_analyses_with_progress_reports_index_hit(tmp_path, capsys):
+    """A reused latest-analyses index is surfaced explicitly to the user."""
+    analysis_json = {
+        "prediction_snapshot": {
+            "ticker": "7203.T",
+            "analysis_date": "2026-03-01",
+            "verdict": "BUY",
+        },
+        "investment_analysis": {},
+    }
+    (tmp_path / "7203_T_2026-03-01_analysis.json").write_text(json.dumps(analysis_json))
+
+    _load_analyses_with_progress(tmp_path)
+    capsys.readouterr()
+
+    analyses = _load_analyses_with_progress(tmp_path)
+    captured = capsys.readouterr()
+
+    assert "Loaded 1 analyses from cache index" in captured.err
+    assert "7203.T" in analyses
+
+
+def test_load_analyses_with_progress_reports_index_reconstruction(tmp_path, capsys):
+    """Corrupt latest-analyses index is reported before fallback reconstruction."""
+    analysis_json = {
+        "prediction_snapshot": {
+            "ticker": "7203.T",
+            "analysis_date": "2026-03-01",
+            "verdict": "BUY",
+        },
+        "investment_analysis": {},
+    }
+    (tmp_path / "7203_T_2026-03-01_analysis.json").write_text(json.dumps(analysis_json))
+
+    _load_analyses_with_progress(tmp_path)
+    from src.ibkr.reconciler import _analysis_index_path
+
+    _analysis_index_path(tmp_path).write_text("{broken json")
+    capsys.readouterr()
+
+    analyses = _load_analyses_with_progress(tmp_path)
+    captured = capsys.readouterr()
+
+    assert "is invalid; reconstructing from analysis files" in captured.err
+    assert "Progress: 1/1 files scanned; 1 latest analyses loaded" in captured.err
+    assert "7203.T" in analyses
+
+
 def test_load_ibkr_context_emits_phase_status_and_returns_live_state(capsys):
     """IBKR loading prints phase status before each external step."""
 
