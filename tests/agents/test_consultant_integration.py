@@ -13,6 +13,7 @@ from langgraph.types import RunnableConfig
 from src.agents import create_consultant_node
 from src.graph import create_trading_graph
 from src.llms import create_consultant_llm, get_consultant_llm
+from src.tooling.runtime import ToolResult
 
 
 class TestConsultantNodeCreation:
@@ -265,6 +266,78 @@ class TestConsultantNodeExecution:
         exec_mock.assert_awaited_once()
         mock_tool.ainvoke.assert_not_called()
         assert result["consultant_review"] == "CONSULTANT REVIEW: VERIFIED"
+
+    @pytest.mark.asyncio
+    async def test_consultant_marks_artifact_not_ok_when_tool_returns_error_payload(
+        self,
+    ):
+        """Completed consultant text should still be marked degraded on tool failure."""
+        mock_llm = Mock()
+        tool_call_response = Mock()
+        tool_call_response.content = ""
+        tool_call_response.tool_calls = [
+            {"name": "spot_check_metric", "args": {"ticker": "0005.HK"}, "id": "call_1"}
+        ]
+        final_response = Mock()
+        final_response.content = "CONSULTANT REVIEW: CONDITIONAL APPROVAL"
+        final_response.tool_calls = []
+
+        mock_tool = Mock()
+        mock_tool.name = "spot_check_metric"
+        mock_tool.ainvoke = AsyncMock()
+
+        async def mock_invoke(*args, **kwargs):
+            if mock_invoke.calls == 0:
+                mock_invoke.calls += 1
+                return tool_call_response
+            return final_response
+
+        mock_invoke.calls = 0
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                with patch(
+                    "src.agents.consultant_nodes.TOOL_SERVICE.execute",
+                    new=AsyncMock(
+                        return_value=ToolResult(
+                            value='{"error":"invalid key","provider":"fmp","failure_kind":"auth_error"}'
+                        )
+                    ),
+                ):
+                    mock_prompt = Mock()
+                    mock_prompt.system_message = "You are a consultant."
+                    mock_prompt.agent_name = "External Consultant"
+                    mock_get_prompt.return_value = mock_prompt
+
+                    consultant_node = create_consultant_node(
+                        mock_llm, "consultant", tools=[mock_tool]
+                    )
+
+                    state = {
+                        "company_of_interest": "0005.HK",
+                        "company_name": "HSBC Holdings",
+                        "market_report": "Report",
+                        "sentiment_report": "Report",
+                        "news_report": "Report",
+                        "fundamentals_report": "Report",
+                        "investment_debate_state": {"history": "Debate"},
+                        "investment_plan": "Plan",
+                    }
+                    config = RunnableConfig(
+                        configurable={"context": Mock(trade_date="2025-12-13")}
+                    )
+
+                    result = await consultant_node(state, config)
+
+        assert result["consultant_review"] == "CONSULTANT REVIEW: CONDITIONAL APPROVAL"
+        assert result["artifact_statuses"]["consultant_review"]["ok"] is False
+        assert result["consultant_tool_failures"] == 1
+        assert (
+            result["artifact_statuses"]["consultant_review"]["message"]
+            == "Consultant review completed with tool failures"
+        )
 
 
 class TestGraphIntegration:

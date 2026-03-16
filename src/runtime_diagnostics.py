@@ -15,6 +15,7 @@ FailureKind = Literal[
     "quota_error",
     "server_error",
     "bad_request",
+    "application_error",
     "unknown_provider_error",
 ]
 ArtifactErrorKind = FailureKind | Literal["application_error"]
@@ -156,6 +157,12 @@ def classify_failure(
     ):
         kind = "timeout"
         retryable = True
+    elif isinstance(
+        root,
+        TypeError | AttributeError | ImportError | NotImplementedError | AssertionError,
+    ):
+        kind = "application_error"
+        retryable = False
     elif any(
         marker in combined
         for marker in ("429", "rate limit", "too many requests", "ratelimit")

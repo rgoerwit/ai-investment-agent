@@ -82,6 +82,18 @@ class TestCompleteOutput:
         result = detect_truncation(text)
         assert result["truncated"] is False
 
+    def test_complete_markdown_pm_block_with_zone_not_flagged(self):
+        """Real emitted PM block format should not trigger a false positive."""
+        text = (
+            "#### --- START PM_BLOCK ---\n"
+            "VERDICT: BUY\n"
+            "ZONE: LOW\n"
+            "TARGET: 10%\n"
+            "#### --- END PM_BLOCK ---"
+        )
+        result = detect_truncation(text, agent="portfolio_manager")
+        assert result["truncated"] is False
+
     def test_complete_data_block(self):
         """Complete DATA_BLOCK should not be flagged."""
         text = "DATA_BLOCK:\nHEALTH_SCORE: 75\nGROWTH_SCORE: 60"

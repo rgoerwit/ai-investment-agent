@@ -27,6 +27,7 @@ from typing import Any
 import structlog
 
 from src.config import config
+from src.runtime_diagnostics import classify_failure
 
 logger = structlog.get_logger(__name__)
 
@@ -137,6 +138,7 @@ LESSON_TYPES = {
 }
 
 LESSONS_COLLECTION_NAME = "lessons_learned"
+_LESSONS_MEMORY_INSTANCE: Any | None = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -522,7 +524,14 @@ def load_past_snapshots(
             logger.warning("malformed_json", file=filepath.name)
             emit_progress()
         except Exception as e:
-            logger.warning("snapshot_load_error", file=filepath.name, error=str(e))
+            logger.warning(
+                "snapshot_load_error",
+                file=filepath.name,
+                error=str(e),
+                error_type=type(e).__name__,
+                root_cause_type=type(e.__cause__ or e.__context__ or e).__name__,
+                exc_info=True,
+            )
             emit_progress()
 
     if progress is not None:
@@ -657,7 +666,18 @@ async def compare_to_reality(snapshot: dict[str, Any]) -> dict[str, Any] | None:
         logger.warning("yfinance_timeout", ticker=ticker)
         return None
     except Exception as e:
-        logger.warning("yfinance_error", ticker=ticker, error=str(e))
+        details = classify_failure(e, provider="unknown", class_name="yfinance")
+        logger.warning(
+            "yfinance_error",
+            ticker=ticker,
+            failure_kind=details.kind,
+            host=details.host,
+            error_type=details.error_type,
+            root_cause_type=details.root_cause_type,
+            retryable=details.retryable,
+            error_message=details.message,
+            exc_info=True,
+        )
         return None
 
     # Calculate returns.
@@ -894,7 +914,23 @@ FAILURE_MODE: CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_BLEED | OPERATIONAL_MISS | 
         return lesson_text, lesson_type, failure_mode
 
     except Exception as e:
-        logger.error("lesson_generation_failed", error=str(e))
+        details = classify_failure(
+            e,
+            provider="google",
+            model_name=getattr(config, "quick_thinking_llm", None),
+            class_name="RetrospectiveLessonLLM",
+        )
+        logger.error(
+            "lesson_generation_failed",
+            provider=details.provider,
+            failure_kind=details.kind,
+            host=details.host,
+            error_type=details.error_type,
+            root_cause_type=details.root_cause_type,
+            retryable=details.retryable,
+            error_message=details.message,
+            exc_info=True,
+        )
         return None
 
 
@@ -1353,7 +1389,13 @@ async def run_retrospective(
 
             lessons_memory = FinancialSituationMemory(LESSONS_COLLECTION_NAME)
         except Exception as e:
-            logger.error("lessons_memory_init_failed", error=str(e))
+            logger.error(
+                "lessons_memory_init_failed",
+                error=str(e),
+                error_type=type(e).__name__,
+                root_cause_type=type(e.__cause__ or e.__context__ or e).__name__,
+                exc_info=True,
+            )
             return []
 
     # Load snapshots
@@ -1463,6 +1505,16 @@ def create_lessons_memory() -> Any:
         FinancialSituationMemory instance (may have available=False if ChromaDB
         is not configured)
     """
-    from src.memory import FinancialSituationMemory
+    global _LESSONS_MEMORY_INSTANCE
 
-    return FinancialSituationMemory(LESSONS_COLLECTION_NAME)
+    if _LESSONS_MEMORY_INSTANCE is None:
+        from src.memory import FinancialSituationMemory
+
+        _LESSONS_MEMORY_INSTANCE = FinancialSituationMemory(LESSONS_COLLECTION_NAME)
+    return _LESSONS_MEMORY_INSTANCE
+
+
+def _reset_lessons_memory_cache_for_tests() -> None:
+    """Reset the cached lessons memory instance to keep tests isolated."""
+    global _LESSONS_MEMORY_INSTANCE
+    _LESSONS_MEMORY_INSTANCE = None

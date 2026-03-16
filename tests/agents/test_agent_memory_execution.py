@@ -23,6 +23,10 @@ from src.memory import (
 class TestResearcherMemoryIsolation:
     """Test that researcher nodes use isolated ticker-specific memories."""
 
+    def teardown_method(self, method):
+        """Clear mock objects from shared state after each test."""
+        FinancialSituationMemory._reset_shared_state_for_tests()
+
     @pytest.mark.asyncio
     @patch("src.memory.GoogleGenerativeAIEmbeddings")
     @patch("chromadb.PersistentClient")
@@ -35,6 +39,9 @@ class TestResearcherMemoryIsolation:
         Design: When analyzing 0005.HK, bull researcher's memory should be
                 named "0005_HK_bull_memory" to prevent cross-contamination.
         """
+        # Reset shared state so the patched constructor is called (not cached real instance).
+        FinancialSituationMemory._reset_shared_state_for_tests()
+
         ticker = "0005.HK"
 
         # Setup mock embeddings
@@ -177,6 +184,10 @@ class TestResearcherMemoryIsolation:
 class TestResearcherMetadataFiltering:
     """Test that researcher nodes enforce metadata filtering correctly."""
 
+    def teardown_method(self, method):
+        """Clear mock objects from shared state after each test."""
+        FinancialSituationMemory._reset_shared_state_for_tests()
+
     @pytest.mark.asyncio
     @patch("src.memory.GoogleGenerativeAIEmbeddings")
     @patch("chromadb.PersistentClient")
@@ -190,6 +201,9 @@ class TestResearcherMetadataFiltering:
                 (shouldn't happen, but defensive), metadata filter should prevent
                 retrieval of wrong ticker's data.
         """
+        # Reset shared state so the patched constructor is called (not cached real instance).
+        FinancialSituationMemory._reset_shared_state_for_tests()
+
         ticker = "0005.HK"
 
         # Setup mock embeddings

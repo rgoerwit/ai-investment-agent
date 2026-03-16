@@ -564,6 +564,57 @@ class TestSavedDiagnostics:
         assert summary["llm_attempts"] == 5
         assert summary["llm_failures"] == 2
 
+    def test_build_run_summary_counts_manual_tool_failures_and_multi_provider_usage(
+        self, monkeypatch
+    ):
+        from langchain_core.messages import ToolMessage
+
+        from src.main import build_run_summary
+
+        class StubTracker:
+            def get_total_stats(self):
+                return {
+                    "failed_attempts": 0,
+                    "total_calls": 2,
+                }
+
+        monkeypatch.setattr("src.token_tracker.get_tracker", lambda: StubTracker())
+        monkeypatch.setattr("src.main.config.llm_provider", "google")
+
+        result = {
+            "analysis_validity": {"publishable": True},
+            "consultant_tool_failures": 1,
+            "artifact_statuses": {
+                "consultant_review": {
+                    "complete": True,
+                    "ok": False,
+                    "provider": "openai",
+                }
+            },
+            "messages": [
+                ToolMessage(
+                    content='{"error":"invalid key","provider":"fmp","failure_kind":"auth_error"}',
+                    tool_call_id="call_1",
+                    name="spot_check_metric_alt",
+                ),
+                ToolMessage(
+                    content="TOOL_ERROR: runner exploded",
+                    tool_call_id="call_2",
+                    name="fetch_reference_content",
+                ),
+            ],
+        }
+
+        summary = build_run_summary(
+            result,
+            quick_mode=False,
+            article_requested=False,
+        )
+
+        assert summary["tool_failures"] == 3
+        assert summary["llm_provider"] == "multi-provider"
+        assert summary["llm_providers_used"] == ["google", "openai"]
+
     def test_save_results_includes_pre_screening_and_run_summary(
         self, tmp_path, monkeypatch
     ):
@@ -618,8 +669,287 @@ class TestSavedDiagnostics:
         payload = json.loads(output_path.read_text())
 
         assert payload["pre_screening_result"] == "PASS"
-        assert payload["run_summary"]["quick_mode"] is True
-        assert payload["run_summary"]["tool_calls"] == 1
+        assert payload["metadata"]["llm_provider"] == "google"
+
+    def test_save_results_uses_read_only_memory_stats_helper(
+        self, tmp_path, monkeypatch
+    ):
+        from src.main import save_results_to_file
+
+        monkeypatch.setattr("src.main.config.results_dir", str(tmp_path))
+        monkeypatch.setattr("src.main.config.enable_memory", True)
+        monkeypatch.setattr("src.prompts.get_all_prompts", lambda: {})
+        monkeypatch.setattr(
+            "src.memory.get_ticker_memory_stats",
+            lambda ticker: {
+                "bull_researcher": {"available": True, "name": "bull", "count": 1}
+            },
+        )
+
+        class StubTracker:
+            def get_total_stats(self):
+                return {
+                    "failed_attempts": 0,
+                    "total_calls": 0,
+                    "total_agents": 0,
+                    "total_prompt_tokens": 0,
+                    "total_completion_tokens": 0,
+                    "total_tokens": 0,
+                    "total_cost_usd": 0.0,
+                    "session_start": "2026-03-14T00:00:00",
+                    "agents": {},
+                    "failed_by_provider": {},
+                    "failed_by_kind": {},
+                }
+
+        monkeypatch.setattr("src.token_tracker.get_tracker", lambda: StubTracker())
+
+        with patch(
+            "src.memory.create_memory_instances",
+            side_effect=AssertionError("save path should not recreate ticker memories"),
+        ):
+            output_path = save_results_to_file(
+                {
+                    "market_report": "ok",
+                    "sentiment_report": "ok",
+                    "news_report": "ok",
+                    "fundamentals_report": "DATA_BLOCK",
+                    "final_trade_decision": "BUY",
+                    "pre_screening_result": "PASS",
+                    "investment_debate_state": {"count": 1},
+                    "analysis_validity": {"publishable": True},
+                    "artifact_statuses": {},
+                    "prompts_used": {},
+                    "run_summary": {"llm_provider": "multi-provider"},
+                },
+                "1308.HK",
+                quick_mode=False,
+            )
+
+        payload = json.loads(output_path.read_text())
+        assert payload["memory_statistics"]["bull_researcher"]["count"] == 1
+        assert payload["metadata"]["llm_provider"] == "multi-provider"
+
+    def test_save_results_updates_index_for_next_indexed_load(
+        self, tmp_path, monkeypatch
+    ):
+        from src.ibkr.reconciler import load_latest_analyses
+        from src.main import save_results_to_file
+
+        monkeypatch.setattr("src.main.config.results_dir", str(tmp_path))
+        monkeypatch.setattr("src.main.config.enable_memory", False)
+        monkeypatch.setattr("src.prompts.get_all_prompts", lambda: {})
+
+        class StubTracker:
+            def get_total_stats(self):
+                return {
+                    "failed_attempts": 0,
+                    "total_calls": 0,
+                    "total_agents": 0,
+                    "total_prompt_tokens": 0,
+                    "total_completion_tokens": 0,
+                    "total_tokens": 0,
+                    "total_cost_usd": 0.0,
+                    "session_start": "2026-03-14T00:00:00",
+                    "agents": {},
+                    "failed_by_provider": {},
+                    "failed_by_kind": {},
+                }
+
+        monkeypatch.setattr("src.token_tracker.get_tracker", lambda: StubTracker())
+
+        seed_result = {
+            "market_report": "ok",
+            "sentiment_report": "ok",
+            "news_report": "ok",
+            "fundamentals_report": "DATA_BLOCK",
+            "final_trade_decision": "BUY",
+            "pre_screening_result": "PASS",
+            "investment_debate_state": {"count": 1},
+            "analysis_validity": {"publishable": True},
+            "artifact_statuses": {},
+            "prompts_used": {},
+            "run_summary": {"quick_mode": False, "tool_calls": 0, "publishable": True},
+        }
+        save_results_to_file(seed_result, "7203.T", quick_mode=False)
+        load_latest_analyses(tmp_path)
+
+        second_result = {
+            "market_report": "ok",
+            "sentiment_report": "ok",
+            "news_report": "ok",
+            "fundamentals_report": "DATA_BLOCK",
+            "final_trade_decision": "BUY",
+            "pre_screening_result": "PASS",
+            "investment_debate_state": {"count": 1},
+            "analysis_validity": {"publishable": True},
+            "artifact_statuses": {},
+            "prompts_used": {},
+            "run_summary": {"quick_mode": True, "tool_calls": 0, "publishable": True},
+        }
+        output_path = save_results_to_file(second_result, "6083.T", quick_mode=True)
+
+        events = []
+        analyses = load_latest_analyses(tmp_path, progress=events.append)
+
+        assert "6083.T" in analyses
+        assert analyses["6083.T"].file_path == str(output_path)
+        assert any(event.phase == "indexed" for event in events)
+        assert not any(event.phase == "rebuilding_index" for event in events)
+
+    def test_save_results_uses_incremental_update_when_mtime_is_stale_but_count_matches(
+        self, tmp_path, monkeypatch
+    ):
+        from src.ibkr.reconciler import _analysis_index_path, load_latest_analyses
+        from src.main import save_results_to_file
+
+        monkeypatch.setattr("src.main.config.results_dir", str(tmp_path))
+        monkeypatch.setattr("src.main.config.enable_memory", False)
+        monkeypatch.setattr("src.prompts.get_all_prompts", lambda: {})
+
+        class StubTracker:
+            def get_total_stats(self):
+                return {
+                    "failed_attempts": 0,
+                    "total_calls": 0,
+                    "total_agents": 0,
+                    "total_prompt_tokens": 0,
+                    "total_completion_tokens": 0,
+                    "total_tokens": 0,
+                    "total_cost_usd": 0.0,
+                    "session_start": "2026-03-14T00:00:00",
+                    "agents": {},
+                    "failed_by_provider": {},
+                    "failed_by_kind": {},
+                }
+
+        monkeypatch.setattr("src.token_tracker.get_tracker", lambda: StubTracker())
+
+        seed_result = {
+            "market_report": "ok",
+            "sentiment_report": "ok",
+            "news_report": "ok",
+            "fundamentals_report": "DATA_BLOCK",
+            "final_trade_decision": "BUY",
+            "pre_screening_result": "PASS",
+            "investment_debate_state": {"count": 1},
+            "analysis_validity": {"publishable": True},
+            "artifact_statuses": {},
+            "prompts_used": {},
+            "run_summary": {"quick_mode": False, "tool_calls": 0, "publishable": True},
+        }
+        save_results_to_file(seed_result, "7203.T", quick_mode=False)
+        load_latest_analyses(tmp_path)
+
+        index_path = _analysis_index_path(tmp_path)
+        payload = json.loads(index_path.read_text())
+        payload["results_dir_mtime_ns"] = int(payload["results_dir_mtime_ns"]) - 1
+        index_path.write_text(json.dumps(payload))
+
+        second_result = {
+            "market_report": "ok",
+            "sentiment_report": "ok",
+            "news_report": "ok",
+            "fundamentals_report": "DATA_BLOCK",
+            "final_trade_decision": "BUY",
+            "pre_screening_result": "PASS",
+            "investment_debate_state": {"count": 1},
+            "analysis_validity": {"publishable": True},
+            "artifact_statuses": {},
+            "prompts_used": {},
+            "run_summary": {"quick_mode": True, "tool_calls": 0, "publishable": True},
+        }
+
+        with patch("src.main.logger") as mock_logger:
+            output_path = save_results_to_file(second_result, "6083.T", quick_mode=True)
+
+        analyses = load_latest_analyses(tmp_path)
+        assert "6083.T" in analyses
+        assert analyses["6083.T"].file_path == str(output_path)
+        accepted_calls = [
+            call
+            for call in mock_logger.debug.call_args_list
+            + mock_logger.info.call_args_list
+            if call.args and call.args[0] == "analysis_index_refreshed_after_save"
+        ]
+        assert not accepted_calls
+
+    def test_save_results_rebuilds_index_when_incremental_update_skips(
+        self, tmp_path, monkeypatch
+    ):
+        from src.ibkr.reconciler import _analysis_index_path, load_latest_analyses
+        from src.main import save_results_to_file
+
+        monkeypatch.setattr("src.main.config.results_dir", str(tmp_path))
+        monkeypatch.setattr("src.main.config.enable_memory", False)
+        monkeypatch.setattr("src.prompts.get_all_prompts", lambda: {})
+
+        class StubTracker:
+            def get_total_stats(self):
+                return {
+                    "failed_attempts": 0,
+                    "total_calls": 0,
+                    "total_agents": 0,
+                    "total_prompt_tokens": 0,
+                    "total_completion_tokens": 0,
+                    "total_tokens": 0,
+                    "total_cost_usd": 0.0,
+                    "session_start": "2026-03-14T00:00:00",
+                    "agents": {},
+                    "failed_by_provider": {},
+                    "failed_by_kind": {},
+                }
+
+        monkeypatch.setattr("src.token_tracker.get_tracker", lambda: StubTracker())
+
+        seed_result = {
+            "market_report": "ok",
+            "sentiment_report": "ok",
+            "news_report": "ok",
+            "fundamentals_report": "DATA_BLOCK",
+            "final_trade_decision": "BUY",
+            "pre_screening_result": "PASS",
+            "investment_debate_state": {"count": 1},
+            "analysis_validity": {"publishable": True},
+            "artifact_statuses": {},
+            "prompts_used": {},
+            "run_summary": {"quick_mode": False, "tool_calls": 0, "publishable": True},
+        }
+        save_results_to_file(seed_result, "7203.T", quick_mode=False)
+        load_latest_analyses(tmp_path)
+
+        index_path = _analysis_index_path(tmp_path)
+        payload = json.loads(index_path.read_text())
+        payload["results_dir_mtime_ns"] = int(payload["results_dir_mtime_ns"]) - 1
+        payload["total_files"] = 0
+        index_path.write_text(json.dumps(payload))
+
+        second_result = {
+            "market_report": "ok",
+            "sentiment_report": "ok",
+            "news_report": "ok",
+            "fundamentals_report": "DATA_BLOCK",
+            "final_trade_decision": "BUY",
+            "pre_screening_result": "PASS",
+            "investment_debate_state": {"count": 1},
+            "analysis_validity": {"publishable": True},
+            "artifact_statuses": {},
+            "prompts_used": {},
+            "run_summary": {"quick_mode": True, "tool_calls": 0, "publishable": True},
+        }
+
+        with patch("src.main.logger") as mock_logger:
+            output_path = save_results_to_file(second_result, "6083.T", quick_mode=True)
+
+        analyses = load_latest_analyses(tmp_path)
+        assert "6083.T" in analyses
+        assert analyses["6083.T"].file_path == str(output_path)
+        mock_logger.info.assert_any_call(
+            "analysis_index_refreshed_after_save",
+            ticker="6083.T",
+            path=str(tmp_path),
+            refreshed_count=len(analyses),
+        )
 
 
 if __name__ == "__main__":

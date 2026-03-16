@@ -631,3 +631,82 @@ KEY_RISKS:
             assert result is not None
         except asyncio.TimeoutError:
             pytest.skip("API too slow, but timeout handling works")
+
+
+class TestClassifyInsiderSellingEvidence:
+    """Tests for classify_insider_selling_evidence() evidence tier utility."""
+
+    def test_named_multi_exec_two_named_sellers(self):
+        """Two named executives with share counts → NAMED_MULTI_EXEC."""
+        from src.tools.ownership import classify_insider_selling_evidence
+
+        data = {
+            "insider_transactions": [
+                {"name": "John Smith (CFO)", "shares": 50000},
+                {"name": "Jane Doe (Chairman)", "shares": 30000},
+            ],
+            "insider_trend": "NET_SELLER",
+        }
+        assert classify_insider_selling_evidence(data) == "NAMED_MULTI_EXEC"
+
+    def test_named_single_exec_one_named_seller(self):
+        """One named executive with shares → NAMED_SINGLE_EXEC."""
+        from src.tools.ownership import classify_insider_selling_evidence
+
+        data = {
+            "insider_transactions": [
+                {"name": "Jane Doe (Chairman)", "shares": 30000},
+            ],
+            "insider_trend": "NET_SELLER",
+        }
+        assert classify_insider_selling_evidence(data) == "NAMED_SINGLE_EXEC"
+
+    def test_generic_trend_net_seller_no_names(self):
+        """NET_SELLER trend but no named records → GENERIC_TREND."""
+        from src.tools.ownership import classify_insider_selling_evidence
+
+        data = {
+            "insider_transactions": [],
+            "insider_trend": "NET_SELLER",
+        }
+        assert classify_insider_selling_evidence(data) == "GENERIC_TREND"
+
+    def test_generic_trend_selling_variant(self):
+        """'SELLING' insider_trend value also maps to GENERIC_TREND."""
+        from src.tools.ownership import classify_insider_selling_evidence
+
+        data = {
+            "insider_transactions": [],
+            "insider_trend": "SELLING",
+        }
+        assert classify_insider_selling_evidence(data) == "GENERIC_TREND"
+
+    def test_none_no_signal(self):
+        """No transactions, no selling trend → NONE."""
+        from src.tools.ownership import classify_insider_selling_evidence
+
+        data = {
+            "insider_transactions": [],
+            "insider_trend": "NET_BUYER",
+        }
+        assert classify_insider_selling_evidence(data) == "NONE"
+
+    def test_named_records_without_shares_not_counted(self):
+        """Records with name but no shares are excluded from named-exec count."""
+        from src.tools.ownership import classify_insider_selling_evidence
+
+        data = {
+            "insider_transactions": [
+                {"name": "CFO Smith", "shares": None},
+                {"name": "CEO Jones", "shares": 0},
+            ],
+            "insider_trend": "NET_SELLER",
+        }
+        # shares is None / 0 → falsy → not counted → falls to GENERIC_TREND
+        assert classify_insider_selling_evidence(data) == "GENERIC_TREND"
+
+    def test_empty_dict_returns_none(self):
+        """Empty ownership dict → NONE."""
+        from src.tools.ownership import classify_insider_selling_evidence
+
+        assert classify_insider_selling_evidence({}) == "NONE"

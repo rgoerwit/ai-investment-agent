@@ -33,6 +33,7 @@ class TestAgentStateTypeDefinitions:
             "news_report",
             "fundamentals_report",
             "investment_plan",
+            "consultant_tool_failures",
             "trader_investment_plan",
             "final_trade_decision",
         ]

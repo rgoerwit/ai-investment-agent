@@ -5,7 +5,7 @@ import multiprocessing
 import tempfile
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -1279,12 +1279,167 @@ class TestLoadLatestAnalyses:
                 tmp_path,
                 record,
                 previous_dir_mtime_ns=previous_dir_mtime_ns,
+                analysis_file_count_before_save=1,
             )
             is True
         )
 
         rebuilt = load_latest_analyses(tmp_path)
         assert set(rebuilt) == {"7203.T", "6758.T"}
+
+    def test_incremental_index_update_logs_success(self, tmp_path):
+        """Successful incremental updates emit an explicit info event."""
+        first = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-03-01",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        second = {
+            "prediction_snapshot": {
+                "ticker": "6758.T",
+                "analysis_date": "2026-03-02",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        (tmp_path / "7203_T_2026-03-01_analysis.json").write_text(json.dumps(first))
+        load_latest_analyses(tmp_path)
+
+        previous_dir_mtime_ns = tmp_path.stat().st_mtime_ns
+        second_path = tmp_path / "6758_T_2026-03-02_analysis.json"
+        second_path.write_text(json.dumps(second))
+        record = _build_analysis_record_from_data(second_path, second)
+        assert record is not None
+
+        with patch("src.ibkr.reconciler.logger") as mock_logger:
+            updated = update_latest_analyses_index(
+                tmp_path,
+                record,
+                previous_dir_mtime_ns=previous_dir_mtime_ns,
+                analysis_file_count_before_save=1,
+            )
+
+        assert updated is True
+        mock_logger.info.assert_any_call(
+            "analysis_index_incremental_updated",
+            ticker="6758.T",
+            path=str(_analysis_index_path(tmp_path)),
+            source_file=str(second_path),
+        )
+
+    @pytest.mark.parametrize(
+        ("reason", "previous_dir_mtime_ns", "mutate_index"),
+        [
+            ("missing_previous_dir_mtime", None, None),
+            ("index_missing", 1, None),
+            (
+                "version_mismatch",
+                "FROM_DIR",
+                lambda payload, tmp_path: payload.__setitem__("version", -1),
+            ),
+            (
+                "results_dir_mismatch",
+                "FROM_DIR",
+                lambda payload, tmp_path: payload.__setitem__(
+                    "results_dir", str((tmp_path / "other").resolve())
+                ),
+            ),
+            (
+                "stale_directory_state",
+                "FROM_DIR",
+                lambda payload, tmp_path: payload.__setitem__(
+                    "results_dir_mtime_ns",
+                    int(payload["results_dir_mtime_ns"]) - 1,
+                ),
+            ),
+        ],
+    )
+    def test_incremental_index_update_logs_skip_reasons(
+        self,
+        tmp_path,
+        reason,
+        previous_dir_mtime_ns,
+        mutate_index,
+    ):
+        """Each guarded skip path emits a specific reason code."""
+        seed = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-03-01",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        new_data = {
+            "prediction_snapshot": {
+                "ticker": "6758.T",
+                "analysis_date": "2026-03-02",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        seed_path = tmp_path / "7203_T_2026-03-01_analysis.json"
+        seed_path.write_text(json.dumps(seed))
+        load_latest_analyses(tmp_path)
+
+        if mutate_index is not None:
+            index_path = _analysis_index_path(tmp_path)
+            payload = json.loads(index_path.read_text())
+            mutate_index(payload, tmp_path)
+            index_path.write_text(json.dumps(payload))
+
+        new_path = tmp_path / "6758_T_2026-03-02_analysis.json"
+        new_path.write_text(json.dumps(new_data))
+        record = _build_analysis_record_from_data(new_path, new_data)
+        assert record is not None
+
+        if reason == "index_missing":
+            _analysis_index_path(tmp_path).unlink()
+            effective_previous_dir_mtime_ns = tmp_path.stat().st_mtime_ns
+        elif previous_dir_mtime_ns == "FROM_DIR":
+            effective_previous_dir_mtime_ns = tmp_path.stat().st_mtime_ns
+        else:
+            effective_previous_dir_mtime_ns = previous_dir_mtime_ns
+
+        with patch("src.ibkr.reconciler.logger") as mock_logger:
+            updated = update_latest_analyses_index(
+                tmp_path,
+                record,
+                previous_dir_mtime_ns=effective_previous_dir_mtime_ns,
+                analysis_file_count_before_save=(
+                    0 if reason == "stale_directory_state" else None
+                ),
+            )
+
+        assert updated is False
+        skip_calls = [
+            call
+            for call in mock_logger.info.call_args_list
+            if call.args and call.args[0] == "analysis_index_incremental_update_skipped"
+        ]
+        assert skip_calls
+        matched = next(
+            (
+                call
+                for call in skip_calls
+                if call.kwargs["ticker"] == "6758.T"
+                and call.kwargs["path"] == str(_analysis_index_path(tmp_path))
+                and call.kwargs["reason"] == reason
+            ),
+            None,
+        )
+        assert matched is not None
+        if reason == "stale_directory_state":
+            assert (
+                matched.kwargs["expected_previous_dir_mtime_ns"]
+                == effective_previous_dir_mtime_ns
+            )
+            assert "index_dir_mtime_ns" in matched.kwargs
+            assert "current_dir_mtime_ns" in matched.kwargs
+            assert matched.kwargs["source_file"] == str(new_path)
 
     def test_leftover_lock_file_does_not_block_index_use(self, tmp_path):
         """An empty leftover lock file is harmless when no process holds the lock."""
@@ -1342,17 +1497,105 @@ class TestLoadLatestAnalyses:
         assert ready.wait(2.0)
 
         start = time.perf_counter()
-        updated = update_latest_analyses_index(
-            tmp_path,
-            record,
-            previous_dir_mtime_ns=previous_dir_mtime_ns,
-        )
+        with patch("src.ibkr.reconciler.logger") as mock_logger:
+            updated = update_latest_analyses_index(
+                tmp_path,
+                record,
+                previous_dir_mtime_ns=previous_dir_mtime_ns,
+                analysis_file_count_before_save=1,
+            )
         elapsed = time.perf_counter() - start
 
         proc.join(timeout=2.0)
         assert proc.exitcode == 0
         assert updated is True
         assert elapsed >= 0.25
+        mock_logger.debug.assert_any_call(
+            "analysis_index_lock_waiting",
+            path=str(_analysis_index_lock_path(tmp_path)),
+        )
+        acquire_calls = [
+            call
+            for call in mock_logger.debug.call_args_list
+            if call.args and call.args[0] == "analysis_index_lock_acquired"
+        ]
+        assert acquire_calls
+        assert acquire_calls[-1].kwargs["path"] == str(
+            _analysis_index_lock_path(tmp_path)
+        )
+        assert acquire_calls[-1].kwargs["wait_secs"] >= 0.0
+
+    def test_incremental_index_update_accepts_mtime_mismatch_when_file_count_matches(
+        self, tmp_path
+    ):
+        """Append-only saves can proceed when file count proves the index is current."""
+        first = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-03-01",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        second = {
+            "prediction_snapshot": {
+                "ticker": "6758.T",
+                "analysis_date": "2026-03-02",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        (tmp_path / "7203_T_2026-03-01_analysis.json").write_text(json.dumps(first))
+        load_latest_analyses(tmp_path)
+
+        index_path = _analysis_index_path(tmp_path)
+        payload = json.loads(index_path.read_text())
+        payload["results_dir_mtime_ns"] = int(payload["results_dir_mtime_ns"]) - 1
+        index_path.write_text(json.dumps(payload))
+
+        previous_dir_mtime_ns = tmp_path.stat().st_mtime_ns
+        second_path = tmp_path / "6758_T_2026-03-02_analysis.json"
+        second_path.write_text(json.dumps(second))
+        record = _build_analysis_record_from_data(second_path, second)
+        assert record is not None
+
+        with patch("src.ibkr.reconciler.logger") as mock_logger:
+            updated = update_latest_analyses_index(
+                tmp_path,
+                record,
+                previous_dir_mtime_ns=previous_dir_mtime_ns,
+                analysis_file_count_before_save=1,
+            )
+
+        assert updated is True
+        mock_logger.info.assert_any_call(
+            "analysis_index_incremental_update_mtime_mismatch_accepted",
+            ticker="6758.T",
+            path=str(index_path),
+            expected_previous_dir_mtime_ns=previous_dir_mtime_ns,
+            index_dir_mtime_ns=payload["results_dir_mtime_ns"],
+            analysis_file_count_before_save=1,
+            indexed_total_files=1,
+            source_file=str(second_path),
+        )
+
+    def test_malformed_index_logs_exception_details(self, tmp_path):
+        """Index load failures should preserve exception type information."""
+        index_path = _analysis_index_path(tmp_path)
+        index_path.write_text("{not-json")
+
+        with patch("src.ibkr.reconciler.logger") as mock_logger:
+            analyses = load_latest_analyses(tmp_path)
+
+        assert analyses == {}
+        mock_logger.warning.assert_any_call(
+            "analysis_index_load_failed",
+            path=str(index_path),
+            error=ANY,
+            error_type="JSONDecodeError",
+            root_cause_type="JSONDecodeError",
+            exc_info=True,
+        )
 
     def test_filename_duplicate_history_is_skipped_before_json_load(self, tmp_path):
         """Older files with the same filename-level ticker key are skipped early."""

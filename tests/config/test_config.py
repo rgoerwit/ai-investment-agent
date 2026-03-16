@@ -78,6 +78,7 @@ class TestLangSmithConfiguration:
         mock_settings = MagicMock(spec=Settings)
         mock_settings.get_langsmith_api_key.return_value = "test-key"
         mock_settings.langsmith_project = "Deep-Trading-System-Gemini3"
+        mock_settings.langsmith_tracing_enabled = True
 
         # Should run without error and log (verify via mock)
         with patch("src.config.logger") as mock_logger:
@@ -96,6 +97,7 @@ class TestLangSmithConfiguration:
         mock_settings = MagicMock(spec=Settings)
         mock_settings.get_langsmith_api_key.return_value = "test-key"
         mock_settings.langsmith_project = "custom-project"
+        mock_settings.langsmith_tracing_enabled = True
 
         with patch("src.config.logger") as mock_logger:
             configure_langsmith_tracing(settings=mock_settings)
@@ -110,11 +112,26 @@ class TestLangSmithConfiguration:
         mock_settings = MagicMock(spec=Settings)
         mock_settings.get_langsmith_api_key.return_value = ""  # No API key
         mock_settings.langsmith_project = "some-project"  # Still needs to be set
+        mock_settings.langsmith_tracing_enabled = True
 
         with patch("src.config.logger") as mock_logger:
             configure_langsmith_tracing(settings=mock_settings)
 
             # Should NOT log if no API key
+            mock_logger.info.assert_not_called()
+
+    def test_configure_langsmith_does_not_log_when_tracing_disabled(self):
+        """API key alone should not claim tracing is enabled."""
+        from src.config import Settings, configure_langsmith_tracing
+
+        mock_settings = MagicMock(spec=Settings)
+        mock_settings.get_langsmith_api_key.return_value = "test-key"
+        mock_settings.langsmith_project = "some-project"
+        mock_settings.langsmith_tracing_enabled = False
+
+        with patch("src.config.logger") as mock_logger:
+            configure_langsmith_tracing(settings=mock_settings)
+
             mock_logger.info.assert_not_called()
 
     def test_settings_has_langsmith_fields(self):

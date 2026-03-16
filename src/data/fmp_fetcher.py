@@ -22,6 +22,7 @@ Usage:
 """
 
 import logging
+from datetime import datetime, timedelta
 from typing import Any
 
 import aiohttp
@@ -34,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 # Default timeout for HTTP requests (session-level safety net + per-request)
 _TIMEOUT = aiohttp.ClientTimeout(total=10)
+_COOLDOWN_MINUTES = 15
 
 
 class FMPFetcher(FinancialFetcher):
@@ -54,10 +56,38 @@ class FMPFetcher(FinancialFetcher):
         self.api_key = api_key or config.get_fmp_api_key()
         self.base_url = "https://financialmodelingprep.com/stable"
         self._key_validated = False
+        self._cooldown_until: datetime | None = None
 
     def is_available(self) -> bool:
         """Check if FMP is configured (API key present)."""
-        return bool(self.api_key)
+        if not self.api_key:
+            return False
+        if self._cooldown_until and datetime.now() < self._cooldown_until:
+            logger.debug(
+                "fmp_unavailable reason=%s cooldown_until=%s",
+                "cooldown_active",
+                self._cooldown_until.isoformat(),
+            )
+            return False
+        return True
+
+    def _start_cooldown(self, status: int, endpoint: str) -> None:
+        self._cooldown_until = datetime.now() + timedelta(minutes=_COOLDOWN_MINUTES)
+        logger.warning(
+            "fmp_cooldown_started status=%s endpoint=%s cooldown_minutes=%s cooldown_until=%s",
+            status,
+            endpoint,
+            _COOLDOWN_MINUTES,
+            self._cooldown_until.isoformat(),
+        )
+
+    async def _response_preview(self, response: aiohttp.ClientResponse) -> str:
+        try:
+            text = await response.text()
+        except Exception as exc:
+            return f"<unavailable: {type(exc).__name__}>"
+        preview = " ".join(text.split())
+        return preview[:200]
 
     async def _get(self, endpoint: str, params: dict) -> Any | None:
         """
@@ -88,29 +118,62 @@ class FMPFetcher(FinancialFetcher):
                         try:
                             data = await response.json()
                         except (ValueError, aiohttp.ContentTypeError) as e:
-                            logger.debug(f"FMP malformed JSON for {endpoint}: {e}")
+                            logger.warning(
+                                "fmp_malformed_json endpoint=%s status=%s error=%s response_preview=%s",
+                                endpoint,
+                                response.status,
+                                e,
+                                await self._response_preview(response),
+                            )
                             return None
                         self._key_validated = True
                         return data
 
                     elif response.status == 403:
+                        response_preview = await self._response_preview(response)
                         if not self._key_validated:
                             # Key is invalid - this is a configuration error
-                            logger.error("FMP API key is invalid (403 Forbidden)")
+                            logger.error(
+                                "fmp_auth_error endpoint=%s status=%s key_state=%s response_preview=%s",
+                                endpoint,
+                                response.status,
+                                "unvalidated",
+                                response_preview,
+                            )
                             raise ValueError(
                                 "FMP_API_KEY is invalid or expired. Check your configuration."
                             )
                         else:
                             # Key was valid before, might be rate limit
+                            self._start_cooldown(403, endpoint)
                             logger.warning(
-                                f"FMP 403 error for {endpoint} (possible rate limit)"
+                                "fmp_request_denied endpoint=%s status=%s reason=%s response_preview=%s",
+                                endpoint,
+                                response.status,
+                                "possible_rate_limit_or_policy_change",
+                                response_preview,
                             )
                             return None
+
+                    elif response.status in {402, 429}:
+                        response_preview = await self._response_preview(response)
+                        self._start_cooldown(response.status, endpoint)
+                        logger.warning(
+                            "fmp_request_limited endpoint=%s status=%s reason=%s response_preview=%s",
+                            endpoint,
+                            response.status,
+                            "quota_or_rate_limit",
+                            response_preview,
+                        )
+                        return None
 
                     else:
                         # Other HTTP errors - log at debug level
                         logger.debug(
-                            f"FMP API returned {response.status} for {endpoint}"
+                            "fmp_http_error endpoint=%s status=%s response_preview=%s",
+                            endpoint,
+                            response.status,
+                            await self._response_preview(response),
                         )
                         return None
 
@@ -119,11 +182,21 @@ class FMPFetcher(FinancialFetcher):
             raise
         except aiohttp.ClientError as e:
             # Network errors - log at debug level
-            logger.debug(f"FMP network error for {endpoint}: {e}")
+            logger.debug(
+                "fmp_network_error endpoint=%s error_type=%s error=%s",
+                endpoint,
+                type(e).__name__,
+                e,
+            )
             return None
         except Exception as e:
             # Unexpected errors - log at debug level
-            logger.debug(f"FMP request failed for {endpoint}: {e}")
+            logger.warning(
+                "fmp_request_failed endpoint=%s error_type=%s error=%s",
+                endpoint,
+                type(e).__name__,
+                e,
+            )
             return None
 
     async def get_company_name(self, ticker: str) -> str | None:

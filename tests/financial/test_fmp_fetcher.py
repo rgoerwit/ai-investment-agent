@@ -149,9 +149,55 @@ class TestFMPGet:
         mock_session.__aexit__ = AsyncMock(return_value=None)
 
         with patch("aiohttp.ClientSession", return_value=mock_session):
-            # Should return None instead of raising
-            result = await fetcher._get("ratios", {"symbol": "AAPL"})
-            assert result is None
+            with patch("src.data.fmp_fetcher.logger") as mock_logger:
+                result = await fetcher._get("ratios", {"symbol": "AAPL"})
+
+        assert result is None
+        assert fetcher._cooldown_until is not None
+        assert fetcher.is_available() is False
+        warning_calls = " ".join(
+            str(call) for call in mock_logger.warning.call_args_list
+        )
+        assert "fmp_cooldown_started" in warning_calls
+        assert "possible_rate_limit_or_policy_change" in warning_calls
+
+    @pytest.mark.asyncio
+    async def test_get_402_starts_cooldown(self):
+        """Quota-style 402 responses should start a temporary cooldown."""
+        fetcher = FMPFetcher(api_key="test-key")
+
+        mock_response = MagicMock()
+        mock_response.status = 402
+
+        mock_response_cm = AsyncMock()
+        mock_response_cm.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response_cm.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=mock_response_cm)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            with patch("src.data.fmp_fetcher.logger") as mock_logger:
+                result = await fetcher._get("ratios", {"symbol": "AAPL"})
+
+        assert result is None
+        assert fetcher._cooldown_until is not None
+        assert fetcher.is_available() is False
+        warning_calls = " ".join(
+            str(call) for call in mock_logger.warning.call_args_list
+        )
+        assert "quota_or_rate_limit" in warning_calls
+
+    def test_is_available_recovers_after_cooldown(self):
+        """The fetcher should become available again after the cooldown expires."""
+        from datetime import datetime, timedelta
+
+        fetcher = FMPFetcher(api_key="test-key")
+        fetcher._cooldown_until = datetime.now() - timedelta(seconds=1)
+
+        assert fetcher.is_available() is True
 
     @pytest.mark.asyncio
     async def test_get_404_not_found(self):
@@ -190,6 +236,36 @@ class TestFMPGet:
         with patch("aiohttp.ClientSession", return_value=mock_session):
             result = await fetcher._get("ratios", {"symbol": "AAPL"})
             assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_malformed_json_logs_response_preview(self):
+        """Malformed payloads should preserve a response preview for debugging."""
+        fetcher = FMPFetcher(api_key="test-key")
+
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.json = AsyncMock(side_effect=ValueError("bad json"))
+        mock_response.text = AsyncMock(return_value='{"unexpected":"payload"}')
+
+        mock_response_cm = AsyncMock()
+        mock_response_cm.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response_cm.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=mock_response_cm)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            with patch("src.data.fmp_fetcher.logger") as mock_logger:
+                result = await fetcher._get("ratios", {"symbol": "AAPL"})
+
+        assert result is None
+        warning_calls = " ".join(
+            str(call) for call in mock_logger.warning.call_args_list
+        )
+        assert "fmp_malformed_json" in warning_calls
+        assert '{"unexpected":"payload"}' in warning_calls
 
     @pytest.mark.asyncio
     async def test_get_adds_api_key_to_params(self):

@@ -325,6 +325,13 @@ class TestMemoryContaminationPrevention:
 class TestMemoryStats:
     """Test memory statistics and monitoring."""
 
+    def setup_method(self, method):
+        """Clear shared state so each test gets fresh mock objects."""
+        FinancialSituationMemory._reset_shared_state_for_tests()
+
+    def teardown_method(self, method):
+        FinancialSituationMemory._reset_shared_state_for_tests()
+
     def test_get_all_memory_stats(self):
         """Test retrieval of all memory collection stats."""
         with patch("chromadb.PersistentClient") as mock_client_class:

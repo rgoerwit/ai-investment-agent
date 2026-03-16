@@ -84,8 +84,9 @@ def configure_langsmith_tracing(settings: "Settings") -> None:
     """
     has_api_key = bool(settings.get_langsmith_api_key())
     project_name = settings.langsmith_project
+    tracing_enabled = bool(getattr(settings, "langsmith_tracing_enabled", False))
 
-    if has_api_key:
+    if has_api_key and tracing_enabled:
         # LangSmith SDK auto-detects from Pydantic Settings - just log for visibility
         logger.info(f"LangSmith tracing enabled for project: {project_name}")
 

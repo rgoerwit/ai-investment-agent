@@ -4,6 +4,7 @@ Covers prompt loading, retrieval, and export.
 """
 
 import json
+import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -576,7 +577,10 @@ class TestNewsAnalystPromptV5:
         return json.loads(path.read_text())
 
     def test_version_is_5_0(self, prompt):
-        assert prompt["version"] == "5.0"
+        # Version bumped to 5.1 when fleet/capacity guardrail was added.
+        assert re.match(
+            r"^5\.\d+$", prompt["version"]
+        ), f"Expected 5.x, got {prompt['version']}"
 
     def test_macro_detection_block_in_system_message(self, prompt):
         assert "MACRO_DETECTION" in prompt["system_message"]

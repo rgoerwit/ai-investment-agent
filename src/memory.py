@@ -44,6 +44,14 @@ class FinancialSituationMemory:
     - Ticker-specific isolation to prevent cross-contamination
     """
 
+    _EMBEDDING_MODEL = "gemini-embedding-001"
+    _EMBEDDING_DIMENSION = 768
+    _shared_embeddings: GoogleGenerativeAIEmbeddings | None = None
+    _shared_embeddings_available: bool = False
+    _shared_embeddings_key: tuple[str | None, str, int] | None = None
+    _shared_chroma_client: Any | None = None
+    _shared_chroma_key: str | None = None
+
     def __init__(self, name: str):
         """
         Initialize a memory collection.
@@ -66,64 +74,16 @@ class FinancialSituationMemory:
             )
             return
 
-        # Initialize Google embeddings
-        try:
-            self.embeddings = GoogleGenerativeAIEmbeddings(
-                model="models/gemini-embedding-001",
-                google_api_key=api_key,
-                task_type="retrieval_document",  # Optimized for semantic search
-                output_dimensionality=768,  # Match existing ChromaDB collections
-            )
-
-            # Validate embeddings work with a test query (Sync call for init)
-            try:
-                test_embedding = self.embeddings.embed_query("initialization test")
-                if not test_embedding or len(test_embedding) == 0:
-                    raise ValueError("Embedding test returned empty result")
-                self.embeddings_available = True
-                logger.info(
-                    "embeddings_initialized",
-                    model="gemini-embedding-001",
-                    collection=name,
-                )
-            except Exception as e:
-                details = classify_failure(
-                    e,
-                    provider="google",
-                    model_name="gemini-embedding-001",
-                    class_name=type(self.embeddings).__name__,
-                )
-                logger.warning(
-                    "embeddings_healthcheck_failed",
-                    collection=name,
-                    provider=details.provider,
-                    model="gemini-embedding-001",
-                    failure_kind=details.kind,
-                    host=details.host,
-                    error_type=details.error_type,
-                    root_cause_type=details.root_cause_type,
-                    retryable=details.retryable,
-                    error_message=details.message,
-                )
-
-        except Exception as e:
-            logger.warning("embeddings_init_failed", error=str(e), collection=name)
+        self.embeddings = self._get_shared_embeddings(name)
+        self.embeddings_available = self._shared_embeddings_available
+        if self.embeddings is None:
             return
 
         # Initialize ChromaDB
         try:
-            # NOTE: Telemetry env vars (ANONYMIZED_TELEMETRY, CHROMA_TELEMETRY_ENABLED)
-            # are now set by config.py's setup_environment validator.
-            import chromadb
-            from chromadb.config import Settings
-
-            CURRENT_EMBEDDING_MODEL = "gemini-embedding-001"
-
-            # Initialize persistent client with telemetry explicitly disabled
-            self.chroma_client = chromadb.PersistentClient(
-                path=str(config.chroma_persist_directory),
-                settings=Settings(anonymized_telemetry=False, allow_reset=True),
-            )
+            self.chroma_client = self._get_shared_chroma_client(name)
+            if self.chroma_client is None:
+                return
 
             # Check if collection exists with stale embedding model
             existing_collections = self.chroma_client.list_collections()
@@ -135,13 +95,13 @@ class FinancialSituationMemory:
                 existing = self.chroma_client.get_collection(name=self.name)
                 existing_model = existing.metadata.get("embedding_model", "unknown")
 
-                if existing_model != CURRENT_EMBEDDING_MODEL:
+                if existing_model != self._EMBEDDING_MODEL:
                     # Model mismatch - delete and recreate to avoid incompatible embeddings
                     logger.warning(
                         "stale_embedding_model_detected",
                         collection=self.name,
                         old_model=existing_model,
-                        new_model=CURRENT_EMBEDDING_MODEL,
+                        new_model=self._EMBEDDING_MODEL,
                         action="recreating_collection",
                     )
                     self.chroma_client.delete_collection(name=self.name)
@@ -151,8 +111,8 @@ class FinancialSituationMemory:
                 name=self.name,
                 metadata={
                     "description": f"Financial debate memory for {name}",
-                    "embedding_model": CURRENT_EMBEDDING_MODEL,
-                    "embedding_dimension": 768,
+                    "embedding_model": self._EMBEDDING_MODEL,
+                    "embedding_dimension": self._EMBEDDING_DIMENSION,
                     "created_at": datetime.now().isoformat(),
                     "version": "2.0",
                 },
@@ -180,6 +140,107 @@ class FinancialSituationMemory:
         except Exception as e:
             logger.warning("chromadb_init_failed", error=str(e), collection=name)
             self.available = False
+
+    @classmethod
+    def _reset_shared_state_for_tests(cls) -> None:
+        """Reset shared resources to keep tests isolated."""
+        cls._shared_embeddings = None
+        cls._shared_embeddings_available = False
+        cls._shared_embeddings_key = None
+        cls._shared_chroma_client = None
+        cls._shared_chroma_key = None
+
+    @classmethod
+    def _get_shared_embeddings(
+        cls, collection_name: str
+    ) -> GoogleGenerativeAIEmbeddings | None:
+        api_key = config.get_google_api_key()
+        cache_key = (api_key, cls._EMBEDDING_MODEL, cls._EMBEDDING_DIMENSION)
+        if cls._shared_embeddings_key != cache_key:
+            cls._shared_embeddings = None
+            cls._shared_embeddings_available = False
+            cls._shared_embeddings_key = cache_key
+
+        if cls._shared_embeddings is not None or cls._shared_embeddings_available:
+            return cls._shared_embeddings
+
+        try:
+            embeddings = GoogleGenerativeAIEmbeddings(
+                model=f"models/{cls._EMBEDDING_MODEL}",
+                google_api_key=api_key,
+                task_type="retrieval_document",
+                output_dimensionality=cls._EMBEDDING_DIMENSION,
+            )
+            try:
+                test_embedding = embeddings.embed_query("initialization test")
+                if not test_embedding or len(test_embedding) == 0:
+                    raise ValueError("Embedding test returned empty result")
+                cls._shared_embeddings = embeddings
+                cls._shared_embeddings_available = True
+                logger.info(
+                    "embeddings_initialized",
+                    model=cls._EMBEDDING_MODEL,
+                    collection=collection_name,
+                    shared=True,
+                )
+            except Exception as e:
+                cls._shared_embeddings = embeddings
+                cls._shared_embeddings_available = False
+                details = classify_failure(
+                    e,
+                    provider="google",
+                    model_name=cls._EMBEDDING_MODEL,
+                    class_name=type(embeddings).__name__,
+                )
+                logger.warning(
+                    "embeddings_healthcheck_failed",
+                    collection=collection_name,
+                    provider=details.provider,
+                    model=cls._EMBEDDING_MODEL,
+                    failure_kind=details.kind,
+                    host=details.host,
+                    error_type=details.error_type,
+                    root_cause_type=details.root_cause_type,
+                    retryable=details.retryable,
+                    error_message=details.message,
+                )
+            return cls._shared_embeddings
+        except Exception as e:
+            logger.warning(
+                "embeddings_init_failed", error=str(e), collection=collection_name
+            )
+            return None
+
+    @classmethod
+    def _get_shared_chroma_client(cls, collection_name: str) -> Any | None:
+        persist_key = str(config.chroma_persist_directory)
+        if cls._shared_chroma_key != persist_key:
+            cls._shared_chroma_client = None
+            cls._shared_chroma_key = persist_key
+
+        if cls._shared_chroma_client is not None:
+            return cls._shared_chroma_client
+
+        try:
+            import chromadb
+            from chromadb.config import Settings
+
+            cls._shared_chroma_client = chromadb.PersistentClient(
+                path=persist_key,
+                settings=Settings(anonymized_telemetry=False, allow_reset=True),
+            )
+            logger.info(
+                "chromadb_client_initialized",
+                collection=collection_name,
+                persist_dir=persist_key,
+                shared=True,
+            )
+            return cls._shared_chroma_client
+        except Exception as e:
+            logger.warning(
+                "chromadb_init_failed", error=str(e), collection=collection_name
+            )
+            return None
 
     @retry(
         stop=stop_after_attempt(3),
@@ -212,9 +273,33 @@ class FinancialSituationMemory:
 
             async with GLOBAL_RATE_LIMITER:
                 embedding = await self.embeddings.aembed_query(truncated_text)
-        except Exception:
+        except Exception as exc:
             # Fallback if rate limiter not available or incompatible (e.g., in tests)
             # Catch all exceptions to handle import errors, attribute errors, type errors, etc.
+            details = classify_failure(
+                exc,
+                provider="google",
+                model_name=self._EMBEDDING_MODEL,
+                class_name=(
+                    type(self.embeddings).__name__
+                    if self.embeddings is not None
+                    else None
+                ),
+            )
+            logger.warning(
+                "embedding_rate_limiter_fallback",
+                collection=self.name,
+                provider=details.provider,
+                model=self._EMBEDDING_MODEL,
+                failure_kind=details.kind,
+                host=details.host,
+                error_type=details.error_type,
+                root_cause_type=details.root_cause_type,
+                retryable=details.retryable,
+                error_message=details.message,
+                fallback="direct_embed_query",
+                exc_info=True,
+            )
             embedding = await self.embeddings.aembed_query(truncated_text)
 
         if not embedding or len(embedding) == 0:
@@ -612,6 +697,62 @@ def create_memory_instances(ticker: str) -> dict[str, FinancialSituationMemory]:
 def create_lessons_collection() -> FinancialSituationMemory:
     """Create a global lessons_learned ChromaDB collection for cross-ticker insights."""
     return FinancialSituationMemory("lessons_learned")
+
+
+def get_ticker_memory_stats(ticker: str) -> dict[str, dict[str, Any]]:
+    """Return per-role memory stats without recreating ticker memory instances."""
+    safe_ticker = sanitize_ticker_for_collection(ticker)
+    role_map = {
+        "bull_researcher": f"{safe_ticker}_bull_memory",
+        "bear_researcher": f"{safe_ticker}_bear_memory",
+        "research_manager": f"{safe_ticker}_invest_judge_memory",
+        "trader": f"{safe_ticker}_trader_memory",
+        "portfolio_manager": f"{safe_ticker}_risk_manager_memory",
+    }
+    unavailable = {"available": False, "count": 0}
+
+    client = FinancialSituationMemory._get_shared_chroma_client(
+        f"{safe_ticker}_stats_probe"
+    )
+    if client is None:
+        return {role: {"name": name, **unavailable} for role, name in role_map.items()}
+
+    try:
+        existing_collections = client.list_collections()
+        existing_names = {
+            collection.name if hasattr(collection, "name") else collection
+            for collection in existing_collections
+        }
+    except Exception as exc:
+        logger.warning("ticker_memory_stats_list_failed", ticker=ticker, error=str(exc))
+        return {role: {"name": name, **unavailable} for role, name in role_map.items()}
+
+    stats: dict[str, dict[str, Any]] = {}
+    for role, collection_name in role_map.items():
+        if collection_name not in existing_names:
+            stats[role] = {"name": collection_name, **unavailable}
+            continue
+        try:
+            collection = client.get_collection(name=collection_name)
+            stats[role] = {
+                "available": True,
+                "name": collection_name,
+                "count": collection.count(),
+            }
+        except Exception as exc:
+            logger.warning(
+                "ticker_memory_stats_failed",
+                ticker=ticker,
+                collection=collection_name,
+                error=str(exc),
+            )
+            stats[role] = {
+                "available": False,
+                "name": collection_name,
+                "count": 0,
+                "error": str(exc),
+            }
+    return stats
 
 
 def cleanup_all_memories(days: int = 0, ticker: str | None = None) -> dict[str, int]:

@@ -403,6 +403,78 @@ class TestReportGeneration:
         assert "TEST" in report
         assert "External Consultant Review" not in report
 
+    def test_report_omits_research_manager_recommendation_when_pm_decision_exists(self):
+        """The public report should not publish a second recommendation section."""
+        reporter = QuietModeReporter(ticker="TEST", company_name="Test Company")
+
+        result = {
+            "company_of_interest": "TEST",
+            "market_report": "Market analysis",
+            "fundamentals_report": "Fundamentals",
+            "investment_plan": "INVESTMENT RECOMMENDATION: HOLD",
+            "final_trade_decision": "PORTFOLIO MANAGER VERDICT: DO NOT INITIATE",
+        }
+
+        report = reporter.generate_report(result, brief_mode=False)
+
+        assert "Investment Recommendation" not in report
+        assert "PORTFOLIO MANAGER VERDICT: DO NOT INITIATE" in report
+
+    def test_report_surfaces_verification_caveats_before_executive_summary(self):
+        """Consultant disputes should be elevated before the main writeup."""
+        reporter = QuietModeReporter(ticker="TEST", company_name="Test Company")
+
+        result = {
+            "company_of_interest": "TEST",
+            "market_report": "Market analysis",
+            "fundamentals_report": "Fundamentals",
+            "consultant_review": (
+                "CONSULTANT REVIEW: CONDITIONAL\n\n"
+                "The insider-selling claim is unsubstantiated.\n"
+                "The 100 new vessels claim is likely wrong."
+            ),
+            "artifact_statuses": {
+                "consultant_review": {"complete": True, "ok": False},
+            },
+            "final_trade_decision": "FINAL DECISION: HOLD",
+        }
+
+        report = reporter.generate_report(result, brief_mode=False)
+
+        assert "## Verification Caveats" in report
+        assert "insider-selling claim is unsubstantiated" in report
+        assert report.index("## Verification Caveats") < report.index(
+            "## Executive Summary"
+        )
+
+    def test_report_rewrites_false_consultant_unavailable_claim(self):
+        """Public report should not claim the consultant was unavailable when review exists."""
+        reporter = QuietModeReporter(ticker="TEST", company_name="Test Company")
+
+        result = {
+            "company_of_interest": "TEST",
+            "market_report": "Market analysis",
+            "fundamentals_report": "Fundamentals",
+            "consultant_review": "CONSULTANT REVIEW: CONDITIONAL APPROVAL\n\nCoverage gaps remain.",
+            "artifact_statuses": {
+                "consultant_review": {"complete": True, "ok": False},
+            },
+            "final_trade_decision": (
+                'DECISION RATIONALE: The pre-screening flagged a "Consultant Conditional" '
+                "warning, but as the external consultant was unavailable to provide "
+                "specific conditions, the verified `DATA_BLOCK` fundamentals and moat "
+                "signals take absolute precedence."
+            ),
+        }
+
+        report = reporter.generate_report(result, brief_mode=False)
+
+        assert (
+            "external consultant was unavailable to provide specific conditions"
+            not in report
+        )
+        assert "tool-coverage gaps" in report
+
 
 class TestBackwardsCompatibility:
     """Test that existing code works with or without consultant."""

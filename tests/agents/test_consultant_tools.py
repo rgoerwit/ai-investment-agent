@@ -5,6 +5,7 @@ Tests both spot_check_metric (yfinance) and spot_check_metric_alt (FMP) tools.
 """
 
 import json
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -65,6 +66,7 @@ class TestSpotCheckMetricAlt:
         """FMP API key missing returns clear unavailable message."""
         mock_fmp = MagicMock()
         mock_fmp.is_available.return_value = False
+        mock_fmp.api_key = None
 
         with patch("src.data.fmp_fetcher.get_fmp_fetcher", return_value=mock_fmp):
             result = json.loads(
@@ -74,6 +76,26 @@ class TestSpotCheckMetricAlt:
             )
         assert "error" in result
         assert "unavailable" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_fmp_cooldown_returns_rate_limit_reason(self):
+        """Cooldown state should not be mislabeled as missing API key."""
+        mock_fmp = MagicMock()
+        mock_fmp.is_available.return_value = False
+        mock_fmp.api_key = "configured-key"
+        mock_fmp._cooldown_until = datetime.now() + timedelta(minutes=5)
+
+        with patch("src.data.fmp_fetcher.get_fmp_fetcher", return_value=mock_fmp):
+            result = json.loads(
+                await spot_check_metric_alt.ainvoke(
+                    {"ticker": "7203.T", "metric": "operatingCashflow"}
+                )
+            )
+
+        assert result["provider"] == "fmp"
+        assert result["failure_kind"] == "rate_limit"
+        assert result["retryable"] is True
+        assert "cooldown" in result["error"].lower()
 
     @pytest.mark.asyncio
     async def test_fmp_returns_valid_data(self):
@@ -132,6 +154,43 @@ class TestSpotCheckMetricAlt:
 
         assert result["value"] == 5_000_000
         assert result["source"] == "fmp_direct"
+
+    @pytest.mark.asyncio
+    async def test_fmp_invalid_key_returns_structured_failure(self):
+        """Configuration failures should be explicit and machine-readable."""
+        mock_fmp = MagicMock()
+        mock_fmp.is_available.return_value = True
+        mock_fmp._get = AsyncMock(side_effect=ValueError("invalid or expired"))
+
+        with patch("src.data.fmp_fetcher.get_fmp_fetcher", return_value=mock_fmp):
+            result = json.loads(
+                await spot_check_metric_alt.ainvoke(
+                    {"ticker": "1308.HK", "metric": "operatingCashflow"}
+                )
+            )
+
+        assert result["provider"] == "fmp"
+        assert result["failure_kind"] == "auth_error"
+        assert result["retryable"] is False
+
+    @pytest.mark.asyncio
+    async def test_fmp_generic_failure_returns_endpoint_details(self):
+        """Unexpected failures should still identify the endpoint and retryability."""
+        mock_fmp = MagicMock()
+        mock_fmp.is_available.return_value = True
+        mock_fmp._get = AsyncMock(side_effect=RuntimeError("429 Too Many Requests"))
+
+        with patch("src.data.fmp_fetcher.get_fmp_fetcher", return_value=mock_fmp):
+            result = json.loads(
+                await spot_check_metric_alt.ainvoke(
+                    {"ticker": "1308.HK", "metric": "operatingCashflow"}
+                )
+            )
+
+        assert result["provider"] == "fmp"
+        assert result["failure_kind"] == "rate_limit"
+        assert result["retryable"] is True
+        assert result["fmp_endpoint"] == "cash-flow-statement"
 
     def test_fmp_field_map_covers_critical_metrics(self):
         """FMP field map includes the most error-prone metrics."""

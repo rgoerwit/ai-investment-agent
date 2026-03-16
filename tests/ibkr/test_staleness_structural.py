@@ -108,8 +108,11 @@ class TestCheckStalenessStructural:
 
     def test_regional_structural_event_does_not_stale_different_region(self):
         """REGIONAL STRUCTURAL event for .T does NOT stale a .HK analysis."""
-        analysis = _analysis("2026-03-01", ticker="0005.HK")
-        event = _structural_event("2026-03-05", scope="REGIONAL", primary_region=".T")
+        # Use relative dates so age_days stays within max_age_days=14 limit.
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        today = date.today().isoformat()
+        analysis = _analysis(yesterday, ticker="0005.HK")
+        event = _structural_event(today, scope="REGIONAL", primary_region=".T")
         is_stale, _ = check_staleness(analysis, structural_macro_events=[event])
         assert not is_stale
 

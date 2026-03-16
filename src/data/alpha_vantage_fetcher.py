@@ -83,10 +83,12 @@ class AlphaVantageFetcher(FinancialFetcher):
                 ) as response:
                     if response.status != 200:
                         # HTTP errors are debug level - not user-facing issues
+                        response_preview = await response.text()
                         logger.debug(
                             "alpha_vantage_http_error",
                             symbol=symbol,
                             status=response.status,
+                            response_preview=response_preview[:200],
                         )
                         return None
 

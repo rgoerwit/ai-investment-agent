@@ -36,6 +36,19 @@ class TestRuntimeFailureClassification:
         assert details.provider == "openai"
         assert details.retryable is True
 
+    def test_classifies_local_rate_limiter_type_error_as_application_error(self):
+        exc = TypeError(
+            "'_LazyRateLimiterProxy' object does not support the asynchronous context manager protocol"
+        )
+
+        details = classify_failure(
+            exc, provider="google", model_name="gemini-embedding-001"
+        )
+
+        assert details.kind == "application_error"
+        assert details.provider == "google"
+        assert details.retryable is False
+
 
 class TestAnalysisValidity:
     def test_publishable_requires_valid_pm_and_fundamentals(self):

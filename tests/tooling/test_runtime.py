@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -165,3 +165,24 @@ async def test_execute_does_not_run_after_hooks_when_runner_fails():
 
     runner.assert_awaited_once_with({"ticker": "AAPL"})
     assert events == ["before:audit"]
+
+
+@pytest.mark.asyncio
+async def test_execute_logs_structured_failure_details_when_runner_fails():
+    service = ToolExecutionService()
+    runner = AsyncMock(side_effect=RuntimeError("429 Too Many Requests"))
+
+    with patch("src.tooling.runtime.logger") as mock_logger:
+        with pytest.raises(RuntimeError, match="429 Too Many Requests"):
+            await service.execute(
+                ToolInvocation(
+                    name="get_news", args={"ticker": "AAPL"}, source="editor"
+                ),
+                runner=runner,
+            )
+
+    mock_logger.error.assert_called_once()
+    kwargs = mock_logger.error.call_args.kwargs
+    assert kwargs["failure_kind"] == "rate_limit"
+    assert kwargs["retryable"] is True
+    assert kwargs["error_type"] == "RuntimeError"

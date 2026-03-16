@@ -65,6 +65,13 @@ class EODHDFetcher(FinancialFetcher):
 
         return ticker
 
+    async def _response_preview(self, response: aiohttp.ClientResponse) -> str:
+        try:
+            text = await response.text()
+        except Exception as exc:
+            return f"<unavailable: {type(exc).__name__}>"
+        return " ".join(text.split())[:200]
+
     async def get_company_name(self, symbol: str) -> str | None:
         """Fetch company name from EODHD General data (lightweight, ~1kb)."""
         if not self.is_available():
@@ -128,14 +135,18 @@ class EODHDFetcher(FinancialFetcher):
 
                     elif response.status == 429:
                         logger.error(
-                            "EODHD API Limit Exceeded (429). Disabling EODHD for this session."
+                            "EODHD API Limit Exceeded (429) for %s. Disabling EODHD for this session. response_preview=%s",
+                            eod_symbol,
+                            await self._response_preview(response),
                         )
                         self._is_exhausted = True
                         return None
 
                     elif response.status == 402:
                         logger.warning(
-                            f"EODHD Payment Required (402). Access restricted for {eod_symbol}."
+                            "EODHD Payment Required (402) for %s. response_preview=%s",
+                            eod_symbol,
+                            await self._response_preview(response),
                         )
                         # Don't disable globally, might just be this specific exchange
                         return None
@@ -146,7 +157,10 @@ class EODHDFetcher(FinancialFetcher):
 
                     else:
                         logger.warning(
-                            f"EODHD API error {response.status} for {eod_symbol}"
+                            "EODHD API error %s for %s. response_preview=%s",
+                            response.status,
+                            eod_symbol,
+                            await self._response_preview(response),
                         )
                         return None
 
@@ -201,24 +215,31 @@ class EODHDFetcher(FinancialFetcher):
                     # Common for international data on free/low-tier plans
                     elif response.status == 402:
                         logger.info(
-                            f"EODHD Paywall (402) for {eod_symbol}. Cannot verify."
+                            "EODHD Paywall (402) for %s. Cannot verify. response_preview=%s",
+                            eod_symbol,
+                            await self._response_preview(response),
                         )
                         return None
 
                     # CASE 3: Rate limit (429) - disable future calls
                     elif response.status == 429:
-                        logger.error(
-                            "EODHD API Limit (429). Disabling EODHD anchor checks."
-                        )
                         self._is_exhausted = True
+                        logger.error(
+                            "EODHD API Limit (429) for %s. Disabling EODHD anchor checks. response_preview=%s",
+                            eod_symbol,
+                            await self._response_preview(response),
+                        )
                         return None
 
                     # CASE 4: Auth Error (401/403)
                     elif response.status in [401, 403]:
-                        logger.warning(
-                            f"EODHD Auth Error ({response.status}). Disabling."
-                        )
                         self._is_exhausted = True
+                        logger.warning(
+                            "EODHD Auth Error (%s) for %s. Disabling. response_preview=%s",
+                            response.status,
+                            eod_symbol,
+                            await self._response_preview(response),
+                        )
                         return None
 
                     # CASE 5: Not found

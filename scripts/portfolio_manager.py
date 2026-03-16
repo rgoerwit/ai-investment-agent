@@ -2490,6 +2490,23 @@ def _print_status(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
+def _format_index_rebuild_notice(details: str | None) -> str:
+    """Convert reconciler rebuild details into a user-facing status line."""
+    if not details:
+        return "Analysis index is invalid; reconstructing from analysis files..."
+
+    parts = details.split(":", 2)
+    index_name = parts[0]
+    reason = parts[1] if len(parts) >= 2 else "unknown"
+    reason_suffix = f" (reason: {reason})"
+    if len(parts) == 3:
+        reason_suffix = f"{reason_suffix}; detail={parts[2]}"
+    return (
+        f"Analysis index {index_name} is invalid{reason_suffix}; "
+        "reconstructing from analysis files..."
+    )
+
+
 def _load_analyses_with_progress(
     results_dir: Path,
     *,
@@ -2511,9 +2528,7 @@ def _load_analyses_with_progress(
             )
             return
         if update.phase == "rebuilding_index":
-            _print_status(
-                f"Analysis index {update.current_file or ''} is invalid; reconstructing from analysis files..."
-            )
+            _print_status(_format_index_rebuild_notice(update.current_file))
             return
         if update.phase == "parsing":
             _print_status(

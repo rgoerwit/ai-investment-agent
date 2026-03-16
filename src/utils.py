@@ -183,7 +183,11 @@ def detect_truncation(text: str, agent: str | None = None) -> dict:
     # These blocks should have both start and required fields
     # (block_marker, required_fields, producing_agent)
     block_completeness = [
-        ("PM_BLOCK:", ["VERDICT:", "RISK_ZONE:"], "portfolio_manager"),
+        (
+            "PM_BLOCK",
+            ["VERDICT:", "RISK_ZONE:", "ZONE:"],
+            "portfolio_manager",
+        ),
         ("DATA_BLOCK:", ["HEALTH_SCORE:", "GROWTH_SCORE:"], "fundamentals_analyst"),
         ("FORENSIC_DATA_BLOCK:", ["VERDICT:", "STATUS:"], "global_forensic_auditor"),
         ("VALUE_TRAP_BLOCK:", ["SCORE:", "VERDICT:"], "value_trap_detector"),

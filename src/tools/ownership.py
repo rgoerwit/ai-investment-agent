@@ -164,3 +164,33 @@ async def get_ownership_structure(
             },
             indent=2,
         )
+
+
+def classify_insider_selling_evidence(ownership_data: dict) -> str:
+    """
+    Return an evidence tier for insider-selling claims.
+
+    Tiers (from strongest to weakest):
+    - NAMED_MULTI_EXEC: structured records naming ≥2 distinct executives with share counts
+    - NAMED_SINGLE_EXEC: one named executive with a share-count record
+    - GENERIC_TREND: directional signal (NET_SELLER) only, no named transactions
+    - NONE: no insider selling detected
+
+    Args:
+        ownership_data: Parsed dict from ``get_ownership_structure()`` JSON output
+            (or the deserialized result).
+
+    Returns:
+        One of the four tier strings above.
+    """
+    insider_records = ownership_data.get("insider_transactions", [])
+    named_execs = {
+        r["name"] for r in insider_records if r.get("name") and r.get("shares")
+    }
+    if len(named_execs) >= 2:
+        return "NAMED_MULTI_EXEC"
+    if len(named_execs) == 1:
+        return "NAMED_SINGLE_EXEC"
+    if ownership_data.get("insider_trend") in ("NET_SELLER", "SELLING"):
+        return "GENERIC_TREND"
+    return "NONE"

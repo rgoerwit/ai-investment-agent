@@ -260,6 +260,7 @@ class RedFlagDetector:
             "peg_ratio": None,
             "ocf": None,
             "ocf_source": None,
+            "ocf_filing_reason": None,
             "segment_flag": None,
             "parent_company": None,
             "analyst_coverage_total_est": None,
@@ -393,6 +394,16 @@ class RedFlagDetector:
             if val != "N/A":
                 metrics["ocf_source"] = val
 
+        ocf_reason_match = re.search(
+            r"OCF_FILING_REASON:\s*(DISCREPANCY|API_UNAVAILABLE|N/A)",
+            data_block,
+            re.IGNORECASE,
+        )
+        if ocf_reason_match:
+            val = ocf_reason_match.group(1).upper()
+            if val != "N/A":
+                metrics["ocf_filing_reason"] = val
+
         # Extract SEGMENT_FLAG
         segment_flag_match = re.search(
             r"SEGMENT_FLAG:\s*(DETERIORATING|STABLE|N/A)",
@@ -435,7 +446,7 @@ class RedFlagDetector:
 
         # Extract GROWTH_TRAJECTORY
         trajectory_match = re.search(
-            r"GROWTH_TRAJECTORY:\s*(ACCELERATING|DECELERATING|STABLE|N/A)",
+            r"GROWTH_TRAJECTORY:\s*(ACCELERATING|DECELERATING|STABLE|MIXED|N/A)",
             data_block,
             re.IGNORECASE,
         )
@@ -1080,7 +1091,30 @@ class RedFlagDetector:
         # --- RED FLAG 10: OCF Source Discrepancy ---
         # Filing OCF differs from API data — signals potential data quality issue
         ocf_source = metrics.get("ocf_source")
-        if ocf_source == "FILING":
+        ocf_reason = (metrics.get("ocf_filing_reason") or "DISCREPANCY").upper()
+        if ocf_source == "FILING" and ocf_reason == "API_UNAVAILABLE":
+            red_flags.append(
+                {
+                    "type": "OCF_SINGLE_SOURCE",
+                    "severity": "INFO",
+                    "detail": (
+                        "OCF value sourced from filing only — API unavailable, no "
+                        "discrepancy detected"
+                    ),
+                    "action": "NOTE",
+                    "risk_penalty": 0.0,
+                    "rationale": (
+                        "The filing provided the only usable OCF value because the "
+                        "aggregator/API source was unavailable. This is a process "
+                        "limitation, not evidence of a company data inconsistency."
+                    ),
+                }
+            )
+            logger.info(
+                "red_flag_ocf_single_source",
+                ticker=ticker,
+            )
+        elif ocf_source == "FILING":
             red_flags.append(
                 {
                     "type": "OCF_SOURCE_DISCREPANCY",
@@ -1100,6 +1134,7 @@ class RedFlagDetector:
             logger.info(
                 "red_flag_ocf_source_discrepancy",
                 ticker=ticker,
+                ocf_filing_reason=ocf_reason,
             )
 
         # --- GROWTH CLIFF WARNING ---
@@ -1160,6 +1195,30 @@ class RedFlagDetector:
             )
             logger.info(
                 "red_flag_thin_consensus",
+                ticker=ticker,
+                total_est=total_est,
+            )
+        if total_est == "HIGH" or (isinstance(total_est, int) and total_est > 20):
+            red_flags.append(
+                {
+                    "type": "LOCAL_COVERAGE_HIGH",
+                    "severity": "WARNING",
+                    "detail": (
+                        "Home-market analyst coverage is high — information edge is "
+                        "weaker than a typical undiscovered thesis candidate"
+                    ),
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 0.25,
+                    "rationale": (
+                        "English-language coverage may still be low, but high local "
+                        "coverage means the home market has likely already absorbed "
+                        "segment-level, governance, and catalyst information. The "
+                        "undiscovered edge is therefore weaker."
+                    ),
+                }
+            )
+            logger.info(
+                "red_flag_local_coverage_high",
                 ticker=ticker,
                 total_est=total_est,
             )

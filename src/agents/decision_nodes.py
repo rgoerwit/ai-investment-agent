@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -50,6 +51,124 @@ They OVERRIDE normal zone decisions where they conflict.
 - Authoritarian regimes: MAX 1.5% (vs 2%)
 - Any remaining uncertainty: MAX 2%
 """
+
+
+def _extract_consultant_resolution_concerns(consultant_review: str) -> list[str]:
+    """Extract a small set of material consultant concerns for PM fallback output."""
+    if not consultant_review:
+        return []
+
+    concern_keywords = (
+        "error",
+        "concern",
+        "discrep",
+        "conflict",
+        "bias",
+        "unanswered",
+        "unsupported",
+        "unsubstantiated",
+        "mismatch",
+        "risk",
+    )
+    concerns: list[str] = []
+    seen: set[str] = set()
+
+    for raw_line in consultant_review.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if not re.match(r"^(?:[-*•]|\d+\.)\s+", line):
+            continue
+        normalized = re.sub(r"^(?:[-*•]|\d+\.)\s+", "", line).strip()
+        if len(normalized) < 12:
+            continue
+        if not any(keyword in normalized.lower() for keyword in concern_keywords):
+            continue
+        normalized = normalized.rstrip(".")
+        if normalized not in seen:
+            seen.add(normalized)
+            concerns.append(normalized)
+        if len(concerns) >= 3:
+            break
+
+    return concerns
+
+
+def _ensure_consultant_resolution_block(
+    pm_output: str, consultant_review: str | None
+) -> str:
+    """Ensure PM output always includes CONSULTANT_RESOLUTION when consultant ran."""
+    if not consultant_review or "CONSULTANT_RESOLUTION:" in pm_output:
+        return pm_output
+
+    from src.validators.red_flag_detector import RedFlagDetector
+
+    conditions = RedFlagDetector.parse_consultant_conditions(consultant_review)
+    concerns = _extract_consultant_resolution_concerns(consultant_review)
+
+    if conditions["verdict"] == "APPROVED" and not concerns:
+        resolution_lines = [
+            "CONSULTANT_RESOLUTION:",
+            "- CONCERN: NONE",
+            "- DATA_CHECK: N/A",
+            "- VERDICT: N/A",
+        ]
+    else:
+        if not concerns:
+            concerns = [
+                "Consultant raised unresolved issues that Portfolio Manager did not explicitly address"
+            ]
+        resolution_lines = []
+        for concern in concerns:
+            resolution_lines.extend(
+                [
+                    "CONSULTANT_RESOLUTION:",
+                    f"- CONCERN: {concern}",
+                    "- DATA_CHECK: NOT_PROVIDED",
+                    "- VERDICT: UNVERIFIABLE",
+                ]
+            )
+
+    resolution_block = "\n".join(resolution_lines).rstrip()
+    pm_block_marker = "### --- START PM_BLOCK ---"
+    if pm_block_marker in pm_output:
+        return pm_output.replace(
+            pm_block_marker, f"{resolution_block}\n\n{pm_block_marker}", 1
+        )
+    return f"{pm_output.rstrip()}\n\n{resolution_block}\n"
+
+
+def resolve_pfic_display_status(
+    legal_pfic_status: str | None,
+    data_block_pfic_risk: str | None,
+) -> tuple[str, str | None]:
+    """
+    Return (canonical_status, note).
+
+    Legal Counsel primary-source research overrides the quantitative heuristic
+    in DATA_BLOCK when they disagree.
+
+    Args:
+        legal_pfic_status: pfic_status from Legal Counsel (CLEAN/UNCERTAIN/PROBABLE/N/A)
+        data_block_pfic_risk: PFIC_RISK from Senior Fundamentals DATA_BLOCK (LOW/MEDIUM/HIGH/N/A)
+
+    Returns:
+        (canonical_status, note): note is non-None only when the override fires.
+    """
+    if not legal_pfic_status or legal_pfic_status.upper() in ("N/A", "CLEAN"):
+        return data_block_pfic_risk or "N/A", None
+
+    mapping = {"PROBABLE": "HIGH", "UNCERTAIN": "UNCERTAIN"}
+    legal_resolved = mapping.get(legal_pfic_status.upper())
+    if not legal_resolved:
+        return data_block_pfic_risk or "N/A", None
+
+    if data_block_pfic_risk and data_block_pfic_risk.upper() == "LOW":
+        return legal_resolved, (
+            f"PFIC_NOTE: Legal Counsel assessment ({legal_pfic_status}) overrides "
+            f"quantitative heuristic (LOW). Legal research is primary."
+        )
+    return legal_resolved, None
 
 
 def create_trader_node(llm, memory: Any | None) -> Callable:
@@ -372,6 +491,10 @@ RISK TEAM DEBATE:
                 model_name=support.get_model_name(llm),
             )
             content_str = message_utils.extract_string_content(response.content)
+            content_str = _ensure_consultant_resolution_block(
+                content_str,
+                consultant if consultant else None,
+            )
 
             from src.utils import detect_truncation
 

@@ -77,9 +77,44 @@ def test_load_analyses_with_progress_reports_index_reconstruction(tmp_path, caps
     analyses = _load_analyses_with_progress(tmp_path)
     captured = capsys.readouterr()
 
-    assert "is invalid; reconstructing from analysis files" in captured.err
+    assert (
+        "is invalid (reason: unknown); reconstructing from analysis files"
+        in captured.err
+    )
     assert "Progress: 1/1 files scanned; 1 latest analyses loaded" in captured.err
     assert "7203.T" in analyses
+
+
+def test_load_analyses_with_progress_reports_rebuild_reason(tmp_path, capsys):
+    """Directory-state invalidation prints the explicit rebuild reason."""
+    first = {
+        "prediction_snapshot": {
+            "ticker": "7203.T",
+            "analysis_date": "2026-03-01",
+            "verdict": "BUY",
+        },
+        "investment_analysis": {},
+    }
+    second = {
+        "prediction_snapshot": {
+            "ticker": "6758.T",
+            "analysis_date": "2026-03-02",
+            "verdict": "BUY",
+        },
+        "investment_analysis": {},
+    }
+    (tmp_path / "7203_T_2026-03-01_analysis.json").write_text(json.dumps(first))
+    _load_analyses_with_progress(tmp_path)
+    capsys.readouterr()
+
+    (tmp_path / "6758_T_2026-03-02_analysis.json").write_text(json.dumps(second))
+
+    analyses = _load_analyses_with_progress(tmp_path)
+    captured = capsys.readouterr()
+
+    assert "reason: stale_directory_state" in captured.err
+    assert "reconstructing from analysis files" in captured.err
+    assert "6758.T" in analyses
 
 
 def test_load_ibkr_context_emits_phase_status_and_returns_live_state(capsys):

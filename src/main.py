@@ -481,17 +481,60 @@ def build_run_summary(
 
     from src.token_tracker import get_tracker
 
+    def _tool_message_failed(content: object) -> bool:
+        if not isinstance(content, str):
+            return False
+        text = content.strip()
+        if not text:
+            return False
+        if text.startswith(
+            (
+                "TOOL_ERROR:",
+                "TOOL_BLOCKED:",
+                "FETCH_FAILED:",
+                "SEARCH_FAILED:",
+                "INVALID_URL:",
+            )
+        ):
+            return True
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError):
+            return False
+        return isinstance(payload, dict) and bool(payload.get("error"))
+
+    def _collect_used_providers() -> list[str]:
+        providers: set[str] = set()
+        configured = str(config.llm_provider or "").strip()
+        if configured:
+            providers.add(configured)
+        artifact_statuses = result.get("artifact_statuses", {}) or {}
+        for status in artifact_statuses.values():
+            provider = str((status or {}).get("provider") or "").strip()
+            if provider:
+                providers.add(provider)
+        return sorted(providers)
+
+    manual_tool_failures = sum(
+        value
+        for key, value in result.items()
+        if key.endswith("_tool_failures") and isinstance(value, int) and value > 0
+    )
+
     tracker_stats = get_tracker().get_total_stats()
     messages = result.get("messages", []) or []
     tool_messages = [msg for msg in messages if isinstance(msg, ToolMessage)]
-    tool_failures = sum(
-        1 for msg in tool_messages if getattr(msg, "status", None) == "error"
+    tool_failures = manual_tool_failures + sum(
+        1
+        for msg in tool_messages
+        if getattr(msg, "status", None) == "error" or _tool_message_failed(msg.content)
     )
     artifact_statuses = result.get("artifact_statuses", {}) or {}
     consultant_status = artifact_statuses.get("consultant_review") or {}
     auditor_status = artifact_statuses.get("auditor_report") or {}
     consultant_finished = bool(consultant_status.get("complete"))
     auditor_finished = bool(auditor_status.get("complete"))
+    providers_used = _collect_used_providers()
 
     return {
         "quick_mode": quick_mode,
@@ -510,6 +553,10 @@ def build_run_summary(
         "llm_failures": tracker_stats["failed_attempts"],
         "tool_calls": len(tool_messages),
         "tool_failures": tool_failures,
+        "llm_providers_used": providers_used,
+        "llm_provider": providers_used[0]
+        if len(providers_used) == 1
+        else "multi-provider",
         "publishable": result.get("analysis_validity", {}).get("publishable", False),
         "required_failures": sorted(
             (result.get("analysis_validity", {}) or {})
@@ -833,13 +880,16 @@ def display_results(result: dict, ticker: str):
 
 def save_results_to_file(result: dict, ticker: str, quick_mode: bool = False) -> Path:
     """Save analysis results to a JSON file in the results directory."""
-    from src.memory import create_memory_instances, sanitize_ticker_for_collection
+    from src.memory import get_ticker_memory_stats
     from src.prompts import get_all_prompts
 
     results_dir = Path(config.results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
     previous_dir_mtime_ns = (
         results_dir.stat().st_mtime_ns if results_dir.exists() else None
+    )
+    analysis_file_count_before_save = sum(
+        1 for candidate in results_dir.glob("*_analysis.json") if candidate.is_file()
     )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -867,25 +917,7 @@ def save_results_to_file(result: dict, ticker: str, quick_mode: bool = False) ->
     memory_stats = {}
     if config.enable_memory:
         try:
-            # Get actual memories for THIS ticker
-            memories = create_memory_instances(ticker)
-            safe_ticker = sanitize_ticker_for_collection(ticker)
-
-            memory_stats = {
-                "bull_researcher": memories.get(
-                    f"{safe_ticker}_bull_memory"
-                ).get_stats(),
-                "bear_researcher": memories.get(
-                    f"{safe_ticker}_bear_memory"
-                ).get_stats(),
-                "research_manager": memories.get(
-                    f"{safe_ticker}_invest_judge_memory"
-                ).get_stats(),
-                "trader": memories.get(f"{safe_ticker}_trader_memory").get_stats(),
-                "portfolio_manager": memories.get(
-                    f"{safe_ticker}_risk_manager_memory"
-                ).get_stats(),
-            }
+            memory_stats = get_ticker_memory_stats(ticker)
         except Exception as e:
             logger.warning("memory_stats_unavailable", error=str(e))
 
@@ -905,7 +937,14 @@ def save_results_to_file(result: dict, ticker: str, quick_mode: bool = False) ->
             "deep_model": config.deep_think_llm,
             "memory_enabled": config.enable_memory,
             "online_tools_enabled": config.online_tools,
-            "llm_provider": config.llm_provider,
+            "llm_provider": (
+                (result.get("run_summary", {}) or {}).get("llm_provider")
+                or config.llm_provider
+            ),
+            "llm_providers_used": (
+                (result.get("run_summary", {}) or {}).get("llm_providers_used")
+                or [config.llm_provider]
+            ),
         },
         "token_usage": token_stats,
         "prompts_metadata": {
@@ -976,16 +1015,26 @@ def save_results_to_file(result: dict, ticker: str, quick_mode: bool = False) ->
     try:
         from src.ibkr.reconciler import (
             _build_analysis_record_from_data,
+            load_latest_analyses,
             update_latest_analyses_index,
         )
 
         record = _build_analysis_record_from_data(filepath, save_data)
         if record is not None:
-            update_latest_analyses_index(
+            updated_index = update_latest_analyses_index(
                 results_dir,
                 record,
                 previous_dir_mtime_ns=previous_dir_mtime_ns,
+                analysis_file_count_before_save=analysis_file_count_before_save,
             )
+            if not updated_index:
+                refreshed = load_latest_analyses(results_dir)
+                logger.info(
+                    "analysis_index_refreshed_after_save",
+                    ticker=ticker,
+                    path=str(results_dir),
+                    refreshed_count=len(refreshed),
+                )
     except Exception as exc:
         logger.debug("analysis_index_update_skipped", error=str(exc))
 

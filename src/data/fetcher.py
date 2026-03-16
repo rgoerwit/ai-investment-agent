@@ -29,6 +29,7 @@ it reads fx_rate_to_usd from analysis snapshots and src/fx_normalization.py.
 """
 
 import asyncio
+import copy
 import json
 import re
 import statistics
@@ -98,6 +99,8 @@ ROE_PERCENTAGE_THRESHOLD = 1.0
 DEBT_EQUITY_PERCENTAGE_THRESHOLD = 10.0
 PRICE_TO_BOOK_CURRENCY_MISMATCH_THRESHOLD = 5.0
 FX_CACHE_TTL_SECONDS = 3600
+FETCH_RESULT_CACHE_TTL_SECONDS = 30
+PRICE_HISTORY_CACHE_TTL_SECONDS = 30
 PER_SOURCE_TIMEOUT = 15
 # These fields are safely comparable with the simple "fraction vs percent" heuristic
 # used in _normalize_percent_pair(). Growth/return metrics are intentionally excluded:
@@ -353,6 +356,10 @@ class SmartMarketDataFetcher(FinancialFetcher):
         self.fx_cache = {}
         self.fx_cache_expiry_time = {}
         self._mnemonic_cache: dict[str, str] = self._load_mnemonic_cache()
+        self._metrics_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._metrics_inflight: dict[str, asyncio.Task[dict[str, Any]]] = {}
+        self._history_cache: dict[tuple[str, str], tuple[float, pd.DataFrame]] = {}
+        self._history_inflight: dict[tuple[str, str], asyncio.Task[pd.DataFrame]] = {}
 
         self.fmp_fetcher = get_fmp_fetcher() if FMP_AVAILABLE else None
         self.eodhd_fetcher = get_eodhd_fetcher() if EODHD_AVAILABLE else None
@@ -381,6 +388,44 @@ class SmartMarketDataFetcher(FinancialFetcher):
             },
             "gaps_filled": 0,
         }
+
+    def _get_cached_metrics(self, ticker: str) -> dict[str, Any] | None:
+        cached = self._metrics_cache.get(ticker)
+        if not cached:
+            return None
+        expires_at, payload = cached
+        if time.monotonic() >= expires_at:
+            self._metrics_cache.pop(ticker, None)
+            return None
+        logger.debug("financial_metrics_cache_hit", symbol=ticker)
+        return copy.deepcopy(payload)
+
+    def _set_cached_metrics(self, ticker: str, payload: dict[str, Any]) -> None:
+        if not payload or payload.get("error"):
+            return
+        self._metrics_cache[ticker] = (
+            time.monotonic() + FETCH_RESULT_CACHE_TTL_SECONDS,
+            copy.deepcopy(payload),
+        )
+
+    def _get_cached_history(self, ticker: str, period: str) -> pd.DataFrame | None:
+        cached = self._history_cache.get((ticker, period))
+        if not cached:
+            return None
+        expires_at, frame = cached
+        if time.monotonic() >= expires_at:
+            self._history_cache.pop((ticker, period), None)
+            return None
+        logger.debug("price_history_cache_hit", symbol=ticker, period=period)
+        return frame.copy(deep=True)
+
+    def _set_cached_history(self, ticker: str, period: str, hist: pd.DataFrame) -> None:
+        if hist is None or hist.empty:
+            return
+        self._history_cache[(ticker, period)] = (
+            time.monotonic() + PRICE_HISTORY_CACHE_TTL_SECONDS,
+            hist.copy(deep=True),
+        )
 
     def get_currency_rate(self, from_curr: str, to_curr: str) -> float:
         """Get FX rate with caching."""
@@ -805,6 +850,16 @@ class SmartMarketDataFetcher(FinancialFetcher):
             else:
                 extracted["growth_trajectory"] = "STABLE"
             extracted["_growth_trajectory_source"] = "calculated_from_quarterly"
+
+        if (
+            extracted.get("growth_trajectory") == "ACCELERATING"
+            and extracted.get("earningsGrowth_TTM") is not None
+            and extracted["earningsGrowth_TTM"] < -0.05
+        ):
+            extracted["growth_trajectory"] = "MIXED"
+            extracted["_growth_trajectory_source"] = (
+                f"{extracted.get('_growth_trajectory_source', 'calculated_from_quarterly')}|eps_divergence"
+            )
 
         if extracted:
             logger.debug(
@@ -1898,6 +1953,16 @@ class SmartMarketDataFetcher(FinancialFetcher):
                         calculated["growth_trajectory"] = "STABLE"
                     calculated["_growth_trajectory_source"] = "calculated_mrq_vs_fy"
 
+            if (
+                calculated.get("growth_trajectory") == "ACCELERATING"
+                and data.get("earningsGrowth_TTM") is not None
+                and data["earningsGrowth_TTM"] < -0.05
+            ):
+                calculated["growth_trajectory"] = "MIXED"
+                calculated["_growth_trajectory_source"] = (
+                    f"{calculated.get('_growth_trajectory_source', 'calculated_mrq_vs_fy')}|eps_divergence"
+                )
+
             # FIX: Ensure marketCap is calculated if missing
             if data.get("marketCap") is None:
                 price = data.get("currentPrice") or data.get("regularMarketPrice")
@@ -2199,7 +2264,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
             logger.warning("ticker_resolution_failed", symbol=symbol, error=str(e))
             return None
 
-    async def get_financial_metrics(
+    async def _get_financial_metrics_uncached(
         self, ticker: str, timeout: int = 30
     ) -> dict[str, Any]:
         """
@@ -2352,7 +2417,34 @@ class SmartMarketDataFetcher(FinancialFetcher):
             logger.error("unexpected_fetch_error", ticker=ticker, error=str(e))
             return {"error": str(e), "symbol": ticker}
 
-    async def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
+    async def get_financial_metrics(
+        self, ticker: str, timeout: int = 30
+    ) -> dict[str, Any]:
+        """Return unified metrics with short-lived per-process caching and inflight dedupe."""
+        cached = self._get_cached_metrics(ticker)
+        if cached is not None:
+            return cached
+
+        inflight = self._metrics_inflight.get(ticker)
+        if inflight is not None:
+            logger.debug("financial_metrics_inflight_wait", symbol=ticker)
+            return copy.deepcopy(await inflight)
+
+        task = asyncio.create_task(
+            self._get_financial_metrics_uncached(ticker, timeout)
+        )
+        self._metrics_inflight[ticker] = task
+        try:
+            result = await task
+        finally:
+            self._metrics_inflight.pop(ticker, None)
+
+        self._set_cached_metrics(ticker, result)
+        return copy.deepcopy(result)
+
+    async def _get_price_history_uncached(
+        self, ticker: str, period: str = "1y"
+    ) -> pd.DataFrame:
         """Fetch historical price data."""
         try:
             stock = yf.Ticker(ticker)
@@ -2369,6 +2461,28 @@ class SmartMarketDataFetcher(FinancialFetcher):
         except Exception as e:
             logger.error("history_fetch_failed", ticker=ticker, error=str(e))
             return pd.DataFrame()
+
+    async def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
+        """Fetch historical price data with short-lived caching and inflight dedupe."""
+        cached = self._get_cached_history(ticker, period)
+        if cached is not None:
+            return cached
+
+        key = (ticker, period)
+        inflight = self._history_inflight.get(key)
+        if inflight is not None:
+            logger.debug("price_history_inflight_wait", symbol=ticker, period=period)
+            return (await inflight).copy(deep=True)
+
+        task = asyncio.create_task(self._get_price_history_uncached(ticker, period))
+        self._history_inflight[key] = task
+        try:
+            hist = await task
+        finally:
+            self._history_inflight.pop(key, None)
+
+        self._set_cached_history(ticker, period, hist)
+        return hist.copy(deep=True)
 
     # Alias for backward compatibility and interface compliance
     async def get_historical_prices(

@@ -8,9 +8,11 @@ Verifies:
 4. Panic Mode for Asian tickers
 """
 
+import asyncio
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
+import pandas as pd
 import pytest
 
 from src.data.fetcher import SmartMarketDataFetcher
@@ -50,6 +52,92 @@ class TestParallelExecution:
         assert result["currentPrice"] == 100
         assert result["pe"] == 15
         assert result["roe"] == 0.2
+
+    @pytest.mark.asyncio
+    async def test_get_financial_metrics_uses_short_lived_cache(self, fetcher):
+        """Repeated symbol fetches within a run should reuse cached merged results."""
+        fetcher._get_financial_metrics_uncached = AsyncMock(
+            return_value={"symbol": "TEST", "currentPrice": 100, "currency": "USD"}
+        )
+
+        first = await fetcher.get_financial_metrics("TEST")
+        second = await fetcher.get_financial_metrics("TEST")
+
+        assert first == second
+        assert first is not second
+        fetcher._get_financial_metrics_uncached.assert_awaited_once_with("TEST", 30)
+
+    @pytest.mark.asyncio
+    async def test_get_financial_metrics_coalesces_inflight_calls(self, fetcher):
+        """Concurrent callers for the same symbol should share one underlying fetch."""
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_fetch(ticker, timeout):
+            started.set()
+            await release.wait()
+            return {"symbol": ticker, "currentPrice": 100, "currency": "USD"}
+
+        fetcher._get_financial_metrics_uncached = AsyncMock(side_effect=slow_fetch)
+
+        first_task = asyncio.create_task(fetcher.get_financial_metrics("TEST"))
+        await started.wait()
+        second_task = asyncio.create_task(fetcher.get_financial_metrics("TEST"))
+        release.set()
+
+        first, second = await asyncio.gather(first_task, second_task)
+
+        assert first == second
+        assert fetcher._get_financial_metrics_uncached.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_get_financial_metrics_clears_inflight_after_unexpected_error(
+        self, fetcher
+    ):
+        """Unexpected exceptions should not poison future same-symbol fetches."""
+        fetcher._get_financial_metrics_uncached = AsyncMock(
+            side_effect=RuntimeError("boom")
+        )
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await fetcher.get_financial_metrics("TEST")
+
+        fetcher._get_financial_metrics_uncached = AsyncMock(
+            return_value={"symbol": "TEST", "currentPrice": 100, "currency": "USD"}
+        )
+        result = await fetcher.get_financial_metrics("TEST")
+
+        assert result["symbol"] == "TEST"
+
+    @pytest.mark.asyncio
+    async def test_get_financial_metrics_does_not_cache_error_payload(self, fetcher):
+        """Error payloads should not be reused as successful cached results."""
+        fetcher._get_financial_metrics_uncached = AsyncMock(
+            side_effect=[
+                {"error": "temporary", "symbol": "TEST"},
+                {"symbol": "TEST", "currentPrice": 100, "currency": "USD"},
+            ]
+        )
+
+        first = await fetcher.get_financial_metrics("TEST")
+        second = await fetcher.get_financial_metrics("TEST")
+
+        assert first["error"] == "temporary"
+        assert second["currentPrice"] == 100
+        assert fetcher._get_financial_metrics_uncached.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_get_price_history_uses_short_lived_cache(self, fetcher):
+        """Repeated history fetches for the same symbol/period should reuse cached data."""
+        frame = pd.DataFrame({"Close": [1.0, 2.0], "Volume": [10, 20]})
+        fetcher._get_price_history_uncached = AsyncMock(return_value=frame)
+
+        first = await fetcher.get_price_history("TEST", period="1y")
+        second = await fetcher.get_price_history("TEST", period="1y")
+
+        assert first.equals(second)
+        assert first is not second
+        fetcher._get_price_history_uncached.assert_awaited_once_with("TEST", "1y")
 
 
 class TestSmartMerge:

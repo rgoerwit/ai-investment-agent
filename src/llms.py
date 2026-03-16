@@ -24,6 +24,7 @@ from langchain_google_genai import (
 from src.config import config
 
 logger = logging.getLogger(__name__)
+_logged_model_init_configs: set[tuple[str, str, int, int, str | None]] = set()
 
 # Relax safety settings slightly for financial/market analysis context
 SAFETY_SETTINGS = {
@@ -93,6 +94,32 @@ def _create_rate_limiter_from_rpm(rpm: int) -> InMemoryRateLimiter:
     )
 
 
+def _reset_init_log_cache_for_tests() -> None:
+    """Reset one-time init logging state for tests."""
+    _logged_model_init_configs.clear()
+
+
+def _log_model_init_once(
+    kind: str,
+    model_name: str,
+    timeout: int,
+    retries: int,
+    thinking_level: str | None,
+) -> None:
+    key = (kind, model_name, timeout, retries, thinking_level)
+    if key in _logged_model_init_configs:
+        return
+    _logged_model_init_configs.add(key)
+    logger.debug(
+        "llm_initialized kind=%s model=%s timeout=%s retries=%s thinking_level=%s",
+        kind,
+        model_name,
+        timeout,
+        retries,
+        thinking_level,
+    )
+
+
 class _LazyRateLimiterProxy(BaseRateLimiter):
     """Lazily construct the shared Gemini rate limiter on first use."""
 
@@ -110,6 +137,13 @@ class _LazyRateLimiterProxy(BaseRateLimiter):
 
     async def aacquire(self, *, blocking: bool = True) -> bool:
         return await self._get_instance().aacquire(blocking=blocking)
+
+    async def __aenter__(self):
+        await self.aacquire(blocking=True)
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        return False
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._get_instance(), name)
@@ -203,7 +237,7 @@ def create_gemini_model(
 
     if thinking_level and _is_gemini_v3_or_greater(model_name):
         kwargs["thinking_level"] = thinking_level
-        logger.debug(f"Applying thinking_level={thinking_level} to {model_name}")
+        logger.debug("Applying thinking_level=%s to %s", thinking_level, model_name)
 
     llm = ChatGoogleGenerativeAI(**kwargs)
 
@@ -235,9 +269,6 @@ def create_quick_thinking_llm(
     thinking_level = None
     if _is_gemini_v3_or_greater(model_name):
         thinking_level = "low"
-        logger.debug(
-            f"Quick LLM ({model_name}) is Gemini 3+ - applying thinking_level=low"
-        )
     elif model_name.startswith("gemini-"):
         # Gemini model but NOT 3+ (likely 2.x)
         logger.warning(
@@ -247,9 +278,8 @@ def create_quick_thinking_llm(
             f"Gemini 3+ models use thinking_level='low' for data gathering."
         )
 
-    logger.debug(
-        f"Initializing Quick LLM: {model_name} "
-        f"(timeout={final_timeout}, retries={final_retries})"
+    _log_model_init_once(
+        "quick", model_name, final_timeout, final_retries, thinking_level
     )
     return create_gemini_model(
         model_name,
@@ -281,13 +311,9 @@ def create_deep_thinking_llm(
     thinking_level = None
     if _is_gemini_v3_or_greater(model_name):
         thinking_level = "high"
-        logger.debug(
-            f"Deep LLM ({model_name}) is Gemini 3+ - applying thinking_level=high"
-        )
 
-    logger.debug(
-        f"Initializing Deep LLM: {model_name} "
-        f"(timeout={final_timeout}, retries={final_retries})"
+    _log_model_init_once(
+        "deep", model_name, final_timeout, final_retries, thinking_level
     )
     return create_gemini_model(
         model_name,
@@ -665,7 +691,14 @@ def get_consultant_llm(
                 callbacks=callbacks, quick_mode=quick_mode
             )
         except Exception as e:
-            logger.error(f"Failed to initialize consultant LLM: {str(e)}")
+            logger.error(
+                "consultant_llm_init_failed model=%s quick_mode=%s error_type=%s error=%s",
+                config.consultant_model,
+                quick_mode,
+                type(e).__name__,
+                str(e),
+                exc_info=True,
+            )
             return None
 
     return _consultant_llm_instance

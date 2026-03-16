@@ -196,6 +196,40 @@ class TestExtractSnapshot:
         assert snapshot["benchmark_index"] == "^GSPC"
 
 
+@pytest.mark.asyncio
+async def test_generate_lesson_logs_structured_failure_details():
+    comparison = _make_snapshot()
+
+    with patch(
+        "src.llms.create_quick_thinking_llm", side_effect=RuntimeError("llm down")
+    ):
+        with patch("src.retrospective.logger") as mock_logger:
+            lesson = await generate_lesson(comparison)
+
+    assert lesson is None
+    mock_logger.error.assert_called_once()
+    kwargs = mock_logger.error.call_args.kwargs
+    assert kwargs["failure_kind"] == "unknown_provider_error"
+    assert kwargs["error_type"] == "RuntimeError"
+    assert kwargs["exc_info"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_retrospective_logs_memory_init_failure(tmp_path):
+    with patch(
+        "src.memory.FinancialSituationMemory", side_effect=RuntimeError("bad init")
+    ):
+        with patch("src.retrospective.logger") as mock_logger:
+            lessons = await run_retrospective(None, tmp_path)
+
+    assert lessons == []
+    mock_logger.error.assert_called_once()
+    kwargs = mock_logger.error.call_args.kwargs
+    assert kwargs["error_type"] == "RuntimeError"
+    assert kwargs["root_cause_type"] == "RuntimeError"
+    assert kwargs["exc_info"] is True
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # DATA_BLOCK Field Extraction Tests
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1008,6 +1042,11 @@ class TestGenerateLesson:
 
 
 class TestCreateLessonsMemory:
+    def setup_method(self):
+        from src.retrospective import _reset_lessons_memory_cache_for_tests
+
+        _reset_lessons_memory_cache_for_tests()
+
     def test_factory_returns_memory(self):
         """create_lessons_memory returns a FinancialSituationMemory instance."""
         with patch("src.memory.FinancialSituationMemory") as MockFSM:
@@ -1016,6 +1055,18 @@ class TestCreateLessonsMemory:
             result = create_lessons_memory()
             MockFSM.assert_called_once_with("lessons_learned")
             assert result == mock_instance
+
+    def test_factory_reuses_cached_memory(self):
+        """Repeated calls should reuse the same lessons memory instance."""
+        with patch("src.memory.FinancialSituationMemory") as MockFSM:
+            mock_instance = MagicMock()
+            MockFSM.return_value = mock_instance
+
+            first = create_lessons_memory()
+            second = create_lessons_memory()
+
+            MockFSM.assert_called_once_with("lessons_learned")
+            assert first is second
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -24,6 +24,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -79,11 +80,31 @@ def _analysis_index_lock(results_dir: Path):
     lock_path = _analysis_index_lock_path(results_dir)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "a+") as lock_handle:
+        wait_started = time.perf_counter()
+        logger.debug("analysis_index_lock_waiting", path=str(lock_path))
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        logger.debug(
+            "analysis_index_lock_acquired",
+            path=str(lock_path),
+            wait_secs=round(time.perf_counter() - wait_started, 6),
+        )
         try:
             yield
         finally:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def _root_cause_type(exc: BaseException) -> str:
+    """Return the deepest chained exception type name for logging."""
+    current = exc
+    seen: set[int] = set()
+    while id(current) not in seen:
+        seen.add(id(current))
+        next_exc = current.__cause__ or current.__context__
+        if next_exc is None:
+            break
+        current = next_exc
+    return type(current).__name__
 
 
 def _serialize_analysis_index_entry(record: AnalysisRecord) -> dict[str, Any]:
@@ -545,7 +566,12 @@ def _load_latest_analyses_from_index(
             payload = json.load(f)
     except (json.JSONDecodeError, OSError) as exc:
         logger.warning(
-            "analysis_index_load_failed", path=str(index_path), error=str(exc)
+            "analysis_index_load_failed",
+            path=str(index_path),
+            error=str(exc),
+            error_type=type(exc).__name__,
+            root_cause_type=_root_cause_type(exc),
+            exc_info=True,
         )
         emit_rebuild_notice(index_path.name)
         return None
@@ -610,7 +636,12 @@ def _write_latest_analyses_index(
             _atomic_write_json(index_path, payload)
     except OSError as exc:
         logger.warning(
-            "analysis_index_write_failed", path=str(index_path), error=str(exc)
+            "analysis_index_write_failed",
+            path=str(index_path),
+            error=str(exc),
+            error_type=type(exc).__name__,
+            root_cause_type=_root_cause_type(exc),
+            exc_info=True,
         )
 
 
@@ -619,10 +650,25 @@ def update_latest_analyses_index(
     record: AnalysisRecord,
     *,
     previous_dir_mtime_ns: int | None,
+    analysis_file_count_before_save: int | None = None,
 ) -> bool:
     """Incrementally update a valid latest-analyses index after saving one analysis."""
     index_path = _analysis_index_path(results_dir)
-    if previous_dir_mtime_ns is None or not index_path.exists():
+    if previous_dir_mtime_ns is None:
+        logger.info(
+            "analysis_index_incremental_update_skipped",
+            ticker=record.ticker,
+            path=str(index_path),
+            reason="missing_previous_dir_mtime",
+        )
+        return False
+    if not index_path.exists():
+        logger.info(
+            "analysis_index_incremental_update_skipped",
+            ticker=record.ticker,
+            path=str(index_path),
+            reason="index_missing",
+        )
         return False
 
     try:
@@ -635,15 +681,58 @@ def update_latest_analyses_index(
                     "analysis_index_incremental_update_failed",
                     path=str(index_path),
                     error=str(exc),
+                    error_type=type(exc).__name__,
+                    root_cause_type=_root_cause_type(exc),
+                    exc_info=True,
                 )
                 return False
 
             if payload.get("version") != _ANALYSIS_INDEX_VERSION:
+                logger.info(
+                    "analysis_index_incremental_update_skipped",
+                    ticker=record.ticker,
+                    path=str(index_path),
+                    reason="version_mismatch",
+                )
                 return False
             if payload.get("results_dir") != str(results_dir.resolve()):
+                logger.info(
+                    "analysis_index_incremental_update_skipped",
+                    ticker=record.ticker,
+                    path=str(index_path),
+                    reason="results_dir_mismatch",
+                )
                 return False
+            indexed_total_files = int(payload.get("total_files") or 0)
             if payload.get("results_dir_mtime_ns") != previous_dir_mtime_ns:
-                return False
+                if (
+                    analysis_file_count_before_save is not None
+                    and indexed_total_files == analysis_file_count_before_save
+                ):
+                    logger.info(
+                        "analysis_index_incremental_update_mtime_mismatch_accepted",
+                        ticker=record.ticker,
+                        path=str(index_path),
+                        expected_previous_dir_mtime_ns=previous_dir_mtime_ns,
+                        index_dir_mtime_ns=payload.get("results_dir_mtime_ns"),
+                        analysis_file_count_before_save=analysis_file_count_before_save,
+                        indexed_total_files=indexed_total_files,
+                        source_file=record.file_path,
+                    )
+                else:
+                    logger.info(
+                        "analysis_index_incremental_update_skipped",
+                        ticker=record.ticker,
+                        path=str(index_path),
+                        reason="stale_directory_state",
+                        expected_previous_dir_mtime_ns=previous_dir_mtime_ns,
+                        index_dir_mtime_ns=payload.get("results_dir_mtime_ns"),
+                        current_dir_mtime_ns=results_dir.stat().st_mtime_ns,
+                        source_file=record.file_path,
+                        analysis_file_count_before_save=analysis_file_count_before_save,
+                        indexed_total_files=indexed_total_files,
+                    )
+                    return False
 
             analyses_payload = dict(payload.get("analyses") or {})
             analyses_payload[record.ticker] = _serialize_analysis_index_entry(record)
@@ -651,8 +740,7 @@ def update_latest_analyses_index(
                 "version": _ANALYSIS_INDEX_VERSION,
                 "results_dir": str(results_dir.resolve()),
                 "results_dir_mtime_ns": results_dir.stat().st_mtime_ns,
-                "total_files": int(payload.get("total_files") or len(analyses_payload))
-                + 1,
+                "total_files": indexed_total_files + 1,
                 "analyses": analyses_payload,
             }
             _atomic_write_json(index_path, updated_payload)
@@ -661,8 +749,17 @@ def update_latest_analyses_index(
             "analysis_index_incremental_write_failed",
             path=str(index_path),
             error=str(exc),
+            error_type=type(exc).__name__,
+            root_cause_type=_root_cause_type(exc),
+            exc_info=True,
         )
         return False
+    logger.info(
+        "analysis_index_incremental_updated",
+        ticker=record.ticker,
+        path=str(index_path),
+        source_file=record.file_path,
+    )
     return True
 
 

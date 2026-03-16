@@ -8,6 +8,8 @@ from typing import Any, Literal, Protocol, TypeAlias
 
 import structlog
 
+from src.runtime_diagnostics import classify_failure
+
 logger = structlog.get_logger(__name__)
 
 ToolSource: TypeAlias = Literal["toolnode", "consultant", "editor"]
@@ -87,15 +89,22 @@ class ToolExecutionService:
 
         try:
             result = ToolResult(value=await runner(call.args))
-        except Exception:
+        except Exception as exc:
             # after() hooks only run for successfully produced tool outputs.
             # Failed executions propagate immediately so callers keep the original
             # stack and error semantics.
+            details = classify_failure(exc, provider="unknown")
             logger.error(
                 "tool_call_runner_failed",
                 tool=call.name,
                 source=call.source,
                 agent_key=call.agent_key,
+                failure_kind=details.kind,
+                retryable=details.retryable,
+                host=details.host,
+                error_type=details.error_type,
+                root_cause_type=details.root_cause_type,
+                error_message=details.message,
                 exc_info=True,
             )
             raise

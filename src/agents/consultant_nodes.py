@@ -11,7 +11,7 @@ from langchain_core.messages import ToolMessage as TM
 from langgraph.prebuilt import create_react_agent
 from langgraph.types import RunnableConfig
 
-from src.runtime_diagnostics import failure_artifact, success_artifact
+from src.runtime_diagnostics import ArtifactStatus, failure_artifact, success_artifact
 from src.tooling.runtime import TOOL_SERVICE, ToolInvocation
 
 from . import message_utils, support
@@ -155,6 +155,8 @@ Provide your independent consultant review."""
             messages = [HumanMessage(content=prompt)]
             active_llm = llm_with_tools or llm
             content_str = ""
+            had_tool_errors = False
+            tool_failure_count = 0
 
             for iteration in range(max_tool_iterations + 1):
                 response = await agent_runtime.invoke_with_rate_limit_handling(
@@ -186,6 +188,7 @@ Provide your independent consultant review."""
                 for tool_call in capped:
                     tool_fn = tools_by_name.get(tool_call["name"])
                     tool_call_id = tool_call.get("id", tool_call["name"])
+                    result_failed = False
                     if tool_fn:
                         try:
                             tool_result = await TOOL_SERVICE.execute(
@@ -199,9 +202,31 @@ Provide your independent consultant review."""
                             )
                             result = tool_result.value
                         except Exception as tool_err:
+                            result_failed = True
+                            logger.warning(
+                                "consultant_tool_failed",
+                                ticker=ticker,
+                                tool=tool_call["name"],
+                                error=str(tool_err),
+                            )
                             result = f"TOOL_ERROR: {str(tool_err)}"
                     else:
+                        result_failed = True
                         result = f"Unknown tool: {tool_call['name']}"
+                    if isinstance(result, str):
+                        stripped = result.strip()
+                        if stripped.startswith(("TOOL_ERROR:", "TOOL_BLOCKED:")):
+                            result_failed = True
+                        else:
+                            try:
+                                payload = json.loads(stripped)
+                            except (TypeError, ValueError):
+                                payload = None
+                            if isinstance(payload, dict) and payload.get("error"):
+                                result_failed = True
+                    if result_failed:
+                        had_tool_errors = True
+                        tool_failure_count += 1
                     messages.append(TM(content=str(result), tool_call_id=tool_call_id))
 
                 for tool_call in tool_calls[max_tool_calls_per_turn:]:
@@ -248,15 +273,32 @@ Provide your independent consultant review."""
                 "consultant_review_complete",
                 ticker=ticker,
                 review_length=len(content_str),
-                has_errors="ERROR" in content_str.upper()
-                or "FAIL" in content_str.upper(),
+                has_errors=had_tool_errors,
+                tool_failure_count=tool_failure_count,
                 truncated=trunc_info["truncated"],
             )
+            if had_tool_errors:
+                status = ArtifactStatus(
+                    complete=True,
+                    ok=False,
+                    content=content_str,
+                    error_kind="application_error",
+                    provider=support.infer_provider_name(llm),
+                    message="Consultant review completed with tool failures",
+                    retryable=False,
+                )
+                return {
+                    "consultant_review": content_str,
+                    "consultant_tool_failures": tool_failure_count,
+                    "artifact_statuses": {
+                        "consultant_review": status.as_dict(),
+                    },
+                }
             return success_artifact(
                 "consultant_review",
                 content_str,
                 provider=support.infer_provider_name(llm),
-            )
+            ) | {"consultant_tool_failures": tool_failure_count}
         except Exception as exc:
             logger.error(
                 "consultant_node_error",
