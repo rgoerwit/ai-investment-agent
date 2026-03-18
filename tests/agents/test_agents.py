@@ -457,6 +457,56 @@ class TestFundamentalsAnalystPrompt:
         assert "agent_name" in prompt_info  # Has an agent name
         assert prompt_info["agent_name"]  # Agent name is not empty
 
+    @pytest.mark.asyncio
+    async def test_fundamentals_analyst_repairs_legacy_datablock_shape(self):
+        """Legacy ``### DATA_BLOCK`` output should be normalized before gating."""
+        from src.agents import create_analyst_node
+
+        mock_llm = MagicMock()
+        legacy_report = """### DATA_BLOCK
+SECTOR: Industrials
+RAW_HEALTH_SCORE: 5/12
+ADJUSTED_HEALTH_SCORE: 41.7% (based on 12 available points)
+RAW_GROWTH_SCORE: 1/6
+ADJUSTED_GROWTH_SCORE: 16.7% (based on 6 available points)
+US_REVENUE_PERCENT: Not disclosed
+ANALYST_COVERAGE_ENGLISH: 1
+PE_RATIO_TTM: 17.57
+ADR_EXISTS: NO
+IBKR_ACCESSIBILITY: Direct
+PFIC_RISK: LOW
+
+### FINANCIAL HEALTH DETAIL
+Score details here.
+"""
+        mock_response = SimpleNamespace(content=legacy_report, tool_calls=None)
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling",
+            new=AsyncMock(return_value=mock_response),
+        ):
+            node = create_analyst_node(
+                mock_llm,
+                "fundamentals_analyst",
+                [],
+                "fundamentals_report",
+            )
+            state = {
+                "messages": [],
+                "company_of_interest": "TEST.US",
+                "trade_date": "2025-12-06",
+            }
+            config = {
+                "configurable": {
+                    "context": MagicMock(ticker="TEST.US", trade_date="2025-12-06")
+                }
+            }
+
+            result = await node(state, config)
+
+        assert "### --- START DATA_BLOCK ---" in result["fundamentals_report"]
+        assert "### --- END DATA_BLOCK ---" in result["fundamentals_report"]
+
 
 class TestParallelDebateInfrastructure:
     """Test parallel debate state management and merging."""

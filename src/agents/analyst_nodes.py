@@ -13,6 +13,7 @@ from src.data_block_utils import (
     extract_last_data_block,
     has_parseable_data_block,
     has_parseable_fenced_block,
+    normalize_legacy_data_block_report,
 )
 from src.runtime_diagnostics import failure_artifact, success_artifact
 
@@ -21,6 +22,22 @@ from . import runtime as agent_runtime
 from .state import AgentState
 
 logger = structlog.get_logger(__name__)
+
+
+def _normalize_structured_output(agent_key: str, content: str, ticker: str) -> str:
+    """Apply narrow deterministic output repairs for known model-format drift."""
+    if agent_key != "fundamentals_analyst":
+        return content
+
+    normalized = normalize_legacy_data_block_report(content)
+    if normalized != content:
+        logger.warning(
+            "fundamentals_legacy_datablock_repaired",
+            ticker=ticker,
+            original_has_datablock=has_parseable_data_block(content),
+            repaired_has_datablock=has_parseable_data_block(normalized),
+        )
+    return normalized
 
 
 def create_analyst_node(
@@ -258,6 +275,7 @@ def create_analyst_node(
                 return new_state
 
             content_str = message_utils.extract_string_content(response.content)
+            content_str = _normalize_structured_output(agent_key, content_str, ticker)
 
             if (
                 allow_retry
@@ -291,6 +309,9 @@ def create_analyst_node(
                     retry_response.name = agent_key
                     retry_content_str = message_utils.extract_string_content(
                         retry_response.content
+                    )
+                    retry_content_str = _normalize_structured_output(
+                        agent_key, retry_content_str, ticker
                     )
                     retry_tool_calls = getattr(retry_response, "tool_calls", None)
                     retry_has_tool_calls = (
