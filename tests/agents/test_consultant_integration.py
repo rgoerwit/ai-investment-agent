@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from langgraph.types import RunnableConfig
 
-from src.agents import create_consultant_node
+from src.agents import create_consultant_node, create_portfolio_manager_node
 from src.graph import create_trading_graph
 from src.llms import create_consultant_llm, get_consultant_llm
 from src.tooling.runtime import ToolResult
@@ -364,6 +364,79 @@ class TestGraphIntegration:
 
         assert graph is not None
         # The graph should have Research Manager → Consultant → Trader path
+
+
+class TestPortfolioManagerConsultantGating:
+    """PM should ignore consultant artifacts that are explicitly invalid."""
+
+    @pytest.mark.asyncio
+    async def test_pm_ignores_invalid_consultant_review_for_flag_generation(self):
+        mock_llm = Mock()
+        mock_response = Mock()
+        mock_response.content = "## FINAL DECISION: HOLD"
+        captured_prompt: dict[str, str] = {}
+
+        async def mock_invoke(*args, **kwargs):
+            messages = args[1]
+            captured_prompt["text"] = messages[0].content
+            return mock_response
+
+        consultant_review = """
+### CONSULTANT REVIEW: CONDITIONAL APPROVAL
+
+Conditions:
+- OCF data needs verification
+- Segment breakdown missing
+
+**Overall Assessment**: CONDITIONAL APPROVAL
+"""
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                mock_prompt = Mock()
+                mock_prompt.system_message = "You are the portfolio manager."
+                mock_prompt.agent_name = "Portfolio Manager"
+                mock_get_prompt.return_value = mock_prompt
+
+                node = create_portfolio_manager_node(mock_llm, None)
+                state = {
+                    "market_report": "Market report",
+                    "sentiment_report": "Sentiment report",
+                    "news_report": "News report",
+                    "fundamentals_report": (
+                        "--- START DATA_BLOCK ---\n"
+                        "PFIC_RISK: LOW\n"
+                        "--- END DATA_BLOCK ---"
+                    ),
+                    "value_trap_report": "",
+                    "investment_plan": "Research plan",
+                    "consultant_review": consultant_review,
+                    "trader_investment_plan": "Trader plan",
+                    "risk_debate_state": {
+                        "current_risky_response": "Risky view",
+                        "current_safe_response": "Safe view",
+                        "current_neutral_response": "Neutral view",
+                    },
+                    "company_of_interest": "TEST.T",
+                    "red_flags": [],
+                    "pre_screening_result": "PASS",
+                    "artifact_statuses": {
+                        "consultant_review": {
+                            "complete": True,
+                            "ok": False,
+                            "content": consultant_review,
+                        }
+                    },
+                }
+
+                result = await node(state, RunnableConfig(configurable={}))
+
+        prompt_text = captured_prompt["text"]
+        assert "CONSULTANT_CONDITIONAL" not in prompt_text
+        assert "N/A (consultant disabled or unavailable)" in prompt_text
+        assert result["final_trade_decision"] == "## FINAL DECISION: HOLD"
 
 
 class TestConsultantValueAddition:

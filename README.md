@@ -460,8 +460,21 @@ poetry install
 **Problem:** Poetry complains about Python version  
 **Solution:** Ensure Python 3.12+ is active: `python --version`
 
-**Problem:** API errors or rate limits  
+**Problem:** API errors or rate limits
 **Solution:** Check `.env` file has valid API keys, verify quotas at provider dashboards
+
+**Problem:** `portfolio_manager.py` hangs on "Loading analyses..." or imports take 10–15 seconds (macOS)
+**Solution:** macOS Spotlight is indexing `.venv/` and/or `results/`. One-time fix:
+```bash
+touch .venv/.metadata_never_index results/.metadata_never_index
+```
+Without this, each of 5,000+ result files takes ~500ms to read (Spotlight I/O contention), making the analysis index rebuild take ~46 minutes instead of ~10 seconds.
+
+**Problem:** `poetry install` fails with `Unable to find installation candidates for primp`
+**Solution:** The lock file is stale. Regenerate it:
+```bash
+poetry lock --no-cache --regenerate && poetry install
+```
 
 ---
 
@@ -470,8 +483,8 @@ poetry install
 For users who trade international equities via Interactive Brokers, an optional reconciliation tool bridges the gap between evaluator recommendations and live portfolio positions.
 
 ```bash
-# Requires IBKR credentials in .env and the ibind optional dependency
-poetry install -E ibkr
+# IBKR client dependencies are installed by default
+poetry install
 
 # All portfolio_manager.py commands require the Poetry venv.
 # Either prefix every command with `poetry run`, or activate once:

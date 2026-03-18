@@ -16,7 +16,7 @@ Usage (requires Poetry venv — either activate it or prefix with `poetry run`):
     # Or activate once: source .venv/bin/activate
     # Then plain `python scripts/portfolio_manager.py` works for the session.
 
-Requires: poetry install -E ibkr
+Requires: poetry install
 """
 
 from __future__ import annotations
@@ -223,6 +223,22 @@ def _check_config(config) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+
+def _preflight_ibkr_requirements() -> None:
+    """Fail fast on missing IBKR runtime/config before scanning analysis files."""
+    try:
+        from src.ibkr.client import IbkrClient  # noqa: F401
+        from src.ibkr_config import ibkr_config
+    except ImportError:
+        print(
+            "ibind not installed. Run: poetry install\n"
+            "Or use --read-only for offline mode.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    _check_config(ibkr_config)
 
 
 def parse_args() -> argparse.Namespace:
@@ -2380,7 +2396,7 @@ def cmd_test_auth(args) -> None:
         from src.ibkr_config import ibkr_config
     except ImportError:
         print(
-            "ibind not installed. Run: poetry install -E ibkr",
+            "ibind not installed. Run: poetry install",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -2668,6 +2684,9 @@ def main() -> None:
         )
         sys.exit(1)
 
+    if not args.read_only:
+        _preflight_ibkr_requirements()
+
     results_dir = Path(args.results_dir)
 
     # Load analyses from disk (always works, no IBKR needed)
@@ -2710,7 +2729,7 @@ def main() -> None:
 
         except ImportError:
             print(
-                "ibind not installed. Run: poetry install -E ibkr\n"
+                "ibind not installed. Run: poetry install\n"
                 "Or use --read-only for offline mode.",
                 file=sys.stderr,
             )

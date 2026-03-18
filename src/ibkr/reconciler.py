@@ -24,6 +24,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -496,9 +497,9 @@ def _build_analysis_record_from_data(
 
     ticker = snapshot.get("ticker") or data.get("ticker", "")
     if not ticker:
-        parts = filepath.stem.split("_")
-        if len(parts) >= 3:
-            ticker = parts[0].replace("_", ".")
+        filename_ticker = _extract_filename_analysis_key(filepath.name)
+        if filename_ticker:
+            ticker = filename_ticker.replace("_", ".")
         if not ticker:
             return None
 
@@ -805,7 +806,32 @@ def load_latest_analyses(
             )
         )
 
+    # Background thread emits a heartbeat every 30 s so a blocked open() call
+    # (e.g. macOS Spotlight holding a file) doesn't look like a silent hang.
+    _hb_state: dict[str, object] = {"file": "", "n": 0, "loaded": 0}
+    _hb_stop = threading.Event()
+
+    def _heartbeat_worker() -> None:
+        while not _hb_stop.wait(timeout=30.0):
+            if progress is not None and _hb_state["file"]:
+                progress(
+                    AnalysisLoadProgress(
+                        phase="parsing",
+                        total_files=total_files,
+                        processed_files=int(_hb_state["n"]),
+                        loaded_analyses=int(_hb_state["loaded"]),
+                        current_file=str(_hb_state["file"]),
+                    )
+                )
+
+    threading.Thread(
+        target=_heartbeat_worker, daemon=True, name="index-scan-heartbeat"
+    ).start()
+
     for processed_files, filepath in enumerate(filepaths, start=1):
+        _hb_state["file"] = filepath.name
+        _hb_state["n"] = processed_files
+        _hb_state["loaded"] = len(analyses)
         filename_key = _extract_filename_analysis_key(filepath.name)
 
         def emit_progress(
@@ -831,13 +857,27 @@ def load_latest_analyses(
             emit_progress()
             continue
 
+        _t0 = time.monotonic()
         try:
             record = _build_analysis_record_from_file(filepath)
         except (json.JSONDecodeError, OSError) as e:
             failed_files += 1
-            logger.debug("analysis_load_failed", file=filepath.name, error=str(e))
+            logger.warning(
+                "analysis_file_unparseable",
+                file=filepath.name,
+                error=str(e),
+                recommendation="delete_and_rerun_analysis",
+            )
             emit_progress()
             continue
+        _elapsed = time.monotonic() - _t0
+        if _elapsed > 5.0:
+            logger.warning(
+                "analysis_file_slow_read",
+                file=filepath.name,
+                elapsed_s=round(_elapsed, 1),
+                hint="possible_spotlight_contention",
+            )
 
         if record is None:
             missing_ticker_files += 1
@@ -856,6 +896,7 @@ def load_latest_analyses(
             seen_filename_keys.add(filename_key)
         emit_progress()
 
+    _hb_stop.set()
     logger.debug(
         "analyses_scan_complete",
         total_files=total_files,

@@ -55,8 +55,8 @@ def check_python_version() -> tuple[bool, list[str]]:
     issues = []
     major, minor = sys.version_info[:2]
 
-    if (major, minor) < (3, 10):
-        issues.append(f"Python {major}.{minor} detected. Requires Python 3.10+")
+    if (major, minor) < (3, 11) or (major, minor) >= (3, 13):
+        issues.append(f"Python {major}.{minor} detected. Requires Python >=3.11,<3.13")
         logger.error("python_version_fail", version=f"{major}.{minor}")
         return False, issues
 

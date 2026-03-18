@@ -128,9 +128,7 @@ class IbkrClient:
             from ibind import IbkrClient as IBClient
             from ibind.oauth.oauth1a import OAuth1aConfig
         except ImportError as e:
-            raise ImportError(
-                "ibind package not installed. Run: poetry install -E ibkr"
-            ) from e
+            raise ImportError("ibind package not installed. Run: poetry install") from e
 
         try:
             # ibind requires credentials bundled into an OAuth1aConfig dataclass.

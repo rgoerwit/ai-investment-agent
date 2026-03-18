@@ -372,7 +372,7 @@ NEUTRAL ANALYST (Balanced):
                     ),
                 )
 
-        consultant_review = state.get("consultant_review", "")
+        consultant_review = get_valid_artifact_content(state, "consultant_review")
         if consultant_review:
             if not isinstance(consultant_review, str):
                 consultant_review = message_utils.extract_string_content(

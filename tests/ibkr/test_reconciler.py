@@ -779,6 +779,38 @@ class TestLoadLatestAnalyses:
         result = load_latest_analyses(tmp_path)
         assert result["0005.HK"].exchange == "HK"
 
+    def test_legacy_filename_fallback_recovers_hk_ticker_suffix(self, tmp_path):
+        """Older files without snapshot ticker should recover suffix from filename."""
+        data = {
+            "final_decision": {
+                "decision": "VERDICT: BUY\nHEALTH_ADJ: 80\nGROWTH_ADJ: 70"
+            },
+            "investment_analysis": {},
+        }
+
+        filepath = tmp_path / "0005_HK_2026-02-20_analysis.json"
+        record = _build_analysis_record_from_data(filepath, data)
+
+        assert record is not None
+        assert record.ticker == "0005.HK"
+        assert record.exchange == "HK"
+
+    def test_legacy_filename_fallback_recovers_tse_ticker_suffix(self, tmp_path):
+        """Older files without snapshot ticker should recover TSE suffix from filename."""
+        data = {
+            "final_decision": {
+                "decision": "VERDICT: HOLD\nHEALTH_ADJ: 62\nGROWTH_ADJ: 55"
+            },
+            "investment_analysis": {},
+        }
+
+        filepath = tmp_path / "7203_T_2026-02-20_analysis.json"
+        record = _build_analysis_record_from_data(filepath, data)
+
+        assert record is not None
+        assert record.ticker == "7203.T"
+        assert record.exchange == "T"
+
     def test_is_quick_mode_loaded_from_snapshot(self, tmp_path):
         """is_quick_mode is extracted from prediction_snapshot when present."""
         data = {

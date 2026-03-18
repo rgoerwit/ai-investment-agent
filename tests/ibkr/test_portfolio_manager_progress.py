@@ -3,13 +3,44 @@
 import json
 import logging
 from argparse import Namespace
+from types import ModuleType
+from unittest.mock import patch
+
+import pytest
 
 from scripts.portfolio_manager import (
     _configure_external_loggers,
     _load_analyses_with_progress,
     _load_ibkr_context,
+    _preflight_ibkr_requirements,
+    main,
 )
 from src.ibkr.models import PortfolioSummary
+
+
+def _make_args(**overrides) -> Namespace:
+    defaults = {
+        "debug": False,
+        "test_auth": False,
+        "execute": False,
+        "results_dir": "results/",
+        "read_only": False,
+        "recommend": False,
+        "report_only": True,
+        "refresh_stale": False,
+        "json": False,
+        "output": "",
+        "max_age": 14,
+        "drift_pct": 15.0,
+        "sector_limit": 30.0,
+        "exchange_limit": 40.0,
+        "watchlist_name": None,
+        "quick": False,
+        "cash_buffer": 0.05,
+        "account_id": "",
+    }
+    defaults.update(overrides)
+    return Namespace(**defaults)
 
 
 def test_load_analyses_with_progress_emits_stderr_updates(tmp_path, capsys):
@@ -190,6 +221,115 @@ def test_load_ibkr_context_emits_phase_status_and_returns_live_state(capsys):
     assert loaded_watchlist_name == "watchlist-2026"
     assert loaded_watchlist_total == 2
     assert live_orders == [{"ticker": "7203", "side": "BUY"}]
+
+
+def test_preflight_ibkr_requirements_fails_when_ibind_missing(capsys):
+    """Missing IBKR runtime should fail before any results scan begins."""
+    original_import = __import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "src.ibkr.client":
+            raise ImportError("No module named 'ibind'")
+        return original_import(name, globals, locals, fromlist, level)
+
+    with patch("builtins.__import__", side_effect=fake_import):
+        with pytest.raises(SystemExit):
+            _preflight_ibkr_requirements()
+
+    captured = capsys.readouterr()
+    assert "ibind not installed. Run: poetry install" in captured.err
+    assert "Or use --read-only for offline mode." in captured.err
+
+
+def test_main_non_read_only_preflight_failure_skips_analysis_load():
+    """Normal mode should abort on IBKR preflight before scanning results."""
+    args = _make_args(read_only=False)
+
+    with (
+        patch("scripts.portfolio_manager.parse_args", return_value=args),
+        patch("scripts.portfolio_manager._configure_logging"),
+        patch(
+            "scripts.portfolio_manager._preflight_ibkr_requirements",
+            side_effect=SystemExit(1),
+        ),
+        patch("scripts.portfolio_manager._load_analyses_with_progress") as mock_load,
+    ):
+        with pytest.raises(SystemExit):
+            main()
+
+    mock_load.assert_not_called()
+
+
+def test_main_read_only_bypasses_ibkr_preflight_and_loads_analyses(capsys):
+    """Read-only mode should still scan saved analyses without IBKR preflight."""
+    args = _make_args(read_only=True)
+
+    with (
+        patch("scripts.portfolio_manager.parse_args", return_value=args),
+        patch("scripts.portfolio_manager._configure_logging"),
+        patch(
+            "scripts.portfolio_manager._preflight_ibkr_requirements"
+        ) as mock_preflight,
+        patch(
+            "scripts.portfolio_manager._load_analyses_with_progress",
+            return_value={"7203.T": object()},
+        ) as mock_load,
+        patch("scripts.portfolio_manager.reconcile", return_value=[]),
+        patch("scripts.portfolio_manager.compute_portfolio_health", return_value=[]),
+        patch("scripts.portfolio_manager._store_macro_event_if_detected"),
+        patch("scripts.portfolio_manager.format_report", return_value="report"),
+    ):
+        main()
+
+    captured = capsys.readouterr()
+    mock_preflight.assert_not_called()
+    mock_load.assert_called_once()
+    assert "Read-only mode: no IBKR connection" in captured.err
+    assert captured.out.strip() == "report"
+
+
+def test_main_test_auth_bypasses_analysis_loading():
+    """Credential test mode should exit before touching saved analyses."""
+    args = _make_args(test_auth=True)
+
+    with (
+        patch("scripts.portfolio_manager.parse_args", return_value=args),
+        patch("scripts.portfolio_manager._configure_logging"),
+        patch("scripts.portfolio_manager.cmd_test_auth") as mock_test_auth,
+        patch("scripts.portfolio_manager._load_analyses_with_progress") as mock_load,
+    ):
+        main()
+
+    mock_test_auth.assert_called_once_with(args)
+    mock_load.assert_not_called()
+
+
+def test_preflight_ibkr_requirements_checks_config_before_scanning():
+    """Preflight should validate required IBKR config without connecting."""
+    fake_client_module = ModuleType("src.ibkr.client")
+    fake_client_module.IbkrClient = object
+    fake_config_module = ModuleType("src.ibkr_config")
+    fake_config = object()
+    fake_config_module.ibkr_config = fake_config
+    original_import = __import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "src.ibkr.client":
+            return fake_client_module
+        if name == "src.ibkr_config":
+            return fake_config_module
+        return original_import(name, globals, locals, fromlist, level)
+
+    with (
+        patch("builtins.__import__", side_effect=fake_import),
+        patch(
+            "scripts.portfolio_manager._check_config", side_effect=SystemExit(1)
+        ) as mock_check,
+    ):
+        with pytest.raises(SystemExit):
+            _preflight_ibkr_requirements()
+
+    mock_check.assert_called_once_with(fake_config)
 
 
 def test_configure_external_loggers_suppresses_transport_noise_in_normal_mode():
