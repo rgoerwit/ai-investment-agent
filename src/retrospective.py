@@ -27,6 +27,7 @@ from typing import Any
 import structlog
 
 from src.config import config
+from src.data_block_utils import extract_last_data_block
 from src.runtime_diagnostics import classify_failure
 
 logger = structlog.get_logger(__name__)
@@ -183,14 +184,10 @@ def _extract_data_block_field(fundamentals_report: str, field_name: str) -> str 
     if not fundamentals_report:
         return None
 
-    data_block_pattern = (
-        r"### --- START DATA_BLOCK[^\n]*---(.+?)### --- END DATA_BLOCK ---"
-    )
-    blocks = list(re.finditer(data_block_pattern, fundamentals_report, re.DOTALL))
-    if not blocks:
+    data_block = extract_last_data_block(fundamentals_report)
+    if not data_block:
         return None
 
-    data_block = blocks[-1].group(1)
     match = re.search(rf"{field_name}:\s*(.+?)(?:\n|$)", data_block, re.IGNORECASE)
     if match:
         value = match.group(1).strip()

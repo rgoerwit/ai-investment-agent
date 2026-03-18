@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
@@ -10,6 +9,11 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.types import RunnableConfig
 
+from src.data_block_utils import (
+    extract_last_data_block,
+    has_parseable_data_block,
+    has_parseable_fenced_block,
+)
 from src.runtime_diagnostics import failure_artifact, success_artifact
 
 from . import message_utils, support
@@ -265,7 +269,7 @@ def create_analyst_node(
                     agent_key=agent_key,
                     ticker=ticker,
                     original_length=len(content_str),
-                    has_datablock="DATA_BLOCK" in content_str if content_str else False,
+                    has_datablock=has_parseable_data_block(content_str),
                     message="Insufficient output from quick LLM, retrying once with deep thinking",
                 )
                 retry_runnable = (
@@ -308,11 +312,7 @@ def create_analyst_node(
                         ticker=ticker,
                         original_length=len(content_str),
                         retry_length=len(retry_content_str),
-                        retry_has_datablock=(
-                            "DATA_BLOCK" in retry_content_str
-                            if retry_content_str
-                            else False
-                        ),
+                        retry_has_datablock=has_parseable_data_block(retry_content_str),
                         retry_improved=len(retry_content_str) > len(content_str),
                     )
                     content_str = retry_content_str
@@ -335,7 +335,7 @@ def create_analyst_node(
             if agent_key == "fundamentals_analyst":
                 logger.info(
                     "fundamentals_output",
-                    has_datablock="DATA_BLOCK" in content_str,
+                    has_datablock=has_parseable_data_block(content_str),
                     length=len(content_str),
                 )
             return new_state
@@ -384,7 +384,8 @@ def create_valuation_calculator_node(llm) -> Callable:
                 fundamentals_report
             )
 
-        if not fundamentals_report or "DATA_BLOCK" not in fundamentals_report:
+        data_block = extract_last_data_block(fundamentals_report, include_markers=True)
+        if not data_block:
             logger.warning(
                 "valuation_calculator_no_datablock",
                 ticker=ticker,
@@ -395,23 +396,6 @@ def create_valuation_calculator_node(llm) -> Callable:
                 "DATA_BLOCK missing",
                 provider=support.infer_provider_name(llm),
             )
-
-        data_block_pattern = (
-            r"### --- START DATA_BLOCK[^\n]*---(.+?)### --- END DATA_BLOCK ---"
-        )
-        blocks = list(re.finditer(data_block_pattern, fundamentals_report, re.DOTALL))
-        if not blocks:
-            logger.warning(
-                "valuation_calculator_datablock_regex_failed",
-                ticker=ticker,
-                message="DATA_BLOCK text present but regex extraction failed",
-            )
-            return failure_artifact(
-                "valuation_params",
-                "DATA_BLOCK regex extraction failed",
-                provider=support.infer_provider_name(llm),
-            )
-        data_block = blocks[-1].group(0)
 
         prompt = f"""{agent_prompt.system_message}
 
@@ -435,7 +419,9 @@ Extract valuation parameters and output in the required format."""
             logger.info(
                 "valuation_calculator_complete",
                 ticker=ticker,
-                has_params_block="VALUATION_PARAMS" in content_str,
+                has_params_block=has_parseable_fenced_block(
+                    content_str, "VALUATION_PARAMS"
+                ),
                 content_length=len(content_str),
             )
             return success_artifact(

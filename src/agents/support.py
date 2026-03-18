@@ -8,6 +8,7 @@ import structlog
 from langchain_core.messages import ToolMessage
 from langgraph.types import RunnableConfig
 
+from src.data_block_utils import extract_last_data_block, has_parseable_data_block
 from src.runtime_diagnostics import get_model_name as _get_model_name
 from src.runtime_diagnostics import infer_provider
 
@@ -478,7 +479,7 @@ def _is_output_insufficient(content: str, agent_key: str) -> bool:
         return not has_tool_output or len(content) < 200
 
     if agent_key == "fundamentals_analyst":
-        return "DATA_BLOCK" not in content
+        return not has_parseable_data_block(content)
 
     if agent_key == "news_analyst":
         return len(content) < 200
@@ -491,7 +492,10 @@ def _extract_sector_from_state(state: dict) -> str:
     fundamentals = state.get("fundamentals_report", "") or ""
     if not fundamentals:
         return "Unknown"
-    match = re.search(r"SECTOR:\s*(.+?)(?:\n|$)", fundamentals, re.IGNORECASE)
+    data_block = extract_last_data_block(fundamentals)
+    if not data_block:
+        return "Unknown"
+    match = re.search(r"SECTOR:\s*(.+?)(?:\n|$)", data_block, re.IGNORECASE)
     if match:
         value = match.group(1).strip()
         if value.upper() not in ("N/A", "NA", "NONE", "-", ""):

@@ -78,6 +78,32 @@ class TestAnalysisValidity:
         assert validity["publishable"] is True
         assert validity["has_data_block"] is True
 
+    def test_publishable_ignores_unparseable_datablock_mentions(self):
+        result = {
+            "market_report": "market",
+            "sentiment_report": "sentiment",
+            "news_report": "news",
+            "value_trap_report": "value trap",
+            "pre_screening_result": "PASS",
+            "fundamentals_report": "The analyst discusses the DATA_BLOCK but never emits the fenced section.",
+            "final_trade_decision": "VERDICT: BUY",
+            "artifact_statuses": {
+                "market_report": {"ok": True, "content": "market"},
+                "sentiment_report": {"ok": True, "content": "sentiment"},
+                "news_report": {"ok": True, "content": "news"},
+                "value_trap_report": {"ok": True, "content": "value trap"},
+                "fundamentals_report": {
+                    "ok": True,
+                    "content": "The analyst discusses the DATA_BLOCK but never emits the fenced section.",
+                },
+                "final_trade_decision": {"ok": True, "content": "VERDICT: BUY"},
+            },
+        }
+
+        validity = build_analysis_validity(result)
+
+        assert validity["has_data_block"] is False
+
     def test_publishable_fails_with_invalid_pm_artifact(self):
         result = {
             "market_report": "market",

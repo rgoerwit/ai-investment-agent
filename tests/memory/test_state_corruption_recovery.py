@@ -752,12 +752,12 @@ class TestEndToEndInformationFlow:
             "fundamentals_report": """
             FUNDAMENTALS ANALYSIS - TEST
 
-            === DATA_BLOCK ===
+            ### --- START DATA_BLOCK ---
             P/E ratio: 12.5
             D/E ratio: 45%
             Revenue growth: 23%
             Free cash flow: $150M
-            === END DATA_BLOCK ===
+            ### --- END DATA_BLOCK ---
 
             Company shows strong fundamentals with reasonable valuation.
             """,
@@ -944,12 +944,12 @@ class TestEndToEndInformationFlow:
             "fundamentals_report": """
             FUNDAMENTALS ANALYSIS - RISKY
 
-            === DATA_BLOCK ===
+            ### --- START DATA_BLOCK ---
             D/E Ratio: 850%
             Net Income: $50M
             Free Cash Flow: -$120M
             Interest Coverage: 1.2x
-            === END DATA_BLOCK ===
+            ### --- END DATA_BLOCK ---
 
             WARNING: Multiple red flags detected. See pre-screening results.
             """,

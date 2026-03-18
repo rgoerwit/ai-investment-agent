@@ -8,6 +8,7 @@ import structlog
 from langchain_core.messages import HumanMessage
 from langgraph.types import RunnableConfig
 
+from src.data_block_utils import has_parseable_data_block
 from src.runtime_diagnostics import (
     failure_artifact,
     get_artifact_status,
@@ -409,18 +410,18 @@ NEUTRAL ANALYST (Balanced):
             value_trap_present=bool(state.get("value_trap_report")),
             value_trap_valid=get_artifact_status(state, "value_trap_report").ok,
             consultant_valid=get_artifact_status(state, "consultant_review").ok,
-            has_datablock="DATA_BLOCK" in fundamentals if fundamentals else False,
+            has_datablock=has_parseable_data_block(fundamentals),
             fund_len=len(fundamentals) if fundamentals else 0,
             value_trap_len=len(value_trap) if value_trap else 0,
             red_flags_count=len(red_flags),
         )
 
-        if not fundamentals or "DATA_BLOCK" not in fundamentals:
+        if not fundamentals or not has_parseable_data_block(fundamentals):
             logger.error(
                 "pm_skipped_invalid_fundamentals",
                 ticker=ticker,
                 fundamentals_valid=get_artifact_status(state, "fundamentals_report").ok,
-                has_datablock="DATA_BLOCK" in fundamentals if fundamentals else False,
+                has_datablock=has_parseable_data_block(fundamentals),
             )
             return failure_artifact(
                 "final_trade_decision",
@@ -583,7 +584,7 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
             sector = RedFlagDetector.detect_sector(fundamentals_report)
             metrics = RedFlagDetector.extract_metrics(fundamentals_report)
 
-            has_data_block = "### --- START DATA_BLOCK" in fundamentals_report
+            has_data_block = has_parseable_data_block(fundamentals_report)
             core_metrics = [
                 metrics.get("debt_to_equity"),
                 metrics.get("net_income"),

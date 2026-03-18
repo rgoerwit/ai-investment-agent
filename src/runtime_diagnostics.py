@@ -5,6 +5,8 @@ import socket
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
+from src.data_block_utils import has_parseable_data_block
+
 ProviderName = Literal["google", "openai", "anthropic", "unknown"]
 FailureKind = Literal[
     "dns_resolution",
@@ -320,7 +322,7 @@ def get_valid_artifact_content(
 def build_analysis_validity(result: dict[str, Any]) -> dict[str, Any]:
     fundamentals = get_valid_artifact_content(result, "fundamentals_report")
     pm_decision = get_valid_artifact_content(result, "final_trade_decision")
-    data_block_present = "DATA_BLOCK" in fundamentals if fundamentals else False
+    data_block_present = has_parseable_data_block(fundamentals)
     required_failures: dict[str, Any] = {}
     optional_failures: dict[str, Any] = {}
 

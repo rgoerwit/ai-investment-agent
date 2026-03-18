@@ -269,6 +269,17 @@ SECTOR: N/A
         assert _extract_data_block_field(None, "SECTOR") is None
         assert _extract_data_block_float("", "PRICE") is None
 
+    def test_extract_ignores_unparseable_datablock_mentions(self):
+        report = """
+The narrative mentions DATA_BLOCK but does not include the fenced section.
+
+DATA_BLOCK:
+SECTOR: Industrials
+CURRENT_PRICE: 145.00
+"""
+        assert _extract_data_block_field(report, "SECTOR") is None
+        assert _extract_data_block_float(report, "CURRENT_PRICE") is None
+
     def test_extract_adjusted_health_score_with_percent(self):
         """ADJUSTED_HEALTH_SCORE has % sign — float extraction handles it."""
         val = _extract_data_block_float(SAMPLE_DATA_BLOCK, "ADJUSTED_HEALTH_SCORE")

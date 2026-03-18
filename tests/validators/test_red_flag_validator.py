@@ -103,6 +103,24 @@ PE_RATIO_TTM: 14.50
         numeric_metrics = {k: v for k, v in metrics.items() if not k.startswith("_")}
         assert all(v is None for v in numeric_metrics.values())
 
+    def test_extract_ignores_datablock_mentions_without_fenced_block(self):
+        """Mentioning DATA_BLOCK should not be treated as a parseable structured block."""
+        report = """
+The analysis below references the DATA_BLOCK, but no fenced structured block was emitted.
+
+DATA_BLOCK:
+Health score looks acceptable, but formatting is incomplete.
+
+D/E: 120
+Free Cash Flow: $450M
+"""
+
+        metrics = RedFlagDetector.extract_metrics(report)
+
+        assert metrics["adjusted_health_score"] is None
+        assert metrics["debt_to_equity"] is None
+        assert metrics["fcf"] is None
+
     def test_extract_with_descriptive_marker(self):
         """Test extraction when DATA_BLOCK marker contains descriptive text (v8.6+)."""
         report = """
@@ -1003,6 +1021,14 @@ SECTOR: {name}
 No SECTOR field here
 """
         assert RedFlagDetector.detect_sector(report_no_sector) == Sector.INDUSTRIALS
+
+        malformed_report = """
+The narrative mentions DATA_BLOCK but does not emit the fenced structured block.
+
+DATA_BLOCK:
+SECTOR: Energy
+"""
+        assert RedFlagDetector.detect_sector(malformed_report) == Sector.INDUSTRIALS
 
     @pytest.mark.asyncio
     async def test_detect_sector_backward_compat(self, validator_node):

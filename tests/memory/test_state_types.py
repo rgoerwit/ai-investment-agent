@@ -233,9 +233,10 @@ class TestStateFieldTypesInPractice:
         assert metrics is not None
         assert isinstance(metrics, dict)
 
-        # This should FAIL if given a list (simulating the bug)
-        with pytest.raises((TypeError, AttributeError)):
-            RedFlagDetector.extract_metrics([report])  # List instead of string
+        # Non-string inputs should now degrade safely rather than throwing.
+        list_metrics = RedFlagDetector.extract_metrics([report])  # List instead of str
+        assert isinstance(list_metrics, dict)
+        assert list_metrics["adjusted_health_score"] is None
 
     def test_state_dict_types_match_expectations(self):
         """Test that state dict values have expected types."""

@@ -26,6 +26,8 @@ from typing import Any
 
 import structlog
 
+from src.data_block_utils import extract_last_data_block
+
 logger = structlog.get_logger(__name__)
 
 
@@ -166,8 +168,32 @@ class RedFlagDetector:
         if not fundamentals_report:
             return Sector.INDUSTRIALS
 
-        # Extract SECTOR from DATA_BLOCK
-        sector_match = re.search(r"SECTOR:\s*(.+?)(?:\n|$)", fundamentals_report)
+        # Prefer the parseable DATA_BLOCK when present.
+        data_block = extract_last_data_block(fundamentals_report)
+        sector_match = (
+            re.search(r"SECTOR:\s*(.+?)(?:\n|$)", data_block) if data_block else None
+        )
+
+        if not sector_match:
+            # Legacy fundamentals reports often place SECTOR in the narrative
+            # header above DATA_BLOCK. Preserve that behavior, but do not scan
+            # into malformed pseudo-blocks like a bare "DATA_BLOCK:" section.
+            marker_positions = [
+                pos
+                for pos in (
+                    fundamentals_report.find("### --- START DATA_BLOCK"),
+                    fundamentals_report.find("\nDATA_BLOCK:"),
+                )
+                if pos >= 0
+            ]
+            header_region = (
+                fundamentals_report[: min(marker_positions)]
+                if marker_positions
+                else fundamentals_report
+            )
+            sector_match = re.search(
+                r"SECTOR:\s*(.+?)(?:\n|$)", header_region, re.IGNORECASE
+            )
 
         if not sector_match:
             logger.debug("no_sector_found_in_report", fallback="INDUSTRIALS")
@@ -275,20 +301,10 @@ class RedFlagDetector:
         if not fundamentals_report:
             return metrics
 
-        # Extract the LAST DATA_BLOCK (agent self-correction pattern)
-        # Tolerate optional descriptive text after "DATA_BLOCK" (e.g., prompt v8.6+
-        # adds "(INTERNAL SCORING — NOT THIRD-PARTY RATINGS)" before closing ---)
-        data_block_pattern = (
-            r"### --- START DATA_BLOCK[^\n]*---(.+?)### --- END DATA_BLOCK ---"
-        )
-        blocks = list(re.finditer(data_block_pattern, fundamentals_report, re.DOTALL))
-
-        if not blocks:
+        data_block = extract_last_data_block(fundamentals_report)
+        if not data_block:
             logger.warning("no_data_block_found_in_fundamentals_report")
             return metrics
-
-        # Use the last (most corrected) block
-        data_block = blocks[-1].group(1)
 
         # Extract ADJUSTED_HEALTH_SCORE (percentage)
         health_match = re.search(
@@ -1804,16 +1820,9 @@ class RedFlagDetector:
             except Exception:
                 return metrics
 
-        # Extract the LAST DATA_BLOCK (agent self-correction pattern)
-        data_block_pattern = (
-            r"### --- START DATA_BLOCK[^\n]*---(.+?)### --- END DATA_BLOCK ---"
-        )
-        blocks = list(re.finditer(data_block_pattern, fundamentals_report, re.DOTALL))
-
-        if not blocks:
+        data_block = extract_last_data_block(fundamentals_report)
+        if not data_block:
             return metrics
-
-        data_block = blocks[-1].group(1)
 
         # --- CATEGORICAL SIGNALS (Primary - used for threshold logic) ---
 
@@ -2022,13 +2031,9 @@ class RedFlagDetector:
 
         signals: dict[str, Any] = {}
 
-        # Find last DATA_BLOCK (in case of multiple)
-        # Use regex split to tolerate optional descriptive text after "DATA_BLOCK"
-        blocks = re.split(r"--- START DATA_BLOCK[^\n]*---", fundamentals_report)
-        if len(blocks) < 2:
+        data_block = extract_last_data_block(fundamentals_report)
+        if not data_block:
             return {}
-
-        data_block = blocks[-1].split("--- END DATA_BLOCK ---")[0]
 
         # Extract ROIC_QUALITY (categorical)
         roic_quality_match = re.search(

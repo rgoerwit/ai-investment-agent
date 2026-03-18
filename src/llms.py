@@ -359,11 +359,9 @@ def create_consultant_llm(
 
     Notes:
         - Requires OPENAI_API_KEY environment variable
-        - Normal mode: Uses CONSULTANT_MODEL env var (defaults to gpt-4o)
+        - Normal mode: Uses CONSULTANT_MODEL env var
         - Quick mode: Uses CONSULTANT_QUICK_MODEL env var (defaults to gpt-4o-mini)
         - Optional ENABLE_CONSULTANT env var (defaults to true)
-        - gpt-4o is recommended as of Dec 2025 (GPT-4 Omni)
-        - ChatGPT 5.2 not yet available via API as of Dec 2025
 
     Example:
         >>> consultant_llm = create_consultant_llm()
@@ -394,8 +392,6 @@ def create_consultant_llm(
         )
 
     # Get model name from config (not os.environ)
-    # Note: As of Dec 2025, gpt-4o (GPT-4 Omni) is the latest production model
-    # ChatGPT 5.2 is not yet available via API
     if model:
         # Explicit model override
         model_name = model
@@ -421,11 +417,19 @@ def create_consultant_llm(
         "max_retries": max_retries,
         "api_key": api_key,
         "callbacks": callbacks or [],
-        "max_completion_tokens": 16384,
+        # Keep the consultant concise enough for bounded latency on multi-turn
+        # tool use while leaving ample room for structured critique.
+        "max_completion_tokens": 8192,
         "streaming": False,
         "use_responses_api": True,
         "output_version": "responses/v1",
     }
+
+    # GPT-5 non-pro models support configurable reasoning effort. Pinning the
+    # consultant to medium keeps it thoughtful without inheriting the much
+    # slower deep-thinking behavior of pro variants.
+    if model_name.startswith("gpt-5") and "pro" not in model_name:
+        kwargs["reasoning_effort"] = "medium"
 
     llm = ChatOpenAI(**kwargs)
 

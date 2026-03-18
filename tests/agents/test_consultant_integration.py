@@ -74,11 +74,13 @@ class TestConsultantNodeCreation:
                 assert call_kwargs["model"] == "gpt-4o"
                 assert call_kwargs["api_key"] == "test-key"
                 assert call_kwargs["max_retries"] == 0
+                assert call_kwargs["max_completion_tokens"] == 8192
                 assert call_kwargs["use_responses_api"] is True
                 assert call_kwargs["output_version"] == "responses/v1"
                 # Temperature is intentionally omitted — many OpenAI model
                 # families (o-series, gpt-5.x) reject non-default temperature.
                 assert "temperature" not in call_kwargs
+                assert "reasoning_effort" not in call_kwargs
 
     def test_consultant_node_creation(self):
         """Test that consultant node factory creates valid node function."""
@@ -511,9 +513,9 @@ Conditions:
                     "sentiment_report": "Sentiment report",
                     "news_report": "News report",
                     "fundamentals_report": (
-                        "--- START DATA_BLOCK ---\n"
+                        "### --- START DATA_BLOCK ---\n"
                         "PFIC_RISK: LOW\n"
-                        "--- END DATA_BLOCK ---"
+                        "### --- END DATA_BLOCK ---"
                     ),
                     "value_trap_report": "",
                     "investment_plan": "Research plan",
@@ -717,6 +719,7 @@ class TestConsultantQuickMode:
                 mock_chatgpt.assert_called_once()
                 call_kwargs = mock_chatgpt.call_args[1]
                 assert call_kwargs["model"] == "gpt-4o-mini"
+                assert call_kwargs["max_completion_tokens"] == 8192
 
     def test_consultant_uses_normal_model_when_quick_disabled(self):
         """Test that consultant uses CONSULTANT_MODEL when quick_mode=False."""
@@ -743,6 +746,7 @@ class TestConsultantQuickMode:
                 mock_chatgpt.assert_called_once()
                 call_kwargs = mock_chatgpt.call_args[1]
                 assert call_kwargs["model"] == "gpt-4o"
+                assert call_kwargs["max_completion_tokens"] == 8192
 
     def test_consultant_defaults_to_gpt4o_mini_in_quick_mode(self):
         """Test that consultant defaults to gpt-4o-mini when CONSULTANT_QUICK_MODEL not set."""
@@ -769,6 +773,33 @@ class TestConsultantQuickMode:
                 mock_chatgpt.assert_called_once()
                 call_kwargs = mock_chatgpt.call_args[1]
                 assert call_kwargs["model"] == "gpt-4o-mini"  # Default for quick mode
+                assert call_kwargs["max_completion_tokens"] == 8192
+
+    def test_consultant_gpt5_uses_medium_reasoning_effort(self):
+        """GPT-5 consultant should stay on normal reasoning, not pro-style deep compute."""
+        try:
+            import langchain_openai
+        except ImportError:
+            pytest.skip("langchain-openai not installed (optional dependency)")
+
+        from unittest.mock import MagicMock, patch
+
+        from src.llms import create_consultant_llm
+
+        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+            mock_chatgpt.return_value = MagicMock()
+
+            with patch("src.llms.config") as mock_config:
+                mock_config.enable_consultant = True
+                mock_config.consultant_model = "gpt-5.4"
+                mock_config.get_openai_api_key.return_value = "test-key"
+                llm = create_consultant_llm()
+
+                assert llm is not None
+                call_kwargs = mock_chatgpt.call_args[1]
+                assert call_kwargs["model"] == "gpt-5.4"
+                assert call_kwargs["reasoning_effort"] == "medium"
+                assert call_kwargs["max_completion_tokens"] == 8192
 
     def test_get_consultant_llm_respects_quick_mode(self):
         """Test that get_consultant_llm passes quick_mode to create_consultant_llm."""

@@ -11,6 +11,8 @@ from dataclasses import dataclass
 
 import structlog
 
+from src.data_block_utils import extract_last_fenced_block
+
 logger = structlog.get_logger(__name__)
 
 
@@ -56,19 +58,10 @@ def _extract_params(valuation_params_report: str) -> ValuationParams:
     if not valuation_params_report:
         return ValuationParams()
 
-    # Look for structured VALUATION_PARAMS block
-    # Use finditer and take the LAST block to handle LLM self-correction pattern
-    block_pattern = (
-        r"### --- START VALUATION_PARAMS ---(.+?)### --- END VALUATION_PARAMS ---"
-    )
-    blocks = list(re.finditer(block_pattern, valuation_params_report, re.DOTALL))
-
-    if not blocks:
+    block = extract_last_fenced_block(valuation_params_report, "VALUATION_PARAMS")
+    if not block:
         logger.debug("No VALUATION_PARAMS block found")
         return ValuationParams()
-
-    # Use the last (most corrected) block
-    block = blocks[-1].group(1)
 
     def extract_float(pattern: str) -> float | None:
         m = re.search(pattern, block, re.IGNORECASE)
