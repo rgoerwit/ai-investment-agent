@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+import time
 from collections.abc import Callable
 from datetime import datetime
 
@@ -19,6 +21,68 @@ from . import runtime as agent_runtime
 from .state import AgentState
 
 logger = structlog.get_logger(__name__)
+
+CONSULTANT_CALL_TIMEOUT_SECONDS = 90.0
+CONSULTANT_TOTAL_TIMEOUT_SECONDS = 240.0
+
+
+def _remaining_consultant_budget(deadline: float) -> float:
+    return max(0.0, deadline - time.monotonic())
+
+
+def _build_consultant_fmp_skip_payload(
+    *, ticker: str, metric: str, failure_kind: str
+) -> str:
+    reason = (
+        "current FMP plan does not cover this request"
+        if failure_kind == "auth_error"
+        else "FMP cooldown is active after a quota or rate-limit response"
+    )
+    return json.dumps(
+        {
+            "error": f"SKIPPED: spot_check_metric_alt disabled after prior FMP {failure_kind}",
+            "suggestion": "Use official filings or primary-source evidence for cross-checks in this run",
+            "ticker": ticker,
+            "metric": metric,
+            "provider": "fmp",
+            "failure_kind": failure_kind,
+            "retryable": failure_kind == "rate_limit",
+            "skipped": True,
+            "reason": reason,
+        }
+    )
+
+
+async def _invoke_consultant_with_deadline(
+    runnable,
+    messages,
+    *,
+    context: str,
+    provider: str,
+    model_name: str,
+    ticker: str,
+    deadline: float,
+) -> object:
+    remaining = _remaining_consultant_budget(deadline)
+    if remaining <= 0:
+        raise TimeoutError(
+            f"Consultant node exceeded total wall-clock timeout of {CONSULTANT_TOTAL_TIMEOUT_SECONDS:.0f}s for {ticker}"
+        )
+
+    timeout_s = min(CONSULTANT_CALL_TIMEOUT_SECONDS, remaining)
+    try:
+        async with asyncio.timeout(timeout_s):
+            return await agent_runtime.invoke_with_rate_limit_handling(
+                runnable,
+                messages,
+                context=context,
+                provider=provider,
+                model_name=model_name,
+            )
+    except TimeoutError as exc:
+        raise TimeoutError(
+            f"Consultant call exceeded {timeout_s:.1f}s wall-clock timeout for {ticker}"
+        ) from exc
 
 
 def _build_legal_fallback_report(
@@ -157,14 +221,22 @@ Provide your independent consultant review."""
             content_str = ""
             had_tool_errors = False
             tool_failure_count = 0
+            consultant_deadline = time.monotonic() + CONSULTANT_TOTAL_TIMEOUT_SECONDS
+            fmp_alt_disabled_kind: str | None = None
+            active_llm_provider = support.infer_provider_name(active_llm)
+            active_llm_model = support.get_model_name(active_llm)
+            fallback_llm_provider = support.infer_provider_name(llm)
+            fallback_llm_model = support.get_model_name(llm)
 
             for iteration in range(max_tool_iterations + 1):
-                response = await agent_runtime.invoke_with_rate_limit_handling(
+                response = await _invoke_consultant_with_deadline(
                     active_llm,
                     messages,
                     context=agent_prompt.agent_name,
-                    provider=support.infer_provider_name(active_llm),
-                    model_name=support.get_model_name(active_llm),
+                    provider=active_llm_provider,
+                    model_name=active_llm_model,
+                    ticker=ticker,
+                    deadline=consultant_deadline,
                 )
                 tool_calls = getattr(response, "tool_calls", None)
                 if (
@@ -189,27 +261,51 @@ Provide your independent consultant review."""
                     tool_fn = tools_by_name.get(tool_call["name"])
                     tool_call_id = tool_call.get("id", tool_call["name"])
                     result_failed = False
+                    count_failure = True
                     if tool_fn:
-                        try:
-                            tool_result = await TOOL_SERVICE.execute(
-                                ToolInvocation(
-                                    name=tool_call["name"],
-                                    args=tool_call["args"],
-                                    source="consultant",
-                                    agent_key=agent_key,
-                                ),
-                                runner=lambda args, tool=tool_fn: tool.ainvoke(args),
+                        if (
+                            tool_call["name"] == "spot_check_metric_alt"
+                            and fmp_alt_disabled_kind is not None
+                        ):
+                            result = _build_consultant_fmp_skip_payload(
+                                ticker=tool_call["args"].get("ticker", ticker),
+                                metric=tool_call["args"].get("metric", "unknown"),
+                                failure_kind=fmp_alt_disabled_kind,
                             )
-                            result = tool_result.value
-                        except Exception as tool_err:
-                            result_failed = True
-                            logger.warning(
-                                "consultant_tool_failed",
+                            count_failure = False
+                            logger.info(
+                                "consultant_tool_suppressed",
                                 ticker=ticker,
                                 tool=tool_call["name"],
-                                error=str(tool_err),
+                                failure_kind=fmp_alt_disabled_kind,
                             )
-                            result = f"TOOL_ERROR: {str(tool_err)}"
+                        else:
+                            if _remaining_consultant_budget(consultant_deadline) <= 0:
+                                raise TimeoutError(
+                                    f"Consultant node exceeded total wall-clock timeout of {CONSULTANT_TOTAL_TIMEOUT_SECONDS:.0f}s for {ticker}"
+                                )
+                            try:
+                                tool_result = await TOOL_SERVICE.execute(
+                                    ToolInvocation(
+                                        name=tool_call["name"],
+                                        args=tool_call["args"],
+                                        source="consultant",
+                                        agent_key=agent_key,
+                                    ),
+                                    runner=lambda args, tool=tool_fn: tool.ainvoke(
+                                        args
+                                    ),
+                                )
+                                result = tool_result.value
+                            except Exception as tool_err:
+                                result_failed = True
+                                logger.warning(
+                                    "consultant_tool_failed",
+                                    ticker=ticker,
+                                    tool=tool_call["name"],
+                                    error=str(tool_err),
+                                )
+                                result = f"TOOL_ERROR: {str(tool_err)}"
                     else:
                         result_failed = True
                         result = f"Unknown tool: {tool_call['name']}"
@@ -224,9 +320,18 @@ Provide your independent consultant review."""
                                 payload = None
                             if isinstance(payload, dict) and payload.get("error"):
                                 result_failed = True
+                                if (
+                                    tool_call["name"] == "spot_check_metric_alt"
+                                    and payload.get("provider") == "fmp"
+                                    and payload.get("failure_kind")
+                                    in {"auth_error", "rate_limit"}
+                                    and not payload.get("skipped")
+                                ):
+                                    fmp_alt_disabled_kind = payload["failure_kind"]
                     if result_failed:
                         had_tool_errors = True
-                        tool_failure_count += 1
+                        if count_failure:
+                            tool_failure_count += 1
                     messages.append(TM(content=str(result), tool_call_id=tool_call_id))
 
                 for tool_call in tool_calls[max_tool_calls_per_turn:]:
@@ -246,12 +351,14 @@ Provide your independent consultant review."""
                 )
 
             if not content_str:
-                response = await agent_runtime.invoke_with_rate_limit_handling(
+                response = await _invoke_consultant_with_deadline(
                     llm,
                     messages,
                     context=agent_prompt.agent_name,
-                    provider=support.infer_provider_name(llm),
-                    model_name=support.get_model_name(llm),
+                    provider=fallback_llm_provider,
+                    model_name=fallback_llm_model,
+                    ticker=ticker,
+                    deadline=consultant_deadline,
                 )
                 content_str = message_utils.extract_string_content(response.content)
 

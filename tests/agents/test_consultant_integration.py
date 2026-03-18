@@ -73,6 +73,7 @@ class TestConsultantNodeCreation:
                 call_kwargs = mock_chatgpt.call_args[1]
                 assert call_kwargs["model"] == "gpt-4o"
                 assert call_kwargs["api_key"] == "test-key"
+                assert call_kwargs["max_retries"] == 0
                 assert call_kwargs["use_responses_api"] is True
                 assert call_kwargs["output_version"] == "responses/v1"
                 # Temperature is intentionally omitted — many OpenAI model
@@ -338,6 +339,110 @@ class TestConsultantNodeExecution:
             result["artifact_statuses"]["consultant_review"]["message"]
             == "Consultant review completed with tool failures"
         )
+
+    @pytest.mark.asyncio
+    async def test_consultant_suppresses_repeated_fmp_alt_calls_after_failure(self):
+        """After one FMP alt-source failure, later alt-source calls should be skipped."""
+        mock_tool_bound_llm = Mock()
+        mock_llm = Mock()
+        mock_llm.bind_tools.return_value = mock_tool_bound_llm
+
+        tool_call_response = Mock()
+        tool_call_response.content = ""
+        tool_call_response.tool_calls = [
+            {
+                "name": "spot_check_metric_alt",
+                "args": {"ticker": "0005.HK", "metric": "operatingCashflow"},
+                "id": "alt_1",
+            },
+            {
+                "name": "get_official_filings",
+                "args": {"ticker": "0005.HK"},
+                "id": "filings_1",
+            },
+            {
+                "name": "spot_check_metric_alt",
+                "args": {"ticker": "0005.HK", "metric": "freeCashflow"},
+                "id": "alt_2",
+            },
+        ]
+        final_response = Mock()
+        final_response.content = "CONSULTANT REVIEW: CONDITIONAL APPROVAL"
+        final_response.tool_calls = []
+
+        async def mock_invoke(*args, **kwargs):
+            if mock_invoke.calls == 0:
+                mock_invoke.calls += 1
+                return tool_call_response
+            mock_invoke.last_messages = args[1]
+            return final_response
+
+        mock_invoke.calls = 0
+        mock_invoke.last_messages = None
+
+        mock_alt_tool = Mock()
+        mock_alt_tool.name = "spot_check_metric_alt"
+        mock_alt_tool.ainvoke = AsyncMock()
+
+        mock_filings_tool = Mock()
+        mock_filings_tool.name = "get_official_filings"
+        mock_filings_tool.ainvoke = AsyncMock()
+
+        exec_mock = AsyncMock(
+            side_effect=[
+                ToolResult(
+                    value='{"error":"FMP alt-source unavailable","provider":"fmp","failure_kind":"auth_error","retryable":false}'
+                ),
+                ToolResult(value="official-filings-result"),
+            ]
+        )
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                with patch(
+                    "src.agents.consultant_nodes.TOOL_SERVICE.execute", new=exec_mock
+                ):
+                    mock_prompt = Mock()
+                    mock_prompt.system_message = "You are a consultant."
+                    mock_prompt.agent_name = "External Consultant"
+                    mock_get_prompt.return_value = mock_prompt
+
+                    consultant_node = create_consultant_node(
+                        mock_llm,
+                        "consultant",
+                        tools=[mock_alt_tool, mock_filings_tool],
+                    )
+
+                    state = {
+                        "company_of_interest": "0005.HK",
+                        "company_name": "HSBC Holdings",
+                        "market_report": "Report",
+                        "sentiment_report": "Report",
+                        "news_report": "Report",
+                        "fundamentals_report": "Report",
+                        "investment_debate_state": {"history": "Debate"},
+                        "investment_plan": "Plan",
+                    }
+                    config = RunnableConfig(
+                        configurable={"context": Mock(trade_date="2025-12-13")}
+                    )
+
+                    result = await consultant_node(state, config)
+
+        assert exec_mock.await_count == 2
+        final_messages = mock_invoke.last_messages
+        assert final_messages is not None
+        skipped_tool_messages = [
+            message.content
+            for message in final_messages
+            if getattr(message, "tool_call_id", "") == "alt_2"
+        ]
+        assert skipped_tool_messages
+        assert '"skipped": true' in skipped_tool_messages[0].lower()
+        assert result["consultant_review"] == "CONSULTANT REVIEW: CONDITIONAL APPROVAL"
+        assert result["consultant_tool_failures"] == 1
 
 
 class TestGraphIntegration:

@@ -14,7 +14,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import pytest
 
-from src.data.fmp_fetcher import FMPFetcher, get_fmp_fetcher
+from src.data.fmp_fetcher import (
+    FMPFetcher,
+    FMPSubscriptionUnavailableError,
+    get_fmp_fetcher,
+)
 
 
 class TestFMPFetcherInit:
@@ -162,12 +166,50 @@ class TestFMPGet:
         assert "possible_rate_limit_or_policy_change" in warning_calls
 
     @pytest.mark.asyncio
-    async def test_get_402_starts_cooldown(self):
-        """Quota-style 402 responses should start a temporary cooldown."""
+    async def test_get_402_subscription_paywall_does_not_start_cooldown(self):
+        """Subscription/paywall 402 responses should not enter cooldown."""
         fetcher = FMPFetcher(api_key="test-key")
 
         mock_response = MagicMock()
         mock_response.status = 402
+        mock_response.text = AsyncMock(
+            return_value=(
+                "Premium Query Parameter: This value set for symbol is not available "
+                "under your current subscription, please upgrade your plan."
+            )
+        )
+
+        mock_response_cm = AsyncMock()
+        mock_response_cm.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response_cm.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=mock_response_cm)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            with patch("src.data.fmp_fetcher.logger") as mock_logger:
+                with pytest.raises(
+                    FMPSubscriptionUnavailableError,
+                    match="current FMP plan does not cover",
+                ):
+                    await fetcher._get("ratios", {"symbol": "AAPL"})
+
+        assert fetcher._cooldown_until is None
+        warning_calls = " ".join(
+            str(call) for call in mock_logger.warning.call_args_list
+        )
+        assert "fmp_subscription_unavailable" in warning_calls
+
+    @pytest.mark.asyncio
+    async def test_get_402_opaque_response_starts_cooldown(self):
+        """Opaque 402 responses should preserve the existing cooldown behavior."""
+        fetcher = FMPFetcher(api_key="test-key")
+
+        mock_response = MagicMock()
+        mock_response.status = 402
+        mock_response.text = AsyncMock(return_value="Payment Required")
 
         mock_response_cm = AsyncMock()
         mock_response_cm.__aenter__ = AsyncMock(return_value=mock_response)

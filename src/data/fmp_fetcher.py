@@ -37,6 +37,22 @@ logger = structlog.get_logger(__name__)
 _TIMEOUT = aiohttp.ClientTimeout(total=10)
 _COOLDOWN_MINUTES = 15
 
+_FMP_SUBSCRIPTION_MARKERS = (
+    "not available under your current subscription",
+    "upgrade your plan",
+    "premium query parameter",
+    "subscription page",
+)
+
+
+class FMPSubscriptionUnavailableError(ValueError):
+    """Raised when the configured FMP plan does not cover the request."""
+
+
+def _is_subscription_preview(preview: str) -> bool:
+    normalized = preview.lower()
+    return any(marker in normalized for marker in _FMP_SUBSCRIPTION_MARKERS)
+
 
 class FMPFetcher(FinancialFetcher):
     """
@@ -158,6 +174,19 @@ class FMPFetcher(FinancialFetcher):
 
                     elif response.status in {402, 429}:
                         response_preview = await self._response_preview(response)
+                        if response.status == 402 and _is_subscription_preview(
+                            response_preview
+                        ):
+                            logger.warning(
+                                "fmp_subscription_unavailable",
+                                endpoint=endpoint,
+                                status=response.status,
+                                reason="subscription_paywall",
+                                preview=response_preview,
+                            )
+                            raise FMPSubscriptionUnavailableError(
+                                "current FMP plan does not cover this ticker or endpoint"
+                            )
                         self._start_cooldown(response.status, endpoint)
                         logger.warning(
                             "fmp_request_limited",
@@ -203,7 +232,10 @@ class FMPFetcher(FinancialFetcher):
 
     async def get_company_name(self, ticker: str) -> str | None:
         """Fetch company name from FMP profile endpoint."""
-        data = await self._get("profile", {"symbol": ticker})
+        try:
+            data = await self._get("profile", {"symbol": ticker})
+        except FMPSubscriptionUnavailableError:
+            return None
         if data and isinstance(data, list) and len(data) > 0:
             name = data[0].get("companyName")
             if name:
@@ -227,7 +259,10 @@ class FMPFetcher(FinancialFetcher):
         result = {}
 
         # Fetch ratios endpoint (has P/E, P/B, PEG, current ratio, D/E, margins)
-        ratios = await self._get("ratios", {"symbol": symbol, "limit": 1})
+        try:
+            ratios = await self._get("ratios", {"symbol": symbol, "limit": 1})
+        except FMPSubscriptionUnavailableError:
+            return None
         if ratios and isinstance(ratios, list) and len(ratios) > 0:
             r = ratios[0]
             # Map to standard interface keys
@@ -243,7 +278,10 @@ class FMPFetcher(FinancialFetcher):
             result["operatingCashflow"] = r.get("operatingCashFlowPerShare")
 
         # Fetch key-metrics endpoint (has ROE, ROA, Cash Flows)
-        metrics = await self._get("key-metrics", {"symbol": symbol, "limit": 1})
+        try:
+            metrics = await self._get("key-metrics", {"symbol": symbol, "limit": 1})
+        except FMPSubscriptionUnavailableError:
+            return result or None
         if metrics and isinstance(metrics, list) and len(metrics) > 0:
             m = metrics[0]
             result["returnOnEquity"] = m.get("returnOnEquity")
@@ -257,9 +295,12 @@ class FMPFetcher(FinancialFetcher):
                 result["marketCap"] = m.get("marketCap")
 
         # Fetch income statement growth endpoint (has revenue/EPS growth)
-        growth = await self._get(
-            "income-statement-growth", {"symbol": symbol, "limit": 1}
-        )
+        try:
+            growth = await self._get(
+                "income-statement-growth", {"symbol": symbol, "limit": 1}
+            )
+        except FMPSubscriptionUnavailableError:
+            return result or None
         if growth and isinstance(growth, list) and len(growth) > 0:
             g = growth[0]
             result["revenueGrowth"] = g.get("growthRevenue")

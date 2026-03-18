@@ -5,6 +5,8 @@ Tests various failure modes, data format edge cases, and system robustness
 to ensure the consultant doesn't break existing functionality under stress.
 """
 
+import asyncio
+import time
 from unittest.mock import Mock, patch
 
 import pytest
@@ -278,6 +280,57 @@ class TestErrorPropagation:
                 status = result["artifact_statuses"]["consultant_review"]
                 assert status["ok"] is False
                 assert status["error_kind"] == "timeout"
+
+    @pytest.mark.asyncio
+    async def test_consultant_wall_clock_timeout_cuts_off_stalled_invoke(self):
+        """A hanging consultant call should be bounded by the node timeout budget."""
+        mock_llm = Mock()
+
+        async def mock_invoke_hang(*args, **kwargs):
+            await asyncio.sleep(1.0)
+            raise AssertionError("consultant invoke should have been cancelled first")
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling",
+            new=mock_invoke_hang,
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                with patch(
+                    "src.agents.consultant_nodes.CONSULTANT_CALL_TIMEOUT_SECONDS", 0.05
+                ):
+                    with patch(
+                        "src.agents.consultant_nodes.CONSULTANT_TOTAL_TIMEOUT_SECONDS",
+                        0.08,
+                    ):
+                        mock_prompt = Mock()
+                        mock_prompt.system_message = "You are a consultant."
+                        mock_prompt.agent_name = "External Consultant"
+                        mock_get_prompt.return_value = mock_prompt
+
+                        consultant_node = create_consultant_node(mock_llm, "consultant")
+                        state = {
+                            "company_of_interest": "TEST",
+                            "company_name": "Test Co",
+                            "market_report": "Report",
+                            "sentiment_report": "Report",
+                            "news_report": "Report",
+                            "fundamentals_report": "Report",
+                            "investment_debate_state": {"history": "Debate"},
+                            "investment_plan": "BUY",
+                        }
+                        config = RunnableConfig(
+                            configurable={"context": Mock(trade_date="2025-12-13")}
+                        )
+
+                        started = time.monotonic()
+                        result = await consultant_node(state, config)
+                        elapsed = time.monotonic() - started
+
+        assert elapsed < 0.5
+        assert result["consultant_review"] == ""
+        status = result["artifact_statuses"]["consultant_review"]
+        assert status["ok"] is False
+        assert status["error_kind"] == "timeout"
 
     @pytest.mark.asyncio
     async def test_consultant_rate_limit_error(self):

@@ -332,7 +332,7 @@ def create_consultant_llm(
     temperature: float = 0.3,
     model: str | None = None,
     timeout: int = 120,
-    max_retries: int = 3,
+    max_retries: int = 0,
     quick_mode: bool = False,
     callbacks: list[BaseCallbackHandler] | None = None,
 ) -> BaseChatModel:

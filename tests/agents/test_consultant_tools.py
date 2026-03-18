@@ -15,6 +15,7 @@ from src.consultant_tools import (
     spot_check_metric,
     spot_check_metric_alt,
 )
+from src.data.fmp_fetcher import FMPSubscriptionUnavailableError
 
 
 class TestSpotCheckMetric:
@@ -172,6 +173,29 @@ class TestSpotCheckMetricAlt:
         assert result["provider"] == "fmp"
         assert result["failure_kind"] == "auth_error"
         assert result["retryable"] is False
+
+    @pytest.mark.asyncio
+    async def test_fmp_subscription_failure_returns_non_retryable_auth_error(self):
+        """Subscription/paywall failures should not look retryable."""
+        mock_fmp = MagicMock()
+        mock_fmp.is_available.return_value = True
+        mock_fmp._get = AsyncMock(
+            side_effect=FMPSubscriptionUnavailableError(
+                "current FMP plan does not cover this ticker or endpoint"
+            )
+        )
+
+        with patch("src.data.fmp_fetcher.get_fmp_fetcher", return_value=mock_fmp):
+            result = json.loads(
+                await spot_check_metric_alt.ainvoke(
+                    {"ticker": "AGS.SI", "metric": "operatingCashflow"}
+                )
+            )
+
+        assert result["provider"] == "fmp"
+        assert result["failure_kind"] == "auth_error"
+        assert result["retryable"] is False
+        assert "current fmp plan does not cover" in result["suggestion"].lower()
 
     @pytest.mark.asyncio
     async def test_fmp_generic_failure_returns_endpoint_details(self):
