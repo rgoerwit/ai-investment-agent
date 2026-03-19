@@ -10,6 +10,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.types import RunnableConfig
 
 from src.data_block_utils import (
+    detect_legacy_data_block_shape,
     extract_last_data_block,
     has_parseable_data_block,
     has_parseable_fenced_block,
@@ -23,21 +24,60 @@ from .state import AgentState
 
 logger = structlog.get_logger(__name__)
 
+_FUNDAMENTALS_RETRY_FORMAT_SUFFIX = """
+CRITICAL FORMAT CORRECTION:
+Emit the DATA_BLOCK first.
+Use exactly these fenced markers:
+### --- START DATA_BLOCK ---
+...
+### --- END DATA_BLOCK ---
+Inside DATA_BLOCK, use plain KEY: VALUE lines only.
+Do NOT use markdown tables inside DATA_BLOCK.
+"""
+
 
 def _normalize_structured_output(agent_key: str, content: str, ticker: str) -> str:
     """Apply narrow deterministic output repairs for known model-format drift."""
     if agent_key != "fundamentals_analyst":
         return content
 
+    repair_kind = detect_legacy_data_block_shape(content)
     normalized = normalize_legacy_data_block_report(content)
     if normalized != content:
+        event = (
+            "fundamentals_markdown_table_datablock_repaired"
+            if repair_kind == "table"
+            else "fundamentals_legacy_datablock_repaired"
+        )
         logger.warning(
-            "fundamentals_legacy_datablock_repaired",
+            event,
             ticker=ticker,
-            original_has_datablock=has_parseable_data_block(content),
+            repair_kind=repair_kind,
+            original_has_datablock=has_parseable_fenced_block(content, "DATA_BLOCK"),
             repaired_has_datablock=has_parseable_data_block(normalized),
         )
     return normalized
+
+
+def _should_retry_output(content: str, agent_key: str) -> bool:
+    """Return True when the initial output should get one deep-model retry."""
+    if support._is_output_insufficient(content, agent_key):
+        return True
+
+    return agent_key == "fundamentals_analyst" and not has_parseable_data_block(content)
+
+
+def _build_retry_invocation_messages(
+    invocation_messages: list[Any], agent_key: str, content: str
+) -> list[Any]:
+    """Add a short corrective suffix for fundamentals format retries only."""
+    if agent_key != "fundamentals_analyst" or has_parseable_data_block(content):
+        return invocation_messages
+
+    return [
+        *invocation_messages,
+        HumanMessage(content=_FUNDAMENTALS_RETRY_FORMAT_SUFFIX.strip()),
+    ]
 
 
 def create_analyst_node(
@@ -280,7 +320,7 @@ def create_analyst_node(
             if (
                 allow_retry
                 and retry_llm is not None
-                and support._is_output_insufficient(content_str, agent_key)
+                and _should_retry_output(content_str, agent_key)
             ):
                 logger.warning(
                     "analyst_retry_with_deep_thinking",
@@ -288,7 +328,10 @@ def create_analyst_node(
                     ticker=ticker,
                     original_length=len(content_str),
                     has_datablock=has_parseable_data_block(content_str),
-                    message="Insufficient output from quick LLM, retrying once with deep thinking",
+                    message="Insufficient or unparseable output from quick LLM, retrying once with deep thinking",
+                )
+                retry_messages = _build_retry_invocation_messages(
+                    invocation_messages, agent_key, content_str
                 )
                 retry_runnable = (
                     prompt_template | retry_llm.bind_tools(tools)
@@ -300,7 +343,7 @@ def create_analyst_node(
                     retry_response = (
                         await agent_runtime.invoke_with_rate_limit_handling(
                             retry_runnable,
-                            {"messages": invocation_messages},
+                            {"messages": retry_messages},
                             context=f"{agent_prompt.agent_name} (RETRY-HIGH)",
                             provider=support.infer_provider_name(retry_llm),
                             model_name=support.get_model_name(retry_llm),

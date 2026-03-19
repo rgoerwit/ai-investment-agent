@@ -364,6 +364,8 @@ def build_graph_components(
         "fundamentals_analyst",
         toolkit.get_senior_fundamental_tools(),
         "fundamentals_report",
+        retry_llm=retry_llm,
+        allow_retry=allow_retry,
     )
     validator = create_financial_health_validator_node(strict_mode=strict_mode)
 
