@@ -427,6 +427,15 @@ class Settings(BaseSettings):
         validation_alias="API_RETRY_ATTEMPTS",
         description="Number of retry attempts for failed API calls",
     )
+    llm_base_output_tokens: int = Field(
+        default=32768,
+        ge=1024,
+        validation_alias="LLM_BASE_OUTPUT_TOKENS",
+        description=(
+            "Global base output-token budget used to derive per-agent caps. "
+            "Increasing this scales fractional agent budgets proportionally."
+        ),
+    )
 
     # --- Rate Limiting ---
     # Free tier: 15 RPM | Paid tier 1: 360 RPM | Tier 2: 1000+ RPM

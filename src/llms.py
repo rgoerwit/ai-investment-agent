@@ -208,6 +208,7 @@ def create_gemini_model(
     streaming: bool = False,
     callbacks: list[BaseCallbackHandler] | None = None,
     thinking_level: str | None = None,
+    max_output_tokens: int | None = None,
 ) -> BaseChatModel:
     """
     Generic factory for Gemini models.
@@ -229,7 +230,7 @@ def create_gemini_model(
         "streaming": streaming,
         "rate_limiter": GLOBAL_RATE_LIMITER,
         "convert_system_message_to_human": False,
-        "max_output_tokens": 32768,
+        "max_output_tokens": max_output_tokens or config.llm_base_output_tokens,
         "callbacks": callbacks or [],
         "api_key": config.get_google_api_key(),  # Explicit API key from config
     }
@@ -241,6 +242,7 @@ def create_gemini_model(
         )
 
     llm = ChatGoogleGenerativeAI(**kwargs)
+    llm._configured_max_output_tokens = kwargs["max_output_tokens"]
 
     # Track instance for cleanup
     _llm_instance_counter += 1
@@ -256,6 +258,7 @@ def create_quick_thinking_llm(
     timeout: int = None,
     max_retries: int = None,
     callbacks: list[BaseCallbackHandler] | None = None,
+    max_output_tokens: int | None = None,
 ) -> BaseChatModel:
     """
     Create a quick thinking LLM.
@@ -284,6 +287,7 @@ def create_quick_thinking_llm(
         final_retries,
         callbacks=callbacks,
         thinking_level=thinking_level,
+        max_output_tokens=max_output_tokens,
     )
 
 
@@ -293,6 +297,7 @@ def create_deep_thinking_llm(
     timeout: int = None,
     max_retries: int = None,
     callbacks: list[BaseCallbackHandler] | None = None,
+    max_output_tokens: int | None = None,
 ) -> BaseChatModel:
     """
     Create a deep thinking LLM.
@@ -318,6 +323,7 @@ def create_deep_thinking_llm(
         final_retries,
         callbacks=callbacks,
         thinking_level=thinking_level,
+        max_output_tokens=max_output_tokens,
     )
 
 
@@ -335,6 +341,7 @@ def create_consultant_llm(
     max_retries: int = 0,
     quick_mode: bool = False,
     callbacks: list[BaseCallbackHandler] | None = None,
+    max_completion_tokens: int | None = None,
 ) -> BaseChatModel:
     """
     Create an OpenAI consultant LLM for cross-validation.
@@ -419,7 +426,7 @@ def create_consultant_llm(
         "callbacks": callbacks or [],
         # Keep the consultant concise enough for bounded latency on multi-turn
         # tool use while leaving ample room for structured critique.
-        "max_completion_tokens": 8192,
+        "max_completion_tokens": max_completion_tokens or 8192,
         "streaming": False,
         "use_responses_api": True,
         "output_version": "responses/v1",
@@ -432,12 +439,14 @@ def create_consultant_llm(
         kwargs["reasoning_effort"] = "medium"
 
     llm = ChatOpenAI(**kwargs)
+    llm._configured_max_completion_tokens = kwargs["max_completion_tokens"]
 
     return llm
 
 
 def create_auditor_llm(
     callbacks: list[BaseCallbackHandler] | None = None,
+    max_completion_tokens: int | None = None,
 ) -> BaseChatModel | None:
     """
     Create Auditor LLM with fallback logic.
@@ -480,13 +489,15 @@ def create_auditor_llm(
         "max_retries": 3,
         "api_key": api_key,
         "callbacks": callbacks or [],
-        "max_completion_tokens": 16384,
+        "max_completion_tokens": max_completion_tokens or 16384,
         "streaming": False,
         "use_responses_api": True,
         "output_version": "responses/v1",
     }
 
-    return ChatOpenAI(**kwargs)
+    llm = ChatOpenAI(**kwargs)
+    llm._configured_max_completion_tokens = kwargs["max_completion_tokens"]
+    return llm
 
 
 def create_writer_llm(
@@ -631,7 +642,9 @@ _consultant_llm_instance = None
 
 
 def get_consultant_llm(
-    callbacks: list[BaseCallbackHandler] | None = None, quick_mode: bool = False
+    callbacks: list[BaseCallbackHandler] | None = None,
+    quick_mode: bool = False,
+    max_completion_tokens: int | None = None,
 ) -> BaseChatModel | None:
     """
     Get or create the consultant LLM instance.
@@ -672,7 +685,9 @@ def get_consultant_llm(
     if _consultant_llm_instance is None:
         try:
             _consultant_llm_instance = create_consultant_llm(
-                callbacks=callbacks, quick_mode=quick_mode
+                callbacks=callbacks,
+                quick_mode=quick_mode,
+                max_completion_tokens=max_completion_tokens,
             )
         except Exception as e:
             logger.error(

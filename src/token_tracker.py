@@ -320,7 +320,12 @@ class TokenTrackingCallback(BaseCallbackHandler):
     Attach this to LLM instances to automatically log token consumption.
     """
 
-    def __init__(self, agent_name: str, tracker: TokenTracker | None = None):
+    def __init__(
+        self,
+        agent_name: str,
+        tracker: TokenTracker | None = None,
+        output_token_cap: int | None = None,
+    ):
         """
         Initialize callback with agent name.
 
@@ -331,6 +336,7 @@ class TokenTrackingCallback(BaseCallbackHandler):
         super().__init__()
         self.agent_name = agent_name
         self.tracker = tracker or TokenTracker()
+        self.output_token_cap = output_token_cap
 
     def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
         """Called when LLM completes a generation."""
@@ -388,6 +394,17 @@ class TokenTrackingCallback(BaseCallbackHandler):
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
                 )
+                if self.output_token_cap and completion_tokens > 0:
+                    logger.info(
+                        "llm_output_budget_usage",
+                        agent=self.agent_name,
+                        model=model_name,
+                        configured_output_cap=self.output_token_cap,
+                        completion_tokens=completion_tokens,
+                        utilization_ratio=round(
+                            completion_tokens / self.output_token_cap, 4
+                        ),
+                    )
 
 
 # Global singleton instance (lazy initialization to respect quiet mode)

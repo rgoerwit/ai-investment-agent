@@ -9,6 +9,8 @@ Tests the token tracking functionality:
 - Statistics aggregation and reporting
 """
 
+from unittest.mock import patch
+
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 
@@ -517,6 +519,37 @@ class TestTokenTrackingCallback:
 
         assert callback.agent_name == "test_agent"
         assert callback.tracker is not None
+
+    def test_callback_records_output_budget_usage(self):
+        """Test callback emits output budget utilization telemetry when capped."""
+        tracker = TokenTracker()
+        tracker.reset()
+
+        callback = TokenTrackingCallback(
+            agent_name="test_agent",
+            tracker=tracker,
+            output_token_cap=1000,
+        )
+        llm_result = LLMResult(
+            generations=[],
+            llm_output={
+                "model_name": "gemini-2.5-flash",
+                "usage_metadata": {"input_tokens": 1000, "output_tokens": 500},
+            },
+        )
+
+        with patch("src.token_tracker.logger.info") as mock_info:
+            callback.on_llm_end(llm_result)
+
+        budget_logs = [
+            call
+            for call in mock_info.call_args_list
+            if call.args and call.args[0] == "llm_output_budget_usage"
+        ]
+        assert len(budget_logs) == 1
+        assert budget_logs[0].kwargs["configured_output_cap"] == 1000
+        assert budget_logs[0].kwargs["completion_tokens"] == 500
+        assert budget_logs[0].kwargs["utilization_ratio"] == 0.5
 
     def test_callback_with_custom_tracker(self):
         """Test creating callback with custom tracker instance."""

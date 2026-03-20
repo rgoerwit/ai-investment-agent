@@ -21,6 +21,11 @@ from src.runtime_diagnostics import failure_artifact, success_artifact
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .output_validation import (
+    log_output_diagnostics,
+    should_fail_closed,
+    validate_required_output,
+)
 from .state import AgentState
 
 logger = structlog.get_logger(__name__)
@@ -390,6 +395,7 @@ def create_analyst_node(
                         retry_improved=len(retry_content_str) > len(content_str),
                     )
                     content_str = retry_content_str
+                    response = retry_response
                 except Exception as retry_error:
                     logger.error(
                         "analyst_retry_failed",
@@ -397,6 +403,51 @@ def create_analyst_node(
                         ticker=ticker,
                         error=str(retry_error),
                     )
+
+            from src.utils import detect_truncation
+
+            trunc_info = detect_truncation(content_str, agent=agent_key)
+            if trunc_info["truncated"]:
+                logger.warning(
+                    "agent_output_truncated",
+                    agent=agent_key,
+                    ticker=ticker,
+                    source=trunc_info["source"],
+                    marker=trunc_info["marker"],
+                    confidence=trunc_info["confidence"],
+                    output_len=len(content_str),
+                )
+
+            validation = validate_required_output(agent_key, content_str)
+            log_output_diagnostics(
+                agent_key=agent_key,
+                ticker=ticker,
+                runnable=llm if response is not None else llm,
+                response=response,
+                content=content_str,
+                truncated=trunc_info["truncated"],
+                validation=validation if validation["checks"] else None,
+            )
+            if should_fail_closed(
+                agent_key,
+                validation=validation,
+                truncated=trunc_info["truncated"],
+                content=content_str,
+            ):
+                logger.error(
+                    "analyst_invalid_structure",
+                    agent=agent_key,
+                    ticker=ticker,
+                    missing_sections=validation["missing"],
+                )
+                result = failure_artifact(
+                    output_field,
+                    f"{agent_key} output missing required structure",
+                    provider=support.infer_provider_name(llm),
+                    fallback_content=content_str,
+                )
+                new_state.update(result)
+                return new_state
 
             new_state.update(
                 success_artifact(

@@ -11,6 +11,11 @@ from src.runtime_diagnostics import failure_artifact, success_artifact
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .output_validation import (
+    log_output_diagnostics,
+    should_fail_closed,
+    validate_required_output,
+)
 from .state import AgentState
 
 logger = structlog.get_logger(__name__)
@@ -66,17 +71,21 @@ def create_researcher_node(
                 }
             }
 
+        market_report = state.get("market_report", "N/A")
+        sentiment_report = state.get("sentiment_report", "N/A")
+        news_report = state.get("news_report", "N/A")
+        fundamentals_report = state.get("fundamentals_report", "N/A")
         reports = f"""MARKET ANALYST REPORT:
-{state.get("market_report", "N/A")}
+{support.summarize_for_pm(market_report, "market", 1800) if market_report != "N/A" else "N/A"}
 
 SENTIMENT ANALYST REPORT:
-{state.get("sentiment_report", "N/A")}
+{support.summarize_for_pm(sentiment_report, "sentiment", 1200) if sentiment_report != "N/A" else "N/A"}
 
 NEWS ANALYST REPORT:
-{state.get("news_report", "N/A")}
+{support.summarize_for_pm(news_report, "news", 1800) if news_report != "N/A" else "N/A"}
 
 FUNDAMENTALS ANALYST REPORT:
-{state.get("fundamentals_report", "N/A")}"""
+{support.summarize_for_pm(fundamentals_report, "fundamentals", 5500) if fundamentals_report != "N/A" else "N/A"}"""
 
         debate_state = state.get("investment_debate_state", {})
         if round_num == 1:
@@ -178,6 +187,28 @@ Only use data explicitly related to {ticker} ({company_name}).
                 model_name=support.get_model_name(llm),
             )
             content_str = message_utils.extract_string_content(response.content)
+            from src.utils import detect_truncation
+
+            trunc_info = detect_truncation(content_str, agent=agent_key)
+            if trunc_info["truncated"]:
+                logger.warning(
+                    "agent_output_truncated",
+                    agent=agent_key,
+                    ticker=ticker,
+                    source=trunc_info["source"],
+                    marker=trunc_info["marker"],
+                    confidence=trunc_info["confidence"],
+                    output_len=len(content_str),
+                )
+            log_output_diagnostics(
+                agent_key=agent_key,
+                ticker=ticker,
+                runnable=llm,
+                response=response,
+                content=content_str,
+                truncated=trunc_info["truncated"],
+                validation=None,
+            )
             argument = f"{agent_prompt.agent_name} (Round {round_num}): {content_str}"
             field_name = f"{researcher_type}_round{round_num}"
 
@@ -236,7 +267,13 @@ def create_research_manager_node(
                 "When Bull/Bear cite conflicting figures, check if they reference different time periods."
             )
 
-        all_reports = f"""MARKET ANALYST REPORT:\n{state.get("market_report", "N/A")}\n\nSENTIMENT ANALYST REPORT:\n{state.get("sentiment_report", "N/A")}\n\nNEWS ANALYST REPORT:\n{state.get("news_report", "N/A")}\n\nFUNDAMENTALS ANALYST REPORT:\n{state.get("fundamentals_report", "N/A")}{attribution_note}\n\nVALUE TRAP ANALYSIS:\n{value_trap}\n\nBULL RESEARCHER:\n{debate.get("bull_history", "N/A")}\n\nBEAR RESEARCHER:\n{debate.get("bear_history", "N/A")}"""
+        market_report = state.get("market_report", "N/A")
+        sentiment_report = state.get("sentiment_report", "N/A")
+        news_report = state.get("news_report", "N/A")
+        fundamentals_report = state.get("fundamentals_report", "N/A")
+        bull_history = debate.get("bull_history", "N/A")
+        bear_history = debate.get("bear_history", "N/A")
+        all_reports = f"""MARKET ANALYST REPORT:\n{support.summarize_for_pm(market_report, "market", 1800) if market_report != "N/A" else "N/A"}\n\nSENTIMENT ANALYST REPORT:\n{support.summarize_for_pm(sentiment_report, "sentiment", 1200) if sentiment_report != "N/A" else "N/A"}\n\nNEWS ANALYST REPORT:\n{support.summarize_for_pm(news_report, "news", 1800) if news_report != "N/A" else "N/A"}\n\nFUNDAMENTALS ANALYST REPORT:\n{support.summarize_for_pm(fundamentals_report, "fundamentals", 6000) if fundamentals_report != "N/A" else "N/A"}{attribution_note}\n\nVALUE TRAP ANALYSIS:\n{support.summarize_for_pm(value_trap, "value_trap", 2200) if value_trap != "N/A" else "N/A"}\n\nBULL RESEARCHER:\n{support.summarize_for_pm(bull_history, "research", 2500) if bull_history != "N/A" else "N/A"}\n\nBEAR RESEARCHER:\n{support.summarize_for_pm(bear_history, "research", 2500) if bear_history != "N/A" else "N/A"}"""
         system_msg = agent_prompt.system_message
         if strict_mode:
             system_msg += _STRICT_RM_ADDENDUM
@@ -264,6 +301,34 @@ def create_research_manager_node(
                     marker=trunc_info["marker"],
                     confidence=trunc_info["confidence"],
                     output_len=len(content_str),
+                )
+
+            validation = validate_required_output("research_manager", content_str)
+            log_output_diagnostics(
+                agent_key="research_manager",
+                ticker=state.get("company_of_interest", "UNKNOWN"),
+                runnable=llm,
+                response=response,
+                content=content_str,
+                truncated=trunc_info["truncated"],
+                validation=validation,
+            )
+            if should_fail_closed(
+                "research_manager",
+                validation=validation,
+                truncated=trunc_info["truncated"],
+                content=content_str,
+            ):
+                logger.error(
+                    "research_manager_invalid_structure",
+                    ticker=state.get("company_of_interest", "UNKNOWN"),
+                    missing_sections=validation["missing"],
+                )
+                return failure_artifact(
+                    "investment_plan",
+                    "Research Manager output missing required structure",
+                    provider=support.infer_provider_name(llm),
+                    fallback_content=content_str,
                 )
 
             return success_artifact(

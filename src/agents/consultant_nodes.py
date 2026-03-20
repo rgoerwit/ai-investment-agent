@@ -17,6 +17,11 @@ from src.tooling.runtime import TOOL_SERVICE, ToolInvocation
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .output_validation import (
+    log_output_diagnostics,
+    should_fail_closed,
+    validate_required_output,
+)
 from .state import AgentState
 
 logger = structlog.get_logger(__name__)
@@ -390,6 +395,34 @@ Provide your independent consultant review."""
                     marker=trunc_info["marker"],
                     confidence=trunc_info["confidence"],
                     output_len=len(content_str),
+                )
+
+            validation = validate_required_output("consultant", content_str)
+            log_output_diagnostics(
+                agent_key="consultant",
+                ticker=ticker,
+                runnable=llm,
+                response=response,
+                content=content_str,
+                truncated=trunc_info["truncated"],
+                validation=validation,
+            )
+            if should_fail_closed(
+                "consultant",
+                validation=validation,
+                truncated=trunc_info["truncated"],
+                content=content_str,
+            ):
+                logger.error(
+                    "consultant_invalid_structure",
+                    ticker=ticker,
+                    missing_sections=validation["missing"],
+                )
+                return failure_artifact(
+                    "consultant_review",
+                    "Consultant output missing required structure",
+                    provider=support.infer_provider_name(llm),
+                    fallback_content=content_str,
                 )
 
             logger.info(
@@ -767,6 +800,53 @@ Perform a forensic audit using your tools."""
 
         try:
             response_str = await _run_auditor_loop(llm, agent_prompt.system_message)
+
+            from src.utils import detect_truncation
+
+            trunc_info = detect_truncation(
+                response_str, agent="global_forensic_auditor"
+            )
+            if trunc_info["truncated"]:
+                logger.warning(
+                    "agent_output_truncated",
+                    agent="global_forensic_auditor",
+                    ticker=ticker,
+                    source=trunc_info["source"],
+                    marker=trunc_info["marker"],
+                    confidence=trunc_info["confidence"],
+                    output_len=len(response_str),
+                )
+            validation = validate_required_output(
+                "global_forensic_auditor", response_str
+            )
+            log_output_diagnostics(
+                agent_key="global_forensic_auditor",
+                ticker=ticker,
+                runnable=llm,
+                response=None,
+                content=response_str,
+                truncated=trunc_info["truncated"],
+                validation=validation,
+            )
+            if should_fail_closed(
+                "global_forensic_auditor",
+                validation=validation,
+                truncated=trunc_info["truncated"],
+                content=response_str,
+            ):
+                logger.error(
+                    "auditor_invalid_structure",
+                    ticker=ticker,
+                    missing_sections=validation["missing"],
+                )
+                result = failure_artifact(
+                    "auditor_report",
+                    "Auditor output missing required structure",
+                    provider=support.infer_provider_name(llm),
+                    fallback_content=response_str,
+                )
+                result["sender"] = "global_forensic_auditor"
+                return result
 
             logger.info("auditor_complete", ticker=ticker, length=len(response_str))
             result = success_artifact(
