@@ -15,6 +15,7 @@ DATA_BLOCK_PATTERN = _compile_named_block_pattern("DATA_BLOCK")
 _LEGACY_DATA_BLOCK_HEADER_PATTERN = re.compile(r"(?m)^### DATA_BLOCK\s*$")
 _SECTION_HEADER_PATTERN = re.compile(r"(?m)^### ")
 _TABLE_ROW_PATTERN = re.compile(r"^\|(.+)\|$")
+_STRUCTURED_BLOCK_BOUNDARY_NAMES = ("DATA_BLOCK", "PM_BLOCK")
 _LIKELY_DATA_BLOCK_KEYS = (
     "SECTOR",
     "RAW_HEALTH_SCORE",
@@ -152,6 +153,26 @@ def extract_last_data_block(
 def has_parseable_data_block(report: str | None) -> bool:
     """Return True only when a fenced DATA_BLOCK can actually be parsed."""
     return extract_last_data_block(report, include_markers=True) is not None
+
+
+def normalize_structured_block_boundaries(report: str | None) -> str | None:
+    """Insert missing line breaks after known structured block end markers.
+
+    This only repairs the narrow glued-heading defect where a recognized end
+    marker is immediately followed by the next markdown heading, e.g.
+    ``### --- END DATA_BLOCK ---### FINANCIAL HEALTH DETAIL``.
+    """
+    if not report or not isinstance(report, str):
+        return report
+
+    normalized = report
+    for block_name in _STRUCTURED_BLOCK_BOUNDARY_NAMES:
+        normalized = re.sub(
+            rf"(### --- END {re.escape(block_name)} ---)(?=###\s)",
+            r"\1\n\n",
+            normalized,
+        )
+    return normalized
 
 
 def normalize_legacy_data_block_report(report: str | None) -> str | None:

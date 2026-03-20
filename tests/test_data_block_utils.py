@@ -4,6 +4,7 @@ from src.data_block_utils import (
     has_parseable_data_block,
     has_parseable_fenced_block,
     normalize_legacy_data_block_report,
+    normalize_structured_block_boundaries,
 )
 
 
@@ -158,3 +159,43 @@ def test_normalize_legacy_data_block_rejects_non_two_column_tables():
 
     assert normalized == report
     assert has_parseable_data_block(report) is False
+
+
+def test_normalize_structured_block_boundaries_repairs_glued_datablock_heading():
+    report = (
+        "### --- START DATA_BLOCK ---\n"
+        "SECTOR: Energy\n"
+        "### --- END DATA_BLOCK ---### FINANCIAL HEALTH DETAIL\n"
+        "**Score**: 9/12\n"
+    )
+
+    normalized = normalize_structured_block_boundaries(report)
+
+    assert normalized is not None
+    assert "### --- END DATA_BLOCK ---\n\n### FINANCIAL HEALTH DETAIL" in normalized
+
+
+def test_normalize_structured_block_boundaries_repairs_glued_pm_block_heading():
+    report = (
+        "### --- START PM_BLOCK ---\n"
+        "VERDICT: BUY\n"
+        "### --- END PM_BLOCK ---### POSITION SIZING\n"
+        "5%\n"
+    )
+
+    normalized = normalize_structured_block_boundaries(report)
+
+    assert normalized is not None
+    assert "### --- END PM_BLOCK ---\n\n### POSITION SIZING" in normalized
+
+
+def test_normalize_structured_block_boundaries_leaves_clean_text_unchanged():
+    report = (
+        "### --- START DATA_BLOCK ---\n"
+        "SECTOR: Energy\n"
+        "### --- END DATA_BLOCK ---\n\n"
+        "### FINANCIAL HEALTH DETAIL\n"
+        "**Score**: 9/12\n"
+    )
+
+    assert normalize_structured_block_boundaries(report) == report

@@ -528,6 +528,27 @@ class TestReportGeneration:
         )
         assert "tool-coverage gaps" in report
 
+    def test_report_repairs_glued_structured_block_boundary_before_demoting_headers(
+        self,
+    ):
+        """Rendered reports should clean older glued block boundaries without other changes."""
+        reporter = QuietModeReporter(ticker="TEST", company_name="Test Company")
+
+        result = {
+            "company_of_interest": "TEST",
+            "fundamentals_report": (
+                "### --- START DATA_BLOCK ---\n"
+                "SECTOR: Energy\n"
+                "### --- END DATA_BLOCK ---### FINANCIAL HEALTH DETAIL\n"
+                "**Score**: 9/12\n"
+            ),
+            "final_trade_decision": "PORTFOLIO MANAGER VERDICT: HOLD",
+        }
+
+        report = reporter.generate_report(result, brief_mode=False)
+
+        assert "#### --- END DATA_BLOCK ---\n\n#### FINANCIAL HEALTH DETAIL" in report
+
 
 class TestBackwardsCompatibility:
     """Test that existing code works with or without consultant."""

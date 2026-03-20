@@ -565,6 +565,58 @@ Score details here.
         assert "### --- END DATA_BLOCK ---" in result["fundamentals_report"]
 
     @pytest.mark.asyncio
+    async def test_fundamentals_analyst_repairs_glued_datablock_boundary(self):
+        """Fundamentals should insert line breaks after a glued DATA_BLOCK end marker."""
+        from src.agents import create_analyst_node
+
+        mock_llm = MagicMock()
+        malformed_report = (
+            "### --- START DATA_BLOCK ---\n"
+            "SECTOR: Energy\n"
+            "RAW_HEALTH_SCORE: 9.5/12\n"
+            "ADJUSTED_HEALTH_SCORE: 79% (12/12 available)\n"
+            "RAW_GROWTH_SCORE: 3/6\n"
+            "ADJUSTED_GROWTH_SCORE: 50% (6/6 available)\n"
+            "US_REVENUE_PERCENT: Not disclosed\n"
+            "ANALYST_COVERAGE_ENGLISH: 2\n"
+            "PE_RATIO_TTM: 12.35\n"
+            "ADR_EXISTS: YES\n"
+            "IBKR_ACCESSIBILITY: Direct\n"
+            "PFIC_RISK: LOW\n"
+            "### --- END DATA_BLOCK ---### FINANCIAL HEALTH DETAIL\n"
+            "**Score**: 9.5/12\n"
+        )
+        mock_response = SimpleNamespace(content=malformed_report, tool_calls=None)
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling",
+            new=AsyncMock(return_value=mock_response),
+        ):
+            node = create_analyst_node(
+                mock_llm,
+                "fundamentals_analyst",
+                [],
+                "fundamentals_report",
+            )
+            state = {
+                "messages": [],
+                "company_of_interest": "ALV.V",
+                "trade_date": "2026-03-18",
+            }
+            config = {
+                "configurable": {
+                    "context": MagicMock(ticker="ALV.V", trade_date="2026-03-18")
+                }
+            }
+
+            result = await node(state, config)
+
+        assert (
+            "### --- END DATA_BLOCK ---\n\n### FINANCIAL HEALTH DETAIL"
+            in result["fundamentals_report"]
+        )
+
+    @pytest.mark.asyncio
     async def test_fundamentals_analyst_retries_unparseable_datablock_with_format_suffix(
         self,
     ):

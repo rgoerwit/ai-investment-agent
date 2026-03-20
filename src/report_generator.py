@@ -17,6 +17,7 @@ from typing import Any
 
 import structlog
 
+from src.data_block_utils import normalize_structured_block_boundaries
 from src.runtime_diagnostics import is_publishable_analysis
 
 logger = structlog.get_logger(__name__)
@@ -1086,6 +1087,10 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         # Remove excessive whitespace
         text = re.sub(r"\n{3,}", "\n\n", text)
         text = text.strip()
+
+        # Repair exact glued block-boundary defects from older artifacts or
+        # upstream model-format drift before any header demotion occurs.
+        text = normalize_structured_block_boundaries(text)
 
         # Remove agent prefixes if present
         text = re.sub(

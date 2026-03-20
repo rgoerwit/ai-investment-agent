@@ -15,6 +15,7 @@ from src.data_block_utils import (
     has_parseable_data_block,
     has_parseable_fenced_block,
     normalize_legacy_data_block_report,
+    normalize_structured_block_boundaries,
 )
 from src.runtime_diagnostics import failure_artifact, success_artifact
 
@@ -56,6 +57,15 @@ def _normalize_structured_output(agent_key: str, content: str, ticker: str) -> s
             original_has_datablock=has_parseable_fenced_block(content, "DATA_BLOCK"),
             repaired_has_datablock=has_parseable_data_block(normalized),
         )
+    boundary_normalized = normalize_structured_block_boundaries(normalized)
+    if boundary_normalized != normalized:
+        logger.warning(
+            "fundamentals_datablock_boundary_repaired",
+            ticker=ticker,
+            original_has_datablock=has_parseable_fenced_block(content, "DATA_BLOCK"),
+            repaired_has_datablock=has_parseable_data_block(boundary_normalized),
+        )
+    normalized = boundary_normalized
     return normalized
 
 
