@@ -262,6 +262,7 @@ The pipeline pauses before each AI stage to show a summary (ticker count, estima
 | `-y, --yes` | Skip all confirmation prompts (for cron/CI/overnight runs) |
 | `--skip-scrape FILE` | Skip Stage 0 scraping; use an existing ticker list file |
 | `--stage N` | Run only stage N (0=scrape, 1=quick-screen, 2=full analysis) |
+| `--run-date DATE` | Force the pipeline/output date for cross-day resume when filenames were copied or renamed |
 | `--buys-file FILE` | Explicit BUY list to use for Stage 2 (see resumption notes below) |
 | `--cooldown N` | Seconds between analyses (default: 60 for free tier, 10 for paid) |
 | `--quick` | Pass `--quick` flag to each analysis (1 debate round, faster) |
@@ -273,18 +274,37 @@ Output lands in `scratch/`: quick-screen reports (`*_quick.md`), full reports fo
 The pipeline has built-in resumability: any ticker whose output file already contains a verdict line is skipped automatically. To resume:
 
 ```bash
+# Same-day resume for Stage 1 or Stage 2
+# Re-run the same command family without --force; completed outputs are skipped
+./scripts/run_pipeline.sh --stage 1 --skip-scrape scratch/gems_2026-03-02.txt
+
 # Same-day resume (pipeline ran and was interrupted today)
 # Just re-run with --stage 2 — it finds today's buys file and skips completed tickers
 ./scripts/run_pipeline.sh --stage 2
+
+# Cross-day resume for Stage 1
+# Point --skip-scrape at the original gems_YYYY-MM-DD.txt file from the interrupted run.
+# The script now derives the run date from that filename and reuses the matching
+# quick-screen outputs instead of looking for today's files.
+./scripts/run_pipeline.sh --stage 1 --skip-scrape scratch/gems_2026-03-02.txt
 
 # Cross-day resume (pipeline started yesterday, interrupted, resuming today)
 # Use --buys-file to point at yesterday's BUY list.
 # The script detects the date in the filename and matches output files correctly —
 # without this, it would look for today's output files and re-analyze everything.
 ./scripts/run_pipeline.sh --stage 2 --buys-file scratch/buys_2026-03-02.txt
+
+# If you copied or renamed the ticker list / BUY list and the original date is no
+# longer in the filename, force the original run date explicitly:
+./scripts/run_pipeline.sh --stage 1 --skip-scrape scratch/gems_2026-03-20.txt --run-date 2026-03-02
 ```
 
-Without `--buys-file` on a cross-day resume, the script looks for today's BUY list and stops. Point it at the earlier `buys_YYYY-MM-DD.txt` file to reuse the correct outputs.
+Subtle but important:
+
+- Stage 1 resumability depends on the original run date because quick outputs are named `README-<ticker>-YYYY-MM-DD_quick.md`.
+- Stage 2 resumability depends on the original run date because full outputs and `buys_YYYY-MM-DD.txt` are date-scoped the same way.
+- If you keep the original `gems_YYYY-MM-DD.txt` / `buys_YYYY-MM-DD.txt` filenames, the script can infer the correct date automatically.
+- If you copy or rename those files, use `--run-date YYYY-MM-DD` so the script checks the correct output files instead of today's.
 
 ### Configuring API Rate Limits
 

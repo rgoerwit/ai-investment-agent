@@ -13,6 +13,7 @@
 #   --include-us        Pass --include-us to find_gems.py
 #   --cooldown N        Override COOLDOWN_SECONDS (default: 60)
 #   --stage N           Start from stage N (0, 1, or 2). Requires prior stages' outputs.
+#   --run-date DATE     Force output/resume date (YYYY-MM-DD), useful for cross-day resume
 #   --buys-file FILE    Explicit BUY list path (bypasses date-based default; use with --stage 2
 #                       when resuming a run that started on a previous calendar day)
 #   -y, --yes           Skip confirmation prompts (run non-interactively)
@@ -40,6 +41,8 @@ INCLUDE_US=""
 START_STAGE=0
 AUTO_YES=false
 STRICT_FLAG=""
+RUN_DATE_OVERRIDE=""
+BUY_LIST_EXPLICIT=false
 
 # --- Colors ---
 RED='\033[0;31m'
@@ -88,7 +91,7 @@ report_verdict_line() {
         /^# / {
             line=$0
             sub(/\r$/, "", line)
-            if (match(line, /: [A-Z_]+$/)) {
+            if (match(line, /: .+$/)) {
                 found = 1
                 print line
                 exit 0
@@ -118,6 +121,74 @@ report_has_verdict_header() {
     [[ -n "$verdict" ]]
 }
 
+extract_date_from_path() {
+    local path="$1"
+    basename "$path" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1 || true
+}
+
+apply_run_date() {
+    local source_label="$1"
+    local new_date="$2"
+    if [[ -z "$new_date" || "$new_date" == "$DATE" ]]; then
+        return
+    fi
+
+    info "Cross-day resume: using date ${new_date} from ${source_label} (was ${DATE})"
+    DATE="$new_date"
+    if [[ -z "$SKIP_SCRAPE" ]]; then
+        TICKER_LIST="${SCRATCH}/gems_${DATE}.txt"
+    fi
+    if ! $BUY_LIST_EXPLICIT; then
+        BUY_LIST="${SCRATCH}/buys_${DATE}.txt"
+    fi
+}
+
+ticker_to_dash() {
+    local ticker="$1"
+    printf '%s\n' "$ticker" | tr '._' '-'
+}
+
+quick_outfile_for() {
+    local ticker="$1"
+    local run_date="$2"
+    local dash
+    dash=$(ticker_to_dash "$ticker")
+    printf '%s/README-%s-%s_quick.md\n' "$SCRATCH" "$dash" "$run_date"
+}
+
+count_completed_quick_reports_for_date() {
+    local ticker_list="$1"
+    local run_date="$2"
+    local count=0
+    local ticker outfile
+    while IFS= read -r ticker || [[ -n "$ticker" ]]; do
+        [[ -z "$ticker" || "$ticker" =~ ^[[:space:]]*# ]] && continue
+        ticker=$(echo "$ticker" | xargs)
+        [[ -z "$ticker" ]] && continue
+        outfile=$(quick_outfile_for "$ticker" "$run_date")
+        if [[ -f "$outfile" ]] && report_has_verdict_header "$outfile"; then
+            count=$((count + 1))
+        fi
+    done < "$ticker_list"
+    printf '%s\n' "$count"
+}
+
+detect_stage1_resume_date() {
+    local ticker_list="$1"
+    local inferred_date="$2"
+    local today_date="$3"
+    local inferred_count today_count
+
+    inferred_count=$(count_completed_quick_reports_for_date "$ticker_list" "$inferred_date")
+    today_count=$(count_completed_quick_reports_for_date "$ticker_list" "$today_date")
+
+    if [[ "$today_count" -gt "$inferred_count" ]]; then
+        printf '%s\n' "$today_date"
+    else
+        printf '%s\n' "$inferred_date"
+    fi
+}
+
 # --- Parse arguments ---
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -136,8 +207,12 @@ while [[ $# -gt 0 ]]; do
         --stage)
             START_STAGE="$2"
             shift 2 ;;
+        --run-date)
+            RUN_DATE_OVERRIDE="$2"
+            shift 2 ;;
         --buys-file)
             BUY_LIST="$2"
+            BUY_LIST_EXPLICIT=true
             shift 2 ;;
         -y|--yes)
             AUTO_YES=true
@@ -162,6 +237,7 @@ OPTIONS:
   --include-us        Include US exchanges in scrape phase
   --cooldown N        Seconds between ticker analyses (default: 60)
   --stage N           Start from stage N (0, 1, or 2)
+  --run-date DATE     Force the pipeline/output date (YYYY-MM-DD) for cross-day resume
   --buys-file FILE    Explicit BUY list path — bypasses the date-based default
                       (scratch/buys_YYYY-MM-DD.txt). Use with --stage 2 when
                       resuming a run that crossed midnight:
@@ -191,6 +267,12 @@ EXAMPLES:
   # Start from Stage 2 (BUY list must exist from prior run)
   ./scripts/run_pipeline.sh --stage 2
 
+  # Resume a prior Stage 1 run from its original date
+  ./scripts/run_pipeline.sh --stage 1 --skip-scrape scratch/gems_2026-02-24.txt
+
+  # Resume using an explicit run date when filenames were copied/renamed
+  ./scripts/run_pipeline.sh --stage 1 --skip-scrape scratch/gems_2026-02-25.txt --run-date 2026-02-24
+
   # Non-interactive (e.g. cron, CI, overnight run)
   caffeinate -i ./scripts/run_pipeline.sh --yes
 
@@ -211,14 +293,22 @@ if [[ -n "$SKIP_SCRAPE" ]]; then
     TICKER_LIST="$SKIP_SCRAPE"
 fi
 
-# If --buys-file was given, derive DATE from the filename so that Stage 2 output
-# filenames and resumability checks stay consistent with the original run.
-# e.g. scratch/buys_2026-03-02.txt  →  DATE=2026-03-02
-if [[ "$BUY_LIST" != "${SCRATCH}/buys_${DATE}.txt" ]]; then
-    EXTRACTED_DATE=$(basename "$BUY_LIST" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1)
-    if [[ -n "$EXTRACTED_DATE" ]]; then
-        info "Cross-day resume: using date ${EXTRACTED_DATE} from buys file (was ${DATE})"
-        DATE="$EXTRACTED_DATE"
+# Date precedence:
+# 1. explicit --run-date
+# 2. explicit --buys-file date
+# 3. --skip-scrape ticker-list date
+if [[ -n "$RUN_DATE_OVERRIDE" ]]; then
+    apply_run_date "run-date override" "$RUN_DATE_OVERRIDE"
+elif $BUY_LIST_EXPLICIT; then
+    apply_run_date "buys file" "$(extract_date_from_path "$BUY_LIST")"
+elif [[ -n "$SKIP_SCRAPE" ]]; then
+    apply_run_date "ticker list" "$(extract_date_from_path "$TICKER_LIST")"
+fi
+
+if [[ -n "$SKIP_SCRAPE" && -z "$RUN_DATE_OVERRIDE" && ! $BUY_LIST_EXPLICIT && $START_STAGE -eq 1 ]]; then
+    DETECTED_STAGE1_DATE=$(detect_stage1_resume_date "$TICKER_LIST" "$DATE" "$(date +%Y-%m-%d)")
+    if [[ -n "$DETECTED_STAGE1_DATE" && "$DETECTED_STAGE1_DATE" != "$DATE" ]]; then
+        apply_run_date "existing quick outputs" "$DETECTED_STAGE1_DATE"
     fi
 fi
 
@@ -449,7 +539,7 @@ if [[ $START_STAGE -le 1 ]]; then
                 HOLD_COUNT=$((HOLD_COUNT + 1))
                 info "HOLD: $ticker"
                 ;;
-            DO_NOT_INITIATE)
+            DO_NOT_INITIATE|DO\ NOT\ INITIATE)
                 SELL_COUNT=$((SELL_COUNT + 1))
                 info "DO_NOT_INITIATE: $ticker"
                 ;;

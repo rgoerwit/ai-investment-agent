@@ -17,7 +17,7 @@ class TestVerdictExtraction:
       # TICKER: DO_NOT_INITIATE
     """
 
-    HEADER_PATTERN = re.compile(r"^# .+: (?P<verdict>[A-Z_]+)$", re.MULTILINE)
+    HEADER_PATTERN = re.compile(r"^# .+: (?P<verdict>[^\r\n]+)$", re.MULTILINE)
 
     @classmethod
     def _extract_verdict(cls, content: str) -> str | None:
@@ -37,12 +37,12 @@ class TestVerdictExtraction:
         assert self._extract_verdict(content) == "HOLD"
 
     def test_do_not_initiate_detected(self):
-        content = "# X.Y (Foo Corp): DO_NOT_INITIATE\n"
-        assert self._extract_verdict(content) == "DO_NOT_INITIATE"
+        content = "# X.Y (Foo Corp): DO NOT INITIATE\n"
+        assert self._extract_verdict(content) == "DO NOT INITIATE"
 
     def test_no_company_name_header_detected(self):
-        content = "# 262A.T: DO_NOT_INITIATE\n"
-        assert self._extract_verdict(content) == "DO_NOT_INITIATE"
+        content = "# 262A.T: DO NOT INITIATE\n"
+        assert self._extract_verdict(content) == "DO NOT INITIATE"
 
     def test_exchange_qualified_numeric_headers_detected(self):
         assert self._extract_verdict("# 2628.HK (Foo): BUY\n") == "BUY"
@@ -86,6 +86,10 @@ class TestVerdictExtraction:
         content = "# X.Y (Foo): BUY_SOMETHING\n"
         assert self._extract_verdict(content) == "BUY_SOMETHING"
 
+    def test_verdict_with_spaces_detected(self):
+        content = "# 0142.HK (First Pacific Company Limited): DO NOT INITIATE\n"
+        assert self._extract_verdict(content) == "DO NOT INITIATE"
+
 
 # ============================================================
 # TestTickerToDash — filename convention
@@ -120,6 +124,91 @@ class TestTickerToDash:
         assert self._ticker_to_dash("BRK_B.TO") == "BRK-B-TO"
 
 
+class TestRunDateDerivation:
+    DATE_RE = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2})")
+
+    @classmethod
+    def _extract_date(cls, path: str) -> str | None:
+        match = cls.DATE_RE.search(Path(path).name)
+        return match.group(1) if match else None
+
+    @classmethod
+    def _derive_run_date(
+        cls,
+        today: str,
+        *,
+        skip_scrape: str = "",
+        buys_file: str = "",
+        run_date: str = "",
+    ) -> str:
+        if run_date:
+            return run_date
+        if buys_file:
+            extracted = cls._extract_date(buys_file)
+            if extracted:
+                return extracted
+        if skip_scrape:
+            extracted = cls._extract_date(skip_scrape)
+            if extracted:
+                return extracted
+        return today
+
+    def test_skip_scrape_date_drives_stage1_resume(self):
+        assert (
+            self._derive_run_date(
+                "2026-03-20", skip_scrape="scratch/gems_2026-03-19.txt"
+            )
+            == "2026-03-19"
+        )
+
+    def test_buys_file_date_drives_stage2_resume(self):
+        assert (
+            self._derive_run_date("2026-03-20", buys_file="scratch/buys_2026-03-18.txt")
+            == "2026-03-18"
+        )
+
+    def test_explicit_run_date_wins(self):
+        assert (
+            self._derive_run_date(
+                "2026-03-20",
+                skip_scrape="scratch/gems_2026-03-19.txt",
+                buys_file="scratch/buys_2026-03-18.txt",
+                run_date="2026-03-17",
+            )
+            == "2026-03-17"
+        )
+
+    @staticmethod
+    def _detect_stage1_resume_date(
+        inferred_date: str,
+        today: str,
+        completed_counts: dict[str, int],
+    ) -> str:
+        inferred_count = completed_counts.get(inferred_date, 0)
+        today_count = completed_counts.get(today, 0)
+        return today if today_count > inferred_count else inferred_date
+
+    def test_stage1_prefers_today_when_more_outputs_exist(self):
+        assert (
+            self._detect_stage1_resume_date(
+                "2026-03-19",
+                "2026-03-20",
+                {"2026-03-19": 6, "2026-03-20": 149},
+            )
+            == "2026-03-20"
+        )
+
+    def test_stage1_keeps_inferred_date_when_it_has_more_outputs(self):
+        assert (
+            self._detect_stage1_resume_date(
+                "2026-03-19",
+                "2026-03-20",
+                {"2026-03-19": 149, "2026-03-20": 6},
+            )
+            == "2026-03-19"
+        )
+
+
 # ============================================================
 # TestResumability — skip logic
 # ============================================================
@@ -146,7 +235,7 @@ class TestResumability:
         """
         if not force and outfile.is_file():
             content = outfile.read_text()
-            if re.search(r"^# .+: [A-Z_]+$", content, re.MULTILINE):
+            if re.search(r"^# .+: .+$", content, re.MULTILINE):
                 return "SKIP"
         return "PROCESS"
 
@@ -187,14 +276,14 @@ class TestResumability:
 
     def test_do_not_initiate_also_skipped(self, tmp_path):
         outfile = tmp_path / "report.md"
-        outfile.write_text("# X.Y (Foo Corp): DO_NOT_INITIATE\n")
+        outfile.write_text("# X.Y (Foo Corp): DO NOT INITIATE\n")
 
         result = self._run_skip_check(outfile, force=False)
         assert result == "SKIP"
 
     def test_no_company_name_header_also_skipped(self, tmp_path):
         outfile = tmp_path / "report.md"
-        outfile.write_text("# 262A.T: DO_NOT_INITIATE\n")
+        outfile.write_text("# 262A.T: DO NOT INITIATE\n")
 
         result = self._run_skip_check(outfile, force=False)
         assert result == "SKIP"
