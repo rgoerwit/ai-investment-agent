@@ -219,6 +219,78 @@ class TestCheckStaleness:
         is_stale, _ = check_staleness(analysis, structural_macro_events=[event])
         assert is_stale is False
 
+
+class TestAlphaBaseFallback:
+    def test_alphanumeric_base_matches_suffixed_analysis(self):
+        pos = _make_position(ticker="262A.T", currency="JPY")
+        pos = NormalizedPosition(
+            conid=pos.conid,
+            ticker=Ticker.from_ibkr("262A", "UNKNOWN", "JPY"),
+            quantity=pos.quantity,
+            avg_cost_local=pos.avg_cost_local,
+            market_value_usd=pos.market_value_usd,
+            currency=pos.currency,
+            current_price_local=pos.current_price_local,
+        )
+        analyses = {"262A.T": _make_analysis(ticker="262A.T")}
+
+        items = reconcile(
+            positions=[pos], analyses=analyses, portfolio=_make_portfolio()
+        )
+
+        assert len(items) == 1
+        assert items[0].ticker.yf == "262A.T"
+
+    def test_suffixed_analysis_wins_over_bare_for_alphanumeric_base(self):
+        pos = NormalizedPosition(
+            conid=123456,
+            ticker=Ticker.from_ibkr("CEK", "UNKNOWN", "EUR"),
+            quantity=100,
+            avg_cost_local=10,
+            market_value_usd=1000,
+            currency="EUR",
+            current_price_local=10,
+        )
+        analyses = {
+            "CEK": _make_analysis(ticker="CEK", verdict="HOLD"),
+            "CEK.DE": _make_analysis(ticker="CEK.DE", verdict="BUY"),
+        }
+
+        items = reconcile(
+            positions=[pos], analyses=analyses, portfolio=_make_portfolio()
+        )
+
+        assert len(items) == 1
+        assert items[0].ticker.yf == "CEK.DE"
+
+    def test_numeric_base_does_not_crossmatch_across_exchanges(self):
+        pos = NormalizedPosition(
+            conid=123456,
+            ticker=Ticker.from_ibkr("2628", "UNKNOWN", ""),
+            quantity=100,
+            avg_cost_local=10,
+            market_value_usd=1000,
+            currency="USD",
+            current_price_local=10,
+        )
+        analyses = {
+            "2628.HK": _make_analysis(
+                ticker="2628.HK", verdict="BUY", current_price=10
+            ),
+            "2628.TW": _make_analysis(
+                ticker="2628.TW", verdict="BUY", current_price=10
+            ),
+            "2628.T": _make_analysis(ticker="2628.T", verdict="BUY", current_price=10),
+        }
+
+        items = reconcile(
+            positions=[pos], analyses=analyses, portfolio=_make_portfolio()
+        )
+
+        assert len(items) == 1
+        assert items[0].action == "REVIEW"
+        assert "no evaluator analysis" in items[0].reason.lower()
+
     def test_regional_structural_event_invalidates_matching_exchange(self):
         """STRUCTURAL event scoped to .T invalidates a .T ticker."""
         from src.memory import MacroEvent

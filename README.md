@@ -806,6 +806,18 @@ Read it this way:
 - `src/data/`, `src/validators/`, `src/memory.py`, and `src/charts/` are shared subsystems used by the graph and reporting layers.
 - `src/ibkr/` is adjacent to, not embedded inside, the single-ticker analysis flow.
 
+### Appendix: Untrusted Content Inspection
+
+If you need to screen untrusted external content before it reaches LLM context, the main insertion points now live under `src/tooling/`:
+
+- `src/tooling/inspection_service.py` owns the backend-agnostic inspection service.
+- `src/tooling/inspection_hook.py` attaches that inspection pass to the shared tool execution path.
+- `src/main.py` wires inspection from config at startup.
+
+Some high-risk direct-ingress paths also call the inspection service explicitly before returning LLM-facing text, including Tavily/search helpers, editor fetch tools, selected news/social inputs, and fetcher gap-fill paths.
+
+The design is intentionally pluggable. Today the default backend is a no-op, but the seam is meant to support remote HTTP services, local Python libraries, subprocess-based scanners, or local/offline model wrappers without changing calling code.
+
 ---
 
 ## Contributing

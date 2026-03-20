@@ -12,37 +12,42 @@ import pytest
 class TestVerdictExtraction:
     """Test the verdict extraction patterns used by run_pipeline.sh.
 
-    The shell script uses grep patterns like:
-      grep -qE '^# .*\\): BUY$' "$OUTFILE"
-    to determine the verdict from the markdown title line.
+    The shell script parses headers in either of these forms:
+      # TICKER (Company Name): BUY
+      # TICKER: DO_NOT_INITIATE
     """
 
-    # The same regex patterns used in run_pipeline.sh
-    BUY_PATTERN = re.compile(r"^# .*\): BUY$", re.MULTILINE)
-    SELL_PATTERN = re.compile(r"^# .*\): SELL", re.MULTILINE)
-    HOLD_PATTERN = re.compile(r"^# .*\): HOLD", re.MULTILINE)
-    DNI_PATTERN = re.compile(r"^# .*\): DO_NOT_INITIATE", re.MULTILINE)
-    # Generic "has verdict" pattern (used for skip logic)
-    VERDICT_PATTERN = re.compile(r"^# .*\): ", re.MULTILINE)
+    HEADER_PATTERN = re.compile(r"^# .+: (?P<verdict>[A-Z_]+)$", re.MULTILINE)
+
+    @classmethod
+    def _extract_verdict(cls, content: str) -> str | None:
+        match = cls.HEADER_PATTERN.search(content)
+        return match.group("verdict") if match else None
 
     def test_buy_detected(self, tmp_path):
         content = "# 8002.T (Marubeni Corporation): BUY\n"
-        assert self.BUY_PATTERN.search(content) is not None
+        assert self._extract_verdict(content) == "BUY"
 
     def test_sell_detected(self, tmp_path):
         content = "# UNTR.JK (PT United Tractors Tbk): SELL\n"
-        assert self.BUY_PATTERN.search(content) is None
-        assert self.SELL_PATTERN.search(content) is not None
+        assert self._extract_verdict(content) == "SELL"
 
     def test_hold_detected(self):
         content = "# 7740.T (Tamron Co.,Ltd.): HOLD\n"
-        assert self.BUY_PATTERN.search(content) is None
-        assert self.HOLD_PATTERN.search(content) is not None
+        assert self._extract_verdict(content) == "HOLD"
 
     def test_do_not_initiate_detected(self):
         content = "# X.Y (Foo Corp): DO_NOT_INITIATE\n"
-        assert self.BUY_PATTERN.search(content) is None
-        assert self.DNI_PATTERN.search(content) is not None
+        assert self._extract_verdict(content) == "DO_NOT_INITIATE"
+
+    def test_no_company_name_header_detected(self):
+        content = "# 262A.T: DO_NOT_INITIATE\n"
+        assert self._extract_verdict(content) == "DO_NOT_INITIATE"
+
+    def test_exchange_qualified_numeric_headers_detected(self):
+        assert self._extract_verdict("# 2628.HK (Foo): BUY\n") == "BUY"
+        assert self._extract_verdict("# 2628.TW (Bar): HOLD\n") == "HOLD"
+        assert self._extract_verdict("# 2628.T (Baz): SELL\n") == "SELL"
 
     def test_verdict_at_line_10(self):
         """Report has preamble lines before the verdict title."""
@@ -59,28 +64,27 @@ class TestVerdictExtraction:
             "# 8002.T (Marubeni Corporation): BUY",
         ]
         content = "\n".join(lines) + "\n"
-        assert self.BUY_PATTERN.search(content) is not None
+        assert self._extract_verdict(content) == "BUY"
 
     def test_commas_in_company_name(self):
         """Company names with commas and periods should still match."""
         content = "# 7740.T (Tamron Co.,Ltd.): HOLD\n"
-        assert self.VERDICT_PATTERN.search(content) is not None
-        assert self.HOLD_PATTERN.search(content) is not None
+        assert self._extract_verdict(content) == "HOLD"
 
     def test_parentheses_in_company_name(self):
         """Nested parentheses shouldn't break the match."""
         content = "# 2330.TW (Taiwan Semiconductor (TSMC)): BUY\n"
-        assert self.BUY_PATTERN.search(content) is not None
+        assert self._extract_verdict(content) == "BUY"
 
     def test_no_verdict_line(self):
         """File without verdict line should not match."""
         content = "Some random content\nNo verdict here\n"
-        assert self.VERDICT_PATTERN.search(content) is None
+        assert self._extract_verdict(content) is None
 
     def test_buy_must_be_exact_end(self):
         """BUY pattern requires exact match at end of line (no trailing text)."""
         content = "# X.Y (Foo): BUY_SOMETHING\n"
-        assert self.BUY_PATTERN.search(content) is None
+        assert self._extract_verdict(content) == "BUY_SOMETHING"
 
 
 # ============================================================
@@ -132,8 +136,7 @@ class TestResumability:
     def _run_skip_check(outfile: Path, force: bool = False) -> str:
         """Pure-Python reimplementation of the skip logic from run_pipeline.sh.
 
-        The shell script checks:
-          if ! $FORCE && [[ -f "$OUTFILE" ]] && grep -qE '^# .*\\): ' "$OUTFILE"
+        The shell script checks whether the report has a parseable verdict header.
 
         Returns "SKIP" or "PROCESS".
 
@@ -143,7 +146,7 @@ class TestResumability:
         """
         if not force and outfile.is_file():
             content = outfile.read_text()
-            if re.search(r"^# .*\): ", content, re.MULTILINE):
+            if re.search(r"^# .+: [A-Z_]+$", content, re.MULTILINE):
                 return "SKIP"
         return "PROCESS"
 
@@ -185,6 +188,13 @@ class TestResumability:
     def test_do_not_initiate_also_skipped(self, tmp_path):
         outfile = tmp_path / "report.md"
         outfile.write_text("# X.Y (Foo Corp): DO_NOT_INITIATE\n")
+
+        result = self._run_skip_check(outfile, force=False)
+        assert result == "SKIP"
+
+    def test_no_company_name_header_also_skipped(self, tmp_path):
+        outfile = tmp_path / "report.md"
+        outfile.write_text("# 262A.T: DO_NOT_INITIATE\n")
 
         result = self._run_skip_check(outfile, force=False)
         assert result == "SKIP"

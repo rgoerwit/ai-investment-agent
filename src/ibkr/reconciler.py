@@ -48,6 +48,7 @@ from src.ibkr.order_builder import (
     round_to_lot_size,
 )
 from src.ibkr.ticker import Ticker
+from src.ticker_policy import is_safe_symbol_crossmatch_base, split_ticker
 from src.ticker_utils import TickerFormatter
 
 logger = structlog.get_logger(__name__)
@@ -1136,10 +1137,8 @@ def reconcile(
     _alpha_base_lookup: dict[str, AnalysisRecord] = {}
     _alpha_base_to_key: dict[str, str] = {}  # base → the analyses key that was chosen
     for _yf_t, _rec in analyses.items():
-        _base = (_yf_t.rsplit(".", 1)[0] if "." in _yf_t else _yf_t).upper()
-        if re.match(
-            r"^[A-Z][A-Z0-9]*$", _base
-        ):  # starts with a letter → not purely numeric
+        _base, _suffix = split_ticker(_yf_t)
+        if is_safe_symbol_crossmatch_base(_base):
             if "." in _yf_t:
                 # Suffixed entry is more specific — always overwrite any bare entry
                 _alpha_base_lookup[_base] = _rec

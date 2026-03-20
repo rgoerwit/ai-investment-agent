@@ -10,7 +10,6 @@ from datetime import datetime
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.messages import ToolMessage as TM
-from langgraph.prebuilt import create_react_agent
 from langgraph.types import RunnableConfig
 
 from src.runtime_diagnostics import ArtifactStatus, failure_artifact, success_artifact
@@ -83,6 +82,23 @@ async def _invoke_consultant_with_deadline(
         raise TimeoutError(
             f"Consultant call exceeded {timeout_s:.1f}s wall-clock timeout for {ticker}"
         ) from exc
+
+
+async def _invoke_agent_loop_llm(
+    runnable,
+    messages,
+    *,
+    context: str,
+) -> object:
+    """Invoke an agent-loop LLM through the shared retry-aware runtime helper."""
+    model_name = getattr(runnable, "model_name", None)
+    return await agent_runtime.invoke_with_rate_limit_handling(
+        runnable,
+        messages,
+        context=context,
+        provider=support.infer_provider_name(runnable),
+        model_name=model_name,
+    )
 
 
 def _build_legal_fallback_report(
@@ -465,19 +481,68 @@ Date: {support._format_date_with_fy_hint(current_date)}
 
 Call the search_legal_tax_disclosures tool with these parameters, then provide your JSON assessment."""
 
-        try:
-            agent = create_react_agent(llm, tools)
-            result = await agent.ainvoke(
-                {
-                    "messages": [
-                        SystemMessage(content=agent_prompt.system_message),
-                        HumanMessage(content=human_msg),
-                    ]
-                }
-            )
+        tools_by_name = {t.name: t for t in tools}
+        max_tool_iterations = 4
 
-            response = result["messages"][-1].content
-            response_str = message_utils.extract_string_content(response)
+        try:
+            messages: list = [
+                SystemMessage(content=agent_prompt.system_message),
+                HumanMessage(content=human_msg),
+            ]
+            response_str = ""
+
+            for iteration in range(max_tool_iterations + 1):
+                response = await _invoke_agent_loop_llm(
+                    llm,
+                    messages,
+                    context="legal_counsel",
+                )
+                tool_calls = getattr(response, "tool_calls", None)
+
+                if (
+                    not isinstance(tool_calls, list)
+                    or not tool_calls
+                    or iteration == max_tool_iterations
+                ):
+                    response_str = message_utils.extract_string_content(
+                        response.content
+                    )
+                    break
+
+                messages.append(response)
+                for tool_call in tool_calls:
+                    tool_fn = tools_by_name.get(tool_call["name"])
+                    tool_call_id = tool_call.get("id", tool_call["name"])
+                    if tool_fn:
+                        try:
+                            tool_result = await TOOL_SERVICE.execute(
+                                ToolInvocation(
+                                    name=tool_call["name"],
+                                    args=tool_call["args"],
+                                    source="legal_counsel",
+                                    agent_key="legal_counsel",
+                                ),
+                                runner=lambda args, fn=tool_fn: fn.ainvoke(args),
+                            )
+                            tool_output = str(tool_result.value)
+                        except Exception as tool_err:
+                            logger.warning(
+                                "legal_counsel_tool_failed",
+                                ticker=ticker,
+                                tool=tool_call["name"],
+                                error=str(tool_err),
+                            )
+                            tool_output = f"TOOL_ERROR: {tool_err}"
+                    else:
+                        tool_output = f"Unknown tool: {tool_call['name']}"
+                    messages.append(TM(content=tool_output, tool_call_id=tool_call_id))
+
+                logger.info(
+                    "legal_counsel_tool_iteration",
+                    ticker=ticker,
+                    iteration=iteration + 1,
+                    tools_called=[tc["name"] for tc in tool_calls],
+                )
 
             try:
                 parsed = json.loads(response_str)
@@ -563,47 +628,6 @@ def create_auditor_node(llm, tools: list) -> Callable:
     """
     max_tool_output_chars = 63500
 
-    def truncate_tool_outputs_hook(state: dict) -> dict:
-        from langchain_core.messages import ToolMessage
-
-        messages = state.get("messages", [])
-        modified = []
-        for message in messages:
-            if isinstance(message, ToolMessage):
-                content = (
-                    message.content
-                    if isinstance(message.content, str)
-                    else str(message.content)
-                )
-                if len(content) > max_tool_output_chars:
-                    head_size = 58000
-                    tail_size = 5500
-                    truncated_chars = len(content) - head_size - tail_size
-                    truncated = (
-                        content[:head_size]
-                        + f"\n\n[...TRUNCATED {truncated_chars:,} chars...]\n"
-                        + "[NOTE: Data truncated due to size limits. Partial analysis may still be useful. "
-                        + "Key financial metrics may appear in head or tail sections above/below.]\n\n"
-                        + content[-tail_size:]
-                    )
-                    modified.append(
-                        ToolMessage(
-                            content=truncated,
-                            tool_call_id=message.tool_call_id,
-                            name=getattr(message, "name", None),
-                        )
-                    )
-                    logger.debug(
-                        "auditor_tool_output_truncated",
-                        original_len=len(content),
-                        truncated_len=len(truncated),
-                    )
-                else:
-                    modified.append(message)
-            else:
-                modified.append(message)
-        return {"llm_input_messages": modified}
-
     async def auditor_node(state: AgentState, config: RunnableConfig) -> dict[str, str]:
         from src.prompts import get_prompt
 
@@ -635,26 +659,114 @@ Date: {support._format_date_with_fy_hint(current_date)}
 
 Perform a forensic audit using your tools."""
 
+        tools_by_name = {t.name: t for t in tools}
+        # recursion_limit=12 in the old create_react_agent maps to 6 tool-call rounds
+        # (each round = 1 LLM call + 1 tool execution step in LangGraph).
+        # We use 6 manual iterations here to preserve the same budget.
+        max_tool_iterations = 6
+
+        def _truncate_messages_for_llm(msgs: list) -> list:
+            """Apply the auditor truncation hook to ToolMessages before LLM invocation."""
+            from langchain_core.messages import ToolMessage as LCToolMessage
+
+            result_msgs = []
+            for msg in msgs:
+                if isinstance(msg, LCToolMessage):
+                    content = (
+                        msg.content
+                        if isinstance(msg.content, str)
+                        else str(msg.content)
+                    )
+                    if len(content) > max_tool_output_chars:
+                        head_size = 58000
+                        tail_size = 5500
+                        truncated_chars = len(content) - head_size - tail_size
+                        truncated = (
+                            content[:head_size]
+                            + f"\n\n[...TRUNCATED {truncated_chars:,} chars...]\n"
+                            + "[NOTE: Data truncated due to size limits. Partial analysis may still be useful. "
+                            + "Key financial metrics may appear in head or tail sections above/below.]\n\n"
+                            + content[-tail_size:]
+                        )
+                        result_msgs.append(
+                            LCToolMessage(
+                                content=truncated,
+                                tool_call_id=msg.tool_call_id,
+                                name=getattr(msg, "name", None),
+                            )
+                        )
+                        logger.debug(
+                            "auditor_tool_output_truncated",
+                            original_len=len(content),
+                            truncated_len=len(truncated),
+                        )
+                    else:
+                        result_msgs.append(msg)
+                else:
+                    result_msgs.append(msg)
+            return result_msgs
+
+        async def _run_auditor_loop(active_llm, agent_prompt_sys: str) -> str:
+            messages: list = [
+                SystemMessage(content=agent_prompt_sys),
+                HumanMessage(content=human_msg),
+            ]
+            for iteration in range(max_tool_iterations + 1):
+                llm_input = _truncate_messages_for_llm(messages)
+                response = await _invoke_agent_loop_llm(
+                    active_llm,
+                    llm_input,
+                    context="global_forensic_auditor",
+                )
+                tool_calls = getattr(response, "tool_calls", None)
+
+                if (
+                    not isinstance(tool_calls, list)
+                    or not tool_calls
+                    or iteration == max_tool_iterations
+                ):
+                    return message_utils.extract_string_content(response.content)
+
+                messages.append(response)
+                for tool_call in tool_calls:
+                    tool_fn = tools_by_name.get(tool_call["name"])
+                    tool_call_id = tool_call.get("id", tool_call["name"])
+                    if tool_fn:
+                        try:
+                            tool_result = await TOOL_SERVICE.execute(
+                                ToolInvocation(
+                                    name=tool_call["name"],
+                                    args=tool_call["args"],
+                                    source="auditor",
+                                    agent_key="global_forensic_auditor",
+                                ),
+                                runner=lambda args, fn=tool_fn: fn.ainvoke(args),
+                            )
+                            tool_output = str(tool_result.value)
+                        except Exception as tool_err:
+                            logger.warning(
+                                "auditor_tool_failed",
+                                ticker=ticker,
+                                tool=tool_call["name"],
+                                error=str(tool_err),
+                            )
+                            tool_output = f"TOOL_ERROR: {tool_err}"
+                    else:
+                        tool_output = f"Unknown tool: {tool_call['name']}"
+                    messages.append(TM(content=tool_output, tool_call_id=tool_call_id))
+
+                logger.info(
+                    "auditor_tool_iteration",
+                    ticker=ticker,
+                    iteration=iteration + 1,
+                    tools_called=[tc["name"] for tc in tool_calls],
+                )
+            return ""
+
         logger.info("auditor_start", ticker=ticker)
 
         try:
-            agent = create_react_agent(
-                llm,
-                tools,
-                pre_model_hook=truncate_tool_outputs_hook,
-            )
-            result = await agent.ainvoke(
-                {
-                    "messages": [
-                        SystemMessage(content=agent_prompt.system_message),
-                        HumanMessage(content=human_msg),
-                    ]
-                },
-                config={"recursion_limit": 12},
-            )
-
-            response = result["messages"][-1].content
-            response_str = message_utils.extract_string_content(response)
+            response_str = await _run_auditor_loop(llm, agent_prompt.system_message)
 
             logger.info("auditor_complete", ticker=ticker, length=len(response_str))
             result = success_artifact(
@@ -727,22 +839,9 @@ VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
                         use_responses_api=True,
                         output_version="responses/v1",
                     )
-                    agent = create_react_agent(
-                        fallback_llm,
-                        tools,
-                        pre_model_hook=truncate_tool_outputs_hook,
+                    response_str = await _run_auditor_loop(
+                        fallback_llm, agent_prompt.system_message
                     )
-                    result = await agent.ainvoke(
-                        {
-                            "messages": [
-                                SystemMessage(content=agent_prompt.system_message),
-                                HumanMessage(content=human_msg),
-                            ]
-                        },
-                        config={"recursion_limit": 12},
-                    )
-                    response = result["messages"][-1].content
-                    response_str = message_utils.extract_string_content(response)
                     logger.info(
                         "auditor_complete_after_retry",
                         ticker=ticker,

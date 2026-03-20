@@ -82,6 +82,42 @@ format_duration() {
     fi
 }
 
+report_verdict_line() {
+    local file="$1"
+    awk '
+        /^# / {
+            line=$0
+            sub(/\r$/, "", line)
+            if (match(line, /: [A-Z_]+$/)) {
+                found = 1
+                print line
+                exit 0
+            }
+        }
+        END {
+            if (!found) {
+                exit 1
+            }
+        }
+    ' "$file" 2>/dev/null || true
+}
+
+extract_report_verdict() {
+    local file="$1"
+    local line
+    line=$(report_verdict_line "$file")
+    if [[ -n "$line" ]]; then
+        printf '%s\n' "${line##*: }"
+    fi
+}
+
+report_has_verdict_header() {
+    local file="$1"
+    local verdict
+    verdict=$(extract_report_verdict "$file")
+    [[ -n "$verdict" ]]
+}
+
 # --- Parse arguments ---
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -244,7 +280,7 @@ if [[ $START_STAGE -le 0 ]]; then
         [[ -z "$ticker" ]] && continue
         DASH=$(echo "$ticker" | tr '._' '-')
         OUTFILE="${SCRATCH}/README-${DASH}-${DATE}_quick.md"
-        if $FORCE || ! [[ -f "$OUTFILE" ]] || ! grep -qE '^# .*\): ' "$OUTFILE"; then
+        if $FORCE || ! [[ -f "$OUTFILE" ]] || ! report_has_verdict_header "$OUTFILE"; then
             STAGE1_TODO=$((STAGE1_TODO + 1))
         fi
     done < "$TICKER_LIST"
@@ -297,7 +333,7 @@ if [[ $START_STAGE -le 1 ]]; then
             [[ -z "$ticker" ]] && continue
             DASH=$(echo "$ticker" | tr '._' '-')
             OUTFILE="${SCRATCH}/README-${DASH}-${DATE}_quick.md"
-            if $FORCE || ! [[ -f "$OUTFILE" ]] || ! grep -qE '^# .*\): ' "$OUTFILE"; then
+            if $FORCE || ! [[ -f "$OUTFILE" ]] || ! report_has_verdict_header "$OUTFILE"; then
                 STAGE1_TODO=$((STAGE1_TODO + 1))
             fi
         done < "$TICKER_LIST"
@@ -340,7 +376,7 @@ if [[ $START_STAGE -le 1 ]]; then
         LOGFILE="${SCRATCH}/${DASH}-LOG-${DATE}_quick.txt"
 
         # Resumability: skip if output already has a verdict line
-        if ! $FORCE && [[ -f "$OUTFILE" ]] && grep -qE '^# .*\): ' "$OUTFILE"; then
+        if ! $FORCE && [[ -f "$OUTFILE" ]] && report_has_verdict_header "$OUTFILE"; then
             STAGE1_SKIPPED=$((STAGE1_SKIPPED + 1))
             info "SKIP $ticker (already done)"
             continue
@@ -354,7 +390,7 @@ if [[ $START_STAGE -le 1 ]]; then
             --quick --strict --no-charts --quiet --brief --no-memory \
             --output "$OUTFILE" \
             2> "$LOGFILE"; then
-            VERDICT=$(grep -m1 -E '^# .*\): ' "$OUTFILE" 2>/dev/null | sed 's/.*): //' | tr -d '\r')
+            VERDICT=$(extract_report_verdict "$OUTFILE")
             [[ -n "$VERDICT" ]] && success "$ticker done [Verdict=${VERDICT}]" || success "$ticker done"
         else
             fail "FAILED: $ticker (see $LOGFILE)"
@@ -398,33 +434,35 @@ if [[ $START_STAGE -le 1 ]]; then
             continue
         fi
 
-        # Title line (line 10) format: "# TICKER (Company Name): VERDICT"
-        if grep -qE '^# .*\): BUY$' "$OUTFILE"; then
-            echo "$ticker" >> "$BUY_LIST"
-            BUY_COUNT=$((BUY_COUNT + 1))
-            success "BUY: $ticker"
-        elif grep -qE '^# .*\): SELL' "$OUTFILE"; then
-            SELL_COUNT=$((SELL_COUNT + 1))
-            info "SELL: $ticker"
-        elif grep -qE '^# .*\): HOLD' "$OUTFILE"; then
-            HOLD_COUNT=$((HOLD_COUNT + 1))
-            info "HOLD: $ticker"
-        elif grep -qE '^# .*\): DO_NOT_INITIATE' "$OUTFILE"; then
-            SELL_COUNT=$((SELL_COUNT + 1))
-            info "DO_NOT_INITIATE: $ticker"
-        else
-            # None of the known verdicts matched — show line 10 verbatim for debugging
-            LINE10=$(sed -n '10p' "$OUTFILE")
-            VERDICT=$(echo "$LINE10" | sed 's/.*): //')
-            if [[ -n "$VERDICT" && "$VERDICT" != "$LINE10" ]]; then
-                # Pattern matched — unusual verdict string (e.g. WATCHLIST, SPECULATIVE_BUY)
+        VERDICT=$(extract_report_verdict "$OUTFILE")
+        case "$VERDICT" in
+            BUY)
+                echo "$ticker" >> "$BUY_LIST"
+                BUY_COUNT=$((BUY_COUNT + 1))
+                success "BUY: $ticker"
+                ;;
+            SELL)
+                SELL_COUNT=$((SELL_COUNT + 1))
+                info "SELL: $ticker"
+                ;;
+            HOLD)
+                HOLD_COUNT=$((HOLD_COUNT + 1))
+                info "HOLD: $ticker"
+                ;;
+            DO_NOT_INITIATE)
+                SELL_COUNT=$((SELL_COUNT + 1))
+                info "DO_NOT_INITIATE: $ticker"
+                ;;
+            "")
+                HEADER=$(report_verdict_line "$OUTFILE")
+                warn "UNKNOWN: $ticker [header: ${HEADER:-<empty>}]"
+                OTHER_COUNT=$((OTHER_COUNT + 1))
+                ;;
+            *)
                 warn "UNKNOWN_VERDICT ($VERDICT): $ticker"
-            else
-                # Pattern didn't match — title not on line 10 or unexpected format
-                warn "UNKNOWN: $ticker [line10: ${LINE10:-<empty>}]"
-            fi
-            OTHER_COUNT=$((OTHER_COUNT + 1))
-        fi
+                OTHER_COUNT=$((OTHER_COUNT + 1))
+                ;;
+        esac
 
     done < "$TICKER_LIST"
 
@@ -466,7 +504,7 @@ if [[ $START_STAGE -le 2 ]]; then
         [[ -z "$ticker" ]] && continue
         DASH=$(echo "$ticker" | tr '._' '-')
         OUTFILE="${SCRATCH}/README-${DASH}-${DATE}.md"
-        if $FORCE || ! [[ -f "$OUTFILE" ]] || ! grep -qE '^# .*\): ' "$OUTFILE"; then
+        if $FORCE || ! [[ -f "$OUTFILE" ]] || ! report_has_verdict_header "$OUTFILE"; then
             STAGE2_TODO=$((STAGE2_TODO + 1))
         fi
     done < "$BUY_LIST"
@@ -506,7 +544,7 @@ if [[ $START_STAGE -le 2 ]]; then
         LOGFILE="${SCRATCH}/${DASH}-LOG-${DATE}.txt"
 
         # Resumability: skip if full analysis output already has a verdict
-        if ! $FORCE && [[ -f "$OUTFILE" ]] && grep -qE '^# .*\): ' "$OUTFILE"; then
+        if ! $FORCE && [[ -f "$OUTFILE" ]] && report_has_verdict_header "$OUTFILE"; then
             STAGE2_SKIPPED=$((STAGE2_SKIPPED + 1))
             info "SKIP $ticker (full analysis exists)"
             continue
@@ -521,7 +559,7 @@ if [[ $START_STAGE -le 2 ]]; then
             $STRICT_FLAG \
             --output "$OUTFILE" \
             2> "$LOGFILE"; then
-            VERDICT=$(grep -m1 -E '^# .*\): ' "$OUTFILE" 2>/dev/null | sed 's/.*): //' | tr -d '\r')
+            VERDICT=$(extract_report_verdict "$OUTFILE")
             [[ -n "$VERDICT" ]] && success "$ticker done [Verdict=${VERDICT}]" || success "$ticker done"
         else
             fail "FAILED: $ticker (see $LOGFILE)"

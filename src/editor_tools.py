@@ -11,6 +11,8 @@ from bs4 import BeautifulSoup
 from langchain_core.tools import tool
 
 from src.runtime_diagnostics import classify_failure
+from src.tooling.inspection_service import INSPECTION_SERVICE
+from src.tooling.inspector import InspectionEnvelope, SourceKind
 
 logger = structlog.get_logger(__name__)
 
@@ -81,7 +83,14 @@ async def fetch_reference_content(url: str) -> str:
             chars=len(text),
         )
 
-        return text
+        envelope = InspectionEnvelope(
+            content_text=text,
+            source_kind=SourceKind.web_fetch,
+            source_name="httpx",
+            source_uri=url,
+            metadata={"url": url[:200]},
+        )
+        return await INSPECTION_SERVICE.check(envelope)
 
     except httpx.TimeoutException:
         logger.warning("reference_fetch_timeout", url=url[:80], failure_kind="timeout")
@@ -150,11 +159,12 @@ async def search_claim(query: str) -> str:
         if not result:
             return "SEARCH_UNAVAILABLE: Tavily search returned no results (API may be unavailable)"
 
-        # Parse results — tavily_search_with_timeout returns raw tool output
+        if isinstance(result, str) and result.startswith("TOOL_BLOCKED:"):
+            return result
+
         text = str(result)
         if len(text) > MAX_CLAIM_SEARCH_CHARS:
             text = text[:MAX_CLAIM_SEARCH_CHARS] + "...[truncated]"
-
         logger.info("claim_search_complete", query=query[:80], result_chars=len(text))
         return text
 

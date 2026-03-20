@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.data.filings.base import FilingFetcher, FilingResult
+from src.data.filings.edinet_fetcher import _extract_ticker_base
 from src.data.filings.registry import FilingRegistry
 
 # ============================================================================
@@ -217,7 +218,6 @@ class TestFilingRegistry:
         reg = FilingRegistry()
         fetcher = _MockFetcher(["T"], "EDINET", available=False)
         reg.register(fetcher)
-
         assert reg.get_fetcher("2767.T") is None
 
     def test_multiple_suffixes_registered(self):
@@ -251,22 +251,11 @@ class TestFilingRegistry:
         """fetch() should catch exceptions and return None."""
         reg = FilingRegistry()
 
-        class _ErrorFetcher(FilingFetcher):
-            @property
-            def supported_suffixes(self):
-                return ["T"]
-
-            @property
-            def source_name(self):
-                return "BROKEN"
-
-            def is_available(self):
-                return True
-
+        class BrokenFetcher(_MockFetcher):
             async def get_filing_data(self, ticker):
-                raise RuntimeError("API down")
+                raise RuntimeError("boom")
 
-        reg.register(_ErrorFetcher())
+        reg.register(BrokenFetcher(["T"], "BROKEN"))
         result = await reg.fetch("2767.T")
         assert result is None
 
@@ -278,6 +267,14 @@ class TestFilingRegistry:
 
         assert "T" in reg.available_suffixes
         assert "KS" not in reg.available_suffixes
+
+
+class TestEdinetTickerBaseExtraction:
+    def test_alphanumeric_tokyo_base_preserved(self):
+        assert _extract_ticker_base("262A.T") == "262A"
+
+    def test_numeric_tokyo_base_preserved(self):
+        assert _extract_ticker_base("2767.T") == "2767"
 
 
 # ============================================================================

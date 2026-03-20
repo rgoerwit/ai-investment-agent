@@ -9,6 +9,9 @@ from typing import Any
 
 import structlog
 
+from src.tooling.inspection_service import INSPECTION_SERVICE
+from src.tooling.inspector import InspectionEnvelope, SourceKind
+
 logger = structlog.get_logger(__name__)
 
 # Tavily timeout configuration (seconds)
@@ -31,17 +34,19 @@ async def tavily_search_with_timeout(
     """
     Execute Tavily search with timeout protection.
 
+    All results pass through INSPECTION_SERVICE before being returned to callers.
+
     Args:
         query: Query dict for tavily_tool.ainvoke (e.g., {"query": "search terms"})
         timeout: Maximum seconds to wait (default: TAVILY_TIMEOUT_SECONDS)
 
     Returns:
-        Tavily search results, or None if timeout/error occurs
+        Tavily search results (inspected), or None if timeout/error occurs
     """
     if not _tavily_tool:
         return None
     try:
-        return await asyncio.wait_for(_tavily_tool.ainvoke(query), timeout=timeout)
+        raw = await asyncio.wait_for(_tavily_tool.ainvoke(query), timeout=timeout)
     except asyncio.TimeoutError:
         logger.warning(
             "tavily_search_timeout",
@@ -56,3 +61,20 @@ async def tavily_search_with_timeout(
             error=str(e),
         )
         return None
+
+    if raw is None:
+        return None
+
+    content_text = raw if isinstance(raw, str) else str(raw)
+    envelope = InspectionEnvelope(
+        content_text=content_text,
+        raw_content=raw,
+        source_kind=SourceKind.web_search,
+        source_name="tavily",
+        metadata={"query": query.get("query", "")[:200]},
+    )
+    approved = await INSPECTION_SERVICE.check(envelope)
+
+    # Preserve the original payload shape on allow/fail-open paths so callers
+    # that merge structured Tavily results do not regress.
+    return approved
