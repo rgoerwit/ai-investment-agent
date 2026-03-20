@@ -115,7 +115,7 @@ def _validate_key_files(config) -> dict[str, str]:
     if sig_fp.exists() and enc_fp.exists() and sig_fp.resolve() == enc_fp.resolve():
         errors.append(
             "IBKR_OAUTH_SIGNATURE_KEY_FP and IBKR_OAUTH_ENCRYPTION_KEY_FP both point "
-            "to the same file. IBKR requires two separate RSA private key files:\n"
+            "to the same file. IBKR requires two separate RSA private key files:\n"  # gitleaks:allow
             "  - Signature key:   your RSA signing key in PEM format (PKCS8)\n"
             "  - Encryption key:  your RSA encryption key in PEM format (separate key pair)\n"
             "  Upload the matching public keys to the IBKR portal — not the PEM files here."
@@ -123,8 +123,8 @@ def _validate_key_files(config) -> dict[str, str]:
 
     # PEM headers that indicate a public key or certificate (not a private key).
     _PUBLIC_HEADERS = (
-        b"-----BEGIN PUBLIC KEY-----",
-        b"-----BEGIN RSA PUBLIC KEY-----",
+        b"-----BEGIN PUBLIC KEY-----",  # gitleaks:allow
+        b"-----BEGIN RSA PUBLIC KEY-----",  # gitleaks:allow
         b"-----BEGIN CERTIFICATE-----",
         b"-----BEGIN CERTIFICATE REQUEST-----",
     )
