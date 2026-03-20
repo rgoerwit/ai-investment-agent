@@ -26,6 +26,7 @@ from tenacity import (
 )
 
 from src.config import config
+from src.runtime_diagnostics import classify_failure
 
 logger = structlog.get_logger(__name__)
 
@@ -43,6 +44,14 @@ class FinancialSituationMemory:
     - Ticker-specific isolation to prevent cross-contamination
     """
 
+    _EMBEDDING_MODEL = "gemini-embedding-001"
+    _EMBEDDING_DIMENSION = 768
+    _shared_embeddings: GoogleGenerativeAIEmbeddings | None = None
+    _shared_embeddings_available: bool = False
+    _shared_embeddings_key: tuple[str | None, str, int] | None = None
+    _shared_chroma_client: Any | None = None
+    _shared_chroma_key: str | None = None
+
     def __init__(self, name: str):
         """
         Initialize a memory collection.
@@ -54,6 +63,8 @@ class FinancialSituationMemory:
         self.available = False
         self.situation_collection = None
         self.embeddings = None
+        self.embeddings_available = False
+        self.chroma_available = False
 
         # Check for API key via config
         api_key = config.get_google_api_key()
@@ -63,46 +74,16 @@ class FinancialSituationMemory:
             )
             return
 
-        # Initialize Google embeddings
-        try:
-            self.embeddings = GoogleGenerativeAIEmbeddings(
-                model="models/gemini-embedding-001",
-                google_api_key=api_key,
-                task_type="retrieval_document",  # Optimized for semantic search
-                output_dimensionality=768,  # Match existing ChromaDB collections
-            )
-
-            # Validate embeddings work with a test query (Sync call for init)
-            try:
-                test_embedding = self.embeddings.embed_query("initialization test")
-                if not test_embedding or len(test_embedding) == 0:
-                    raise ValueError("Embedding test returned empty result")
-            except Exception as e:
-                logger.warning(f"Embedding initialization test failed: {e}")
-                # Don't fail completely, might be transient
-
-            logger.info(
-                "embeddings_initialized", model="gemini-embedding-001", collection=name
-            )
-
-        except Exception as e:
-            logger.warning("embeddings_init_failed", error=str(e), collection=name)
+        self.embeddings = self._get_shared_embeddings(name)
+        self.embeddings_available = self._shared_embeddings_available
+        if self.embeddings is None:
             return
 
         # Initialize ChromaDB
         try:
-            # NOTE: Telemetry env vars (ANONYMIZED_TELEMETRY, CHROMA_TELEMETRY_ENABLED)
-            # are now set by config.py's setup_environment validator.
-            import chromadb
-            from chromadb.config import Settings
-
-            CURRENT_EMBEDDING_MODEL = "gemini-embedding-001"
-
-            # Initialize persistent client with telemetry explicitly disabled
-            self.chroma_client = chromadb.PersistentClient(
-                path=str(config.chroma_persist_directory),
-                settings=Settings(anonymized_telemetry=False, allow_reset=True),
-            )
+            self.chroma_client = self._get_shared_chroma_client(name)
+            if self.chroma_client is None:
+                return
 
             # Check if collection exists with stale embedding model
             existing_collections = self.chroma_client.list_collections()
@@ -114,13 +95,13 @@ class FinancialSituationMemory:
                 existing = self.chroma_client.get_collection(name=self.name)
                 existing_model = existing.metadata.get("embedding_model", "unknown")
 
-                if existing_model != CURRENT_EMBEDDING_MODEL:
+                if existing_model != self._EMBEDDING_MODEL:
                     # Model mismatch - delete and recreate to avoid incompatible embeddings
                     logger.warning(
                         "stale_embedding_model_detected",
                         collection=self.name,
                         old_model=existing_model,
-                        new_model=CURRENT_EMBEDDING_MODEL,
+                        new_model=self._EMBEDDING_MODEL,
                         action="recreating_collection",
                     )
                     self.chroma_client.delete_collection(name=self.name)
@@ -130,14 +111,15 @@ class FinancialSituationMemory:
                 name=self.name,
                 metadata={
                     "description": f"Financial debate memory for {name}",
-                    "embedding_model": CURRENT_EMBEDDING_MODEL,
-                    "embedding_dimension": 768,
+                    "embedding_model": self._EMBEDDING_MODEL,
+                    "embedding_dimension": self._EMBEDDING_DIMENSION,
                     "created_at": datetime.now().isoformat(),
                     "version": "2.0",
                 },
             )
 
-            self.available = True
+            self.chroma_available = True
+            self.available = self.embeddings_available and self.chroma_available
 
             # Log collection stats
             count = self.situation_collection.count()
@@ -147,10 +129,118 @@ class FinancialSituationMemory:
                 persist_dir=str(config.chroma_persist_directory),
                 existing_documents=count,
             )
+            if not self.available:
+                logger.warning(
+                    "memory_degraded",
+                    collection=self.name,
+                    embeddings_available=self.embeddings_available,
+                    chroma_available=self.chroma_available,
+                )
 
         except Exception as e:
             logger.warning("chromadb_init_failed", error=str(e), collection=name)
             self.available = False
+
+    @classmethod
+    def _reset_shared_state_for_tests(cls) -> None:
+        """Reset shared resources to keep tests isolated."""
+        cls._shared_embeddings = None
+        cls._shared_embeddings_available = False
+        cls._shared_embeddings_key = None
+        cls._shared_chroma_client = None
+        cls._shared_chroma_key = None
+
+    @classmethod
+    def _get_shared_embeddings(
+        cls, collection_name: str
+    ) -> GoogleGenerativeAIEmbeddings | None:
+        api_key = config.get_google_api_key()
+        cache_key = (api_key, cls._EMBEDDING_MODEL, cls._EMBEDDING_DIMENSION)
+        if cls._shared_embeddings_key != cache_key:
+            cls._shared_embeddings = None
+            cls._shared_embeddings_available = False
+            cls._shared_embeddings_key = cache_key
+
+        if cls._shared_embeddings is not None or cls._shared_embeddings_available:
+            return cls._shared_embeddings
+
+        try:
+            embeddings = GoogleGenerativeAIEmbeddings(
+                model=f"models/{cls._EMBEDDING_MODEL}",
+                google_api_key=api_key,
+                task_type="retrieval_document",
+                output_dimensionality=cls._EMBEDDING_DIMENSION,
+            )
+            try:
+                test_embedding = embeddings.embed_query("initialization test")
+                if not test_embedding or len(test_embedding) == 0:
+                    raise ValueError("Embedding test returned empty result")
+                cls._shared_embeddings = embeddings
+                cls._shared_embeddings_available = True
+                logger.info(
+                    "embeddings_initialized",
+                    model=cls._EMBEDDING_MODEL,
+                    collection=collection_name,
+                    shared=True,
+                )
+            except Exception as e:
+                cls._shared_embeddings = embeddings
+                cls._shared_embeddings_available = False
+                details = classify_failure(
+                    e,
+                    provider="google",
+                    model_name=cls._EMBEDDING_MODEL,
+                    class_name=type(embeddings).__name__,
+                )
+                logger.warning(
+                    "embeddings_healthcheck_failed",
+                    collection=collection_name,
+                    provider=details.provider,
+                    model=cls._EMBEDDING_MODEL,
+                    failure_kind=details.kind,
+                    host=details.host,
+                    error_type=details.error_type,
+                    root_cause_type=details.root_cause_type,
+                    retryable=details.retryable,
+                    error_message=details.message,
+                )
+            return cls._shared_embeddings
+        except Exception as e:
+            logger.warning(
+                "embeddings_init_failed", error=str(e), collection=collection_name
+            )
+            return None
+
+    @classmethod
+    def _get_shared_chroma_client(cls, collection_name: str) -> Any | None:
+        persist_key = str(config.chroma_persist_directory)
+        if cls._shared_chroma_key != persist_key:
+            cls._shared_chroma_client = None
+            cls._shared_chroma_key = persist_key
+
+        if cls._shared_chroma_client is not None:
+            return cls._shared_chroma_client
+
+        try:
+            import chromadb
+            from chromadb.config import Settings
+
+            cls._shared_chroma_client = chromadb.PersistentClient(
+                path=persist_key,
+                settings=Settings(anonymized_telemetry=False, allow_reset=True),
+            )
+            logger.info(
+                "chromadb_client_initialized",
+                collection=collection_name,
+                persist_dir=persist_key,
+                shared=True,
+            )
+            return cls._shared_chroma_client
+        except Exception as e:
+            logger.warning(
+                "chromadb_init_failed", error=str(e), collection=collection_name
+            )
+            return None
 
     @retry(
         stop=stop_after_attempt(3),
@@ -183,9 +273,33 @@ class FinancialSituationMemory:
 
             async with GLOBAL_RATE_LIMITER:
                 embedding = await self.embeddings.aembed_query(truncated_text)
-        except Exception:
+        except Exception as exc:
             # Fallback if rate limiter not available or incompatible (e.g., in tests)
             # Catch all exceptions to handle import errors, attribute errors, type errors, etc.
+            details = classify_failure(
+                exc,
+                provider="google",
+                model_name=self._EMBEDDING_MODEL,
+                class_name=(
+                    type(self.embeddings).__name__
+                    if self.embeddings is not None
+                    else None
+                ),
+            )
+            logger.warning(
+                "embedding_rate_limiter_fallback",
+                collection=self.name,
+                provider=details.provider,
+                model=self._EMBEDDING_MODEL,
+                failure_kind=details.kind,
+                host=details.host,
+                error_type=details.error_type,
+                root_cause_type=details.root_cause_type,
+                retryable=details.retryable,
+                error_message=details.message,
+                fallback="direct_embed_query",
+                exc_info=True,
+            )
             embedding = await self.embeddings.aembed_query(truncated_text)
 
         if not embedding or len(embedding) == 0:
@@ -585,6 +699,62 @@ def create_lessons_collection() -> FinancialSituationMemory:
     return FinancialSituationMemory("lessons_learned")
 
 
+def get_ticker_memory_stats(ticker: str) -> dict[str, dict[str, Any]]:
+    """Return per-role memory stats without recreating ticker memory instances."""
+    safe_ticker = sanitize_ticker_for_collection(ticker)
+    role_map = {
+        "bull_researcher": f"{safe_ticker}_bull_memory",
+        "bear_researcher": f"{safe_ticker}_bear_memory",
+        "research_manager": f"{safe_ticker}_invest_judge_memory",
+        "trader": f"{safe_ticker}_trader_memory",
+        "portfolio_manager": f"{safe_ticker}_risk_manager_memory",
+    }
+    unavailable = {"available": False, "count": 0}
+
+    client = FinancialSituationMemory._get_shared_chroma_client(
+        f"{safe_ticker}_stats_probe"
+    )
+    if client is None:
+        return {role: {"name": name, **unavailable} for role, name in role_map.items()}
+
+    try:
+        existing_collections = client.list_collections()
+        existing_names = {
+            collection.name if hasattr(collection, "name") else collection
+            for collection in existing_collections
+        }
+    except Exception as exc:
+        logger.warning("ticker_memory_stats_list_failed", ticker=ticker, error=str(exc))
+        return {role: {"name": name, **unavailable} for role, name in role_map.items()}
+
+    stats: dict[str, dict[str, Any]] = {}
+    for role, collection_name in role_map.items():
+        if collection_name not in existing_names:
+            stats[role] = {"name": collection_name, **unavailable}
+            continue
+        try:
+            collection = client.get_collection(name=collection_name)
+            stats[role] = {
+                "available": True,
+                "name": collection_name,
+                "count": collection.count(),
+            }
+        except Exception as exc:
+            logger.warning(
+                "ticker_memory_stats_failed",
+                ticker=ticker,
+                collection=collection_name,
+                error=str(exc),
+            )
+            stats[role] = {
+                "available": False,
+                "name": collection_name,
+                "count": 0,
+                "error": str(exc),
+            }
+    return stats
+
+
 def cleanup_all_memories(days: int = 0, ticker: str | None = None) -> dict[str, int]:
     """
     Clean up memories from collections.
@@ -731,3 +901,222 @@ def get_all_memory_stats() -> dict[str, dict[str, Any]]:
         logger.error("get_all_stats_failed", error=str(e))
 
     return stats
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Macro Events Store
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+from dataclasses import dataclass  # noqa: E402 — after existing imports
+
+
+@dataclass
+class MacroEvent:
+    """Represents a portfolio-detected macro event stored in ChromaDB."""
+
+    event_date: str  # YYYY-MM-DD (peak_anchor from CORRELATED_SELL_EVENT)
+    detected_date: str  # YYYY-MM-DD
+    expiry: str  # YYYY-MM-DD — event considered stale/priced-in after this date
+    impact: str  # "TRANSIENT" | "STRUCTURAL" | "UNCERTAIN"
+    event_type: str  # TARIFF_TRADE | LIQUIDITY_PANIC | ... | UNKNOWN
+    scope: str  # "GLOBAL" | "REGIONAL" | "SECTOR"
+    primary_region: str  # most-common exchange suffix, e.g. ".T", ".HK", or "GLOBAL"
+    primary_sector: str  # most-common sector string, or ""
+    severity: str  # "HIGH" (≥40%), "MEDIUM" (25-40%)
+    correlation_pct: float
+    peak_count: int
+    total_held: int
+    news_headline: str  # ≤120 chars
+    news_detail: str  # ≤300 chars
+    forced_reanalysis: bool = (
+        False  # True → STRUCTURAL events that immediately invalidate
+    )
+
+
+MACRO_EVENTS_COLLECTION = "macro_events"
+
+
+def _date_to_int(iso_date: str) -> int:
+    """Convert YYYY-MM-DD to YYYYMMDD integer for ChromaDB numeric range comparisons.
+
+    ChromaDB >= 0.6 requires $gt/$gte/$lt/$lte operands to be int or float.
+    ISO strings are stored alongside these ints for human-readable reconstruction.
+    """
+    return int(iso_date.replace("-", ""))
+
+
+def _meta_to_macro_event(meta: dict) -> "MacroEvent":
+    """Deserialize a ChromaDB metadata dict back into a MacroEvent."""
+    return MacroEvent(
+        event_date=meta["event_date"],
+        detected_date=meta.get("detected_date", ""),
+        expiry=meta.get("expiry", ""),
+        impact=meta.get("impact", "UNCERTAIN"),
+        event_type=meta.get("event_type", "UNKNOWN"),
+        scope=meta.get("scope", "GLOBAL"),
+        primary_region=meta.get("primary_region", "GLOBAL"),
+        primary_sector=meta.get("primary_sector", ""),
+        severity=meta.get("severity", "MEDIUM"),
+        correlation_pct=float(meta.get("correlation_pct", 0)),
+        peak_count=int(meta.get("peak_count", 0)),
+        total_held=int(meta.get("total_held", 0)),
+        news_headline=meta.get("news_headline", ""),
+        news_detail=meta.get("news_detail", ""),
+        forced_reanalysis=bool(meta.get("forced_reanalysis", False)),
+    )
+
+
+class MacroEventsStore:
+    """
+    Global ChromaDB collection for portfolio-detected macro events.
+    Uses dummy embeddings ([0.0]*768) — queries are metadata-only.
+    Non-ticker-isolated (like lessons_learned in retrospective.py).
+    """
+
+    def __init__(self) -> None:
+        self.available = False
+        self.collection = None
+        self._init()
+
+    def _init(self) -> None:
+        try:
+            import chromadb
+            from chromadb.config import Settings
+
+            client = chromadb.PersistentClient(
+                path=str(config.chroma_persist_directory),
+                settings=Settings(anonymized_telemetry=False, allow_reset=True),
+            )
+            self.collection = client.get_or_create_collection(
+                name=MACRO_EVENTS_COLLECTION,
+                metadata={
+                    "description": "Portfolio macro events",
+                    "embedding_model": "dummy",
+                },
+            )
+            self.available = True
+        except Exception as e:
+            logger.warning("macro_events_store_init_failed", error=str(e))
+
+    def store_event(self, event: "MacroEvent") -> bool:
+        """Store with 7-day dedup on event_date. Returns True if stored."""
+        if not self.available:
+            return False
+        try:
+            from datetime import date as _date
+            from datetime import timedelta as _td
+
+            anchor = _date.fromisoformat(event.event_date)
+            window_start_ts = _date_to_int((anchor - _td(days=7)).isoformat())
+            window_end_ts = _date_to_int((anchor + _td(days=7)).isoformat())
+            existing = self.collection.get(
+                where={
+                    "$and": [
+                        {"event_date_ts": {"$gte": window_start_ts}},
+                        {"event_date_ts": {"$lte": window_end_ts}},
+                    ]
+                }
+            )
+            if existing and existing.get("ids"):
+                logger.info("macro_event_dedup_skipped", event_date=event.event_date)
+                return False
+
+            event_id = f"macro_{event.event_date}_{event.detected_date}"
+            self.collection.add(
+                ids=[event_id],
+                embeddings=[[0.0] * 768],
+                documents=[f"{event.event_date} {event.news_headline}"],
+                metadatas=[
+                    {
+                        "event_date": event.event_date,
+                        "event_date_ts": _date_to_int(event.event_date),
+                        "detected_date": event.detected_date,
+                        "expiry": event.expiry,
+                        "expiry_ts": _date_to_int(event.expiry),
+                        "impact": event.impact,
+                        "event_type": event.event_type,
+                        "scope": event.scope,
+                        "primary_region": event.primary_region,
+                        "primary_sector": event.primary_sector,
+                        "severity": event.severity,
+                        "correlation_pct": float(event.correlation_pct),
+                        "peak_count": int(event.peak_count),
+                        "total_held": int(event.total_held),
+                        "news_headline": event.news_headline[:120],
+                        "news_detail": event.news_detail[:300],
+                        "forced_reanalysis": event.forced_reanalysis,
+                    }
+                ],
+            )
+            logger.info(
+                "macro_event_stored",
+                event_date=event.event_date,
+                impact=event.impact,
+                scope=event.scope,
+                headline=event.news_headline[:60],
+            )
+            return True
+        except Exception as e:
+            logger.warning("macro_event_store_failed", error=str(e))
+            return False
+
+    def get_active_events(
+        self,
+        region_filter: str | None = None,
+    ) -> list["MacroEvent"]:
+        """Return events where expiry > today, optionally filtered by region."""
+        if not self.available:
+            return []
+        try:
+            from datetime import date as _date
+
+            today_ts = _date_to_int(_date.today().isoformat())
+            where_clause: dict = {"expiry_ts": {"$gt": today_ts}}
+            results = self.collection.get(
+                where=where_clause,
+                include=["metadatas"],
+            )
+            events: list[MacroEvent] = []
+            for meta in results.get("metadatas") or []:
+                if region_filter:
+                    primary = meta.get("primary_region", "GLOBAL")
+                    if primary != "GLOBAL" and primary != region_filter:
+                        continue
+                events.append(_meta_to_macro_event(meta))
+            events.sort(key=lambda e: e.event_date, reverse=True)
+            return events
+        except Exception as e:
+            logger.warning("macro_events_get_failed", error=str(e))
+            return []
+
+    def get_structural_events_since(self, since_date: str) -> list["MacroEvent"]:
+        """Return STRUCTURAL events detected after since_date (for staleness check)."""
+        if not self.available:
+            return []
+        try:
+            from datetime import date as _date
+
+            today_ts = _date_to_int(_date.today().isoformat())
+            since_date_ts = _date_to_int(since_date)
+            results = self.collection.get(
+                where={
+                    "$and": [
+                        {"impact": {"$eq": "STRUCTURAL"}},
+                        {"event_date_ts": {"$gte": since_date_ts}},
+                        {"expiry_ts": {"$gt": today_ts}},
+                    ]
+                },
+                include=["metadatas"],
+            )
+            events = [_meta_to_macro_event(m) for m in results.get("metadatas") or []]
+            events.sort(key=lambda e: e.event_date, reverse=True)
+            return events
+        except Exception as e:
+            logger.warning("macro_structural_events_get_failed", error=str(e))
+            return []
+
+
+def create_macro_events_store() -> MacroEventsStore:
+    """Create a global MacroEventsStore instance backed by ChromaDB."""
+    return MacroEventsStore()

@@ -1059,7 +1059,7 @@ IBKR_ACCESSIBILITY: [Direct / ADR_Required / Restricted]
 PFIC_RISK: [LOW / MEDIUM / HIGH]
 ### --- END DATA_BLOCK ---
 
-**REMINDER**: The scores in DATA_BLOCK above MUST match your calculations below. Do the detailed breakdown FIRST, then copy the final totals to DATA_BLOCK.
+**REMINDER**: The scores in DATA_BLOCK above MUST match your calculations below. Do the detailed breakdown FIRST, then copy the final totals to DATA_BLOCK. Inside DATA_BLOCK, use plain `KEY: VALUE` lines only. Do NOT use markdown tables inside DATA_BLOCK.
 
 ### FINANCIAL HEALTH DETAIL
 **Score**: [X]/12 (Adjusted: [X]%)

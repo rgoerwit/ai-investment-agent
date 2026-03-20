@@ -7,8 +7,6 @@ Two-tiered session: read-only (portfolio data) vs brokerage (orders).
 
 from __future__ import annotations
 
-import time
-
 import structlog
 
 from src.ibkr.exceptions import (
@@ -16,6 +14,7 @@ from src.ibkr.exceptions import (
     IBKRAuthError,
     IBKRSessionConflictError,
 )
+from src.ibkr.throttle import IBKRThrottle
 from src.ibkr_config import IbkrSettings
 
 logger = structlog.get_logger(__name__)
@@ -100,8 +99,9 @@ class IbkrClient:
     def __init__(self, settings: IbkrSettings | None = None):
         self._settings = settings or IbkrSettings()
         self._ibind_client = None
-        self._last_request_time: float = 0.0
-        self._min_interval = 1.0 / self._settings.ibkr_rate_limit_per_sec
+        self._throttle = IBKRThrottle(
+            rate_per_sec=self._settings.ibkr_rate_limit_per_sec,
+        )
 
     def connect(self, brokerage_session: bool = False) -> None:
         """
@@ -128,9 +128,7 @@ class IbkrClient:
             from ibind import IbkrClient as IBClient
             from ibind.oauth.oauth1a import OAuth1aConfig
         except ImportError as e:
-            raise ImportError(
-                "ibind package not installed. Run: poetry install -E ibkr"
-            ) from e
+            raise ImportError("ibind package not installed. Run: poetry install") from e
 
         try:
             # ibind requires credentials bundled into an OAuth1aConfig dataclass.
@@ -208,14 +206,6 @@ class IbkrClient:
     def __exit__(self, *args) -> None:
         self.close()
 
-    def _rate_limit(self) -> None:
-        """Enforce rate limit (10 req/sec by default)."""
-        now = time.time()
-        elapsed = now - self._last_request_time
-        if elapsed < self._min_interval:
-            time.sleep(self._min_interval - elapsed)
-        self._last_request_time = time.time()
-
     def _ensure_connected(self) -> None:
         if self._ibind_client is None:
             raise IBKRAuthError("Not connected. Call connect() first.")
@@ -225,9 +215,10 @@ class IbkrClient:
     def get_accounts(self) -> list[str]:
         """Get list of account IDs."""
         self._ensure_connected()
-        self._rate_limit()
         try:
-            result = self._ibind_client.portfolio_accounts()
+            result = self._throttle.call(
+                lambda: self._ibind_client.portfolio_accounts()
+            )
             data = result.data if hasattr(result, "data") else result
             if isinstance(data, list):
                 return [
@@ -250,10 +241,11 @@ class IbkrClient:
         Returns list of raw IBKR position dicts.
         """
         self._ensure_connected()
-        self._rate_limit()
         acct = account_id or self._settings.ibkr_account_id
         try:
-            result = self._ibind_client.positions(account_id=acct)
+            result = self._throttle.call(
+                lambda: self._ibind_client.positions(account_id=acct)
+            )
             data = result.data if hasattr(result, "data") else result
             return data if isinstance(data, list) else []
         except Exception as e:
@@ -266,29 +258,243 @@ class IbkrClient:
         Returns raw IBKR ledger dict.
         """
         self._ensure_connected()
-        self._rate_limit()
         acct = account_id or self._settings.ibkr_account_id
         try:
-            result = self._ibind_client.get_ledger(account_id=acct)
+            result = self._throttle.call(
+                lambda: self._ibind_client.get_ledger(account_id=acct)
+            )
             data = result.data if hasattr(result, "data") else result
             return data if isinstance(data, dict) else {}
         except Exception as e:
             raise IBKRAPIError(f"Failed to fetch ledger: {e}") from e
 
-    def stock_conid_by_symbol(self, symbol: str) -> dict:
+    def stock_conid_by_symbol(
+        self, symbol: str, default_filtering: bool = False
+    ) -> dict:
         """
         Resolve stock conid from symbol.
 
         Returns dict of {symbol: [{conid, exchange, ...}]}.
+
+        Note: default_filtering=False is the correct default for this system — ibind's
+        built-in default applies {isUS: True} which silently drops all non-US contracts.
         """
         self._ensure_connected()
-        self._rate_limit()
         try:
-            result = self._ibind_client.stock_conid_by_symbol(symbol)
+            result = self._throttle.call(
+                lambda: self._ibind_client.stock_conid_by_symbol(
+                    symbol, default_filtering=default_filtering
+                )
+            )
             data = result.data if hasattr(result, "data") else result
             return data if isinstance(data, dict) else {}
         except Exception as e:
             raise IBKRAPIError(f"Failed to resolve conid for {symbol}: {e}") from e
+
+    def initialize_brokerage_session(self, compete: bool = True) -> bool:
+        """
+        Initialize the IBKR brokerage session (POST /iserver/auth/ssodh/init).
+
+        Required before calling any /iserver/ endpoint (watchlists, market data,
+        orders, contract info).  The portfolio /portfolio/ endpoints work without
+        this; the brokerage session is an additional step on top of the OAuth
+        live session token.
+
+        Args:
+            compete: When True (default), disconnects competing brokerage sessions.
+                     When False, fails if another brokerage session is already active.
+
+        Returns:
+            True on success, False on failure (logs a warning on failure).
+        """
+        self._ensure_connected()
+        try:
+            self._throttle.call(
+                lambda: self._ibind_client.initialize_brokerage_session(compete=compete)
+            )
+            logger.info("brokerage_session_initialized", compete=compete)
+            return True
+        except Exception as e:
+            logger.warning(
+                "brokerage_session_init_failed", error=str(e), compete=compete
+            )
+            return False
+
+    def get_watchlist(self, name_hint: str = "default watchlist") -> list[dict] | None:
+        """
+        Fetch watchlist rows from IBKR.
+
+        Finds the watchlist whose name contains name_hint (case-insensitive),
+        falling back to the first watchlist when hint is empty.
+
+        Args:
+            name_hint: Case-insensitive substring to match against watchlist name.
+                       Empty string matches the first watchlist.
+
+        Returns:
+            List of raw watchlist row dicts (may be empty if watchlist exists but
+            has no rows).  Returns None when the named watchlist was not found.
+            Returns [] on API error (treated as transient failure, not "not found").
+        """
+        self._ensure_connected()
+        # /iserver/ endpoints require a brokerage session on top of the OAuth
+        # live session token.  Initialize it here; this is a no-op if already active.
+        self.initialize_brokerage_session()
+        try:
+            result = self._throttle.call(
+                lambda: self._ibind_client.get_all_watchlists(sc="USER_WATCHLIST")
+            )
+            data = result.data if hasattr(result, "data") else result
+
+            # Log raw shape for diagnostics
+            if isinstance(data, dict):
+                logger.debug("watchlists_raw_dict", keys=sorted(data.keys()))
+            elif isinstance(data, list):
+                logger.debug("watchlists_raw_list", length=len(data))
+            else:
+                logger.debug("watchlists_raw_other", data_type=type(data).__name__)
+
+            def _extract_watchlist_list(payload, depth: int = 0) -> list:
+                """Recursively find the list of watchlist entries in the response.
+
+                IBKR response shapes observed:
+                  [...]                                          — bare list
+                  {"data": [...]}                                — one level of wrapping
+                  {"MID":…, "action":…, "data": {"user_lists": [...]}}
+                                                                 — two levels of wrapping
+                """
+                if isinstance(payload, list):
+                    return payload
+                if not isinstance(payload, dict) or depth > 3:
+                    return []
+                for key in ("data", "user_lists", "lists", "watchlists"):
+                    val = payload.get(key)
+                    if isinstance(val, list):
+                        return val
+                    if isinstance(val, dict):
+                        nested = _extract_watchlist_list(val, depth + 1)
+                        if nested:
+                            return nested
+                return []
+
+            watchlists = _extract_watchlist_list(data)
+            if not watchlists and isinstance(data, dict) and data:
+                logger.warning("watchlists_unexpected_shape", keys=sorted(data.keys()))
+
+            logger.info("watchlists_fetched", count=len(watchlists))
+            if not watchlists:
+                logger.debug("watchlist_none_found")
+                return None if name_hint else []
+
+            # Find by name_hint (case-insensitive substring).
+            # Empty hint → fall back to the first watchlist.
+            # Non-empty hint with no match → return None ("not found").
+            matched = None
+            hint_lower = name_hint.lower()
+            for wl in watchlists:
+                if hint_lower and hint_lower in (wl.get("name", "") or "").lower():
+                    matched = wl
+                    break
+            if matched is None:
+                if hint_lower:
+                    available = [wl.get("name", wl.get("id", "?")) for wl in watchlists]
+                    logger.warning(
+                        "watchlist_not_found",
+                        hint=name_hint,
+                        available=available,
+                    )
+                    return None
+                matched = watchlists[0]
+
+            wl_id = matched.get("id", "")
+            wl_name = matched.get("name", wl_id)
+            info_result = self._throttle.call(
+                lambda: self._ibind_client.get_watchlist_information(wl_id)
+            )
+            info_data = (
+                info_result.data if hasattr(info_result, "data") else info_result
+            )
+            # Unwrap MID/action envelope: {"MID":…, "action":…, "data": {watchlist dict}}
+            if isinstance(info_data, dict):
+                inner = info_data.get("data")
+                if isinstance(inner, dict):
+                    info_data = inner
+                elif isinstance(inner, list):
+                    info_data = {"rows": inner}
+            info = info_data if isinstance(info_data, dict) else {}
+            logger.debug(
+                "watchlist_info_keys",
+                keys=sorted(info.keys()),
+                rows_type=type(info.get("rows")).__name__,
+            )
+            rows = info.get("rows") or info.get("instruments") or []
+            if not isinstance(rows, list):
+                rows = []
+            logger.info("watchlist_loaded", name=wl_name, count=len(rows))
+            return rows
+        except Exception as e:
+            logger.warning("watchlist_fetch_failed", error=str(e))
+            return []  # API error — transient failure, distinct from "not found" (None)
+
+    def get_live_orders(self, account_id: str | None = None) -> list[dict]:
+        """
+        Fetch open/pending orders from IBKR.
+
+        Returns list of raw order dicts (may be empty).
+        Requires a brokerage session — initializes one if not already active.
+
+        IBKR's /iserver/account/orders endpoint requires a "pre-flight" call:
+        the first request always returns an empty list while the server wakes
+        up the orders engine.  A second request made shortly after returns the
+        actual orders.  This method makes both calls automatically.
+        """
+        self._ensure_connected()
+        self.initialize_brokerage_session()
+        acct = account_id or self._settings.ibkr_account_id
+
+        def _extract(result) -> list[dict]:
+            data = result.data if hasattr(result, "data") else result
+            if isinstance(data, dict):
+                return data.get("orders", [])
+            return data if isinstance(data, list) else []
+
+        try:
+            # Pre-flight wakes IBKR's orders engine; real call returns actual orders.
+            # call_with_warmup encodes the engine-init pattern: pre-flight → sleep → call.
+            raw = self._throttle.call_with_warmup(
+                preflight=lambda: self._ibind_client.live_orders(
+                    account_id=acct, force=True
+                ),
+                request=lambda: self._ibind_client.live_orders(account_id=acct),
+                warm_up_secs=1.0,
+                label="live_orders",
+            )
+            orders = _extract(raw)
+            logger.info("live_orders_fetched", count=len(orders))
+            return orders
+        except Exception as e:
+            logger.warning("live_orders_fetch_failed", error=str(e))
+            return []
+
+    def get_contract_info(self, conid: int) -> dict:
+        """
+        Get contract details (symbol, exchange, currency) for a given conid.
+
+        Used to resolve watchlist conids to yfinance tickers.
+
+        Returns raw contract info dict, or {} on failure.
+        """
+        self._ensure_connected()
+        self.initialize_brokerage_session()
+        try:
+            result = self._throttle.call(
+                lambda: self._ibind_client.contract_information_by_conid(str(conid))
+            )
+            data = result.data if hasattr(result, "data") else result
+            return data if isinstance(data, dict) else {}
+        except Exception as e:
+            logger.debug("contract_info_failed", conid=conid, error=str(e))
+            return {}
 
     # ── Order Placement (brokerage session required) ──
 
@@ -306,7 +512,6 @@ class IbkrClient:
             IBKR order response dict
         """
         self._ensure_connected()
-        self._rate_limit()
         try:
             from ibind.client.ibkr_utils import OrderRequest, QuestionType
 
@@ -321,10 +526,12 @@ class IbkrClient:
             )
             # Auto-confirm all IBKR pre-trade confirmation questions.
             answers = dict.fromkeys(QuestionType, True)
-            result = self._ibind_client.place_order(
-                order_request=order_request,
-                answers=answers,
-                account_id=account_id,
+            result = self._throttle.call(
+                lambda: self._ibind_client.place_order(
+                    order_request=order_request,
+                    answers=answers,
+                    account_id=account_id,
+                )
             )
             data = result.data if hasattr(result, "data") else result
             logger.info(

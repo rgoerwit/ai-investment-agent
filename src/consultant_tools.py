@@ -21,6 +21,8 @@ import structlog
 import yfinance as yf
 from langchain_core.tools import tool
 
+from src.runtime_diagnostics import classify_failure
+
 logger = structlog.get_logger(__name__)
 
 # Fields the consultant is allowed to spot-check (decision-critical metrics only)
@@ -62,6 +64,29 @@ FMP_FIELD_MAP: dict[str, tuple[str, str]] = {
     "currentRatio": ("ratios", "currentRatio"),
     "dividendYield": ("ratios", "dividendYield"),
 }
+
+
+def _build_fmp_access_failure(
+    *,
+    ticker: str,
+    metric: str,
+    error: str,
+    suggestion: str,
+    retryable: bool,
+    cooldown_until: str | None = None,
+) -> str:
+    payload = {
+        "error": error,
+        "suggestion": suggestion,
+        "ticker": ticker,
+        "metric": metric,
+        "provider": "fmp",
+        "failure_kind": "auth_error" if not retryable else "rate_limit",
+        "retryable": retryable,
+    }
+    if cooldown_until is not None:
+        payload["cooldown_until"] = cooldown_until
+    return json.dumps(payload)
 
 
 @tool("spot_check_metric")
@@ -132,17 +157,29 @@ async def spot_check_metric_alt(
         )
 
     try:
-        from src.data.fmp_fetcher import get_fmp_fetcher
+        from src.data.fmp_fetcher import (
+            FMPSubscriptionUnavailableError,
+            get_fmp_fetcher,
+        )
 
         fmp = get_fmp_fetcher()
         if not fmp.is_available():
-            return json.dumps(
-                {
-                    "error": "FMP alt-source unavailable (no API key configured)",
-                    "suggestion": "spot_check_metric uses yfinance as primary — same source as DATA_BLOCK pipeline",
-                    "ticker": ticker,
-                    "metric": metric,
-                }
+            cooldown_until = getattr(fmp, "_cooldown_until", None)
+            if not getattr(fmp, "api_key", None):
+                return _build_fmp_access_failure(
+                    ticker=ticker,
+                    metric=metric,
+                    error="FMP alt-source unavailable (no API key configured)",
+                    suggestion="spot_check_metric uses yfinance as primary — same source as DATA_BLOCK pipeline",
+                    retryable=False,
+                )
+            return _build_fmp_access_failure(
+                ticker=ticker,
+                metric=metric,
+                error="FMP alt-source temporarily unavailable (cooldown active after quota/rate-limit response)",
+                suggestion="Retry later or rely on official filings / primary data until FMP cooldown expires",
+                retryable=True,
+                cooldown_until=cooldown_until.isoformat() if cooldown_until else None,
             )
 
         endpoint, fmp_field = FMP_FIELD_MAP[metric]
@@ -183,6 +220,20 @@ async def spot_check_metric_alt(
             }
         )
 
+    except FMPSubscriptionUnavailableError as e:
+        logger.warning(
+            "spot_check_alt_subscription_unavailable",
+            ticker=ticker,
+            metric=metric,
+            error=str(e),
+        )
+        return _build_fmp_access_failure(
+            ticker=ticker,
+            metric=metric,
+            error=f"FMP alt-source unavailable: {e}",
+            suggestion="The current FMP plan does not cover this ticker or endpoint. Use official filings or another primary source instead.",
+            retryable=False,
+        )
     except ValueError as e:
         # FMP API key validation error
         logger.warning(
@@ -191,21 +242,37 @@ async def spot_check_metric_alt(
             metric=metric,
             error=str(e),
         )
-        return json.dumps(
-            {
-                "error": f"FMP API key issue: {e}",
-                "ticker": ticker,
-                "metric": metric,
-            }
+        return _build_fmp_access_failure(
+            ticker=ticker,
+            metric=metric,
+            error=f"FMP API key issue: {e}",
+            suggestion="Check FMP API credentials or use official filings if independent cross-validation is still needed.",
+            retryable=False,
         )
     except Exception as e:
+        details = classify_failure(e, provider="unknown", model_name="fmp_alt_source")
         logger.warning(
             "spot_check_alt_failed",
             ticker=ticker,
             metric=metric,
+            failure_kind=details.kind,
+            retryable=details.retryable,
+            error_type=details.error_type,
             error=str(e),
         )
-        return json.dumps({"error": str(e), "ticker": ticker, "metric": metric})
+        endpoint, _ = FMP_FIELD_MAP[metric]
+        return json.dumps(
+            {
+                "error": str(e),
+                "ticker": ticker,
+                "metric": metric,
+                "provider": "fmp",
+                "failure_kind": details.kind,
+                "retryable": details.retryable,
+                "error_type": details.error_type,
+                "fmp_endpoint": endpoint,
+            }
+        )
 
 
 def get_consultant_tools() -> list:

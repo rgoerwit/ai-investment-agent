@@ -28,8 +28,8 @@ class TestGraphMemoryIntegration:
         assert context.cleanup_previous_memories
         assert hasattr(context, "ticker_memories")
 
-    @patch("src.graph.create_memory_instances")
-    @patch("src.graph.cleanup_all_memories")
+    @patch("src.graph.components.create_memory_instances")
+    @patch("src.graph.components.cleanup_all_memories")
     def test_graph_creation_with_cleanup(self, mock_cleanup, mock_create_memories):
         """Test graph creation with cleanup_previous=True."""
         # Setup mock memories
@@ -57,7 +57,7 @@ class TestGraphMemoryIntegration:
         # Verify graph was created
         assert graph is not None
 
-    @patch("src.graph.create_memory_instances")
+    @patch("src.graph.components.create_memory_instances")
     def test_graph_creation_without_cleanup(self, mock_create_memories):
         """Test graph creation with cleanup_previous=False."""
         # Setup mock memories
@@ -88,7 +88,7 @@ class TestGraphMemoryIntegration:
 
         assert graph is not None
 
-    @patch("src.graph.create_memory_instances")
+    @patch("src.graph.components.create_memory_instances")
     def test_different_tickers_create_different_graphs(self, mock_create_memories):
         """Test that different tickers create graphs with different memories."""
         # Setup mock for first ticker
@@ -134,8 +134,8 @@ class TestGraphMemoryContaminationPrevention:
     These simulate the real-world scenario from Grok's critique.
     """
 
-    @patch("src.graph.create_memory_instances")
-    @patch("src.graph.cleanup_all_memories")
+    @patch("src.graph.components.create_memory_instances")
+    @patch("src.graph.components.cleanup_all_memories")
     def test_sequential_analysis_no_contamination(
         self, mock_cleanup, mock_create_memories
     ):
@@ -208,7 +208,7 @@ class TestGraphMemoryContaminationPrevention:
         assert canon_graph is not None
         assert hsbc_graph_2 is not None
 
-    @patch("src.graph.create_memory_instances")
+    @patch("src.graph.components.create_memory_instances")
     def test_memory_disabled_still_works(self, mock_create_memories):
         """Test that graph works even when memory is disabled."""
         # Don't mock create_memory_instances for this test
@@ -230,9 +230,9 @@ class TestGraphMemoryContaminationPrevention:
 class TestGraphLogging:
     """Test that graph logs contamination-prevention actions."""
 
-    @patch("src.graph.create_memory_instances")
-    @patch("src.graph.cleanup_all_memories")
-    @patch("src.graph.logger")
+    @patch("src.graph.components.create_memory_instances")
+    @patch("src.graph.components.cleanup_all_memories")
+    @patch("src.graph.components.logger")
     def test_cleanup_logged(self, mock_logger, mock_cleanup, mock_create_memories):
         """Test that cleanup actions are logged."""
         mock_memories = {
@@ -257,8 +257,8 @@ class TestGraphLogging:
 
         assert cleanup_logged, "Cleanup action should be logged"
 
-    @patch("src.graph.create_memory_instances")
-    @patch("src.graph.logger")
+    @patch("src.graph.components.create_memory_instances")
+    @patch("src.graph.components.logger")
     def test_ticker_memory_creation_logged(self, mock_logger, mock_create_memories):
         """Test that ticker-specific memory creation is logged."""
         mock_memories = {
@@ -282,7 +282,7 @@ class TestGraphLogging:
 
         assert creation_logged, "Ticker memory creation should be logged"
 
-    @patch("src.graph.logger")
+    @patch("src.graph.components.logger")
     def test_legacy_memory_warning_logged(self, mock_logger):
         """Test that using legacy memories triggers a warning."""
         # Create graph without ticker (legacy mode)
@@ -291,18 +291,33 @@ class TestGraphLogging:
         # Verify warning was logged
         warning_logged = False
         for call in mock_logger.warning.call_args_list:
-            if len(call[0]) > 0 and "using_legacy_memories" in str(call[0][0]):
+            if len(call[0]) > 0 and "using_legacy_memories_no_ticker" in str(
+                call[0][0]
+            ):
                 warning_logged = True
                 break
 
         assert warning_logged, "Legacy memory usage should trigger warning"
 
+    @patch("src.graph.components.logger")
+    def test_memory_disabled_uses_info_not_warning(self, mock_logger):
+        """Intentional memory disablement should not log a warning."""
+        graph = create_trading_graph(
+            ticker="TEST", enable_memory=False, max_debate_rounds=1
+        )
+
+        assert graph is not None
+        mock_logger.warning.assert_not_called()
+        mock_logger.info.assert_any_call(
+            "memory_disabled_using_legacy_memories", ticker="TEST"
+        )
+
 
 class TestGraphMemoryKeyConsistency:
     """Test that graph.py uses same sanitization as memory.py for edge-case tickers."""
 
-    @patch("src.graph.create_memory_instances")
-    @patch("src.graph.cleanup_all_memories")
+    @patch("src.graph.components.create_memory_instances")
+    @patch("src.graph.components.cleanup_all_memories")
     def test_edge_case_ticker_sanitization_matches(
         self, mock_cleanup, mock_create_memories
     ):
@@ -348,8 +363,8 @@ class TestGraphMemoryKeyConsistency:
                 else:
                     raise
 
-    @patch("src.graph.create_memory_instances")
-    @patch("src.graph.cleanup_all_memories")
+    @patch("src.graph.components.create_memory_instances")
+    @patch("src.graph.components.cleanup_all_memories")
     def test_hyphenated_ticker_specific(self, mock_cleanup, mock_create_memories):
         """Specific test for hyphenated tickers like BRK-B."""
         ticker = "BRK-B"
@@ -379,8 +394,8 @@ class TestGraphMemoryKeyConsistency:
         assert graph is not None
         mock_create_memories.assert_called_once_with(ticker)
 
-    @patch("src.graph.create_memory_instances")
-    @patch("src.graph.cleanup_all_memories")
+    @patch("src.graph.components.create_memory_instances")
+    @patch("src.graph.components.cleanup_all_memories")
     def test_very_long_ticker_truncation(self, mock_cleanup, mock_create_memories):
         """Test that very long tickers (>40 chars) are handled consistently."""
         long_ticker = "A" * 100
@@ -409,8 +424,8 @@ class TestGraphMemoryKeyConsistency:
 
         assert graph is not None
 
-    @patch("src.graph.create_memory_instances")
-    @patch("src.graph.cleanup_all_memories")
+    @patch("src.graph.components.create_memory_instances")
+    @patch("src.graph.components.cleanup_all_memories")
     def test_ticker_starting_with_special_char(
         self, mock_cleanup, mock_create_memories
     ):

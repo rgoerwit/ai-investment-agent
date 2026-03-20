@@ -5,14 +5,15 @@ Tests both the functionality of the consultant node and non-regression
 of existing system behavior when consultant is enabled/disabled.
 """
 
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from langgraph.types import RunnableConfig
 
-from src.agents import create_consultant_node
+from src.agents import create_consultant_node, create_portfolio_manager_node
 from src.graph import create_trading_graph
 from src.llms import create_consultant_llm, get_consultant_llm
+from src.tooling.runtime import ToolResult
 
 
 class TestConsultantNodeCreation:
@@ -71,10 +72,15 @@ class TestConsultantNodeCreation:
                 mock_chatgpt.assert_called_once()
                 call_kwargs = mock_chatgpt.call_args[1]
                 assert call_kwargs["model"] == "gpt-4o"
-                assert call_kwargs["openai_api_key"] == "test-key"
+                assert call_kwargs["api_key"] == "test-key"
+                assert call_kwargs["max_retries"] == 0
+                assert call_kwargs["max_completion_tokens"] == 8192
+                assert call_kwargs["use_responses_api"] is True
+                assert call_kwargs["output_version"] == "responses/v1"
                 # Temperature is intentionally omitted — many OpenAI model
                 # families (o-series, gpt-5.x) reject non-default temperature.
                 assert "temperature" not in call_kwargs
+                assert "reasoning_effort" not in call_kwargs
 
     def test_consultant_node_creation(self):
         """Test that consultant node factory creates valid node function."""
@@ -99,7 +105,9 @@ class TestConsultantNodeExecution:
         async def mock_invoke(*args, **kwargs):
             return mock_response
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
@@ -146,17 +154,20 @@ class TestConsultantNodeExecution:
             result = await consultant_node(state, config)
 
             assert "consultant_review" in result
-            assert "Error" in result["consultant_review"]
+            assert result["consultant_review"] == ""
+            assert result["artifact_statuses"]["consultant_review"]["ok"] is False
 
     @pytest.mark.asyncio
     async def test_consultant_node_handles_llm_error(self):
-        """Test that consultant node returns error message on LLM failure."""
+        """Test that consultant node records invalid artifact metadata on LLM failure."""
         mock_llm = Mock()
 
         async def mock_invoke_error(*args, **kwargs):
             raise Exception("OpenAI API timeout")
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke_error):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke_error
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
@@ -183,8 +194,257 @@ class TestConsultantNodeExecution:
                 result = await consultant_node(state, config)
 
                 assert "consultant_review" in result
-                assert "Error" in result["consultant_review"]
-                assert "OpenAI API timeout" in result["consultant_review"]
+                assert result["consultant_review"] == ""
+                status = result["artifact_statuses"]["consultant_review"]
+                assert status["ok"] is False
+                assert status["message"] == "OpenAI API timeout"
+
+    @pytest.mark.asyncio
+    async def test_consultant_tool_loop_routes_through_tool_service(self):
+        """Consultant verification tools should use the shared tool service."""
+        from src.tooling.runtime import ToolResult
+
+        mock_tool_bound_llm = Mock()
+        mock_llm = Mock()
+        mock_llm.bind_tools.return_value = mock_tool_bound_llm
+
+        tool_call_response = Mock()
+        tool_call_response.content = ""
+        tool_call_response.tool_calls = [
+            {
+                "name": "spot_check_metric",
+                "args": {"ticker": "0005.HK"},
+                "id": "tool_1",
+            }
+        ]
+        final_response = Mock()
+        final_response.content = "CONSULTANT REVIEW: VERIFIED"
+        final_response.tool_calls = []
+
+        mock_tool = Mock()
+        mock_tool.name = "spot_check_metric"
+        mock_tool.ainvoke = AsyncMock(return_value="direct-tool-result")
+
+        async def mock_invoke(*args, **kwargs):
+            if mock_invoke.calls == 0:
+                mock_invoke.calls += 1
+                return tool_call_response
+            return final_response
+
+        mock_invoke.calls = 0
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                with patch(
+                    "src.agents.consultant_nodes.TOOL_SERVICE.execute", new=AsyncMock()
+                ) as exec_mock:
+                    mock_prompt = Mock()
+                    mock_prompt.system_message = "You are a consultant."
+                    mock_prompt.agent_name = "External Consultant"
+                    mock_get_prompt.return_value = mock_prompt
+                    exec_mock.return_value = ToolResult(value="hooked-tool-result")
+
+                    consultant_node = create_consultant_node(
+                        mock_llm, "consultant", tools=[mock_tool]
+                    )
+
+                    state = {
+                        "company_of_interest": "0005.HK",
+                        "company_name": "HSBC Holdings",
+                        "market_report": "Report",
+                        "sentiment_report": "Report",
+                        "news_report": "Report",
+                        "fundamentals_report": "Report",
+                        "investment_debate_state": {"history": "Debate"},
+                        "investment_plan": "Plan",
+                    }
+                    config = RunnableConfig(
+                        configurable={"context": Mock(trade_date="2025-12-13")}
+                    )
+
+                    result = await consultant_node(state, config)
+
+        exec_mock.assert_awaited_once()
+        mock_tool.ainvoke.assert_not_called()
+        assert result["consultant_review"] == "CONSULTANT REVIEW: VERIFIED"
+
+    @pytest.mark.asyncio
+    async def test_consultant_marks_artifact_not_ok_when_tool_returns_error_payload(
+        self,
+    ):
+        """Completed consultant text should still be marked degraded on tool failure."""
+        mock_llm = Mock()
+        tool_call_response = Mock()
+        tool_call_response.content = ""
+        tool_call_response.tool_calls = [
+            {"name": "spot_check_metric", "args": {"ticker": "0005.HK"}, "id": "call_1"}
+        ]
+        final_response = Mock()
+        final_response.content = "CONSULTANT REVIEW: CONDITIONAL APPROVAL"
+        final_response.tool_calls = []
+
+        mock_tool = Mock()
+        mock_tool.name = "spot_check_metric"
+        mock_tool.ainvoke = AsyncMock()
+
+        async def mock_invoke(*args, **kwargs):
+            if mock_invoke.calls == 0:
+                mock_invoke.calls += 1
+                return tool_call_response
+            return final_response
+
+        mock_invoke.calls = 0
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                with patch(
+                    "src.agents.consultant_nodes.TOOL_SERVICE.execute",
+                    new=AsyncMock(
+                        return_value=ToolResult(
+                            value='{"error":"invalid key","provider":"fmp","failure_kind":"auth_error"}'
+                        )
+                    ),
+                ):
+                    mock_prompt = Mock()
+                    mock_prompt.system_message = "You are a consultant."
+                    mock_prompt.agent_name = "External Consultant"
+                    mock_get_prompt.return_value = mock_prompt
+
+                    consultant_node = create_consultant_node(
+                        mock_llm, "consultant", tools=[mock_tool]
+                    )
+
+                    state = {
+                        "company_of_interest": "0005.HK",
+                        "company_name": "HSBC Holdings",
+                        "market_report": "Report",
+                        "sentiment_report": "Report",
+                        "news_report": "Report",
+                        "fundamentals_report": "Report",
+                        "investment_debate_state": {"history": "Debate"},
+                        "investment_plan": "Plan",
+                    }
+                    config = RunnableConfig(
+                        configurable={"context": Mock(trade_date="2025-12-13")}
+                    )
+
+                    result = await consultant_node(state, config)
+
+        assert result["consultant_review"] == "CONSULTANT REVIEW: CONDITIONAL APPROVAL"
+        assert result["artifact_statuses"]["consultant_review"]["ok"] is False
+        assert result["consultant_tool_failures"] == 1
+        assert (
+            result["artifact_statuses"]["consultant_review"]["message"]
+            == "Consultant review completed with tool failures"
+        )
+
+    @pytest.mark.asyncio
+    async def test_consultant_suppresses_repeated_fmp_alt_calls_after_failure(self):
+        """After one FMP alt-source failure, later alt-source calls should be skipped."""
+        mock_tool_bound_llm = Mock()
+        mock_llm = Mock()
+        mock_llm.bind_tools.return_value = mock_tool_bound_llm
+
+        tool_call_response = Mock()
+        tool_call_response.content = ""
+        tool_call_response.tool_calls = [
+            {
+                "name": "spot_check_metric_alt",
+                "args": {"ticker": "0005.HK", "metric": "operatingCashflow"},
+                "id": "alt_1",
+            },
+            {
+                "name": "get_official_filings",
+                "args": {"ticker": "0005.HK"},
+                "id": "filings_1",
+            },
+            {
+                "name": "spot_check_metric_alt",
+                "args": {"ticker": "0005.HK", "metric": "freeCashflow"},
+                "id": "alt_2",
+            },
+        ]
+        final_response = Mock()
+        final_response.content = "CONSULTANT REVIEW: CONDITIONAL APPROVAL"
+        final_response.tool_calls = []
+
+        async def mock_invoke(*args, **kwargs):
+            if mock_invoke.calls == 0:
+                mock_invoke.calls += 1
+                return tool_call_response
+            mock_invoke.last_messages = args[1]
+            return final_response
+
+        mock_invoke.calls = 0
+        mock_invoke.last_messages = None
+
+        mock_alt_tool = Mock()
+        mock_alt_tool.name = "spot_check_metric_alt"
+        mock_alt_tool.ainvoke = AsyncMock()
+
+        mock_filings_tool = Mock()
+        mock_filings_tool.name = "get_official_filings"
+        mock_filings_tool.ainvoke = AsyncMock()
+
+        exec_mock = AsyncMock(
+            side_effect=[
+                ToolResult(
+                    value='{"error":"FMP alt-source unavailable","provider":"fmp","failure_kind":"auth_error","retryable":false}'
+                ),
+                ToolResult(value="official-filings-result"),
+            ]
+        )
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                with patch(
+                    "src.agents.consultant_nodes.TOOL_SERVICE.execute", new=exec_mock
+                ):
+                    mock_prompt = Mock()
+                    mock_prompt.system_message = "You are a consultant."
+                    mock_prompt.agent_name = "External Consultant"
+                    mock_get_prompt.return_value = mock_prompt
+
+                    consultant_node = create_consultant_node(
+                        mock_llm,
+                        "consultant",
+                        tools=[mock_alt_tool, mock_filings_tool],
+                    )
+
+                    state = {
+                        "company_of_interest": "0005.HK",
+                        "company_name": "HSBC Holdings",
+                        "market_report": "Report",
+                        "sentiment_report": "Report",
+                        "news_report": "Report",
+                        "fundamentals_report": "Report",
+                        "investment_debate_state": {"history": "Debate"},
+                        "investment_plan": "Plan",
+                    }
+                    config = RunnableConfig(
+                        configurable={"context": Mock(trade_date="2025-12-13")}
+                    )
+
+                    result = await consultant_node(state, config)
+
+        assert exec_mock.await_count == 2
+        final_messages = mock_invoke.last_messages
+        assert final_messages is not None
+        skipped_tool_messages = [
+            message.content
+            for message in final_messages
+            if getattr(message, "tool_call_id", "") == "alt_2"
+        ]
+        assert skipped_tool_messages
+        assert '"skipped": true' in skipped_tool_messages[0].lower()
+        assert result["consultant_review"] == "CONSULTANT REVIEW: CONDITIONAL APPROVAL"
+        assert result["consultant_tool_failures"] == 1
 
 
 class TestGraphIntegration:
@@ -213,6 +473,79 @@ class TestGraphIntegration:
         # The graph should have Research Manager → Consultant → Trader path
 
 
+class TestPortfolioManagerConsultantGating:
+    """PM should ignore consultant artifacts that are explicitly invalid."""
+
+    @pytest.mark.asyncio
+    async def test_pm_ignores_invalid_consultant_review_for_flag_generation(self):
+        mock_llm = Mock()
+        mock_response = Mock()
+        mock_response.content = "## FINAL DECISION: HOLD"
+        captured_prompt: dict[str, str] = {}
+
+        async def mock_invoke(*args, **kwargs):
+            messages = args[1]
+            captured_prompt["text"] = messages[0].content
+            return mock_response
+
+        consultant_review = """
+### CONSULTANT REVIEW: CONDITIONAL APPROVAL
+
+Conditions:
+- OCF data needs verification
+- Segment breakdown missing
+
+**Overall Assessment**: CONDITIONAL APPROVAL
+"""
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                mock_prompt = Mock()
+                mock_prompt.system_message = "You are the portfolio manager."
+                mock_prompt.agent_name = "Portfolio Manager"
+                mock_get_prompt.return_value = mock_prompt
+
+                node = create_portfolio_manager_node(mock_llm, None)
+                state = {
+                    "market_report": "Market report",
+                    "sentiment_report": "Sentiment report",
+                    "news_report": "News report",
+                    "fundamentals_report": (
+                        "### --- START DATA_BLOCK ---\n"
+                        "PFIC_RISK: LOW\n"
+                        "### --- END DATA_BLOCK ---"
+                    ),
+                    "value_trap_report": "",
+                    "investment_plan": "Research plan",
+                    "consultant_review": consultant_review,
+                    "trader_investment_plan": "Trader plan",
+                    "risk_debate_state": {
+                        "current_risky_response": "Risky view",
+                        "current_safe_response": "Safe view",
+                        "current_neutral_response": "Neutral view",
+                    },
+                    "company_of_interest": "TEST.T",
+                    "red_flags": [],
+                    "pre_screening_result": "PASS",
+                    "artifact_statuses": {
+                        "consultant_review": {
+                            "complete": True,
+                            "ok": False,
+                            "content": consultant_review,
+                        }
+                    },
+                }
+
+                result = await node(state, RunnableConfig(configurable={}))
+
+        prompt_text = captured_prompt["text"]
+        assert "CONSULTANT_CONDITIONAL" not in prompt_text
+        assert "N/A (consultant disabled or unavailable)" in prompt_text
+        assert result["final_trade_decision"] == "## FINAL DECISION: HOLD"
+
+
 class TestConsultantValueAddition:
     """Test suite for consultant adding value to analysis."""
 
@@ -236,7 +569,9 @@ Status: ⚠ BIASES IDENTIFIED
         async def mock_invoke(*args, **kwargs):
             return mock_response
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
@@ -288,7 +623,9 @@ Material Errors:
         async def mock_invoke(*args, **kwargs):
             return mock_response
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
@@ -382,6 +719,7 @@ class TestConsultantQuickMode:
                 mock_chatgpt.assert_called_once()
                 call_kwargs = mock_chatgpt.call_args[1]
                 assert call_kwargs["model"] == "gpt-4o-mini"
+                assert call_kwargs["max_completion_tokens"] == 8192
 
     def test_consultant_uses_normal_model_when_quick_disabled(self):
         """Test that consultant uses CONSULTANT_MODEL when quick_mode=False."""
@@ -408,6 +746,7 @@ class TestConsultantQuickMode:
                 mock_chatgpt.assert_called_once()
                 call_kwargs = mock_chatgpt.call_args[1]
                 assert call_kwargs["model"] == "gpt-4o"
+                assert call_kwargs["max_completion_tokens"] == 8192
 
     def test_consultant_defaults_to_gpt4o_mini_in_quick_mode(self):
         """Test that consultant defaults to gpt-4o-mini when CONSULTANT_QUICK_MODEL not set."""
@@ -434,6 +773,33 @@ class TestConsultantQuickMode:
                 mock_chatgpt.assert_called_once()
                 call_kwargs = mock_chatgpt.call_args[1]
                 assert call_kwargs["model"] == "gpt-4o-mini"  # Default for quick mode
+                assert call_kwargs["max_completion_tokens"] == 8192
+
+    def test_consultant_gpt5_uses_medium_reasoning_effort(self):
+        """GPT-5 consultant should stay on normal reasoning, not pro-style deep compute."""
+        try:
+            import langchain_openai
+        except ImportError:
+            pytest.skip("langchain-openai not installed (optional dependency)")
+
+        from unittest.mock import MagicMock, patch
+
+        from src.llms import create_consultant_llm
+
+        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+            mock_chatgpt.return_value = MagicMock()
+
+            with patch("src.llms.config") as mock_config:
+                mock_config.enable_consultant = True
+                mock_config.consultant_model = "gpt-5.4"
+                mock_config.get_openai_api_key.return_value = "test-key"
+                llm = create_consultant_llm()
+
+                assert llm is not None
+                call_kwargs = mock_chatgpt.call_args[1]
+                assert call_kwargs["model"] == "gpt-5.4"
+                assert call_kwargs["reasoning_effort"] == "medium"
+                assert call_kwargs["max_completion_tokens"] == 8192
 
     def test_get_consultant_llm_respects_quick_mode(self):
         """Test that get_consultant_llm passes quick_mode to create_consultant_llm."""

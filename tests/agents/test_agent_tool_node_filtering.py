@@ -13,7 +13,7 @@ The fix: Check `msg.name == agent_key` in addition to tool name intersection.
 These tests ensure this bug doesn't regress.
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -29,36 +29,14 @@ class TestAgentToolNodeFiltering:
         """Create mock tools with names."""
         tool1 = MagicMock()
         tool1.name = "get_news"
+        tool1.ainvoke = AsyncMock(return_value="result1")
         tool2 = MagicMock()
         tool2.name = "get_macroeconomic_news"
+        tool2.ainvoke = AsyncMock(return_value="result2")
         return [tool1, tool2]
 
-    @pytest.fixture
-    def mock_tool_node(self):
-        """Mock the ToolNode to return predictable results."""
-        with patch("src.graph.ToolNode") as mock:
-            mock_instance = AsyncMock()
-            mock_instance.ainvoke = AsyncMock(
-                return_value={
-                    "messages": [
-                        ToolMessage(
-                            content="result1", tool_call_id="1", name="get_news"
-                        ),
-                        ToolMessage(
-                            content="result2",
-                            tool_call_id="2",
-                            name="get_macroeconomic_news",
-                        ),
-                    ]
-                }
-            )
-            mock.return_value = mock_instance
-            yield mock_instance
-
     @pytest.mark.asyncio
-    async def test_filters_by_agent_key_not_just_tool_name(
-        self, mock_tools, mock_tool_node
-    ):
+    async def test_filters_by_agent_key_not_just_tool_name(self, mock_tools):
         """
         CRITICAL TEST: Verify tool node only picks up AIMessages from its own agent.
 
@@ -122,17 +100,13 @@ class TestAgentToolNodeFiltering:
         config = {"configurable": {}}
         result = await agent_tool_node(state, config)
 
-        # Should have called ToolNode with news_analyst's message, not value_trap's
-        mock_tool_node.ainvoke.assert_called_once()
-        call_args = mock_tool_node.ainvoke.call_args[0][0]
-        assert len(call_args["messages"]) == 1
-        assert call_args["messages"][0].name == "news_analyst"
-        assert len(call_args["messages"][0].tool_calls) == 2
+        mock_tools[0].ainvoke.assert_awaited_once_with({"ticker": "ALQ.AX"})
+        mock_tools[1].ainvoke.assert_awaited_once_with({"date": "2026-01-09"})
+        assert len(result["messages"]) == 2
+        assert {msg.tool_call_id for msg in result["messages"]} == {"1", "2"}
 
     @pytest.mark.asyncio
-    async def test_returns_empty_when_no_matching_agent_message(
-        self, mock_tools, mock_tool_node
-    ):
+    async def test_returns_empty_when_no_matching_agent_message(self, mock_tools):
         """
         Test that tool node returns empty when no AIMessage matches agent_key.
 
@@ -161,12 +135,11 @@ class TestAgentToolNodeFiltering:
 
         # Should return empty, not execute wrong agent's tools
         assert result == {"messages": []}
-        mock_tool_node.ainvoke.assert_not_called()
+        mock_tools[0].ainvoke.assert_not_called()
+        mock_tools[1].ainvoke.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_finds_correct_agent_message_among_many(
-        self, mock_tools, mock_tool_node
-    ):
+    async def test_finds_correct_agent_message_among_many(self, mock_tools):
         """Test that correct AIMessage is found among multiple agents' messages."""
         agent_tool_node = create_agent_tool_node(mock_tools, "news_analyst")
 
@@ -196,13 +169,12 @@ class TestAgentToolNodeFiltering:
         config = {"configurable": {}}
         result = await agent_tool_node(state, config)
 
-        # Should find and use news_analyst's message (searching backwards)
-        mock_tool_node.ainvoke.assert_called_once()
-        call_args = mock_tool_node.ainvoke.call_args[0][0]
-        assert call_args["messages"][0].name == "news_analyst"
+        mock_tools[0].ainvoke.assert_awaited_once_with({})
+        assert len(result["messages"]) == 1
+        assert result["messages"][0].tool_call_id == "1"
 
     @pytest.mark.asyncio
-    async def test_tags_tool_messages_with_agent_key(self, mock_tools, mock_tool_node):
+    async def test_tags_tool_messages_with_agent_key(self, mock_tools):
         """Verify ToolMessages are tagged with agent_key for filtering."""
         agent_tool_node = create_agent_tool_node(mock_tools, "news_analyst")
 
@@ -226,6 +198,36 @@ class TestAgentToolNodeFiltering:
         for msg in result["messages"]:
             assert isinstance(msg, ToolMessage)
             assert msg.additional_kwargs.get("agent_key") == "news_analyst"
+
+    @pytest.mark.asyncio
+    async def test_error_tool_messages_include_default_block_metadata(self, mock_tools):
+        """Error-path ToolMessages should expose the same metadata keys as success."""
+        mock_tools[0].ainvoke.side_effect = RuntimeError("boom")
+        agent_tool_node = create_agent_tool_node(mock_tools, "news_analyst")
+
+        state = {
+            "messages": [
+                HumanMessage(content="Analyze"),
+                AIMessage(
+                    name="news_analyst",
+                    content="",
+                    tool_calls=[
+                        {"name": "get_news", "args": {}, "id": "1", "type": "tool_call"}
+                    ],
+                ),
+            ]
+        }
+
+        result = await agent_tool_node(state, {"configurable": {}})
+
+        assert len(result["messages"]) == 1
+        msg = result["messages"][0]
+        assert isinstance(msg, ToolMessage)
+        assert msg.additional_kwargs == {
+            "agent_key": "news_analyst",
+            "blocked": False,
+            "findings": [],
+        }
 
 
 class TestCrossAgentToolUsage:
@@ -373,37 +375,30 @@ class TestAllAgentToolCombinations:
         for agent_key, tools in agent_tool_configs:
             if not tools:  # Skip agents without tools
                 continue
+            tool_node = create_agent_tool_node(tools, agent_key)
 
-            with patch("src.graph.ToolNode") as mock_tn:
-                mock_instance = AsyncMock()
-                mock_instance.ainvoke = AsyncMock(return_value={"messages": []})
-                mock_tn.return_value = mock_instance
+            # Create AIMessage tagged with a DIFFERENT agent
+            wrong_agent = "some_other_agent"
+            state = {
+                "messages": [
+                    AIMessage(
+                        name=wrong_agent,  # Wrong agent!
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": tools[0].name,
+                                "args": {},
+                                "id": "1",
+                                "type": "tool_call",
+                            }
+                        ],
+                    )
+                ]
+            }
 
-                tool_node = create_agent_tool_node(tools, agent_key)
+            result = await tool_node(state, {"configurable": {}})
 
-                # Create AIMessage tagged with a DIFFERENT agent
-                wrong_agent = "some_other_agent"
-                state = {
-                    "messages": [
-                        AIMessage(
-                            name=wrong_agent,  # Wrong agent!
-                            content="",
-                            tool_calls=[
-                                {
-                                    "name": tools[0].name,
-                                    "args": {},
-                                    "id": "1",
-                                    "type": "tool_call",
-                                }
-                            ],
-                        )
-                    ]
-                }
-
-                result = await tool_node(state, {"configurable": {}})
-
-                # Should return empty, not execute wrong agent's tools
-                assert result == {
-                    "messages": []
-                }, f"{agent_key} tool node accepted wrong agent's message"
-                mock_instance.ainvoke.assert_not_called()
+            # Should return empty, not execute wrong agent's tools
+            assert result == {
+                "messages": []
+            }, f"{agent_key} tool node accepted wrong agent's message"

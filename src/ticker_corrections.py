@@ -57,6 +57,8 @@ ALTERNATIVE_FORMATS = {
     "NOVN.VX": "NOVN.SW",
     "ROG:SWX": "ROG.SW",
     "NESN:SWX": "NESN.SW",
+    # UK — bare codes without .L suffix
+    "MEGP": "MEGP.L",
 }
 
 
@@ -143,6 +145,11 @@ KNOWN_VALID_TICKERS = {
     },
     "HSBA.L": {
         "name": "HSBC Holdings plc",
+        "exchange": "London Stock Exchange",
+        "country": "United Kingdom",
+    },
+    "MEGP.L": {
+        "name": "ME Group International plc",
         "exchange": "London Stock Exchange",
         "country": "United Kingdom",
     },

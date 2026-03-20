@@ -4,6 +4,7 @@ Covers prompt loading, retrieval, and export.
 """
 
 import json
+import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -565,3 +566,60 @@ def sample_custom_prompt():
         "requires_tools": False,
         "metadata": {"last_updated": "2025-01-01", "changes": "Initial version"},
     }
+
+
+class TestNewsAnalystPromptV5:
+    """news_analyst.json v5.0 structural checks."""
+
+    @pytest.fixture
+    def prompt(self):
+        path = Path("prompts/news_analyst.json")
+        return json.loads(path.read_text())
+
+    def test_version_is_5_0(self, prompt):
+        # Version bumped to 5.1 when fleet/capacity guardrail was added.
+        assert re.match(
+            r"^5\.\d+$", prompt["version"]
+        ), f"Expected 5.x, got {prompt['version']}"
+
+    def test_macro_detection_block_in_system_message(self, prompt):
+        assert "MACRO_DETECTION" in prompt["system_message"]
+
+    def test_innocent_bystander_framing_in_system_message(self, prompt):
+        assert "Innocent Bystander" in prompt["system_message"]
+
+    def test_structurally_impaired_framing_in_system_message(self, prompt):
+        assert "Structurally Impaired" in prompt["system_message"]
+
+    def test_macro_detection_in_critical_outputs(self, prompt):
+        assert "macro_detection" in prompt["metadata"]["critical_outputs"]
+
+    def test_macro_event_context_section_present(self, prompt):
+        assert "MACRO EVENT CONTEXT" in prompt["system_message"]
+
+    def test_all_11_event_types_documented(self, prompt):
+        """Ensure all event types from taxonomy appear in prompt."""
+        msg = prompt["system_message"]
+        for etype in [
+            "TARIFF_TRADE",
+            "LIQUIDITY_PANIC",
+            "CONTAGION_SPREAD",
+            "POLITICAL_EVENT",
+            "MONETARY_PIVOT",
+            "COMMODITY_SHOCK",
+            "GEOPOLITICAL",
+            "REGULATORY_SHIFT",
+            "CREDIT_CONTAGION",
+            "MACRO_RECESSION",
+            "EXOGENOUS_SHOCK",
+        ]:
+            assert etype in msg, f"{etype} missing from news_analyst prompt"
+
+    def test_word_limit_is_900(self, prompt):
+        assert "900" in prompt["system_message"]
+
+    def test_opportunity_field_in_output_block(self, prompt):
+        assert "OPPORTUNITY:" in prompt["system_message"]
+
+    def test_triggered_field_in_output_block(self, prompt):
+        assert "TRIGGERED:" in prompt["system_message"]

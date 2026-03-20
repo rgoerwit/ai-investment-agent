@@ -336,6 +336,7 @@ class TestEODHDArbitration:
 
         mock_resp = AsyncMock()
         mock_resp.status = 402
+        mock_resp.text = AsyncMock(return_value="Payment Required")
 
         # Create proper async context manager mock for response
         mock_response_cm = AsyncMock()
@@ -361,6 +362,7 @@ class TestEODHDArbitration:
 
         mock_resp = AsyncMock()
         mock_resp.status = 401
+        mock_resp.text = AsyncMock(return_value="Unauthorized")
 
         # Create proper async context manager mock for response
         mock_response_cm = AsyncMock()
@@ -386,6 +388,7 @@ class TestEODHDArbitration:
 
         mock_resp = AsyncMock()
         mock_resp.status = 429
+        mock_resp.text = AsyncMock(return_value="Rate limit exceeded")
 
         # Create proper async context manager mock for response
         mock_response_cm = AsyncMock()

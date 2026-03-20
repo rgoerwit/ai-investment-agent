@@ -21,19 +21,37 @@ Usage:
         data = await fmp.get_financial_metrics("005930.KS")
 """
 
-import logging
+from datetime import datetime, timedelta
 from typing import Any
 
 import aiohttp
 import pandas as pd
+import structlog
 
 from src.config import config
 from src.data.interfaces import FinancialFetcher
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # Default timeout for HTTP requests (session-level safety net + per-request)
 _TIMEOUT = aiohttp.ClientTimeout(total=10)
+_COOLDOWN_MINUTES = 15
+
+_FMP_SUBSCRIPTION_MARKERS = (
+    "not available under your current subscription",
+    "upgrade your plan",
+    "premium query parameter",
+    "subscription page",
+)
+
+
+class FMPSubscriptionUnavailableError(ValueError):
+    """Raised when the configured FMP plan does not cover the request."""
+
+
+def _is_subscription_preview(preview: str) -> bool:
+    normalized = preview.lower()
+    return any(marker in normalized for marker in _FMP_SUBSCRIPTION_MARKERS)
 
 
 class FMPFetcher(FinancialFetcher):
@@ -54,10 +72,38 @@ class FMPFetcher(FinancialFetcher):
         self.api_key = api_key or config.get_fmp_api_key()
         self.base_url = "https://financialmodelingprep.com/stable"
         self._key_validated = False
+        self._cooldown_until: datetime | None = None
 
     def is_available(self) -> bool:
         """Check if FMP is configured (API key present)."""
-        return bool(self.api_key)
+        if not self.api_key:
+            return False
+        if self._cooldown_until and datetime.now() < self._cooldown_until:
+            logger.debug(
+                "fmp_unavailable",
+                reason="cooldown_active",
+                cooldown_until=self._cooldown_until.isoformat(),
+            )
+            return False
+        return True
+
+    def _start_cooldown(self, status: int, endpoint: str) -> None:
+        self._cooldown_until = datetime.now() + timedelta(minutes=_COOLDOWN_MINUTES)
+        logger.warning(
+            "fmp_cooldown_started",
+            status=status,
+            endpoint=endpoint,
+            cooldown_minutes=_COOLDOWN_MINUTES,
+            cooldown_until=self._cooldown_until.isoformat(),
+        )
+
+    async def _response_preview(self, response: aiohttp.ClientResponse) -> str:
+        try:
+            text = await response.text()
+        except Exception as exc:
+            return f"<unavailable: {type(exc).__name__}>"
+        preview = " ".join(text.split())
+        return preview[:200]
 
     async def _get(self, endpoint: str, params: dict) -> Any | None:
         """
@@ -88,29 +134,77 @@ class FMPFetcher(FinancialFetcher):
                         try:
                             data = await response.json()
                         except (ValueError, aiohttp.ContentTypeError) as e:
-                            logger.debug(f"FMP malformed JSON for {endpoint}: {e}")
+                            preview = await self._response_preview(response)
+                            logger.warning(
+                                "fmp_malformed_json",
+                                endpoint=endpoint,
+                                status=response.status,
+                                error=str(e),
+                                preview=preview,
+                            )
                             return None
                         self._key_validated = True
                         return data
 
                     elif response.status == 403:
+                        response_preview = await self._response_preview(response)
                         if not self._key_validated:
                             # Key is invalid - this is a configuration error
-                            logger.error("FMP API key is invalid (403 Forbidden)")
+                            logger.error(
+                                "fmp_auth_error",
+                                endpoint=endpoint,
+                                status=response.status,
+                                key_state="unvalidated",
+                                preview=response_preview,
+                            )
                             raise ValueError(
                                 "FMP_API_KEY is invalid or expired. Check your configuration."
                             )
                         else:
                             # Key was valid before, might be rate limit
+                            self._start_cooldown(403, endpoint)
                             logger.warning(
-                                f"FMP 403 error for {endpoint} (possible rate limit)"
+                                "fmp_request_denied",
+                                endpoint=endpoint,
+                                status=response.status,
+                                reason="possible_rate_limit_or_policy_change",
+                                preview=response_preview,
                             )
                             return None
 
+                    elif response.status in {402, 429}:
+                        response_preview = await self._response_preview(response)
+                        if response.status == 402 and _is_subscription_preview(
+                            response_preview
+                        ):
+                            logger.warning(
+                                "fmp_subscription_unavailable",
+                                endpoint=endpoint,
+                                status=response.status,
+                                reason="subscription_paywall",
+                                preview=response_preview,
+                            )
+                            raise FMPSubscriptionUnavailableError(
+                                "current FMP plan does not cover this ticker or endpoint"
+                            )
+                        self._start_cooldown(response.status, endpoint)
+                        logger.warning(
+                            "fmp_request_limited",
+                            endpoint=endpoint,
+                            status=response.status,
+                            reason="quota_or_rate_limit",
+                            preview=response_preview,
+                        )
+                        return None
+
                     else:
                         # Other HTTP errors - log at debug level
+                        preview = await self._response_preview(response)
                         logger.debug(
-                            f"FMP API returned {response.status} for {endpoint}"
+                            "fmp_http_error",
+                            endpoint=endpoint,
+                            status=response.status,
+                            preview=preview,
                         )
                         return None
 
@@ -119,16 +213,29 @@ class FMPFetcher(FinancialFetcher):
             raise
         except aiohttp.ClientError as e:
             # Network errors - log at debug level
-            logger.debug(f"FMP network error for {endpoint}: {e}")
+            logger.debug(
+                "fmp_network_error",
+                endpoint=endpoint,
+                error_type=type(e).__name__,
+                error=str(e),
+            )
             return None
         except Exception as e:
             # Unexpected errors - log at debug level
-            logger.debug(f"FMP request failed for {endpoint}: {e}")
+            logger.warning(
+                "fmp_request_failed",
+                endpoint=endpoint,
+                error_type=type(e).__name__,
+                error=str(e),
+            )
             return None
 
     async def get_company_name(self, ticker: str) -> str | None:
         """Fetch company name from FMP profile endpoint."""
-        data = await self._get("profile", {"symbol": ticker})
+        try:
+            data = await self._get("profile", {"symbol": ticker})
+        except FMPSubscriptionUnavailableError:
+            return None
         if data and isinstance(data, list) and len(data) > 0:
             name = data[0].get("companyName")
             if name:
@@ -152,7 +259,10 @@ class FMPFetcher(FinancialFetcher):
         result = {}
 
         # Fetch ratios endpoint (has P/E, P/B, PEG, current ratio, D/E, margins)
-        ratios = await self._get("ratios", {"symbol": symbol, "limit": 1})
+        try:
+            ratios = await self._get("ratios", {"symbol": symbol, "limit": 1})
+        except FMPSubscriptionUnavailableError:
+            return None
         if ratios and isinstance(ratios, list) and len(ratios) > 0:
             r = ratios[0]
             # Map to standard interface keys
@@ -168,7 +278,10 @@ class FMPFetcher(FinancialFetcher):
             result["operatingCashflow"] = r.get("operatingCashFlowPerShare")
 
         # Fetch key-metrics endpoint (has ROE, ROA, Cash Flows)
-        metrics = await self._get("key-metrics", {"symbol": symbol, "limit": 1})
+        try:
+            metrics = await self._get("key-metrics", {"symbol": symbol, "limit": 1})
+        except FMPSubscriptionUnavailableError:
+            return result or None
         if metrics and isinstance(metrics, list) and len(metrics) > 0:
             m = metrics[0]
             result["returnOnEquity"] = m.get("returnOnEquity")
@@ -182,9 +295,12 @@ class FMPFetcher(FinancialFetcher):
                 result["marketCap"] = m.get("marketCap")
 
         # Fetch income statement growth endpoint (has revenue/EPS growth)
-        growth = await self._get(
-            "income-statement-growth", {"symbol": symbol, "limit": 1}
-        )
+        try:
+            growth = await self._get(
+                "income-statement-growth", {"symbol": symbol, "limit": 1}
+            )
+        except FMPSubscriptionUnavailableError:
+            return result or None
         if growth and isinstance(growth, list) and len(growth) > 0:
             g = growth[0]
             result["revenueGrowth"] = g.get("growthRevenue")
@@ -192,7 +308,7 @@ class FMPFetcher(FinancialFetcher):
 
         # Log if we got no data at all
         if not result:
-            logger.debug(f"FMP returned no data for {symbol}")
+            logger.debug("fmp_no_data", symbol=symbol)
             return None
 
         result["_source"] = "fmp"

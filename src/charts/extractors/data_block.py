@@ -7,6 +7,8 @@ from dataclasses import dataclass
 
 import structlog
 
+from src.data_block_utils import extract_last_data_block
+
 logger = structlog.get_logger(__name__)
 
 
@@ -121,19 +123,10 @@ def extract_chart_data_from_data_block(fundamentals_report: str) -> ChartRawData
     if not fundamentals_report:
         return ChartRawData()
 
-    # Find the DATA_BLOCK section (take last one for self-correction pattern)
-    # Tolerates optional descriptive text after "DATA_BLOCK" (e.g., prompt v8.6+)
-    data_block_pattern = (
-        r"### --- START DATA_BLOCK[^\n]*---(.+?)### --- END DATA_BLOCK ---"
-    )
-    blocks = list(re.finditer(data_block_pattern, fundamentals_report, re.DOTALL))
-
-    if not blocks:
+    data_block = extract_last_data_block(fundamentals_report)
+    if not data_block:
         logger.debug("No DATA_BLOCK found in fundamentals report")
         return ChartRawData()
-
-    # Use the last (most corrected) block
-    data_block = blocks[-1].group(1)
 
     # Extract each field
     # Pattern captures optional markdown/currency chars around numbers

@@ -36,9 +36,11 @@ class TestTypedDictStructuralIssues:
             invoke_calls.append(args)
             return mock_response
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
-                with patch("src.agents.logger") as mock_logger:
+                with patch("src.agents.consultant_nodes.logger") as mock_logger:
                     mock_prompt = Mock()
                     mock_prompt.system_message = "You are a consultant."
                     mock_prompt.agent_name = "External Consultant"
@@ -93,7 +95,9 @@ class TestTypedDictStructuralIssues:
             invoke_calls.append(args)
             return mock_response
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
@@ -148,7 +152,9 @@ class TestTypedDictStructuralIssues:
             invoke_calls.append(args)
             return mock_response
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
@@ -217,9 +223,11 @@ class TestFastFailRouting:
             invoke_calls.append(args)
             return mock_response
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
-                with patch("src.agents.logger") as mock_logger:
+                with patch("src.agents.consultant_nodes.logger") as mock_logger:
                     mock_prompt = Mock()
                     mock_prompt.system_message = "You are a consultant."
                     mock_prompt.agent_name = "External Consultant"
@@ -291,7 +299,9 @@ class TestPartialStateCorruption:
             invoke_calls.append(args)
             return mock_response
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
@@ -355,7 +365,9 @@ class TestPartialStateCorruption:
             invoke_calls.append(args)
             return mock_response
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
@@ -421,7 +433,9 @@ class TestInformationPreservation:
             invoke_calls.append(args)
             return mock_response
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
@@ -485,7 +499,9 @@ class TestInformationPreservation:
             invoke_calls.append(args)
             return mock_response
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
@@ -545,9 +561,11 @@ class TestLoggingQuietModeRespect:
         async def mock_invoke(*args, **kwargs):
             return mock_response
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
-                with patch("src.agents.logger") as mock_logger:
+                with patch("src.agents.consultant_nodes.logger") as mock_logger:
                     mock_prompt = Mock()
                     mock_prompt.system_message = "You are a consultant."
                     mock_prompt.agent_name = "External Consultant"
@@ -606,7 +624,9 @@ class TestStateMergeConflicts:
             invoke_calls.append(args)
             return mock_response
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
@@ -732,12 +752,12 @@ class TestEndToEndInformationFlow:
             "fundamentals_report": """
             FUNDAMENTALS ANALYSIS - TEST
 
-            === DATA_BLOCK ===
+            ### --- START DATA_BLOCK ---
             P/E ratio: 12.5
             D/E ratio: 45%
             Revenue growth: 23%
             Free cash flow: $150M
-            === END DATA_BLOCK ===
+            ### --- END DATA_BLOCK ---
 
             Company shows strong fundamentals with reasonable valuation.
             """,
@@ -829,7 +849,9 @@ class TestEndToEndInformationFlow:
         mock_llm = Mock()
         pm_node = create_portfolio_manager_node(mock_llm, memory=None)
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_pm_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_pm_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are the portfolio manager."
@@ -922,12 +944,12 @@ class TestEndToEndInformationFlow:
             "fundamentals_report": """
             FUNDAMENTALS ANALYSIS - RISKY
 
-            === DATA_BLOCK ===
+            ### --- START DATA_BLOCK ---
             D/E Ratio: 850%
             Net Income: $50M
             Free Cash Flow: -$120M
             Interest Coverage: 1.2x
-            === END DATA_BLOCK ===
+            ### --- END DATA_BLOCK ---
 
             WARNING: Multiple red flags detected. See pre-screening results.
             """,
@@ -953,7 +975,9 @@ class TestEndToEndInformationFlow:
         mock_llm = Mock()
         pm_node = create_portfolio_manager_node(mock_llm, memory=None)
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_pm_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_pm_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are the portfolio manager."

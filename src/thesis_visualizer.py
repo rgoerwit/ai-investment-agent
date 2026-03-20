@@ -101,7 +101,7 @@ class ThesisVisualizer:
     PEG_MAX = 1.2
     ANALYST_MAX = 15
     US_REVENUE_MAX = 35.0
-    LIQUIDITY_MIN = 500_000  # $500k
+    LIQUIDITY_MIN = 250_000  # $250k
     RISK_HIGH = 2.0
     RISK_MODERATE = 1.0
 

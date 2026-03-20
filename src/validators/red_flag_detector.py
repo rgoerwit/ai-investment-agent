@@ -26,6 +26,8 @@ from typing import Any
 
 import structlog
 
+from src.data_block_utils import extract_last_data_block
+
 logger = structlog.get_logger(__name__)
 
 
@@ -166,8 +168,32 @@ class RedFlagDetector:
         if not fundamentals_report:
             return Sector.INDUSTRIALS
 
-        # Extract SECTOR from DATA_BLOCK
-        sector_match = re.search(r"SECTOR:\s*(.+?)(?:\n|$)", fundamentals_report)
+        # Prefer the parseable DATA_BLOCK when present.
+        data_block = extract_last_data_block(fundamentals_report)
+        sector_match = (
+            re.search(r"SECTOR:\s*(.+?)(?:\n|$)", data_block) if data_block else None
+        )
+
+        if not sector_match:
+            # Legacy fundamentals reports often place SECTOR in the narrative
+            # header above DATA_BLOCK. Preserve that behavior, but do not scan
+            # into malformed pseudo-blocks like a bare "DATA_BLOCK:" section.
+            marker_positions = [
+                pos
+                for pos in (
+                    fundamentals_report.find("### --- START DATA_BLOCK"),
+                    fundamentals_report.find("\nDATA_BLOCK:"),
+                )
+                if pos >= 0
+            ]
+            header_region = (
+                fundamentals_report[: min(marker_positions)]
+                if marker_positions
+                else fundamentals_report
+            )
+            sector_match = re.search(
+                r"SECTOR:\s*(.+?)(?:\n|$)", header_region, re.IGNORECASE
+            )
 
         if not sector_match:
             logger.debug("no_sector_found_in_report", fallback="INDUSTRIALS")
@@ -260,6 +286,7 @@ class RedFlagDetector:
             "peg_ratio": None,
             "ocf": None,
             "ocf_source": None,
+            "ocf_filing_reason": None,
             "segment_flag": None,
             "parent_company": None,
             "analyst_coverage_total_est": None,
@@ -274,20 +301,10 @@ class RedFlagDetector:
         if not fundamentals_report:
             return metrics
 
-        # Extract the LAST DATA_BLOCK (agent self-correction pattern)
-        # Tolerate optional descriptive text after "DATA_BLOCK" (e.g., prompt v8.6+
-        # adds "(INTERNAL SCORING — NOT THIRD-PARTY RATINGS)" before closing ---)
-        data_block_pattern = (
-            r"### --- START DATA_BLOCK[^\n]*---(.+?)### --- END DATA_BLOCK ---"
-        )
-        blocks = list(re.finditer(data_block_pattern, fundamentals_report, re.DOTALL))
-
-        if not blocks:
+        data_block = extract_last_data_block(fundamentals_report)
+        if not data_block:
             logger.warning("no_data_block_found_in_fundamentals_report")
             return metrics
-
-        # Use the last (most corrected) block
-        data_block = blocks[-1].group(1)
 
         # Extract ADJUSTED_HEALTH_SCORE (percentage)
         health_match = re.search(
@@ -393,6 +410,16 @@ class RedFlagDetector:
             if val != "N/A":
                 metrics["ocf_source"] = val
 
+        ocf_reason_match = re.search(
+            r"OCF_FILING_REASON:\s*(DISCREPANCY|API_UNAVAILABLE|N/A)",
+            data_block,
+            re.IGNORECASE,
+        )
+        if ocf_reason_match:
+            val = ocf_reason_match.group(1).upper()
+            if val != "N/A":
+                metrics["ocf_filing_reason"] = val
+
         # Extract SEGMENT_FLAG
         segment_flag_match = re.search(
             r"SEGMENT_FLAG:\s*(DETERIORATING|STABLE|N/A)",
@@ -435,7 +462,7 @@ class RedFlagDetector:
 
         # Extract GROWTH_TRAJECTORY
         trajectory_match = re.search(
-            r"GROWTH_TRAJECTORY:\s*(ACCELERATING|DECELERATING|STABLE|N/A)",
+            r"GROWTH_TRAJECTORY:\s*(ACCELERATING|DECELERATING|STABLE|MIXED|N/A)",
             data_block,
             re.IGNORECASE,
         )
@@ -1080,7 +1107,30 @@ class RedFlagDetector:
         # --- RED FLAG 10: OCF Source Discrepancy ---
         # Filing OCF differs from API data — signals potential data quality issue
         ocf_source = metrics.get("ocf_source")
-        if ocf_source == "FILING":
+        ocf_reason = (metrics.get("ocf_filing_reason") or "DISCREPANCY").upper()
+        if ocf_source == "FILING" and ocf_reason == "API_UNAVAILABLE":
+            red_flags.append(
+                {
+                    "type": "OCF_SINGLE_SOURCE",
+                    "severity": "INFO",
+                    "detail": (
+                        "OCF value sourced from filing only — API unavailable, no "
+                        "discrepancy detected"
+                    ),
+                    "action": "NOTE",
+                    "risk_penalty": 0.0,
+                    "rationale": (
+                        "The filing provided the only usable OCF value because the "
+                        "aggregator/API source was unavailable. This is a process "
+                        "limitation, not evidence of a company data inconsistency."
+                    ),
+                }
+            )
+            logger.info(
+                "red_flag_ocf_single_source",
+                ticker=ticker,
+            )
+        elif ocf_source == "FILING":
             red_flags.append(
                 {
                     "type": "OCF_SOURCE_DISCREPANCY",
@@ -1100,6 +1150,7 @@ class RedFlagDetector:
             logger.info(
                 "red_flag_ocf_source_discrepancy",
                 ticker=ticker,
+                ocf_filing_reason=ocf_reason,
             )
 
         # --- GROWTH CLIFF WARNING ---
@@ -1160,6 +1211,30 @@ class RedFlagDetector:
             )
             logger.info(
                 "red_flag_thin_consensus",
+                ticker=ticker,
+                total_est=total_est,
+            )
+        if total_est == "HIGH" or (isinstance(total_est, int) and total_est > 20):
+            red_flags.append(
+                {
+                    "type": "LOCAL_COVERAGE_HIGH",
+                    "severity": "WARNING",
+                    "detail": (
+                        "Home-market analyst coverage is high — information edge is "
+                        "weaker than a typical undiscovered thesis candidate"
+                    ),
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 0.25,
+                    "rationale": (
+                        "English-language coverage may still be low, but high local "
+                        "coverage means the home market has likely already absorbed "
+                        "segment-level, governance, and catalyst information. The "
+                        "undiscovered edge is therefore weaker."
+                    ),
+                }
+            )
+            logger.info(
+                "red_flag_local_coverage_high",
                 ticker=ticker,
                 total_est=total_est,
             )
@@ -1745,16 +1820,9 @@ class RedFlagDetector:
             except Exception:
                 return metrics
 
-        # Extract the LAST DATA_BLOCK (agent self-correction pattern)
-        data_block_pattern = (
-            r"### --- START DATA_BLOCK[^\n]*---(.+?)### --- END DATA_BLOCK ---"
-        )
-        blocks = list(re.finditer(data_block_pattern, fundamentals_report, re.DOTALL))
-
-        if not blocks:
+        data_block = extract_last_data_block(fundamentals_report)
+        if not data_block:
             return metrics
-
-        data_block = blocks[-1].group(1)
 
         # --- CATEGORICAL SIGNALS (Primary - used for threshold logic) ---
 
@@ -1963,13 +2031,9 @@ class RedFlagDetector:
 
         signals: dict[str, Any] = {}
 
-        # Find last DATA_BLOCK (in case of multiple)
-        # Use regex split to tolerate optional descriptive text after "DATA_BLOCK"
-        blocks = re.split(r"--- START DATA_BLOCK[^\n]*---", fundamentals_report)
-        if len(blocks) < 2:
+        data_block = extract_last_data_block(fundamentals_report)
+        if not data_block:
             return {}
-
-        data_block = blocks[-1].split("--- END DATA_BLOCK ---")[0]
 
         # Extract ROIC_QUALITY (categorical)
         roic_quality_match = re.search(

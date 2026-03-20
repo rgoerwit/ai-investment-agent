@@ -18,11 +18,24 @@ Focus:
 - Statistics (per-instance)
 """
 
+import socket
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.memory import FinancialSituationMemory, cleanup_all_memories
+from src.llms import _LazyRateLimiterProxy
+from src.memory import (
+    FinancialSituationMemory,
+    cleanup_all_memories,
+    get_ticker_memory_stats,
+)
+
+
+@pytest.fixture(autouse=True)
+def reset_shared_memory_state():
+    FinancialSituationMemory._reset_shared_state_for_tests()
+    yield
+    FinancialSituationMemory._reset_shared_state_for_tests()
 
 
 class TestFinancialSituationMemoryInitialization:
@@ -80,6 +93,7 @@ class TestFinancialSituationMemoryInitialization:
 
     def test_successful_init(self):
         """Memory should initialize successfully with valid configuration."""
+        FinancialSituationMemory._reset_shared_state_for_tests()
         # Mock config getter directly (os.environ patching no longer works due to SecretStr)
         with patch("src.memory.config") as mock_config:
             mock_config.get_google_api_key.return_value = "test-key"
@@ -104,6 +118,97 @@ class TestFinancialSituationMemoryInitialization:
                     assert memory.available
                     assert memory.embeddings is not None
                     assert memory.situation_collection is not None
+        FinancialSituationMemory._reset_shared_state_for_tests()
+
+    def test_reuses_shared_embeddings_and_chroma_client(self):
+        """Multiple memory instances should share heavy embedding/client resources."""
+        FinancialSituationMemory._reset_shared_state_for_tests()
+        with patch("src.memory.config") as mock_config:
+            mock_config.get_google_api_key.return_value = "test-key"
+            mock_config.chroma_persist_directory = "test-chroma"
+
+            with patch(
+                "src.memory.GoogleGenerativeAIEmbeddings"
+            ) as mock_embeddings_class:
+                mock_embeddings = MagicMock()
+                mock_embeddings.embed_query.return_value = [0.1] * 768
+                mock_embeddings_class.return_value = mock_embeddings
+
+                with patch("chromadb.PersistentClient") as mock_client_class:
+                    mock_client = MagicMock()
+                    mock_collection_a = MagicMock()
+                    mock_collection_a.count.return_value = 0
+                    mock_collection_b = MagicMock()
+                    mock_collection_b.count.return_value = 0
+                    mock_client.list_collections.return_value = []
+                    mock_client.get_or_create_collection.side_effect = [
+                        mock_collection_a,
+                        mock_collection_b,
+                    ]
+                    mock_client_class.return_value = mock_client
+
+                    memory_a = FinancialSituationMemory("test_memory_a")
+                    memory_b = FinancialSituationMemory("test_memory_b")
+
+                    assert memory_a.available is True
+                    assert memory_b.available is True
+                    assert mock_embeddings_class.call_count == 1
+                    assert mock_client_class.call_count == 1
+        FinancialSituationMemory._reset_shared_state_for_tests()
+
+    def test_init_with_embedding_healthcheck_failure_is_degraded(self):
+        """Memory should not report available when embedding healthcheck fails."""
+        with patch("src.memory.config") as mock_config:
+            mock_config.get_google_api_key.return_value = "test-key"
+
+            with patch(
+                "src.memory.GoogleGenerativeAIEmbeddings"
+            ) as mock_embeddings_class:
+                mock_embeddings = MagicMock()
+                mock_embeddings.embed_query.side_effect = socket.gaierror(
+                    8, "nodename nor servname provided, or not known"
+                )
+                mock_embeddings_class.return_value = mock_embeddings
+
+                with patch("chromadb.PersistentClient") as mock_client_class:
+                    mock_client = MagicMock()
+                    mock_collection = MagicMock()
+                    mock_collection.count.return_value = 0
+                    mock_client.get_or_create_collection.return_value = mock_collection
+                    mock_client_class.return_value = mock_client
+
+                    memory = FinancialSituationMemory("test_memory")
+
+                    assert memory.chroma_available is True
+                    assert memory.embeddings_available is False
+                    assert memory.available is False
+
+    def test_get_ticker_memory_stats_reads_existing_collections_without_recreating(
+        self,
+    ):
+        """The read-only stats helper should inspect existing collections only."""
+        with patch("src.memory.config") as mock_config:
+            mock_config.chroma_persist_directory = "test-chroma"
+
+            mock_client = MagicMock()
+            existing = MagicMock()
+            existing.name = "1308_HK_bull_memory"
+            mock_collection = MagicMock()
+            mock_collection.count.return_value = 3
+            mock_client.list_collections.return_value = [existing]
+            mock_client.get_collection.return_value = mock_collection
+
+            with patch.object(
+                FinancialSituationMemory,
+                "_get_shared_chroma_client",
+                return_value=mock_client,
+            ) as mock_get_client:
+                stats = get_ticker_memory_stats("1308.HK")
+
+        mock_get_client.assert_called_once()
+        assert stats["bull_researcher"]["available"] is True
+        assert stats["bull_researcher"]["count"] == 3
+        assert stats["bear_researcher"]["available"] is False
 
 
 class TestSituationStorage:
@@ -155,6 +260,67 @@ class TestSituationStorage:
         # Check correct number of items
         assert len(call_kwargs["documents"]) == 2
         assert len(call_kwargs["embeddings"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_get_embedding_logs_rate_limiter_fallback(self):
+        """Rate-limiter failures should be visible before direct embedding fallback."""
+
+        class BrokenLimiter:
+            async def __aenter__(self):
+                raise RuntimeError("limiter unavailable")
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        memory = FinancialSituationMemory("test_memory")
+        memory.available = True
+        memory.embeddings = MagicMock()
+        memory.embeddings.aembed_query = AsyncMock(return_value=[0.1] * 768)
+
+        with patch("src.llms.GLOBAL_RATE_LIMITER", BrokenLimiter()):
+            with patch("src.memory.logger") as mock_logger:
+                embedding = await memory._get_embedding("hello world")
+
+        assert embedding == [0.1] * 768
+        mock_logger.warning.assert_called_once()
+        kwargs = mock_logger.warning.call_args.kwargs
+        assert kwargs["fallback"] == "direct_embed_query"
+        assert kwargs["failure_kind"] in {
+            "application_error",
+            "connect_error",
+            "timeout",
+            "unknown_provider_error",
+        }
+        assert kwargs["error_type"] == "RuntimeError"
+        assert kwargs["exc_info"] is True
+
+    @pytest.mark.asyncio
+    async def test_get_embedding_accepts_lazy_rate_limiter_proxy(self):
+        """The shared lazy proxy should behave as an async context manager."""
+
+        class TrackingLimiter:
+            def __init__(self):
+                self.acquired = 0
+
+            async def aacquire(self, *, blocking=True):
+                self.acquired += 1
+                return True
+
+        limiter = TrackingLimiter()
+        memory = FinancialSituationMemory("test_memory")
+        memory.available = True
+        memory.embeddings = MagicMock()
+        memory.embeddings.aembed_query = AsyncMock(return_value=[0.2] * 768)
+
+        with patch(
+            "src.llms.GLOBAL_RATE_LIMITER", _LazyRateLimiterProxy(lambda: limiter)
+        ):
+            with patch("src.memory.logger") as mock_logger:
+                embedding = await memory._get_embedding("hello world")
+
+        assert embedding == [0.2] * 768
+        assert limiter.acquired == 1
+        mock_logger.warning.assert_not_called()
 
 
 class TestSituationQuerying:

@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -25,8 +27,23 @@ from typing import Any
 import structlog
 
 from src.config import config
+from src.data_block_utils import extract_last_data_block
+from src.runtime_diagnostics import classify_failure
 
 logger = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotLoadProgress:
+    """Progress update emitted while scanning saved prediction snapshots."""
+
+    phase: str
+    total_files: int
+    processed_files: int
+    loaded_tickers: int
+    loaded_snapshots: int
+    current_file: str | None = None
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Constants
@@ -122,6 +139,7 @@ LESSON_TYPES = {
 }
 
 LESSONS_COLLECTION_NAME = "lessons_learned"
+_LESSONS_MEMORY_INSTANCE: Any | None = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -166,14 +184,10 @@ def _extract_data_block_field(fundamentals_report: str, field_name: str) -> str 
     if not fundamentals_report:
         return None
 
-    data_block_pattern = (
-        r"### --- START DATA_BLOCK[^\n]*---(.+?)### --- END DATA_BLOCK ---"
-    )
-    blocks = list(re.finditer(data_block_pattern, fundamentals_report, re.DOTALL))
-    if not blocks:
+    data_block = extract_last_data_block(fundamentals_report)
+    if not data_block:
         return None
 
-    data_block = blocks[-1].group(1)
     match = re.search(rf"{field_name}:\s*(.+?)(?:\n|$)", data_block, re.IGNORECASE)
     if match:
         value = match.group(1).strip()
@@ -298,14 +312,27 @@ def extract_snapshot(
     currency = EXCHANGE_CURRENCY.get(suffix, FALLBACK_CURRENCY)
     benchmark = EXCHANGE_BENCHMARK.get(suffix, FALLBACK_BENCHMARK)
 
-    # FX rate at analysis time (synchronous fallback only — no async in snapshot)
+    # FX rate at analysis time (synchronous fallback only — no async in snapshot).
+    # Saved here so the reconciler has an at-analysis-time rate to use for cost
+    # calculations without needing a live FX fetch.
     fx_rate = None
     try:
         from src.fx_normalization import FALLBACK_RATES_TO_USD
 
-        fx_rate = FALLBACK_RATES_TO_USD.get(currency, 1.0)
+        fx_rate = FALLBACK_RATES_TO_USD.get(currency)
+        if fx_rate is None:
+            logger.warning(
+                "snapshot_fx_rate_unknown",
+                ticker=ticker,
+                currency=currency,
+                msg=(
+                    "Currency not in FALLBACK_RATES_TO_USD — "
+                    "saving fx_rate_to_usd=None. "
+                    "Add to src/fx_normalization.py to fix cost calculations."
+                ),
+            )
     except ImportError:
-        fx_rate = 1.0
+        fx_rate = None
 
     # TRADE_BLOCK extraction from trader plan (zero LLM cost — pure regex)
     trader_plan = result.get("investment_analysis", {}).get("trader_plan", "") or ""
@@ -371,8 +398,28 @@ def extract_snapshot(
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+def _should_emit_snapshot_progress(processed_files: int, total_files: int) -> bool:
+    """Return True when snapshot-scan progress should be surfaced."""
+    if total_files <= 0:
+        return False
+    if total_files > 20 and processed_files in {1, 5, 10, 25, 50, 100}:
+        return True
+    if total_files <= 20:
+        return True
+    if total_files <= 200:
+        step = 25
+    elif total_files <= 1000:
+        step = 100
+    else:
+        step = 250
+    return processed_files == total_files or processed_files % step == 0
+
+
 def load_past_snapshots(
-    ticker: str | None, results_dir: Path
+    ticker: str | None,
+    results_dir: Path,
+    *,
+    progress: Callable[[SnapshotLoadProgress], None] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """
     Load prediction snapshots from saved analysis JSON files.
@@ -413,7 +460,41 @@ def load_past_snapshots(
             unique_files.append(f)
     files = unique_files
 
-    for filepath in files:
+    total_files = len(files)
+    if progress is not None:
+        progress(
+            SnapshotLoadProgress(
+                phase="discovered",
+                total_files=total_files,
+                processed_files=0,
+                loaded_tickers=0,
+                loaded_snapshots=0,
+                current_file=None,
+            )
+        )
+
+    for processed_files, filepath in enumerate(files, start=1):
+
+        def emit_progress(
+            processed_files_: int = processed_files,
+            current_file: str = filepath.name,
+        ) -> None:
+            if progress is None or not _should_emit_snapshot_progress(
+                processed_files_, total_files
+            ):
+                return
+            loaded_snapshots = sum(len(items) for items in snapshots.values())
+            progress(
+                SnapshotLoadProgress(
+                    phase="parsing",
+                    total_files=total_files,
+                    processed_files=processed_files_,
+                    loaded_tickers=len(snapshots),
+                    loaded_snapshots=loaded_snapshots,
+                    current_file=current_file,
+                )
+            )
+
         try:
             with open(filepath) as f:
                 data = json.load(f)
@@ -425,6 +506,7 @@ def load_past_snapshots(
                     file=filepath.name,
                     reason="predates retrospective feature",
                 )
+                emit_progress()
                 continue
 
             snap_ticker = snapshot.get("ticker", "UNKNOWN")
@@ -433,11 +515,33 @@ def load_past_snapshots(
             # Attach source file for deduplication
             snapshot["_source_file"] = filepath.name
             snapshots[snap_ticker].append(snapshot)
+            emit_progress()
 
         except json.JSONDecodeError:
             logger.warning("malformed_json", file=filepath.name)
+            emit_progress()
         except Exception as e:
-            logger.warning("snapshot_load_error", file=filepath.name, error=str(e))
+            logger.warning(
+                "snapshot_load_error",
+                file=filepath.name,
+                error=str(e),
+                error_type=type(e).__name__,
+                root_cause_type=type(e.__cause__ or e.__context__ or e).__name__,
+                exc_info=True,
+            )
+            emit_progress()
+
+    if progress is not None:
+        progress(
+            SnapshotLoadProgress(
+                phase="complete",
+                total_files=total_files,
+                processed_files=total_files,
+                loaded_tickers=len(snapshots),
+                loaded_snapshots=sum(len(items) for items in snapshots.values()),
+                current_file=files[-1].name if files else None,
+            )
+        )
 
     return snapshots
 
@@ -559,23 +663,43 @@ async def compare_to_reality(snapshot: dict[str, Any]) -> dict[str, Any] | None:
         logger.warning("yfinance_timeout", ticker=ticker)
         return None
     except Exception as e:
-        logger.warning("yfinance_error", ticker=ticker, error=str(e))
+        details = classify_failure(e, provider="unknown", class_name="yfinance")
+        logger.warning(
+            "yfinance_error",
+            ticker=ticker,
+            failure_kind=details.kind,
+            host=details.host,
+            error_type=details.error_type,
+            root_cause_type=details.root_cause_type,
+            retryable=details.retryable,
+            error_message=details.message,
+            exc_info=True,
+        )
         return None
 
-    # Calculate returns
+    # Calculate returns.
+    # Both start_price / end_price are in LOCAL currency (yfinance returns local prices),
+    # and both bench_start / bench_end are in the benchmark index's native unit.
+    # The percentage formula (end-start)/start cancels the currency unit, so
+    # price_return_pct and benchmark_return_pct are currency-neutral percentages
+    # and can be compared directly without FX conversion.
     start_price = data.get("start_adj_close")
     end_price = data.get("end_adj_close")
     if not start_price or not end_price or start_price <= 0:
         logger.debug("insufficient_price_data", ticker=ticker)
         return None
 
-    price_return_pct = ((end_price - start_price) / start_price) * 100.0
+    price_return_pct = (
+        (end_price - start_price) / start_price
+    ) * 100.0  # % in LOCAL ccy
 
     bench_start = data.get("bench_start")
     bench_end = data.get("bench_end")
     benchmark_return_pct = 0.0
     if bench_start and bench_end and bench_start > 0:
-        benchmark_return_pct = ((bench_end - bench_start) / bench_start) * 100.0
+        benchmark_return_pct = (
+            (bench_end - bench_start) / bench_start
+        ) * 100.0  # % unitless
 
     excess_return_pct = price_return_pct - benchmark_return_pct
 
@@ -787,7 +911,23 @@ FAILURE_MODE: CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_BLEED | OPERATIONAL_MISS | 
         return lesson_text, lesson_type, failure_mode
 
     except Exception as e:
-        logger.error("lesson_generation_failed", error=str(e))
+        details = classify_failure(
+            e,
+            provider="google",
+            model_name=getattr(config, "quick_thinking_llm", None),
+            class_name="RetrospectiveLessonLLM",
+        )
+        logger.error(
+            "lesson_generation_failed",
+            provider=details.provider,
+            failure_kind=details.kind,
+            host=details.host,
+            error_type=details.error_type,
+            root_cause_type=details.root_cause_type,
+            retryable=details.retryable,
+            error_message=details.message,
+            exc_info=True,
+        )
         return None
 
 
@@ -1225,6 +1365,7 @@ async def run_retrospective(
     ticker: str | None,
     results_dir: Path,
     lessons_memory: Any = None,
+    progress: Callable[[SnapshotLoadProgress], None] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Orchestrate retrospective: load snapshots → compare → generate → store.
@@ -1245,11 +1386,17 @@ async def run_retrospective(
 
             lessons_memory = FinancialSituationMemory(LESSONS_COLLECTION_NAME)
         except Exception as e:
-            logger.error("lessons_memory_init_failed", error=str(e))
+            logger.error(
+                "lessons_memory_init_failed",
+                error=str(e),
+                error_type=type(e).__name__,
+                root_cause_type=type(e.__cause__ or e.__context__ or e).__name__,
+                exc_info=True,
+            )
             return []
 
     # Load snapshots
-    all_snapshots = load_past_snapshots(ticker, results_dir)
+    all_snapshots = load_past_snapshots(ticker, results_dir, progress=progress)
 
     if not all_snapshots:
         msg = f"for {ticker}" if ticker else "in results directory"
@@ -1355,6 +1502,16 @@ def create_lessons_memory() -> Any:
         FinancialSituationMemory instance (may have available=False if ChromaDB
         is not configured)
     """
-    from src.memory import FinancialSituationMemory
+    global _LESSONS_MEMORY_INSTANCE
 
-    return FinancialSituationMemory(LESSONS_COLLECTION_NAME)
+    if _LESSONS_MEMORY_INSTANCE is None:
+        from src.memory import FinancialSituationMemory
+
+        _LESSONS_MEMORY_INSTANCE = FinancialSituationMemory(LESSONS_COLLECTION_NAME)
+    return _LESSONS_MEMORY_INSTANCE
+
+
+def _reset_lessons_memory_cache_for_tests() -> None:
+    """Reset the cached lessons memory instance to keep tests isolated."""
+    global _LESSONS_MEMORY_INSTANCE
+    _LESSONS_MEMORY_INSTANCE = None

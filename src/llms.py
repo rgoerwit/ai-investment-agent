@@ -6,12 +6,15 @@ UPDATED: Configurable rate limits via GEMINI_RPM_LIMIT environment variable.
 UPDATED: Added OpenAI consultant LLM for cross-validation (Dec 2025).
 """
 
-import logging
 import re
+from collections.abc import Callable
+from importlib.util import find_spec
+from typing import Any
 
+import structlog
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
-from langchain_core.rate_limiters import InMemoryRateLimiter
+from langchain_core.rate_limiters import BaseRateLimiter, InMemoryRateLimiter
 from langchain_google_genai import (
     ChatGoogleGenerativeAI,
     HarmBlockThreshold,
@@ -20,7 +23,8 @@ from langchain_google_genai import (
 
 from src.config import config
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
+_logged_model_init_configs: set[tuple[str, str, int, int, str | None]] = set()
 
 # Relax safety settings slightly for financial/market analysis context
 SAFETY_SETTINGS = {
@@ -82,19 +86,108 @@ def _create_rate_limiter_from_rpm(rpm: int) -> InMemoryRateLimiter:
     rps = (rpm / 60.0) * safety_factor
     max_bucket = max(5, int(rpm * 0.1))
     logger.info(
-        f"Rate limiter configured: {rpm} RPM → {rps:.2f} RPS "
-        f"(80% of limit, bucket size: {max_bucket})"
+        "rate_limiter_configured", rpm=rpm, rps=round(rps, 2), max_bucket=max_bucket
     )
     return InMemoryRateLimiter(
         requests_per_second=rps, check_every_n_seconds=0.1, max_bucket_size=max_bucket
     )
 
 
-GLOBAL_RATE_LIMITER = _create_rate_limiter_from_rpm(config.gemini_rpm_limit)
+def _reset_init_log_cache_for_tests() -> None:
+    """Reset one-time init logging state for tests."""
+    _logged_model_init_configs.clear()
+
+
+def _log_model_init_once(
+    kind: str,
+    model_name: str,
+    timeout: int,
+    retries: int,
+    thinking_level: str | None,
+) -> None:
+    key = (kind, model_name, timeout, retries, thinking_level)
+    if key in _logged_model_init_configs:
+        return
+    _logged_model_init_configs.add(key)
+    logger.debug(
+        "llm_initialized",
+        kind=kind,
+        model=model_name,
+        timeout=timeout,
+        retries=retries,
+        thinking_level=thinking_level,
+    )
+
+
+class _LazyRateLimiterProxy(BaseRateLimiter):
+    """Lazily construct the shared Gemini rate limiter on first use."""
+
+    def __init__(self, factory: Callable[[], InMemoryRateLimiter]):
+        self._factory = factory
+        self._instance: InMemoryRateLimiter | None = None
+
+    def _get_instance(self) -> InMemoryRateLimiter:
+        if self._instance is None:
+            self._instance = self._factory()
+        return self._instance
+
+    def acquire(self, *, blocking: bool = True) -> bool:
+        return self._get_instance().acquire(blocking=blocking)
+
+    async def aacquire(self, *, blocking: bool = True) -> bool:
+        return await self._get_instance().aacquire(blocking=blocking)
+
+    async def __aenter__(self):
+        await self.aacquire(blocking=True)
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._get_instance(), name)
+
+    def __repr__(self) -> str:
+        status = "initialized" if self._instance is not None else "lazy"
+        return f"<_LazyRateLimiterProxy {status}>"
+
+
+GLOBAL_RATE_LIMITER = _LazyRateLimiterProxy(
+    lambda: _create_rate_limiter_from_rpm(config.gemini_rpm_limit)
+)
 
 # Track LLM instances for cleanup
 _llm_instances: dict = {}
 _llm_instance_counter: int = 0
+
+
+class _LazyLLMProxy:
+    """Lazily construct a default LLM on first use."""
+
+    def __init__(self, factory):
+        self._factory = factory
+        self._instance = None
+
+    def _get_instance(self):
+        if self._instance is None:
+            self._instance = self._factory()
+        return self._instance
+
+    def __getattr__(self, name):
+        return getattr(self._get_instance(), name)
+
+    def __repr__(self) -> str:
+        status = "initialized" if self._instance is not None else "lazy"
+        return f"<_LazyLLMProxy {status}>"
+
+
+def is_openai_consultant_available() -> bool:
+    """Return whether OpenAI-backed consultant/auditor nodes can be enabled."""
+    if not config.enable_consultant:
+        return False
+    if not config.get_openai_api_key():
+        return False
+    return find_spec("langchain_openai") is not None
 
 
 def get_all_llm_instances() -> dict:
@@ -143,7 +236,9 @@ def create_gemini_model(
 
     if thinking_level and _is_gemini_v3_or_greater(model_name):
         kwargs["thinking_level"] = thinking_level
-        logger.info(f"Applying thinking_level={thinking_level} to {model_name}")
+        logger.debug(
+            "thinking_level_applied", thinking_level=thinking_level, model=model_name
+        )
 
     llm = ChatGoogleGenerativeAI(**kwargs)
 
@@ -175,21 +270,12 @@ def create_quick_thinking_llm(
     thinking_level = None
     if _is_gemini_v3_or_greater(model_name):
         thinking_level = "low"
-        logger.info(
-            f"Quick LLM ({model_name}) is Gemini 3+ - applying thinking_level=low"
-        )
     elif model_name.startswith("gemini-"):
         # Gemini model but NOT 3+ (likely 2.x)
-        logger.warning(
-            f"QUICK_MODEL is {model_name} (Gemini 2.x) - tool calling bugs "
-            f"may occur with some LangGraph versions. Recommend using "
-            f"Gemini 3+ (e.g., gemini-3-pro-preview) for QUICK_MODEL. "
-            f"Gemini 3+ models use thinking_level='low' for data gathering."
-        )
+        logger.warning("quick_model_gemini_2x_warning", model=model_name)
 
-    logger.info(
-        f"Initializing Quick LLM: {model_name} "
-        f"(timeout={final_timeout}, retries={final_retries})"
+    _log_model_init_once(
+        "quick", model_name, final_timeout, final_retries, thinking_level
     )
     return create_gemini_model(
         model_name,
@@ -221,13 +307,9 @@ def create_deep_thinking_llm(
     thinking_level = None
     if _is_gemini_v3_or_greater(model_name):
         thinking_level = "high"
-        logger.info(
-            f"Deep LLM ({model_name}) is Gemini 3+ - applying thinking_level=high"
-        )
 
-    logger.info(
-        f"Initializing Deep LLM: {model_name} "
-        f"(timeout={final_timeout}, retries={final_retries})"
+    _log_model_init_once(
+        "deep", model_name, final_timeout, final_retries, thinking_level
     )
     return create_gemini_model(
         model_name,
@@ -239,9 +321,10 @@ def create_deep_thinking_llm(
     )
 
 
-# Initialize default instances (automatically tracked by create_gemini_model)
-quick_thinking_llm = create_quick_thinking_llm()
-deep_thinking_llm = create_deep_thinking_llm()
+# Lazily initialize default instances so importing src.llms does not construct
+# network-capable clients during test collection or light-weight CLI paths.
+quick_thinking_llm = _LazyLLMProxy(create_quick_thinking_llm)
+deep_thinking_llm = _LazyLLMProxy(create_deep_thinking_llm)
 
 
 # ... (rest of the file is the same)
@@ -249,7 +332,7 @@ def create_consultant_llm(
     temperature: float = 0.3,
     model: str | None = None,
     timeout: int = 120,
-    max_retries: int = 3,
+    max_retries: int = 0,
     quick_mode: bool = False,
     callbacks: list[BaseCallbackHandler] | None = None,
 ) -> BaseChatModel:
@@ -276,11 +359,9 @@ def create_consultant_llm(
 
     Notes:
         - Requires OPENAI_API_KEY environment variable
-        - Normal mode: Uses CONSULTANT_MODEL env var (defaults to gpt-4o)
+        - Normal mode: Uses CONSULTANT_MODEL env var
         - Quick mode: Uses CONSULTANT_QUICK_MODEL env var (defaults to gpt-4o-mini)
         - Optional ENABLE_CONSULTANT env var (defaults to true)
-        - gpt-4o is recommended as of Dec 2025 (GPT-4 Omni)
-        - ChatGPT 5.2 not yet available via API as of Dec 2025
 
     Example:
         >>> consultant_llm = create_consultant_llm()
@@ -311,8 +392,6 @@ def create_consultant_llm(
         )
 
     # Get model name from config (not os.environ)
-    # Note: As of Dec 2025, gpt-4o (GPT-4 Omni) is the latest production model
-    # ChatGPT 5.2 is not yet available via API
     if model:
         # Explicit model override
         model_name = model
@@ -324,8 +403,7 @@ def create_consultant_llm(
         model_name = config.consultant_model
 
     logger.info(
-        f"Initializing Consultant LLM (OpenAI): {model_name} "
-        f"(timeout={timeout}s, retries={max_retries})"
+        "consultant_llm_init", model=model_name, timeout=timeout, retries=max_retries
     )
 
     # Do NOT set temperature — multiple OpenAI model families (o-series,
@@ -337,11 +415,21 @@ def create_consultant_llm(
         "model": model_name,
         "timeout": timeout,
         "max_retries": max_retries,
-        "openai_api_key": api_key,
+        "api_key": api_key,
         "callbacks": callbacks or [],
-        "max_tokens": 16384,
+        # Keep the consultant concise enough for bounded latency on multi-turn
+        # tool use while leaving ample room for structured critique.
+        "max_completion_tokens": 8192,
         "streaming": False,
+        "use_responses_api": True,
+        "output_version": "responses/v1",
     }
+
+    # GPT-5 non-pro models support configurable reasoning effort. Pinning the
+    # consultant to medium keeps it thoughtful without inheriting the much
+    # slower deep-thinking behavior of pro variants.
+    if model_name.startswith("gpt-5") and "pro" not in model_name:
+        kwargs["reasoning_effort"] = "medium"
 
     llm = ChatOpenAI(**kwargs)
 
@@ -364,7 +452,7 @@ def create_auditor_llm(
     try:
         from langchain_openai import ChatOpenAI
     except ImportError as e:
-        logger.warning(f"langchain-openai not found: {e}")
+        logger.warning("langchain_openai_missing", error=str(e))
         return None
 
     if not config.enable_consultant:
@@ -373,13 +461,13 @@ def create_auditor_llm(
     # Get OpenAI API key via config
     api_key = config.get_openai_api_key()
     if not api_key:
-        logger.warning("OPENAI_API_KEY not found - Auditor will be disabled.")
+        logger.warning("auditor_no_api_key")
         return None
 
     # Determine model: Specific -> Consultant -> Default
     model_name = config.auditor_model or config.consultant_model or "gpt-4o"
 
-    logger.info(f"Initializing Auditor LLM: {model_name}")
+    logger.info("auditor_llm_init", model=model_name)
 
     # Do NOT set temperature — multiple OpenAI model families (o-series reasoning
     # models, gpt-5.x) reject temperature != 1.0.  Forensic precision comes from
@@ -390,10 +478,12 @@ def create_auditor_llm(
         "model": model_name,
         "timeout": 120,
         "max_retries": 3,
-        "openai_api_key": api_key,
+        "api_key": api_key,
         "callbacks": callbacks or [],
-        "max_tokens": 16384,
+        "max_completion_tokens": 16384,
         "streaming": False,
+        "use_responses_api": True,
+        "output_version": "responses/v1",
     }
 
     return ChatOpenAI(**kwargs)
@@ -424,10 +514,7 @@ def create_writer_llm(
     api_key = config.get_claude_api_key()
 
     if not api_key:
-        logger.warning(
-            "CLAUDE_KEY not found — falling back to Gemini for article writer. "
-            "To use Claude, add CLAUDE_KEY=sk-ant-... to your .env file."
-        )
+        logger.warning("writer_no_claude_key")
         return create_deep_thinking_llm(
             temperature=temperature,
             callbacks=callbacks,
@@ -437,10 +524,7 @@ def create_writer_llm(
     try:
         from langchain_anthropic import ChatAnthropic
     except ImportError:
-        logger.warning(
-            "langchain-anthropic not installed — falling back to Gemini. "
-            "Install with: poetry add langchain-anthropic"
-        )
+        logger.warning("langchain_anthropic_missing")
         return create_deep_thinking_llm(
             temperature=temperature,
             callbacks=callbacks,
@@ -467,20 +551,17 @@ def create_writer_llm(
         # CRITICAL: Anthropic returns 400 if temperature != 1.0 with thinking.
         # Omit temperature entirely — SDK defaults to 1.0.
         logger.info(
-            f"Writer LLM ({model_name}): adaptive thinking, effort=high, "
-            f"temperature=1.0 (Anthropic constraint, requested {temperature} ignored)"
+            "writer_llm_adaptive_thinking", model=model_name, requested_temp=temperature
         )
     elif "sonnet" in model_name or "opus" in model_name:
         # Other Claude 4.x models: manual extended thinking
         kwargs["thinking"] = {"type": "enabled", "budget_tokens": 8192}
         # Same temperature constraint applies
-        logger.info(f"Writer LLM ({model_name}): extended thinking, budget=8192 tokens")
+        logger.info("writer_llm_extended_thinking", model=model_name)
     else:
         # Haiku or unknown models: no thinking, use requested temperature
         kwargs["temperature"] = temperature
-        logger.info(
-            f"Writer LLM ({model_name}): no thinking, temperature={temperature}"
-        )
+        logger.info("writer_llm_no_thinking", model=model_name, temperature=temperature)
 
     llm = ChatAnthropic(**kwargs)
 
@@ -490,10 +571,7 @@ def create_writer_llm(
     instance_name = f"claude_{model_name}_{_llm_instance_counter}"
     _llm_instances[instance_name] = llm
 
-    logger.info(
-        f"Initialized Writer LLM (Claude): {model_name} "
-        f"(timeout={final_timeout}s, max_tokens=16384)"
-    )
+    logger.info("writer_llm_init", model=model_name, timeout=final_timeout)
 
     return llm
 
@@ -517,32 +595,34 @@ def create_editor_llm(
     try:
         from langchain_openai import ChatOpenAI
     except ImportError as e:
-        logger.warning(f"langchain-openai not found: {e}")
+        logger.warning("langchain_openai_missing", error=str(e))
         return None
 
     if not config.enable_consultant:
-        logger.info("Editor LLM disabled (ENABLE_CONSULTANT=false)")
+        logger.info("editor_disabled")
         return None
 
     api_key = config.get_openai_api_key()
     if not api_key:
-        logger.warning("OPENAI_API_KEY not found - Editor will be disabled.")
+        logger.warning("editor_no_api_key")
         return None
 
     # Fallback chain: EDITOR_MODEL -> CONSULTANT_MODEL -> gpt-4o
     model_name = config.editor_model or config.consultant_model or "gpt-4o"
 
-    logger.info(f"Initializing Editor LLM: {model_name}")
+    logger.info("editor_llm_init", model=model_name)
 
     return ChatOpenAI(
         model=model_name,
         temperature=0.3,  # Slightly creative for style suggestions
         timeout=120,
         max_retries=3,
-        openai_api_key=api_key,
+        api_key=api_key,
         callbacks=callbacks or [],
-        max_tokens=8192,  # Editor feedback is concise JSON
+        max_completion_tokens=8192,  # Editor feedback is concise JSON
         streaming=False,
+        use_responses_api=True,
+        output_version="responses/v1",
     )
 
 
@@ -575,20 +655,17 @@ def get_consultant_llm(
 
     # Skip consultant in quick mode for performance
     if quick_mode:
-        logger.info("Consultant LLM skipped in quick mode for performance")
+        logger.info("consultant_quick_mode_skip")
         return None
 
     # Check if consultant is enabled (via config, not os.environ)
     if not config.enable_consultant:
-        logger.info("Consultant LLM disabled via ENABLE_CONSULTANT=false")
+        logger.info("consultant_disabled")
         return None
 
     # Check if API key exists (via config with SecretStr protection)
     if not config.get_openai_api_key():
-        logger.warning(
-            "OPENAI_API_KEY not found - consultant node will be skipped. "
-            "To enable consultant cross-validation, add OPENAI_API_KEY to .env"
-        )
+        logger.warning("consultant_no_api_key")
         return None
 
     # Lazy initialization
@@ -598,7 +675,14 @@ def get_consultant_llm(
                 callbacks=callbacks, quick_mode=quick_mode
             )
         except Exception as e:
-            logger.error(f"Failed to initialize consultant LLM: {str(e)}")
+            logger.error(
+                "consultant_llm_init_failed",
+                model=config.consultant_model,
+                quick_mode=quick_mode,
+                error_type=type(e).__name__,
+                error=str(e),
+                exc_info=True,
+            )
             return None
 
     return _consultant_llm_instance

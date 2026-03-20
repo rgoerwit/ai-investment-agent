@@ -1,0 +1,127 @@
+"""News and sentiment tool implementations."""
+
+from typing import Annotated
+
+import structlog
+import yfinance as yf
+from langchain_core.tools import tool
+
+from src.stocktwits_api import StockTwitsAPI
+from src.ticker_utils import normalize_ticker
+from src.tools import shared
+
+logger = structlog.get_logger(__name__)
+stocktwits_api = StockTwitsAPI()
+
+
+@tool
+async def get_news(
+    ticker: Annotated[str, "Stock ticker symbol"],
+    search_query: Annotated[str, "Specific query"] = None,
+) -> str:
+    """
+    Get recent news using Tavily with ENHANCED multi-query strategy.
+    Structures output for News Analyst prompt ingestion.
+    """
+    if not shared.tavily_tool:
+        return "News tool unavailable."
+
+    try:
+        normalized_symbol = normalize_ticker(ticker)
+        ticker_obj = yf.Ticker(normalized_symbol)
+        company_name = await shared.extract_company_name_async(ticker_obj)
+
+        local_source_hints = {
+            ".KS": "site:pulsenews.co.kr OR site:koreatimes.co.kr OR site:koreaherald.com",
+            ".HK": "site:scmp.com OR site:thestandard.com.hk OR site:ejinsight.com",
+            ".T": "site:japantimes.co.jp OR site:nikkei.com",
+            ".L": "site:ft.com OR site:bbc.co.uk/news/business",
+            ".PA": "site:france24.com OR site:lemonde.fr",
+            ".DE": "site:dw.com OR site:handelsblatt.com",
+        }
+
+        suffix = ""
+        if "." in normalized_symbol:
+            suffix = "." + normalized_symbol.split(".")[-1]
+        local_hint = local_source_hints.get(suffix, "")
+
+        results = []
+
+        general_query = (
+            f'"{company_name}" {search_query}'
+            if search_query
+            else f'"{company_name}" (earnings OR merger OR acquisition OR regulatory)'
+        )
+        general_result = await shared._tavily_search_with_timeout(
+            {"query": general_query}
+        )
+        if general_result:
+            formatted = shared._format_and_truncate_tavily_result(general_result)
+            if formatted.strip():
+                results.append(f"=== GENERAL NEWS ===\n{formatted}\n")
+
+        if local_hint and not search_query:
+            local_query = (
+                f'"{company_name}" {local_hint} (earnings OR guidance OR strategy)'
+            )
+            local_result = await shared._tavily_search_with_timeout(
+                {"query": local_query}
+            )
+            if local_result:
+                formatted_local = shared._format_and_truncate_tavily_result(
+                    local_result
+                )
+                if formatted_local.strip():
+                    results.append(
+                        f"=== LOCAL/REGIONAL NEWS SOURCES ===\n{formatted_local}\n"
+                    )
+
+        if not results:
+            return f"No news found for {company_name}."
+
+        return f"News Results for {company_name}:\n\n" + "\n".join(results)
+    except Exception as exc:
+        logger.error(f"News fetch failed for {ticker}: {exc}")
+        return f"Error fetching news: {str(exc)}"
+
+
+@tool
+async def get_social_media_sentiment(ticker: str) -> str:
+    """Get sentiment from StockTwits."""
+    try:
+        data = await stocktwits_api.get_sentiment(ticker)
+
+        if "error" in data:
+            return f"StockTwits Sentiment Error: {data.get('error')}"
+
+        summary = (
+            f"StockTwits Sentiment for {data.get('ticker')}:\n"
+            f"- Bullish: {data.get('bullish_pct')}% ({data.get('bullish_count')} msgs)\n"
+            f"- Bearish: {data.get('bearish_pct')}% ({data.get('bearish_count')} msgs)\n"
+            f"- Total Volume (last 30): {data.get('total_messages_last_30')}\n\n"
+            "Sample Messages:\n"
+        )
+
+        messages = data.get("messages", [])
+        if messages:
+            for msg in messages:
+                summary += f"- {msg}\n"
+        else:
+            summary += "- No recent messages found.\n"
+
+        return summary
+    except Exception as exc:
+        return f"Error getting sentiment: {str(exc)}"
+
+
+@tool
+async def get_macroeconomic_news(trade_date: str) -> str:
+    """Get macroeconomic news context for a specific date."""
+    if not shared.tavily_tool:
+        return "Tool unavailable"
+    result = await shared._tavily_search_with_timeout(
+        {"query": f"macroeconomic news {trade_date}"}
+    )
+    if not result:
+        return "Macroeconomic news search timed out or failed."
+    return shared._format_and_truncate_tavily_result(result)

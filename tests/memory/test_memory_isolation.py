@@ -274,7 +274,9 @@ class TestMemoryContaminationPrevention:
         """Test that graph.py creates ticker-specific memories when given a ticker."""
         from src.graph import create_trading_graph
 
-        with patch("src.graph.create_memory_instances") as mock_create_memories:
+        with patch(
+            "src.graph.components.create_memory_instances"
+        ) as mock_create_memories:
             # Setup mock memories
             mock_memories = {}
             for name in [
@@ -298,8 +300,8 @@ class TestMemoryContaminationPrevention:
         """Test that graph cleans up previous memories when cleanup_previous=True."""
         from src.graph import create_trading_graph
 
-        with patch("src.graph.cleanup_all_memories") as mock_cleanup:
-            with patch("src.graph.create_memory_instances") as mock_create:
+        with patch("src.graph.components.cleanup_all_memories") as mock_cleanup:
+            with patch("src.graph.components.create_memory_instances") as mock_create:
                 # Setup mock memories
                 mock_memories = {}
                 for name in [
@@ -322,6 +324,13 @@ class TestMemoryContaminationPrevention:
 
 class TestMemoryStats:
     """Test memory statistics and monitoring."""
+
+    def setup_method(self, method):
+        """Clear shared state so each test gets fresh mock objects."""
+        FinancialSituationMemory._reset_shared_state_for_tests()
+
+    def teardown_method(self, method):
+        FinancialSituationMemory._reset_shared_state_for_tests()
 
     def test_get_all_memory_stats(self):
         """Test retrieval of all memory collection stats."""

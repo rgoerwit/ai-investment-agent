@@ -10,6 +10,8 @@ import structlog
 from bs4 import BeautifulSoup
 from langchain_core.tools import tool
 
+from src.runtime_diagnostics import classify_failure
+
 logger = structlog.get_logger(__name__)
 
 # Maximum characters to fetch from each reference URL
@@ -82,23 +84,40 @@ async def fetch_reference_content(url: str) -> str:
         return text
 
     except httpx.TimeoutException:
-        logger.warning("Reference fetch timeout", url=url[:80])
+        logger.warning("reference_fetch_timeout", url=url[:80], failure_kind="timeout")
         return "FETCH_FAILED: Request timed out after 10 seconds"
 
     except httpx.HTTPStatusError as e:
         logger.warning(
-            "Reference fetch HTTP error",
+            "reference_fetch_http_error",
             url=url[:80],
             status=e.response.status_code,
+            response_preview=e.response.text[:200] if e.response.text else "",
         )
         return f"FETCH_FAILED: HTTP {e.response.status_code}"
 
     except httpx.RequestError as e:
-        logger.warning("Reference fetch request error", url=url[:80], error=str(e))
+        details = classify_failure(e, provider="unknown")
+        logger.warning(
+            "reference_fetch_request_error",
+            url=url[:80],
+            failure_kind=details.kind,
+            retryable=details.retryable,
+            error_type=details.error_type,
+            error=str(e),
+        )
         return f"FETCH_FAILED: {type(e).__name__}"
 
     except Exception as e:
-        logger.error("Unexpected error fetching reference", url=url[:80], error=str(e))
+        details = classify_failure(e, provider="unknown")
+        logger.error(
+            "reference_fetch_unexpected_error",
+            url=url[:80],
+            failure_kind=details.kind,
+            retryable=details.retryable,
+            error_type=details.error_type,
+            error=str(e),
+        )
         return f"FETCH_FAILED: {str(e)}"
 
 
@@ -140,7 +159,15 @@ async def search_claim(query: str) -> str:
         return text
 
     except Exception as e:
-        logger.warning("claim_search_failed", query=query[:80], error=str(e))
+        details = classify_failure(e, provider="unknown")
+        logger.warning(
+            "claim_search_failed",
+            query=query[:80],
+            failure_kind=details.kind,
+            retryable=details.retryable,
+            error_type=details.error_type,
+            error=str(e),
+        )
         return f"SEARCH_FAILED: {str(e)}"
 
 

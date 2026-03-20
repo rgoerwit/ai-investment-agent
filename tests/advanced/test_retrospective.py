@@ -22,6 +22,7 @@ from src.retrospective import (
     LESSONS_COLLECTION_NAME,
     MAX_LESSONS_PER_TICKER,
     MINIMUM_DAYS_ELAPSED,
+    SnapshotLoadProgress,
     _extract_bear_risks,
     _extract_data_block_field,
     _extract_data_block_float,
@@ -195,6 +196,40 @@ class TestExtractSnapshot:
         assert snapshot["benchmark_index"] == "^GSPC"
 
 
+@pytest.mark.asyncio
+async def test_generate_lesson_logs_structured_failure_details():
+    comparison = _make_snapshot()
+
+    with patch(
+        "src.llms.create_quick_thinking_llm", side_effect=RuntimeError("llm down")
+    ):
+        with patch("src.retrospective.logger") as mock_logger:
+            lesson = await generate_lesson(comparison)
+
+    assert lesson is None
+    mock_logger.error.assert_called_once()
+    kwargs = mock_logger.error.call_args.kwargs
+    assert kwargs["failure_kind"] == "unknown_provider_error"
+    assert kwargs["error_type"] == "RuntimeError"
+    assert kwargs["exc_info"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_retrospective_logs_memory_init_failure(tmp_path):
+    with patch(
+        "src.memory.FinancialSituationMemory", side_effect=RuntimeError("bad init")
+    ):
+        with patch("src.retrospective.logger") as mock_logger:
+            lessons = await run_retrospective(None, tmp_path)
+
+    assert lessons == []
+    mock_logger.error.assert_called_once()
+    kwargs = mock_logger.error.call_args.kwargs
+    assert kwargs["error_type"] == "RuntimeError"
+    assert kwargs["root_cause_type"] == "RuntimeError"
+    assert kwargs["exc_info"] is True
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # DATA_BLOCK Field Extraction Tests
 # ══════════════════════════════════════════════════════════════════════════════
@@ -233,6 +268,17 @@ SECTOR: N/A
         assert _extract_data_block_field("", "SECTOR") is None
         assert _extract_data_block_field(None, "SECTOR") is None
         assert _extract_data_block_float("", "PRICE") is None
+
+    def test_extract_ignores_unparseable_datablock_mentions(self):
+        report = """
+The narrative mentions DATA_BLOCK but does not include the fenced section.
+
+DATA_BLOCK:
+SECTOR: Industrials
+CURRENT_PRICE: 145.00
+"""
+        assert _extract_data_block_field(report, "SECTOR") is None
+        assert _extract_data_block_float(report, "CURRENT_PRICE") is None
 
     def test_extract_adjusted_health_score_with_percent(self):
         """ADJUSTED_HEALTH_SCORE has % sign — float extraction handles it."""
@@ -572,6 +618,37 @@ class TestLoadPastSnapshots:
 
         result = load_past_snapshots(None, tmp_path)
         assert result == {}
+
+    def test_progress_callback_receives_discovered_parsing_and_complete(self, tmp_path):
+        """Snapshot loading emits visible progress events for callers."""
+        events: list[SnapshotLoadProgress] = []
+
+        for ticker, prefix in [("2767.T", "2767_T"), ("0005.HK", "0005_HK")]:
+            data = {"prediction_snapshot": _make_snapshot(ticker=ticker)}
+            (tmp_path / f"{prefix}_20260101_120000_analysis.json").write_text(
+                json.dumps(data)
+            )
+
+        snapshots = load_past_snapshots(None, tmp_path, progress=events.append)
+
+        assert set(snapshots) == {"2767.T", "0005.HK"}
+        assert events[0] == SnapshotLoadProgress(
+            phase="discovered",
+            total_files=2,
+            processed_files=0,
+            loaded_tickers=0,
+            loaded_snapshots=0,
+            current_file=None,
+        )
+        assert any(event.phase == "parsing" for event in events)
+        assert events[-1] == SnapshotLoadProgress(
+            phase="complete",
+            total_files=2,
+            processed_files=2,
+            loaded_tickers=2,
+            loaded_snapshots=2,
+            current_file="0005_HK_20260101_120000_analysis.json",
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -976,6 +1053,11 @@ class TestGenerateLesson:
 
 
 class TestCreateLessonsMemory:
+    def setup_method(self):
+        from src.retrospective import _reset_lessons_memory_cache_for_tests
+
+        _reset_lessons_memory_cache_for_tests()
+
     def test_factory_returns_memory(self):
         """create_lessons_memory returns a FinancialSituationMemory instance."""
         with patch("src.memory.FinancialSituationMemory") as MockFSM:
@@ -984,6 +1066,18 @@ class TestCreateLessonsMemory:
             result = create_lessons_memory()
             MockFSM.assert_called_once_with("lessons_learned")
             assert result == mock_instance
+
+    def test_factory_reuses_cached_memory(self):
+        """Repeated calls should reuse the same lessons memory instance."""
+        with patch("src.memory.FinancialSituationMemory") as MockFSM:
+            mock_instance = MagicMock()
+            MockFSM.return_value = mock_instance
+
+            first = create_lessons_memory()
+            second = create_lessons_memory()
+
+            MockFSM.assert_called_once_with("lessons_learned")
+            assert first is second
 
 
 # ══════════════════════════════════════════════════════════════════════════════

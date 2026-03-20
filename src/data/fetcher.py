@@ -9,14 +9,35 @@ Strategy:
 2. Enhance yfinance with financial statement extraction
 3. Smart merge with quality scoring (Statements > EODHD > Alpha Vantage/yfinance > FMP > Yahoo Info)
 4. Mandatory Tavily gap-fill if coverage <70%
+
+## Currency Convention for Returned Data
+----------------------------------------------------------------------
+get_financial_metrics() returns a merged dict where:
+
+  PRICE / ABSOLUTE fields (currentPrice, 52w_high, 52w_low, market_cap,
+  revenue, operating_cash_flow, free_cash_flow, moving averages, …)
+      → LOCAL TRADING CURRENCY of the stock (JPY for .T, HKD for .HK, …).
+        The 'currency' key in the dict identifies which local currency.
+
+  RATIO / PERCENTAGE fields (pe_ratio, pb_ratio, peg_ratio, profit_margin,
+  roa, roe, debt_to_equity, revenue_growth, eps_growth, …)
+      → CURRENCY-NEUTRAL (dimensionless; safe to compare across markets).
+
+This dict is consumed by LLM agents for analysis.  The IBKR order-sizing
+pipeline (src/ibkr/reconciler.py) does NOT use prices from this dict —
+it reads fx_rate_to_usd from analysis snapshots and src/fx_normalization.py.
 """
 
 import asyncio
+import copy
+import json
 import re
 import statistics
+import time
 from collections import namedtuple
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -78,7 +99,20 @@ ROE_PERCENTAGE_THRESHOLD = 1.0
 DEBT_EQUITY_PERCENTAGE_THRESHOLD = 10.0
 PRICE_TO_BOOK_CURRENCY_MISMATCH_THRESHOLD = 5.0
 FX_CACHE_TTL_SECONDS = 3600
+FETCH_RESULT_CACHE_TTL_SECONDS = 30
+PRICE_HISTORY_CACHE_TTL_SECONDS = 30
 PER_SOURCE_TIMEOUT = 15
+# These fields are safely comparable with the simple "fraction vs percent" heuristic
+# used in _normalize_percent_pair(). Growth/return metrics are intentionally excluded:
+# values > 1.0 can be legitimate in decimal form, so blind scaling creates false conflicts.
+PERCENT_LIKE_FIELDS = frozenset(
+    {
+        "dividendYield",
+        "trailingAnnualDividendYield",
+        "fiveYearAvgDividendYield",
+        "regularMarketChangePercent",
+    }
+)
 
 # Source quality rankings (higher = more reliable)
 SOURCE_QUALITY = {
@@ -98,6 +132,15 @@ SOURCE_QUALITY = {
 }
 
 MergeResult = namedtuple("MergeResult", ["data", "gaps_filled"])
+
+
+def _normalize_percent_pair(old_val: float, new_val: float) -> tuple[float, float]:
+    """Normalize decimal-vs-percent representations before comparison."""
+    if abs(old_val) < 1 and abs(new_val) > 1:
+        old_val *= 100
+    elif abs(new_val) < 1 and abs(old_val) > 1:
+        new_val *= 100
+    return old_val, new_val
 
 
 @dataclass
@@ -277,6 +320,11 @@ class SmartMarketDataFetcher(FinancialFetcher):
 
     REQUIRED_BASICS = ["symbol", "currentPrice", "currency"]
 
+    # Exchanges where IBKR mnemonics ≠ yfinance numeric codes (confirmed cases only)
+    _MNEMONIC_EXCHANGES = frozenset({".KL"})
+    _MNEMONIC_CACHE_FILE = Path("scratch/ticker_mnemonic_map.json")
+    _MNEMONIC_CACHE_TTL = 30 * 24 * 3600  # 30 days
+
     IMPORTANT_FIELDS = [
         "sector",  # Prevents sector hallucination (e.g., industrial classified as tech)
         "industry",  # Sub-classification for sector-specific thresholds
@@ -307,6 +355,11 @@ class SmartMarketDataFetcher(FinancialFetcher):
     def __init__(self):
         self.fx_cache = {}
         self.fx_cache_expiry_time = {}
+        self._mnemonic_cache: dict[str, str] = self._load_mnemonic_cache()
+        self._metrics_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._metrics_inflight: dict[str, asyncio.Task[dict[str, Any]]] = {}
+        self._history_cache: dict[tuple[str, str], tuple[float, pd.DataFrame]] = {}
+        self._history_inflight: dict[tuple[str, str], asyncio.Task[pd.DataFrame]] = {}
 
         self.fmp_fetcher = get_fmp_fetcher() if FMP_AVAILABLE else None
         self.eodhd_fetcher = get_eodhd_fetcher() if EODHD_AVAILABLE else None
@@ -335,6 +388,44 @@ class SmartMarketDataFetcher(FinancialFetcher):
             },
             "gaps_filled": 0,
         }
+
+    def _get_cached_metrics(self, ticker: str) -> dict[str, Any] | None:
+        cached = self._metrics_cache.get(ticker)
+        if not cached:
+            return None
+        expires_at, payload = cached
+        if time.monotonic() >= expires_at:
+            self._metrics_cache.pop(ticker, None)
+            return None
+        logger.debug("financial_metrics_cache_hit", symbol=ticker)
+        return copy.deepcopy(payload)
+
+    def _set_cached_metrics(self, ticker: str, payload: dict[str, Any]) -> None:
+        if not payload or payload.get("error"):
+            return
+        self._metrics_cache[ticker] = (
+            time.monotonic() + FETCH_RESULT_CACHE_TTL_SECONDS,
+            copy.deepcopy(payload),
+        )
+
+    def _get_cached_history(self, ticker: str, period: str) -> pd.DataFrame | None:
+        cached = self._history_cache.get((ticker, period))
+        if not cached:
+            return None
+        expires_at, frame = cached
+        if time.monotonic() >= expires_at:
+            self._history_cache.pop((ticker, period), None)
+            return None
+        logger.debug("price_history_cache_hit", symbol=ticker, period=period)
+        return frame.copy(deep=True)
+
+    def _set_cached_history(self, ticker: str, period: str, hist: pd.DataFrame) -> None:
+        if hist is None or hist.empty:
+            return
+        self._history_cache[(ticker, period)] = (
+            time.monotonic() + PRICE_HISTORY_CACHE_TTL_SECONDS,
+            hist.copy(deep=True),
+        )
 
     def get_currency_rate(self, from_curr: str, to_curr: str) -> float:
         """Get FX rate with caching."""
@@ -759,6 +850,16 @@ class SmartMarketDataFetcher(FinancialFetcher):
             else:
                 extracted["growth_trajectory"] = "STABLE"
             extracted["_growth_trajectory_source"] = "calculated_from_quarterly"
+
+        if (
+            extracted.get("growth_trajectory") == "ACCELERATING"
+            and extracted.get("earningsGrowth_TTM") is not None
+            and extracted["earningsGrowth_TTM"] < -0.05
+        ):
+            extracted["growth_trajectory"] = "MIXED"
+            extracted["_growth_trajectory_source"] = (
+                f"{extracted.get('_growth_trajectory_source', 'calculated_from_quarterly')}|eps_divergence"
+            )
 
         if extracted:
             logger.debug(
@@ -1621,26 +1722,16 @@ class SmartMarketDataFetcher(FinancialFetcher):
                         except (ValueError, TypeError):
                             pass
 
-                    # Record source conflicts when replacing with >20% variance
-                    # Normalize decimal-vs-percentage fields before comparison
-                    _PCT_FIELDS = frozenset(
-                        {
-                            "dividendYield",
-                            "trailingAnnualDividendYield",
-                            "fiveYearAvgDividendYield",
-                        }
-                    )
+                    # Record source conflicts when replacing with >20% variance.
+                    # Normalize decimal-vs-percentage fields before comparison.
                     if key in merged and merged[key] is not None and value is not None:
                         try:
                             old_val = float(merged[key])
                             new_val = float(value)
-                            # Normalize: if one looks like decimal (<1) and
-                            # the other like percentage (>1), scale up
-                            if key in _PCT_FIELDS:
-                                if old_val < 1 and new_val > 1:
-                                    old_val *= 100
-                                elif new_val < 1 and old_val > 1:
-                                    new_val *= 100
+                            if key in PERCENT_LIKE_FIELDS:
+                                old_val, new_val = _normalize_percent_pair(
+                                    old_val, new_val
+                                )
                             if (
                                 old_val != 0
                                 and abs(new_val - old_val) / abs(old_val) > 0.20
@@ -1862,6 +1953,16 @@ class SmartMarketDataFetcher(FinancialFetcher):
                         calculated["growth_trajectory"] = "STABLE"
                     calculated["_growth_trajectory_source"] = "calculated_mrq_vs_fy"
 
+            if (
+                calculated.get("growth_trajectory") == "ACCELERATING"
+                and data.get("earningsGrowth_TTM") is not None
+                and data["earningsGrowth_TTM"] < -0.05
+            ):
+                calculated["growth_trajectory"] = "MIXED"
+                calculated["_growth_trajectory_source"] = (
+                    f"{calculated.get('_growth_trajectory_source', 'calculated_mrq_vs_fy')}|eps_divergence"
+                )
+
             # FIX: Ensure marketCap is calculated if missing
             if data.get("marketCap") is None:
                 price = data.get("currentPrice") or data.get("regularMarketPrice")
@@ -1910,6 +2011,12 @@ class SmartMarketDataFetcher(FinancialFetcher):
         de = info.get("debtToEquity")
         if de is None:
             return info
+        # Some sources (yfinance, yahooquery) can return numeric fields as strings
+        # for certain tickers/exchanges; convert before any numeric comparison.
+        try:
+            de = float(de)
+        except (TypeError, ValueError):
+            return info
         # Statement-calculated values are already ratios — no correction needed
         if info.get("_debtToEquity_source") == "calculated_from_statements":
             return info
@@ -1933,8 +2040,19 @@ class SmartMarketDataFetcher(FinancialFetcher):
 
         # P/E Normalization with sanity checks
         # Only replace trailing with forward if BOTH values are reasonable
-        trailing = info.get("trailingPE")
-        forward = info.get("forwardPE")
+        # Convert to float defensively — some sources return numeric fields as strings.
+        try:
+            trailing = (
+                float(info["trailingPE"])
+                if info.get("trailingPE") is not None
+                else None
+            )
+            forward = (
+                float(info["forwardPE"]) if info.get("forwardPE") is not None else None
+            )
+        except (TypeError, ValueError):
+            trailing = None
+            forward = None
 
         if trailing and forward and trailing > 0 and forward > 0:
             # Sanity thresholds based on realistic P/E distributions:
@@ -2019,6 +2137,80 @@ class SmartMarketDataFetcher(FinancialFetcher):
 
         return quality
 
+    def _load_mnemonic_cache(self) -> dict[str, str]:
+        """Load the mnemonic→numeric cache, discarding entries older than TTL."""
+        if not self._MNEMONIC_CACHE_FILE.exists():
+            return {}
+        try:
+            with open(self._MNEMONIC_CACHE_FILE) as f:
+                raw = json.load(f)
+            now = time.time()
+            return {
+                k: v["resolved"]
+                for k, v in raw.items()
+                if now - v.get("ts", 0) < self._MNEMONIC_CACHE_TTL
+            }
+        except (json.JSONDecodeError, OSError, KeyError):
+            return {}
+
+    def _save_mnemonic_cache(self, original: str, resolved: str) -> None:
+        """Persist a new mnemonic→numeric mapping to the file cache."""
+        self._mnemonic_cache[original] = resolved
+        raw = {
+            k: {"resolved": v, "ts": time.time()}
+            for k, v in self._mnemonic_cache.items()
+        }
+        self._MNEMONIC_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(self._MNEMONIC_CACHE_FILE, "w") as f:
+                json.dump(raw, f, indent=2)
+        except OSError as e:
+            logger.warning("mnemonic_cache_save_failed", error=str(e))
+
+    async def _pre_resolve_ticker(self, ticker: str) -> str:
+        """
+        Map mnemonic tickers (e.g. SCIENTX.KL) to numeric yfinance equivalents
+        (e.g. 4731.KL) before any data source is called.
+
+        Only fires for exchanges in _MNEMONIC_EXCHANGES when the base symbol
+        contains alphabetic characters. Uses yahooquery.search() with a 30-day
+        file-backed cache. Falls through silently on any error — the existing
+        Tavily fallback in _resolve_ticker_via_search() still active downstream.
+        """
+        suffix = next((s for s in self._MNEMONIC_EXCHANGES if ticker.endswith(s)), None)
+        if not suffix:
+            return ticker
+
+        base = ticker[: -len(suffix)]
+        if base.isdigit():  # already numeric — nothing to do
+            return ticker
+
+        if ticker in self._mnemonic_cache:
+            resolved = self._mnemonic_cache[ticker]
+            logger.debug("mnemonic_cache_hit", original=ticker, resolved=resolved)
+            return resolved
+
+        try:
+            from yahooquery import search as yq_search
+
+            result = await asyncio.to_thread(yq_search, base)
+            quotes = result.get("quotes", []) if isinstance(result, dict) else []
+            for q in quotes:
+                sym = q.get("symbol", "")
+                # Accept only results on the same exchange whose base is all-digits
+                if (
+                    sym.endswith(suffix)
+                    and sym[: -len(suffix)].isdigit()
+                    and sym != ticker
+                ):
+                    logger.info("mnemonic_pre_resolved", original=ticker, resolved=sym)
+                    self._save_mnemonic_cache(ticker, sym)
+                    return sym
+        except Exception as e:
+            logger.warning("mnemonic_pre_resolve_failed", ticker=ticker, error=str(e))
+
+        return ticker  # original ticker; Tavily fallback still active
+
     async def _resolve_ticker_via_search(self, symbol: str) -> str | None:
         """
         Recover from a failed yfinance lookup by searching for the numeric ticker.
@@ -2072,7 +2264,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
             logger.warning("ticker_resolution_failed", symbol=symbol, error=str(e))
             return None
 
-    async def get_financial_metrics(
+    async def _get_financial_metrics_uncached(
         self, ticker: str, timeout: int = 30
     ) -> dict[str, Any]:
         """
@@ -2082,6 +2274,9 @@ class SmartMarketDataFetcher(FinancialFetcher):
         self.stats["fetches"] += 1
 
         try:
+            # PHASE 0: Proactive mnemonic→numeric pre-resolution (e.g. SCIENTX.KL → 4731.KL)
+            ticker = await self._pre_resolve_ticker(ticker)
+
             # PHASE 1: Parallel source execution
             source_results = await self._fetch_all_sources_parallel(ticker)
 
@@ -2107,15 +2302,16 @@ class SmartMarketDataFetcher(FinancialFetcher):
                 source_results, ticker
             )
 
-            # Panic Mode for Asian tickers
+            # Panic Mode: full vacuum (any market) OR basics missing for fragile exchanges
             basics_failed = not all(k in merged for k in self.REQUIRED_BASICS)
-            is_asian = ticker.endswith((".HK", ".TW", ".KS", ".T"))
+            is_fragile_exchange = ticker.endswith((".HK", ".TW", ".KS", ".T", ".L"))
 
-            if not merged or (is_asian and basics_failed):
+            if not merged or (is_fragile_exchange and basics_failed):
+                panic_reason = "total data vacuum" if not merged else "basics missing"
                 logger.warning(
                     "data_vacuum_detected",
                     symbol=ticker,
-                    msg="Triggering Panic Mode for Asian ticker",
+                    msg=f"Triggering Panic Mode ({panic_reason})",
                 )
                 all_critical = self.IMPORTANT_FIELDS + self.REQUIRED_BASICS
                 tavily_rescue = await self._fetch_tavily_gaps(ticker, all_critical)
@@ -2221,7 +2417,34 @@ class SmartMarketDataFetcher(FinancialFetcher):
             logger.error("unexpected_fetch_error", ticker=ticker, error=str(e))
             return {"error": str(e), "symbol": ticker}
 
-    async def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
+    async def get_financial_metrics(
+        self, ticker: str, timeout: int = 30
+    ) -> dict[str, Any]:
+        """Return unified metrics with short-lived per-process caching and inflight dedupe."""
+        cached = self._get_cached_metrics(ticker)
+        if cached is not None:
+            return cached
+
+        inflight = self._metrics_inflight.get(ticker)
+        if inflight is not None:
+            logger.debug("financial_metrics_inflight_wait", symbol=ticker)
+            return copy.deepcopy(await inflight)
+
+        task = asyncio.create_task(
+            self._get_financial_metrics_uncached(ticker, timeout)
+        )
+        self._metrics_inflight[ticker] = task
+        try:
+            result = await task
+        finally:
+            self._metrics_inflight.pop(ticker, None)
+
+        self._set_cached_metrics(ticker, result)
+        return copy.deepcopy(result)
+
+    async def _get_price_history_uncached(
+        self, ticker: str, period: str = "1y"
+    ) -> pd.DataFrame:
         """Fetch historical price data."""
         try:
             stock = yf.Ticker(ticker)
@@ -2239,6 +2462,28 @@ class SmartMarketDataFetcher(FinancialFetcher):
             logger.error("history_fetch_failed", ticker=ticker, error=str(e))
             return pd.DataFrame()
 
+    async def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
+        """Fetch historical price data with short-lived caching and inflight dedupe."""
+        cached = self._get_cached_history(ticker, period)
+        if cached is not None:
+            return cached
+
+        key = (ticker, period)
+        inflight = self._history_inflight.get(key)
+        if inflight is not None:
+            logger.debug("price_history_inflight_wait", symbol=ticker, period=period)
+            return (await inflight).copy(deep=True)
+
+        task = asyncio.create_task(self._get_price_history_uncached(ticker, period))
+        self._history_inflight[key] = task
+        try:
+            hist = await task
+        finally:
+            self._history_inflight.pop(key, None)
+
+        self._set_cached_history(ticker, period, hist)
+        return hist.copy(deep=True)
+
     # Alias for backward compatibility and interface compliance
     async def get_historical_prices(
         self, ticker: str, period: str = "1y"
@@ -2255,10 +2500,50 @@ class SmartMarketDataFetcher(FinancialFetcher):
         self.fx_cache_expiry_time = {}
 
 
-# Singleton instance
-fetcher = SmartMarketDataFetcher()
+_fetcher_instance: SmartMarketDataFetcher | None = None
+
+
+def get_fetcher() -> SmartMarketDataFetcher:
+    """Return the process-wide market data fetcher, initializing lazily."""
+    global _fetcher_instance
+    if _fetcher_instance is None:
+        _fetcher_instance = SmartMarketDataFetcher()
+    return _fetcher_instance
+
+
+class _LazyFetcherProxy:
+    """Proxy that defers SmartMarketDataFetcher construction until first use."""
+
+    async def get_financial_metrics(self, *args, **kwargs):
+        return await get_fetcher().get_financial_metrics(*args, **kwargs)
+
+    async def get_historical_prices(self, *args, **kwargs):
+        return await get_fetcher().get_historical_prices(*args, **kwargs)
+
+    async def get_price_history(self, *args, **kwargs):
+        return await get_fetcher().get_price_history(*args, **kwargs)
+
+    def get_stats(self, *args, **kwargs):
+        return get_fetcher().get_stats(*args, **kwargs)
+
+    def clear_fx_cache(self, *args, **kwargs):
+        return get_fetcher().clear_fx_cache(*args, **kwargs)
+
+    def is_available(self, *args, **kwargs):
+        return get_fetcher().is_available(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(get_fetcher(), name)
+
+    def __repr__(self) -> str:
+        status = "initialized" if _fetcher_instance is not None else "lazy"
+        return f"<_LazyFetcherProxy {status}>"
+
+
+# Singleton proxy
+fetcher = _LazyFetcherProxy()
 
 
 # Backward compatibility
 async def fetch_ticker_data(ticker: str) -> dict[str, Any]:
-    return await fetcher.get_financial_metrics(ticker)
+    return await get_fetcher().get_financial_metrics(ticker)

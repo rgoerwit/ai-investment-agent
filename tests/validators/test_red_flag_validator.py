@@ -103,6 +103,24 @@ PE_RATIO_TTM: 14.50
         numeric_metrics = {k: v for k, v in metrics.items() if not k.startswith("_")}
         assert all(v is None for v in numeric_metrics.values())
 
+    def test_extract_ignores_datablock_mentions_without_fenced_block(self):
+        """Mentioning DATA_BLOCK should not be treated as a parseable structured block."""
+        report = """
+The analysis below references the DATA_BLOCK, but no fenced structured block was emitted.
+
+DATA_BLOCK:
+Health score looks acceptable, but formatting is incomplete.
+
+D/E: 120
+Free Cash Flow: $450M
+"""
+
+        metrics = RedFlagDetector.extract_metrics(report)
+
+        assert metrics["adjusted_health_score"] is None
+        assert metrics["debt_to_equity"] is None
+        assert metrics["fcf"] is None
+
     def test_extract_with_descriptive_marker(self):
         """Test extraction when DATA_BLOCK marker contains descriptive text (v8.6+)."""
         report = """
@@ -1003,6 +1021,14 @@ SECTOR: {name}
 No SECTOR field here
 """
         assert RedFlagDetector.detect_sector(report_no_sector) == Sector.INDUSTRIALS
+
+        malformed_report = """
+The narrative mentions DATA_BLOCK but does not emit the fenced structured block.
+
+DATA_BLOCK:
+SECTOR: Energy
+"""
+        assert RedFlagDetector.detect_sector(malformed_report) == Sector.INDUSTRIALS
 
     @pytest.mark.asyncio
     async def test_detect_sector_backward_compat(self, validator_node):
@@ -2786,6 +2812,7 @@ VIE_STRUCTURE: NO
         assert metrics["parent_company"] == "Bandai Namco Holdings (49.2%)"
         assert metrics["ocf"] == 7_800_000_000
         assert metrics["adjusted_health_score"] == 67.0
+        assert metrics["ocf_filing_reason"] is None
 
     def test_both_new_warnings_fire_together(self):
         """SEGMENT_DETERIORATION and OCF_SOURCE_DISCREPANCY can fire together."""
@@ -2808,6 +2835,7 @@ VIE_STRUCTURE: NO
             "peg_ratio": None,
             "ocf": None,
             "ocf_source": "FILING",
+            "ocf_filing_reason": None,
             "segment_flag": "DETERIORATING",
             "parent_company": "Bandai Namco (49%)",
             "_raw_report": "",
@@ -2819,6 +2847,54 @@ VIE_STRUCTURE: NO
         total_penalty = sum(f.get("risk_penalty", 0) for f in flags)
         assert total_penalty == 1.0  # 0.5 + 0.5
         assert result == "PASS"  # Warnings only, not reject
+
+    def test_ocf_source_filing_api_unavailable_is_note_only(self):
+        """Filing-only OCF due to API outage should not add company risk."""
+        metrics = {
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": 10.0,
+            "pb_ratio": None,
+            "adjusted_health_score": 60.0,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+            "profitability_trend": None,
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": None,
+            "ocf": None,
+            "ocf_source": "FILING",
+            "ocf_filing_reason": "API_UNAVAILABLE",
+            "segment_flag": None,
+            "parent_company": None,
+            "_raw_report": "",
+        }
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        flag_types = [f["type"] for f in flags]
+        assert "OCF_SOURCE_DISCREPANCY" not in flag_types
+        assert "OCF_SINGLE_SOURCE" in flag_types
+        ocf_flag = [f for f in flags if f["type"] == "OCF_SINGLE_SOURCE"][0]
+        assert ocf_flag["severity"] == "INFO"
+        assert ocf_flag["risk_penalty"] == 0.0
+        assert result == "PASS"
+
+    def test_extract_ocf_filing_reason(self):
+        """OCF_FILING_REASON should be extracted from the DATA_BLOCK."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 60%
+OPERATING_CASH_FLOW_SOURCE: FILING
+OCF_FILING_REASON: API_UNAVAILABLE
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["ocf_source"] == "FILING"
+        assert metrics["ocf_filing_reason"] == "API_UNAVAILABLE"
 
 
 class TestThinConsensusFlag:
@@ -3069,6 +3145,76 @@ ADJUSTED_HEALTH_SCORE: 60%
         flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
         flag_types = [f["type"] for f in flags]
         assert "THIN_CONSENSUS" not in flag_types
+
+    def test_local_coverage_high_tier_flags(self):
+        """HIGH total coverage should add a soft undiscovered penalty."""
+        metrics = {
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": None,
+            "pb_ratio": None,
+            "adjusted_health_score": 70,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+            "profitability_trend": None,
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": None,
+            "ocf": None,
+            "ocf_source": None,
+            "ocf_filing_reason": None,
+            "segment_flag": None,
+            "parent_company": None,
+            "analyst_coverage_total_est": "HIGH",
+            "growth_trajectory": None,
+            "revenue_growth_ttm": None,
+            "latest_quarter_date": None,
+            "_raw_report": "",
+        }
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        local_cov = [f for f in flags if f["type"] == "LOCAL_COVERAGE_HIGH"]
+        assert len(local_cov) == 1
+        assert local_cov[0]["risk_penalty"] == 0.25
+        assert result == "PASS"
+
+    def test_local_coverage_high_numeric_flags(self):
+        """Explicit total coverage above 20 should add the same soft penalty."""
+        metrics = {
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": None,
+            "pb_ratio": None,
+            "adjusted_health_score": 70,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "roic_quality": None,
+            "profitability_trend": None,
+            "roa_current": None,
+            "roa_5y_avg": None,
+            "roe_5y_avg": None,
+            "peg_ratio": None,
+            "ocf": None,
+            "ocf_source": None,
+            "ocf_filing_reason": None,
+            "segment_flag": None,
+            "parent_company": None,
+            "analyst_coverage_total_est": 21,
+            "growth_trajectory": None,
+            "revenue_growth_ttm": None,
+            "latest_quarter_date": None,
+            "_raw_report": "",
+        }
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        flag_types = [f["type"] for f in flags]
+        assert "LOCAL_COVERAGE_HIGH" in flag_types
 
 
 # ============================================================

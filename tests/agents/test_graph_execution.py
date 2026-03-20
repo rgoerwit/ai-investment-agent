@@ -1,5 +1,7 @@
 """Fixed test_graph_execution.py - removed pytestmark from non-async tests."""
 
+import sys
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -61,14 +63,14 @@ class TestGraphRouting:
 class TestDebateRouter:
     """Test debate routing logic."""
 
-    @patch("src.graph.create_agent_tool_node")
-    @patch("src.graph.create_analyst_node")
-    @patch("src.graph.create_researcher_node")
-    @patch("src.graph.create_research_manager_node")
-    @patch("src.graph.create_trader_node")
-    @patch("src.graph.create_risk_debater_node")
-    @patch("src.graph.create_portfolio_manager_node")
-    @patch("src.graph.toolkit")
+    @patch("src.graph.components.create_agent_tool_node")
+    @patch("src.graph.components.create_analyst_node")
+    @patch("src.graph.components.create_researcher_node")
+    @patch("src.graph.components.create_research_manager_node")
+    @patch("src.graph.components.create_trader_node")
+    @patch("src.graph.components.create_risk_debater_node")
+    @patch("src.graph.components.create_portfolio_manager_node")
+    @patch("src.graph.components.toolkit")
     def test_debate_router_alternation(
         self,
         mock_toolkit,
@@ -102,7 +104,7 @@ class TestDebateRouter:
 class TestSyncCheckRouter:
     """Test sync_check_router for parallel debate fan-out."""
 
-    @patch("src.graph.config")
+    @patch("src.graph.routing.config")
     def test_sync_check_returns_end_when_incomplete(self, mock_config):
         """Test router returns __end__ when not all analysts complete."""
         from src.graph import sync_check_router
@@ -120,7 +122,39 @@ class TestSyncCheckRouter:
         result = sync_check_router(state, config)
         assert result == "__end__"
 
-    @patch("src.graph.config")
+    @patch("src.graph.routing.config")
+    def test_sync_check_proceeds_when_required_branch_failed_but_completed(
+        self, mock_config
+    ):
+        """Router should wait for completion, not success, at the sync barrier."""
+        from src.graph import sync_check_router
+
+        mock_config.enable_consultant = False
+
+        state = {
+            "market_report": "Error: DNS failure",
+            "sentiment_report": "done",
+            "news_report": "done",
+            "value_trap_report": "done",
+            "pre_screening_result": "PASS",
+            "artifact_statuses": {
+                "market_report": {
+                    "complete": True,
+                    "ok": False,
+                    "error_kind": "dns_resolution",
+                    "provider": "google",
+                },
+                "sentiment_report": {"ok": True, "content": "done"},
+                "news_report": {"ok": True, "content": "done"},
+                "value_trap_report": {"ok": True, "content": "done"},
+            },
+        }
+
+        result = sync_check_router(state, {})
+        assert isinstance(result, list)
+        assert "Bull Researcher R1" in result
+
+    @patch("src.graph.routing.config")
     def test_sync_check_returns_pm_fast_fail_on_reject(self, mock_config):
         """Test router returns PM Fast-Fail on REJECT (separate node to avoid edge conflicts)."""
         from src.graph import sync_check_router
@@ -139,7 +173,7 @@ class TestSyncCheckRouter:
         result = sync_check_router(state, config)
         assert result == "PM Fast-Fail"
 
-    @patch("src.graph.config")
+    @patch("src.graph.routing.config")
     def test_sync_check_returns_list_for_parallel_r1(self, mock_config):
         """Test router returns list for parallel Bull/Bear R1 on PASS."""
         from src.graph import sync_check_router
@@ -165,37 +199,41 @@ class TestSyncCheckRouter:
 class TestAuditorIntegration:
     """Test auditor node integration with graph routing."""
 
-    @patch("src.graph.config")
+    @patch("src.graph.routing.config")
     def test_is_auditor_enabled_when_consultant_disabled(self, mock_config):
         """Test _is_auditor_enabled returns False when consultant disabled."""
-        from src.graph import _is_auditor_enabled
+        from src.graph.routing import _is_auditor_enabled
 
         mock_config.enable_consultant = False
         mock_config.get_openai_api_key.return_value = "test-key"
 
         assert _is_auditor_enabled() is False
 
-    @patch("src.graph.config")
-    def test_is_auditor_enabled_when_no_api_key(self, mock_config):
+    @patch("src.graph.routing.is_openai_consultant_available")
+    @patch("src.graph.routing.config")
+    def test_is_auditor_enabled_when_no_api_key(self, mock_config, mock_available):
         """Test _is_auditor_enabled returns False when API key missing."""
-        from src.graph import _is_auditor_enabled
+        from src.graph.routing import _is_auditor_enabled
 
         mock_config.enable_consultant = True
-        mock_config.get_openai_api_key.return_value = None
+        mock_available.return_value = False
 
         assert _is_auditor_enabled() is False
 
-    @patch("src.graph.config")
-    def test_is_auditor_enabled_when_all_conditions_met(self, mock_config):
+    @patch("src.graph.routing.is_openai_consultant_available")
+    @patch("src.graph.routing.config")
+    def test_is_auditor_enabled_when_all_conditions_met(
+        self, mock_config, mock_available
+    ):
         """Test _is_auditor_enabled returns True when all conditions met."""
-        from src.graph import _is_auditor_enabled
+        from src.graph.routing import _is_auditor_enabled
 
         mock_config.enable_consultant = True
-        mock_config.get_openai_api_key.return_value = "test-key"
+        mock_available.return_value = True
 
         assert _is_auditor_enabled() is True
 
-    @patch("src.graph._is_auditor_enabled")
+    @patch("src.graph.routing._is_auditor_enabled")
     def test_fan_out_includes_auditor_when_enabled(self, mock_auditor_enabled):
         """Test fan_out_to_analysts includes Auditor when enabled."""
         from src.graph import fan_out_to_analysts
@@ -207,7 +245,7 @@ class TestAuditorIntegration:
         assert "Value Trap Detector" in result
         assert len(result) == 8  # 7 analysts + Auditor
 
-    @patch("src.graph._is_auditor_enabled")
+    @patch("src.graph.routing._is_auditor_enabled")
     def test_fan_out_excludes_auditor_when_disabled(self, mock_auditor_enabled):
         """Test fan_out_to_analysts excludes Auditor when disabled."""
         from src.graph import fan_out_to_analysts
@@ -219,7 +257,7 @@ class TestAuditorIntegration:
         assert "Value Trap Detector" in result
         assert len(result) == 7
 
-    @patch("src.graph._is_auditor_enabled")
+    @patch("src.graph.routing._is_auditor_enabled")
     def test_sync_check_waits_for_auditor_when_enabled(self, mock_auditor_enabled):
         """Test sync_check_router waits for auditor_report when enabled."""
         from src.graph import sync_check_router
@@ -238,7 +276,37 @@ class TestAuditorIntegration:
         result = sync_check_router(state, {})
         assert result == "__end__"  # Should wait
 
-    @patch("src.graph._is_auditor_enabled")
+    @patch("src.graph.routing._is_auditor_enabled")
+    def test_sync_check_proceeds_when_auditor_failed_but_completed(
+        self, mock_auditor_enabled
+    ):
+        """A failed enabled auditor branch should still satisfy sync completion."""
+        from src.graph import sync_check_router
+
+        mock_auditor_enabled.return_value = True
+
+        state = {
+            "market_report": "done",
+            "sentiment_report": "done",
+            "news_report": "done",
+            "value_trap_report": "done",
+            "pre_screening_result": "PASS",
+            "auditor_report": "",
+            "artifact_statuses": {
+                "auditor_report": {
+                    "complete": True,
+                    "ok": False,
+                    "error_kind": "timeout",
+                    "provider": "openai",
+                }
+            },
+        }
+
+        result = sync_check_router(state, {})
+        assert isinstance(result, list)
+        assert "Bull Researcher R1" in result
+
+    @patch("src.graph.routing._is_auditor_enabled")
     def test_sync_check_proceeds_when_auditor_complete(self, mock_auditor_enabled):
         """Test sync_check_router proceeds when auditor_report complete."""
         from src.graph import sync_check_router
@@ -364,6 +432,48 @@ class TestAuditorLLMConfiguration:
             src.llms._consultant_llm_instance = None
 
 
+class TestAuditorEnablementContract:
+    """Ensure routing and LLM creation stay aligned on auditor availability."""
+
+    def test_auditor_disabled_contract_stays_aligned(self, monkeypatch):
+        import src.graph.routing as routing
+        import src.llms as llms
+
+        monkeypatch.setattr(routing, "is_openai_consultant_available", lambda: False)
+        monkeypatch.setattr(routing.config, "enable_consultant", False)
+        monkeypatch.setattr(llms.config, "enable_consultant", False)
+
+        assert routing._is_auditor_enabled() is False
+        assert llms.create_auditor_llm() is None
+
+    def test_auditor_enabled_contract_stays_aligned(self, monkeypatch):
+        import src.graph.routing as routing
+        import src.llms as llms
+
+        stub_module = ModuleType("langchain_openai")
+
+        class StubChatOpenAI:
+            def __init__(self, **kwargs):
+                self.model_name = kwargs["model"]
+
+        stub_module.ChatOpenAI = StubChatOpenAI
+
+        monkeypatch.setitem(sys.modules, "langchain_openai", stub_module)
+        monkeypatch.setattr(routing, "is_openai_consultant_available", lambda: True)
+        monkeypatch.setattr(routing.config, "enable_consultant", True)
+        monkeypatch.setattr(llms.config, "enable_consultant", True)
+        monkeypatch.setattr(
+            type(llms.config), "get_openai_api_key", lambda self: "fake-key"
+        )
+        monkeypatch.setattr(llms.config, "auditor_model", "gpt-5-mini")
+        monkeypatch.setattr(llms.config, "consultant_model", "gpt-5")
+
+        assert routing._is_auditor_enabled() is True
+        llm = llms.create_auditor_llm()
+        assert llm is not None
+        assert llm.model_name == "gpt-5-mini"
+
+
 class TestTradingContext:
     """Test TradingContext dataclass."""
 
@@ -398,10 +508,10 @@ class TestTradingContext:
 class TestGraphCompilation:
     """Test graph compilation."""
 
-    @patch("src.graph.create_agent_tool_node")
-    @patch("src.graph.create_quick_thinking_llm")
-    @patch("src.graph.create_deep_thinking_llm")
-    @patch("src.graph.toolkit")
+    @patch("src.graph.components.create_agent_tool_node")
+    @patch("src.graph.components.create_quick_thinking_llm")
+    @patch("src.graph.components.create_deep_thinking_llm")
+    @patch("src.graph.components.toolkit")
     def test_create_trading_graph(
         self, mock_toolkit, mock_deep_llm_func, mock_quick_llm_func, mock_tool_node
     ):
@@ -434,15 +544,15 @@ class TestGraphCompilation:
 class TestStrictGraphWiring:
     """Smoke tests: strict_mode threads correctly through graph construction."""
 
-    @patch("src.graph.create_financial_health_validator_node")
-    @patch("src.graph.create_portfolio_manager_node")
-    @patch("src.graph.create_research_manager_node")
-    @patch("src.graph.create_analyst_node")
-    @patch("src.graph.create_researcher_node")
-    @patch("src.graph.create_trader_node")
-    @patch("src.graph.create_risk_debater_node")
-    @patch("src.graph.create_agent_tool_node")
-    @patch("src.graph.toolkit")
+    @patch("src.graph.components.create_financial_health_validator_node")
+    @patch("src.graph.components.create_portfolio_manager_node")
+    @patch("src.graph.components.create_research_manager_node")
+    @patch("src.graph.components.create_analyst_node")
+    @patch("src.graph.components.create_researcher_node")
+    @patch("src.graph.components.create_trader_node")
+    @patch("src.graph.components.create_risk_debater_node")
+    @patch("src.graph.components.create_agent_tool_node")
+    @patch("src.graph.components.toolkit")
     def test_strict_mode_reaches_validator_factory(
         self,
         mock_toolkit,
@@ -482,15 +592,15 @@ class TestStrictGraphWiring:
         create_trading_graph(strict_mode=True, enable_memory=False)
         mock_validator.assert_called_once_with(strict_mode=True)
 
-    @patch("src.graph.create_financial_health_validator_node")
-    @patch("src.graph.create_portfolio_manager_node")
-    @patch("src.graph.create_research_manager_node")
-    @patch("src.graph.create_analyst_node")
-    @patch("src.graph.create_researcher_node")
-    @patch("src.graph.create_trader_node")
-    @patch("src.graph.create_risk_debater_node")
-    @patch("src.graph.create_agent_tool_node")
-    @patch("src.graph.toolkit")
+    @patch("src.graph.components.create_financial_health_validator_node")
+    @patch("src.graph.components.create_portfolio_manager_node")
+    @patch("src.graph.components.create_research_manager_node")
+    @patch("src.graph.components.create_analyst_node")
+    @patch("src.graph.components.create_researcher_node")
+    @patch("src.graph.components.create_trader_node")
+    @patch("src.graph.components.create_risk_debater_node")
+    @patch("src.graph.components.create_agent_tool_node")
+    @patch("src.graph.components.toolkit")
     def test_strict_mode_reaches_pm_factory(
         self,
         mock_toolkit,
@@ -533,15 +643,15 @@ class TestStrictGraphWiring:
         assert len(calls) == 2
         assert all(call.kwargs.get("strict_mode") is True for call in calls)
 
-    @patch("src.graph.create_financial_health_validator_node")
-    @patch("src.graph.create_portfolio_manager_node")
-    @patch("src.graph.create_research_manager_node")
-    @patch("src.graph.create_analyst_node")
-    @patch("src.graph.create_researcher_node")
-    @patch("src.graph.create_trader_node")
-    @patch("src.graph.create_risk_debater_node")
-    @patch("src.graph.create_agent_tool_node")
-    @patch("src.graph.toolkit")
+    @patch("src.graph.components.create_financial_health_validator_node")
+    @patch("src.graph.components.create_portfolio_manager_node")
+    @patch("src.graph.components.create_research_manager_node")
+    @patch("src.graph.components.create_analyst_node")
+    @patch("src.graph.components.create_researcher_node")
+    @patch("src.graph.components.create_trader_node")
+    @patch("src.graph.components.create_risk_debater_node")
+    @patch("src.graph.components.create_agent_tool_node")
+    @patch("src.graph.components.toolkit")
     def test_strict_mode_reaches_rm_factory(
         self,
         mock_toolkit,

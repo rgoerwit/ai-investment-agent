@@ -347,7 +347,7 @@ if [[ $START_STAGE -le 1 ]]; then
         fi
 
         STAGE1_PROCESSED=$((STAGE1_PROCESSED + 1))
-        info "[$STAGE1_PROCESSED] Quick: $ticker"
+        info "[$STAGE1_PROCESSED/$STAGE1_TODO, $TICKER_COUNT total] Quick: $ticker"
 
         if poetry run python -m src.main \
             --ticker "$ticker" \
@@ -513,7 +513,7 @@ if [[ $START_STAGE -le 2 ]]; then
         fi
 
         STAGE2_PROCESSED=$((STAGE2_PROCESSED + 1))
-        info "[$STAGE2_PROCESSED/$BUY_TOTAL] Full: $ticker"
+        info "[$STAGE2_PROCESSED/$STAGE2_TODO, $BUY_TOTAL total] Full: $ticker"
 
         if poetry run python -m src.main \
             --ticker "$ticker" \

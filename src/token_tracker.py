@@ -150,10 +150,10 @@ class TokenTracker:
         self._initialized = True
         self.agent_stats: dict[str, AgentTokenStats] = {}
         self.all_usages: list[TokenUsage] = []
+        self.failed_attempts: list[dict[str, str]] = []
         self.session_start = datetime.now().isoformat()
 
-        # Only log if quiet mode is not enabled (check both class and instance level)
-        if not self.__class__._quiet_mode and not self._quiet_mode:
+        if not self._quiet_mode:
             logger.info("token_tracker_initialized", session_start=self.session_start)
 
     @classmethod
@@ -211,6 +211,7 @@ class TokenTracker:
         total_cost = sum(stats.total_cost_usd for stats in self.agent_stats.values())
 
         return {
+            "failed_attempts": len(self.failed_attempts),
             "total_calls": len(self.all_usages),
             "total_agents": len(self.agent_stats),
             "total_prompt_tokens": total_prompt,
@@ -228,12 +229,42 @@ class TokenTracker:
                 }
                 for name, stats in self.agent_stats.items()
             },
+            "failed_by_provider": self._count_failures("provider"),
+            "failed_by_kind": self._count_failures("failure_kind"),
         }
+
+    def _count_failures(self, key: str) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for failure in self.failed_attempts:
+            value = failure.get(key, "unknown")
+            counts[value] = counts.get(value, 0) + 1
+        return counts
+
+    def record_failure(
+        self, *, agent_name: str, provider: str, failure_kind: str, model_name: str = ""
+    ) -> None:
+        self.failed_attempts.append(
+            {
+                "agent_name": agent_name,
+                "provider": provider or "unknown",
+                "failure_kind": failure_kind or "unknown",
+                "model_name": model_name,
+            }
+        )
+        if not self._quiet_mode:
+            logger.info(
+                "llm_failure_recorded",
+                agent=agent_name,
+                provider=provider or "unknown",
+                failure_kind=failure_kind or "unknown",
+                model=model_name,
+            )
 
     def reset(self):
         """Reset all tracking data (useful for new analysis runs)."""
         self.agent_stats.clear()
         self.all_usages.clear()
+        self.failed_attempts.clear()
         self.session_start = datetime.now().isoformat()
         if not self._quiet_mode:
             logger.info("token_tracker_reset", session_start=self.session_start)
@@ -248,6 +279,7 @@ class TokenTracker:
         logger.info("=" * 80 + "\n" + "TOKEN USAGE SUMMARY\n" + "=" * 80)
         logger.info(f"Session Start: {stats['session_start']}")
         logger.info(f"Total LLM Calls: {stats['total_calls']}")
+        logger.info(f"Failed LLM Attempts: {stats['failed_attempts']}")
         logger.info(f"Total Agents: {stats['total_agents']}")
         logger.info(f"Total Prompt Tokens: {stats['total_prompt_tokens']:,}")
         logger.info(f"Total Completion Tokens: {stats['total_completion_tokens']:,}")
@@ -258,6 +290,11 @@ class TokenTracker:
         )
         logger.info("\nPer-Agent Breakdown:")
         logger.info("-" * 80)
+
+        if stats["failed_by_provider"]:
+            logger.info(f"Failed by Provider: {stats['failed_by_provider']}")
+        if stats["failed_by_kind"]:
+            logger.info(f"Failed by Kind: {stats['failed_by_kind']}")
 
         # Sort agents by cost (descending)
         sorted_agents = sorted(

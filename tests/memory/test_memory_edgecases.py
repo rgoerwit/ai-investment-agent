@@ -15,6 +15,13 @@ from src.memory import (
 class TestEmbeddingEdgeCases:
     """Test edge cases in embedding generation and vector operations."""
 
+    def setup_method(self, method):
+        """Clear shared state so each test gets fresh mock objects."""
+        FinancialSituationMemory._reset_shared_state_for_tests()
+
+    def teardown_method(self, method):
+        FinancialSituationMemory._reset_shared_state_for_tests()
+
     async def test_embedding_dimension_mismatch(self):
         """Test handling of mismatched embedding dimensions."""
         with patch("src.memory.config") as mock_config:

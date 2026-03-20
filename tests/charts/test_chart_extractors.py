@@ -90,6 +90,17 @@ class TestDataBlockExtractor:
         result = extract_chart_data_from_data_block(report)
         assert result.current_price is None
 
+    def test_extract_ignores_unparseable_datablock_mentions(self):
+        """Plain DATA_BLOCK mentions should not be treated as a structured block."""
+        report = """
+        The analyst references the DATA_BLOCK but does not emit the fenced block.
+
+        DATA_BLOCK:
+        CURRENT_PRICE: 145.00
+        """
+        result = extract_chart_data_from_data_block(report)
+        assert result.current_price is None
+
     def test_extract_uses_last_data_block(self):
         """Test that extraction uses the last DATA_BLOCK (self-correction pattern)."""
         report = """
@@ -508,6 +519,16 @@ class TestValuationParamsExtractor:
     def test_extract_no_params_block(self):
         """Test extraction when VALUATION_PARAMS block is missing."""
         report = "This report has no valuation params block."
+        result = _extract_params(report)
+        assert result.method is None
+
+    def test_extract_ignores_unparseable_params_mentions(self):
+        """Plain VALUATION_PARAMS mentions should not be treated as a block."""
+        report = """
+        VALUATION_PARAMS:
+        METHOD: P/E_NORMALIZATION
+        CURRENT_PRICE: 145.00
+        """
         result = _extract_params(report)
         assert result.method is None
 

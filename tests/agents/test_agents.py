@@ -50,7 +50,7 @@ class TestAnalystNode:
     """Test analyst node creation."""
 
     @pytest.mark.asyncio
-    @patch("src.agents.filter_messages_for_gemini")
+    @patch("src.agents.message_utils.filter_messages_for_gemini")
     async def test_create_analyst_node(self, mock_filter):
         """Test analyst node creation and execution."""
         from src.agents import create_analyst_node
@@ -363,6 +363,7 @@ class TestFundamentalsAnalystPrompt:
         # Valuation metrics
         assert "P/E" in system_message or "PE_RATIO" in system_message
         assert "PEG" in system_message or "PEG_RATIO" in system_message
+        assert "DO NOT USE MARKDOWN TABLES" in system_message.upper()
 
     def test_fundamentals_analyst_has_sector_aware_scoring(self):
         """Test that prompt includes sector-specific scoring logic."""
@@ -456,6 +457,240 @@ class TestFundamentalsAnalystPrompt:
         assert "version" in prompt_info  # Has some version
         assert "agent_name" in prompt_info  # Has an agent name
         assert prompt_info["agent_name"]  # Agent name is not empty
+
+    @pytest.mark.asyncio
+    async def test_fundamentals_analyst_repairs_legacy_datablock_shape(self):
+        """Legacy ``### DATA_BLOCK`` output should be normalized before gating."""
+        from src.agents import create_analyst_node
+
+        mock_llm = MagicMock()
+        legacy_report = """### DATA_BLOCK
+SECTOR: Industrials
+RAW_HEALTH_SCORE: 5/12
+ADJUSTED_HEALTH_SCORE: 41.7% (based on 12 available points)
+RAW_GROWTH_SCORE: 1/6
+ADJUSTED_GROWTH_SCORE: 16.7% (based on 6 available points)
+US_REVENUE_PERCENT: Not disclosed
+ANALYST_COVERAGE_ENGLISH: 1
+PE_RATIO_TTM: 17.57
+ADR_EXISTS: NO
+IBKR_ACCESSIBILITY: Direct
+PFIC_RISK: LOW
+
+### FINANCIAL HEALTH DETAIL
+Score details here.
+"""
+        mock_response = SimpleNamespace(content=legacy_report, tool_calls=None)
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling",
+            new=AsyncMock(return_value=mock_response),
+        ):
+            node = create_analyst_node(
+                mock_llm,
+                "fundamentals_analyst",
+                [],
+                "fundamentals_report",
+            )
+            state = {
+                "messages": [],
+                "company_of_interest": "TEST.US",
+                "trade_date": "2025-12-06",
+            }
+            config = {
+                "configurable": {
+                    "context": MagicMock(ticker="TEST.US", trade_date="2025-12-06")
+                }
+            }
+
+            result = await node(state, config)
+
+        assert "### --- START DATA_BLOCK ---" in result["fundamentals_report"]
+        assert "### --- END DATA_BLOCK ---" in result["fundamentals_report"]
+
+    @pytest.mark.asyncio
+    async def test_fundamentals_analyst_repairs_markdown_table_datablock_shape(self):
+        """Markdown table DATA_BLOCK output should be normalized before gating."""
+        from src.agents import create_analyst_node
+
+        mock_llm = MagicMock()
+        legacy_report = """### FINANCIAL ANALYSIS: ALVOPETRO ENERGY (ALV.V)
+
+### DATA_BLOCK
+
+| Metric | Value |
+| :--- | :--- |
+| SECTOR | Energy |
+| RAW_HEALTH_SCORE | 9.5/12 |
+| ADJUSTED_HEALTH_SCORE | 79% (12/12 available) |
+| RAW_GROWTH_SCORE | 3/6 |
+| ADJUSTED_GROWTH_SCORE | 50% (6/6 available) |
+| US_REVENUE_PERCENT | Not disclosed |
+| ANALYST_COVERAGE_ENGLISH | 2 |
+| PE_RATIO_TTM | 12.35 |
+| ADR_EXISTS | YES |
+| IBKR_ACCESSIBILITY | Direct |
+| PFIC_RISK | LOW |
+
+### FINANCIAL HEALTH DETAIL
+Score details here.
+"""
+        mock_response = SimpleNamespace(content=legacy_report, tool_calls=None)
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling",
+            new=AsyncMock(return_value=mock_response),
+        ):
+            node = create_analyst_node(
+                mock_llm,
+                "fundamentals_analyst",
+                [],
+                "fundamentals_report",
+            )
+            state = {
+                "messages": [],
+                "company_of_interest": "ALV.V",
+                "trade_date": "2026-03-18",
+            }
+            config = {
+                "configurable": {
+                    "context": MagicMock(ticker="ALV.V", trade_date="2026-03-18")
+                }
+            }
+
+            result = await node(state, config)
+
+        assert "### --- START DATA_BLOCK ---" in result["fundamentals_report"]
+        assert "SECTOR: Energy" in result["fundamentals_report"]
+        assert "### --- END DATA_BLOCK ---" in result["fundamentals_report"]
+
+    @pytest.mark.asyncio
+    async def test_fundamentals_analyst_repairs_glued_datablock_boundary(self):
+        """Fundamentals should insert line breaks after a glued DATA_BLOCK end marker."""
+        from src.agents import create_analyst_node
+
+        mock_llm = MagicMock()
+        malformed_report = (
+            "### --- START DATA_BLOCK ---\n"
+            "SECTOR: Energy\n"
+            "RAW_HEALTH_SCORE: 9.5/12\n"
+            "ADJUSTED_HEALTH_SCORE: 79% (12/12 available)\n"
+            "RAW_GROWTH_SCORE: 3/6\n"
+            "ADJUSTED_GROWTH_SCORE: 50% (6/6 available)\n"
+            "US_REVENUE_PERCENT: Not disclosed\n"
+            "ANALYST_COVERAGE_ENGLISH: 2\n"
+            "PE_RATIO_TTM: 12.35\n"
+            "ADR_EXISTS: YES\n"
+            "IBKR_ACCESSIBILITY: Direct\n"
+            "PFIC_RISK: LOW\n"
+            "### --- END DATA_BLOCK ---### FINANCIAL HEALTH DETAIL\n"
+            "**Score**: 9.5/12\n"
+        )
+        mock_response = SimpleNamespace(content=malformed_report, tool_calls=None)
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling",
+            new=AsyncMock(return_value=mock_response),
+        ):
+            node = create_analyst_node(
+                mock_llm,
+                "fundamentals_analyst",
+                [],
+                "fundamentals_report",
+            )
+            state = {
+                "messages": [],
+                "company_of_interest": "ALV.V",
+                "trade_date": "2026-03-18",
+            }
+            config = {
+                "configurable": {
+                    "context": MagicMock(ticker="ALV.V", trade_date="2026-03-18")
+                }
+            }
+
+            result = await node(state, config)
+
+        assert (
+            "### --- END DATA_BLOCK ---\n\n### FINANCIAL HEALTH DETAIL"
+            in result["fundamentals_report"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_fundamentals_analyst_retries_unparseable_datablock_with_format_suffix(
+        self,
+    ):
+        """Fundamentals should get one retry even for long but unparseable output."""
+        from src.agents import create_analyst_node
+
+        mock_llm = MagicMock()
+        retry_llm = MagicMock()
+        initial_response = SimpleNamespace(
+            content=(
+                "### FINANCIAL ANALYSIS\n\n### DATA_BLOCK\n\n"
+                "| Metric | Value |\n| :--- | :--- |\n| Only | Two |\n\n"
+                "### FINANCIAL HEALTH DETAIL\nLong enough body here."
+            ),
+            tool_calls=None,
+        )
+        retry_response = SimpleNamespace(
+            content=(
+                "### --- START DATA_BLOCK ---\n"
+                "SECTOR: Energy\n"
+                "RAW_HEALTH_SCORE: 9.5/12\n"
+                "ADJUSTED_HEALTH_SCORE: 79% (12/12 available)\n"
+                "RAW_GROWTH_SCORE: 3/6\n"
+                "ADJUSTED_GROWTH_SCORE: 50% (6/6 available)\n"
+                "US_REVENUE_PERCENT: Not disclosed\n"
+                "ANALYST_COVERAGE_ENGLISH: 2\n"
+                "PE_RATIO_TTM: 12.35\n"
+                "ADR_EXISTS: YES\n"
+                "IBKR_ACCESSIBILITY: Direct\n"
+                "PFIC_RISK: LOW\n"
+                "### --- END DATA_BLOCK ---\n"
+            ),
+            tool_calls=None,
+        )
+        captured_inputs = []
+
+        async def mock_invoke(_runnable, input_data, **_kwargs):
+            captured_inputs.append(input_data)
+            if len(captured_inputs) == 1:
+                return initial_response
+            return retry_response
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling",
+            new=mock_invoke,
+        ):
+            node = create_analyst_node(
+                mock_llm,
+                "fundamentals_analyst",
+                [],
+                "fundamentals_report",
+                retry_llm=retry_llm,
+                allow_retry=True,
+            )
+            state = {
+                "messages": [],
+                "company_of_interest": "ALV.V",
+                "trade_date": "2026-03-18",
+            }
+            config = {
+                "configurable": {
+                    "context": MagicMock(ticker="ALV.V", trade_date="2026-03-18")
+                }
+            }
+
+            result = await node(state, config)
+
+        assert len(captured_inputs) == 2
+        retry_messages = captured_inputs[1]["messages"]
+        assert (
+            "Do NOT use markdown tables inside DATA_BLOCK."
+            in retry_messages[-1].content
+        )
+        assert "### --- START DATA_BLOCK ---" in result["fundamentals_report"]
 
 
 class TestParallelDebateInfrastructure:

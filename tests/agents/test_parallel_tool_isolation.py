@@ -10,7 +10,7 @@ This test suite was created after a bug where parallel agents' tool_calls
 were being processed by the wrong tool nodes, causing data quality regression.
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -669,60 +669,43 @@ class TestActualCreateAgentToolNode:
     async def test_message_filtering_logic(self):
         """
         Test that the actual create_agent_tool_node filters correctly.
-        We mock the ToolNode to avoid needing LangGraph runtime.
+        It should execute only the matching agent's tool calls.
         """
         from src.graph import create_agent_tool_node
 
         # Create the actual function with our test tools
-        with patch("src.graph.ToolNode") as MockToolNode:
-            # Setup mock to capture what messages are passed
-            mock_instance = MagicMock()
-            mock_instance.ainvoke = AsyncMock(
-                return_value={
-                    "messages": [ToolMessage(content="mocked", tool_call_id="test")]
-                }
-            )
-            MockToolNode.return_value = mock_instance
+        tool_node_fn = create_agent_tool_node(MARKET_TOOLS, "market_analyst")
 
-            tool_node_fn = create_agent_tool_node(MARKET_TOOLS, "market_analyst")
+        # Create mixed messages - one from wrong agent, one from correct agent
+        messages = [
+            AIMessage(
+                content="",
+                name="sentiment_analyst",  # Wrong agent
+                tool_calls=[
+                    {
+                        "name": "get_sentiment",
+                        "args": {"ticker": "T"},
+                        "id": "wrong",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                name="market_analyst",  # Correct agent - matches agent_key
+                tool_calls=[
+                    {
+                        "name": "get_technical_indicators",
+                        "args": {"symbol": "T"},
+                        "id": "correct",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+        ]
 
-            # Create mixed messages - one from wrong agent, one from correct agent
-            # Note: create_agent_tool_node filters by msg.name == agent_key
-            messages = [
-                AIMessage(
-                    content="",
-                    name="sentiment_analyst",  # Wrong agent
-                    tool_calls=[
-                        {
-                            "name": "get_sentiment",
-                            "args": {"ticker": "T"},
-                            "id": "wrong",
-                            "type": "tool_call",
-                        }
-                    ],
-                ),
-                AIMessage(
-                    content="",
-                    name="market_analyst",  # Correct agent - matches agent_key
-                    tool_calls=[
-                        {
-                            "name": "get_technical_indicators",
-                            "args": {"symbol": "T"},
-                            "id": "correct",
-                            "type": "tool_call",
-                        }
-                    ],
-                ),
-            ]
+        result = await tool_node_fn({"messages": messages}, {})
 
-            result = await tool_node_fn({"messages": messages}, {})
-
-            # Verify ToolNode.ainvoke was called with filtered messages
-            call_args = mock_instance.ainvoke.call_args
-            filtered_msgs = call_args[0][0]["messages"]
-
-            # Should only have the market analyst's message
-            assert len(filtered_msgs) == 1
-            assert (
-                filtered_msgs[0].tool_calls[0]["id"] == "correct"
-            ), "Should filter to only market analyst's message"
+        assert len(result["messages"]) == 1
+        assert result["messages"][0].tool_call_id == "correct"
+        assert "RSI: 45" in result["messages"][0].content

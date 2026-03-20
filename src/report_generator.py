@@ -17,10 +17,34 @@ from typing import Any
 
 import structlog
 
+from src.data_block_utils import normalize_structured_block_boundaries
+from src.runtime_diagnostics import is_publishable_analysis
+
 logger = structlog.get_logger(__name__)
 
 # Local import for utility function to avoid circular dependency at module level
 # We import inside the method where it is needed
+
+_GOVERNANCE_TERM_FIXES = [
+    # "controlled subsidiary" → "controlled company" for listed equities with a
+    # controlling shareholder (HKEX/SEHK terminology; "subsidiary" implies full
+    # ownership and different legal standing from a listed controlled company).
+    (
+        re.compile(r"\bcontrolled subsidiary\b", re.IGNORECASE),
+        "controlled company",
+    ),
+    (
+        re.compile(r"\bparent subsidiary relationship\b", re.IGNORECASE),
+        "controlling shareholder relationship",
+    ),
+]
+
+
+def normalize_governance_terms(text: str) -> str:
+    """Deterministic correction of common governance terminology errors in LLM output."""
+    for pattern, replacement in _GOVERNANCE_TERM_FIXES:
+        text = pattern.sub(replacement, text)
+    return text
 
 
 class QuietModeReporter:
@@ -231,10 +255,10 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
             return chart_path
 
         except ImportError as e:
-            logger.warning(f"Chart generation dependencies not available: {e}")
+            logger.warning("chart_deps_unavailable", error=str(e))
             return None
         except Exception as e:
-            logger.warning(f"Chart generation failed: {e}")
+            logger.warning("chart_generation_failed", error=str(e))
             return None
 
     def _generate_radar_chart(self, result: dict) -> Path | None:
@@ -344,12 +368,27 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
             # Start at 100 (no regulatory concerns), subtract for each risk
             regulatory = 100.0
 
+            # Canonicalize PFIC status: Legal Counsel overrides DATA_BLOCK heuristic.
+            legal_pfic_status = None
+            for flag in result.get("red_flags", []):
+                flag_type = str(flag.get("type", "")).upper()
+                if flag_type == "PFIC_PROBABLE":
+                    legal_pfic_status = "PROBABLE"
+                    break
+                if flag_type == "PFIC_UNCERTAIN":
+                    legal_pfic_status = "UNCERTAIN"
+            from src.agents.decision_nodes import resolve_pfic_display_status
+
+            canonical_pfic, _pfic_note = resolve_pfic_display_status(
+                legal_pfic_status, raw.pfic_risk
+            )
+
             # PFIC Penalty (passive foreign investment company)
-            if raw.pfic_risk:
-                risk_upper = raw.pfic_risk.upper()
+            if canonical_pfic:
+                risk_upper = canonical_pfic.upper()
                 if "HIGH" in risk_upper:
                     regulatory -= 40  # Major tax/reporting burden
-                elif "MEDIUM" in risk_upper:
+                elif "MEDIUM" in risk_upper or "UNCERTAIN" in risk_upper:
                     regulatory -= 20
 
             # VIE Structure Penalty (Variable Interest Entity - China risk)
@@ -468,7 +507,7 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
             return chart_path
 
         except Exception as e:
-            logger.warning(f"Radar chart generation failed: {e}")
+            logger.warning("radar_chart_generation_failed", error=str(e))
             return None
 
     def _normalize_string(self, content: Any) -> str:
@@ -608,7 +647,8 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
             result.get("final_trade_decision", "")
         )
         if final_decision_raw and final_decision_raw.strip():
-            return final_decision_raw
+            final_decision_raw = normalize_governance_terms(final_decision_raw)
+            return self._reconcile_consultant_wording(final_decision_raw, result)
 
         # Log warning and try fallbacks
         import structlog
@@ -669,6 +709,99 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
 """
         return error_msg
 
+    def _has_primary_final_decision(self, result: dict[str, Any]) -> bool:
+        final_decision = self._normalize_string(result.get("final_trade_decision", ""))
+        return bool(final_decision and final_decision.strip())
+
+    def _build_verification_caveat(self, result: dict[str, Any]) -> str | None:
+        review = self._normalize_string(result.get("consultant_review", ""))
+        if not review:
+            return None
+
+        if "N/A (consultant disabled" in review:
+            return None
+
+        consultant_status = (result.get("artifact_statuses", {}) or {}).get(
+            "consultant_review"
+        ) or {}
+        flagged_patterns = (
+            r"\b(unsubstantiated|unsupported|likely wrong|likely incorrect)\b",
+            r"\b(cannot verify|unable to verify|not supported)\b",
+            r"\b(tool[_ -]?error|tool failure|verification failed)\b",
+        )
+        has_flagged_content = any(
+            re.search(pattern, review, flags=re.IGNORECASE)
+            for pattern in flagged_patterns
+        )
+        if consultant_status.get("ok", True) and not has_flagged_content:
+            return None
+
+        candidate_lines = []
+        for raw_line in review.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("#") or line.upper().startswith("CONSULTANT REVIEW"):
+                continue
+            if has_flagged_content and not any(
+                re.search(pattern, line, flags=re.IGNORECASE)
+                for pattern in flagged_patterns
+            ):
+                continue
+            candidate_lines.append(f"- {line}")
+            if len(candidate_lines) == 4:
+                break
+
+        if not candidate_lines:
+            preview = review.strip().splitlines()
+            candidate_lines = [
+                f"- {line.strip()}" for line in preview[:3] if line.strip()
+            ]
+
+        if not candidate_lines:
+            return None
+
+        intro = (
+            "Independent consultant checks raised verification caveats. Treat any "
+            "unsupported or conflicting narrative claims below as suspect until re-verified."
+        )
+        return intro + "\n\n" + "\n".join(candidate_lines)
+
+    def _reconcile_consultant_wording(
+        self,
+        final_decision: str,
+        result: dict[str, Any],
+    ) -> str:
+        """Remove contradictions when consultant review exists but is degraded."""
+        final_decision = self._normalize_string(final_decision)
+        consultant_review = self._normalize_string(result.get("consultant_review", ""))
+        if not final_decision or not consultant_review:
+            return final_decision
+        if "N/A (consultant disabled" in consultant_review:
+            return final_decision
+
+        consultant_status = (result.get("artifact_statuses", {}) or {}).get(
+            "consultant_review"
+        ) or {}
+        if consultant_status.get("complete") is False:
+            return final_decision
+
+        contradictory_pattern = re.compile(
+            r'The pre-screening flagged a "Consultant Conditional" warning, but as '
+            r"the external consultant was unavailable to provide specific conditions, "
+            r"the verified `DATA_BLOCK` fundamentals and moat signals take absolute "
+            r"precedence\.",
+            flags=re.IGNORECASE,
+        )
+        replacement = (
+            'The pre-screening flagged a "Consultant Conditional" warning, and the '
+            "external consultant identified reservations plus tool-coverage gaps during "
+            "independent spot checks. The verified `DATA_BLOCK` fundamentals and moat "
+            "signals still drove the final decision, but the consultant caveats above "
+            "should be reviewed before acting."
+        )
+        return contradictory_pattern.sub(replacement, final_decision)
+
     def generate_report(self, result: dict, brief_mode: bool = False) -> str:
         """
         Generate markdown report from analysis results.
@@ -680,7 +813,12 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
 
         # Get final decision with comprehensive error handling
         final_decision_raw = self._get_final_decision_text(result)
-        decision = self.extract_decision(final_decision_raw)
+        publishable = is_publishable_analysis(result)
+        decision = (
+            self.extract_decision(final_decision_raw)
+            if publishable
+            else "ANALYSIS FAILED"
+        )
 
         # Build title
         if self.company_name:
@@ -690,6 +828,19 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
 
         # Build report sections
         report_parts = [title, f"\n**Analysis Date:** {self.timestamp}\n", "---\n"]
+
+        if not publishable:
+            report_parts.append(
+                "\n## Analysis Validity\n\n"
+                "This run did not produce a publishable analysis. Required LLM or "
+                "data artifacts were missing or invalid, so verdict-dependent output "
+                "should be treated as diagnostics only.\n"
+            )
+
+        verification_caveat = self._build_verification_caveat(result)
+        if verification_caveat:
+            report_parts.append("\n## Verification Caveats\n\n")
+            report_parts.append(f"{verification_caveat}\n\n---\n")
 
         # Red Flag Pre-Screening (if applicable)
         red_flags = result.get("red_flags", [])
@@ -850,7 +1001,8 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         add_section("fundamentals_report", "Fundamental Analysis")
         add_section("sentiment_report", "Market Sentiment")
         add_section("news_report", "News & Catalysts")
-        add_section("investment_plan", "Investment Recommendation")
+        if not self._has_primary_final_decision(result):
+            add_section("investment_plan", "Investment Recommendation")
 
         # CRITICAL: Include consultant review if present (external cross-validation)
         consultant_review = result.get("consultant_review", "")
@@ -872,7 +1024,15 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
                     f"{self._clean_text(normalized, demote_headers=True)}\n\n"
                 )
 
-        add_section("trader_investment_plan", "Trading Strategy")
+        _verdict = self.extract_decision(final_decision_raw)
+        if _verdict in ("DO NOT INITIATE", "SELL"):
+            report_parts.append("## Trading Strategy\n\n")
+            report_parts.append(
+                f"*Entry/exit parameters not applicable — "
+                f"Portfolio Manager verdict: **{_verdict}**.*\n\n"
+            )
+        else:
+            add_section("trader_investment_plan", "Trading Strategy")
 
         # Risk Assessment (if present)
         risk_state = result.get("risk_debate_state", {})
@@ -927,6 +1087,10 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         # Remove excessive whitespace
         text = re.sub(r"\n{3,}", "\n\n", text)
         text = text.strip()
+
+        # Repair exact glued block-boundary defects from older artifacts or
+        # upstream model-format drift before any header demotion occurs.
+        text = normalize_structured_block_boundaries(text)
 
         # Remove agent prefixes if present
         text = re.sub(

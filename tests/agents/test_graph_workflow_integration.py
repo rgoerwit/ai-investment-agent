@@ -23,8 +23,8 @@ from src.memory import sanitize_ticker_for_collection
 class TestGraphWorkflowExecution:
     """Test that graph workflow executes agents in correct sequence."""
 
-    @patch("src.graph.create_memory_instances")
-    @patch("src.graph.cleanup_all_memories")
+    @patch("src.graph.components.create_memory_instances")
+    @patch("src.graph.components.cleanup_all_memories")
     @patch("src.llms.create_quick_thinking_llm")
     @patch("src.llms.create_deep_thinking_llm")
     def test_graph_executes_analyst_nodes_in_sequence(
@@ -127,8 +127,8 @@ class TestGraphWorkflowExecution:
         # Verify graph has expected nodes (check compiled graph structure)
         # This validates that the graph was created with correct node sequence
 
-    @patch("src.graph.create_memory_instances")
-    @patch("src.graph.cleanup_all_memories")
+    @patch("src.graph.components.create_memory_instances")
+    @patch("src.graph.components.cleanup_all_memories")
     def test_graph_state_accumulates_across_nodes(
         self, mock_cleanup, mock_create_memories
     ):
@@ -162,8 +162,8 @@ class TestGraphWorkflowExecution:
 class TestPreScreeningValidatorRouting:
     """Test that pre-screening validator correctly routes workflow."""
 
-    @patch("src.graph.create_memory_instances")
-    @patch("src.graph.cleanup_all_memories")
+    @patch("src.graph.components.create_memory_instances")
+    @patch("src.graph.components.cleanup_all_memories")
     def test_validator_reject_skips_debate(self, mock_cleanup, mock_create_memories):
         """
         Verify that pre-screening REJECT skips debate and goes directly to portfolio manager.
@@ -202,8 +202,8 @@ class TestPreScreeningValidatorRouting:
 class TestAgentMemoryIsolation:
     """Test that agents use isolated ticker-specific memories during execution."""
 
-    @patch("src.graph.create_memory_instances")
-    @patch("src.graph.cleanup_all_memories")
+    @patch("src.graph.components.create_memory_instances")
+    @patch("src.graph.components.cleanup_all_memories")
     @patch("src.llms.create_deep_thinking_llm")
     def test_researcher_nodes_use_correct_memory_filter(
         self, mock_deep_llm, mock_cleanup, mock_create_memories
@@ -252,8 +252,8 @@ class TestAgentMemoryIsolation:
         assert f"{safe_ticker}_bull_memory" in mock_memories
         assert f"{safe_ticker}_bear_memory" in mock_memories
 
-    @patch("src.graph.create_memory_instances")
-    @patch("src.graph.cleanup_all_memories")
+    @patch("src.graph.components.create_memory_instances")
+    @patch("src.graph.components.cleanup_all_memories")
     def test_sequential_tickers_get_isolated_memories(
         self, mock_cleanup, mock_create_memories
     ):
@@ -316,8 +316,8 @@ class TestAgentMemoryIsolation:
 class TestDebateFlowIntegration:
     """Test that debate rounds execute correctly."""
 
-    @patch("src.graph.create_memory_instances")
-    @patch("src.graph.cleanup_all_memories")
+    @patch("src.graph.components.create_memory_instances")
+    @patch("src.graph.components.cleanup_all_memories")
     def test_debate_rounds_respect_max_limit(self, mock_cleanup, mock_create_memories):
         """
         Verify that debate rounds respect max_debate_rounds configuration.
@@ -353,8 +353,8 @@ class TestDebateFlowIntegration:
 class TestConfigurationPropagation:
     """Test that configuration parameters are correctly propagated."""
 
-    @patch("src.graph.create_memory_instances")
-    @patch("src.graph.cleanup_all_memories")
+    @patch("src.graph.components.create_memory_instances")
+    @patch("src.graph.components.cleanup_all_memories")
     def test_quick_mode_affects_debate_rounds(self, mock_cleanup, mock_create_memories):
         """
         Verify that quick_mode parameter is considered when setting debate rounds.
@@ -392,8 +392,8 @@ class TestConfigurationPropagation:
         assert graph_quick is not None
         assert graph_standard is not None
 
-    @patch("src.graph.create_memory_instances")
-    @patch("src.graph.cleanup_all_memories")
+    @patch("src.graph.components.create_memory_instances")
+    @patch("src.graph.components.cleanup_all_memories")
     def test_cleanup_previous_triggers_cleanup(
         self, mock_cleanup, mock_create_memories
     ):
@@ -430,7 +430,7 @@ class TestConfigurationPropagation:
         # Verify create_memory_instances was called AFTER cleanup
         mock_create_memories.assert_called_once_with("TEST")
 
-    @patch("src.graph.create_memory_instances")
+    @patch("src.graph.components.create_memory_instances")
     def test_enable_memory_false_uses_legacy_memories(self, mock_create_memories):
         """
         Verify that enable_memory=False uses legacy global memories.
@@ -454,8 +454,8 @@ class TestConfigurationPropagation:
 class TestCriticalEdgeCases:
     """Test critical edge cases that could break the workflow."""
 
-    @patch("src.graph.create_memory_instances")
-    @patch("src.graph.cleanup_all_memories")
+    @patch("src.graph.components.create_memory_instances")
+    @patch("src.graph.components.cleanup_all_memories")
     def test_hyphenated_ticker_memory_lookup_succeeds(
         self, mock_cleanup, mock_create_memories
     ):
@@ -491,8 +491,8 @@ class TestCriticalEdgeCases:
 
         assert graph is not None
 
-    @patch("src.graph.create_memory_instances")
-    @patch("src.graph.cleanup_all_memories")
+    @patch("src.graph.components.create_memory_instances")
+    @patch("src.graph.components.cleanup_all_memories")
     def test_memory_creation_failure_raises_clear_error(
         self, mock_cleanup, mock_create_memories
     ):

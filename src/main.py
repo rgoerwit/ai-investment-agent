@@ -8,10 +8,14 @@ import argparse
 import asyncio
 import json
 import logging
+import os
+import socket
 import sys
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 import structlog
 from rich import box
@@ -22,12 +26,41 @@ from rich.table import Table
 # Import config FIRST to set telemetry/system env vars before any library imports
 from src.config import config, validate_environment_variables
 from src.report_generator import QuietModeReporter
+from src.runtime_diagnostics import build_analysis_validity, is_publishable_analysis
 
 # IMPORTANT: Don't import get_tracker here - it instantiates the singleton immediately
 # Import it lazily in functions that need it, after quiet mode is set
 
 logger = structlog.get_logger(__name__)
 console = Console()
+
+CLI_APP_DEBUG_LOGGERS = ("__main__", "src")
+CLI_NOISY_DEPENDENCY_LOGGERS: dict[str, int] = {
+    "anthropic": logging.WARNING,
+    "google": logging.INFO,
+    "google_genai": logging.WARNING,
+    "hpack": logging.WARNING,
+    "httpcore": logging.WARNING,
+    "httpx": logging.WARNING,
+    "langchain": logging.INFO,
+    "langgraph": logging.INFO,
+    "openai": logging.WARNING,
+    "urllib3": logging.WARNING,
+}
+HTTP_TRACE_LOGGERS = ("openai", "httpx", "httpcore", "hpack")
+
+
+@dataclass(frozen=True)
+class OutputTargets:
+    """Resolved output and chart destinations for a CLI run."""
+
+    output_file: Path | None
+    image_dir: Path
+    skip_charts: bool
+
+    @property
+    def output_dir(self) -> Path:
+        return self.output_file.parent if self.output_file else Path.cwd()
 
 
 def _cost_suffix() -> str:
@@ -70,6 +103,20 @@ def suppress_all_logging():
     import warnings
 
     warnings.filterwarnings("ignore")
+
+
+def _cli_logging_mode(
+    args,
+) -> Literal["quiet", "brief", "normal", "verbose", "debug"]:
+    if getattr(args, "quiet", False):
+        return "quiet"
+    if getattr(args, "brief", False):
+        return "brief"
+    if getattr(args, "debug", False):
+        return "debug"
+    if getattr(args, "verbose", False):
+        return "verbose"
+    return "normal"
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -163,7 +210,20 @@ Examples:
         help=f"Model to use for deep analysis (default: {config.deep_think_llm})",
     )
 
-    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable high-signal application diagnostics",
+    )
+
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "Enable developer debug logging; use INVESTMENT_AGENT_TRACE_HTTP=1 "
+            "for raw transport traces"
+        ),
+    )
 
     parser.add_argument(
         "--no-memory", action="store_true", help="Disable persistent memory (ChromaDB)"
@@ -240,6 +300,9 @@ def parse_arguments() -> argparse.Namespace:
     # Validate: --ticker is required unless --retrospective-only
     if not args.retrospective_only and not args.ticker:
         parser.error("--ticker is required unless --retrospective-only is specified")
+
+    if args.debug:
+        args.verbose = True
 
     return args
 
@@ -334,6 +397,178 @@ def resolve_article_path(args, ticker: str) -> Path | None:
             return config.results_dir / f"{safe_ticker}_article.md"
     else:
         return None
+
+
+def run_provider_preflight() -> dict[str, dict[str, str]]:
+    """Log and return a concise provider/network preflight summary."""
+    results: dict[str, dict[str, str]] = {}
+    provider_hosts = [
+        ("google_gemini", "generativelanguage.googleapis.com"),
+        ("anthropic", "api.anthropic.com"),
+        ("openai", "api.openai.com"),
+        ("yahoo", "guce.yahoo.com"),
+    ]
+    for provider, host in provider_hosts:
+        try:
+            socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+            results[provider] = {"host": host, "dns": "ok"}
+            logger.info("provider_preflight", provider=provider, host=host, dns="ok")
+        except Exception as exc:
+            results[provider] = {
+                "host": host,
+                "dns": "failed",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+            logger.warning(
+                "provider_preflight",
+                provider=provider,
+                host=host,
+                dns="failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+    return results
+
+
+def configure_tool_audit_logging(enabled: bool) -> None:
+    """Install or remove verbose tool audit hooks for this CLI run."""
+    from src.tooling.audit import LoggingToolAuditHook
+    from src.tooling.runtime import TOOL_SERVICE
+
+    if enabled:
+        TOOL_SERVICE.set_hooks([LoggingToolAuditHook()])
+        logger.info("tool_audit_logging_enabled")
+    else:
+        TOOL_SERVICE.clear_hooks()
+
+
+def configure_cli_logging(args) -> dict[str, dict[str, str]]:
+    """Configure CLI logging without globally enabling dependency debug output."""
+    mode = _cli_logging_mode(args)
+    if mode in {"quiet", "brief"}:
+        configure_tool_audit_logging(False)
+        suppress_all_logging()
+        return {}
+
+    logging.getLogger().setLevel(logging.INFO)
+
+    app_level = logging.DEBUG if mode in {"verbose", "debug"} else logging.INFO
+    for name in CLI_APP_DEBUG_LOGGERS:
+        logging.getLogger(name).setLevel(app_level)
+
+    for name, level in CLI_NOISY_DEPENDENCY_LOGGERS.items():
+        logging.getLogger(name).setLevel(level)
+
+    if mode == "debug" and os.getenv("INVESTMENT_AGENT_TRACE_HTTP") == "1":
+        for name in HTTP_TRACE_LOGGERS:
+            logging.getLogger(name).setLevel(logging.DEBUG)
+
+    enable_diagnostics = mode in {"verbose", "debug"}
+    configure_tool_audit_logging(enable_diagnostics)
+    return run_provider_preflight() if enable_diagnostics else {}
+
+
+def build_run_summary(
+    result: dict,
+    *,
+    quick_mode: bool,
+    article_requested: bool,
+    provider_preflight: dict[str, dict[str, str]] | None = None,
+) -> dict[str, object]:
+    """Build a compact summary for saved artifacts and end-of-run logs."""
+    from langchain_core.messages import ToolMessage
+
+    from src.token_tracker import get_tracker
+
+    def _tool_message_failed(content: object) -> bool:
+        if not isinstance(content, str):
+            return False
+        text = content.strip()
+        if not text:
+            return False
+        if text.startswith(
+            (
+                "TOOL_ERROR:",
+                "TOOL_BLOCKED:",
+                "FETCH_FAILED:",
+                "SEARCH_FAILED:",
+                "INVALID_URL:",
+            )
+        ):
+            return True
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError):
+            return False
+        return isinstance(payload, dict) and bool(payload.get("error"))
+
+    def _collect_used_providers() -> list[str]:
+        providers: set[str] = set()
+        configured = str(config.llm_provider or "").strip()
+        if configured:
+            providers.add(configured)
+        artifact_statuses = result.get("artifact_statuses", {}) or {}
+        for status in artifact_statuses.values():
+            provider = str((status or {}).get("provider") or "").strip()
+            if provider:
+                providers.add(provider)
+        return sorted(providers)
+
+    manual_tool_failures = sum(
+        value
+        for key, value in result.items()
+        if key.endswith("_tool_failures") and isinstance(value, int) and value > 0
+    )
+
+    tracker_stats = get_tracker().get_total_stats()
+    messages = result.get("messages", []) or []
+    tool_messages = [msg for msg in messages if isinstance(msg, ToolMessage)]
+    tool_failures = manual_tool_failures + sum(
+        1
+        for msg in tool_messages
+        if getattr(msg, "status", None) == "error" or _tool_message_failed(msg.content)
+    )
+    artifact_statuses = result.get("artifact_statuses", {}) or {}
+    consultant_status = artifact_statuses.get("consultant_review") or {}
+    auditor_status = artifact_statuses.get("auditor_report") or {}
+    consultant_finished = bool(consultant_status.get("complete"))
+    auditor_finished = bool(auditor_status.get("complete"))
+    providers_used = _collect_used_providers()
+
+    return {
+        "quick_mode": quick_mode,
+        "provider_preflight": provider_preflight or {},
+        "pre_screening_result": result.get("pre_screening_result", ""),
+        "debate_rounds": result.get("investment_debate_state", {}).get("count", 0),
+        # Backward-compatible aliases: "completed" here means "finished", not "succeeded".
+        "consultant_completed": consultant_finished,
+        "auditor_completed": auditor_finished,
+        "consultant_finished": consultant_finished,
+        "auditor_finished": auditor_finished,
+        "consultant_successful": bool(consultant_status.get("ok")),
+        "auditor_successful": bool(auditor_status.get("ok")),
+        "article_requested": article_requested,
+        "llm_attempts": tracker_stats["total_calls"] + tracker_stats["failed_attempts"],
+        "llm_failures": tracker_stats["failed_attempts"],
+        "tool_calls": len(tool_messages),
+        "tool_failures": tool_failures,
+        "llm_providers_used": providers_used,
+        "llm_provider": providers_used[0]
+        if len(providers_used) == 1
+        else "multi-provider",
+        "publishable": result.get("analysis_validity", {}).get("publishable", False),
+        "required_failures": sorted(
+            (result.get("analysis_validity", {}) or {})
+            .get("required_failures", {})
+            .keys()
+        ),
+        "optional_failures": sorted(
+            (result.get("analysis_validity", {}) or {})
+            .get("optional_failures", {})
+            .keys()
+        ),
+    }
 
 
 async def handle_article_generation(
@@ -450,7 +685,7 @@ async def handle_article_generation(
             console.print(f"[dim]Word count: {word_count} words[/dim]")
 
     except Exception as e:
-        logger.error(f"Article generation failed: {e}", exc_info=True)
+        logger.error("article_generation_failed", error=str(e), exc_info=True)
         if not args.quiet and not args.brief:
             console.print(f"[yellow]Warning: Article generation failed: {e}[/yellow]")
 
@@ -528,7 +763,7 @@ def display_memory_statistics(ticker: str):
         console.print()
 
     except Exception as e:
-        logger.warning(f"Could not display memory statistics: {e}")
+        logger.warning("memory_statistics_unavailable", error=str(e))
 
 
 def display_token_summary():
@@ -645,11 +880,17 @@ def display_results(result: dict, ticker: str):
 
 def save_results_to_file(result: dict, ticker: str, quick_mode: bool = False) -> Path:
     """Save analysis results to a JSON file in the results directory."""
-    from src.memory import create_memory_instances, sanitize_ticker_for_collection
+    from src.memory import get_ticker_memory_stats
     from src.prompts import get_all_prompts
 
     results_dir = Path(config.results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
+    previous_dir_mtime_ns = (
+        results_dir.stat().st_mtime_ns if results_dir.exists() else None
+    )
+    analysis_file_count_before_save = sum(
+        1 for candidate in results_dir.glob("*_analysis.json") if candidate.is_file()
+    )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"{ticker}_{timestamp}_analysis.json"
@@ -676,27 +917,9 @@ def save_results_to_file(result: dict, ticker: str, quick_mode: bool = False) ->
     memory_stats = {}
     if config.enable_memory:
         try:
-            # Get actual memories for THIS ticker
-            memories = create_memory_instances(ticker)
-            safe_ticker = sanitize_ticker_for_collection(ticker)
-
-            memory_stats = {
-                "bull_researcher": memories.get(
-                    f"{safe_ticker}_bull_memory"
-                ).get_stats(),
-                "bear_researcher": memories.get(
-                    f"{safe_ticker}_bear_memory"
-                ).get_stats(),
-                "research_manager": memories.get(
-                    f"{safe_ticker}_invest_judge_memory"
-                ).get_stats(),
-                "trader": memories.get(f"{safe_ticker}_trader_memory").get_stats(),
-                "portfolio_manager": memories.get(
-                    f"{safe_ticker}_risk_manager_memory"
-                ).get_stats(),
-            }
+            memory_stats = get_ticker_memory_stats(ticker)
         except Exception as e:
-            logger.warning(f"Could not get memory stats: {e}")
+            logger.warning("memory_stats_unavailable", error=str(e))
 
     # Get token usage stats
     from src.token_tracker import get_tracker
@@ -714,7 +937,14 @@ def save_results_to_file(result: dict, ticker: str, quick_mode: bool = False) ->
             "deep_model": config.deep_think_llm,
             "memory_enabled": config.enable_memory,
             "online_tools_enabled": config.online_tools,
-            "llm_provider": config.llm_provider,
+            "llm_provider": (
+                (result.get("run_summary", {}) or {}).get("llm_provider")
+                or config.llm_provider
+            ),
+            "llm_providers_used": (
+                (result.get("run_summary", {}) or {}).get("llm_providers_used")
+                or [config.llm_provider]
+            ),
         },
         "token_usage": token_stats,
         "prompts_metadata": {
@@ -765,6 +995,10 @@ def save_results_to_file(result: dict, ticker: str, quick_mode: bool = False) ->
             "decision": result.get("final_trade_decision", ""),
             "processed_signal": None,
         },
+        "pre_screening_result": result.get("pre_screening_result", ""),
+        "run_summary": result.get("run_summary", {}),
+        "analysis_validity": result.get("analysis_validity", {}),
+        "artifact_statuses": result.get("artifact_statuses", {}),
     }
 
     # Extract prediction snapshot for future retrospective evaluation (zero LLM cost)
@@ -773,10 +1007,36 @@ def save_results_to_file(result: dict, ticker: str, quick_mode: bool = False) ->
 
         save_data["prediction_snapshot"] = extract_snapshot(result, ticker, quick_mode)
     except Exception as e:
-        logger.warning(f"Snapshot extraction failed (non-fatal): {e}")
+        logger.warning("snapshot_extraction_failed", error=str(e))
 
     with open(filepath, "w") as f:
         json.dump(save_data, f, indent=2)
+
+    try:
+        from src.ibkr.reconciler import (
+            _build_analysis_record_from_data,
+            load_latest_analyses,
+            update_latest_analyses_index,
+        )
+
+        record = _build_analysis_record_from_data(filepath, save_data)
+        if record is not None:
+            updated_index = update_latest_analyses_index(
+                results_dir,
+                record,
+                previous_dir_mtime_ns=previous_dir_mtime_ns,
+                analysis_file_count_before_save=analysis_file_count_before_save,
+            )
+            if not updated_index:
+                refreshed = load_latest_analyses(results_dir)
+                logger.info(
+                    "analysis_index_refreshed_after_save",
+                    ticker=ticker,
+                    path=str(results_dir),
+                    refreshed_count=len(refreshed),
+                )
+    except Exception as exc:
+        logger.debug("analysis_index_update_skipped", error=str(exc))
 
     logger.info(
         f"Results saved to {filepath} ({len(prompts_used)} prompts tracked, {len(custom_prompts_loaded)} custom)"
@@ -792,6 +1052,65 @@ def save_results_to_file(result: dict, ticker: str, quick_mode: bool = False) ->
         )
 
     return filepath
+
+
+_BENCH_NAMES: dict[str, str] = {
+    "^N225": "Nikkei-225",
+    "^HSI": "Hang Seng",
+    "^TWII": "Taiwan Weighted",
+    "^KS11": "KOSPI",
+    "^AEX": "AEX",
+    "^GDAXI": "DAX",
+    "^FTSE": "FTSE 100",
+    "^FCHI": "CAC 40",
+    "^GSPTSE": "TSX",
+    "^AXJO": "ASX 200",
+    "^STI": "STI",
+    "^FTSEMIB": "FTSE MIB",
+    "^OMX": "OMX Stockholm",
+    "^GSPC": "S&P 500",
+}
+
+
+async def _fetch_market_context(ticker: str, trade_date: str) -> str:
+    """
+    Return a one-line benchmark performance note for the ticker's home market.
+
+    Example: "MARKET NOTE: Nikkei-225 down 4.2% on 2026-03-05."
+
+    Returns empty string on any error so callers never need to handle exceptions.
+    """
+    try:
+        import yfinance as yf
+
+        from src.retrospective import (
+            EXCHANGE_BENCHMARK,
+            FALLBACK_BENCHMARK,
+            _get_ticker_suffix,
+        )
+
+        suffix = _get_ticker_suffix(ticker)
+        benchmark = EXCHANGE_BENCHMARK.get(suffix, FALLBACK_BENCHMARK)
+        hist = await asyncio.to_thread(
+            lambda: yf.Ticker(benchmark).history(period="2d")
+        )
+        if len(hist) >= 2:
+            pct = (
+                (hist["Close"].iloc[-1] - hist["Close"].iloc[0])
+                / hist["Close"].iloc[0]
+                * 100
+            )
+            direction = "up" if pct >= 0 else "down"
+            name = _BENCH_NAMES.get(benchmark, benchmark.lstrip("^"))
+            actual_date = (
+                hist.index[-1].strftime("%Y-%m-%d")
+                if hasattr(hist.index[-1], "strftime")
+                else trade_date
+            )
+            return f"MARKET NOTE: {name} {direction} {abs(pct):.1f}% on {actual_date}."
+    except Exception as e:
+        logger.debug("market_context_fetch_failed", error=str(e))
+    return ""
 
 
 async def run_analysis(
@@ -825,7 +1144,7 @@ async def run_analysis(
         tracker = get_tracker()
         tracker.reset()
 
-        logger.info(f"Starting analysis for {ticker} (quick_mode={quick_mode})")
+        logger.info("analysis_starting", ticker=ticker, quick_mode=quick_mode)
 
         # CRITICAL FIX: Enforce real-world date to prevent "Time Travel" hallucinations
         # This overrides potentially stale system prompts or environment defaults
@@ -846,6 +1165,10 @@ async def run_analysis(
                 message="No source could resolve company name — LLM hallucination risk",
             )
 
+        # Fetch benchmark context once (non-blocking) before graph starts.
+        # Prepended to the HumanMessage so every agent receives it as session context.
+        market_context = await _fetch_market_context(ticker, real_date)
+
         graph = create_trading_graph(
             ticker=ticker,  # BUG FIX #1: Pass ticker for isolation
             cleanup_previous=True,  # BUG FIX #1: Cleanup to prevent contamination
@@ -862,12 +1185,11 @@ async def run_analysis(
             skip_charts=skip_charts,
         )
 
+        _base_msg = f"Analyze {ticker} ({company_name}) for investment decision. Current Date: {real_date}."
+        if market_context:
+            _base_msg += f" {market_context}"
         initial_state = AgentState(
-            messages=[
-                HumanMessage(
-                    content=f"Analyze {ticker} ({company_name}) for investment decision. Current Date: {real_date}"
-                )
-            ],
+            messages=[HumanMessage(content=_base_msg)],
             company_of_interest=ticker,
             company_name=company_name,  # ADDED: Anchor verified company name in state
             company_name_resolved=name_result.is_resolved,
@@ -903,6 +1225,7 @@ async def run_analysis(
             final_trade_decision="",
             tools_called={},
             prompts_used={},
+            artifact_statuses={},
             red_flags=[],
             pre_screening_result="",
             legal_report="",
@@ -919,7 +1242,9 @@ async def run_analysis(
             max_risk_rounds=1,
         )
 
-        logger.info(f"Starting multi-agent analysis for {ticker} on {real_date}")
+        logger.info(
+            "multi_agent_analysis_starting", ticker=ticker, trade_date=real_date
+        )
 
         # Get observability callbacks (Langfuse if enabled)
         from src.observability import flush_traces, get_tracing_callbacks
@@ -950,7 +1275,7 @@ async def run_analysis(
         # Flush traces before returning
         flush_traces()
 
-        logger.info(f"Analysis completed for {ticker}")
+        logger.info("analysis_completed", ticker=ticker)
 
         # Log token usage summary
         from src.token_tracker import get_tracker
@@ -958,379 +1283,527 @@ async def run_analysis(
         tracker = get_tracker()
         tracker.print_summary()
 
+        if isinstance(result, dict):
+            result["analysis_validity"] = build_analysis_validity(result)
+
         return result
 
     except Exception as e:
-        logger.error(f"Analysis failed for {ticker}: {str(e)}", exc_info=True)
+        logger.error("analysis_failed", ticker=ticker, error=str(e), exc_info=True)
         console.print(f"\n[bold red]Error during analysis:[/bold red] {str(e)}\n")
         return None
 
 
-async def main():
+def _enable_quiet_runtime_if_needed(args: argparse.Namespace) -> None:
+    """Suppress tracker/log noise before any later imports can initialize it."""
+    if not (args.quiet or args.brief):
+        return
+
+    from src.token_tracker import TokenTracker
+
+    TokenTracker.set_quiet_mode(True)
+    suppress_all_logging()
+
+    tracker = TokenTracker()
+    tracker._quiet_mode = True
+    config.quiet_mode = True
+
+
+def _apply_runtime_overrides(args: argparse.Namespace) -> None:
+    """Apply per-run CLI overrides to the config singleton."""
+    if args.quick_model:
+        config.quick_think_llm = args.quick_model
+    if args.deep_model:
+        config.deep_think_llm = args.deep_model
+    if args.no_memory:
+        config.enable_memory = False
+    if args.trace_langfuse:
+        config.langfuse_enabled = True
+
+
+def _validate_cli_args(args: argparse.Namespace) -> None:
+    """Validate incompatible flag combinations."""
+    if not args.quick:
+        return
+
+    chart_flags = [
+        f
+        for f, value in [("--transparent", args.transparent), ("--svg", args.svg)]
+        if value
+    ]
+    if not chart_flags:
+        return
+
+    flags_str = " and ".join(chart_flags)
+    verb = "has" if len(chart_flags) == 1 else "have"
+    noun = "that flag" if len(chart_flags) == 1 else "those flags"
+    print(
+        f"error: {flags_str} {verb} no effect with --quick "
+        f"(chart generation is skipped in quick mode). "
+        f"Remove {noun} or drop --quick.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+
+def _resolve_output_targets(args: argparse.Namespace) -> OutputTargets:
+    """Resolve output/image paths and derived chart behavior for this run."""
+    output_file, image_dir = resolve_output_paths(args)
+    skip_charts = bool(args.no_charts or (output_file is None and not args.imagedir))
+    return OutputTargets(
+        output_file=output_file,
+        image_dir=image_dir,
+        skip_charts=skip_charts,
+    )
+
+
+def _setup_runtime(
+    args: argparse.Namespace, output_targets: OutputTargets
+) -> dict[str, dict[str, str]]:
+    """Configure logging, runtime paths, and environment validation."""
+    _enable_quiet_runtime_if_needed(args)
+    config.images_dir = output_targets.image_dir
+
+    provider_preflight = configure_cli_logging(args)
+
+    if (
+        output_targets.skip_charts
+        and not args.no_charts
+        and not args.imagedir
+        and not args.quiet
+        and not args.brief
+    ):
+        logger.warning(
+            "Writing to stdout: Charts disabled (no way to link them). "
+            "Use --output to enable charts, or --imagedir to save images separately."
+        )
+
+    if not output_targets.skip_charts and output_targets.output_file:
+        try:
+            output_targets.image_dir.resolve().relative_to(
+                output_targets.output_dir.resolve()
+            )
+        except ValueError:
+            logger.warning(
+                f"Image directory ({output_targets.image_dir}) is not a subdirectory of output directory ({output_targets.output_dir}). "
+                "Report will contain absolute paths to images, which may not render correctly on other systems."
+            )
+
+    try:
+        validate_environment_variables()
+    except ValueError as exc:
+        if args.quiet or args.brief:
+            print(f"# Configuration Error\n\n{str(exc)}")
+        else:
+            console.print(f"\n[bold red]Configuration Error:[/bold red] {str(exc)}\n")
+            console.print(
+                "Please check your .env file and ensure all required API keys are set.\n"
+            )
+        raise SystemExit(1) from exc
+
+    return provider_preflight
+
+
+async def _run_retrospective_only(args: argparse.Namespace) -> int:
+    """Run retrospective-only mode and return the process exit code."""
+    try:
+        from src.retrospective import SnapshotLoadProgress, run_retrospective
+
+        def report(update: SnapshotLoadProgress) -> None:
+            if update.phase == "discovered":
+                if update.total_files:
+                    print(
+                        f"Scanning {update.total_files} saved analysis file"
+                        f"{'' if update.total_files == 1 else 's'} for retrospective snapshots...",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                return
+            if update.phase == "parsing":
+                print(
+                    f"  Snapshot load progress: {update.processed_files}/{update.total_files} "
+                    f"files scanned; {update.loaded_snapshots} snapshots across {update.loaded_tickers} tickers",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return
+            if update.phase == "complete":
+                print(
+                    f"Loaded {update.loaded_snapshots} retrospective snapshots from {update.total_files} files.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+        results_dir = Path(config.results_dir)
+        if not args.quiet and not args.brief:
+            console.print(
+                "[cyan]Running retrospective evaluation on all past analyses...[/cyan]"
+            )
+
+        lessons = await run_retrospective(
+            ticker=None,
+            results_dir=results_dir,
+            progress=report if not (args.quiet or args.brief) else None,
+        )
+
+        if lessons:
+            if not args.quiet and not args.brief:
+                console.print(f"\n[green]Generated {len(lessons)} lesson(s):[/green]")
+                for lesson in lessons:
+                    stored = "[stored]" if lesson.get("stored") else "[skipped]"
+                    console.print(
+                        f"  {stored} [{lesson['ticker']}] {lesson['lesson']} "
+                        f"({lesson['failure_mode']} | conf: {lesson['confidence']:.2f})"
+                    )
+            else:
+                print(
+                    f"# Retrospective Complete\n\nGenerated {len(lessons)} lesson(s)."
+                )
+        else:
+            msg = "No significant prediction deltas found."
+            if not args.quiet and not args.brief:
+                console.print(f"[yellow]{msg}[/yellow]")
+            else:
+                print(f"# Retrospective Complete\n\n{msg}")
+    except Exception as exc:
+        logger.error("retrospective_failed", error=str(exc), exc_info=True)
+        if not args.quiet and not args.brief:
+            console.print(
+                f"[yellow]Warning: Retrospective evaluation failed: {exc}[/yellow]"
+            )
+        return 1
+    return 0
+
+
+async def _maybe_run_ticker_retrospective(args: argparse.Namespace) -> None:
+    """Optionally generate retrospective lessons for the current ticker."""
+    if not args.ticker:
+        return
+    if args.no_memory:
+        logger.info("retrospective_skipped_no_memory", ticker=args.ticker)
+        return
+
+    try:
+        from src.retrospective import SnapshotLoadProgress, run_retrospective
+
+        def report(update: SnapshotLoadProgress) -> None:
+            if update.phase != "parsing" or args.quiet or args.brief:
+                return
+            print(
+                f"  Retrospective scan: {update.processed_files}/{update.total_files} "
+                f"files; {update.loaded_snapshots} candidate snapshots",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        results_dir = Path(config.results_dir)
+        lessons = await run_retrospective(
+            ticker=args.ticker,
+            results_dir=results_dir,
+            progress=report,
+        )
+        if lessons and not args.quiet and not args.brief:
+            console.print(
+                f"\n[green]Generated {len(lessons)} new lesson(s) from past analyses[/green]"
+            )
+    except Exception as exc:
+        logger.warning("retrospective_failed", ticker=args.ticker, error=str(exc))
+
+
+def _emit_start_banner(args: argparse.Namespace, output_targets: OutputTargets) -> str:
+    """Render or log the startup banner and return it for file output."""
+    welcome_banner = get_welcome_banner(args.ticker, args.quick)
+    if not output_targets.output_file and not args.quiet and not args.brief:
+        print(welcome_banner)
+    if output_targets.output_file and not args.quiet and not args.brief:
+        logger.info(
+            "analysis_output_starting",
+            ticker=args.ticker,
+            output_path=str(output_targets.output_file),
+        )
+    return welcome_banner
+
+
+async def _execute_analysis(
+    args: argparse.Namespace, output_targets: OutputTargets
+) -> dict | None:
+    """Run the analysis graph for the current CLI request."""
+    return await run_analysis(
+        args.ticker,
+        args.quick,
+        strict_mode=args.strict,
+        chart_format="svg" if args.svg else "png",
+        transparent_charts=args.transparent,
+        image_dir=output_targets.image_dir,
+        skip_charts=output_targets.skip_charts,
+    )
+
+
+def _attach_run_summary(
+    result: dict,
+    args: argparse.Namespace,
+    provider_preflight: dict[str, dict[str, str]],
+) -> None:
+    """Attach the compact run summary before any persistence/output steps."""
+    result["run_summary"] = build_run_summary(
+        result,
+        quick_mode=args.quick,
+        article_requested=bool(args.article),
+        provider_preflight=provider_preflight,
+    )
+
+
+def _load_company_name_for_output(ticker: str) -> str | None:
+    """Best-effort company-name lookup for markdown output contexts."""
+    try:
+        import yfinance as yf
+
+        ticker_obj = yf.Ticker(ticker)
+        info = ticker_obj.info
+        return info.get("longName") or info.get("shortName")
+    except Exception:
+        return None
+
+
+def _render_primary_output(
+    result: dict,
+    args: argparse.Namespace,
+    output_targets: OutputTargets,
+    welcome_banner: str,
+) -> tuple[str | None, str | None, QuietModeReporter | None]:
+    """Render the main user-facing report to stdout or file."""
+    use_markdown = (
+        args.brief
+        or args.quiet
+        or not sys.stdout.isatty()
+        or output_targets.output_file
+    )
+    company_name = None
+    report = None
+    reporter = None
+
+    if not use_markdown:
+        display_results(result, args.ticker)
+        return company_name, report, reporter
+
+    company_name = _load_company_name_for_output(args.ticker)
+    reporter = QuietModeReporter(
+        args.ticker,
+        company_name,
+        quick_mode=args.quick,
+        chart_format="svg" if args.svg else "png",
+        transparent_charts=args.transparent,
+        skip_charts=output_targets.skip_charts,
+        image_dir=output_targets.image_dir,
+        report_dir=output_targets.output_dir,
+        report_stem=output_targets.output_file.stem
+        if output_targets.output_file
+        else None,
+    )
+    report = reporter.generate_report(result, brief_mode=args.brief)
+
+    if output_targets.output_file:
+        full_content = welcome_banner + "\n" + report
+        try:
+            if output_targets.output_file.parent != Path("."):
+                output_targets.output_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(output_targets.output_file, "w") as f:
+                f.write(full_content)
+            if not args.quiet and not args.brief:
+                console.print(
+                    f"[green]Report saved to:[/green] [cyan]{output_targets.output_file}[/cyan]{_cost_suffix()}"
+                )
+        except Exception as exc:
+            logger.error(
+                "report_write_failed",
+                path=str(output_targets.output_file),
+                error=str(exc),
+                exc_info=True,
+            )
+            raise SystemExit(1) from exc
+    else:
+        print(report)
+
+    return company_name, report, reporter
+
+
+def _persist_analysis_outputs(result: dict, args: argparse.Namespace) -> None:
+    """Persist JSON artifacts and rejection records."""
+    try:
+        filepath = save_results_to_file(result, args.ticker, quick_mode=args.quick)
+        if not args.quiet and not args.brief:
+            console.print(
+                f"[green]Results saved to:[/green] [cyan]{filepath}[/cyan]{_cost_suffix()}"
+            )
+    except Exception as exc:
+        logger.error("results_save_failed", error=str(exc), exc_info=True)
+        if not args.quiet and not args.brief:
+            console.print(
+                f"\n[yellow]Warning: Could not save results to file: {exc}[/yellow]\n"
+            )
+
+
+async def _maybe_save_rejection_record(result: dict, args: argparse.Namespace) -> None:
+    """Persist non-BUY verdicts as retrospective rejection records."""
+    try:
+        from src.retrospective import (
+            create_lessons_memory,
+            extract_snapshot,
+            save_rejection_record,
+        )
+
+        snapshot = extract_snapshot(result, args.ticker, is_quick_mode=args.quick)
+        verdict = snapshot.get("verdict", "")
+        if verdict and verdict != "BUY":
+            rejection_memory = create_lessons_memory()
+            await save_rejection_record(snapshot, rejection_memory)
+    except Exception as exc:
+        logger.debug("rejection_record_save_skipped", error=str(exc))
+
+
+async def _maybe_generate_article(
+    result: dict,
+    args: argparse.Namespace,
+    output_targets: OutputTargets,
+    company_name: str | None,
+    report: str | None,
+    reporter: QuietModeReporter | None,
+) -> bool:
+    """Generate an article from a publishable analysis when requested."""
+    if not args.article:
+        return False
+
+    if not is_publishable_analysis(result):
+        logger.warning(
+            "article_generation_skipped_invalid_analysis",
+            ticker=args.ticker,
+            analysis_validity=result.get("analysis_validity", {}),
+        )
+        if not args.quiet and not args.brief:
+            console.print(
+                "[yellow]Skipping article generation because the analysis is incomplete or invalid.[/yellow]"
+            )
+        return False
+
+    if (
+        output_targets.skip_charts
+        and not output_targets.output_file
+        and not args.imagedir
+    ):
+        print(
+            "Warning: Article generated without images (stdout mode).",
+            file=sys.stderr,
+        )
+
+    trade_date = result.get("trade_date") or datetime.now().strftime("%Y-%m-%d")
+
+    if report is None or reporter is None:
+        if company_name is None:
+            company_name = _load_company_name_for_output(args.ticker) or args.ticker
+        reporter = QuietModeReporter(
+            args.ticker,
+            company_name,
+            quick_mode=args.quick,
+            chart_format="svg" if args.svg else "png",
+            transparent_charts=args.transparent,
+            skip_charts=output_targets.skip_charts,
+            image_dir=output_targets.image_dir,
+            report_dir=output_targets.output_dir,
+            report_stem=output_targets.output_file.stem
+            if output_targets.output_file
+            else None,
+        )
+        report = reporter.generate_report(result, brief_mode=False)
+
+    await handle_article_generation(
+        args=args,
+        ticker=args.ticker,
+        company_name=company_name or args.ticker,
+        report_text=report,
+        trade_date=trade_date,
+        valuation_context=reporter.get_valuation_context(),
+        analysis_result=result,
+    )
+    return True
+
+
+def _log_final_summary(
+    result: dict, args: argparse.Namespace, article_generated: bool
+) -> None:
+    """Emit the structured end-of-run summary log."""
+    logger.info(
+        "analysis_run_summary",
+        ticker=args.ticker,
+        **{**result.get("run_summary", {}), "article_generated": article_generated},
+    )
+
+
+def _report_analysis_failure(args: argparse.Namespace) -> None:
+    """Print the standard top-level analysis failure message."""
+    if args.quiet or args.brief:
+        print(
+            "# Analysis Failed\n\nAn error occurred during analysis. Check logs for details."
+        )
+    else:
+        console.print(
+            "\n[bold red]Analysis failed. Check logs for details.[/bold red]\n"
+        )
+
+
+async def main() -> int:
     """Main entry point for the application."""
     args = None
     try:
         args = parse_arguments()
+        _apply_runtime_overrides(args)
+        _validate_cli_args(args)
+        output_targets = _resolve_output_targets(args)
+        provider_preflight = _setup_runtime(args, output_targets)
 
-        # Import cleanup module (will be used in finally block)
-        from src.cleanup import cleanup_async_resources
-
-        if args.quiet or args.brief:
-            # Suppress token tracker logging BEFORE any imports that might initialize it
-            # CRITICAL: Must set quiet mode before importing get_tracker() or any module that uses it
-            from src.token_tracker import TokenTracker
-
-            TokenTracker.set_quiet_mode(True)
-            suppress_all_logging()
-
-            # Force re-initialization with quiet mode active
-            # (in case global_tracker was already imported elsewhere)
-            tracker = TokenTracker()
-            tracker._quiet_mode = True
-
-            # Set config flag for rate limit handler to check
-            config.quiet_mode = True
-
-        if args.quick_model:
-            config.quick_think_llm = args.quick_model
-        if args.deep_model:
-            config.deep_think_llm = args.deep_model
-
-        if args.no_memory:
-            config.enable_memory = False
-
-        if args.trace_langfuse:
-            config.langfuse_enabled = True
-
-        # --- Output and Image Directory Logic ---
-        output_file, image_dir = resolve_output_paths(args)
-        output_dir = output_file.parent if output_file else Path.cwd()
-
-        config.images_dir = image_dir
-
-        # Handle stdout case: suppress charts unless user explicitly requested imagedir
-        if not output_file and not args.no_charts and not args.imagedir:
-            # Disable charts when writing to stdout (no way to link them)
-            # Exception: if user specified --imagedir, they want images saved separately
-            if not args.quiet and not args.brief:
-                logger.warning(
-                    "Writing to stdout: Charts disabled (no way to link them). "
-                    "Use --output to enable charts, or --imagedir to save images separately."
-                )
-            args.no_charts = True
-
-        # Validate image directory relative to output directory (for linking)
-        # Only relevant if we are generating charts
-        if not args.no_charts and output_file:
-            try:
-                # Check if image_dir is inside output_dir
-                # We use absolute paths for the check to be robust
-                abs_image_dir = image_dir.resolve()
-                abs_output_dir = output_dir.resolve()
-
-                # attempt to find relative path
-                abs_image_dir.relative_to(abs_output_dir)
-            except ValueError:
-                # Not a subdirectory
-                logger.warning(
-                    f"Image directory ({image_dir}) is not a subdirectory of output directory ({output_dir}). "
-                    "Report will contain absolute paths to images, which may not render correctly on other systems."
-                )
-
-        if args.verbose and not args.quiet and not args.brief:
-            logging.getLogger().setLevel(logging.DEBUG)
-            for name in logging.root.manager.loggerDict:
-                logging.getLogger(name).setLevel(logging.DEBUG)
-
-        try:
-            validate_environment_variables()
-        except ValueError as e:
-            if args.quiet or args.brief:
-                print(f"# Configuration Error\n\n{str(e)}")
-            else:
-                console.print(f"\n[bold red]Configuration Error:[/bold red] {str(e)}\n")
-                console.print(
-                    "Please check your .env file and ensure all required API keys are set.\n"
-                )
-            sys.exit(1)
-
-        # Handle --retrospective-only (no analysis, just evaluate past predictions)
         if args.retrospective_only:
-            try:
-                from src.retrospective import run_retrospective
+            return await _run_retrospective_only(args)
 
-                results_dir = Path(config.results_dir)
-                if not args.quiet and not args.brief:
-                    console.print(
-                        "[cyan]Running retrospective evaluation on all past analyses...[/cyan]"
-                    )
+        await _maybe_run_ticker_retrospective(args)
+        welcome_banner = _emit_start_banner(args, output_targets)
+        result = await _execute_analysis(args, output_targets)
 
-                lessons = await run_retrospective(ticker=None, results_dir=results_dir)
+        if not result:
+            _report_analysis_failure(args)
+            return 1
 
-                if lessons:
-                    if not args.quiet and not args.brief:
-                        console.print(
-                            f"\n[green]Generated {len(lessons)} lesson(s):[/green]"
-                        )
-                        for lesson in lessons:
-                            stored = "[stored]" if lesson.get("stored") else "[skipped]"
-                            console.print(
-                                f"  {stored} [{lesson['ticker']}] {lesson['lesson']} "
-                                f"({lesson['failure_mode']} | conf: {lesson['confidence']:.2f})"
-                            )
-                    else:
-                        print(
-                            f"# Retrospective Complete\n\nGenerated {len(lessons)} lesson(s)."
-                        )
-                else:
-                    msg = "No significant prediction deltas found."
-                    if not args.quiet and not args.brief:
-                        console.print(f"[yellow]{msg}[/yellow]")
-                    else:
-                        print(f"# Retrospective Complete\n\n{msg}")
-            except Exception as e:
-                logger.error(f"Retrospective failed: {e}", exc_info=True)
-                if not args.quiet and not args.brief:
-                    console.print(
-                        f"[yellow]Warning: Retrospective evaluation failed: {e}[/yellow]"
-                    )
-
-            sys.exit(0)
-
-        # Always evaluate past predictions for this ticker (if any exist)
-        # Gated on memory being enabled (--no-memory skips this)
-        if args.ticker and not args.no_memory:
-            try:
-                from src.retrospective import run_retrospective
-
-                results_dir = Path(config.results_dir)
-                lessons = await run_retrospective(
-                    ticker=args.ticker, results_dir=results_dir
-                )
-
-                if lessons and not args.quiet and not args.brief:
-                    console.print(
-                        f"\n[green]Generated {len(lessons)} new lesson(s) from past analyses[/green]"
-                    )
-            except Exception as e:
-                logger.warning("retrospective_failed", ticker=args.ticker, error=str(e))
-        elif args.ticker and args.no_memory:
-            logger.info("retrospective_skipped_no_memory", ticker=args.ticker)
-
-        # Generate welcome banner
-        welcome_banner = get_welcome_banner(args.ticker, args.quick)
-
-        # If writing to stdout (no output file), print banner immediately unless quiet/brief
-        if not output_file and not args.quiet and not args.brief:
-            print(welcome_banner)
-
-        # If writing to file, we will prepend the banner to the file content later
-        # We might still want to log that analysis is starting, but use logger for that
-        if output_file and not args.quiet and not args.brief:
-            logger.info(
-                f"Starting analysis for {args.ticker} (output to {output_file})"
-            )
-
-        result = await run_analysis(
-            args.ticker,
-            args.quick,
-            strict_mode=args.strict,
-            chart_format="svg" if args.svg else "png",
-            transparent_charts=args.transparent,
-            image_dir=image_dir,
-            skip_charts=args.no_charts,
+        _attach_run_summary(result, args, provider_preflight)
+        company_name, report, reporter = _render_primary_output(
+            result, args, output_targets, welcome_banner
         )
-
-        if result:
-            # Auto-detect non-TTY stdout (e.g., output redirected to file)
-            # Use markdown output instead of Rich formatting to avoid box-drawing characters
-            use_markdown = (
-                args.brief or args.quiet or not sys.stdout.isatty() or args.output
-            )
-
-            # Initialize variables that may be needed for article generation
-            company_name = None
-            report = None
-
-            if use_markdown:
-                try:
-                    import yfinance as yf
-
-                    ticker_obj = yf.Ticker(args.ticker)
-                    info = ticker_obj.info
-                    company_name = info.get("longName") or info.get("shortName")
-                except Exception:
-                    pass
-
-                reporter = QuietModeReporter(
-                    args.ticker,
-                    company_name,
-                    quick_mode=args.quick,
-                    chart_format="svg" if args.svg else "png",
-                    transparent_charts=args.transparent,
-                    skip_charts=args.no_charts,
-                    image_dir=image_dir,
-                    report_dir=output_dir,  # Pass output dir for relative link calculation
-                    report_stem=Path(args.output).stem if args.output else None,
-                )
-                report = reporter.generate_report(result, brief_mode=args.brief)
-
-                # Prepend welcome banner if we generated it and are writing to file (or stdout in full markdown mode)
-                # But careful: if we already printed it (stdout case above), don't duplicate.
-                # Logic:
-                # 1. If output_file: Prepend banner to report content.
-                # 2. If stdout: We already printed banner above. BUT generate_report creates a full markdown string.
-                #    If we print that string, it's fine.
-
-                if args.output:
-                    # Prepend banner to file content
-                    full_content = welcome_banner + "\n" + report
-
-                    try:
-                        # Ensure parent directory exists
-                        if output_file.parent != Path("."):
-                            output_file.parent.mkdir(parents=True, exist_ok=True)
-
-                        with open(output_file, "w") as f:
-                            f.write(full_content)
-
-                        if not args.quiet and not args.brief:
-                            console.print(
-                                f"[green]Report saved to:[/green] [cyan]{output_file}[/cyan]{_cost_suffix()}"
-                            )
-                    except Exception as e:
-                        logger.error(f"Failed to write report to {output_file}: {e}")
-                        sys.exit(1)
-                else:
-                    # Writing to stdout
-                    print(report)
-            else:
-                display_results(result, args.ticker)
-
-            try:
-                filepath = save_results_to_file(
-                    result, args.ticker, quick_mode=args.quick
-                )
-                if not args.quiet and not args.brief:
-                    console.print(
-                        f"[green]Results saved to:[/green] [cyan]{filepath}[/cyan]{_cost_suffix()}"
-                    )
-            except Exception as e:
-                logger.error(f"Failed to save results: {e}")
-                if not args.quiet and not args.brief:
-                    console.print(
-                        f"\n[yellow]Warning: Could not save results to file: {e}[/yellow]\n"
-                    )
-
-            # Save rejection record for non-BUY verdicts (unconditional — not gated
-            # by --no-memory, since rejection records are factual metrics, not agent
-            # reasoning; they're always useful for future analyses of the same ticker)
-            try:
-                from src.retrospective import (
-                    create_lessons_memory,
-                    extract_snapshot,
-                    save_rejection_record,
-                )
-
-                _snapshot = extract_snapshot(
-                    result, args.ticker, is_quick_mode=args.quick
-                )
-                _verdict = _snapshot.get("verdict", "")
-                if _verdict and _verdict != "BUY":
-                    _rejection_memory = create_lessons_memory()
-                    await save_rejection_record(_snapshot, _rejection_memory)
-            except Exception as e:
-                logger.debug("rejection_record_save_skipped", error=str(e))
-
-            # Generate article if --article flag is set
-            if args.article:
-                # Warn if article will lack images (stdout mode disables charts)
-                # Use stderr so warning is visible even in quiet mode
-                if args.no_charts and not output_file and not args.imagedir:
-                    print(
-                        "Warning: Article generated without images (stdout mode).",
-                        file=sys.stderr,
-                    )
-                # Get trade_date from result or current date
-                trade_date = result.get("trade_date") or datetime.now().strftime(
-                    "%Y-%m-%d"
-                )
-
-                # Generate report text for article if not already done
-                if not use_markdown:
-                    # Need to generate markdown report for article
-                    if company_name is None:
-                        try:
-                            import yfinance as yf
-
-                            ticker_obj = yf.Ticker(args.ticker)
-                            info = ticker_obj.info
-                            company_name = (
-                                info.get("longName")
-                                or info.get("shortName")
-                                or args.ticker
-                            )
-                        except Exception:
-                            company_name = args.ticker
-
-                    reporter = QuietModeReporter(
-                        args.ticker,
-                        company_name,
-                        quick_mode=args.quick,
-                        chart_format="svg" if args.svg else "png",
-                        transparent_charts=args.transparent,
-                        skip_charts=args.no_charts,
-                        image_dir=image_dir,
-                        report_dir=output_dir,
-                        report_stem=Path(args.output).stem if args.output else None,
-                    )
-                    report = reporter.generate_report(result, brief_mode=False)
-
-                await handle_article_generation(
-                    args=args,
-                    ticker=args.ticker,
-                    company_name=company_name or args.ticker,
-                    report_text=report,
-                    trade_date=trade_date,
-                    valuation_context=reporter.get_valuation_context(),
-                    analysis_result=result,
-                )
-
-            sys.exit(0)
-        else:
-            if args.quiet or args.brief:
-                print(
-                    "# Analysis Failed\n\nAn error occurred during analysis. Check logs for details."
-                )
-            else:
-                console.print(
-                    "\n[bold red]Analysis failed. Check logs for details.[/bold red]\n"
-                )
-            sys.exit(1)
+        _persist_analysis_outputs(result, args)
+        await _maybe_save_rejection_record(result, args)
+        article_generated = await _maybe_generate_article(
+            result, args, output_targets, company_name, report, reporter
+        )
+        _log_final_summary(result, args, article_generated)
+        return 0
 
     except KeyboardInterrupt:
-        if args and (args.quiet or args.brief):
-            pass
-        else:
+        if not (args and (args.quiet or args.brief)):
             console.print("\n[yellow]Analysis interrupted by user.[/yellow]\n")
-        sys.exit(1)
-    except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}", exc_info=True)
+        return 1
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else 1
+    except Exception as exc:
+        logger.error("unexpected_error", error=str(exc), exc_info=True)
         if args and (args.quiet or args.brief):
-            print(f"# Unexpected Error\n\n{str(e)}")
+            print(f"# Unexpected Error\n\n{str(exc)}")
         else:
-            console.print(f"\n[bold red]Unexpected error:[/bold red] {str(e)}\n")
-        sys.exit(1)
+            console.print(f"\n[bold red]Unexpected error:[/bold red] {str(exc)}\n")
+        return 1
     finally:
-        # Clean up async resources (aiohttp sessions, etc.)
-        # This prevents "coroutine was never awaited" warnings
         try:
             from src.cleanup import cleanup_async_resources
 
             await cleanup_async_resources()
         except Exception:
-            pass  # Cleanup errors shouldn't prevent exit
+            pass
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.exit(asyncio.run(main()))

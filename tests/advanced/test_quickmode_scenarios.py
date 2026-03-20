@@ -4,14 +4,15 @@ Verifies that thinking_level is set based only on the model version,
 not on any comparison between DEEP_MODEL and QUICK_MODEL.
 """
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-# The functions to test
 from src.llms import (
     _is_gemini_v3_or_greater,
     create_deep_thinking_llm,
+    create_gemini_model,
     create_quick_thinking_llm,
 )
 
@@ -130,3 +131,32 @@ def test_deep_llm_has_no_thinking_level_on_gemini_2(
     mock_create_gemini_model.assert_called_once()
     call_kwargs = mock_create_gemini_model.call_args.kwargs
     assert call_kwargs.get("thinking_level") is None
+
+
+def test_create_gemini_model_logs_thinking_level_at_debug(caplog):
+    with patch("src.llms.ChatGoogleGenerativeAI", return_value=MagicMock()):
+        caplog.set_level(logging.DEBUG, logger="src.llms")
+
+        create_gemini_model(
+            "gemini-3-pro-preview",
+            temperature=0.1,
+            timeout=30,
+            max_retries=1,
+            thinking_level="high",
+        )
+
+    info_messages = [
+        record.message
+        for record in caplog.records
+        if record.levelno == logging.INFO and "thinking_level_applied" in record.message
+    ]
+    debug_records = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.DEBUG and "thinking_level_applied" in r.message
+    ]
+
+    assert info_messages == []
+    assert debug_records
+    assert "high" in debug_records[0].message
+    assert "gemini-3-pro-preview" in debug_records[0].message

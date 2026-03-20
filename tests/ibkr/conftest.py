@@ -10,6 +10,7 @@ from src.ibkr.models import (
     PortfolioSummary,
     TradeBlockData,
 )
+from src.ibkr.ticker import Ticker
 
 
 @pytest.fixture
@@ -62,9 +63,7 @@ def sample_positions():
     return [
         NormalizedPosition(
             conid=123456,
-            yf_ticker="7203.T",
-            symbol="7203",
-            exchange="TSE",
+            ticker=Ticker.from_yf("7203.T"),
             quantity=100,
             avg_cost_local=2000.0,
             market_value_usd=1400.0,
@@ -73,9 +72,7 @@ def sample_positions():
         ),
         NormalizedPosition(
             conid=789012,
-            yf_ticker="0005.HK",
-            symbol="5",
-            exchange="SEHK",
+            ticker=Ticker.from_yf("0005.HK"),
             quantity=400,
             avg_cost_local=58.0,
             market_value_usd=2960.0,

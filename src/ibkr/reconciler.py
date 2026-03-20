@@ -19,12 +19,22 @@ unaware of existing positions. This module bridges that gap by:
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import re
+import tempfile
+import threading
+import time
+from collections.abc import Callable
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import structlog
 
+from src.fx_normalization import get_fx_rate_fallback
 from src.ibkr.models import (
     AnalysisRecord,
     NormalizedPosition,
@@ -37,8 +47,199 @@ from src.ibkr.order_builder import (
     parse_trade_block,
     round_to_lot_size,
 )
+from src.ibkr.ticker import Ticker
+from src.ticker_utils import TickerFormatter
 
 logger = structlog.get_logger(__name__)
+_ANALYSIS_INDEX_VERSION = 2
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisLoadProgress:
+    """Progress update emitted while scanning/parsing saved analysis snapshots."""
+
+    phase: str
+    total_files: int
+    processed_files: int
+    loaded_analyses: int
+    current_file: str | None = None
+
+
+def _analysis_index_path(results_dir: Path) -> Path:
+    """Return the sibling cache file that stores latest-per-ticker analysis records."""
+    return results_dir.parent / f".{results_dir.name}.latest_analyses_index.json"
+
+
+def _analysis_index_lock_path(results_dir: Path) -> Path:
+    """Return the sibling lock file used to serialize index updates."""
+    return results_dir.parent / f".{results_dir.name}.latest_analyses_index.lock"
+
+
+@contextmanager
+def _analysis_index_lock(results_dir: Path):
+    """Serialize index updates across concurrent processes."""
+    lock_path = _analysis_index_lock_path(results_dir)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+") as lock_handle:
+        wait_started = time.perf_counter()
+        logger.debug("analysis_index_lock_waiting", path=str(lock_path))
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        logger.debug(
+            "analysis_index_lock_acquired",
+            path=str(lock_path),
+            wait_secs=round(time.perf_counter() - wait_started, 6),
+        )
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def _root_cause_type(exc: BaseException) -> str:
+    """Return the deepest chained exception type name for logging."""
+    current = exc
+    seen: set[int] = set()
+    while id(current) not in seen:
+        seen.add(id(current))
+        next_exc = current.__cause__ or current.__context__
+        if next_exc is None:
+            break
+        current = next_exc
+    return type(current).__name__
+
+
+def _serialize_analysis_index_entry(record: AnalysisRecord) -> dict[str, Any]:
+    """Serialize an indexed latest-analysis entry with source-file validation metadata."""
+    source_path = Path(record.file_path)
+    source_stat = source_path.stat()
+    return {
+        "record": record.model_dump(mode="json"),
+        "source_file": str(source_path),
+        "source_mtime_ns": source_stat.st_mtime_ns,
+        "source_size": source_stat.st_size,
+    }
+
+
+def _deserialize_analysis_record(data: dict[str, Any]) -> AnalysisRecord:
+    """Deserialize an AnalysisRecord from the latest-analyses cache."""
+    return AnalysisRecord.model_validate(data)
+
+
+def _validate_analysis_index_entry(
+    ticker: str,
+    entry: dict[str, Any],
+) -> AnalysisRecord | None:
+    """Return the cached AnalysisRecord only if its source file still matches."""
+    record_payload = entry.get("record")
+    source_file = entry.get("source_file")
+    source_mtime_ns = entry.get("source_mtime_ns")
+    source_size = entry.get("source_size")
+
+    if (
+        not isinstance(record_payload, dict)
+        or not isinstance(source_file, str)
+        or not isinstance(source_mtime_ns, int)
+        or not isinstance(source_size, int)
+    ):
+        logger.warning("analysis_index_entry_invalid", ticker=ticker)
+        return None
+
+    source_path = Path(source_file)
+    try:
+        stat = source_path.stat()
+    except OSError:
+        logger.warning(
+            "analysis_index_entry_source_missing",
+            ticker=ticker,
+            source_file=source_file,
+        )
+        return None
+
+    if stat.st_mtime_ns != source_mtime_ns or stat.st_size != source_size:
+        logger.warning(
+            "analysis_index_entry_stale",
+            ticker=ticker,
+            source_file=source_file,
+        )
+        return None
+
+    return _deserialize_analysis_record(record_payload)
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Atomically replace a JSON file on the same filesystem."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _resolve_fx(analysis: AnalysisRecord) -> float:
+    """Return FX rate (local → USD) for an analysis, with fallback chain.
+
+    Priority:
+    1. Saved fx_rate_to_usd from the analysis snapshot — UNLESS it equals exactly
+       1.0 for a non-USD currency, which indicates the legacy bogus fallback that was
+       stored before SEK/NOK/PLN/etc. were added to FALLBACK_RATES_TO_USD.  In that
+       case, fall through to the fallback table so old snapshots are self-healing.
+    2. Hardcoded fallback table (get_fx_rate_fallback) keyed by analysis.currency.
+    3. 1.0 (last resort — logs an error so the user knows cost figures may be wrong).
+    """
+    currency = (analysis.currency or "USD").strip().upper()
+    saved = analysis.fx_rate_to_usd
+
+    if saved is not None:
+        # Guard against legacy bogus rate: before the fix, unknown currencies (SEK,
+        # NOK, PLN, etc.) were saved as 1.0 via `or 1.0` in retrospective.py.
+        # For any non-USD currency, 1.0 is implausible — prefer the fallback table.
+        if saved == 1.0 and currency not in ("USD", ""):
+            fallback = get_fx_rate_fallback(currency)
+            if fallback is not None:
+                logger.warning(
+                    "fx_rate_saved_1_overridden",
+                    ticker=analysis.ticker,
+                    currency=currency,
+                    fallback_rate=fallback,
+                    msg="Saved fx_rate=1.0 for non-USD currency replaced with fallback "
+                    "(legacy snapshot; re-run analysis to persist correct rate)",
+                )
+                return fallback
+        return saved
+
+    if currency in ("USD", ""):
+        return 1.0
+    rate = get_fx_rate_fallback(currency)
+    if rate is not None:
+        logger.warning(
+            "fx_rate_missing_using_fallback",
+            ticker=analysis.ticker,
+            currency=currency,
+            fallback_rate=rate,
+            msg="Analysis snapshot missing fx_rate_to_usd — cost/quantity estimates approximate",
+        )
+        return rate
+    logger.error(
+        "fx_rate_unknown",
+        ticker=analysis.ticker,
+        currency=currency,
+        msg="No FX rate available; cost/quantity will be wrong — re-run analysis to fix",
+    )
+    return 1.0
+
 
 # Minimum USD order value — orders below this are not worth recommending.
 _MIN_ORDER_USD: float = 200.0
@@ -59,6 +260,29 @@ _EXCHANGE_LONG_NAMES: dict[str, str] = {
     "SZ": "Shenzhen",
     "SI": "Singapore",
     "US": "United States",
+    "MX": "Mexico",
+    "MC": "Madrid",
+    "AX": "Australia",
+    "KL": "Malaysia",
+    "VI": "Vienna",
+    "WA": "Poland",
+    "ST": "Sweden",
+    "OL": "Norway",
+    "CO": "Denmark",
+    "SA": "Brazil",
+    "JK": "Indonesia",
+    "BK": "Thailand",
+    "BO": "India BSE",
+    "NS": "India NSE",
+    "TO": "Canada",
+    "V": "Canada TSXV",
+    "NZ": "New Zealand",
+    "SW": "Switzerland",
+    "F": "Frankfurt",
+    "BR": "Belgium",
+    "LS": "Lisbon",
+    "MI": "Milan",
+    "EUR": "Europe (EUR)",
 }
 
 
@@ -69,12 +293,482 @@ def _exchange_from_ticker(ticker: str) -> str:
     return ticker.rsplit(".", 1)[-1].upper()
 
 
+def _exchange_from_position(pos: NormalizedPosition) -> str:
+    """
+    Derive a short exchange code (e.g. 'T', 'HK', 'KL') from a NormalizedPosition.
+
+    Priority:
+    1. ticker.yf suffix — always correct when normalize_positions() set it via
+       Ticker.from_ibkr() (which already consulted IBKR_TO_YFINANCE).
+    2. IBKR listingExchange (ticker.exchange) via TickerFormatter.IBKR_TO_YFINANCE —
+       corrects cases where an analysis was run without an exchange suffix, causing
+       the ticker-based inference to fall through to the wrong "US" default.
+    3. Currency heuristic — handles IBKR exchanges not in the static map (e.g. some
+       regional venues) when the currency is unambiguous (SEK→ST, MYR→KL, etc.).
+    4. "US" fallback.
+
+    No network calls are made.
+    """
+    yf_str = pos.ticker.yf
+    # 1. Suffix present on ticker.yf — most positions satisfy this condition
+    if "." in yf_str:
+        return yf_str.rsplit(".", 1)[-1].upper()
+
+    # 2. IBKR listingExchange via static map
+    if pos.ticker.exchange:
+        ibkr_suffix = TickerFormatter.IBKR_TO_YFINANCE.get(pos.ticker.exchange, None)
+        if ibkr_suffix is not None:
+            # Empty string means a US venue (NASDAQ, NYSE, etc.)
+            return ibkr_suffix.lstrip(".") if ibkr_suffix else "US"
+
+    # 3. Currency heuristic.
+    #    Single-exchange currencies (HKD, JPY, etc.) are truly unambiguous.
+    #    Regionally-specific currencies (GBP, CAD, CHF) have multiple exchanges
+    #    within the same country but are geographically unambiguous — far better
+    #    to label them as UK/Canada/Switzerland than to miscount them as US.
+    #    EUR is multi-country but unmistakably non-US; grouped as "EUR".
+    _CURRENCY_TO_EXCHANGE: dict[str, str] = {
+        "HKD": "HK",
+        "JPY": "T",
+        "TWD": "TW",
+        "KRW": "KS",
+        "SGD": "SI",
+        "AUD": "AX",
+        "NZD": "NZ",
+        "BRL": "SA",
+        "MXN": "MX",
+        "MYR": "KL",
+        "PLN": "WA",
+        "SEK": "ST",
+        "NOK": "OL",
+        "DKK": "CO",
+        # Regionally-specific (non-US) currencies — group by country/region
+        "GBP": "L",  # UK (LSE / AIM)
+        "GBX": "L",  # UK pence
+        "CAD": "TO",  # Canada (TSX / TSXV)
+        "CHF": "SW",  # Switzerland (SIX)
+        "EUR": "EUR",  # Europe (multi-country; better than "US")
+    }
+    if pos.currency:
+        code = _CURRENCY_TO_EXCHANGE.get(pos.currency.upper(), "")
+        if code:
+            return code
+
+    return "US"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Analysis Loading
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def load_latest_analyses(results_dir: Path) -> dict[str, AnalysisRecord]:
+def _normalize_verdict(raw: str) -> str:
+    """Normalise a verdict string to canonical UPPER_SNAKE_CASE.
+
+    The PM occasionally outputs "DO NOT INITIATE" (spaces) instead of
+    "DO_NOT_INITIATE".  Both forms must compare equal in Phase 1.5 checks.
+
+    It also sometimes writes "DO\nNOT INITIATE" (newline between words),
+    causing the verdict regex to capture only the first word "DO".  Map that
+    truncation back to the full form so routing and display stay correct.
+    """
+    normed = raw.strip().replace(" ", "_").upper()
+    if normed == "DO":
+        return "DO_NOT_INITIATE"
+    return normed
+
+
+_REJECT_VERDICTS = frozenset({"DO_NOT_INITIATE", "SELL", "REJECT"})
+_FILENAME_DASH_DATE_RE = re.compile(
+    r"^(?P<ticker>.+?)_(\d{4}-\d{2}-\d{2})_analysis\.json$"
+)
+_FILENAME_TIMESTAMP_RE = re.compile(r"^(?P<ticker>.+?)_(\d{8})_(\d{6})_analysis\.json$")
+
+
+def _parse_scores_from_final_decision(text: str) -> dict:
+    """Extract health_adj, growth_adj, verdict, zone from a PM final_decision narrative.
+
+    Handles two legacy text formats for analyses that predate prediction_snapshot:
+
+    Mid-era (structured fields in text):
+        HEALTH_ADJ: 79  /  GROWTH_ADJ: 83  /  VERDICT: BUY  /  ZONE: MODERATE
+
+    Old-era (prose narrative):
+        Financial Health: 70.8% (Adjusted)  /  Growth Transition: 66.7% (Adjusted)
+        **Action**: **BUY**
+    """
+    result: dict = {}
+
+    # ── Health score ──────────────────────────────────────────────────────────
+    m = re.search(r"\bHEALTH_ADJ[:\s]+([0-9.]+)", text, re.IGNORECASE)
+    if not m:
+        # Handles "Financial Health: 70.8%" and "**Financial Health**: 70.8%"
+        # [^0-9\n]+ stops at the first digit so the number isn't partially consumed
+        m = re.search(r"Financial Health[^0-9\n]+([\d.]+)%", text, re.IGNORECASE)
+    if m:
+        try:
+            result["health_adj"] = float(m.group(1))
+        except ValueError:
+            pass
+
+    # ── Growth score ──────────────────────────────────────────────────────────
+    m = re.search(r"\bGROWTH_ADJ[:\s]+([0-9.]+)", text, re.IGNORECASE)
+    if not m:
+        m = re.search(r"Growth Transition[^0-9\n]+([\d.]+)%", text, re.IGNORECASE)
+    if m:
+        try:
+            result["growth_adj"] = float(m.group(1))
+        except ValueError:
+            pass
+
+    # ── Verdict ───────────────────────────────────────────────────────────────
+    # Capture 1-to-4 uppercase/underscore tokens separated by spaces or tabs
+    # (NOT newlines) so that "DO NOT INITIATE" is captured whole rather than
+    # truncated to "DO".  After capture, spaces are normalised to underscores.
+    _VERDICT_TOKEN = r"[A-Z_]+(?:[ \t][A-Z_]+)*"
+    for pat in (
+        rf"\bVERDICT[:\s]+({_VERDICT_TOKEN})",
+        rf"PORTFOLIO MANAGER VERDICT:\s*({_VERDICT_TOKEN})",
+        r"\*\*Action\*\*:\s*\*\*(\w[\w_ ]*)\*\*",
+    ):
+        m = re.search(pat, text)
+        if m:
+            result["verdict"] = m.group(1).strip().replace(" ", "_").upper()
+            break
+
+    # ── Risk zone ─────────────────────────────────────────────────────────────
+    m = re.search(r"\bZONE[:\s]+(HIGH|MODERATE|LOW)\b", text, re.IGNORECASE)
+    if m:
+        result["zone"] = m.group(1).upper()
+
+    return result
+
+
+def _should_emit_analysis_progress(processed_files: int, total_files: int) -> bool:
+    """Return True when a user-facing progress update is worth emitting."""
+    if total_files <= 0:
+        return False
+    if total_files > 20 and processed_files in {1, 5, 10, 25, 50, 100}:
+        return True
+    if total_files <= 20:
+        return True
+    if total_files <= 200:
+        step = 25
+    elif total_files <= 1000:
+        step = 100
+    else:
+        step = 250
+    return processed_files == total_files or processed_files % step == 0
+
+
+def _extract_filename_analysis_key(filename: str) -> str | None:
+    """Extract the filename-level ticker segment from an analysis snapshot filename."""
+    match = _FILENAME_DASH_DATE_RE.match(filename) or _FILENAME_TIMESTAMP_RE.match(
+        filename
+    )
+    if not match:
+        return None
+    return match.group("ticker")
+
+
+def _build_analysis_record_from_data(
+    filepath: Path, data: dict[str, Any]
+) -> AnalysisRecord | None:
+    """Build an AnalysisRecord from a saved analysis payload."""
+    snapshot = data.get("prediction_snapshot", {})
+
+    # For analyses that predate prediction_snapshot, extract scores from the
+    # PM final_decision text so that health/growth appear in the SELL output.
+    if snapshot.get("health_adj") is None or not snapshot.get("verdict"):
+        fd_text = (data.get("final_decision") or {}).get("decision", "") or ""
+        if fd_text:
+            fb = _parse_scores_from_final_decision(fd_text)
+            if snapshot.get("health_adj") is None:
+                snapshot = {**snapshot, "health_adj": fb.get("health_adj")}
+            if snapshot.get("growth_adj") is None:
+                snapshot = {**snapshot, "growth_adj": fb.get("growth_adj")}
+            if not snapshot.get("verdict"):
+                snapshot = {
+                    **snapshot,
+                    "verdict": _normalize_verdict(fb.get("verdict") or ""),
+                }
+            if not snapshot.get("zone"):
+                snapshot = {**snapshot, "zone": fb.get("zone") or ""}
+
+    ticker = snapshot.get("ticker") or data.get("ticker", "")
+    if not ticker:
+        filename_ticker = _extract_filename_analysis_key(filepath.name)
+        if filename_ticker:
+            ticker = filename_ticker.replace("_", ".")
+        if not ticker:
+            return None
+
+    trader_plan = data.get("investment_analysis", {}).get("trader_plan", "") or ""
+    trade_block = parse_trade_block(trader_plan) or TradeBlockData()
+
+    return AnalysisRecord(
+        ticker=ticker,
+        analysis_date=snapshot.get("analysis_date", "")
+        or _extract_date_from_filename(filepath.name),
+        file_path=str(filepath),
+        verdict=_normalize_verdict(snapshot.get("verdict", "") or ""),
+        health_adj=snapshot.get("health_adj"),
+        growth_adj=snapshot.get("growth_adj"),
+        zone=snapshot.get("zone") or "",
+        position_size=snapshot.get("position_size"),
+        current_price=snapshot.get("current_price"),
+        currency=snapshot.get("currency") or "USD",
+        fx_rate_to_usd=snapshot.get("fx_rate_to_usd"),
+        trade_block=trade_block,
+        entry_price=snapshot.get("entry_price") or trade_block.entry_price,
+        stop_price=snapshot.get("stop_price") or trade_block.stop_price,
+        target_1_price=snapshot.get("target_1_price") or trade_block.target_1_price,
+        target_2_price=snapshot.get("target_2_price") or trade_block.target_2_price,
+        conviction=snapshot.get("conviction") or trade_block.conviction,
+        sector=snapshot.get("sector") or "",
+        exchange=snapshot.get("exchange") or _exchange_from_ticker(ticker),
+        is_quick_mode=bool(snapshot.get("is_quick_mode", False)),
+    )
+
+
+def _build_analysis_record_from_file(filepath: Path) -> AnalysisRecord | None:
+    """Load a saved analysis JSON and convert it to an AnalysisRecord."""
+    with open(filepath) as f:
+        data = json.load(f)
+    return _build_analysis_record_from_data(filepath, data)
+
+
+def _load_latest_analyses_from_index(
+    results_dir: Path,
+    *,
+    current_dir_mtime_ns: int,
+    progress: Callable[[AnalysisLoadProgress], None] | None = None,
+) -> dict[str, AnalysisRecord] | None:
+    """Return cached latest analyses if the results directory has not changed."""
+    index_path = _analysis_index_path(results_dir)
+    if not index_path.exists():
+        return None
+
+    def emit_rebuild_notice(current_file: str, total_files: int = 0) -> None:
+        if progress is None:
+            return
+        progress(
+            AnalysisLoadProgress(
+                phase="rebuilding_index",
+                total_files=total_files,
+                processed_files=0,
+                loaded_analyses=0,
+                current_file=current_file,
+            )
+        )
+
+    try:
+        with open(index_path) as f:
+            payload = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning(
+            "analysis_index_load_failed",
+            path=str(index_path),
+            error=str(exc),
+            error_type=type(exc).__name__,
+            root_cause_type=_root_cause_type(exc),
+            exc_info=True,
+        )
+        emit_rebuild_notice(index_path.name)
+        return None
+
+    if payload.get("version") != _ANALYSIS_INDEX_VERSION:
+        emit_rebuild_notice(f"{index_path.name}:version_mismatch")
+        return None
+    if payload.get("results_dir") != str(results_dir.resolve()):
+        emit_rebuild_notice(f"{index_path.name}:path_mismatch")
+        return None
+    if payload.get("results_dir_mtime_ns") != current_dir_mtime_ns:
+        emit_rebuild_notice(f"{index_path.name}:stale_directory_state")
+        return None
+
+    analyses: dict[str, AnalysisRecord] = {}
+    for ticker, entry in (payload.get("analyses") or {}).items():
+        record = _validate_analysis_index_entry(ticker, entry)
+        if record is None:
+            emit_rebuild_notice(
+                f"{index_path.name}:entry_invalid:{ticker}",
+                total_files=int(payload.get("total_files") or 0),
+            )
+            return None
+        analyses[ticker] = record
+    total_files = int(payload.get("total_files") or len(analyses))
+
+    if progress is not None:
+        progress(
+            AnalysisLoadProgress(
+                phase="indexed",
+                total_files=total_files,
+                processed_files=total_files,
+                loaded_analyses=len(analyses),
+                current_file=None,
+            )
+        )
+
+    logger.info("analyses_loaded_from_index", count=len(analyses), path=str(index_path))
+    return analyses
+
+
+def _write_latest_analyses_index(
+    results_dir: Path,
+    analyses: dict[str, AnalysisRecord],
+    *,
+    total_files: int,
+) -> None:
+    """Persist the latest-per-ticker cache for future fast loads."""
+    index_path = _analysis_index_path(results_dir)
+    payload = {
+        "version": _ANALYSIS_INDEX_VERSION,
+        "results_dir": str(results_dir.resolve()),
+        "results_dir_mtime_ns": results_dir.stat().st_mtime_ns,
+        "total_files": total_files,
+        "analyses": {
+            ticker: _serialize_analysis_index_entry(record)
+            for ticker, record in analyses.items()
+        },
+    }
+    try:
+        with _analysis_index_lock(results_dir):
+            _atomic_write_json(index_path, payload)
+    except OSError as exc:
+        logger.warning(
+            "analysis_index_write_failed",
+            path=str(index_path),
+            error=str(exc),
+            error_type=type(exc).__name__,
+            root_cause_type=_root_cause_type(exc),
+            exc_info=True,
+        )
+
+
+def update_latest_analyses_index(
+    results_dir: Path,
+    record: AnalysisRecord,
+    *,
+    previous_dir_mtime_ns: int | None,
+    analysis_file_count_before_save: int | None = None,
+) -> bool:
+    """Incrementally update a valid latest-analyses index after saving one analysis."""
+    index_path = _analysis_index_path(results_dir)
+    if previous_dir_mtime_ns is None:
+        logger.info(
+            "analysis_index_incremental_update_skipped",
+            ticker=record.ticker,
+            path=str(index_path),
+            reason="missing_previous_dir_mtime",
+        )
+        return False
+    if not index_path.exists():
+        logger.info(
+            "analysis_index_incremental_update_skipped",
+            ticker=record.ticker,
+            path=str(index_path),
+            reason="index_missing",
+        )
+        return False
+
+    try:
+        with _analysis_index_lock(results_dir):
+            try:
+                with open(index_path) as f:
+                    payload = json.load(f)
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.warning(
+                    "analysis_index_incremental_update_failed",
+                    path=str(index_path),
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                    root_cause_type=_root_cause_type(exc),
+                    exc_info=True,
+                )
+                return False
+
+            if payload.get("version") != _ANALYSIS_INDEX_VERSION:
+                logger.info(
+                    "analysis_index_incremental_update_skipped",
+                    ticker=record.ticker,
+                    path=str(index_path),
+                    reason="version_mismatch",
+                )
+                return False
+            if payload.get("results_dir") != str(results_dir.resolve()):
+                logger.info(
+                    "analysis_index_incremental_update_skipped",
+                    ticker=record.ticker,
+                    path=str(index_path),
+                    reason="results_dir_mismatch",
+                )
+                return False
+            indexed_total_files = int(payload.get("total_files") or 0)
+            if payload.get("results_dir_mtime_ns") != previous_dir_mtime_ns:
+                if (
+                    analysis_file_count_before_save is not None
+                    and indexed_total_files == analysis_file_count_before_save
+                ):
+                    logger.info(
+                        "analysis_index_incremental_update_mtime_mismatch_accepted",
+                        ticker=record.ticker,
+                        path=str(index_path),
+                        expected_previous_dir_mtime_ns=previous_dir_mtime_ns,
+                        index_dir_mtime_ns=payload.get("results_dir_mtime_ns"),
+                        analysis_file_count_before_save=analysis_file_count_before_save,
+                        indexed_total_files=indexed_total_files,
+                        source_file=record.file_path,
+                    )
+                else:
+                    logger.info(
+                        "analysis_index_incremental_update_skipped",
+                        ticker=record.ticker,
+                        path=str(index_path),
+                        reason="stale_directory_state",
+                        expected_previous_dir_mtime_ns=previous_dir_mtime_ns,
+                        index_dir_mtime_ns=payload.get("results_dir_mtime_ns"),
+                        current_dir_mtime_ns=results_dir.stat().st_mtime_ns,
+                        source_file=record.file_path,
+                        analysis_file_count_before_save=analysis_file_count_before_save,
+                        indexed_total_files=indexed_total_files,
+                    )
+                    return False
+
+            analyses_payload = dict(payload.get("analyses") or {})
+            analyses_payload[record.ticker] = _serialize_analysis_index_entry(record)
+            updated_payload = {
+                "version": _ANALYSIS_INDEX_VERSION,
+                "results_dir": str(results_dir.resolve()),
+                "results_dir_mtime_ns": results_dir.stat().st_mtime_ns,
+                "total_files": indexed_total_files + 1,
+                "analyses": analyses_payload,
+            }
+            _atomic_write_json(index_path, updated_payload)
+    except OSError as exc:
+        logger.warning(
+            "analysis_index_incremental_write_failed",
+            path=str(index_path),
+            error=str(exc),
+            error_type=type(exc).__name__,
+            root_cause_type=_root_cause_type(exc),
+            exc_info=True,
+        )
+        return False
+    logger.info(
+        "analysis_index_incremental_updated",
+        ticker=record.ticker,
+        path=str(index_path),
+        source_file=record.file_path,
+    )
+    return True
+
+
+def load_latest_analyses(
+    results_dir: Path,
+    *,
+    progress: Callable[[AnalysisLoadProgress], None] | None = None,
+) -> dict[str, AnalysisRecord]:
     """
     Load the most recent analysis JSON for each ticker from results_dir.
 
@@ -84,70 +778,146 @@ def load_latest_analyses(results_dir: Path) -> dict[str, AnalysisRecord]:
         logger.warning("results_dir_not_found", path=str(results_dir))
         return {}
 
-    analyses: dict[str, AnalysisRecord] = {}
+    current_dir_mtime_ns = results_dir.stat().st_mtime_ns
+    indexed = _load_latest_analyses_from_index(
+        results_dir,
+        current_dir_mtime_ns=current_dir_mtime_ns,
+        progress=progress,
+    )
+    if indexed is not None:
+        return indexed
 
-    for filepath in sorted(results_dir.glob("*_analysis.json"), reverse=True):
-        try:
-            with open(filepath) as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
-            logger.debug("analysis_load_failed", file=filepath.name, error=str(e))
+    analyses: dict[str, AnalysisRecord] = {}
+    filepaths = sorted(results_dir.glob("*_analysis.json"), reverse=True)
+    total_files = len(filepaths)
+    failed_files = 0
+    duplicate_files = 0
+    filename_duplicates_skipped = 0
+    missing_ticker_files = 0
+    seen_filename_keys: set[str] = set()
+
+    if progress is not None:
+        progress(
+            AnalysisLoadProgress(
+                phase="discovered",
+                total_files=total_files,
+                processed_files=0,
+                loaded_analyses=0,
+            )
+        )
+
+    # Background thread emits a heartbeat every 30 s so a blocked open() call
+    # (e.g. macOS Spotlight holding a file) doesn't look like a silent hang.
+    _hb_state: dict[str, object] = {"file": "", "n": 0, "loaded": 0}
+    _hb_stop = threading.Event()
+
+    def _heartbeat_worker() -> None:
+        while not _hb_stop.wait(timeout=30.0):
+            if progress is not None and _hb_state["file"]:
+                progress(
+                    AnalysisLoadProgress(
+                        phase="parsing",
+                        total_files=total_files,
+                        processed_files=int(_hb_state["n"]),
+                        loaded_analyses=int(_hb_state["loaded"]),
+                        current_file=str(_hb_state["file"]),
+                    )
+                )
+
+    threading.Thread(
+        target=_heartbeat_worker, daemon=True, name="index-scan-heartbeat"
+    ).start()
+
+    for processed_files, filepath in enumerate(filepaths, start=1):
+        _hb_state["file"] = filepath.name
+        _hb_state["n"] = processed_files
+        _hb_state["loaded"] = len(analyses)
+        filename_key = _extract_filename_analysis_key(filepath.name)
+
+        def emit_progress(
+            processed_files_: int = processed_files,
+            current_file: str = filepath.name,
+        ) -> None:
+            if progress is None or not _should_emit_analysis_progress(
+                processed_files_, total_files
+            ):
+                return
+            progress(
+                AnalysisLoadProgress(
+                    phase="parsing",
+                    total_files=total_files,
+                    processed_files=processed_files_,
+                    loaded_analyses=len(analyses),
+                    current_file=current_file,
+                )
+            )
+
+        if filename_key is not None and filename_key in seen_filename_keys:
+            filename_duplicates_skipped += 1
+            emit_progress()
             continue
 
-        snapshot = data.get("prediction_snapshot", {})
-        ticker = snapshot.get("ticker") or data.get("ticker", "")
-        if not ticker:
-            # Try to extract from filename: TICKER_YYYY-MM-DD_analysis.json
-            parts = filepath.stem.split("_")
-            if len(parts) >= 3:
-                ticker = parts[0].replace("_", ".")
-            if not ticker:
-                continue
+        _t0 = time.monotonic()
+        try:
+            record = _build_analysis_record_from_file(filepath)
+        except (json.JSONDecodeError, OSError) as e:
+            failed_files += 1
+            logger.warning(
+                "analysis_file_unparseable",
+                file=filepath.name,
+                error=str(e),
+                recommendation="delete_and_rerun_analysis",
+            )
+            emit_progress()
+            continue
+        _elapsed = time.monotonic() - _t0
+        if _elapsed > 5.0:
+            logger.warning(
+                "analysis_file_slow_read",
+                file=filepath.name,
+                elapsed_s=round(_elapsed, 1),
+                hint="possible_spotlight_contention",
+            )
+
+        if record is None:
+            missing_ticker_files += 1
+            emit_progress()
+            continue
+        ticker = record.ticker
 
         # Skip if we already have a more recent analysis for this ticker
         if ticker in analyses:
+            duplicate_files += 1
+            emit_progress()
             continue
 
-        # Parse TRADE_BLOCK from trader output
-        trader_plan = data.get("investment_analysis", {}).get("trader_plan", "") or ""
-        trade_block = parse_trade_block(trader_plan) or TradeBlockData()
-
-        # Build the analysis record
-        record = AnalysisRecord(
-            ticker=ticker,
-            analysis_date=snapshot.get("analysis_date", "")
-            or _extract_date_from_filename(filepath.name),
-            file_path=str(filepath),
-            verdict=snapshot.get("verdict", "") or "",
-            health_adj=snapshot.get("health_adj"),
-            growth_adj=snapshot.get("growth_adj"),
-            zone=snapshot.get("zone", ""),
-            position_size=snapshot.get("position_size"),
-            current_price=snapshot.get("current_price"),
-            currency=snapshot.get("currency", "USD"),
-            fx_rate_to_usd=snapshot.get("fx_rate_to_usd"),
-            trade_block=trade_block,
-            # Structured TRADE_BLOCK fields from snapshot (if present)
-            entry_price=snapshot.get("entry_price") or trade_block.entry_price,
-            stop_price=snapshot.get("stop_price") or trade_block.stop_price,
-            target_1_price=snapshot.get("target_1_price") or trade_block.target_1_price,
-            target_2_price=snapshot.get("target_2_price") or trade_block.target_2_price,
-            conviction=snapshot.get("conviction", "") or trade_block.conviction,
-            # Concentration metadata (sector may be absent in older snapshots)
-            sector=snapshot.get("sector", ""),
-            exchange=snapshot.get("exchange", "") or _exchange_from_ticker(ticker),
-        )
-
         analyses[ticker] = record
-        logger.debug(
-            "analysis_loaded",
-            ticker=ticker,
-            verdict=record.verdict,
-            date=record.analysis_date,
-            age_days=record.age_days,
-        )
+        if filename_key is not None:
+            seen_filename_keys.add(filename_key)
+        emit_progress()
 
+    _hb_stop.set()
+    logger.debug(
+        "analyses_scan_complete",
+        total_files=total_files,
+        loaded=len(analyses),
+        failed=failed_files,
+        duplicates_skipped=duplicate_files,
+        filename_duplicates_skipped=filename_duplicates_skipped,
+        missing_ticker=missing_ticker_files,
+    )
     logger.info("analyses_loaded", count=len(analyses))
+    _write_latest_analyses_index(results_dir, analyses, total_files=total_files)
+    if progress is not None:
+        progress(
+            AnalysisLoadProgress(
+                phase="complete",
+                total_files=total_files,
+                processed_files=total_files,
+                loaded_analyses=len(analyses),
+                current_file=filepaths[-1].name if filepaths else None,
+            )
+        )
     return analyses
 
 
@@ -167,6 +937,7 @@ def check_staleness(
     current_price_local: float | None = None,
     max_age_days: int = 14,
     drift_threshold_pct: float = 15.0,
+    structural_macro_events: list | None = None,
 ) -> tuple[bool, str]:
     """
     Check if an analysis is stale and should be reviewed.
@@ -176,6 +947,9 @@ def check_staleness(
         current_price_local: Live price from IBKR (in local currency)
         max_age_days: Maximum age before considered stale
         drift_threshold_pct: Price movement threshold for staleness
+        structural_macro_events: Optional list of MacroEvent (STRUCTURAL only).
+            If an event occurred AFTER this analysis was written, the analysis
+            is considered stale (thesis may no longer be valid).
 
     Returns:
         Tuple of (is_stale, reason)
@@ -184,7 +958,8 @@ def check_staleness(
 
     # Age check
     if analysis.age_days > max_age_days:
-        reasons.append(f"age {analysis.age_days}d > {max_age_days}d limit")
+        age_str = "no date" if analysis.age_days >= 9999 else f"{analysis.age_days}d"
+        reasons.append(f"age {age_str} > {max_age_days}d limit")
 
     # Price drift check (requires both analysis price and current price)
     entry_price = analysis.entry_price or analysis.current_price
@@ -193,6 +968,28 @@ def check_staleness(
         if drift_pct > drift_threshold_pct:
             direction = "up" if current_price_local > entry_price else "down"
             reasons.append(f"price drift {drift_pct:.1f}% {direction}")
+
+    # Structural macro event check: if a STRUCTURAL event occurred AFTER this
+    # analysis was written, the thesis may no longer be valid — force re-analysis.
+    if structural_macro_events and analysis.analysis_date:
+        for event in structural_macro_events:
+            if event.event_date > analysis.analysis_date:
+                if event.scope == "GLOBAL":
+                    reasons.append(
+                        f"STRUCTURAL macro event ({event.news_headline[:40]!r}) "
+                        f"detected after analysis"
+                    )
+                    break
+                # For REGIONAL: check if this analysis ticker matches the event region
+                ticker = getattr(analysis, "ticker", "") or ""
+                dot = ticker.rfind(".")
+                suffix = ticker[dot:] if dot >= 0 else ""
+                if suffix and suffix == event.primary_region:
+                    reasons.append(
+                        f"STRUCTURAL macro event ({event.news_headline[:40]!r}) "
+                        f"in your region ({suffix}) after analysis"
+                    )
+                    break
 
     if reasons:
         return True, "; ".join(reasons)
@@ -206,6 +1003,17 @@ def check_stop_breach(
     """Check if current price has breached the stop-loss level."""
     stop = analysis.stop_price
     if stop and current_price_local > 0:
+        ratio = stop / current_price_local
+        if ratio > 50 or ratio < 0.02:
+            logger.warning(
+                "stop_price_ratio_suspicious",
+                ticker=analysis.ticker,
+                stop=stop,
+                current_price=current_price_local,
+                ratio=f"{ratio:.1f}x",
+                hint="Possible currency-unit mismatch or stale stop from different analysis",
+            )
+            return False  # suppress — don't trigger a stop on a likely data error
         return current_price_local < stop
     return False
 
@@ -240,6 +1048,29 @@ def _settlement_date(business_days: int) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Sell Classification
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _classify_sell_type(analysis: AnalysisRecord | None, stop_breached: bool) -> str:
+    """
+    Classify why a position is being sold.
+
+    Returns:
+        "STOP_BREACH"  — mechanical stop-loss trigger
+        "HARD_REJECT"  — fundamental failure (health_adj < 50 OR growth_adj < 50)
+        "SOFT_REJECT"  — passed hard checks, rejected on soft tally / macro fear
+    """
+    if stop_breached:
+        return "STOP_BREACH"
+    if analysis is None:
+        return "HARD_REJECT"  # no data → treat conservatively
+    health_ok = (analysis.health_adj or 0.0) >= 50.0
+    growth_ok = (analysis.growth_adj or 0.0) >= 50.0
+    return "SOFT_REJECT" if (health_ok and growth_ok) else "HARD_REJECT"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Position-Aware Reconciliation
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -254,6 +1085,7 @@ def reconcile(
     underweight_threshold_pct: float = 20.0,
     sector_limit_pct: float = 30.0,
     exchange_limit_pct: float = 40.0,
+    watchlist_tickers: set[str] | None = None,
 ) -> list[ReconciliationItem]:
     """
     Compare IBKR positions against evaluator recommendations.
@@ -263,8 +1095,11 @@ def reconcile(
     positions — this function does.
 
     Args:
-        positions: Live IBKR positions (normalized)
-        analyses: Latest analysis per ticker (from load_latest_analyses)
+        positions: Live IBKR positions (normalized). Each NormalizedPosition has
+            a yf_ticker (yfinance format, e.g. "7203.T") and a symbol (IBKR raw, e.g. "7203").
+        analyses: dict keyed by **yfinance ticker** (e.g. "7203.T", "0005.HK") →
+            AnalysisRecord. All keys must be in yf format — this is what
+            load_latest_analyses() returns and what watchlist_tickers contains.
         portfolio: Portfolio summary (cash, value); sector_weights and
             exchange_weights fields are populated as a side-effect.
         max_age_days: Max analysis age for staleness
@@ -273,6 +1108,11 @@ def reconcile(
         underweight_threshold_pct: % shortfall vs target before suggesting ADD
         sector_limit_pct: Warn when an ADD/BUY would push any sector above this %
         exchange_limit_pct: Warn when an ADD/BUY would push any exchange above this %
+        watchlist_tickers: Optional set of **yfinance tickers** from the IBKR watchlist.
+            Conversion from IBKR watchlist format to yf format is the caller's
+            responsibility (see ibkr_symbol_to_yf in ticker_mapper.py).
+            Tickers not currently held are evaluated in Phase 1.5 and surfaced as
+            BUY/HOLD/REMOVE/REVIEW based on their analysis verdict.
 
     Returns:
         List of ReconciliationItems with position-aware actions
@@ -282,21 +1122,78 @@ def reconcile(
     # Track remaining settled cash across Phase 1 ADDs and Phase 2 BUYs
     remaining_cash = portfolio.available_cash_usd
 
+    # ── Secondary lookup: base symbol → AnalysisRecord (alphabetic tickers only) ──
+    # Enables cross-format matching when a position's yf_ticker doesn't find an
+    # exact key in analyses, in either direction:
+    #   "MEGP" pos   → analysis stored as "MEGP.L"   (ibkr_symbol_to_yf failed)
+    #   "MEGP.L" pos → analysis stored as "MEGP"     (was re-run without suffix)
+    # Purely numeric bases (e.g. "7203", "0005") are excluded because the same
+    # number exists on Tokyo, HK, and TW — we cannot safely cross-match them.
+    #
+    # Suffixed analyses always win over bare ones in this lookup, so even when
+    # both "CEK" and "CEK.DE" exist in analyses (different run dates), the lookup
+    # always returns the canonical suffixed form "CEK.DE".
+    _alpha_base_lookup: dict[str, AnalysisRecord] = {}
+    _alpha_base_to_key: dict[str, str] = {}  # base → the analyses key that was chosen
+    for _yf_t, _rec in analyses.items():
+        _base = (_yf_t.rsplit(".", 1)[0] if "." in _yf_t else _yf_t).upper()
+        if re.match(
+            r"^[A-Z][A-Z0-9]*$", _base
+        ):  # starts with a letter → not purely numeric
+            if "." in _yf_t:
+                # Suffixed entry is more specific — always overwrite any bare entry
+                _alpha_base_lookup[_base] = _rec
+                _alpha_base_to_key[_base] = _yf_t
+            else:
+                # Bare (no suffix) — only use if no suffixed entry exists yet
+                _alpha_base_lookup.setdefault(_base, _rec)
+                _alpha_base_to_key.setdefault(_base, _yf_t)
+
+    # Pre-fetch structural macro events for staleness invalidation (fail-safe).
+    _structural_events: list = []
+    try:
+        from datetime import datetime as _dt
+        from datetime import timedelta
+
+        from src.memory import create_macro_events_store
+
+        _mstore = create_macro_events_store()
+        if _mstore.available:
+            _structural_events = _mstore.get_structural_events_since(
+                (_dt.now() - timedelta(days=180)).strftime("%Y-%m-%d")
+            )
+    except Exception:
+        pass
+
     # ── Pre-compute concentration weights from currently held positions ──
     # These are stored on the portfolio object for use by format_report().
+    # Use sum of position values as denominator so weights always sum to 100%,
+    # even when IBKR ledger total and position market values use different FX rates.
+    # Use pos.ticker.yf (with alpha-base fallback) so bare-ticker positions (e.g. "CEK")
+    # find the right analysis (e.g. "CEK.DE") for sector classification.
     _sector_weights: dict[str, float] = {}
     _exchange_weights: dict[str, float] = {}
-    if portfolio.portfolio_value_usd > 0:
+    _total_pos_value = sum(p.market_value_usd for p in positions)
+    if _total_pos_value > 0:
         for pos in positions:
-            _analysis = analyses.get(pos.yf_ticker)
+            _cticker = pos.ticker.yf
+            _analysis = analyses.get(_cticker)
+            # Alpha-base fallback: bare ticker position (e.g. "CEK") → suffixed analysis
+            if (
+                _analysis is None
+                and not pos.ticker.has_suffix
+                and not pos.ticker.ibkr.isdigit()
+            ):
+                _best = _alpha_base_lookup.get(pos.ticker.ibkr.upper())
+                if _best and "." in _best.ticker:
+                    _cticker = _best.ticker
+                    _analysis = _best
             _sector = (_analysis.sector if _analysis else "") or "Unknown"
-            _exchange = (
-                (_analysis.exchange if _analysis else "")
-                or _exchange_from_ticker(pos.yf_ticker)
-                or pos.exchange
-                or "Unknown"
-            )
-            _w = pos.market_value_usd / portfolio.portfolio_value_usd * 100
+            # Use IBKR-authoritative exchange inference: yf_ticker suffix → IBKR
+            # listingExchange → currency heuristic.  Avoids misclassifying stocks
+            # that were analysed without an exchange suffix as "US".
+            _exchange = _exchange_from_position(pos)
+            _w = pos.market_value_usd / _total_pos_value * 100
             _sector_weights[_sector] = _sector_weights.get(_sector, 0.0) + _w
             _exchange_weights[_exchange] = _exchange_weights.get(_exchange, 0.0) + _w
     portfolio.sector_weights = _sector_weights
@@ -304,15 +1201,79 @@ def reconcile(
 
     # ── Phase 1: Evaluate existing positions ──
     for pos in positions:
-        ticker = pos.yf_ticker
+        # IBKR occasionally returns positions with quantity=0 for a short period
+        # after a fill clears (the position is in the process of being removed).
+        # Skip these — they are not held; treating them as held would trigger
+        # spurious stop-breach SELLs or verdict-conflict REVIEWs with no shares.
+        if pos.quantity <= 0:
+            continue
+
+        # Resolve canonical yfinance ticker BEFORE the analyses.get() call.
+        # For bare tickers (no exchange suffix), consult _alpha_base_lookup first:
+        # it always returns the suffixed analysis when one exists, so a bare "CEK"
+        # position finds "CEK.DE" analysis rather than the bare "CEK" one.
+        # Numeric symbols excluded — same number appears on multiple exchanges.
+        yf_key = pos.ticker.yf
+        analysis: AnalysisRecord | None = None
+
+        if (
+            not pos.ticker.has_suffix
+            and pos.ticker.ibkr
+            and not pos.ticker.ibkr.isdigit()
+        ):
+            # Bare ticker: alpha-base lookup wins over exact-match to prefer suffixed form
+            _best = _alpha_base_lookup.get(pos.ticker.ibkr.upper())
+            if _best:
+                yf_key = (
+                    _best.ticker
+                )  # e.g. "CEK.DE" or bare "MEGP" if no suffixed version
+                analysis = _best
+                logger.debug(
+                    "analysis_found_via_alpha_base",
+                    pos_yf=pos.ticker.yf,
+                    ibkr_symbol=pos.ticker.ibkr,
+                    found_as=_best.ticker,
+                )
+
+        # Direct lookup: suffixed tickers, or bare tickers with no alpha-base match
+        if analysis is None:
+            analysis = analyses.get(yf_key)
+
+        # Fallback B: suffixed pos but analysis stored under bare ticker
+        # (e.g. pos.ticker.yf = "MEGP.L" but analysis stored as "MEGP").
+        if analysis is None and pos.ticker.ibkr and not pos.ticker.ibkr.isdigit():
+            analysis = _alpha_base_lookup.get(pos.ticker.ibkr.upper())
+            if analysis:
+                logger.debug(
+                    "analysis_found_via_base_symbol",
+                    yf_ticker=pos.ticker.yf,
+                    ibkr_symbol=pos.ticker.ibkr,
+                    found_as=analysis.ticker,
+                )
+
+        # Canonical Ticker for the item (upgraded if fallback fired):
+        item_ticker = Ticker.from_yf(yf_key) if yf_key != pos.ticker.yf else pos.ticker
+        ticker = yf_key
         held_tickers.add(ticker)
-        analysis = analyses.get(ticker)
+
+        # For bare tickers (no exchange suffix), also block every suffixed
+        # analysis key with the same base symbol so Phase 2 doesn't surface
+        # them as untracked BUY candidates.  The alpha_base_lookup above handles
+        # alphabetic tickers when an analysis exists, but numeric tickers are
+        # explicitly excluded from that lookup — this covers the gap.
+        # Example: holding bare "5434" while the analysis is "5434.TW" would
+        # otherwise produce a false WATCHLIST CANDIDATE for the held position.
+        if "." not in ticker:
+            _held_base = ticker.upper()
+            for _ak in analyses:
+                if "." in _ak and _ak.split(".")[0].upper() == _held_base:
+                    held_tickers.add(_ak)
 
         if analysis is None:
             # Position held but NO analysis exists → needs review
             items.append(
                 ReconciliationItem(
-                    ticker=ticker,
+                    ticker=item_ticker,
                     action="REVIEW",
                     reason="Position held but no evaluator analysis found",
                     urgency="MEDIUM",
@@ -327,7 +1288,7 @@ def reconcile(
         if check_stop_breach(analysis, current_price):
             items.append(
                 ReconciliationItem(
-                    ticker=ticker,
+                    ticker=item_ticker,
                     action="SELL",
                     reason=f"Stop breached: price {current_price:.2f} < stop {analysis.stop_price:.2f}",
                     urgency="HIGH",
@@ -338,16 +1299,17 @@ def reconcile(
                     suggested_order_type="LMT",
                     cash_impact_usd=pos.market_value_usd,
                     settlement_date=_settlement_date(2),
+                    sell_type="STOP_BREACH",
                 )
             )
             continue
 
         # Check verdict conflict: we hold but evaluator says don't
-        verdict_upper = (analysis.verdict or "").upper()
-        if verdict_upper in ("DO_NOT_INITIATE", "SELL", "REJECT"):
+        verdict_upper = _normalize_verdict(analysis.verdict or "")
+        if verdict_upper in _REJECT_VERDICTS:
             items.append(
                 ReconciliationItem(
-                    ticker=ticker,
+                    ticker=item_ticker,
                     action="SELL",
                     reason=f"Verdict → {analysis.verdict}  ({analysis.analysis_date})",
                     urgency="HIGH",
@@ -358,6 +1320,7 @@ def reconcile(
                     suggested_price=current_price,
                     cash_impact_usd=pos.market_value_usd,
                     settlement_date=_settlement_date(2),
+                    sell_type=_classify_sell_type(analysis, stop_breached=False),
                 )
             )
             continue
@@ -366,9 +1329,9 @@ def reconcile(
         if check_target_hit(analysis, current_price):
             items.append(
                 ReconciliationItem(
-                    ticker=ticker,
+                    ticker=item_ticker,
                     action="REVIEW",
-                    reason=f"Target hit: price {current_price:.2f} >= T1 {analysis.target_1_price:.2f}",
+                    reason=f"Target hit: price {current_price:.2f} >= target {analysis.target_1_price:.2f}",
                     urgency="LOW",
                     ibkr_position=pos,
                     analysis=analysis,
@@ -378,12 +1341,16 @@ def reconcile(
 
         # Check staleness (after target hit, which is more specific)
         is_stale, stale_reason = check_staleness(
-            analysis, current_price, max_age_days, drift_threshold_pct
+            analysis,
+            current_price,
+            max_age_days,
+            drift_threshold_pct,
+            structural_macro_events=_structural_events,
         )
         if is_stale:
             items.append(
                 ReconciliationItem(
-                    ticker=ticker,
+                    ticker=item_ticker,
                     action="REVIEW",
                     reason=f"Stale analysis: {stale_reason}",
                     urgency="MEDIUM",
@@ -414,7 +1381,7 @@ def reconcile(
                 )
                 items.append(
                     ReconciliationItem(
-                        ticker=ticker,
+                        ticker=item_ticker,
                         action="TRIM",
                         reason=f"Overweight: {actual_pct:.1f}% vs target {target_size_pct:.1f}% (+{excess_pct:.1f}%)",
                         urgency="MEDIUM",
@@ -431,7 +1398,7 @@ def reconcile(
 
             # Check underweight — only for BUY-verdict positions with sufficient shortfall
             shortfall_pct = target_size_pct - actual_pct
-            verdict_upper = (analysis.verdict or "").upper()
+            verdict_upper = _normalize_verdict(analysis.verdict or "")
             if (
                 shortfall_pct > underweight_threshold_pct
                 and verdict_upper == "BUY"
@@ -485,7 +1452,7 @@ def reconcile(
                             add_reason += "  " + "; ".join(conc_warns)
                     items.append(
                         ReconciliationItem(
-                            ticker=ticker,
+                            ticker=item_ticker,
                             action="ADD",
                             reason=add_reason,
                             urgency="LOW",
@@ -513,11 +1480,11 @@ def reconcile(
         if analysis.stop_price:
             status_parts.append(f"stop {analysis.stop_price:.2f}")
         if analysis.target_1_price:
-            status_parts.append(f"T1 {analysis.target_1_price:.2f}")
+            status_parts.append(f"target {analysis.target_1_price:.2f}")
 
         items.append(
             ReconciliationItem(
-                ticker=ticker,
+                ticker=item_ticker,
                 action="HOLD",
                 reason=f"Within targets — {'; '.join(status_parts)}"
                 if status_parts
@@ -528,18 +1495,206 @@ def reconcile(
             )
         )
 
+    # ── Phase 1.5: Watchlist tickers not currently held ──
+    # Evaluates each watchlist ticker that isn't an open position.
+    # After processing, all watchlist tickers are added to held_tickers so that
+    # Phase 2 doesn't surface them a second time as plain BUY recommendations.
+    watchlist_set = (watchlist_tickers or set()) - held_tickers
+    # Collects the analyses keys (e.g. "WDO.TO") resolved via base-symbol lookup
+    # for watchlist entries stored without a suffix (e.g. "WDO").  These must also
+    # be added to held_tickers after Phase 1.5 so Phase 2 doesn't re-surface them
+    # as untracked BUY candidates.
+    _watchlist_resolved_keys: set[str] = set()
+
+    for ticker in sorted(watchlist_set):
+        analysis = analyses.get(ticker)
+
+        # ALWAYS check _alpha_base_to_key for the base symbol — even when the bare
+        # analysis was found directly (e.g. analyses holds both "WDO" DNI and
+        # "WDO.TO" BUY).  Two goals:
+        # (a) Add the suffixed key to _watchlist_resolved_keys so Phase 2 doesn't
+        #     re-surface it as an untracked BUY candidate.
+        # (b) Prefer the more-specific suffixed analysis and ticker form so that
+        #     run commands (`--ticker WDO.TO`) are generated correctly.
+        _wl_base = (ticker.rsplit(".", 1)[0] if "." in ticker else ticker).upper()
+        if re.match(r"^[A-Z][A-Z0-9]*$", _wl_base):
+            _resolved_key = _alpha_base_to_key.get(_wl_base)
+            if _resolved_key and _resolved_key != ticker:
+                _watchlist_resolved_keys.add(_resolved_key)
+                _resolved_analysis = analyses.get(_resolved_key)
+                if _resolved_analysis:
+                    # Prefer the more-specific suffixed form
+                    analysis = _resolved_analysis
+                    ticker = _resolved_key  # e.g. upgrade "WDO" → "WDO.TO"
+        else:
+            # Numeric base (e.g. "5434"): _alpha_base_to_key skips numeric symbols.
+            # Manually cross-reference all suffixed analysis keys so Phase 2 doesn't
+            # re-surface them as untracked BUY candidates.
+            for _ak in analyses:
+                if "." in _ak and _ak.split(".")[0].upper() == _wl_base:
+                    _watchlist_resolved_keys.add(_ak)
+                    if analysis is None:
+                        _resolved_analysis = analyses.get(_ak)
+                        if _resolved_analysis:
+                            analysis = _resolved_analysis
+                            ticker = _ak
+
+        if analysis is None:
+            items.append(
+                ReconciliationItem(
+                    ticker=ticker,
+                    action="REVIEW",
+                    reason="Watchlist: no analysis found",
+                    urgency="MEDIUM",
+                    is_watchlist=True,
+                )
+            )
+            continue
+
+        is_stale, stale_reason = check_staleness(
+            analysis,
+            None,
+            max_age_days,
+            drift_threshold_pct,
+            structural_macro_events=_structural_events,
+        )
+        if is_stale:
+            items.append(
+                ReconciliationItem(
+                    ticker=ticker,
+                    action="REVIEW",
+                    reason=f"Watchlist: stale analysis ({stale_reason})",
+                    urgency="MEDIUM",
+                    analysis=analysis,
+                    is_watchlist=True,
+                )
+            )
+            continue
+
+        verdict_upper = _normalize_verdict(analysis.verdict or "")
+
+        if verdict_upper in _REJECT_VERDICTS:
+            items.append(
+                ReconciliationItem(
+                    ticker=ticker,
+                    action="REMOVE",
+                    reason=f"Remove from watchlist — verdict → {analysis.verdict}  ({analysis.analysis_date})",
+                    urgency="MEDIUM",
+                    analysis=analysis,
+                    is_watchlist=True,
+                )
+            )
+
+        elif verdict_upper == "BUY":
+            has_portfolio = portfolio.portfolio_value_usd > 0
+            if has_portfolio and remaining_cash <= 0:
+                # No cash — still surface the BUY as informational
+                items.append(
+                    ReconciliationItem(
+                        ticker=ticker,
+                        action="BUY",
+                        reason=f"Watchlist BUY ({analysis.analysis_date}) — no cash available",
+                        urgency="MEDIUM",
+                        analysis=analysis,
+                        is_watchlist=True,
+                    )
+                )
+            else:
+                entry_price = analysis.entry_price or analysis.current_price
+                conviction = (
+                    analysis.conviction or analysis.trade_block.conviction or ""
+                )
+                size_pct = analysis.trade_block.size_pct or (
+                    analysis.position_size or 0
+                )
+                _fx = _resolve_fx(analysis)
+                buy_qty = calculate_quantity(
+                    available_cash_usd=remaining_cash,
+                    entry_price_local=entry_price or 0.0,
+                    fx_rate_to_usd=_fx,
+                    size_pct=size_pct,
+                    portfolio_value_usd=portfolio.portfolio_value_usd,
+                    yf_ticker=ticker,
+                )
+                buy_cost_usd = buy_qty * (entry_price or 0.0) * _fx
+                if buy_qty > 0 and buy_cost_usd < _MIN_ORDER_USD:
+                    # Too small to place; skip (same rule as Phase 2)
+                    pass
+                else:
+                    remaining_cash -= buy_cost_usd
+                    buy_reason = f"Watchlist BUY ({analysis.analysis_date}) — {conviction} conviction, target {size_pct:.1f}%"
+                    if portfolio.portfolio_value_usd > 0:
+                        exch = analysis.exchange or _exchange_from_ticker(ticker)
+                        sect = analysis.sector or "Unknown"
+                        proj_exch = (
+                            _exchange_weights.get(exch, 0.0)
+                            + buy_cost_usd / portfolio.portfolio_value_usd * 100
+                        )
+                        proj_sect = (
+                            _sector_weights.get(sect, 0.0)
+                            + buy_cost_usd / portfolio.portfolio_value_usd * 100
+                        )
+                        conc_warns = []
+                        if proj_exch > exchange_limit_pct:
+                            conc_warns.append(
+                                f"⚠ {exch} → {proj_exch:.0f}% (limit {exchange_limit_pct:.0f}%)"
+                            )
+                        if proj_sect > sector_limit_pct:
+                            conc_warns.append(
+                                f"⚠ {sect} sector → {proj_sect:.0f}% (limit {sector_limit_pct:.0f}%)"
+                            )
+                        if conc_warns:
+                            buy_reason += "  " + "; ".join(conc_warns)
+                    items.append(
+                        ReconciliationItem(
+                            ticker=ticker,
+                            action="BUY",
+                            reason=buy_reason,
+                            urgency="MEDIUM",
+                            analysis=analysis,
+                            suggested_quantity=buy_qty if buy_qty > 0 else None,
+                            suggested_price=entry_price,
+                            suggested_order_type="LMT",
+                            cash_impact_usd=-buy_cost_usd if buy_cost_usd > 0 else 0.0,
+                            is_watchlist=True,
+                        )
+                    )
+
+        else:
+            # HOLD or any other verdict: keep watching, no position action
+            items.append(
+                ReconciliationItem(
+                    ticker=ticker,
+                    action="HOLD",
+                    reason=f"Watchlist: monitoring — verdict {analysis.verdict}  ({analysis.analysis_date})",
+                    urgency="LOW",
+                    analysis=analysis,
+                    is_watchlist=True,
+                )
+            )
+
+    # Prevent Phase 2 from re-processing watchlist tickers.
+    # Also block any suffixed keys resolved via base-symbol lookup (e.g. "WDO.TO"
+    # when the watchlist entry was "WDO") so Phase 2 doesn't surface them again.
+    held_tickers.update(watchlist_set)
+    held_tickers.update(_watchlist_resolved_keys)
+
     # ── Phase 2: Find BUY recommendations not yet held ──
     for ticker, analysis in analyses.items():
         if ticker in held_tickers:
             continue  # Already handled above
 
-        verdict_upper = (analysis.verdict or "").upper()
+        verdict_upper = _normalize_verdict(analysis.verdict or "")
         if verdict_upper not in ("BUY",):
             continue  # Only surface new BUY recommendations
 
         # Skip stale analyses for new buys
         is_stale, stale_reason = check_staleness(
-            analysis, None, max_age_days, drift_threshold_pct
+            analysis,
+            None,
+            max_age_days,
+            drift_threshold_pct,
+            structural_macro_events=_structural_events,
         )
         if is_stale:
             continue
@@ -554,15 +1709,16 @@ def reconcile(
         conviction = analysis.conviction or analysis.trade_block.conviction or ""
         size_pct = analysis.trade_block.size_pct or (analysis.position_size or 0)
 
+        _fx = _resolve_fx(analysis)
         buy_qty = calculate_quantity(
             available_cash_usd=remaining_cash,
             entry_price_local=entry_price or 0.0,
-            fx_rate_to_usd=analysis.fx_rate_to_usd,
+            fx_rate_to_usd=_fx,
             size_pct=size_pct,
             portfolio_value_usd=portfolio.portfolio_value_usd,
             yf_ticker=ticker,
         )
-        buy_cost_usd = buy_qty * (entry_price or 0.0) * (analysis.fx_rate_to_usd or 1.0)
+        buy_cost_usd = buy_qty * (entry_price or 0.0) * _fx
 
         # Skip only when we CAN calculate a quantity but the cost is trivially small.
         # If buy_qty=0 due to lot-size rounding (e.g. can't afford a full lot yet),
@@ -624,6 +1780,7 @@ def reconcile(
         buys=sum(1 for i in items if i.action == "BUY"),
         holds=sum(1 for i in items if i.action == "HOLD"),
         reviews=sum(1 for i in items if i.action == "REVIEW"),
+        removes=sum(1 for i in items if i.action == "REMOVE"),
     )
 
     return items
@@ -639,6 +1796,8 @@ def compute_portfolio_health(
     analyses: dict[str, AnalysisRecord],
     portfolio: PortfolioSummary,
     max_age_days: int = 14,
+    reconciliation_items: list | None = None,
+    correlated_window_days: int = 7,
 ) -> list[str]:
     """
     Compute portfolio-level health flags using data already in held analyses.
@@ -646,11 +1805,22 @@ def compute_portfolio_health(
     Returns a list of human-readable flag strings. Empty list = no flags.
     Call AFTER reconcile() so that portfolio.exchange_weights is already set.
 
+    When reconciliation_items is provided, also detects CORRELATED_SELL_EVENT
+    and demotes SOFT_REJECT SELLs to REVIEW in-place on correlated days.
+
+    Args:
+        correlated_window_days: Window width for grouping nearby sell dates.
+            Sells whose analysis_date falls within this many days of an anchor date
+            are counted as a single correlated event.  Default 7 prevents batch
+            re-analyses run over consecutive nights from fragmenting the same event.
+
     Flags:
-        LOW_HEALTH_AVERAGE    Weighted avg health_adj < 60 across holdings
-        LOW_GROWTH_AVERAGE    Weighted avg growth_adj < 55 across holdings
+        LOW_HEALTH_AVERAGE      Weighted avg health_adj < 60 across holdings
+        LOW_GROWTH_AVERAGE      Weighted avg growth_adj < 55 across holdings
         CURRENCY_CONCENTRATION  >50% of portfolio in a single currency
-        STALE_ANALYSIS_RATIO  >30% of positions have analyses older than max_age_days
+        STALE_ANALYSIS_RATIO    >30% of positions have analyses older than max_age_days
+        CORRELATED_SELL_EVENT   ≥5 and ≥25% of held positions flipped verdict within
+                                correlated_window_days of the same anchor date
     """
     if not positions or portfolio.portfolio_value_usd <= 0:
         return []
@@ -663,35 +1833,62 @@ def compute_portfolio_health(
     growth_count = 0
     stale_count = 0
     currency_weights: dict[str, float] = {}
+    # Per-position scores for detail lines: (ticker, score, is_stale)
+    scored_health: list[tuple[str, float, bool]] = []
+    scored_growth: list[tuple[str, float, bool]] = []
 
     for pos in positions:
         weight = pos.market_value_usd / portfolio.portfolio_value_usd
         total_weight += weight
 
-        analysis = analyses.get(pos.yf_ticker)
+        analysis = analyses.get(pos.ticker.yf)
+        is_stale = analysis is not None and analysis.age_days > max_age_days
         if analysis:
             if analysis.health_adj is not None:
                 weighted_health += analysis.health_adj * weight
                 health_count += 1
+                scored_health.append((pos.ticker.yf, analysis.health_adj, is_stale))
             if analysis.growth_adj is not None:
                 weighted_growth += analysis.growth_adj * weight
                 growth_count += 1
-            if analysis.age_days > max_age_days:
+                scored_growth.append((pos.ticker.yf, analysis.growth_adj, is_stale))
+            if is_stale:
                 stale_count += 1
 
         ccy = (pos.currency or "USD").upper()
         currency_weights[ccy] = currency_weights.get(ccy, 0.0) + weight * 100
 
+    def _worst_detail(
+        scored: list[tuple[str, float, bool]],
+        max_age_days: int,
+        n: int = 5,
+    ) -> str:
+        """Build a detail sub-line showing the N lowest-scoring positions."""
+        worst = sorted(scored, key=lambda x: x[1])[:n]
+        items_str = "  ".join(f"{t}({s:.0f}{'†' if st else ''})" for t, s, st in worst)
+        stale_n = sum(1 for _, _, st in scored if st)
+        lines = [f"       Lowest: {items_str}"]
+        if stale_n > 0:
+            lines.append(
+                f"       (†= stale >{max_age_days}d — {stale_n}/{len(scored)} scored"
+                f" analyses; scores may not reflect recent conditions)"
+            )
+        return "\n".join(lines)
+
     if total_weight > 0:
         if health_count > 0 and (weighted_health / total_weight) < 60:
+            detail = _worst_detail(scored_health, max_age_days)
             flags.append(
                 f"LOW_HEALTH_AVERAGE: weighted avg health {weighted_health / total_weight:.0f} < 60"
                 " — portfolio skewing toward distressed names"
+                f"\n{detail}"
             )
         if growth_count > 0 and (weighted_growth / total_weight) < 55:
+            detail = _worst_detail(scored_growth, max_age_days)
             flags.append(
                 f"LOW_GROWTH_AVERAGE: weighted avg growth {weighted_growth / total_weight:.0f} < 55"
                 " — GARP thesis eroding"
+                f"\n{detail}"
             )
 
     for ccy, pct in sorted(currency_weights.items(), key=lambda x: -x[1]):
@@ -708,6 +1905,7 @@ def compute_portfolio_health(
                 f"STALE_ANALYSIS_RATIO: {stale_count}/{len(positions)} positions"
                 f" ({stale_pct:.0f}%) have analyses older than {max_age_days}d"
                 " — flying blind on significant chunk of portfolio"
+                " (re-run with --refresh-stale to update)"
             )
 
     # Geography concentration is already surfaced via portfolio.exchange_weights;
@@ -719,5 +1917,85 @@ def compute_portfolio_health(
                 f"GEOGRAPHY_CONCENTRATION: {pct:.1f}% in {exch} ({long_name})"
                 " — single-exchange concentration"
             )
+
+    # ── CORRELATED_SELL_EVENT ─────────────────────────────────────────────────
+    # Detect when many held positions change verdict within a short window — a
+    # sign of macro noise rather than company-specific thesis failures.  Uses a
+    # sliding date window (correlated_window_days, default 7) so that batch
+    # re-analyses spread over consecutive nights don't fragment the same macro
+    # event across multiple exact dates.  Only verdict-driven SELLs
+    # (HARD_REJECT + SOFT_REJECT) are counted; mechanical stop breaches are
+    # excluded.
+    if reconciliation_items is not None:
+        from datetime import date as _date
+        from datetime import timedelta as _td
+
+        verdict_sells = [
+            item
+            for item in reconciliation_items
+            if item.action == "SELL"
+            and item.sell_type in ("HARD_REJECT", "SOFT_REJECT")
+        ]
+        total_held = sum(
+            1 for item in reconciliation_items if item.ibkr_position is not None
+        )
+
+        if verdict_sells:
+            # Parse analysis dates; skip sells with unparseable dates.
+            dated: list[tuple] = []
+            for item in verdict_sells:
+                if item.analysis and item.analysis.analysis_date:
+                    try:
+                        d = _date.fromisoformat(item.analysis.analysis_date)
+                        dated.append((item, d))
+                    except ValueError:
+                        pass
+
+            if dated:
+                all_dates = [d for _, d in dated]
+                peak_count = 0
+                peak_anchor = None
+
+                # Sliding window: for each sell date as anchor, count sells
+                # whose date falls within [anchor, anchor + window).
+                for anchor in all_dates:
+                    window_end = anchor + _td(days=correlated_window_days - 1)
+                    count = sum(1 for d in all_dates if anchor <= d <= window_end)
+                    if count > peak_count:
+                        peak_count = count
+                        peak_anchor = anchor
+
+                correlated_event = (
+                    peak_count >= 5
+                    and total_held > 0
+                    and peak_count / total_held >= 0.25
+                )
+                if correlated_event and peak_anchor is not None:
+                    flags.append(
+                        f"CORRELATED_SELL_EVENT: {peak_count} positions changed verdict"
+                        f" within {correlated_window_days}d of {peak_anchor.isoformat()}"
+                        f" ({peak_count / total_held:.0%} of held"
+                        f" positions) — probable macro event. Execute stop-breach SELLs"
+                        f" only; review verdict-change SELLs before acting."
+                    )
+                    # Demote SOFT_REJECT from SELL to REVIEW — these passed all hard
+                    # fundamental checks; the SELL verdict came from the soft-tally
+                    # (geopolitical/macro points), not from a thesis failure.
+                    for item in reconciliation_items:
+                        if item.action == "SELL" and item.sell_type == "SOFT_REJECT":
+                            item.action = "REVIEW"
+                            item.urgency = "MEDIUM"
+                            item.reason += (
+                                "  [MACRO_WATCH: demoted from SELL — correlated"
+                                " event detected]"
+                            )
+                    logger.info(
+                        "correlated_sell_event_detected",
+                        peak_date=peak_anchor.isoformat(),
+                        window_days=correlated_window_days,
+                        peak_count=peak_count,
+                        total_held=total_held,
+                        pct=f"{peak_count / total_held:.0%}",
+                    )
 
     return flags

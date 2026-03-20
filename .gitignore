@@ -5,6 +5,7 @@ CLAUDE.md
 .gemini
 .gemini/*
 GEMINI.md
+AGENTS.md
 
 # Local things we ignore
 examples/~*
@@ -161,6 +162,9 @@ ibkr_*.*
 outputs/
 results/
 reports/
+# Latest-analysis cache index and lock files
+/.*.latest_analyses_index.json
+/.*.latest_analyses_index.lock
 ## Track images; some production runs leave artifacts we want on GitHub
 # images/
 

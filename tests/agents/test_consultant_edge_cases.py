@@ -5,6 +5,8 @@ Tests various failure modes, data format edge cases, and system robustness
 to ensure the consultant doesn't break existing functionality under stress.
 """
 
+import asyncio
+import time
 from unittest.mock import Mock, patch
 
 import pytest
@@ -27,7 +29,9 @@ class TestDataFormatEdgeCases:
         async def mock_invoke(*args, **kwargs):
             return mock_response
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
@@ -73,9 +77,11 @@ class TestDataFormatEdgeCases:
             invoke_calls.append(args)
             return mock_response
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
-                with patch("src.agents.logger") as mock_logger:
+                with patch("src.agents.consultant_nodes.logger") as mock_logger:
                     mock_prompt = Mock()
                     mock_prompt.system_message = "You are a consultant."
                     mock_prompt.agent_name = "External Consultant"
@@ -130,7 +136,9 @@ class TestDataFormatEdgeCases:
         async def mock_invoke(*args, **kwargs):
             return mock_response
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."
@@ -239,7 +247,8 @@ class TestErrorPropagation:
             raise TimeoutError("OpenAI API request timed out after 120s")
 
         with patch(
-            "src.agents.invoke_with_rate_limit_handling", new=mock_invoke_timeout
+            "src.agents.runtime.invoke_with_rate_limit_handling",
+            new=mock_invoke_timeout,
         ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
@@ -267,8 +276,61 @@ class TestErrorPropagation:
                 result = await consultant_node(state, config)
 
                 assert "consultant_review" in result
-                assert "Error" in result["consultant_review"]
-                assert "Analysis will proceed" in result["consultant_review"]
+                assert result["consultant_review"] == ""
+                status = result["artifact_statuses"]["consultant_review"]
+                assert status["ok"] is False
+                assert status["error_kind"] == "timeout"
+
+    @pytest.mark.asyncio
+    async def test_consultant_wall_clock_timeout_cuts_off_stalled_invoke(self):
+        """A hanging consultant call should be bounded by the node timeout budget."""
+        mock_llm = Mock()
+
+        async def mock_invoke_hang(*args, **kwargs):
+            await asyncio.sleep(1.0)
+            raise AssertionError("consultant invoke should have been cancelled first")
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling",
+            new=mock_invoke_hang,
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                with patch(
+                    "src.agents.consultant_nodes.CONSULTANT_CALL_TIMEOUT_SECONDS", 0.05
+                ):
+                    with patch(
+                        "src.agents.consultant_nodes.CONSULTANT_TOTAL_TIMEOUT_SECONDS",
+                        0.08,
+                    ):
+                        mock_prompt = Mock()
+                        mock_prompt.system_message = "You are a consultant."
+                        mock_prompt.agent_name = "External Consultant"
+                        mock_get_prompt.return_value = mock_prompt
+
+                        consultant_node = create_consultant_node(mock_llm, "consultant")
+                        state = {
+                            "company_of_interest": "TEST",
+                            "company_name": "Test Co",
+                            "market_report": "Report",
+                            "sentiment_report": "Report",
+                            "news_report": "Report",
+                            "fundamentals_report": "Report",
+                            "investment_debate_state": {"history": "Debate"},
+                            "investment_plan": "BUY",
+                        }
+                        config = RunnableConfig(
+                            configurable={"context": Mock(trade_date="2025-12-13")}
+                        )
+
+                        started = time.monotonic()
+                        result = await consultant_node(state, config)
+                        elapsed = time.monotonic() - started
+
+        assert elapsed < 0.5
+        assert result["consultant_review"] == ""
+        status = result["artifact_statuses"]["consultant_review"]
+        assert status["ok"] is False
+        assert status["error_kind"] == "timeout"
 
     @pytest.mark.asyncio
     async def test_consultant_rate_limit_error(self):
@@ -279,7 +341,8 @@ class TestErrorPropagation:
             raise Exception("Rate limit exceeded. Please retry after 60s.")
 
         with patch(
-            "src.agents.invoke_with_rate_limit_handling", new=mock_invoke_rate_limit
+            "src.agents.runtime.invoke_with_rate_limit_handling",
+            new=mock_invoke_rate_limit,
         ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
@@ -307,8 +370,10 @@ class TestErrorPropagation:
                 result = await consultant_node(state, config)
 
                 assert "consultant_review" in result
-                assert "Error" in result["consultant_review"]
-                assert "Rate limit" in result["consultant_review"]
+                assert result["consultant_review"] == ""
+                status = result["artifact_statuses"]["consultant_review"]
+                assert status["ok"] is False
+                assert status["error_kind"] == "rate_limit"
 
 
 class TestReportGeneration:
@@ -390,6 +455,99 @@ class TestReportGeneration:
         assert "BUY" in report
         assert "TEST" in report
         assert "External Consultant Review" not in report
+
+    def test_report_omits_research_manager_recommendation_when_pm_decision_exists(self):
+        """The public report should not publish a second recommendation section."""
+        reporter = QuietModeReporter(ticker="TEST", company_name="Test Company")
+
+        result = {
+            "company_of_interest": "TEST",
+            "market_report": "Market analysis",
+            "fundamentals_report": "Fundamentals",
+            "investment_plan": "INVESTMENT RECOMMENDATION: HOLD",
+            "final_trade_decision": "PORTFOLIO MANAGER VERDICT: DO NOT INITIATE",
+        }
+
+        report = reporter.generate_report(result, brief_mode=False)
+
+        assert "Investment Recommendation" not in report
+        assert "PORTFOLIO MANAGER VERDICT: DO NOT INITIATE" in report
+
+    def test_report_surfaces_verification_caveats_before_executive_summary(self):
+        """Consultant disputes should be elevated before the main writeup."""
+        reporter = QuietModeReporter(ticker="TEST", company_name="Test Company")
+
+        result = {
+            "company_of_interest": "TEST",
+            "market_report": "Market analysis",
+            "fundamentals_report": "Fundamentals",
+            "consultant_review": (
+                "CONSULTANT REVIEW: CONDITIONAL\n\n"
+                "The insider-selling claim is unsubstantiated.\n"
+                "The 100 new vessels claim is likely wrong."
+            ),
+            "artifact_statuses": {
+                "consultant_review": {"complete": True, "ok": False},
+            },
+            "final_trade_decision": "FINAL DECISION: HOLD",
+        }
+
+        report = reporter.generate_report(result, brief_mode=False)
+
+        assert "## Verification Caveats" in report
+        assert "insider-selling claim is unsubstantiated" in report
+        assert report.index("## Verification Caveats") < report.index(
+            "## Executive Summary"
+        )
+
+    def test_report_rewrites_false_consultant_unavailable_claim(self):
+        """Public report should not claim the consultant was unavailable when review exists."""
+        reporter = QuietModeReporter(ticker="TEST", company_name="Test Company")
+
+        result = {
+            "company_of_interest": "TEST",
+            "market_report": "Market analysis",
+            "fundamentals_report": "Fundamentals",
+            "consultant_review": "CONSULTANT REVIEW: CONDITIONAL APPROVAL\n\nCoverage gaps remain.",
+            "artifact_statuses": {
+                "consultant_review": {"complete": True, "ok": False},
+            },
+            "final_trade_decision": (
+                'DECISION RATIONALE: The pre-screening flagged a "Consultant Conditional" '
+                "warning, but as the external consultant was unavailable to provide "
+                "specific conditions, the verified `DATA_BLOCK` fundamentals and moat "
+                "signals take absolute precedence."
+            ),
+        }
+
+        report = reporter.generate_report(result, brief_mode=False)
+
+        assert (
+            "external consultant was unavailable to provide specific conditions"
+            not in report
+        )
+        assert "tool-coverage gaps" in report
+
+    def test_report_repairs_glued_structured_block_boundary_before_demoting_headers(
+        self,
+    ):
+        """Rendered reports should clean older glued block boundaries without other changes."""
+        reporter = QuietModeReporter(ticker="TEST", company_name="Test Company")
+
+        result = {
+            "company_of_interest": "TEST",
+            "fundamentals_report": (
+                "### --- START DATA_BLOCK ---\n"
+                "SECTOR: Energy\n"
+                "### --- END DATA_BLOCK ---### FINANCIAL HEALTH DETAIL\n"
+                "**Score**: 9/12\n"
+            ),
+            "final_trade_decision": "PORTFOLIO MANAGER VERDICT: HOLD",
+        }
+
+        report = reporter.generate_report(result, brief_mode=False)
+
+        assert "#### --- END DATA_BLOCK ---\n\n#### FINANCIAL HEALTH DETAIL" in report
 
 
 class TestBackwardsCompatibility:
@@ -487,7 +645,9 @@ class TestLargeContextHandling:
         async def mock_invoke(*args, **kwargs):
             return mock_response
 
-        with patch("src.agents.invoke_with_rate_limit_handling", new=mock_invoke):
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 mock_prompt = Mock()
                 mock_prompt.system_message = "You are a consultant."

@@ -63,7 +63,7 @@ class TestBackwardsCompatibility:
                     {"ticker": "0005.HK"}
                 )
 
-        # Should pass (>$500k threshold)
+        # Should pass (>$250k threshold)
         assert "Status: PASS" in result
         assert "HKD" in result
         # Old calculation: ~60 * 100000 * 0.129 = ~$774,000 (may vary slightly due to price variation)
@@ -370,13 +370,16 @@ class TestBackwardsCompatibility:
 
     @pytest.mark.asyncio
     async def test_threshold_unchanged(self):
-        """Test that thresholds correctly classify liquidity levels."""
-        # Test between $100k-$500k (should be MARGINAL)
-        # Price $4.8 * volume 100k * FX 1.0 = ~$480,000 (with variation: $475k-$485k)
-        # Vary prices slightly to avoid flat-price detection (±1% variation)
+        """Test that thresholds correctly classify liquidity levels.
+
+        PASS threshold is $250k (aligned with PM/Market Analyst prompts).
+        Stocks at $100k-$250k → MARGINAL; >$250k → PASS.
+        """
+        # $150k is solidly in the MARGINAL zone under the $250k PASS threshold.
+        # Price $1.5 * volume 100k * FX 1.0 = ~$150,000
         import numpy as np
 
-        prices = 4.8 + np.random.uniform(-0.048, 0.048, 60)
+        prices = 1.5 + np.random.uniform(-0.015, 0.015, 60)
         mock_hist = pd.DataFrame({"Close": prices, "Volume": [100_000] * 60})
 
         with (
@@ -385,32 +388,27 @@ class TestBackwardsCompatibility:
                 return_value=mock_hist,
             ),
             patch(
-                # Mock get_financial_metrics to return None to force fallback
-                # to historical mean price (standard test behavior here).
                 "src.liquidity_calculation_tool.market_data_fetcher.get_financial_metrics",
                 new=AsyncMock(return_value=None),
             ),
-        ):
-            with patch(
+            patch(
                 "src.liquidity_calculation_tool.get_fx_rate",
                 new=AsyncMock(return_value=(1.0, "identity")),
-            ):
-                result = await calculate_liquidity_metrics.ainvoke(
-                    {"ticker": "BOUNDARY"}
-                )
+            ),
+        ):
+            result = await calculate_liquidity_metrics.ainvoke({"ticker": "BOUNDARY"})
 
-        # Between $100k-$500k, should be MARGINAL
+        # $150k is between $100k–$250k → MARGINAL
         assert "Status: MARGINAL" in result
-        # Check turnover is in marginal range
         import re
 
         turnover_match = re.search(r"Turnover \(USD\): \$(\d+,?\d*)", result)
         if turnover_match:
             turnover = int(turnover_match.group(1).replace(",", ""))
-            assert 100_000 < turnover < 500_000
+            assert 100_000 < turnover < 250_000
         assert "Thresholds:" in result
-        assert "100,000" in result  # MARGINAL threshold
-        assert "500,000" in result  # PASS threshold
+        assert "100,000" in result  # lower boundary
+        assert "250,000" in result  # PASS threshold
 
 
 class TestRealWorldScenarios:

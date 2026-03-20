@@ -140,42 +140,72 @@ class TickerFormatter:
         "BK": (".BK", "Stock Exchange of Thailand", "Thailand", "SET"),
     }
 
-    # IBKR exchange code to yfinance suffix mapping
+    # IBKR exchange code to yfinance suffix mapping.
+    # When IBKR reports a listingExchange for a position, this dict converts it
+    # to the yfinance suffix.  Add entries here whenever a new exchange code
+    # appears in IBKR portfolio responses that isn't already covered.
     IBKR_TO_YFINANCE = {
-        "SWX": ".SW",
-        "IBIS": ".DE",
-        "FWB": ".F",
-        "SBF": ".PA",
-        "AEB": ".AS",
-        "EBR": ".BR",
-        "BVLP": ".LS",
-        "BVME": ".MI",
-        "BM": ".MC",
-        "LSE": ".L",
-        "TSE": ".T",
-        "SEHK": ".HK",
-        "SSE": ".SS",
-        "SZSE": ".SZ",
-        "KRX": ".KS",
-        "KOSDAQ": ".KQ",
-        "TWSE": ".TW",
-        "SGX": ".SI",
-        "BSE": ".BO",
-        "NSE": ".NS",
-        "TSX": ".TO",
-        "VENTURE": ".V",
-        "ASX": ".AX",
-        "NZE": ".NZ",
-        "BVMF": ".SA",
-        "MEXI": ".MX",
-        "IDX": ".JK",
-        "KLSE": ".KL",
-        "SET": ".BK",
+        # ── Germany ──────────────────────────────────────────────────────────
+        "IBIS": ".DE",  # XETRA electronic trading system (primary)
+        "IBIS2": ".DE",  # XETRA (second segment; some IBKR positions use this)
+        "FWB": ".F",  # Frankfurt Stock Exchange (floor)
+        "FWB2": ".F",  # Frankfurt (alternative segment)
+        # ── Other Continental Europe ─────────────────────────────────────────
+        "SWX": ".SW",  # SIX Swiss Exchange
+        "EBS": ".SW",  # SIX (alternative IBKR code)
+        "SBF": ".PA",  # Euronext Paris
+        "AEB": ".AS",  # Euronext Amsterdam
+        "EBR": ".BR",  # Euronext Brussels
+        "BVLP": ".LS",  # Euronext Lisbon
+        "BVME": ".MI",  # Borsa Italiana (Milan)
+        "BM": ".MC",  # Bolsa Madrid (BME)
+        "SIBE": ".MC",  # Bolsa Madrid electronic order book
+        "OSL": ".OL",  # Oslo Børs (Norway)
+        "STO": ".ST",  # Nasdaq Stockholm (Sweden)
+        "HEL": ".HE",  # Nasdaq Helsinki (Finland)
+        "CPH": ".CO",  # Nasdaq Copenhagen (Denmark)
+        "ENEXT.BE": ".BR",  # Euronext Brussels (long-form code)
+        # ── United Kingdom ───────────────────────────────────────────────────
+        "LSE": ".L",  # London Stock Exchange
+        "LSEETF": ".L",  # LSE ETF segment
+        # ── Asia-Pacific ─────────────────────────────────────────────────────
+        "TSE": ".T",  # Tokyo Stock Exchange
+        "OSE.JPN": ".T",  # Osaka Exchange (merged into TSE)
+        "SEHK": ".HK",  # Stock Exchange of Hong Kong
+        "SSE": ".SS",  # Shanghai Stock Exchange
+        "SZSE": ".SZ",  # Shenzhen Stock Exchange
+        "KRX": ".KS",  # Korea Stock Exchange
+        "KOSDAQ": ".KQ",  # KOSDAQ (South Korea)
+        "TWSE": ".TW",  # Taiwan Stock Exchange
+        "TPEx": ".TWO",  # Taipei Exchange (OTC board, Taiwan)
+        "SGX": ".SI",  # Singapore Exchange
+        "ASX": ".AX",  # Australian Securities Exchange
+        "NZE": ".NZ",  # New Zealand Exchange
+        "BSE": ".BO",  # BSE (Bombay Stock Exchange)
+        "NSE": ".NS",  # NSE (National Stock Exchange, India)
+        "IDX": ".JK",  # Indonesia Stock Exchange
+        "KLSE": ".KL",  # Bursa Malaysia
+        "SET": ".BK",  # Stock Exchange of Thailand
+        # ── Eastern Europe ───────────────────────────────────────────────────
+        "WBAG": ".VI",  # Wiener Börse AG (Vienna Stock Exchange)
+        "VSE": ".VI",  # Vienna Stock Exchange (alternative IBKR code)
+        "WSE": ".WA",  # Warsaw Stock Exchange
+        "PSE": ".PR",  # Prague Stock Exchange
+        "BVB": ".RO",  # Bucharest Stock Exchange
+        "BSE2": ".BD",  # Budapest Stock Exchange
+        # ── Americas ─────────────────────────────────────────────────────────
+        "TSX": ".TO",  # Toronto Stock Exchange
+        "VENTURE": ".V",  # TSX Venture Exchange
+        "BVMF": ".SA",  # B3 (São Paulo)
+        "MEXI": ".MX",  # Bolsa Mexicana de Valores
+        # ── US (no suffix in yfinance) ───────────────────────────────────────
         "NASDAQ": "",
         "NYSE": "",
         "ARCA": "",
         "AMEX": "",
-        "SMART": "",
+        "SMART": "",  # IBKR Smart Order Routing — treated as US by default
+        "IEXG": "",  # IEX (US alternative venue)
+        "CBOE": "",  # CBOE (US options/equities)
     }
 
     # Reverse mapping: yfinance to IBKR
