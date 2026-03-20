@@ -59,8 +59,10 @@ class TestCheckStalenessStructural:
 
     def test_structural_event_before_analysis_does_not_stale(self):
         """Analysis written AFTER the event → analysis incorporates the event → not stale."""
-        analysis = _analysis("2026-03-10")  # newer than event
-        event = _structural_event("2026-03-05")
+        event_date = (date.today() - timedelta(days=5)).isoformat()
+        analysis_date = date.today().isoformat()
+        analysis = _analysis(analysis_date)
+        event = _structural_event(event_date)
         is_stale, reason = check_staleness(analysis, structural_macro_events=[event])
         assert not is_stale
 
@@ -140,9 +142,9 @@ class TestCheckStalenessStructural:
 
     def test_same_day_event_and_analysis_not_stale(self):
         """Structural event on same day as analysis → event_date not > analysis_date → not stale."""
-        # Same date: "2026-03-05" > "2026-03-05" is False → no stale from struct check
-        analysis = _analysis("2026-03-05")
-        event = _structural_event("2026-03-05")
+        today = date.today().isoformat()
+        analysis = _analysis(today)
+        event = _structural_event(today)
         is_stale, _ = check_staleness(analysis, structural_macro_events=[event])
         # Strict ">" comparison: same day does not stale
         assert not is_stale
