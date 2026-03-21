@@ -103,7 +103,7 @@ permissions:
 
 env:
   REGISTRY_NAME: tradingsystem  # ⚠️  CHANGE THIS! Use your own Azure Container Registry name
-  IMAGE_NAME: trading-system
+  IMAGE_NAME: investment-agent
 
 jobs:
   # ═══════════════════════════════════════════════════════════════════════════

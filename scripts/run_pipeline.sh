@@ -43,6 +43,8 @@ AUTO_YES=false
 STRICT_FLAG=""
 RUN_DATE_OVERRIDE=""
 BUY_LIST_EXPLICIT=false
+PYTHON_CMD=()
+PYTHON_CMD_DISPLAY=""
 
 # --- Colors ---
 RED='\033[0;31m'
@@ -119,6 +121,30 @@ report_has_verdict_header() {
     local verdict
     verdict=$(extract_report_verdict "$file")
     [[ -n "$verdict" ]]
+}
+
+resolve_python_cmd() {
+    if [[ -n "${INVESTMENT_AGENT_CONTAINER:-}" ]] || [[ -f "/.dockerenv" ]] || [[ -f "/run/.containerenv" ]]; then
+        PYTHON_CMD=(python)
+        PYTHON_CMD_DISPLAY="python"
+        return
+    fi
+
+    if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+        PYTHON_CMD=(python)
+        PYTHON_CMD_DISPLAY="python"
+        return
+    fi
+
+    if command -v poetry &> /dev/null; then
+        PYTHON_CMD=(poetry run python)
+        PYTHON_CMD_DISPLAY="poetry run python"
+        return
+    fi
+
+    fail "Poetry is not installed and no active virtual environment was detected"
+    info "Either activate your venv, or install Poetry from: https://python-poetry.org/docs/#installation"
+    exit 1
 }
 
 extract_date_from_path() {
@@ -315,12 +341,9 @@ fi
 # --- Ensure scratch directory exists ---
 mkdir -p "$SCRATCH"
 
-# --- Check Poetry is available ---
-if ! command -v poetry &> /dev/null; then
-    fail "Poetry is not installed"
-    info "Install from: https://python-poetry.org/docs/#installation"
-    exit 1
-fi
+# --- Resolve Python runtime ---
+resolve_python_cmd
+info "Python runtime:      $PYTHON_CMD_DISPLAY"
 
 # ============================================================
 # STAGE 0: Scrape + Filter
@@ -339,13 +362,13 @@ if [[ $START_STAGE -le 0 ]]; then
         TICKER_LIST="$SKIP_SCRAPE"
         info "Using existing ticker list: $TICKER_LIST"
     else
-        GEMS_CMD="poetry run python scripts/find_gems.py --output $TICKER_LIST --details ${SCRATCH}/gems_details_${DATE}.csv"
+        GEMS_CMD=("${PYTHON_CMD[@]}" scripts/find_gems.py --output "$TICKER_LIST" --details "${SCRATCH}/gems_details_${DATE}.csv")
         if [[ -n "$INCLUDE_US" ]]; then
-            GEMS_CMD="$GEMS_CMD $INCLUDE_US"
+            GEMS_CMD+=("$INCLUDE_US")
         fi
 
-        info "Running: $GEMS_CMD"
-        if eval "$GEMS_CMD"; then
+        info "Running: ${GEMS_CMD[*]}"
+        if "${GEMS_CMD[@]}"; then
             success "Scrape + filter complete"
         else
             fail "find_gems.py failed"
@@ -475,7 +498,7 @@ if [[ $START_STAGE -le 1 ]]; then
         STAGE1_PROCESSED=$((STAGE1_PROCESSED + 1))
         info "[$STAGE1_PROCESSED/$STAGE1_TODO, $TICKER_COUNT total] Quick: $ticker"
 
-        if poetry run python -m src.main \
+        if "${PYTHON_CMD[@]}" -m src.main \
             --ticker "$ticker" \
             --quick --strict --no-charts --quiet --brief --no-memory \
             --output "$OUTFILE" \
@@ -643,7 +666,7 @@ if [[ $START_STAGE -le 2 ]]; then
         STAGE2_PROCESSED=$((STAGE2_PROCESSED + 1))
         info "[$STAGE2_PROCESSED/$STAGE2_TODO, $BUY_TOTAL total] Full: $ticker"
 
-        if poetry run python -m src.main \
+        if "${PYTHON_CMD[@]}" -m src.main \
             --ticker "$ticker" \
             --transparent --quiet \
             $STRICT_FLAG \

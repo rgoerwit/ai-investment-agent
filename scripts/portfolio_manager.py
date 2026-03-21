@@ -6,7 +6,7 @@ Compares live IBKR positions against the equity evaluator's latest
 analysis recommendations. Produces position-aware BUY/SELL/HOLD/TRIM/REVIEW
 actions that account for existing holdings.
 
-Usage (requires Poetry venv — either activate it or prefix with `poetry run`):
+Usage (manual repo mode: use Poetry or an activated venv):
     poetry run python scripts/portfolio_manager.py --test-auth          # Verify IBKR credentials work
     poetry run python scripts/portfolio_manager.py                      # Report only
     poetry run python scripts/portfolio_manager.py --recommend          # + order suggestions
@@ -16,7 +16,10 @@ Usage (requires Poetry venv — either activate it or prefix with `poetry run`):
     # Or activate once: source .venv/bin/activate
     # Then plain `python scripts/portfolio_manager.py` works for the session.
 
-Requires: poetry install
+    # Local container mode (inside the runtime image, Poetry is not installed):
+    python scripts/portfolio_manager.py --read-only
+
+Requires: project dependencies installed (manual repo mode typically uses `poetry install`)
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ import argparse
 import asyncio
 import getpass
 import json
+import os
 import sys
 import textwrap
 from datetime import datetime
@@ -50,6 +54,28 @@ from src.ibkr.reconciler import (
 _IBKR_OAUTH_PORTAL = (
     "https://ndcdyn.interactivebrokers.com/sso/Login?action=OAUTH&RL=1&ip2loc=US"
 )
+
+
+def _python_command_prefix() -> str:
+    """Return the user-facing Python launcher for the current runtime."""
+    if (
+        os.getenv("INVESTMENT_AGENT_CONTAINER")
+        or os.getenv("VIRTUAL_ENV")
+        or Path("/.dockerenv").exists()
+        or Path("/run/.containerenv").exists()
+    ):
+        return "python"
+    return "poetry run python"
+
+
+def _analysis_command(ticker: str) -> str:
+    return f"{_python_command_prefix()} -m src.main --ticker {ticker}"
+
+
+def _portfolio_manager_command(*args: str) -> str:
+    suffix = " ".join(args).strip()
+    base = f"{_python_command_prefix()} scripts/portfolio_manager.py"
+    return f"{base} {suffix}".strip()
 
 
 def _prompt_for_missing_secret(config) -> None:
@@ -1286,9 +1312,7 @@ def format_report(
                 if "." not in _run_t
                 else ""
             )
-            lines.append(
-                f"      poetry run python -m src.main --ticker {_run_t}{_sfx_warn}"
-            )
+            lines.append(f"      {_analysis_command(_run_t)}{_sfx_warn}")
         lines.append("")
 
     def _norm_reason(r: str) -> str:
@@ -1955,7 +1979,7 @@ def format_report(
             _sfx_warn = (
                 "  ← ⚠ exchange unknown, verify suffix" if "." not in _run_t else ""
             )
-            run_cmd = f"python -m src.main --ticker {_run_t}{_sfx_warn}"
+            run_cmd = f"{_analysis_command(_run_t)}{_sfx_warn}"
             lines.append(
                 f"  {'REVIEW':<6}  {_display_ticker(item):<12}  {reason_short}  →  {run_cmd}"
             )
@@ -2237,7 +2261,7 @@ def format_report(
                     f"  {_dstars}  score {_dscore:.0f}"
                     f"  H:{_dh}% G:{_dg}%"
                     f"  [{_dqty}]"
-                    f"  →  poetry run python -m src.main --ticker {_run_ticker_for(_di)}"
+                    f"  →  {_analysis_command(_run_ticker_for(_di))}"
                 )
             if _dips_in_flight:
                 lines.append(
@@ -2262,7 +2286,7 @@ def format_report(
                 lines.append(
                     f"    → ADD TO WATCHLIST  {_display_ticker(i)}"
                     f"  — analysis {i.analysis.analysis_date if i.analysis else '?'} says BUY{_quick_note}"
-                    f"  →  poetry run python -m src.main --ticker {_run_ticker_for(i)}"
+                    f"  →  {_analysis_command(_run_ticker_for(i))}"
                 )
             skipped = len(_cands_actionable) - len(strong_candidates)
             if skipped > 0:
@@ -2290,9 +2314,7 @@ def format_report(
                     "  (see DIP OPPORTUNITIES above)"
                 )
             lines.append("    → Run before placing any additional buys:")
-            lines.append(
-                "        poetry run python scripts/portfolio_manager.py --recommend"
-            )
+            lines.append(f"        {_portfolio_manager_command('--recommend')}")
             lines.append("")
 
         if upcoming_reviews:
@@ -2305,7 +2327,7 @@ def format_report(
                 )
                 lines.append(
                     f"    → {disp_sym:<14} expires {expires}  ({days_left}d remaining)"
-                    f"  →  poetry run python -m src.main --ticker {yf_t}{_sfx_warn}"
+                    f"  →  {_analysis_command(yf_t)}{_sfx_warn}"
                 )
             lines.append("")
 
@@ -2694,7 +2716,7 @@ def main() -> None:
     if not analyses:
         print(f"No analysis JSONs found in {results_dir}/", file=sys.stderr)
         print(
-            "Run some analyses first: poetry run python -m src.main --ticker 7203.T --output results/7203.T.md",
+            f"Run some analyses first: {_analysis_command('7203.T')} --output results/7203.T.md",
             file=sys.stderr,
         )
         sys.exit(1)

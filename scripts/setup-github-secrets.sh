@@ -47,7 +47,7 @@ Usage: ./scripts/setup-github-secrets.sh --repo owner/repo [OPTIONS]
 Upload API keys from .env to GitHub as encrypted secrets.
 
 REQUIRED:
-    --repo OWNER/REPO    GitHub repository (e.g., "username/trading-system")
+    --repo OWNER/REPO    GitHub repository (e.g., "username/investment-agent")
 
 OPTIONAL:
     --env-file FILE      Path to .env file (default: .env)
@@ -57,7 +57,7 @@ OPTIONAL:
 
 EXAMPLES:
     # Upload secrets to your repository
-    ./scripts/setup-github-secrets.sh --repo myusername/my-trading-system
+    ./scripts/setup-github-secrets.sh --repo myusername/investment-agent
 
     # Dry run to see what would happen
     ./scripts/setup-github-secrets.sh --repo myusername/my-repo --dry-run

@@ -14,7 +14,8 @@
 #   ✓ Have tested in a dev environment first
 #
 # IF YOU JUST WANT TO ANALYZE STOCKS LOCALLY:
-#   DO NOT USE THIS SCRIPT - use ./scripts/run-analysis.sh instead
+#   DO NOT USE THIS SCRIPT - run `python -m src.main --ticker 0005.HK`
+#   (or `poetry run python -m src.main ...` in manual repo mode) instead
 #
 # COMMANDS:
 #   validate  - Check Terraform configuration (safe, no changes)

@@ -228,6 +228,129 @@ poetry run python -u -m src.main --ticker 0005.HK --output scratch/report.md >sc
 poetry run pytest tests/ -v
 ```
 
+### Optional: Local Container Mode
+
+Manual repo mode remains the default. If you prefer stronger runtime isolation, you can also run the project locally in a container. For local use, prefer **Podman** over Docker. It has a tighter default security posture and is the better fit for most developers who are wary of giving a daemon broad control of their workstation.
+
+This container mode is intentionally secondary: it uses **bind mounts** so the container reads and writes the same host directories that manual mode uses.
+
+What persists on the host in container mode:
+
+- `results/` -> analysis JSONs and report outputs
+- `chroma_db/` -> ChromaDB-backed memory state
+- `data_cache/` -> cached data fetches
+- `images/` -> generated charts and image assets
+- `scratch/` -> pipeline artifacts, logs, and resumability files
+
+Important:
+
+- Manual mode and container mode can share the same host directories safely.
+- Embedded Chroma is still a **single-writer local store**. Do not run multiple concurrently writing containers against the same `chroma_db/`.
+- The image is built from the repo root. During `docker build` / `podman build`, the Dockerfile copies `src/` into `/app/src`, `prompts/` into `/app/prompts`, and `scripts/` into `/app/scripts`. That is how both the application code and the operational scripts get into the image.
+- The runtime image does **not** include Poetry. Shell scripts in the image call plain `python ...` so they work both in a container and in an activated local venv.
+- On macOS with Podman, use `--user "$(id -u):$(id -g)"` in the examples below. `--userns=keep-id` is not sufficient there for bind-mounted write access.
+
+Build the image:
+
+```bash
+# Preferred:
+podman build -t investment-agent .
+
+# Secondary option:
+docker build -t investment-agent .
+```
+
+One-off analysis through Podman:
+
+```bash
+podman run --rm \
+  --env-file .env \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD/results:/app/results:Z" \
+  -v "$PWD/chroma_db:/app/chroma_db:Z" \
+  -v "$PWD/data_cache:/app/data_cache:Z" \
+  -v "$PWD/images:/app/images:Z" \
+  -v "$PWD/scratch:/app/scratch:Z" \
+  investment-agent \
+  --ticker 0005.HK --output results/0005.HK.md
+```
+
+Docker equivalent:
+
+```bash
+docker run --rm \
+  --env-file .env \
+  -v "$PWD/results:/app/results" \
+  -v "$PWD/chroma_db:/app/chroma_db" \
+  -v "$PWD/data_cache:/app/data_cache" \
+  -v "$PWD/images:/app/images" \
+  -v "$PWD/scratch:/app/scratch" \
+  investment-agent \
+  --ticker 0005.HK --output results/0005.HK.md
+```
+
+Containerized pipeline:
+
+```bash
+podman run --rm \
+  --entrypoint bash \
+  --env-file .env \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD/results:/app/results:Z" \
+  -v "$PWD/chroma_db:/app/chroma_db:Z" \
+  -v "$PWD/data_cache:/app/data_cache:Z" \
+  -v "$PWD/images:/app/images:Z" \
+  -v "$PWD/scratch:/app/scratch:Z" \
+  investment-agent \
+  scripts/run_pipeline.sh --stage 1 --skip-scrape scratch/gems_2026-03-20.txt
+```
+
+Docker equivalent:
+
+```bash
+docker run --rm \
+  --entrypoint bash \
+  --env-file .env \
+  -v "$PWD/results:/app/results" \
+  -v "$PWD/chroma_db:/app/chroma_db" \
+  -v "$PWD/data_cache:/app/data_cache" \
+  -v "$PWD/images:/app/images" \
+  -v "$PWD/scratch:/app/scratch" \
+  investment-agent \
+  scripts/run_pipeline.sh --stage 1 --skip-scrape scratch/gems_2026-03-20.txt
+```
+
+Containerized portfolio manager:
+
+```bash
+podman run --rm \
+  --entrypoint python \
+  --env-file .env \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD/results:/app/results:Z" \
+  -v "$PWD/chroma_db:/app/chroma_db:Z" \
+  -v "$PWD/data_cache:/app/data_cache:Z" \
+  -v "$PWD/images:/app/images:Z" \
+  -v "$PWD/scratch:/app/scratch:Z" \
+  investment-agent \
+  scripts/portfolio_manager.py --read-only
+```
+
+Docker equivalent:
+
+```bash
+docker run --rm \
+  --entrypoint python \
+  --env-file .env \
+  -v "$PWD/results:/app/results" \
+  -v "$PWD/chroma_db:/app/chroma_db" \
+  -v "$PWD/data_cache:/app/data_cache" \
+  -v "$PWD/images:/app/images" \
+  -v "$PWD/scratch:/app/scratch" \
+  investment-agent \
+  scripts/portfolio_manager.py --read-only
+```
+
 ### Automated Screening Pipeline (Fastest Path to Gems)
 
 Find undervalued international stocks end-to-end — no manual steps:
@@ -740,18 +863,26 @@ Edge case testing matters here because the runtime depends on unreliable externa
 
 ## Deployment (Educational Reference)
 
-### Docker Support
+### Container Support
 
-Production-ready **multi-stage Dockerfile** (Poetry 2.x, non-root user, ~40% smaller images):
+The repo includes a multi-stage container image for optional local execution. For most local setups, prefer **Podman** and use the bind-mounted workflows in [Optional: Local Container Mode](#optional-local-container-mode). Docker still works, but it is the secondary path here.
 
 ```bash
-# Build and run
-docker build -t trading-system .
-docker run --env-file .env trading-system --ticker 0005.HK --quick
-
-# Or use docker-compose
-docker compose run --rm investment-agent --ticker 7203.T
+# Preferred local build/run path
+podman build -t investment-agent .
+podman run --rm \
+  --env-file .env \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD/results:/app/results:Z" \
+  -v "$PWD/chroma_db:/app/chroma_db:Z" \
+  -v "$PWD/data_cache:/app/data_cache:Z" \
+  -v "$PWD/images:/app/images:Z" \
+  -v "$PWD/scratch:/app/scratch:Z" \
+  investment-agent \
+  --ticker 0005.HK --quick --output results/0005.HK.md
 ```
+
+For Docker equivalents, `run_pipeline.sh`, and `portfolio_manager.py`, see [Optional: Local Container Mode](#optional-local-container-mode).
 
 ### Azure Container Instances (Terraform)
 

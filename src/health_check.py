@@ -4,7 +4,9 @@ Health check script for container health monitoring.
 Tests core system components without running full analysis.
 Updated for Gemini 3 Migration (Nov 2025).
 
-Run with:  poetry run python src/health_check.py
+Run with:  python src/health_check.py
+Manual repo mode without an activated venv can instead use:
+  poetry run python src/health_check.py
 """
 
 import asyncio

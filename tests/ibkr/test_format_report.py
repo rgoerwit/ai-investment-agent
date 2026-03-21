@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from scripts.portfolio_manager import _compute_dip_score, format_report
+from unittest.mock import patch
+
+from scripts.portfolio_manager import (
+    _analysis_command,
+    _compute_dip_score,
+    _portfolio_manager_command,
+    format_report,
+)
 from src.ibkr.models import (
     AnalysisRecord,
     NormalizedPosition,
@@ -67,6 +74,22 @@ def _panic_items() -> list[ReconciliationItem]:
         )
     )
     return items
+
+
+class TestRuntimeCommandHints:
+    def test_analysis_command_uses_python_in_container(self, monkeypatch):
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.setenv("INVESTMENT_AGENT_CONTAINER", "1")
+        assert _analysis_command("7203.T") == "python -m src.main --ticker 7203.T"
+
+    def test_portfolio_manager_command_falls_back_to_poetry_on_host(self, monkeypatch):
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("INVESTMENT_AGENT_CONTAINER", raising=False)
+        with patch("scripts.portfolio_manager.Path.exists", return_value=False):
+            assert (
+                _portfolio_manager_command("--recommend")
+                == "poetry run python scripts/portfolio_manager.py --recommend"
+            )
 
 
 class TestFormatReportPanicDay:
