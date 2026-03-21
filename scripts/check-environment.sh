@@ -31,6 +31,29 @@ print_error() {
     echo -e "${RED}[✗]${NC} $1"
 }
 
+resolve_python_cmd() {
+    if [[ -n "${INVESTMENT_AGENT_CONTAINER:-}" ]] || [[ -f "/.dockerenv" ]] || [[ -f "/run/.containerenv" ]]; then
+        PYTHON_CMD=(python)
+        PYTHON_CMD_DISPLAY="python"
+        return
+    fi
+
+    if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+        PYTHON_CMD=(python)
+        PYTHON_CMD_DISPLAY="python"
+        return
+    fi
+
+    if command -v poetry &> /dev/null; then
+        PYTHON_CMD=(poetry run python)
+        PYTHON_CMD_DISPLAY="poetry run python"
+        return
+    fi
+
+    PYTHON_CMD=()
+    PYTHON_CMD_DISPLAY=""
+}
+
 echo ""
 echo "════════════════════════════════════════════════════════════"
 echo "  Multi-Agent Trading System - Environment Check"
@@ -113,6 +136,7 @@ echo ""
 
 # Check Python/Poetry
 print_info "Checking Python environment..."
+resolve_python_cmd
 
 if command -v python3 &> /dev/null; then
     python_version=$(python3 --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
@@ -122,12 +146,16 @@ else
     errors=$((errors + 1))
 fi
 
-if command -v poetry &> /dev/null; then
-    poetry_version=$(poetry --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-    print_success "Poetry $poetry_version found"
+if [[ -n "${PYTHON_CMD_DISPLAY:-}" ]]; then
+    if [[ "$PYTHON_CMD_DISPLAY" == "poetry run python" ]]; then
+        poetry_version=$(poetry --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        print_success "Poetry $poetry_version found"
+    else
+        print_success "Runtime command available: $PYTHON_CMD_DISPLAY"
+    fi
 else
-    print_error "Poetry not found"
-    print_info "Install from: https://python-poetry.org/docs/#installation"
+    print_error "Poetry not found and no active venv/container runtime detected"
+    print_info "Install Poetry from: https://python-poetry.org/docs/#installation"
     errors=$((errors + 1))
 fi
 
@@ -152,9 +180,9 @@ else
     fi
     echo ""
     print_info "You're ready to run analysis:"
-    echo "  ./scripts/run-analysis.sh --ticker AAPL"
+    echo "  ${PYTHON_CMD_DISPLAY} -m src.main --ticker AAPL"
     echo ""
     print_info "Or run the health check:"
-    echo "  poetry run python src/health_check.py"
+    echo "  ${PYTHON_CMD_DISPLAY} src/health_check.py"
     echo ""
 fi

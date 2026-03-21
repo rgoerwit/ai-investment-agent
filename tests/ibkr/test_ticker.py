@@ -133,6 +133,12 @@ class TestTickerFromYf:
         assert t.suffix == ".T"
         assert t.yf == "7203.T"
 
+    def test_japan_alphanumeric_suffix(self):
+        t = Ticker.from_yf("262A.T")
+        assert t.symbol == "262A"
+        assert t.suffix == ".T"
+        assert t.yf == "262A.T"
+
     def test_hong_kong_suffix(self):
         t = Ticker.from_yf("0005.HK")
         assert t.symbol == "5"  # zero-padding stripped from symbol

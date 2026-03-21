@@ -16,6 +16,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import Literal
 
 import structlog
 from pydantic import Field, SecretStr, model_validator
@@ -426,6 +427,15 @@ class Settings(BaseSettings):
         validation_alias="API_RETRY_ATTEMPTS",
         description="Number of retry attempts for failed API calls",
     )
+    llm_base_output_tokens: int = Field(
+        default=32768,
+        ge=1024,
+        validation_alias="LLM_BASE_OUTPUT_TOKENS",
+        description=(
+            "Global base output-token budget used to derive per-agent caps. "
+            "Increasing this scales fractional agent budgets proportionally."
+        ),
+    )
 
     # --- Rate Limiting ---
     # Free tier: 15 RPM | Paid tier 1: 360 RPM | Tier 2: 1000+ RPM
@@ -457,6 +467,30 @@ class Settings(BaseSettings):
         default=False,
         validation_alias="QUIET_MODE",
         description="Suppress verbose logging output (set via CLI --quiet)",
+    )
+
+    # --- Untrusted Content Inspection ---
+    untrusted_content_inspection_enabled: bool = Field(
+        default=False,
+        validation_alias="UNTRUSTED_CONTENT_INSPECTION_ENABLED",
+        description="Enable content inspection for external ingress paths",
+    )
+    untrusted_content_inspection_mode: Literal["warn", "sanitize", "block"] = Field(
+        default="warn",
+        validation_alias="UNTRUSTED_CONTENT_INSPECTION_MODE",
+        description="Inspection action mode: warn | sanitize | block",
+    )
+    untrusted_content_fail_policy: Literal["fail_open", "fail_closed"] = Field(
+        default="fail_open",
+        validation_alias="UNTRUSTED_CONTENT_FAIL_POLICY",
+        description="Policy when backend errors: fail_open | fail_closed",
+    )
+    untrusted_content_backend: Literal[
+        "null", "http", "python", "subprocess", "composite"
+    ] = Field(
+        default="null",
+        validation_alias="UNTRUSTED_CONTENT_BACKEND",
+        description="Inspection backend: null | http | python | subprocess | composite",
     )
 
     # --- Telemetry & System Overrides ---

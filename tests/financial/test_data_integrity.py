@@ -10,6 +10,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.data.fetcher import SmartMarketDataFetcher
+from src.ticker_policy import (
+    allows_search_resolution,
+    is_safe_symbol_crossmatch_base,
+    normalize_exchange_specific_base,
+    same_exchange,
+    split_ticker,
+)
 
 
 @pytest.fixture
@@ -66,6 +73,96 @@ class TestTickerResolution:
         resolved = await fetcher._resolve_ticker_via_search("AAPL")
         assert resolved is None
         assert not fetcher.tavily_client.search.called
+
+    @pytest.mark.asyncio
+    async def test_resolve_ticker_tokyo_disabled(self, fetcher):
+        fetcher.tavily_client = MagicMock()
+
+        resolved = await fetcher._resolve_ticker_via_search("262A.T")
+        assert resolved is None
+        assert not fetcher.tavily_client.search.called
+
+    @pytest.mark.asyncio
+    async def test_resolve_ticker_taiwan_requires_exact_suffix(self, fetcher):
+        fetcher.tavily_client = MagicMock()
+        fetcher.tavily_client.search = MagicMock(
+            return_value={
+                "results": [
+                    {
+                        "title": "Cross-listed examples",
+                        "content": "2628.HK 2628.TW 2628.T appear together; correct TW code is 2628.TW",
+                    }
+                ]
+            }
+        )
+
+        resolved = await fetcher._resolve_ticker_via_search("FOO.TW")
+        assert resolved == "2628.TW"
+
+    @pytest.mark.asyncio
+    async def test_resolve_ticker_two_requires_exact_suffix(self, fetcher):
+        fetcher.tavily_client = MagicMock()
+        fetcher.tavily_client.search = MagicMock(
+            return_value={
+                "results": [
+                    {
+                        "title": "Cross-listed OTC examples",
+                        "content": "1264.TWO and 1264.TW are different listings; exact OTC code is 1264.TWO",
+                    }
+                ]
+            }
+        )
+
+        resolved = await fetcher._resolve_ticker_via_search("FOO.TWO")
+        assert resolved == "1264.TWO"
+
+    @pytest.mark.asyncio
+    async def test_resolve_ticker_does_not_cross_exchange_on_shared_numeric(
+        self, fetcher
+    ):
+        fetcher.tavily_client = MagicMock()
+        fetcher.tavily_client.search = MagicMock(
+            return_value={
+                "results": [
+                    {
+                        "title": "Shared numeric codes",
+                        "content": "2628.HK appears here, but 2628.T is a different Japanese listing.",
+                    }
+                ]
+            }
+        )
+
+        resolved = await fetcher._resolve_ticker_via_search("FOO.TW")
+        assert resolved is None
+
+
+class TestTickerPolicy:
+    def test_split_ticker_preserves_exchange(self):
+        assert split_ticker("262A.T") == ("262A", ".T")
+        assert split_ticker("0005.HK") == ("0005", ".HK")
+
+    def test_same_exchange_requires_identical_suffix(self):
+        assert same_exchange("2628.HK", "0700.HK") is True
+        assert same_exchange("2628.HK", "2628.TW") is False
+        assert same_exchange("2628.T", "2628.TW") is False
+        assert same_exchange("1264.TWO", "1264.TW") is False
+
+    def test_crossmatch_safe_only_for_non_numeric_bases(self):
+        assert is_safe_symbol_crossmatch_base("262A") is True
+        assert is_safe_symbol_crossmatch_base("CEK") is True
+        assert is_safe_symbol_crossmatch_base("2628") is False
+
+    def test_exchange_specific_normalization_only_pads_hk(self):
+        assert normalize_exchange_specific_base("5", ".HK") == "0005"
+        assert normalize_exchange_specific_base("262A", ".T") == "262A"
+        assert normalize_exchange_specific_base("2330", ".TW") == "2330"
+
+    def test_search_resolution_policy_is_exchange_specific(self):
+        assert allows_search_resolution("TENCENT.HK") is True
+        assert allows_search_resolution("PADINI.KL") is True
+        assert allows_search_resolution("2330.TW") is True
+        assert allows_search_resolution("1264.TWO") is True
+        assert allows_search_resolution("262A.T") is False
 
 
 class TestScalingCorrection:

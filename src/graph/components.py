@@ -21,6 +21,7 @@ from src.agents import (
 )
 from src.charts.chart_node import create_chart_generator_node
 from src.config import config
+from src.llm_budgets import get_agent_output_budget
 from src.llms import (
     create_auditor_llm,
     create_deep_thinking_llm,
@@ -166,32 +167,50 @@ def build_graph_components(
     )
 
     tracker = get_tracker()
+    base_output_tokens = config.llm_base_output_tokens
+
+    def output_budget(agent_name: str) -> int:
+        return get_agent_output_budget(agent_name, base_output_tokens)
+
+    def tracked_callbacks(agent_name: str) -> list[TokenTrackingCallback]:
+        return [
+            TokenTrackingCallback(
+                agent_name,
+                tracker,
+                output_token_cap=output_budget(agent_name),
+            )
+        ]
 
     market_llm = create_quick_thinking_llm(
-        callbacks=[TokenTrackingCallback("Market Analyst", tracker)]
+        callbacks=tracked_callbacks("Market Analyst"),
+        max_output_tokens=output_budget("Market Analyst"),
     )
     social_llm = create_quick_thinking_llm(
-        callbacks=[TokenTrackingCallback("Sentiment Analyst", tracker)]
+        callbacks=tracked_callbacks("Sentiment Analyst"),
+        max_output_tokens=output_budget("Sentiment Analyst"),
     )
     news_llm = create_quick_thinking_llm(
-        callbacks=[TokenTrackingCallback("News Analyst", tracker)]
+        callbacks=tracked_callbacks("News Analyst"),
+        max_output_tokens=output_budget("News Analyst"),
     )
     junior_fund_llm = create_quick_thinking_llm(
-        callbacks=[TokenTrackingCallback("Junior Fundamentals Analyst", tracker)]
+        callbacks=tracked_callbacks("Junior Fundamentals Analyst"),
+        max_output_tokens=output_budget("Junior Fundamentals Analyst"),
     )
     # Senior Fundamentals stays on the quick model even in normal mode.
     # This node does structured synthesis over large upstream inputs; using the
     # deep/thinking-heavy model here has historically increased timeout risk
     # without improving downstream scoring quality enough to justify it.
     senior_fund_llm = create_quick_thinking_llm(
-        callbacks=[TokenTrackingCallback("Fundamentals Analyst", tracker)]
+        callbacks=tracked_callbacks("Fundamentals Analyst"),
+        max_output_tokens=output_budget("Fundamentals Analyst"),
     )
 
     retry_llm = None
     allow_retry = False
     if not quick_mode and is_gemini_v3_or_greater(config.quick_think_llm):
         retry_llm = create_deep_thinking_llm(
-            callbacks=[TokenTrackingCallback("Retry Agent (Deep)", tracker)]
+            callbacks=tracked_callbacks("Retry Agent (Deep)"),
         )
         allow_retry = True
         logger.info("retry_llm_enabled", ticker=ticker)
@@ -201,66 +220,84 @@ def build_graph_components(
     if quick_mode:
         logger.info("synthesis_llm_mode", quick_mode=quick_mode, thinking_level="low")
         bull_llm = create_quick_thinking_llm(
-            callbacks=[TokenTrackingCallback("Bull Researcher", tracker)]
+            callbacks=tracked_callbacks("Bull Researcher"),
+            max_output_tokens=output_budget("Bull Researcher"),
         )
         bear_llm = create_quick_thinking_llm(
-            callbacks=[TokenTrackingCallback("Bear Researcher", tracker)]
+            callbacks=tracked_callbacks("Bear Researcher"),
+            max_output_tokens=output_budget("Bear Researcher"),
         )
         res_mgr_llm = create_quick_thinking_llm(
-            callbacks=[TokenTrackingCallback("Research Manager", tracker)]
+            callbacks=tracked_callbacks("Research Manager"),
+            max_output_tokens=output_budget("Research Manager"),
         )
         pm_llm = create_quick_thinking_llm(
-            callbacks=[TokenTrackingCallback("Portfolio Manager", tracker)]
+            callbacks=tracked_callbacks("Portfolio Manager"),
+            max_output_tokens=output_budget("Portfolio Manager"),
         )
         risky_llm = create_quick_thinking_llm(
-            callbacks=[TokenTrackingCallback("Risky Analyst", tracker)]
+            callbacks=tracked_callbacks("Risky Analyst"),
+            max_output_tokens=output_budget("Risky Analyst"),
         )
         safe_llm = create_quick_thinking_llm(
-            callbacks=[TokenTrackingCallback("Safe Analyst", tracker)]
+            callbacks=tracked_callbacks("Safe Analyst"),
+            max_output_tokens=output_budget("Safe Analyst"),
         )
         neutral_llm = create_quick_thinking_llm(
-            callbacks=[TokenTrackingCallback("Neutral Analyst", tracker)]
+            callbacks=tracked_callbacks("Neutral Analyst"),
+            max_output_tokens=output_budget("Neutral Analyst"),
         )
     else:
         logger.info("synthesis_llm_mode", quick_mode=quick_mode, thinking_level="high")
         bull_llm = create_deep_thinking_llm(
-            callbacks=[TokenTrackingCallback("Bull Researcher", tracker)]
+            callbacks=tracked_callbacks("Bull Researcher"),
+            max_output_tokens=output_budget("Bull Researcher"),
         )
         bear_llm = create_deep_thinking_llm(
-            callbacks=[TokenTrackingCallback("Bear Researcher", tracker)]
+            callbacks=tracked_callbacks("Bear Researcher"),
+            max_output_tokens=output_budget("Bear Researcher"),
         )
         res_mgr_llm = create_deep_thinking_llm(
-            callbacks=[TokenTrackingCallback("Research Manager", tracker)]
+            callbacks=tracked_callbacks("Research Manager"),
+            max_output_tokens=output_budget("Research Manager"),
         )
         pm_llm = create_deep_thinking_llm(
-            callbacks=[TokenTrackingCallback("Portfolio Manager", tracker)]
+            callbacks=tracked_callbacks("Portfolio Manager"),
+            max_output_tokens=output_budget("Portfolio Manager"),
         )
         risky_llm = create_deep_thinking_llm(
-            callbacks=[TokenTrackingCallback("Risky Analyst", tracker)]
+            callbacks=tracked_callbacks("Risky Analyst"),
+            max_output_tokens=output_budget("Risky Analyst"),
         )
         safe_llm = create_deep_thinking_llm(
-            callbacks=[TokenTrackingCallback("Safe Analyst", tracker)]
+            callbacks=tracked_callbacks("Safe Analyst"),
+            max_output_tokens=output_budget("Safe Analyst"),
         )
         neutral_llm = create_deep_thinking_llm(
-            callbacks=[TokenTrackingCallback("Neutral Analyst", tracker)]
+            callbacks=tracked_callbacks("Neutral Analyst"),
+            max_output_tokens=output_budget("Neutral Analyst"),
         )
 
     trader_llm = create_quick_thinking_llm(
-        callbacks=[TokenTrackingCallback("Trader", tracker)]
+        callbacks=tracked_callbacks("Trader"),
+        max_output_tokens=output_budget("Trader"),
     )
     valuation_llm = create_quick_thinking_llm(
-        callbacks=[TokenTrackingCallback("Valuation Calculator", tracker)]
+        callbacks=tracked_callbacks("Valuation Calculator"),
+        max_output_tokens=output_budget("Valuation Calculator"),
     )
 
     consultant_llm = get_consultant_llm(
-        callbacks=[TokenTrackingCallback("Consultant", tracker)],
+        callbacks=tracked_callbacks("Consultant"),
         quick_mode=quick_mode,
+        max_completion_tokens=output_budget("Consultant"),
     )
 
     auditor_requested = _is_auditor_enabled()
     auditor_llm = (
         create_auditor_llm(
-            callbacks=[TokenTrackingCallback("Global Forensic Auditor", tracker)]
+            callbacks=tracked_callbacks("Global Forensic Auditor"),
+            max_completion_tokens=output_budget("Global Forensic Auditor"),
         )
         if auditor_requested
         else None
@@ -309,7 +346,8 @@ def build_graph_components(
     )
 
     foreign_llm = create_quick_thinking_llm(
-        callbacks=[TokenTrackingCallback("Foreign Language Analyst", tracker)]
+        callbacks=tracked_callbacks("Foreign Language Analyst"),
+        max_output_tokens=output_budget("Foreign Language Analyst"),
     )
     foreign_analyst = create_analyst_node(
         foreign_llm,
@@ -321,12 +359,14 @@ def build_graph_components(
     )
 
     legal_llm = create_quick_thinking_llm(
-        callbacks=[TokenTrackingCallback("Legal Counsel", tracker)]
+        callbacks=tracked_callbacks("Legal Counsel"),
+        max_output_tokens=output_budget("Legal Counsel"),
     )
     legal_counsel = create_legal_counsel_node(legal_llm, toolkit.get_legal_tools())
 
     value_trap_llm = create_quick_thinking_llm(
-        callbacks=[TokenTrackingCallback("Value Trap Detector", tracker)]
+        callbacks=tracked_callbacks("Value Trap Detector"),
+        max_output_tokens=output_budget("Value Trap Detector"),
     )
     value_trap_detector = create_analyst_node(
         value_trap_llm,

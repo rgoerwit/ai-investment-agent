@@ -13,6 +13,7 @@
 #   --include-us        Pass --include-us to find_gems.py
 #   --cooldown N        Override COOLDOWN_SECONDS (default: 60)
 #   --stage N           Start from stage N (0, 1, or 2). Requires prior stages' outputs.
+#   --run-date DATE     Force output/resume date (YYYY-MM-DD), useful for cross-day resume
 #   --buys-file FILE    Explicit BUY list path (bypasses date-based default; use with --stage 2
 #                       when resuming a run that started on a previous calendar day)
 #   -y, --yes           Skip confirmation prompts (run non-interactively)
@@ -40,6 +41,10 @@ INCLUDE_US=""
 START_STAGE=0
 AUTO_YES=false
 STRICT_FLAG=""
+RUN_DATE_OVERRIDE=""
+BUY_LIST_EXPLICIT=false
+PYTHON_CMD=()
+PYTHON_CMD_DISPLAY=""
 
 # --- Colors ---
 RED='\033[0;31m'
@@ -82,6 +87,134 @@ format_duration() {
     fi
 }
 
+report_verdict_line() {
+    local file="$1"
+    awk '
+        /^# / {
+            line=$0
+            sub(/\r$/, "", line)
+            if (match(line, /: .+$/)) {
+                found = 1
+                print line
+                exit 0
+            }
+        }
+        END {
+            if (!found) {
+                exit 1
+            }
+        }
+    ' "$file" 2>/dev/null || true
+}
+
+extract_report_verdict() {
+    local file="$1"
+    local line
+    line=$(report_verdict_line "$file")
+    if [[ -n "$line" ]]; then
+        printf '%s\n' "${line##*: }"
+    fi
+}
+
+report_has_verdict_header() {
+    local file="$1"
+    local verdict
+    verdict=$(extract_report_verdict "$file")
+    [[ -n "$verdict" ]]
+}
+
+resolve_python_cmd() {
+    if [[ -n "${INVESTMENT_AGENT_CONTAINER:-}" ]] || [[ -f "/.dockerenv" ]] || [[ -f "/run/.containerenv" ]]; then
+        PYTHON_CMD=(python)
+        PYTHON_CMD_DISPLAY="python"
+        return
+    fi
+
+    if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+        PYTHON_CMD=(python)
+        PYTHON_CMD_DISPLAY="python"
+        return
+    fi
+
+    if command -v poetry &> /dev/null; then
+        PYTHON_CMD=(poetry run python)
+        PYTHON_CMD_DISPLAY="poetry run python"
+        return
+    fi
+
+    fail "Poetry is not installed and no active virtual environment was detected"
+    info "Either activate your venv, or install Poetry from: https://python-poetry.org/docs/#installation"
+    exit 1
+}
+
+extract_date_from_path() {
+    local path="$1"
+    basename "$path" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1 || true
+}
+
+apply_run_date() {
+    local source_label="$1"
+    local new_date="$2"
+    if [[ -z "$new_date" || "$new_date" == "$DATE" ]]; then
+        return
+    fi
+
+    info "Cross-day resume: using date ${new_date} from ${source_label} (was ${DATE})"
+    DATE="$new_date"
+    if [[ -z "$SKIP_SCRAPE" ]]; then
+        TICKER_LIST="${SCRATCH}/gems_${DATE}.txt"
+    fi
+    if ! $BUY_LIST_EXPLICIT; then
+        BUY_LIST="${SCRATCH}/buys_${DATE}.txt"
+    fi
+}
+
+ticker_to_dash() {
+    local ticker="$1"
+    printf '%s\n' "$ticker" | tr '._' '-'
+}
+
+quick_outfile_for() {
+    local ticker="$1"
+    local run_date="$2"
+    local dash
+    dash=$(ticker_to_dash "$ticker")
+    printf '%s/README-%s-%s_quick.md\n' "$SCRATCH" "$dash" "$run_date"
+}
+
+count_completed_quick_reports_for_date() {
+    local ticker_list="$1"
+    local run_date="$2"
+    local count=0
+    local ticker outfile
+    while IFS= read -r ticker || [[ -n "$ticker" ]]; do
+        [[ -z "$ticker" || "$ticker" =~ ^[[:space:]]*# ]] && continue
+        ticker=$(echo "$ticker" | xargs)
+        [[ -z "$ticker" ]] && continue
+        outfile=$(quick_outfile_for "$ticker" "$run_date")
+        if [[ -f "$outfile" ]] && report_has_verdict_header "$outfile"; then
+            count=$((count + 1))
+        fi
+    done < "$ticker_list"
+    printf '%s\n' "$count"
+}
+
+detect_stage1_resume_date() {
+    local ticker_list="$1"
+    local inferred_date="$2"
+    local today_date="$3"
+    local inferred_count today_count
+
+    inferred_count=$(count_completed_quick_reports_for_date "$ticker_list" "$inferred_date")
+    today_count=$(count_completed_quick_reports_for_date "$ticker_list" "$today_date")
+
+    if [[ "$today_count" -gt "$inferred_count" ]]; then
+        printf '%s\n' "$today_date"
+    else
+        printf '%s\n' "$inferred_date"
+    fi
+}
+
 # --- Parse arguments ---
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -100,8 +233,12 @@ while [[ $# -gt 0 ]]; do
         --stage)
             START_STAGE="$2"
             shift 2 ;;
+        --run-date)
+            RUN_DATE_OVERRIDE="$2"
+            shift 2 ;;
         --buys-file)
             BUY_LIST="$2"
+            BUY_LIST_EXPLICIT=true
             shift 2 ;;
         -y|--yes)
             AUTO_YES=true
@@ -126,6 +263,7 @@ OPTIONS:
   --include-us        Include US exchanges in scrape phase
   --cooldown N        Seconds between ticker analyses (default: 60)
   --stage N           Start from stage N (0, 1, or 2)
+  --run-date DATE     Force the pipeline/output date (YYYY-MM-DD) for cross-day resume
   --buys-file FILE    Explicit BUY list path — bypasses the date-based default
                       (scratch/buys_YYYY-MM-DD.txt). Use with --stage 2 when
                       resuming a run that crossed midnight:
@@ -155,6 +293,12 @@ EXAMPLES:
   # Start from Stage 2 (BUY list must exist from prior run)
   ./scripts/run_pipeline.sh --stage 2
 
+  # Resume a prior Stage 1 run from its original date
+  ./scripts/run_pipeline.sh --stage 1 --skip-scrape scratch/gems_2026-02-24.txt
+
+  # Resume using an explicit run date when filenames were copied/renamed
+  ./scripts/run_pipeline.sh --stage 1 --skip-scrape scratch/gems_2026-02-25.txt --run-date 2026-02-24
+
   # Non-interactive (e.g. cron, CI, overnight run)
   caffeinate -i ./scripts/run_pipeline.sh --yes
 
@@ -175,26 +319,31 @@ if [[ -n "$SKIP_SCRAPE" ]]; then
     TICKER_LIST="$SKIP_SCRAPE"
 fi
 
-# If --buys-file was given, derive DATE from the filename so that Stage 2 output
-# filenames and resumability checks stay consistent with the original run.
-# e.g. scratch/buys_2026-03-02.txt  →  DATE=2026-03-02
-if [[ "$BUY_LIST" != "${SCRATCH}/buys_${DATE}.txt" ]]; then
-    EXTRACTED_DATE=$(basename "$BUY_LIST" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1)
-    if [[ -n "$EXTRACTED_DATE" ]]; then
-        info "Cross-day resume: using date ${EXTRACTED_DATE} from buys file (was ${DATE})"
-        DATE="$EXTRACTED_DATE"
+# Date precedence:
+# 1. explicit --run-date
+# 2. explicit --buys-file date
+# 3. --skip-scrape ticker-list date
+if [[ -n "$RUN_DATE_OVERRIDE" ]]; then
+    apply_run_date "run-date override" "$RUN_DATE_OVERRIDE"
+elif $BUY_LIST_EXPLICIT; then
+    apply_run_date "buys file" "$(extract_date_from_path "$BUY_LIST")"
+elif [[ -n "$SKIP_SCRAPE" ]]; then
+    apply_run_date "ticker list" "$(extract_date_from_path "$TICKER_LIST")"
+fi
+
+if [[ -n "$SKIP_SCRAPE" && -z "$RUN_DATE_OVERRIDE" && ! $BUY_LIST_EXPLICIT && $START_STAGE -eq 1 ]]; then
+    DETECTED_STAGE1_DATE=$(detect_stage1_resume_date "$TICKER_LIST" "$DATE" "$(date +%Y-%m-%d)")
+    if [[ -n "$DETECTED_STAGE1_DATE" && "$DETECTED_STAGE1_DATE" != "$DATE" ]]; then
+        apply_run_date "existing quick outputs" "$DETECTED_STAGE1_DATE"
     fi
 fi
 
 # --- Ensure scratch directory exists ---
 mkdir -p "$SCRATCH"
 
-# --- Check Poetry is available ---
-if ! command -v poetry &> /dev/null; then
-    fail "Poetry is not installed"
-    info "Install from: https://python-poetry.org/docs/#installation"
-    exit 1
-fi
+# --- Resolve Python runtime ---
+resolve_python_cmd
+info "Python runtime:      $PYTHON_CMD_DISPLAY"
 
 # ============================================================
 # STAGE 0: Scrape + Filter
@@ -213,13 +362,13 @@ if [[ $START_STAGE -le 0 ]]; then
         TICKER_LIST="$SKIP_SCRAPE"
         info "Using existing ticker list: $TICKER_LIST"
     else
-        GEMS_CMD="poetry run python scripts/find_gems.py --output $TICKER_LIST --details ${SCRATCH}/gems_details_${DATE}.csv"
+        GEMS_CMD=("${PYTHON_CMD[@]}" scripts/find_gems.py --output "$TICKER_LIST" --details "${SCRATCH}/gems_details_${DATE}.csv")
         if [[ -n "$INCLUDE_US" ]]; then
-            GEMS_CMD="$GEMS_CMD $INCLUDE_US"
+            GEMS_CMD+=("$INCLUDE_US")
         fi
 
-        info "Running: $GEMS_CMD"
-        if eval "$GEMS_CMD"; then
+        info "Running: ${GEMS_CMD[*]}"
+        if "${GEMS_CMD[@]}"; then
             success "Scrape + filter complete"
         else
             fail "find_gems.py failed"
@@ -244,7 +393,7 @@ if [[ $START_STAGE -le 0 ]]; then
         [[ -z "$ticker" ]] && continue
         DASH=$(echo "$ticker" | tr '._' '-')
         OUTFILE="${SCRATCH}/README-${DASH}-${DATE}_quick.md"
-        if $FORCE || ! [[ -f "$OUTFILE" ]] || ! grep -qE '^# .*\): ' "$OUTFILE"; then
+        if $FORCE || ! [[ -f "$OUTFILE" ]] || ! report_has_verdict_header "$OUTFILE"; then
             STAGE1_TODO=$((STAGE1_TODO + 1))
         fi
     done < "$TICKER_LIST"
@@ -297,7 +446,7 @@ if [[ $START_STAGE -le 1 ]]; then
             [[ -z "$ticker" ]] && continue
             DASH=$(echo "$ticker" | tr '._' '-')
             OUTFILE="${SCRATCH}/README-${DASH}-${DATE}_quick.md"
-            if $FORCE || ! [[ -f "$OUTFILE" ]] || ! grep -qE '^# .*\): ' "$OUTFILE"; then
+            if $FORCE || ! [[ -f "$OUTFILE" ]] || ! report_has_verdict_header "$OUTFILE"; then
                 STAGE1_TODO=$((STAGE1_TODO + 1))
             fi
         done < "$TICKER_LIST"
@@ -340,7 +489,7 @@ if [[ $START_STAGE -le 1 ]]; then
         LOGFILE="${SCRATCH}/${DASH}-LOG-${DATE}_quick.txt"
 
         # Resumability: skip if output already has a verdict line
-        if ! $FORCE && [[ -f "$OUTFILE" ]] && grep -qE '^# .*\): ' "$OUTFILE"; then
+        if ! $FORCE && [[ -f "$OUTFILE" ]] && report_has_verdict_header "$OUTFILE"; then
             STAGE1_SKIPPED=$((STAGE1_SKIPPED + 1))
             info "SKIP $ticker (already done)"
             continue
@@ -349,12 +498,12 @@ if [[ $START_STAGE -le 1 ]]; then
         STAGE1_PROCESSED=$((STAGE1_PROCESSED + 1))
         info "[$STAGE1_PROCESSED/$STAGE1_TODO, $TICKER_COUNT total] Quick: $ticker"
 
-        if poetry run python -m src.main \
+        if "${PYTHON_CMD[@]}" -m src.main \
             --ticker "$ticker" \
             --quick --strict --no-charts --quiet --brief --no-memory \
             --output "$OUTFILE" \
             2> "$LOGFILE"; then
-            VERDICT=$(grep -m1 -E '^# .*\): ' "$OUTFILE" 2>/dev/null | sed 's/.*): //' | tr -d '\r')
+            VERDICT=$(extract_report_verdict "$OUTFILE")
             [[ -n "$VERDICT" ]] && success "$ticker done [Verdict=${VERDICT}]" || success "$ticker done"
         else
             fail "FAILED: $ticker (see $LOGFILE)"
@@ -398,33 +547,35 @@ if [[ $START_STAGE -le 1 ]]; then
             continue
         fi
 
-        # Title line (line 10) format: "# TICKER (Company Name): VERDICT"
-        if grep -qE '^# .*\): BUY$' "$OUTFILE"; then
-            echo "$ticker" >> "$BUY_LIST"
-            BUY_COUNT=$((BUY_COUNT + 1))
-            success "BUY: $ticker"
-        elif grep -qE '^# .*\): SELL' "$OUTFILE"; then
-            SELL_COUNT=$((SELL_COUNT + 1))
-            info "SELL: $ticker"
-        elif grep -qE '^# .*\): HOLD' "$OUTFILE"; then
-            HOLD_COUNT=$((HOLD_COUNT + 1))
-            info "HOLD: $ticker"
-        elif grep -qE '^# .*\): DO_NOT_INITIATE' "$OUTFILE"; then
-            SELL_COUNT=$((SELL_COUNT + 1))
-            info "DO_NOT_INITIATE: $ticker"
-        else
-            # None of the known verdicts matched — show line 10 verbatim for debugging
-            LINE10=$(sed -n '10p' "$OUTFILE")
-            VERDICT=$(echo "$LINE10" | sed 's/.*): //')
-            if [[ -n "$VERDICT" && "$VERDICT" != "$LINE10" ]]; then
-                # Pattern matched — unusual verdict string (e.g. WATCHLIST, SPECULATIVE_BUY)
+        VERDICT=$(extract_report_verdict "$OUTFILE")
+        case "$VERDICT" in
+            BUY)
+                echo "$ticker" >> "$BUY_LIST"
+                BUY_COUNT=$((BUY_COUNT + 1))
+                success "BUY: $ticker"
+                ;;
+            SELL)
+                SELL_COUNT=$((SELL_COUNT + 1))
+                info "SELL: $ticker"
+                ;;
+            HOLD)
+                HOLD_COUNT=$((HOLD_COUNT + 1))
+                info "HOLD: $ticker"
+                ;;
+            DO_NOT_INITIATE|DO\ NOT\ INITIATE)
+                SELL_COUNT=$((SELL_COUNT + 1))
+                info "DO_NOT_INITIATE: $ticker"
+                ;;
+            "")
+                HEADER=$(report_verdict_line "$OUTFILE")
+                warn "UNKNOWN: $ticker [header: ${HEADER:-<empty>}]"
+                OTHER_COUNT=$((OTHER_COUNT + 1))
+                ;;
+            *)
                 warn "UNKNOWN_VERDICT ($VERDICT): $ticker"
-            else
-                # Pattern didn't match — title not on line 10 or unexpected format
-                warn "UNKNOWN: $ticker [line10: ${LINE10:-<empty>}]"
-            fi
-            OTHER_COUNT=$((OTHER_COUNT + 1))
-        fi
+                OTHER_COUNT=$((OTHER_COUNT + 1))
+                ;;
+        esac
 
     done < "$TICKER_LIST"
 
@@ -466,7 +617,7 @@ if [[ $START_STAGE -le 2 ]]; then
         [[ -z "$ticker" ]] && continue
         DASH=$(echo "$ticker" | tr '._' '-')
         OUTFILE="${SCRATCH}/README-${DASH}-${DATE}.md"
-        if $FORCE || ! [[ -f "$OUTFILE" ]] || ! grep -qE '^# .*\): ' "$OUTFILE"; then
+        if $FORCE || ! [[ -f "$OUTFILE" ]] || ! report_has_verdict_header "$OUTFILE"; then
             STAGE2_TODO=$((STAGE2_TODO + 1))
         fi
     done < "$BUY_LIST"
@@ -506,7 +657,7 @@ if [[ $START_STAGE -le 2 ]]; then
         LOGFILE="${SCRATCH}/${DASH}-LOG-${DATE}.txt"
 
         # Resumability: skip if full analysis output already has a verdict
-        if ! $FORCE && [[ -f "$OUTFILE" ]] && grep -qE '^# .*\): ' "$OUTFILE"; then
+        if ! $FORCE && [[ -f "$OUTFILE" ]] && report_has_verdict_header "$OUTFILE"; then
             STAGE2_SKIPPED=$((STAGE2_SKIPPED + 1))
             info "SKIP $ticker (full analysis exists)"
             continue
@@ -515,13 +666,13 @@ if [[ $START_STAGE -le 2 ]]; then
         STAGE2_PROCESSED=$((STAGE2_PROCESSED + 1))
         info "[$STAGE2_PROCESSED/$STAGE2_TODO, $BUY_TOTAL total] Full: $ticker"
 
-        if poetry run python -m src.main \
+        if "${PYTHON_CMD[@]}" -m src.main \
             --ticker "$ticker" \
             --transparent --quiet \
             $STRICT_FLAG \
             --output "$OUTFILE" \
             2> "$LOGFILE"; then
-            VERDICT=$(grep -m1 -E '^# .*\): ' "$OUTFILE" 2>/dev/null | sed 's/.*): //' | tr -d '\r')
+            VERDICT=$(extract_report_verdict "$OUTFILE")
             [[ -n "$VERDICT" ]] && success "$ticker done [Verdict=${VERDICT}]" || success "$ticker done"
         else
             fail "FAILED: $ticker (see $LOGFILE)"

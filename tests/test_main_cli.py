@@ -167,6 +167,89 @@ class TestToolAuditLogging:
         finally:
             configure_tool_audit_logging(False)
 
+    def test_configure_tool_audit_logging_preserves_content_inspection_hook(self):
+        from src.main import configure_tool_audit_logging
+        from src.tooling.inspection_hook import ContentInspectionHook
+        from src.tooling.runtime import TOOL_SERVICE
+
+        TOOL_SERVICE.set_hooks([ContentInspectionHook()])
+        try:
+            configure_tool_audit_logging(True)
+            hook_types = [type(h).__name__ for h in TOOL_SERVICE.hooks]
+            assert "LoggingToolAuditHook" in hook_types
+            assert "ContentInspectionHook" in hook_types
+
+            configure_tool_audit_logging(False)
+            hook_types = [type(h).__name__ for h in TOOL_SERVICE.hooks]
+            assert "LoggingToolAuditHook" not in hook_types
+            assert "ContentInspectionHook" in hook_types
+        finally:
+            TOOL_SERVICE.clear_hooks()
+
+    def test_configure_content_inspection_from_config_installs_tool_hook(
+        self, monkeypatch
+    ):
+        from src.main import configure_content_inspection_from_config
+        from src.tooling.runtime import TOOL_SERVICE
+
+        monkeypatch.setattr(
+            "src.main.config.untrusted_content_inspection_enabled", True
+        )
+        monkeypatch.setattr("src.main.config.untrusted_content_backend", "null")
+        monkeypatch.setattr("src.main.config.untrusted_content_inspection_mode", "warn")
+        monkeypatch.setattr(
+            "src.main.config.untrusted_content_fail_policy", "fail_open"
+        )
+
+        TOOL_SERVICE.clear_hooks()
+        try:
+            configure_content_inspection_from_config()
+            hook_types = [type(h).__name__ for h in TOOL_SERVICE.hooks]
+            assert "ContentInspectionHook" in hook_types
+        finally:
+            TOOL_SERVICE.clear_hooks()
+
+    def test_configure_content_inspection_from_config_removes_tool_hook_when_disabled(
+        self, monkeypatch
+    ):
+        from src.main import configure_content_inspection_from_config
+        from src.tooling.inspection_hook import ContentInspectionHook
+        from src.tooling.runtime import TOOL_SERVICE
+
+        monkeypatch.setattr(
+            "src.main.config.untrusted_content_inspection_enabled", False
+        )
+
+        TOOL_SERVICE.set_hooks([ContentInspectionHook()])
+        try:
+            configure_content_inspection_from_config()
+            hook_types = [type(h).__name__ for h in TOOL_SERVICE.hooks]
+            assert "ContentInspectionHook" not in hook_types
+        finally:
+            TOOL_SERVICE.clear_hooks()
+
+    def test_configure_content_inspection_from_config_rejects_unimplemented_backend(
+        self, monkeypatch
+    ):
+        from src.main import configure_content_inspection_from_config
+        from src.tooling.runtime import TOOL_SERVICE
+
+        monkeypatch.setattr(
+            "src.main.config.untrusted_content_inspection_enabled", True
+        )
+        monkeypatch.setattr("src.main.config.untrusted_content_backend", "http")
+        monkeypatch.setattr("src.main.config.untrusted_content_inspection_mode", "warn")
+        monkeypatch.setattr(
+            "src.main.config.untrusted_content_fail_policy", "fail_open"
+        )
+
+        TOOL_SERVICE.clear_hooks()
+        try:
+            with pytest.raises(ValueError, match="only 'null' is implemented"):
+                configure_content_inspection_from_config()
+        finally:
+            TOOL_SERVICE.clear_hooks()
+
     @patch("src.main.socket.getaddrinfo", side_effect=OSError("dns down"))
     def test_provider_preflight_logs_failures(self, _mock_dns):
         from src.main import run_provider_preflight

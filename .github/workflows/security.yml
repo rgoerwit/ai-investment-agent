@@ -207,7 +207,7 @@ jobs:
 
       # Scan repository for vulnerabilities in dependencies, misconfigurations, secrets
       - name: Run Trivy vulnerability scanner (repo mode)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: 'fs'  # Filesystem scan (entire repository)
           scan-ref: '.'    # Scan current directory
@@ -239,7 +239,7 @@ jobs:
       # Generate human-readable report for PR comments
       - name: Run Trivy for PR comment (table format)
         if: github.event_name == 'pull_request'
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: 'fs'
           scan-ref: '.'
@@ -303,7 +303,7 @@ jobs:
 
       # Scan Python dependencies specifically (more focused than repo scan)
       - name: Run Trivy on Python dependencies
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: 'fs'
           scan-ref: '.'
@@ -357,7 +357,7 @@ jobs:
       # Scan the built Docker image for vulnerabilities
       - name: Run Trivy on Docker image
         if: steps.dockerfile_check.outputs.exists == 'true'
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: 'image'  # Scan Docker image
           image-ref: 'investment-agent:${{ github.sha }}'
@@ -392,7 +392,7 @@ jobs:
       # Generate table report for Docker scan
       - name: Run Trivy for Docker summary
         if: steps.dockerfile_check.outputs.exists == 'true'
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: 'image'
           image-ref: 'investment-agent:${{ github.sha }}'

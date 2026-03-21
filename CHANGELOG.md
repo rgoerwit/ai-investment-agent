@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.5] - 2026-03-21
+
+### Added
+
+- **Content Inspection Hook** — `src/tooling/inspector.py` / `inspection_service.py` / `inspection_hook.py`: policy layer that potentially sanitises every tool output before it reaches LLM context. `NullInspector` default (zero overhead); swap backend via `configure_content_inspection()` at startup.
+- **Per-Agent Output Budgets** — `src/llm_budgets.py` centralises fractional `max_tokens` caps per agent; `src/agents/output_validation.py` coerces and validates DATA_BLOCK numeric fields.
+
+### Fixed
+
+- **`DO NOT INITIATE` Restart Parsing** — `run_pipeline.sh` now correctly recognises `DO NOT INITIATE` verdicts when resuming interrupted batch runs; previously they were re-queued as unresolved.
+- **Exchange-Qualified Ticker Propagation** — `src/ticker_policy.py` centralises exchange-suffix rules; fixes cross-exchange base-symbol clashes in the data fetcher and pipeline verdict parser.
+- **Trivy CI Pin** — `trivy-action` bumped `0.28.0` → `0.35.0`; the old tag did not exist, silently blocking all Trivy jobs before any scan ran.
+
+### Changed
+
+- **Container Hardening** — `Dockerfile`, `docker-compose.yml`, and `scripts/check-environment.sh` updated for Podman-first runtime; `README.md` local-container setup docs expanded.
+
 ## [3.9.4] - 2026-03-19
 
 ### Changed

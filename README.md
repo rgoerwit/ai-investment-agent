@@ -228,6 +228,129 @@ poetry run python -u -m src.main --ticker 0005.HK --output scratch/report.md >sc
 poetry run pytest tests/ -v
 ```
 
+### Optional: Local Container Mode
+
+Manual repo mode remains the default. If you prefer stronger runtime isolation, you can also run the project locally in a container. For local use, prefer **Podman** over Docker. It has a tighter default security posture and is the better fit for most developers who are wary of giving a daemon broad control of their workstation.
+
+This container mode is intentionally secondary: it uses **bind mounts** so the container reads and writes the same host directories that manual mode uses.
+
+What persists on the host in container mode:
+
+- `results/` -> analysis JSONs and report outputs
+- `chroma_db/` -> ChromaDB-backed memory state
+- `data_cache/` -> cached data fetches
+- `images/` -> generated charts and image assets
+- `scratch/` -> pipeline artifacts, logs, and resumability files
+
+Important:
+
+- Manual mode and container mode can share the same host directories safely.
+- Embedded Chroma is still a **single-writer local store**. Do not run multiple concurrently writing containers against the same `chroma_db/`.
+- The image is built from the repo root. During `docker build` / `podman build`, the Dockerfile copies `src/` into `/app/src`, `prompts/` into `/app/prompts`, and `scripts/` into `/app/scripts`. That is how both the application code and the operational scripts get into the image.
+- The runtime image does **not** include Poetry. Shell scripts in the image call plain `python ...` so they work both in a container and in an activated local venv.
+- On macOS with Podman, use `--user "$(id -u):$(id -g)"` in the examples below. `--userns=keep-id` is not sufficient there for bind-mounted write access.
+
+Build the image:
+
+```bash
+# Preferred:
+podman build -t investment-agent .
+
+# Secondary option:
+docker build -t investment-agent .
+```
+
+One-off analysis through Podman:
+
+```bash
+podman run --rm \
+  --env-file .env \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD/results:/app/results:Z" \
+  -v "$PWD/chroma_db:/app/chroma_db:Z" \
+  -v "$PWD/data_cache:/app/data_cache:Z" \
+  -v "$PWD/images:/app/images:Z" \
+  -v "$PWD/scratch:/app/scratch:Z" \
+  investment-agent \
+  --ticker 0005.HK --output results/0005.HK.md
+```
+
+Docker equivalent:
+
+```bash
+docker run --rm \
+  --env-file .env \
+  -v "$PWD/results:/app/results" \
+  -v "$PWD/chroma_db:/app/chroma_db" \
+  -v "$PWD/data_cache:/app/data_cache" \
+  -v "$PWD/images:/app/images" \
+  -v "$PWD/scratch:/app/scratch" \
+  investment-agent \
+  --ticker 0005.HK --output results/0005.HK.md
+```
+
+Containerized pipeline:
+
+```bash
+podman run --rm \
+  --entrypoint bash \
+  --env-file .env \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD/results:/app/results:Z" \
+  -v "$PWD/chroma_db:/app/chroma_db:Z" \
+  -v "$PWD/data_cache:/app/data_cache:Z" \
+  -v "$PWD/images:/app/images:Z" \
+  -v "$PWD/scratch:/app/scratch:Z" \
+  investment-agent \
+  scripts/run_pipeline.sh --stage 1 --skip-scrape scratch/gems_2026-03-20.txt
+```
+
+Docker equivalent:
+
+```bash
+docker run --rm \
+  --entrypoint bash \
+  --env-file .env \
+  -v "$PWD/results:/app/results" \
+  -v "$PWD/chroma_db:/app/chroma_db" \
+  -v "$PWD/data_cache:/app/data_cache" \
+  -v "$PWD/images:/app/images" \
+  -v "$PWD/scratch:/app/scratch" \
+  investment-agent \
+  scripts/run_pipeline.sh --stage 1 --skip-scrape scratch/gems_2026-03-20.txt
+```
+
+Containerized portfolio manager:
+
+```bash
+podman run --rm \
+  --entrypoint python \
+  --env-file .env \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD/results:/app/results:Z" \
+  -v "$PWD/chroma_db:/app/chroma_db:Z" \
+  -v "$PWD/data_cache:/app/data_cache:Z" \
+  -v "$PWD/images:/app/images:Z" \
+  -v "$PWD/scratch:/app/scratch:Z" \
+  investment-agent \
+  scripts/portfolio_manager.py --read-only
+```
+
+Docker equivalent:
+
+```bash
+docker run --rm \
+  --entrypoint python \
+  --env-file .env \
+  -v "$PWD/results:/app/results" \
+  -v "$PWD/chroma_db:/app/chroma_db" \
+  -v "$PWD/data_cache:/app/data_cache" \
+  -v "$PWD/images:/app/images" \
+  -v "$PWD/scratch:/app/scratch" \
+  investment-agent \
+  scripts/portfolio_manager.py --read-only
+```
+
 ### Automated Screening Pipeline (Fastest Path to Gems)
 
 Find undervalued international stocks end-to-end — no manual steps:
@@ -262,6 +385,7 @@ The pipeline pauses before each AI stage to show a summary (ticker count, estima
 | `-y, --yes` | Skip all confirmation prompts (for cron/CI/overnight runs) |
 | `--skip-scrape FILE` | Skip Stage 0 scraping; use an existing ticker list file |
 | `--stage N` | Run only stage N (0=scrape, 1=quick-screen, 2=full analysis) |
+| `--run-date DATE` | Force the pipeline/output date for cross-day resume when filenames were copied or renamed |
 | `--buys-file FILE` | Explicit BUY list to use for Stage 2 (see resumption notes below) |
 | `--cooldown N` | Seconds between analyses (default: 60 for free tier, 10 for paid) |
 | `--quick` | Pass `--quick` flag to each analysis (1 debate round, faster) |
@@ -273,18 +397,37 @@ Output lands in `scratch/`: quick-screen reports (`*_quick.md`), full reports fo
 The pipeline has built-in resumability: any ticker whose output file already contains a verdict line is skipped automatically. To resume:
 
 ```bash
+# Same-day resume for Stage 1 or Stage 2
+# Re-run the same command family without --force; completed outputs are skipped
+./scripts/run_pipeline.sh --stage 1 --skip-scrape scratch/gems_2026-03-02.txt
+
 # Same-day resume (pipeline ran and was interrupted today)
 # Just re-run with --stage 2 — it finds today's buys file and skips completed tickers
 ./scripts/run_pipeline.sh --stage 2
+
+# Cross-day resume for Stage 1
+# Point --skip-scrape at the original gems_YYYY-MM-DD.txt file from the interrupted run.
+# The script now derives the run date from that filename and reuses the matching
+# quick-screen outputs instead of looking for today's files.
+./scripts/run_pipeline.sh --stage 1 --skip-scrape scratch/gems_2026-03-02.txt
 
 # Cross-day resume (pipeline started yesterday, interrupted, resuming today)
 # Use --buys-file to point at yesterday's BUY list.
 # The script detects the date in the filename and matches output files correctly —
 # without this, it would look for today's output files and re-analyze everything.
 ./scripts/run_pipeline.sh --stage 2 --buys-file scratch/buys_2026-03-02.txt
+
+# If you copied or renamed the ticker list / BUY list and the original date is no
+# longer in the filename, force the original run date explicitly:
+./scripts/run_pipeline.sh --stage 1 --skip-scrape scratch/gems_2026-03-20.txt --run-date 2026-03-02
 ```
 
-Without `--buys-file` on a cross-day resume, the script looks for today's BUY list and stops. Point it at the earlier `buys_YYYY-MM-DD.txt` file to reuse the correct outputs.
+Subtle but important:
+
+- Stage 1 resumability depends on the original run date because quick outputs are named `README-<ticker>-YYYY-MM-DD_quick.md`.
+- Stage 2 resumability depends on the original run date because full outputs and `buys_YYYY-MM-DD.txt` are date-scoped the same way.
+- If you keep the original `gems_YYYY-MM-DD.txt` / `buys_YYYY-MM-DD.txt` filenames, the script can infer the correct date automatically.
+- If you copy or rename those files, use `--run-date YYYY-MM-DD` so the script checks the correct output files instead of today's.
 
 ### Configuring API Rate Limits
 
@@ -720,18 +863,26 @@ Edge case testing matters here because the runtime depends on unreliable externa
 
 ## Deployment (Educational Reference)
 
-### Docker Support
+### Container Support
 
-Production-ready **multi-stage Dockerfile** (Poetry 2.x, non-root user, ~40% smaller images):
+The repo includes a multi-stage container image for optional local execution. For most local setups, prefer **Podman** and use the bind-mounted workflows in [Optional: Local Container Mode](#optional-local-container-mode). Docker still works, but it is the secondary path here.
 
 ```bash
-# Build and run
-docker build -t trading-system .
-docker run --env-file .env trading-system --ticker 0005.HK --quick
-
-# Or use docker-compose
-docker compose run --rm investment-agent --ticker 7203.T
+# Preferred local build/run path
+podman build -t investment-agent .
+podman run --rm \
+  --env-file .env \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD/results:/app/results:Z" \
+  -v "$PWD/chroma_db:/app/chroma_db:Z" \
+  -v "$PWD/data_cache:/app/data_cache:Z" \
+  -v "$PWD/images:/app/images:Z" \
+  -v "$PWD/scratch:/app/scratch:Z" \
+  investment-agent \
+  --ticker 0005.HK --quick --output results/0005.HK.md
 ```
+
+For Docker equivalents, `run_pipeline.sh`, and `portfolio_manager.py`, see [Optional: Local Container Mode](#optional-local-container-mode).
 
 ### Azure Container Instances (Terraform)
 
@@ -805,6 +956,18 @@ Read it this way:
 - `src/toolkit.py` and `src/tools/` form the agent tool surface over market, news, search, filing, and ownership data.
 - `src/data/`, `src/validators/`, `src/memory.py`, and `src/charts/` are shared subsystems used by the graph and reporting layers.
 - `src/ibkr/` is adjacent to, not embedded inside, the single-ticker analysis flow.
+
+### Appendix: Untrusted Content Inspection
+
+If you need to screen untrusted external content before it reaches LLM context, the main insertion points now live under `src/tooling/`:
+
+- `src/tooling/inspection_service.py` owns the backend-agnostic inspection service.
+- `src/tooling/inspection_hook.py` attaches that inspection pass to the shared tool execution path.
+- `src/main.py` wires inspection from config at startup.
+
+Some high-risk direct-ingress paths also call the inspection service explicitly before returning LLM-facing text, including Tavily/search helpers, editor fetch tools, selected news/social inputs, and fetcher gap-fill paths.
+
+The design is intentionally pluggable. Today the default backend is a no-op, but the seam is meant to support remote HTTP services, local Python libraries, subprocess-based scanners, or local/offline model wrappers without changing calling code.
 
 ---
 

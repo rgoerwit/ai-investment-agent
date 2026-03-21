@@ -42,8 +42,8 @@ def _safe_float(value) -> float | None:
         return None
 
 
-def _extract_ticker_number(ticker: str) -> str:
-    """Extract the numeric part from a ticker like '2767.T' -> '2767'."""
+def _extract_ticker_base(ticker: str) -> str:
+    """Extract the exchange-qualified base from a ticker like '2767.T' -> '2767'."""
     return ticker.split(".")[0]
 
 
@@ -69,10 +69,10 @@ class EdinetFetcher(FilingFetcher):
             logger.warning("edinet_tools_not_installed")
             return None
 
-        ticker_num = _extract_ticker_number(ticker)
+        ticker_base = _extract_ticker_base(ticker)
 
         # Look up entity in EDINET
-        entity = await asyncio.to_thread(edinet_tools.entity, ticker_num)
+        entity = await asyncio.to_thread(edinet_tools.entity, ticker_base)
         if entity is None:
             logger.info("edinet_entity_not_found", ticker=ticker)
             return None

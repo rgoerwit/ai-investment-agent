@@ -18,6 +18,11 @@ from src.runtime_diagnostics import (
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .output_validation import (
+    log_output_diagnostics,
+    should_fail_closed,
+    validate_required_output,
+)
 from .state import AgentState
 
 logger = structlog.get_logger(__name__)
@@ -187,27 +192,32 @@ def create_trader_node(llm, memory: Any | None) -> Callable:
         consultant = get_valid_artifact_content(state, "consultant_review")
         consultant_section = (
             "\n\nEXTERNAL CONSULTANT REVIEW (Cross-Validation):\n"
-            f"{consultant if consultant else 'N/A (consultant disabled or unavailable)'}"
+            f"{support.summarize_for_pm(consultant, 'consultant', 2500) if consultant else 'N/A (consultant disabled or unavailable)'}"
         )
         valuation = state.get("valuation_params", "")
         valuation_section = (
             f"\n\nVALUATION PARAMETERS:\n{valuation}" if valuation else ""
         )
 
+        market_report = state.get("market_report", "N/A")
+        sentiment_report = state.get("sentiment_report", "N/A")
+        news_report = state.get("news_report", "N/A")
+        fundamentals_report = state.get("fundamentals_report", "N/A")
+        investment_plan = state.get("investment_plan", "N/A")
         all_input = f"""MARKET ANALYST REPORT:
-{state.get("market_report", "N/A")}
+{support.summarize_for_pm(market_report, "market", 1800) if market_report != "N/A" else "N/A"}
 
 SENTIMENT ANALYST REPORT:
-{state.get("sentiment_report", "N/A")}
+{support.summarize_for_pm(sentiment_report, "sentiment", 1200) if sentiment_report != "N/A" else "N/A"}
 
 NEWS ANALYST REPORT:
-{state.get("news_report", "N/A")}
+{support.summarize_for_pm(news_report, "news", 1800) if news_report != "N/A" else "N/A"}
 
 FUNDAMENTALS ANALYST REPORT:
-{state.get("fundamentals_report", "N/A")}
+{support.summarize_for_pm(fundamentals_report, "fundamentals", 6000) if fundamentals_report != "N/A" else "N/A"}
 
 RESEARCH MANAGER PLAN:
-{state.get("investment_plan", "N/A")}{consultant_section}{valuation_section}"""
+{support.summarize_for_pm(investment_plan, "research", 3500) if investment_plan != "N/A" else "N/A"}{consultant_section}{valuation_section}"""
         prompt = f"{agent_prompt.system_message}\n\n{all_input}\n\nCreate Trading Plan."
 
         try:
@@ -218,9 +228,32 @@ RESEARCH MANAGER PLAN:
                 provider=support.infer_provider_name(llm),
                 model_name=support.get_model_name(llm),
             )
+            content_str = message_utils.extract_string_content(response.content)
+            from src.utils import detect_truncation
+
+            trunc_info = detect_truncation(content_str, agent="trader")
+            if trunc_info["truncated"]:
+                logger.warning(
+                    "agent_output_truncated",
+                    agent="trader",
+                    ticker=state.get("company_of_interest", "UNKNOWN"),
+                    source=trunc_info["source"],
+                    marker=trunc_info["marker"],
+                    confidence=trunc_info["confidence"],
+                    output_len=len(content_str),
+                )
+            log_output_diagnostics(
+                agent_key="trader",
+                ticker=state.get("company_of_interest", "UNKNOWN"),
+                runnable=llm,
+                response=response,
+                content=content_str,
+                truncated=trunc_info["truncated"],
+                validation=None,
+            )
             return success_artifact(
                 "trader_investment_plan",
-                message_utils.extract_string_content(response.content),
+                content_str,
                 provider=support.infer_provider_name(llm),
             )
         except Exception as exc:
@@ -509,6 +542,34 @@ RISK TEAM DEBATE:
                     marker=trunc_info["marker"],
                     confidence=trunc_info["confidence"],
                     output_len=len(content_str),
+                )
+
+            validation = validate_required_output("portfolio_manager", content_str)
+            log_output_diagnostics(
+                agent_key="portfolio_manager",
+                ticker=ticker,
+                runnable=llm,
+                response=response,
+                content=content_str,
+                truncated=trunc_info["truncated"],
+                validation=validation,
+            )
+            if should_fail_closed(
+                "portfolio_manager",
+                validation=validation,
+                truncated=trunc_info["truncated"],
+                content=content_str,
+            ):
+                logger.error(
+                    "portfolio_manager_invalid_structure",
+                    ticker=ticker,
+                    missing_sections=validation["missing"],
+                )
+                return failure_artifact(
+                    "final_trade_decision",
+                    "Portfolio Manager output missing required structure",
+                    provider=support.infer_provider_name(llm),
+                    fallback_content=content_str,
                 )
 
             return success_artifact(

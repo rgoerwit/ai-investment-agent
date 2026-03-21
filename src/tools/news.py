@@ -1,5 +1,6 @@
 """News and sentiment tool implementations."""
 
+import asyncio
 from typing import Annotated
 
 import structlog
@@ -8,6 +9,8 @@ from langchain_core.tools import tool
 
 from src.stocktwits_api import StockTwitsAPI
 from src.ticker_utils import normalize_ticker
+from src.tooling.inspection_service import INSPECTION_SERVICE
+from src.tooling.inspector import InspectionEnvelope, SourceKind
 from src.tools import shared
 
 logger = structlog.get_logger(__name__)
@@ -94,6 +97,23 @@ async def get_social_media_sentiment(ticker: str) -> str:
         if "error" in data:
             return f"StockTwits Sentiment Error: {data.get('error')}"
 
+        # Inspect user-generated message content before including in summary.
+        raw_messages = data.get("messages", [])
+        inspection_tasks = []
+        for msg in raw_messages:
+            msg_text = str(msg)
+            envelope = InspectionEnvelope(
+                content_text=msg_text,
+                source_kind=SourceKind.social_feed,
+                source_name="stocktwits",
+                metadata={"ticker": ticker},
+            )
+            inspection_tasks.append(INSPECTION_SERVICE.check(envelope))
+
+        inspected_messages = (
+            await asyncio.gather(*inspection_tasks) if inspection_tasks else []
+        )
+
         summary = (
             f"StockTwits Sentiment for {data.get('ticker')}:\n"
             f"- Bullish: {data.get('bullish_pct')}% ({data.get('bullish_count')} msgs)\n"
@@ -102,9 +122,8 @@ async def get_social_media_sentiment(ticker: str) -> str:
             "Sample Messages:\n"
         )
 
-        messages = data.get("messages", [])
-        if messages:
-            for msg in messages:
+        if inspected_messages:
+            for msg in inspected_messages:
                 summary += f"- {msg}\n"
         else:
             summary += "- No recent messages found.\n"

@@ -9,8 +9,16 @@
 # Variables
 PYTHON := python3
 POETRY := poetry
+# Prefer Podman locally via `make ... DOCKER=podman` if available.
 DOCKER ?= docker
+COMPOSE ?= $(DOCKER) compose
 TICKER ?= AAPL
+CONTAINER_MOUNTS = \
+	-v "$(CURDIR)/results:/app/results" \
+	-v "$(CURDIR)/chroma_db:/app/chroma_db" \
+	-v "$(CURDIR)/data_cache:/app/data_cache" \
+	-v "$(CURDIR)/images:/app/images" \
+	-v "$(CURDIR)/scratch:/app/scratch"
 
 # Colors for output
 BLUE := \033[0;34m
@@ -28,7 +36,7 @@ help: ## Show this help message
 	@echo "  make install          # Install dependencies"
 	@echo "  make run-quick TICKER=AAPL  # Quick analysis for AAPL"
 	@echo "  make test             # Run tests"
-	@echo "  make docker-run TICKER=NVDA # Run with Docker"
+	@echo "  make docker-run TICKER=NVDA DOCKER=podman # Preferred local container path"
 
 install: ## Install dependencies using Poetry
 	@echo "$(BLUE)Installing dependencies...$(NC)"
@@ -128,24 +136,27 @@ docker-build: ## Build Docker image
 
 docker-run: ## Run with Docker (default: AAPL quick)
 	@echo "$(BLUE)Running Docker container for $(TICKER)...$(NC)"
-	$(DOCKER) run --rm --env-file .env investment-agent:latest --ticker $(TICKER) --quick
+	@mkdir -p results chroma_db data_cache images scratch
+	$(DOCKER) run --rm --env-file .env $(CONTAINER_MOUNTS) investment-agent:latest --ticker $(TICKER) --quick --output results/$(TICKER).md
 
 docker-run-deep: ## Run deep analysis with Docker (default: AAPL)
 	@echo "$(BLUE)Running Docker container for $(TICKER) (deep mode)...$(NC)"
-	$(DOCKER) run --rm --env-file .env investment-agent:latest --ticker $(TICKER)
+	@mkdir -p results chroma_db data_cache images scratch
+	$(DOCKER) run --rm --env-file .env $(CONTAINER_MOUNTS) investment-agent:latest --ticker $(TICKER) --output results/$(TICKER).md
 
 docker-shell: ## Open shell in Docker container
 	@echo "$(BLUE)Opening shell in Docker container...$(NC)"
-	$(DOCKER) run --rm -it --env-file .env --entrypoint /bin/bash investment-agent:latest
+	@mkdir -p results chroma_db data_cache images scratch
+	$(DOCKER) run --rm -it --env-file .env $(CONTAINER_MOUNTS) --entrypoint /bin/bash investment-agent:latest
 
 docker-compose-up: ## Start services with docker-compose
-	@echo "$(BLUE)Starting services with docker-compose...$(NC)"
-	docker-compose up -d
+	@echo "$(BLUE)Starting services with compose...$(NC)"
+	$(COMPOSE) up -d
 	@echo "$(GREEN)Services started!$(NC)"
 
 docker-compose-down: ## Stop services with docker-compose
 	@echo "$(BLUE)Stopping services...$(NC)"
-	docker-compose down
+	$(COMPOSE) down
 	@echo "$(GREEN)Services stopped!$(NC)"
 
 env-setup: ## Copy .env.example to .env

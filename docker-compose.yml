@@ -14,8 +14,8 @@ services:
 
     # Or specify environment variables directly
     environment:
-      # Note: Model selection is hardcoded in src/llms.py
-      # QUICK_MODEL and DEEP_MODEL env vars are ignored
+      # Model selection overrides the repo defaults in src/config.py
+      # Set QUICK_MODEL / DEEP_MODEL here if you want different runtime defaults
 
       # Logging
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -24,6 +24,10 @@ services:
       # ChromaDB
       - ANONYMIZED_TELEMETRY=False
       - CHROMA_PERSIST_DIRECTORY=/app/chroma_db
+      - CHROMA_PERSIST_DIR=/app/chroma_db
+      - RESULTS_DIR=/app/results
+      - DATA_CACHE_DIR=/app/data_cache
+      - IMAGES_DIR=/app/images
 
       # LangSmith (optional)
       - LANGSMITH_TRACING=${LANGSMITH_TRACING:-false}
@@ -32,13 +36,13 @@ services:
       - GRPC_VERBOSITY=ERROR
       - GRPC_TRACE=
 
-    # Volume mounts for persistence
+    # Local bind mounts so container mode and manual mode share the same state
     volumes:
-      # Persist ChromaDB data
-      - chroma-data:/app/chroma_db
-
-      # Optional: Mount local code for development
-      # - ./src:/app/src:ro
+      - ./results:/app/results
+      - ./chroma_db:/app/chroma_db
+      - ./data_cache:/app/data_cache
+      - ./images:/app/images
+      - ./scratch:/app/scratch
 
     # Resource limits
     deploy:
@@ -49,12 +53,6 @@ services:
         reservations:
           cpus: '1.0'
           memory: 2G
-
-    # Restart policy
-    restart: unless-stopped
-
-    # Network mode
-    network_mode: bridge
 
     # Command override (examples)
     # Uncomment one of these or override at runtime
@@ -102,16 +100,6 @@ services:
   #     - agent-network
   #   depends_on:
   #     - prometheus
-
-volumes:
-  chroma-data:
-    driver: local
-
-  # Uncomment if enabling observability stack
-  # prometheus-data:
-  #   driver: local
-  # grafana-data:
-  #   driver: local
 
 networks:
   agent-network:

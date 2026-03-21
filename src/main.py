@@ -436,11 +436,56 @@ def configure_tool_audit_logging(enabled: bool) -> None:
     from src.tooling.audit import LoggingToolAuditHook
     from src.tooling.runtime import TOOL_SERVICE
 
+    hooks = [h for h in TOOL_SERVICE.hooks if not isinstance(h, LoggingToolAuditHook)]
     if enabled:
-        TOOL_SERVICE.set_hooks([LoggingToolAuditHook()])
+        hooks.insert(0, LoggingToolAuditHook())
+        TOOL_SERVICE.set_hooks(hooks)
         logger.info("tool_audit_logging_enabled")
     else:
-        TOOL_SERVICE.clear_hooks()
+        TOOL_SERVICE.set_hooks(hooks)
+
+
+def configure_content_inspection_from_config() -> None:
+    """Wire up content inspection from config settings.
+
+    Called independently of logging configuration — security inspection must
+    not be gated on CLI verbosity flags.
+    """
+    from src.tooling.inspection_hook import ContentInspectionHook
+    from src.tooling.inspection_service import configure_content_inspection
+    from src.tooling.inspector import NullInspector
+    from src.tooling.runtime import TOOL_SERVICE
+
+    hooks = [h for h in TOOL_SERVICE.hooks if not isinstance(h, ContentInspectionHook)]
+
+    if not config.untrusted_content_inspection_enabled:
+        TOOL_SERVICE.set_hooks(hooks)
+        configure_content_inspection(
+            NullInspector(), mode="warn", fail_policy="fail_open"
+        )
+        return
+
+    mode = config.untrusted_content_inspection_mode
+    fail_policy = config.untrusted_content_fail_policy
+    backend_name = config.untrusted_content_backend
+
+    if backend_name == "null" or not backend_name:
+        inspector = NullInspector()
+    else:
+        raise ValueError(
+            "UNTRUSTED_CONTENT_BACKEND is set to "
+            f"{backend_name!r}, but only 'null' is implemented in this branch."
+        )
+
+    configure_content_inspection(inspector, mode=mode, fail_policy=fail_policy)
+    hooks.append(ContentInspectionHook())
+    TOOL_SERVICE.set_hooks(hooks)
+    logger.info(
+        "content_inspection_enabled",
+        mode=mode,
+        fail_policy=fail_policy,
+        backend=backend_name,
+    )
 
 
 def configure_cli_logging(args) -> dict[str, dict[str, str]]:
@@ -1399,6 +1444,16 @@ def _setup_runtime(
             console.print(
                 "Please check your .env file and ensure all required API keys are set.\n"
             )
+        raise SystemExit(1) from exc
+
+    # Content inspection is configured independently of logging verbosity.
+    try:
+        configure_content_inspection_from_config()
+    except ValueError as exc:
+        if args.quiet or args.brief:
+            print(f"# Configuration Error\n\n{str(exc)}")
+        else:
+            console.print(f"\n[bold red]Configuration Error:[/bold red] {str(exc)}\n")
         raise SystemExit(1) from exc
 
     return provider_preflight

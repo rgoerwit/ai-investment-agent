@@ -12,7 +12,9 @@ from src.runtime_diagnostics import classify_failure
 
 logger = structlog.get_logger(__name__)
 
-ToolSource: TypeAlias = Literal["toolnode", "consultant", "editor"]
+ToolSource: TypeAlias = Literal[
+    "toolnode", "consultant", "editor", "legal_counsel", "auditor"
+]
 
 
 class ToolCallBlocked(RuntimeError):

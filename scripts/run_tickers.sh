@@ -178,6 +178,30 @@ print_success() {
     echo -e "${GREEN}[SUCCESS]${NC} $1"
 }
 
+resolve_python_cmd() {
+    if [[ -n "${INVESTMENT_AGENT_CONTAINER:-}" ]] || [[ -f "/.dockerenv" ]] || [[ -f "/run/.containerenv" ]]; then
+        PYTHON_CMD=(python)
+        PYTHON_CMD_DISPLAY="python"
+        return
+    fi
+
+    if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+        PYTHON_CMD=(python)
+        PYTHON_CMD_DISPLAY="python"
+        return
+    fi
+
+    if command -v poetry &> /dev/null; then
+        PYTHON_CMD=(poetry run python)
+        PYTHON_CMD_DISPLAY="poetry run python"
+        return
+    fi
+
+    print_error "Poetry is not installed and no active virtual environment was detected"
+    print_info "Either activate your venv, or install Poetry from: https://python-poetry.org/docs/#installation"
+    exit 1
+}
+
 # Ensure output directories exist
 mkdir -p "$(dirname "$OUTPUT_FILE")"
 mkdir -p "$IMAGE_DIR"
@@ -207,12 +231,7 @@ if [[ "$ticker_count" -eq 0 ]]; then
     exit 1
 fi
 
-# Check if Poetry is available
-if ! command -v poetry &> /dev/null; then
-    print_error "Poetry is not installed"
-    print_info "Install from: https://python-poetry.org/docs/#installation"
-    exit 1
-fi
+resolve_python_cmd
 
 # Initialize output file with header
 cat > "$OUTPUT_FILE" << EOF
@@ -255,6 +274,7 @@ print_info "Input: $INPUT_FILE ($ticker_count tickers)"
 print_info "Output: $OUTPUT_FILE"
 print_info "Logs:  $LOG_FILE"
 print_info "Images: $IMAGE_DIR"
+print_info "Python: $PYTHON_CMD_DISPLAY"
 echo ""
 
 # Process each ticker
@@ -285,29 +305,29 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     TEMP_LOG="${OUTPUT_DIR}/.temp_analysis_${ticker}.log"
 
     # Build the Python command based on flags
-    PYTHON_CMD="poetry run python"
+    ticker_cmd=("${PYTHON_CMD[@]}")
 
     # Add -u flag for unbuffered output in loud mode
     if $LOUD_MODE; then
-        PYTHON_CMD="$PYTHON_CMD -u"
+        ticker_cmd+=(-u)
     fi
 
     # Use --output to ensure charts are generated correctly
-    PYTHON_CMD="$PYTHON_CMD -m src.main --ticker $ticker --imagedir $IMAGE_DIR --output $TEMP_REPORT"
+    ticker_cmd+=(-m src.main --ticker "$ticker" --imagedir "$IMAGE_DIR" --output "$TEMP_REPORT")
 
     # Add --quiet unless in loud mode
     if ! $LOUD_MODE; then
-        PYTHON_CMD="$PYTHON_CMD --quiet"
+        ticker_cmd+=(--quiet)
     fi
 
     # Add --brief unless in loud or verbose mode
     if ! $LOUD_MODE && ! $VERBOSE_MODE; then
-        PYTHON_CMD="$PYTHON_CMD --brief"
+        ticker_cmd+=(--brief)
     fi
 
     # Add --quick if in quick mode
     if $QUICK_MODE; then
-        PYTHON_CMD="$PYTHON_CMD --quick"
+        ticker_cmd+=(--quick)
     fi
 
     # Run analysis
@@ -320,12 +340,12 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     if $LOUD_MODE; then
         # In loud mode: logs to terminal AND master log file
         # pipefail is set, so if python fails, this returns failure
-        if $PYTHON_CMD 2>&1 | tee -a "$LOG_FILE"; then
+        if "${ticker_cmd[@]}" 2>&1 | tee -a "$LOG_FILE"; then
             SUCCESS=true
         fi
     else
         # In quiet mode: logs capture to temp log
-        if $PYTHON_CMD > "$TEMP_LOG" 2>&1; then
+        if "${ticker_cmd[@]}" > "$TEMP_LOG" 2>&1; then
             SUCCESS=true
         fi
 
@@ -343,7 +363,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
             failed=$((failed + 1))
 
             # Treat as failure for debugging purposes
-            local debug_dir="${OUTPUT_DIR}/debug_failures"
+            debug_dir="${OUTPUT_DIR}/debug_failures"
             mkdir -p "$debug_dir"
             cp "$TEMP_REPORT" "$debug_dir/${ticker}_report.md" 2>/dev/null || true
             if ! $LOUD_MODE && [ -f "$TEMP_LOG" ]; then

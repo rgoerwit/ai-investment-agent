@@ -93,6 +93,7 @@ def test_quick_llm_has_no_thinking_level_on_gemini_2(
     mock_create_gemini_model.assert_called_once()
     call_kwargs = mock_create_gemini_model.call_args.kwargs
     assert call_kwargs.get("thinking_level") is None
+    assert call_kwargs.get("max_output_tokens") is None
 
 
 def test_deep_llm_sets_high_thinking_level_on_gemini_4(
@@ -131,6 +132,28 @@ def test_deep_llm_has_no_thinking_level_on_gemini_2(
     mock_create_gemini_model.assert_called_once()
     call_kwargs = mock_create_gemini_model.call_args.kwargs
     assert call_kwargs.get("thinking_level") is None
+
+
+def test_quick_llm_passes_through_max_output_tokens(
+    mock_create_gemini_model, mock_config
+):
+    mock_config.quick_think_llm = GEMINI_3_PRO
+
+    create_quick_thinking_llm(max_output_tokens=4096)
+
+    call_kwargs = mock_create_gemini_model.call_args.kwargs
+    assert call_kwargs.get("max_output_tokens") == 4096
+
+
+def test_deep_llm_passes_through_max_output_tokens(
+    mock_create_gemini_model, mock_config
+):
+    mock_config.deep_think_llm = GEMINI_4_ULTRA
+
+    create_deep_thinking_llm(max_output_tokens=8192)
+
+    call_kwargs = mock_create_gemini_model.call_args.kwargs
+    assert call_kwargs.get("max_output_tokens") == 8192
 
 
 def test_create_gemini_model_logs_thinking_level_at_debug(caplog):

@@ -48,8 +48,9 @@ RUN poetry install --only main --no-root --no-interaction --no-ansi
 # ────────────────────────────────────────────────────────────────────────────
 FROM python:3.12-slim AS runtime
 
-# Install only runtime dependencies (SQLite for ChromaDB)
+# Install only runtime dependencies (SQLite for ChromaDB + bash for scripts)
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
     libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -60,29 +61,40 @@ WORKDIR /app
 
 # Copy installed packages from builder stage
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Copy application code
 COPY --chown=agent:agent src/ ./src/
 COPY --chown=agent:agent prompts/ ./prompts/
+COPY --chown=agent:agent scripts/ ./scripts/
 
-# Create directories for ChromaDB persistence and results
-RUN mkdir -p /app/chroma_db /app/results /app/scratch \
+# Normalise source-file permissions: COPY preserves host mode bits, so
+# directories that are mode 700 on the host would be unreadable by any user
+# other than the owner. a+rX makes all source/prompts/scripts files readable
+# and directories traversable regardless of what the host had.
+RUN chmod -R a+rX /app/src /app/prompts /app/scripts
+
+# Create directories for bind-mounted local persistence
+RUN mkdir -p /app/chroma_db /app/results /app/data_cache /app/images /app/scratch \
     && chown -R agent:agent /app
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    HOME=/app \
+    INVESTMENT_AGENT_CONTAINER=1 \
     CHROMA_PERSIST_DIRECTORY=/app/chroma_db \
+    CHROMA_PERSIST_DIR=/app/chroma_db \
+    RESULTS_DIR=/app/results \
+    DATA_CACHE_DIR=/app/data_cache \
+    IMAGES_DIR=/app/images \
     ANONYMIZED_TELEMETRY=False
 
 # Switch to non-root user
 USER agent
 
-# Health check - verify Python imports work (no HTTP server needed)
-# This checks that the application can at least import its main module
+# Health check - verify Python and the lightweight config module import cleanly
 HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
-    CMD python -c "import sys; from src.main import main; sys.exit(0)" || exit 1
+    CMD python -c "import src.config" || exit 1
 
 # Entrypoint uses module syntax for clean imports
 ENTRYPOINT ["python", "-m", "src.main"]

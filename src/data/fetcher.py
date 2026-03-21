@@ -46,6 +46,7 @@ import yfinance as yf
 
 from src.config import config
 from src.data.interfaces import FinancialFetcher
+from src.ticker_policy import allows_search_resolution, normalize_exchange_specific_base
 from src.ticker_utils import generate_strict_search_query
 
 logger = structlog.get_logger(__name__)
@@ -1880,6 +1881,19 @@ class SmartMarketDataFetcher(FinancialFetcher):
             return {}
 
         all_text = "\n\n".join(search_results.values())
+
+        # Inspect web content before extracting structured metrics from it.
+        from src.tooling.inspection_service import INSPECTION_SERVICE
+        from src.tooling.inspector import InspectionEnvelope, SourceKind
+
+        envelope = InspectionEnvelope(
+            content_text=all_text,
+            source_kind=SourceKind.web_search,
+            source_name="tavily",
+            metadata={"symbol": symbol, "fields": list(search_results.keys())},
+        )
+        all_text = await INSPECTION_SERVICE.check(envelope)
+
         return self.pattern_extractor.extract_from_text(all_text, skip_fields=set())
 
     def _merge_gap_fill_data(
@@ -2223,10 +2237,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         if not self.tavily_client:
             return None
 
-        # Only attempt for markets known to use numeric codes
-        # KL=Malaysia, HK=Hong Kong, T=Japan, TW=Taiwan
-        target_suffixes = (".KL", ".HK", ".T", ".TW")
-        if not symbol.endswith(target_suffixes):
+        if not allows_search_resolution(symbol):
             return None
 
         try:
@@ -2248,14 +2259,19 @@ class SmartMarketDataFetcher(FinancialFetcher):
             )
 
             # Look for patterns like "7052.KL" or just "7052" near the company name
-            # Simple heuristic: Look for 4-digit number followed by the original suffix
-            suffix = symbol.split(".")[-1]
-            match = re.search(rf"\b(\d{{4}})\.{suffix}\b", content, re.IGNORECASE)
+            # Only rescue when the result stays on the exact same exchange suffix.
+            _, suffix = symbol.rsplit(".", 1)
+            match = re.search(
+                rf"\b(\d{{4}})\.{re.escape(suffix)}\b", content, re.IGNORECASE
+            )
 
             if match:
-                resolved = match.group(0).upper()
+                resolved_base = normalize_exchange_specific_base(
+                    match.group(1), f".{suffix}"
+                )
+                resolved = f"{resolved_base}.{suffix}".upper()
                 # Sanity check: Ensure it's different from input
-                if resolved != symbol:
+                if resolved != symbol.upper():
                     return resolved
 
             return None

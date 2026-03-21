@@ -1750,6 +1750,19 @@ class TestSearchClaimTool:
             assert "SEARCH_UNAVAILABLE" in result
 
     @pytest.mark.asyncio
+    async def test_search_claim_preserves_blocked_sentinel_from_tavily(self):
+        """Blocked Tavily content should pass through without a second inspection pass."""
+        from src.editor_tools import search_claim
+
+        with patch(
+            "src.tavily_utils.tavily_search_with_timeout",
+            new_callable=AsyncMock,
+            return_value="TOOL_BLOCKED: suspicious content",
+        ):
+            result = await search_claim.ainvoke({"query": "test query here"})
+            assert result == "TOOL_BLOCKED: suspicious content"
+
+    @pytest.mark.asyncio
     async def test_search_truncates_long_results(self):
         """Long search results should be truncated."""
         from src.editor_tools import MAX_CLAIM_SEARCH_CHARS, search_claim
