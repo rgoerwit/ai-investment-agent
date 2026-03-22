@@ -218,6 +218,13 @@ poetry run python -m src.main --retrospective-only
 
 # Run with real-time logging visible (unbuffered Python output)
 # Redirect to file and monitor with: tail -f scratch/ticker_analysis_info.txt
+
+# Baseline capture for replay/eval fixtures
+poetry run python -m src.main --ticker 0005.HK --quick --capture-baseline
+
+# Cleanup-only mode for stale interrupted captures
+poetry run python -m src.main --capture-baseline-cleanup
+
 # Note: Use --output for the report so that charts are generated
 poetry run python -u -m src.main --ticker 0005.HK --output scratch/report.md >scratch/ticker_analysis_info.txt 2>&1 &
 
@@ -227,6 +234,67 @@ poetry run python -u -m src.main --ticker 0005.HK --output scratch/report.md >sc
 # Run tests to verify installation
 poetry run pytest tests/ -v
 ```
+
+### Baseline Capture
+
+`--capture-baseline` writes replay-oriented capture bundles under `evals/captures/schema_v4/`.
+
+Storage layout:
+
+- `inflight/` contains the temporary working directory while a capture is running
+- `accepted/<date>/<run_id>/` contains finalized replay-eligible captures
+- `rejected/<date>/<run_id>/` contains rejected or interrupted captures for diagnosis
+
+Important behavior:
+
+- Baseline capture requires a **clean local git worktree**
+- This is about local `git status --short`, not pushing to GitHub
+- Modified tracked files and untracked files both count as dirty
+- Stash presence is recorded in capture metadata for awareness, but does **not** block capture
+- Dirty worktrees block capture **before** analysis starts, so you do not waste LLM/API cost
+- `schema_v4` is the current supported capture format
+- Every capture writes a `run_manifest.json` with:
+  - `capture_status`
+  - `usable_for_replay`
+  - `usable_for_promotion`
+  - `rejection_reasons`
+  - `storage_tier`
+  - `code.has_stash` / `code.stash_count`
+  - `prompt_set_digest`
+  - default and observed model provenance
+
+Current capture scope:
+
+- this stage is still about **capture quality**, not regression scoring
+- accepted captures now include enough prompt/model/LLM-call provenance to support later deterministic and judge-based prompt evaluation
+- prompt comparison, model comparison, and baseline promotion remain separate later-stage workflows
+
+Current validation behavior:
+
+- today’s validator checks structural completeness and replay-readiness only
+- it does **not** yet compare one capture to another for regression scoring
+- an accepted capture can therefore be structurally valid and replay-ready without yet being compared to a prior baseline
+
+Cleanup behavior:
+
+- Each `--capture-baseline` run automatically sweeps stale `inflight/` runs from earlier interrupted captures and moves them to `rejected/`
+- `--capture-baseline-cleanup` runs only that cleanup sweep and exits
+- Cleanup does **not** touch accepted capture history and does **not** modify your git worktree
+
+Examples:
+
+```bash
+# Capture a replay-eligible baseline bundle
+poetry run python -m src.main --ticker 0005.HK --quick --capture-baseline
+
+# Clean up stale interrupted inflight captures only
+poetry run python -m src.main --capture-baseline-cleanup
+```
+
+To check if a capture is usable, open its `run_manifest.json` and look for:
+
+- `"capture_status": "accepted"`
+- `"usable_for_replay": true`
 
 ### Optional: Local Container Mode
 

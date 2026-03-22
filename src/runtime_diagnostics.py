@@ -44,8 +44,14 @@ REQUIRED_PUBLISHABLE_ARTIFACTS = frozenset(
         "final_trade_decision",
     }
 )
+QUICK_REQUIRED_PUBLISHABLE_ARTIFACTS = REQUIRED_PUBLISHABLE_ARTIFACTS - frozenset(
+    {"value_trap_report"}
+)
 OPTIONAL_PUBLISHABLE_ARTIFACTS = frozenset(
     {"auditor_report", "consultant_review", "valuation_params"}
+)
+QUICK_OPTIONAL_PUBLISHABLE_ARTIFACTS = OPTIONAL_PUBLISHABLE_ARTIFACTS | frozenset(
+    {"value_trap_report"}
 )
 
 
@@ -319,19 +325,49 @@ def get_valid_artifact_content(
     return status.content
 
 
+def _is_quick_mode_result(result: dict[str, Any]) -> bool:
+    run_summary = result.get("run_summary")
+    if isinstance(run_summary, dict):
+        return bool(run_summary.get("quick_mode", False))
+
+    metadata = result.get("metadata")
+    if isinstance(metadata, dict):
+        return bool(metadata.get("quick_mode", False))
+
+    return bool(result.get("quick_mode", False))
+
+
+def get_required_publishable_artifacts(result: dict[str, Any]) -> frozenset[str]:
+    return (
+        QUICK_REQUIRED_PUBLISHABLE_ARTIFACTS
+        if _is_quick_mode_result(result)
+        else REQUIRED_PUBLISHABLE_ARTIFACTS
+    )
+
+
+def get_optional_publishable_artifacts(result: dict[str, Any]) -> frozenset[str]:
+    return (
+        QUICK_OPTIONAL_PUBLISHABLE_ARTIFACTS
+        if _is_quick_mode_result(result)
+        else OPTIONAL_PUBLISHABLE_ARTIFACTS
+    )
+
+
 def build_analysis_validity(result: dict[str, Any]) -> dict[str, Any]:
     fundamentals = get_valid_artifact_content(result, "fundamentals_report")
     pm_decision = get_valid_artifact_content(result, "final_trade_decision")
     data_block_present = has_parseable_data_block(fundamentals)
     required_failures: dict[str, Any] = {}
     optional_failures: dict[str, Any] = {}
+    required_artifacts = get_required_publishable_artifacts(result)
+    optional_artifacts = get_optional_publishable_artifacts(result)
 
-    for field in REQUIRED_PUBLISHABLE_ARTIFACTS:
+    for field in required_artifacts:
         status = get_artifact_status(result, field)
         if not status.ok:
             required_failures[field] = status.as_dict()
 
-    for field in OPTIONAL_PUBLISHABLE_ARTIFACTS:
+    for field in optional_artifacts:
         status = get_artifact_status(result, field)
         if status.complete and not status.ok:
             optional_failures[field] = status.as_dict()
@@ -362,6 +398,8 @@ def build_analysis_validity(result: dict[str, Any]) -> dict[str, Any]:
         "has_valid_fundamentals": bool(fundamentals),
         "has_data_block": data_block_present,
         "has_valid_pre_screening": has_valid_pre_screening,
+        "required_artifacts": sorted(required_artifacts),
+        "optional_artifacts": sorted(optional_artifacts),
         "required_failures": required_failures,
         "optional_failures": optional_failures,
         # Backward-compatible alias for older callers/tests.

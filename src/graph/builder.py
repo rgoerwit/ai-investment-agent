@@ -8,6 +8,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.types import RunnableConfig
 
 from src.agents import AgentState
+from src.eval import BaselineCaptureManager
 
 from .components import build_graph_components
 from .routing import (
@@ -34,6 +35,7 @@ def create_trading_graph(
     transparent_charts: bool = False,
     image_dir: Path | None = None,
     skip_charts: bool = False,
+    baseline_capture: BaselineCaptureManager | None = None,
 ):
     """
     Create the multi-agent trading analysis graph with parallel analyst execution.
@@ -157,16 +159,29 @@ BEAR RESEARCHER:
             }
         }
 
-    workflow.add_node("Dispatcher", dispatcher_node)
-    workflow.add_node("Sync Check", sync_check_node)
-    workflow.add_node("Fundamentals Sync Check", fundamentals_sync_node)
-    workflow.add_node("Debate Sync R1", debate_sync_r1_node)
-    workflow.add_node("Debate Sync Final", debate_sync_final_node)
+    def maybe_wrap(node_name: str, node):
+        if baseline_capture is None:
+            return node
+        return baseline_capture.wrap_node(node_name, node)
+
+    workflow.add_node("Dispatcher", maybe_wrap("Dispatcher", dispatcher_node))
+    workflow.add_node("Sync Check", maybe_wrap("Sync Check", sync_check_node))
+    workflow.add_node(
+        "Fundamentals Sync Check",
+        maybe_wrap("Fundamentals Sync Check", fundamentals_sync_node),
+    )
+    workflow.add_node(
+        "Debate Sync R1", maybe_wrap("Debate Sync R1", debate_sync_r1_node)
+    )
+    workflow.add_node(
+        "Debate Sync Final",
+        maybe_wrap("Debate Sync Final", debate_sync_final_node),
+    )
 
     for node_name, node in components.nodes.items():
-        workflow.add_node(node_name, node)
+        workflow.add_node(node_name, maybe_wrap(node_name, node))
     for node_name, node in components.tool_nodes.items():
-        workflow.add_node(node_name, node)
+        workflow.add_node(node_name, maybe_wrap(node_name, node))
 
     workflow.set_entry_point("Dispatcher")
 

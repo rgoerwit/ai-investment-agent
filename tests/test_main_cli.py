@@ -106,6 +106,29 @@ class TestStrictModeCLI:
         assert args.quick is True
         assert args.quiet is True
 
+    def test_capture_baseline_flag_parsed_from_cli(self):
+        """--capture-baseline enables baseline capture mode."""
+        from src.main import build_arg_parser
+
+        parser = build_arg_parser()
+        args = parser.parse_args(["--ticker", "0005.HK", "--capture-baseline"])
+        assert args.capture_baseline is True
+
+    def test_capture_baseline_cleanup_flag_parsed_from_cli(self):
+        from src.main import build_arg_parser
+
+        parser = build_arg_parser()
+        args = parser.parse_args(["--ticker", "0005.HK", "--capture-baseline-cleanup"])
+        assert args.capture_baseline_cleanup is True
+
+    def test_parse_arguments_allows_cleanup_without_ticker(self, monkeypatch):
+        from src.main import parse_arguments
+
+        monkeypatch.setattr(sys, "argv", ["prog", "--capture-baseline-cleanup"])
+        args = parse_arguments()
+        assert args.capture_baseline_cleanup is True
+        assert args.ticker is None
+
 
 class TestStrictAddendaContent:
     """Sanity-check the content of _STRICT_PM_ADDENDUM and _STRICT_RM_ADDENDUM.
@@ -249,6 +272,57 @@ class TestToolAuditLogging:
                 configure_content_inspection_from_config()
         finally:
             TOOL_SERVICE.clear_hooks()
+
+
+class TestBaselineCaptureCliHelpers:
+    def test_preflight_blocks_dirty_worktree_before_analysis(self):
+        from src.main import _run_baseline_capture_preflight
+
+        args = SimpleNamespace(capture_baseline=True, capture_baseline_cleanup=False)
+
+        class DirtyCapture:
+            def __init__(self):
+                self.cleaned = False
+
+            def cleanup_stale_inflight_runs(self):
+                self.cleaned = True
+                return SimpleNamespace(
+                    scanned=0,
+                    moved_to_rejected=0,
+                    removed_empty=0,
+                    rejected_paths=(),
+                )
+
+            def preflight_git_clean(self):
+                return False, ["dirty worktree"]
+
+        capture = DirtyCapture()
+        ok, messages = _run_baseline_capture_preflight(args, capture)
+
+        assert ok is False
+        assert capture.cleaned is True
+        assert messages[-1] == "dirty worktree"
+
+    def test_preflight_cleanup_only_mode_skips_git_clean_gate(self):
+        from src.main import _run_baseline_capture_preflight
+
+        args = SimpleNamespace(capture_baseline=False, capture_baseline_cleanup=True)
+
+        class CleanupOnlyCapture:
+            def cleanup_stale_inflight_runs(self):
+                return SimpleNamespace(
+                    scanned=2,
+                    moved_to_rejected=1,
+                    removed_empty=1,
+                    rejected_paths=("a",),
+                )
+
+            def preflight_git_clean(self):
+                raise AssertionError("should not run git preflight")
+
+        ok, messages = _run_baseline_capture_preflight(args, CleanupOnlyCapture())
+        assert ok is True
+        assert "Cleaned 1 stale inflight capture(s)" in messages[0]
 
     @patch("src.main.socket.getaddrinfo", side_effect=OSError("dns down"))
     def test_provider_preflight_logs_failures(self, _mock_dns):
@@ -601,6 +675,80 @@ class TestMainOrchestration:
 
 
 class TestSavedDiagnostics:
+    def test_attach_run_summary_recomputes_mode_aware_validity(self, monkeypatch):
+        from src.main import _attach_run_summary
+
+        class StubTracker:
+            def get_total_stats(self):
+                return {"failed_attempts": 0, "total_calls": 0}
+
+        monkeypatch.setattr("src.token_tracker.get_tracker", lambda: StubTracker())
+        monkeypatch.setattr("src.main.config.llm_provider", "google")
+
+        result = {
+            "pre_screening_result": "PASS",
+            "investment_debate_state": {"count": 0},
+            "value_trap_report": "",
+            "fundamentals_report": (
+                "### --- START DATA_BLOCK ---\n"
+                "SECTOR: Industrials\n"
+                "RAW_HEALTH_SCORE: 5/12\n"
+                "ADJUSTED_HEALTH_SCORE: 41.7%\n"
+                "RAW_GROWTH_SCORE: 1/6\n"
+                "ADJUSTED_GROWTH_SCORE: 16.7%\n"
+                "US_REVENUE_PERCENT: Not disclosed\n"
+                "### --- END DATA_BLOCK ---"
+            ),
+            "final_trade_decision": "VERDICT: BUY",
+            "analysis_validity": {
+                "publishable": False,
+                "required_failures": {"value_trap_report": {}},
+                "optional_failures": {},
+            },
+            "artifact_statuses": {
+                "market_report": {"complete": True, "ok": True, "content": "market"},
+                "sentiment_report": {
+                    "complete": True,
+                    "ok": True,
+                    "content": "sentiment",
+                },
+                "news_report": {"complete": True, "ok": True, "content": "news"},
+                "value_trap_report": {
+                    "complete": True,
+                    "ok": False,
+                    "error_kind": "dns_resolution",
+                    "provider": "google",
+                },
+                "fundamentals_report": {
+                    "complete": True,
+                    "ok": True,
+                    "content": (
+                        "### --- START DATA_BLOCK ---\n"
+                        "SECTOR: Industrials\n"
+                        "RAW_HEALTH_SCORE: 5/12\n"
+                        "ADJUSTED_HEALTH_SCORE: 41.7%\n"
+                        "RAW_GROWTH_SCORE: 1/6\n"
+                        "ADJUSTED_GROWTH_SCORE: 16.7%\n"
+                        "US_REVENUE_PERCENT: Not disclosed\n"
+                        "### --- END DATA_BLOCK ---"
+                    ),
+                },
+                "final_trade_decision": {
+                    "complete": True,
+                    "ok": True,
+                    "content": "VERDICT: BUY",
+                },
+            },
+        }
+        args = SimpleNamespace(article=False, quick=True)
+
+        _attach_run_summary(result, args, provider_preflight={})
+
+        assert result["analysis_validity"]["publishable"] is True
+        assert result["run_summary"]["publishable"] is True
+        assert result["run_summary"]["required_failures"] == []
+        assert result["run_summary"]["optional_failures"] == ["value_trap_report"]
+
     def test_build_run_summary_tracks_finished_vs_successful_artifacts(
         self, monkeypatch
     ):
@@ -697,6 +845,29 @@ class TestSavedDiagnostics:
         assert summary["tool_failures"] == 3
         assert summary["llm_provider"] == "multi-provider"
         assert summary["llm_providers_used"] == ["google", "openai"]
+
+    def test_build_run_summary_includes_quick_and_deep_models(self, monkeypatch):
+        from src.main import build_run_summary
+
+        class StubTracker:
+            def get_total_stats(self):
+                return {
+                    "failed_attempts": 0,
+                    "total_calls": 0,
+                }
+
+        monkeypatch.setattr("src.token_tracker.get_tracker", lambda: StubTracker())
+        monkeypatch.setattr("src.main.config.quick_think_llm", "gemini-3-flash-preview")
+        monkeypatch.setattr("src.main.config.deep_think_llm", "gemini-3-pro-preview")
+
+        summary = build_run_summary(
+            {"analysis_validity": {"publishable": True}},
+            quick_mode=True,
+            article_requested=False,
+        )
+
+        assert summary["quick_model"] == "gemini-3-flash-preview"
+        assert summary["deep_model"] == "gemini-3-pro-preview"
 
     def test_save_results_includes_pre_screening_and_run_summary(
         self, tmp_path, monkeypatch

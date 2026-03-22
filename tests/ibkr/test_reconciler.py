@@ -2658,9 +2658,11 @@ class TestCurrencyAccuracy:
         self, currency: str, entry_price: float, fx_rate: float | None = None
     ) -> AnalysisRecord:
         """Make a BUY AnalysisRecord with the given currency and price."""
+        from datetime import datetime, timedelta
+
         return AnalysisRecord(
             ticker="TEST.XX",
-            analysis_date="2026-03-07",
+            analysis_date=(datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"),
             verdict="BUY",
             currency=currency,
             fx_rate_to_usd=fx_rate,

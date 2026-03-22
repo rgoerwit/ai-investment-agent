@@ -32,6 +32,22 @@ from src.runtime_diagnostics import classify_failure
 
 logger = structlog.get_logger(__name__)
 
+try:
+    from src.eval import get_active_capture_manager as _get_capture_manager
+except ImportError:
+
+    def _get_capture_manager():
+        return None
+
+
+def _record_capture_memory_event(payload: dict[str, Any]) -> None:
+    try:
+        manager = _get_capture_manager()
+        if manager:
+            manager.record_memory_event(payload)
+    except Exception:
+        pass
+
 
 @dataclass(frozen=True, slots=True)
 class SnapshotLoadProgress:
@@ -1208,6 +1224,15 @@ async def get_relevant_lessons(
         List of lesson dicts with 'document', 'metadata', 'distance' keys
     """
     if not lessons_memory or not lessons_memory.available:
+        _record_capture_memory_event(
+            {
+                "event": "lessons_query_skipped",
+                "sector": sector,
+                "ticker": ticker,
+                "n_results": n_results,
+                "available": False,
+            }
+        )
         return []
 
     try:
@@ -1216,9 +1241,30 @@ async def get_relevant_lessons(
             query_text=query,
             n_results=n_results,
         )
+        _record_capture_memory_event(
+            {
+                "event": "lessons_query",
+                "sector": sector,
+                "ticker": ticker,
+                "n_results": n_results,
+                "query_text": query,
+                "available": True,
+                "results": results,
+            }
+        )
         return results
     except Exception as e:
         logger.debug("lesson_query_failed", error=str(e))
+        _record_capture_memory_event(
+            {
+                "event": "lessons_query_failed",
+                "sector": sector,
+                "ticker": ticker,
+                "n_results": n_results,
+                "available": True,
+                "error": str(e),
+            }
+        )
         return []
 
 
@@ -1242,11 +1288,29 @@ async def format_lessons_for_injection(
         Formatted string for prompt injection, or "" if no lessons available
     """
     if not lessons_memory or not lessons_memory.available:
+        _record_capture_memory_event(
+            {
+                "event": "lessons_injection_skipped",
+                "ticker": ticker,
+                "sector": sector,
+                "available": False,
+                "reason": "memory_unavailable",
+            }
+        )
         return ""
 
     # Fast-path: no lessons exist yet — skip embedding API call (~1-2ms check vs ~200ms)
     try:
         if lessons_memory.situation_collection.count() == 0:
+            _record_capture_memory_event(
+                {
+                    "event": "lessons_injection_skipped",
+                    "ticker": ticker,
+                    "sector": sector,
+                    "available": True,
+                    "reason": "collection_empty",
+                }
+            )
             return ""
     except Exception:
         pass  # Fall through to normal query
@@ -1254,9 +1318,27 @@ async def format_lessons_for_injection(
     try:
         results = await get_relevant_lessons(lessons_memory, sector, ticker)
     except Exception:
+        _record_capture_memory_event(
+            {
+                "event": "lessons_injection_skipped",
+                "ticker": ticker,
+                "sector": sector,
+                "available": True,
+                "reason": "query_exception",
+            }
+        )
         return ""
 
     if not results:
+        _record_capture_memory_event(
+            {
+                "event": "lessons_injection_skipped",
+                "ticker": ticker,
+                "sector": sector,
+                "available": True,
+                "reason": "no_results",
+            }
+        )
         return ""
 
     # Apply geographic boost and confidence filtering
@@ -1315,6 +1397,17 @@ async def format_lessons_for_injection(
     )
 
     if not top_lessons:
+        _record_capture_memory_event(
+            {
+                "event": "lessons_injection_skipped",
+                "ticker": ticker,
+                "sector": sector,
+                "available": True,
+                "reason": "filtered_out",
+                "candidates": len(results) if results else 0,
+                "passed_filter": len(scored_lessons),
+            }
+        )
         return ""
 
     lines = ["LESSONS FROM PAST ANALYSES (cross-market):"]
@@ -1325,7 +1418,20 @@ async def format_lessons_for_injection(
             f"| conf: {lesson['confidence']})"
         )
 
-    return "\n".join(lines)
+    formatted = "\n".join(lines)
+    _record_capture_memory_event(
+        {
+            "event": "lessons_injected",
+            "ticker": ticker,
+            "sector": sector,
+            "available": True,
+            "candidates": len(results) if results else 0,
+            "passed_filter": len(scored_lessons),
+            "selected_lessons": top_lessons,
+            "injected_text": formatted,
+        }
+    )
+    return formatted
 
 
 # ══════════════════════════════════════════════════════════════════════════════

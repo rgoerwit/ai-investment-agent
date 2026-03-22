@@ -3,12 +3,16 @@ import socket
 from src.runtime_diagnostics import (
     FUNDAMENTALS_SYNC_FIELDS,
     OPTIONAL_PUBLISHABLE_ARTIFACTS,
+    QUICK_OPTIONAL_PUBLISHABLE_ARTIFACTS,
+    QUICK_REQUIRED_PUBLISHABLE_ARTIFACTS,
     REQUIRED_PUBLISHABLE_ARTIFACTS,
     SYNC_CHECK_FIELDS,
     build_analysis_validity,
     classify_failure,
     failure_artifact,
     get_artifact_status,
+    get_optional_publishable_artifacts,
+    get_required_publishable_artifacts,
     is_artifact_complete,
 )
 
@@ -51,27 +55,41 @@ class TestRuntimeFailureClassification:
 
 
 class TestAnalysisValidity:
-    def test_publishable_requires_valid_pm_and_fundamentals(self):
-        result = {
+    @staticmethod
+    def _make_result(*, quick_mode: bool, value_trap_ok: bool = True) -> dict:
+        value_trap_status = {"ok": value_trap_ok, "content": "value trap"}
+        if not value_trap_ok:
+            value_trap_status = {
+                "complete": True,
+                "ok": False,
+                "error_kind": "dns_resolution",
+                "provider": "google",
+            }
+
+        return {
             "market_report": "market",
             "sentiment_report": "sentiment",
             "news_report": "news",
-            "value_trap_report": "value trap",
+            "value_trap_report": "value trap" if value_trap_ok else "",
             "pre_screening_result": "PASS",
-            "fundamentals_report": "### --- START DATA_BLOCK ---\nvalue\n### --- END DATA_BLOCK ---",
+            "fundamentals_report": "### --- START DATA_BLOCK ---\nSECTOR: Industrials\nRAW_HEALTH_SCORE: 5/12\nADJUSTED_HEALTH_SCORE: 41.7%\nRAW_GROWTH_SCORE: 1/6\nADJUSTED_GROWTH_SCORE: 16.7%\nUS_REVENUE_PERCENT: Not disclosed\n### --- END DATA_BLOCK ---",
             "final_trade_decision": "VERDICT: BUY",
+            "run_summary": {"quick_mode": quick_mode},
             "artifact_statuses": {
                 "market_report": {"ok": True, "content": "market"},
                 "sentiment_report": {"ok": True, "content": "sentiment"},
                 "news_report": {"ok": True, "content": "news"},
-                "value_trap_report": {"ok": True, "content": "value trap"},
+                "value_trap_report": value_trap_status,
                 "fundamentals_report": {
                     "ok": True,
-                    "content": "### --- START DATA_BLOCK ---\nvalue\n### --- END DATA_BLOCK ---",
+                    "content": "### --- START DATA_BLOCK ---\nSECTOR: Industrials\nRAW_HEALTH_SCORE: 5/12\nADJUSTED_HEALTH_SCORE: 41.7%\nRAW_GROWTH_SCORE: 1/6\nADJUSTED_GROWTH_SCORE: 16.7%\nUS_REVENUE_PERCENT: Not disclosed\n### --- END DATA_BLOCK ---",
                 },
                 "final_trade_decision": {"ok": True, "content": "VERDICT: BUY"},
             },
         }
+
+    def test_publishable_requires_valid_pm_and_fundamentals(self):
+        result = self._make_result(quick_mode=False)
 
         validity = build_analysis_validity(result)
 
@@ -87,6 +105,7 @@ class TestAnalysisValidity:
             "pre_screening_result": "PASS",
             "fundamentals_report": "The analyst discusses the DATA_BLOCK but never emits the fenced section.",
             "final_trade_decision": "VERDICT: BUY",
+            "run_summary": {"quick_mode": False},
             "artifact_statuses": {
                 "market_report": {"ok": True, "content": "market"},
                 "sentiment_report": {"ok": True, "content": "sentiment"},
@@ -105,29 +124,12 @@ class TestAnalysisValidity:
         assert validity["has_data_block"] is False
 
     def test_publishable_fails_with_invalid_pm_artifact(self):
-        result = {
-            "market_report": "market",
-            "sentiment_report": "sentiment",
-            "news_report": "news",
-            "value_trap_report": "value trap",
-            "pre_screening_result": "PASS",
-            "fundamentals_report": "### --- START DATA_BLOCK ---\nvalue\n### --- END DATA_BLOCK ---",
-            "final_trade_decision": "",
-            "artifact_statuses": {
-                "market_report": {"ok": True, "content": "market"},
-                "sentiment_report": {"ok": True, "content": "sentiment"},
-                "news_report": {"ok": True, "content": "news"},
-                "value_trap_report": {"ok": True, "content": "value trap"},
-                "fundamentals_report": {
-                    "ok": True,
-                    "content": "### --- START DATA_BLOCK ---\nvalue\n### --- END DATA_BLOCK ---",
-                },
-                "final_trade_decision": {
-                    "ok": False,
-                    "error_kind": "dns_resolution",
-                    "provider": "google",
-                },
-            },
+        result = self._make_result(quick_mode=False)
+        result["final_trade_decision"] = ""
+        result["artifact_statuses"]["final_trade_decision"] = {
+            "ok": False,
+            "error_kind": "dns_resolution",
+            "provider": "google",
         }
 
         validity = build_analysis_validity(result)
@@ -136,31 +138,12 @@ class TestAnalysisValidity:
         assert "final_trade_decision" in validity["required_failures"]
 
     def test_publishable_allows_optional_failure(self):
-        result = {
-            "market_report": "market",
-            "sentiment_report": "sentiment",
-            "news_report": "news",
-            "value_trap_report": "value trap",
-            "pre_screening_result": "PASS",
-            "fundamentals_report": "### --- START DATA_BLOCK ---\nvalue\n### --- END DATA_BLOCK ---",
-            "final_trade_decision": "VERDICT: BUY",
-            "artifact_statuses": {
-                "market_report": {"ok": True, "content": "market"},
-                "sentiment_report": {"ok": True, "content": "sentiment"},
-                "news_report": {"ok": True, "content": "news"},
-                "value_trap_report": {"ok": True, "content": "value trap"},
-                "fundamentals_report": {
-                    "ok": True,
-                    "content": "### --- START DATA_BLOCK ---\nvalue\n### --- END DATA_BLOCK ---",
-                },
-                "final_trade_decision": {"ok": True, "content": "VERDICT: BUY"},
-                "auditor_report": {
-                    "complete": True,
-                    "ok": False,
-                    "error_kind": "timeout",
-                    "provider": "openai",
-                },
-            },
+        result = self._make_result(quick_mode=False)
+        result["artifact_statuses"]["auditor_report"] = {
+            "complete": True,
+            "ok": False,
+            "error_kind": "timeout",
+            "provider": "openai",
         }
 
         validity = build_analysis_validity(result)
@@ -168,6 +151,23 @@ class TestAnalysisValidity:
         assert validity["publishable"] is True
         assert validity["required_failures"] == {}
         assert "auditor_report" in validity["optional_failures"]
+
+    def test_publishable_quick_mode_does_not_require_value_trap_report(self):
+        result = self._make_result(quick_mode=True, value_trap_ok=False)
+
+        validity = build_analysis_validity(result)
+
+        assert validity["publishable"] is True
+        assert "value_trap_report" not in validity["required_failures"]
+        assert "value_trap_report" in validity["optional_failures"]
+
+    def test_publishable_deep_mode_still_requires_value_trap_report(self):
+        result = self._make_result(quick_mode=False, value_trap_ok=False)
+
+        validity = build_analysis_validity(result)
+
+        assert validity["publishable"] is False
+        assert "value_trap_report" in validity["required_failures"]
 
 
 class TestArtifactStatus:
@@ -211,8 +211,50 @@ class TestArtifactPolicy:
             "fundamentals_report",
             "final_trade_decision",
         }
+        assert QUICK_REQUIRED_PUBLISHABLE_ARTIFACTS == {
+            "market_report",
+            "sentiment_report",
+            "news_report",
+            "fundamentals_report",
+            "final_trade_decision",
+        }
         assert OPTIONAL_PUBLISHABLE_ARTIFACTS == {
             "auditor_report",
             "consultant_review",
             "valuation_params",
+        }
+        assert QUICK_OPTIONAL_PUBLISHABLE_ARTIFACTS == {
+            "auditor_report",
+            "consultant_review",
+            "valuation_params",
+            "value_trap_report",
+        }
+
+    def test_required_publishable_artifacts_follow_mode(self):
+        assert get_required_publishable_artifacts(
+            {"run_summary": {"quick_mode": True}}
+        ) == {
+            "market_report",
+            "sentiment_report",
+            "news_report",
+            "fundamentals_report",
+            "final_trade_decision",
+        }
+        assert get_required_publishable_artifacts(
+            {"run_summary": {"quick_mode": False}}
+        ) == {
+            "market_report",
+            "sentiment_report",
+            "news_report",
+            "value_trap_report",
+            "fundamentals_report",
+            "final_trade_decision",
+        }
+        assert get_optional_publishable_artifacts(
+            {"run_summary": {"quick_mode": True}}
+        ) == {
+            "auditor_report",
+            "consultant_review",
+            "valuation_params",
+            "value_trap_report",
         }
