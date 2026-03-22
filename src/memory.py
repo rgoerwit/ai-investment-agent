@@ -47,6 +47,11 @@ def _record_capture_memory_event(payload: dict[str, Any]) -> None:
         pass
 
 
+def _is_missing_collection_error(exc: Exception) -> bool:
+    message = str(exc)
+    return "does not exist" in message or "Collection not found" in message
+
+
 class FinancialSituationMemory:
     """
     Vector memory storage for financial agent debate history.
@@ -465,9 +470,20 @@ class FinancialSituationMemory:
             return formatted_results
 
         except Exception as e:
-            logger.error(
-                "query_similar_situations_failed", collection=self.name, error=str(e)
-            )
+            error_kind = "query_failure"
+            if _is_missing_collection_error(e):
+                error_kind = "missing_collection"
+                logger.debug(
+                    "query_similar_situations_no_collection",
+                    collection=self.name,
+                    note="collection not yet created; no lessons available",
+                )
+            else:
+                logger.error(
+                    "query_similar_situations_failed",
+                    collection=self.name,
+                    error=str(e),
+                )
             _record_capture_memory_event(
                 {
                     "event": "query_similar_situations_failed",
@@ -476,6 +492,7 @@ class FinancialSituationMemory:
                     "n_results": n_results,
                     "metadata_filter": metadata_filter,
                     "error": str(e),
+                    "error_kind": error_kind,
                     "available": True,
                 }
             )
@@ -641,7 +658,7 @@ class FinancialSituationMemory:
             return {"available": True, "name": self.name, "count": count}
         except Exception as e:
             # FIX: Gracefully handle deleted collections (zombies)
-            if "does not exist" in str(e) or "Collection not found" in str(e):
+            if _is_missing_collection_error(e):
                 logger.debug("collection_deleted_externally", collection=self.name)
                 return {
                     "available": False,
@@ -938,7 +955,7 @@ def get_all_memory_stats() -> dict[str, dict[str, Any]]:
             except Exception as e:
                 name = getattr(collection_item, "name", str(collection_item))
                 # Gracefully handle zombies in all-stats too
-                if "does not exist" in str(e):
+                if _is_missing_collection_error(e):
                     continue
                 logger.error(
                     "get_collection_stats_failed", collection=name, error=str(e)

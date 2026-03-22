@@ -94,10 +94,57 @@ class TestCompleteOutput:
         result = detect_truncation(text, agent="portfolio_manager")
         assert result["truncated"] is False
 
+    def test_complete_legacy_pm_block_not_flagged(self):
+        """Legacy PM_BLOCK header with required fields should be accepted."""
+        text = "PM_BLOCK:\nVERDICT: BUY\nRISK_ZONE: LOW"
+        result = detect_truncation(text, agent="portfolio_manager")
+        assert result["truncated"] is False
+
     def test_complete_data_block(self):
         """Complete DATA_BLOCK should not be flagged."""
         text = "DATA_BLOCK:\nHEALTH_SCORE: 75\nGROWTH_SCORE: 60"
         result = detect_truncation(text)
+        assert result["truncated"] is False
+
+    def test_complete_fenced_data_block_not_flagged_for_fundamentals_agent(self):
+        """Fenced DATA_BLOCK should short-circuit truncation heuristics."""
+        text = (
+            "### --- START DATA_BLOCK ---\n"
+            "HEALTH_SCORE: 75\n"
+            "GROWTH_SCORE: 60\n"
+            "### --- END DATA_BLOCK ---"
+        )
+        result = detect_truncation(text, agent="fundamentals_analyst")
+        assert result["truncated"] is False
+
+    def test_complete_fenced_value_trap_block_not_flagged(self):
+        """Fenced VALUE_TRAP_BLOCK should not be flagged as truncated."""
+        text = (
+            "### --- START VALUE_TRAP_BLOCK ---\n"
+            "SCORE: 45\n"
+            "VERDICT: CAUTIOUS\n"
+            "### --- END VALUE_TRAP_BLOCK ---"
+        )
+        result = detect_truncation(text, agent="value_trap_detector")
+        assert result["truncated"] is False
+
+    def test_complete_legacy_forensic_block_not_flagged(self):
+        """Legacy FORENSIC_DATA_BLOCK should remain accepted."""
+        text = "FORENSIC_DATA_BLOCK:\nSTATUS: CLEAN\nVERDICT: RELY_ON_DATA_BLOCK"
+        result = detect_truncation(text, agent="global_forensic_auditor")
+        assert result["truncated"] is False
+
+    def test_raw_data_exact_end_sentinel_not_flagged_for_junior_fundamentals(self):
+        """Junior raw-data sentinel should count as a complete structured terminator."""
+        text = (
+            "=== RAW FINANCIAL DATA FOR TEST ===\n"
+            "### TOOL 1: get_financial_metrics\n"
+            '{"currency": "USD"}\n'
+            "### TOOL 2: get_fundamental_analysis\n"
+            "Coverage looks limited.\n"
+            "=== END RAW DATA ==="
+        )
+        result = detect_truncation(text, agent="junior_fundamentals_analyst")
         assert result["truncated"] is False
 
     def test_ends_with_period(self):
@@ -202,4 +249,12 @@ class TestAgentScoping:
         """Without agent param, all block checks apply (backward compat)."""
         text = "DATA_BLOCK:\nTICKER: TEST.X\nSECTOR: Technology"
         result = detect_truncation(text)
+        assert result["truncated"] is True
+
+    def test_narrative_datablock_mention_does_not_count_as_complete_block(self):
+        """Narrative mentions should not be treated as a real DATA_BLOCK start."""
+        text = (
+            "The DATA_BLOCK: shows strong margins in the report, but the summary ends"
+        )
+        result = detect_truncation(text, agent="fundamentals_analyst")
         assert result["truncated"] is True

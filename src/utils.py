@@ -5,14 +5,37 @@ agentic workflow, such as extracting a clean signal and detecting truncation.
 
 import re
 import unicodedata
+from collections.abc import Callable
 
 import structlog
 
 from src.agents import extract_string_content
 from src.config import Config
+from src.data_block_utils import has_parseable_data_block, has_parseable_fenced_block
 from src.llms import quick_thinking_llm
 
 logger = structlog.get_logger(__name__)
+
+
+def _line_starts_with_any(text: str, patterns: tuple[str, ...]) -> bool:
+    return any(re.search(pattern, text, re.MULTILINE) for pattern in patterns)
+
+
+def _has_complete_legacy_block(
+    text: str,
+    header_patterns: tuple[str, ...],
+    required_fields: tuple[str, ...],
+) -> bool:
+    if not _line_starts_with_any(text, header_patterns):
+        return False
+    return any(field in text for field in required_fields)
+
+
+def _ends_with_known_structured_terminator(text: str, agent: str | None) -> bool:
+    raw_data_end = "=== END RAW DATA ==="
+    if agent is not None and agent != "junior_fundamentals_analyst":
+        return False
+    return text.rstrip().endswith(raw_data_end)
 
 
 class SignalProcessor:
@@ -179,45 +202,91 @@ def detect_truncation(text: str, agent: str | None = None) -> dict:
                 "confidence": "high",
             }
 
-    # Check for incomplete structured blocks FIRST (MEDIUM confidence)
-    # These blocks should have both start and required fields
-    # (block_marker, required_fields, producing_agent)
-    block_completeness = [
-        (
-            "PM_BLOCK",
-            ["VERDICT:", "RISK_ZONE:", "ZONE:"],
-            "portfolio_manager",
-        ),
-        ("DATA_BLOCK:", ["HEALTH_SCORE:", "GROWTH_SCORE:"], "fundamentals_analyst"),
-        ("FORENSIC_DATA_BLOCK:", ["VERDICT:", "STATUS:"], "global_forensic_auditor"),
-        ("VALUE_TRAP_BLOCK:", ["SCORE:", "VERDICT:"], "value_trap_detector"),
-    ]
-
-    has_complete_block = False
-    for block_start, required_fields, owner in block_completeness:
-        if agent and agent != owner:
-            continue
-        if block_start in text:
-            # Block started - check if any required field is present
-            has_required = any(field in text for field in required_fields)
-            if not has_required:
-                return {
-                    "truncated": True,
-                    "source": "llm",
-                    "marker": f"incomplete {block_start} block (missing {required_fields})",
-                    "confidence": "medium",
-                }
-            else:
-                has_complete_block = True
-
-    # If we have complete structured blocks, consider output complete
-    if has_complete_block:
+    if _ends_with_known_structured_terminator(text, agent):
         return {
             "truncated": False,
             "source": None,
             "marker": None,
             "confidence": "high",
         }
+
+    # Check for incomplete structured blocks FIRST (MEDIUM confidence)
+    # These blocks should have a valid start marker plus required fields.
+    # We keep the current lenient "any required field" behavior for legacy
+    # line-start variants to avoid broad behavior changes.
+    block_rules: tuple[
+        tuple[str, str, tuple[str, ...], tuple[str, ...], Callable[[str], bool]],
+        ...,
+    ] = (
+        (
+            "PM_BLOCK",
+            "portfolio_manager",
+            (
+                r"^\s*PM_BLOCK:\s*$",
+                r"^\s*#+\s*--- START PM_BLOCK[^\n]*---\s*$",
+            ),
+            ("VERDICT:", "RISK_ZONE:", "ZONE:"),
+            lambda value: has_parseable_fenced_block(value, "PM_BLOCK"),
+        ),
+        (
+            "DATA_BLOCK",
+            "fundamentals_analyst",
+            (
+                r"^\s*DATA_BLOCK:\s*$",
+                r"^\s*###\s+DATA_BLOCK(?:\b.*)?$",
+                r"^\s*#+\s*--- START DATA_BLOCK[^\n]*---\s*$",
+            ),
+            ("HEALTH_SCORE:", "GROWTH_SCORE:"),
+            has_parseable_data_block,
+        ),
+        (
+            "FORENSIC_DATA_BLOCK",
+            "global_forensic_auditor",
+            (
+                r"^\s*FORENSIC_DATA_BLOCK:\s*$",
+                r"^\s*#+\s*--- START FORENSIC_DATA_BLOCK[^\n]*---\s*$",
+            ),
+            ("VERDICT:", "STATUS:"),
+            lambda value: has_parseable_fenced_block(value, "FORENSIC_DATA_BLOCK"),
+        ),
+        (
+            "VALUE_TRAP_BLOCK",
+            "value_trap_detector",
+            (
+                r"^\s*VALUE_TRAP_BLOCK:\s*$",
+                r"^\s*###\s+VALUE_TRAP_BLOCK(?:\b.*)?$",
+                r"^\s*#+\s*--- START VALUE_TRAP_BLOCK[^\n]*---\s*$",
+            ),
+            ("SCORE:", "VERDICT:"),
+            lambda value: has_parseable_fenced_block(value, "VALUE_TRAP_BLOCK"),
+        ),
+    )
+
+    for (
+        block_name,
+        owner,
+        start_patterns,
+        required_fields,
+        parseable_check,
+    ) in block_rules:
+        if agent and agent != owner:
+            continue
+        if parseable_check(text) or _has_complete_legacy_block(
+            text, start_patterns, required_fields
+        ):
+            return {
+                "truncated": False,
+                "source": None,
+                "marker": None,
+                "confidence": "high",
+            }
+        if _line_starts_with_any(text, start_patterns):
+            return {
+                "truncated": True,
+                "source": "llm",
+                "marker": f"incomplete {block_name} block (missing {required_fields})",
+                "confidence": "medium",
+            }
 
     # LLM truncation heuristics (MEDIUM confidence)
     # Check if ends mid-sentence (not with valid ending punctuation)
