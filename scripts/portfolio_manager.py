@@ -31,6 +31,7 @@ import json
 import os
 import sys
 import textwrap
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -54,6 +55,40 @@ from src.ibkr.reconciler import (
 _IBKR_OAUTH_PORTAL = (
     "https://ndcdyn.interactivebrokers.com/sso/Login?action=OAUTH&RL=1&ip2loc=US"
 )
+
+
+@dataclass(frozen=True)
+class _AnalysisFreshnessRow:
+    display_ticker: str
+    run_ticker: str
+    bucket: str
+    reason_family: str
+    reason_text: str
+    action: str
+    age_days: int | None
+    expires_date: str | None
+    days_until_due: int | None
+
+
+@dataclass
+class _AnalysisFreshnessSummary:
+    blocking_now: list[_AnalysisFreshnessRow] = field(default_factory=list)
+    stale_in_queue: list[_AnalysisFreshnessRow] = field(default_factory=list)
+    due_soon: list[_AnalysisFreshnessRow] = field(default_factory=list)
+    candidate_blocked: list[_AnalysisFreshnessRow] = field(default_factory=list)
+    fresh: list[_AnalysisFreshnessRow] = field(default_factory=list)
+
+
+@dataclass
+class _RefreshActivity:
+    policy: str
+    limit: int
+    queued: list[str] = field(default_factory=list)
+    refreshed: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
+    skipped_due_to_policy: list[str] = field(default_factory=list)
+    skipped_due_to_limit: list[str] = field(default_factory=list)
+    skipped_read_only: list[str] = field(default_factory=list)
 
 
 def _python_command_prefix() -> str:
@@ -315,7 +350,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--refresh-stale",
         action="store_true",
-        help="Re-run evaluator on stale tickers and positions with no analysis",
+        help="Backward-compatible alias for --refresh-policy blocking",
+    )
+    parser.add_argument(
+        "--refresh-policy",
+        choices=("off", "blocking", "proactive"),
+        default=None,
+        help=(
+            "Auto-refresh policy: off (default for reports), blocking "
+            "(default for --recommend), or proactive (also refresh due-soon holds)"
+        ),
+    )
+    parser.add_argument(
+        "--refresh-limit",
+        type=int,
+        default=10,
+        help="Maximum tickers to auto-refresh in one run (default: 10)",
     )
     parser.add_argument(
         "--sector-limit",
@@ -363,7 +413,197 @@ def parse_args() -> argparse.Namespace:
     if args.recommend or args.execute:
         args.report_only = False
 
+    if args.refresh_limit < 1:
+        parser.error("--refresh-limit must be >= 1")
+
     return args
+
+
+def _resolve_refresh_policy(args: argparse.Namespace) -> str:
+    """Resolve refresh policy from explicit flags and execution mode."""
+    explicit_policy = getattr(args, "refresh_policy", None)
+    if explicit_policy:
+        return explicit_policy
+    if getattr(args, "refresh_stale", False):
+        return "blocking"
+    if getattr(args, "recommend", False) and not getattr(args, "read_only", False):
+        return "blocking"
+    return "off"
+
+
+def _analysis_expiry_details(
+    analysis: AnalysisRecord | None,
+    max_age_days: int,
+) -> tuple[str | None, int | None]:
+    """Return (expiry_date, days_until_due) for a saved analysis."""
+    if not analysis or not analysis.analysis_date:
+        return (None, None)
+    try:
+        from datetime import datetime as _dt
+        from datetime import timedelta
+
+        expires_dt = _dt.strptime(analysis.analysis_date, "%Y-%m-%d") + timedelta(
+            days=max_age_days
+        )
+        return (expires_dt.date().isoformat(), max_age_days - analysis.age_days)
+    except (TypeError, ValueError):
+        return (None, None)
+
+
+def _reason_family(item: ReconciliationItem, max_age_days: int) -> str:
+    """Map an item to a stable freshness reason family for display."""
+    reason_lower = (item.reason or "").lower()
+    if item.analysis is None or "no analysis found" in reason_lower:
+        return "no analysis"
+    if "target hit" in reason_lower:
+        return "target hit"
+    if "price drift" in reason_lower or "drift" in reason_lower:
+        return "price drift"
+    if "stale analysis" in reason_lower or item.analysis.age_days > max_age_days:
+        return "stale"
+    return "review required"
+
+
+def _classify_analysis_freshness(
+    items: list[ReconciliationItem],
+    *,
+    max_age_days: int,
+) -> _AnalysisFreshnessSummary:
+    """Classify reconciliation items into freshness buckets for reporting/refresh."""
+    summary = _AnalysisFreshnessSummary()
+
+    for item in items:
+        analysis = item.analysis
+        expires_date, days_until_due = _analysis_expiry_details(analysis, max_age_days)
+        row = _AnalysisFreshnessRow(
+            display_ticker=item.ticker.ibkr,
+            run_ticker=_run_ticker_for(item),
+            bucket="fresh",
+            reason_family=_reason_family(item, max_age_days),
+            reason_text=item.reason,
+            action=item.action,
+            age_days=analysis.age_days if analysis else None,
+            expires_date=expires_date,
+            days_until_due=days_until_due,
+        )
+
+        if (
+            item.ibkr_position is not None
+            and item.action == "REVIEW"
+            and item.sell_type != "SOFT_REJECT"
+        ):
+            summary.blocking_now.append(
+                _AnalysisFreshnessRow(**{**row.__dict__, "bucket": "blocking_now"})
+            )
+            continue
+
+        if (
+            item.ibkr_position is not None
+            and analysis is not None
+            and analysis.age_days > max_age_days
+            and (item.action in {"SELL", "TRIM"} or item.sell_type == "SOFT_REJECT")
+        ):
+            summary.stale_in_queue.append(
+                _AnalysisFreshnessRow(**{**row.__dict__, "bucket": "stale_in_queue"})
+            )
+            continue
+
+        if (
+            item.ibkr_position is not None
+            and item.action == "HOLD"
+            and analysis is not None
+            and days_until_due is not None
+            and 0 < days_until_due <= 7
+        ):
+            summary.due_soon.append(
+                _AnalysisFreshnessRow(**{**row.__dict__, "bucket": "due_soon"})
+            )
+            continue
+
+        if item.ibkr_position is None and item.action == "REVIEW":
+            summary.candidate_blocked.append(
+                _AnalysisFreshnessRow(**{**row.__dict__, "bucket": "candidate_blocked"})
+            )
+            continue
+
+        summary.fresh.append(row)
+
+    return summary
+
+
+def _plan_refresh_activity(
+    summary: _AnalysisFreshnessSummary,
+    *,
+    policy: str,
+    limit: int,
+    show_recommendations: bool,
+    read_only: bool,
+) -> _RefreshActivity:
+    """Build the refresh plan from structured freshness buckets."""
+    activity = _RefreshActivity(policy=policy, limit=limit)
+
+    candidates: list[str] = []
+    candidates.extend(row.run_ticker for row in summary.blocking_now)
+    if show_recommendations:
+        candidates.extend(row.run_ticker for row in summary.candidate_blocked)
+    if policy == "proactive":
+        candidates.extend(row.run_ticker for row in summary.due_soon)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for ticker in candidates:
+        if ticker in seen:
+            continue
+        seen.add(ticker)
+        deduped.append(ticker)
+
+    if policy == "off":
+        activity.skipped_due_to_policy = deduped
+        return activity
+
+    activity.queued = deduped[:limit]
+    activity.skipped_due_to_limit = deduped[limit:]
+
+    if read_only:
+        activity.skipped_read_only = list(activity.queued)
+        activity.queued = []
+
+    return activity
+
+
+def _refresh_user_action(
+    summary: _AnalysisFreshnessSummary,
+    activity: _RefreshActivity,
+    *,
+    show_recommendations: bool,
+) -> str:
+    """Return the single next-step line the operator should act on, if any."""
+    if not summary.blocking_now and not summary.candidate_blocked:
+        return "none"
+
+    base_args: list[str] = []
+    if show_recommendations:
+        base_args.append("--recommend")
+    base_args.extend(["--refresh-policy", "blocking"])
+
+    if activity.failed:
+        return (
+            f"refresh failed for {', '.join(activity.failed)} — rerun "
+            f"{_portfolio_manager_command(*base_args)}"
+        )
+    if activity.skipped_read_only:
+        return (
+            "read-only mode blocked refresh — run "
+            f"{_portfolio_manager_command(*base_args)}"
+        )
+    if activity.policy == "off":
+        return f"run {_portfolio_manager_command(*base_args)}"
+    if activity.skipped_due_to_limit:
+        return (
+            "refresh limit reached — rerun with a higher --refresh-limit "
+            f"(remaining: {', '.join(activity.skipped_due_to_limit)})"
+        )
+    return "none"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1029,6 +1269,8 @@ def format_report(
     watchlist_name: str | None = None,
     watchlist_total: int | None = None,
     watchlist_tickers: set[str] | None = None,
+    freshness_summary: _AnalysisFreshnessSummary | None = None,
+    refresh_activity: _RefreshActivity | None = None,
 ) -> str:
     """Format reconciliation results as sectioned human-readable text."""
     lines: list[str] = []
@@ -1101,6 +1343,11 @@ def format_report(
     reviews = [
         i for i in items if i.action == "REVIEW" and i.sell_type != "SOFT_REJECT"
     ]
+    freshness_summary = freshness_summary or _classify_analysis_freshness(
+        items,
+        max_age_days=max_age_days,
+    )
+    refresh_activity = refresh_activity or _RefreshActivity(policy="off", limit=0)
 
     def _section(title: str, subtitle: str = "") -> None:
         lines.append(_DIVIDER)
@@ -1654,6 +1901,129 @@ def format_report(
             lines.append(bl)
         lines.append("")
 
+    # ── ANALYSIS FRESHNESS ───────────────────────────────────────────────────
+    _blocking_rows = freshness_summary.blocking_now
+    _queue_rows = freshness_summary.stale_in_queue
+    _due_rows = freshness_summary.due_soon
+    _candidate_rows = freshness_summary.candidate_blocked
+    if (
+        _blocking_rows
+        or _queue_rows
+        or _due_rows
+        or _candidate_rows
+        or refresh_activity.refreshed
+        or refresh_activity.failed
+        or refresh_activity.skipped_due_to_policy
+        or refresh_activity.skipped_due_to_limit
+        or refresh_activity.skipped_read_only
+    ):
+        _section(
+            "ANALYSIS FRESHNESS", "what is stale, what is queued, what happens next"
+        )
+
+        lines.append("  Blocking now:")
+        if _blocking_rows:
+            for row in _blocking_rows:
+                detail_bits = [row.reason_family]
+                if row.age_days is not None:
+                    detail_bits.append(f"{row.age_days}d old")
+                if row.expires_date:
+                    detail_bits.append(f"expired {row.expires_date}")
+                lines.append(
+                    f"    {row.display_ticker:<12} {'  ·  '.join(detail_bits)}"
+                    f"  →  {_analysis_command(row.run_ticker)}"
+                )
+        else:
+            lines.append("    None")
+        lines.append("")
+
+        if _candidate_rows:
+            lines.append("  Candidates blocked:")
+            for row in _candidate_rows:
+                detail_bits = [row.reason_family]
+                if row.age_days is not None:
+                    detail_bits.append(f"{row.age_days}d old")
+                lines.append(
+                    f"    {row.display_ticker:<12} {'  ·  '.join(detail_bits)}"
+                    f"  →  {_analysis_command(row.run_ticker)}"
+                )
+            lines.append("")
+
+        lines.append("  Already in queue:")
+        if _queue_rows:
+            for row in _queue_rows:
+                detail_bits = [f"already in {row.action} queue"]
+                if row.age_days is not None:
+                    detail_bits.append(f"{row.age_days}d old")
+                lines.append(
+                    f"    {row.display_ticker:<12} {'  ·  '.join(detail_bits)}"
+                )
+        else:
+            lines.append("    None")
+        lines.append("")
+
+        lines.append("  Due soon:")
+        if _due_rows:
+            for row in sorted(
+                _due_rows,
+                key=lambda current: (
+                    current.days_until_due
+                    if current.days_until_due is not None
+                    else 9999
+                ),
+            ):
+                due_bits: list[str] = []
+                if row.expires_date:
+                    due_bits.append(f"expires {row.expires_date}")
+                if row.days_until_due is not None:
+                    due_bits.append(f"{row.days_until_due}d remaining")
+                lines.append(
+                    f"    {row.display_ticker:<12} {'  ·  '.join(due_bits)}"
+                    f"  →  {_analysis_command(row.run_ticker)}"
+                )
+        else:
+            lines.append("    None")
+        lines.append("")
+
+        lines.append("  Refresh activity this run:")
+        lines.append(
+            f"    Policy: {refresh_activity.policy}"
+            + (f"  ·  limit {refresh_activity.limit}" if refresh_activity.limit else "")
+        )
+        if refresh_activity.refreshed:
+            lines.append(f"    Refreshed: {', '.join(refresh_activity.refreshed)}")
+        if refresh_activity.failed:
+            lines.append(f"    Failed: {', '.join(refresh_activity.failed)}")
+        if refresh_activity.skipped_read_only:
+            lines.append(
+                "    Skipped (read-only): "
+                + ", ".join(refresh_activity.skipped_read_only)
+            )
+        if refresh_activity.skipped_due_to_policy:
+            lines.append(
+                "    Skipped (policy): "
+                + ", ".join(refresh_activity.skipped_due_to_policy)
+            )
+        if refresh_activity.skipped_due_to_limit:
+            lines.append(
+                "    Deferred by limit: "
+                + ", ".join(refresh_activity.skipped_due_to_limit)
+            )
+        if not (
+            refresh_activity.refreshed
+            or refresh_activity.failed
+            or refresh_activity.skipped_read_only
+            or refresh_activity.skipped_due_to_policy
+            or refresh_activity.skipped_due_to_limit
+        ):
+            lines.append("    No refresh actions were needed.")
+        lines.append("")
+
+        lines.append(
+            f"  User action: {_refresh_user_action(freshness_summary, refresh_activity, show_recommendations=show_recommendations)}"
+        )
+        lines.append("")
+
     # ── SELLS — STOP BREACHED (mechanical — execute) ─────────────────────────
     if stop_sells:
         _section("SELLS — STOP BREACHED", "mechanical — execute these")
@@ -1970,7 +2340,7 @@ def format_report(
 
     # ── REVIEWS ───────────────────────────────────────────────────────────────
     if reviews:
-        _section("REVIEWS", "stale or price-drifted — re-run analysis")
+        _section("REVIEWS", "analysis not decision-safe — refresh before acting")
         for item in reviews:
             reason_short = item.reason.replace("Stale analysis: ", "").replace(
                 "Position held but no evaluator analysis found", "no analysis found"
@@ -2092,10 +2462,9 @@ def format_report(
             lines.append("")
 
     # ── ACTION PLAN ───────────────────────────────────────────────────────────
-    # Show a sequenced action plan: what to do today vs after 2-day settlement,
-    # and which HOLD positions are approaching their staleness deadline.
-    from datetime import date, timedelta
-    from datetime import datetime as _dt
+    # Show a sequenced action plan: what to do today vs after settlement,
+    # plus any pending refresh follow-through the operator still owns.
+    from datetime import date
 
     today_str = date.today().isoformat()
     action_today = [i for i in items if i.action in ("SELL", "TRIM")]
@@ -2115,41 +2484,20 @@ def format_report(
             settle_groups[i.settlement_date] = (
                 settle_groups.get(i.settlement_date, 0.0) + i.cash_impact_usd
             )
-    # Upcoming review deadlines: real HOLD positions (not watchlist) nearing max_age_days
-    upcoming_reviews: list[
-        tuple[str, str, str, int]
-    ] = []  # (disp_sym, run_ticker, expires_date, days_left)
-    for item in items:
-        if item.action == "HOLD" and not item.is_watchlist and item.analysis:
-            remaining_days = max_age_days - item.analysis.age_days
-            if 0 < remaining_days <= 7:
-                try:
-                    expires_dt = _dt.strptime(
-                        item.analysis.analysis_date, "%Y-%m-%d"
-                    ) + timedelta(days=max_age_days)
-                    upcoming_reviews.append(
-                        (
-                            _display_ticker(item),
-                            _run_ticker_for(item),
-                            expires_dt.date().isoformat(),
-                            remaining_days,
-                        )
-                    )
-                except (ValueError, TypeError):
-                    pass
-
     if (
         action_today
         or funded_today
         or dip_candidates
         or settle_groups
-        or upcoming_reviews
         or _cands_deduped
         or removes
+        or refresh_activity.refreshed
+        or refresh_activity.failed
+        or refresh_activity.skipped_due_to_limit
     ):
         _section(
             "ACTION PLAN",
-            "execution orders · watchlist moves · when proceeds clear · re-analysis deadlines",
+            "execution orders · watchlist moves · when proceeds clear · refresh follow-through",
         )
 
         if action_today or funded_today:
@@ -2317,17 +2665,24 @@ def format_report(
             lines.append(f"        {_portfolio_manager_command('--recommend')}")
             lines.append("")
 
-        if upcoming_reviews:
-            lines.append("  Upcoming review deadlines:")
-            for disp_sym, yf_t, expires, days_left in sorted(
-                upcoming_reviews, key=lambda x: x[3]
-            ):
-                _sfx_warn = (
-                    "  ← ⚠ exchange unknown, verify suffix" if "." not in yf_t else ""
-                )
+        if (
+            refresh_activity.refreshed
+            or refresh_activity.failed
+            or refresh_activity.skipped_due_to_limit
+        ):
+            lines.append("  ANALYSIS REFRESH:")
+            if refresh_activity.refreshed:
                 lines.append(
-                    f"    → {disp_sym:<14} expires {expires}  ({days_left}d remaining)"
-                    f"  →  {_analysis_command(yf_t)}{_sfx_warn}"
+                    f"    ✓ Refreshed this run: {', '.join(refresh_activity.refreshed)}"
+                )
+            if refresh_activity.failed:
+                lines.append(
+                    f"    → Retry failed refreshes: {', '.join(refresh_activity.failed)}"
+                )
+            if refresh_activity.skipped_due_to_limit:
+                lines.append(
+                    "    → Remaining after limit: "
+                    + ", ".join(refresh_activity.skipped_due_to_limit)
                 )
             lines.append("")
 
@@ -2371,12 +2726,42 @@ def format_report(
 def format_json(
     items: list[ReconciliationItem],
     portfolio: PortfolioSummary,
+    *,
+    freshness_summary: _AnalysisFreshnessSummary | None = None,
+    refresh_activity: _RefreshActivity | None = None,
+    max_age_days: int = 14,
+    show_recommendations: bool = False,
 ) -> str:
     """Format reconciliation results as JSON."""
+    freshness_summary = freshness_summary or _classify_analysis_freshness(
+        items,
+        max_age_days=max_age_days,
+    )
+    refresh_activity = refresh_activity or _RefreshActivity(policy="off", limit=0)
     data = {
         "timestamp": datetime.now().isoformat(),
         "portfolio": portfolio.model_dump(),
         "items": [item.model_dump() for item in items],
+        "analysis_freshness_summary": {
+            "blocking_now_count": len(freshness_summary.blocking_now),
+            "stale_in_queue_count": len(freshness_summary.stale_in_queue),
+            "due_soon_count": len(freshness_summary.due_soon),
+            "candidate_blocked_count": len(freshness_summary.candidate_blocked),
+            "refreshed_this_run": refresh_activity.refreshed,
+            "refresh_failed": refresh_activity.failed,
+            "refresh_policy": refresh_activity.policy,
+            "manual_action_required": _refresh_user_action(
+                freshness_summary,
+                refresh_activity,
+                show_recommendations=show_recommendations,
+            )
+            != "none",
+            "user_action": _refresh_user_action(
+                freshness_summary,
+                refresh_activity,
+                show_recommendations=show_recommendations,
+            ),
+        },
     }
     return json.dumps(data, indent=2, default=str)
 
@@ -2692,6 +3077,7 @@ def _load_ibkr_context(
 def main() -> None:
     args = parse_args()
     _configure_logging(args.debug)
+    refresh_policy = _resolve_refresh_policy(args)
 
     # --test-auth exits immediately after credential check — no analyses needed.
     if args.test_auth:
@@ -2786,28 +3172,32 @@ def main() -> None:
         max_age_days=args.max_age,
         reconciliation_items=items,
     )
+    freshness_summary = _classify_analysis_freshness(items, max_age_days=args.max_age)
+    refresh_activity = _plan_refresh_activity(
+        freshness_summary,
+        policy=refresh_policy,
+        limit=getattr(args, "refresh_limit", 10),
+        show_recommendations=args.recommend,
+        read_only=args.read_only,
+    )
 
-    # Handle stale refreshes — also picks up positions with no analysis at all
-    if args.refresh_stale:
-        stale_tickers = [
-            _run_ticker_for(item)
-            for item in items
-            if item.action == "REVIEW"
-            and (
-                "stale" in (item.reason or "").lower()
-                or "no evaluator analysis found" in (item.reason or "").lower()
-                or "no analysis found" in (item.reason or "").lower()
-            )
-        ]
-        if stale_tickers:
+    # Handle analysis refreshes from structured freshness state.
+    if refresh_activity.queued:
+        refresh_count = len(refresh_activity.queued)
+        if refresh_count:
             print(
-                f"\nRefreshing {len(stale_tickers)} stale analyses...", file=sys.stderr
+                f"\nRefreshing {refresh_count} analyses ({refresh_policy})...",
+                file=sys.stderr,
             )
-            for index, ticker in enumerate(stale_tickers, start=1):
-                _print_status(
-                    f"Refreshing stale analysis {index}/{len(stale_tickers)}: {ticker}"
+            for index, ticker in enumerate(refresh_activity.queued, start=1):
+                _print_status(f"Refreshing analysis {index}/{refresh_count}: {ticker}")
+                refreshed = asyncio.run(
+                    refresh_stale_analysis(ticker, quick=args.quick)
                 )
-                asyncio.run(refresh_stale_analysis(ticker, quick=args.quick))
+                if refreshed:
+                    refresh_activity.refreshed.append(ticker)
+                else:
+                    refresh_activity.failed.append(ticker)
 
             # Reload and re-reconcile
             analyses = _load_analyses_with_progress(
@@ -2831,6 +3221,10 @@ def main() -> None:
                 max_age_days=args.max_age,
                 reconciliation_items=items,
             )
+            freshness_summary = _classify_analysis_freshness(
+                items,
+                max_age_days=args.max_age,
+            )
 
     # Detect and store macro events (fail-safe — errors caught internally).
     _store_macro_event_if_detected(health_flags, items)
@@ -2839,7 +3233,14 @@ def main() -> None:
     show_recs = args.recommend
 
     if args.json:
-        output = format_json(items, portfolio)
+        output = format_json(
+            items,
+            portfolio,
+            freshness_summary=freshness_summary,
+            refresh_activity=refresh_activity,
+            max_age_days=args.max_age,
+            show_recommendations=show_recs,
+        )
     else:
         output = format_report(
             items,
@@ -2851,6 +3252,8 @@ def main() -> None:
             watchlist_name=_loaded_watchlist_name,
             watchlist_total=_loaded_watchlist_total,
             watchlist_tickers=watchlist_tickers if watchlist_tickers else None,
+            freshness_summary=freshness_summary,
+            refresh_activity=refresh_activity,
         )
 
     if args.output:

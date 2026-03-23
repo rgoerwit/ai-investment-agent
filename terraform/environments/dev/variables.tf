@@ -112,7 +112,7 @@ variable "enable_backup" {
 }
 
 variable "allowed_ip_ranges" {
-  description = "List of IP ranges allowed to access the container (empty list allows all)."
+  description = "List of client IP ranges allowed to access restricted resources; empty list denies direct public client access by default."
   type        = list(string)
   default     = []
 }

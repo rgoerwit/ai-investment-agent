@@ -14,7 +14,9 @@
 # ────────────────────────────────────────────────────────────────────────────
 # Stage 1: Builder - Install dependencies in isolated environment
 # ────────────────────────────────────────────────────────────────────────────
-FROM python:3.12-slim AS builder
+ARG PYTHON_VERSION=3.12
+
+FROM python:${PYTHON_VERSION}-slim AS builder
 
 ARG POETRY_VERSION=2.1.1
 
@@ -46,7 +48,7 @@ RUN poetry install --only main --no-root --no-interaction --no-ansi
 # ────────────────────────────────────────────────────────────────────────────
 # Stage 2: Runtime - Minimal production image
 # ────────────────────────────────────────────────────────────────────────────
-FROM python:3.12-slim AS runtime
+FROM python:${PYTHON_VERSION}-slim AS runtime
 
 # Install only runtime dependencies (SQLite for ChromaDB + bash for scripts)
 RUN apt-get update && apt-get install -y --no-install-recommends \

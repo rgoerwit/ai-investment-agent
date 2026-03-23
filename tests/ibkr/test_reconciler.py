@@ -2033,6 +2033,69 @@ class TestComputePortfolioHealth:
         )
         assert any("STALE" in f for f in flags)
 
+    def test_stale_analysis_ratio_with_reconciliation_breakdown(self):
+        """When reconciliation items are present, stale flags distinguish queue vs blocking."""
+        pos1 = _make_position(
+            ticker="7203.T", market_value_usd=5000, currency="JPY", conid=1
+        )
+        pos2 = _make_position(
+            ticker="0005.HK", market_value_usd=5000, currency="HKD", conid=2
+        )
+        stale_a = _make_analysis(ticker="7203.T", age_days=20)
+        stale_b = _make_analysis(ticker="0005.HK", age_days=20)
+        portfolio = _make_portfolio(value=100000)
+        portfolio.exchange_weights = {}
+        items = [
+            ReconciliationItem(
+                ticker="7203.T",
+                action="REVIEW",
+                reason="Stale analysis: age 20d > max_age_days 14",
+                urgency="MEDIUM",
+                ibkr_position=pos1,
+                analysis=stale_a,
+            ),
+            ReconciliationItem(
+                ticker="0005.HK",
+                action="REVIEW",
+                reason="Verdict → DO_NOT_INITIATE  (2026-03-05)",
+                urgency="MEDIUM",
+                ibkr_position=pos2,
+                analysis=stale_b,
+                sell_type="SOFT_REJECT",
+            ),
+        ]
+        flags = compute_portfolio_health(
+            [pos1, pos2],
+            {"7203.T": stale_a, "0005.HK": stale_b},
+            portfolio,
+            max_age_days=14,
+            reconciliation_items=items,
+        )
+        stale_flag = next(flag for flag in flags if "STALE_ANALYSIS_RATIO" in flag)
+        assert "1 already in sell/review queue" in stale_flag
+        assert "1 still need refreshed analysis before action" in stale_flag
+
+    def test_stale_analysis_ratio_without_reconciliation_keeps_legacy_message(self):
+        """Older call sites without reconciliation items keep the legacy wording."""
+        pos1 = _make_position(
+            ticker="7203.T", market_value_usd=5000, currency="JPY", conid=1
+        )
+        pos2 = _make_position(
+            ticker="0005.HK", market_value_usd=5000, currency="HKD", conid=2
+        )
+        stale_a = _make_analysis(ticker="7203.T", age_days=20)
+        stale_b = _make_analysis(ticker="0005.HK", age_days=20)
+        portfolio = _make_portfolio(value=100000)
+        portfolio.exchange_weights = {}
+        flags = compute_portfolio_health(
+            [pos1, pos2],
+            {"7203.T": stale_a, "0005.HK": stale_b},
+            portfolio,
+            max_age_days=14,
+        )
+        stale_flag = next(flag for flag in flags if "STALE_ANALYSIS_RATIO" in flag)
+        assert "flying blind on significant chunk of portfolio" in stale_flag
+
     def test_currency_concentration_flag(self):
         """More than 50% in a single currency → CURRENCY_CONCENTRATION flag."""
         pos = _make_position(market_value_usd=60000, currency="HKD")

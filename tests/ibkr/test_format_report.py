@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 from scripts.portfolio_manager import (
     _analysis_command,
     _compute_dip_score,
     _portfolio_manager_command,
+    _RefreshActivity,
+    format_json,
     format_report,
 )
 from src.ibkr.models import (
@@ -17,7 +20,11 @@ from src.ibkr.models import (
     TradeBlockData,
 )
 from src.ibkr.ticker import Ticker
-from tests.ibkr.test_reconciler import _make_portfolio, _make_position
+from tests.ibkr.test_reconciler import (
+    _make_analysis,
+    _make_portfolio,
+    _make_position,
+)
 
 # A realistic CORRELATED_SELL_EVENT flag string (matches what compute_portfolio_health emits).
 # Format: "CORRELATED_SELL_EVENT: N positions changed verdict within Xd of DATE (P% of held …"
@@ -1842,3 +1849,96 @@ class TestPortfolioManagerOutputTightening:
         report = format_report([high], _make_portfolio(), show_recommendations=True)
         assert "ADD TO WATCHLIST  TOTL" in report
         assert "ADDED TO WATCHLIST" not in report
+
+
+class TestAnalysisFreshnessReporting:
+    def _items(self) -> list[ReconciliationItem]:
+        blocking = ReconciliationItem(
+            ticker="7203.T",
+            action="REVIEW",
+            reason="Stale analysis: age 20d > max_age_days 14",
+            urgency="MEDIUM",
+            ibkr_position=_make_position(ticker="7203.T"),
+            analysis=_make_analysis(ticker="7203.T", age_days=20),
+        )
+        queued = ReconciliationItem(
+            ticker="0005.HK",
+            action="REVIEW",
+            reason="Verdict → DO_NOT_INITIATE  (2026-03-05)",
+            urgency="MEDIUM",
+            ibkr_position=_make_position(ticker="0005.HK"),
+            analysis=_make_analysis(ticker="0005.HK", age_days=20),
+            sell_type="SOFT_REJECT",
+        )
+        due_soon = ReconciliationItem(
+            ticker="GTT.PA",
+            action="HOLD",
+            reason="Position OK",
+            urgency="LOW",
+            ibkr_position=_make_position(ticker="GTT.PA"),
+            analysis=_make_analysis(ticker="GTT.PA", age_days=8),
+        )
+        return [blocking, queued, due_soon]
+
+    def test_analysis_freshness_section_replaces_split_brain_deadlines(self):
+        report = format_report(self._items(), _make_portfolio(), max_age_days=14)
+        assert "ANALYSIS FRESHNESS" in report
+        assert "Blocking now:" in report
+        assert "Already in queue:" in report
+        assert "Due soon:" in report
+        assert "Upcoming review deadlines" not in report
+
+    def test_reviews_subtitle_uses_decision_safe_wording(self):
+        report = format_report(self._items(), _make_portfolio(), max_age_days=14)
+        assert "REVIEWS  (analysis not decision-safe — refresh before acting)" in report
+
+    def test_read_only_refresh_skip_shows_exact_manual_action(self):
+        item = ReconciliationItem(
+            ticker="7203.T",
+            action="REVIEW",
+            reason="Stale analysis: age 20d > max_age_days 14",
+            urgency="MEDIUM",
+            ibkr_position=_make_position(ticker="7203.T"),
+            analysis=_make_analysis(ticker="7203.T", age_days=20),
+        )
+        report = format_report(
+            [item],
+            _make_portfolio(),
+            refresh_activity=_RefreshActivity(
+                policy="blocking",
+                limit=10,
+                skipped_read_only=["7203.T"],
+            ),
+        )
+        assert "Skipped (read-only): 7203.T" in report
+        assert (
+            "User action: read-only mode blocked refresh — run "
+            f"{_portfolio_manager_command('--refresh-policy', 'blocking')}"
+        ) in report
+
+    def test_successful_refresh_run_can_leave_no_manual_action(self):
+        report = format_report(
+            [],
+            _make_portfolio(),
+            refresh_activity=_RefreshActivity(
+                policy="blocking",
+                limit=10,
+                refreshed=["7203.T"],
+            ),
+        )
+        assert "Refreshed: 7203.T" in report
+        assert "User action: none" in report
+
+    def test_format_json_includes_freshness_summary(self):
+        payload = json.loads(
+            format_json(
+                self._items(),
+                _make_portfolio(),
+                max_age_days=14,
+            )
+        )
+        summary = payload["analysis_freshness_summary"]
+        assert summary["blocking_now_count"] == 1
+        assert summary["stale_in_queue_count"] == 1
+        assert summary["due_soon_count"] == 1
+        assert summary["manual_action_required"] is True

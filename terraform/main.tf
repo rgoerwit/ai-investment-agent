@@ -164,12 +164,13 @@ resource "azurerm_storage_account" "main" {
     versioning_enabled = true
   }
 
-  # Network access rules - Allow Azure services by default
+  # Network access rules - deny by default and allow only explicit IP ranges.
   network_rules {
-    default_action = "Allow" # For demo purposes; restrict in production
+    default_action = "Deny"
     bypass         = ["AzureServices"]
 
-    # Fixed: Use ip_rules as a list directly, not as dynamic block
+    # Fixed: Use ip_rules as a list directly, not as dynamic block.
+    # Empty list means no direct public client IPs are allowed by default.
     ip_rules = var.allowed_ip_ranges
   }
 
@@ -360,45 +361,6 @@ resource "azurerm_container_group" "main" {
     for_each = var.enable_managed_identity ? [1] : []
     content {
       type = "SystemAssigned"
-    }
-  }
-
-  tags = local.common_tags
-}
-
-# Network Security Group for container access control
-resource "azurerm_network_security_group" "main" {
-  count               = length(var.allowed_ip_ranges) > 0 ? 1 : 0
-  name                = "${var.resource_group_name}-nsg"
-  location            = azurerm_resource_group.main.location
-  resource_group_name = azurerm_resource_group.main.name
-
-  # Allow HTTP health checks
-  security_rule {
-    name                       = "AllowHealthCheck"
-    priority                   = 1001
-    direction                  = "Inbound"
-    access                     = "Allow"
-    protocol                   = "Tcp"
-    source_port_range          = "*"
-    destination_port_range     = "8080"
-    source_address_prefix      = "*"
-    destination_address_prefix = "*"
-  }
-
-  # Dynamic rules for allowed IP ranges
-  dynamic "security_rule" {
-    for_each = { for idx, ip in var.allowed_ip_ranges : idx => ip }
-    content {
-      name                       = "AllowSpecificIP-${security_rule.key}"
-      priority                   = 1100 + security_rule.key
-      direction                  = "Inbound"
-      access                     = "Allow"
-      protocol                   = "Tcp"
-      source_port_range          = "*"
-      destination_port_range     = "8080"
-      source_address_prefix      = security_rule.value
-      destination_address_prefix = "*"
     }
   }
 
