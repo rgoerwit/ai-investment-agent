@@ -132,6 +132,97 @@ class TestPENormalizationSanityChecks:
         assert result["trailingPE"] == 12.626695
         assert result.get("_trailingPE_source") is None
 
+    def test_quarantines_recent_split_forward_metrics(self, fetcher):
+        """Recent split with aligned PE/EPS ratios should null forward valuation metrics."""
+        info = {
+            "trailingPE": 14.366964,
+            "forwardPE": 7.019027,
+            "epsTrailingTwelveMonths": 80.88,
+            "forwardEps": 165.55,
+            "pegRatio": 0.69,
+            "lastSplitDate": 1766966400,
+            "lastSplitFactor": "2:1",
+            "regularMarketTime": 1773383400,
+        }
+
+        result = fetcher._normalize_data_integrity(info, "4396.T")
+
+        assert result["trailingPE"] == pytest.approx(14.366964)
+        assert result["epsTrailingTwelveMonths"] == pytest.approx(80.88)
+        assert result["forwardPE"] is None
+        assert result["forwardEps"] is None
+        assert result["pegRatio"] is None
+        assert result["_split_sensitive_metrics_quarantined"] is True
+        assert result["_split_quarantine_reason"] == "recent_split_share_basis_mismatch"
+        assert any(
+            "quarantined forward valuation metrics" in note
+            for note in result["_data_quality_notes"]
+        )
+
+    def test_no_quarantine_without_recent_split_metadata(self, fetcher):
+        """Do not quarantine on ratio mismatch alone without recent split evidence."""
+        info = {
+            "trailingPE": 14.366964,
+            "forwardPE": 7.019027,
+            "epsTrailingTwelveMonths": 80.88,
+            "forwardEps": 165.55,
+            "pegRatio": 0.69,
+        }
+
+        result = fetcher._normalize_data_integrity(info, "4396.T")
+
+        assert result["forwardPE"] == pytest.approx(7.019027)
+        assert result["forwardEps"] == pytest.approx(165.55)
+        assert result["pegRatio"] == pytest.approx(0.69)
+        assert result.get("_split_sensitive_metrics_quarantined") is None
+
+    def test_no_quarantine_when_only_pe_ratio_matches_split_factor(self, fetcher):
+        """Require both PE and EPS ratios to match the split factor."""
+        info = {
+            "trailingPE": 14.366964,
+            "forwardPE": 7.019027,
+            "epsTrailingTwelveMonths": 80.88,
+            "forwardEps": 120.0,
+            "pegRatio": 0.69,
+            "lastSplitDate": 1766966400,
+            "lastSplitFactor": "2:1",
+            "regularMarketTime": 1773383400,
+        }
+
+        result = fetcher._normalize_data_integrity(info, "4396.T")
+
+        assert result["forwardPE"] == pytest.approx(7.019027)
+        assert result["forwardEps"] == pytest.approx(120.0)
+        assert result["pegRatio"] == pytest.approx(0.69)
+        assert result.get("_split_sensitive_metrics_quarantined") is None
+
+    def test_reconciles_latest_quarter_date_to_newer_metadata(self, fetcher):
+        """Prefer newer mostRecentQuarter when latest_quarter_date is materially stale."""
+        info = {
+            "latest_quarter_date": "2024-12-31",
+            "mostRecentQuarter": 1767139200,
+        }
+
+        result = fetcher._normalize_data_integrity(info, "4396.T")
+
+        assert result["latest_quarter_date"] == "2025-12-31"
+        assert result["_latest_quarter_date_source"] == "reconciled_most_recent_quarter"
+
+    def test_does_not_reconcile_when_quarter_dates_are_aligned(self, fetcher):
+        """Keep the existing date when both sources are already effectively aligned."""
+        info = {
+            "latest_quarter_date": "2025-12-31",
+            "mostRecentQuarter": 1767139200,
+        }
+
+        result = fetcher._normalize_data_integrity(info, "4396.T")
+
+        assert result["latest_quarter_date"] == "2025-12-31"
+        assert (
+            result.get("_latest_quarter_date_source")
+            != "reconciled_most_recent_quarter"
+        )
+
 
 class TestDataDivergenceDetection:
     """Test that extreme TTM vs statement divergence is detected and handled."""
