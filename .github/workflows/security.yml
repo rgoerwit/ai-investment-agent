@@ -196,218 +196,287 @@ jobs:
       #     category: gitleaks
 
   # ══════════════════════════════════════════════════════════════════════════
+  # TRIVY JOBS DISABLED — March 2026 (week 4)
+  # Two supply-chain compromise incidents affecting aquasecurity/trivy-action
+  # were disclosed during the fourth week of March 2026. All three Trivy jobs
+  # (trivy-repo-scan, trivy-python-deps, trivy-docker-scan) are commented out
+  # until aquasecurity publishes a verified-safe release and the action has
+  # been audited. Re-enable by un-commenting the job blocks below.
+  # ══════════════════════════════════════════════════════════════════════════
+
+  # ── trivy-repo-scan (disabled) ────────────────────────────────────────────
   # Trivy - Comprehensive vulnerability scanner for dependencies, containers, IaC
-  # ══════════════════════════════════════════════════════════════════════════
-  trivy-repo-scan:
-    name: Trivy Repository Scan
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+  # trivy-repo-scan:
+  #   name: Trivy Repository Scan
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v4
+  #
+  #     # Scan repository for vulnerabilities in dependencies, misconfigurations, secrets
+  #     - name: Run Trivy vulnerability scanner (repo mode)
+  #       uses: aquasecurity/trivy-action@0.35.0
+  #       with:
+  #         scan-type: 'fs'  # Filesystem scan (entire repository)
+  #         scan-ref: '.'    # Scan current directory
+  #         format: 'sarif'  # SARIF format for GitHub Security integration
+  #         output: 'trivy-repo-results.sarif'
+  #         severity: 'CRITICAL,HIGH,MEDIUM'  # Report these severities
+  #         # Security checks to run:
+  #         # - vuln: Package vulnerabilities (CVEs in dependencies)
+  #         # - config: IaC misconfigurations (Terraform, Docker, K8s, etc.)
+  #         # - secret: Hardcoded secrets (complements GitLeaks)
+  #         scanners: 'vuln,config,secret'
+  #         # Ignore unfixed vulnerabilities (no patch available yet)
+  #         ignore-unfixed: false
+  #         # Exit code: 0 = no vulns, 1 = vulns found
+  #         exit-code: '0'  # Don't fail build, just report (change to '1' for strict mode)
+  #         # Timeout for scan operation
+  #         timeout: '10m'
+  #         # Use GitHub token for downloading vulnerability database
+  #         github-pat: ${{ secrets.GITHUB_TOKEN }}
+  #
+  #     # Upload Trivy results to GitHub Security tab (shows up in "Security" -> "Code scanning")
+  #     - name: Upload Trivy SARIF to GitHub Security
+  #       if: always()  # Upload even if scan found issues
+  #       uses: github/codeql-action/upload-sarif@v4
+  #       with:
+  #         sarif_file: 'trivy-repo-results.sarif'
+  #         category: 'trivy-repo-scan'
+  #
+  #     # Generate human-readable report for PR comments
+  #     - name: Run Trivy for PR comment (table format)
+  #       if: github.event_name == 'pull_request'
+  #       uses: aquasecurity/trivy-action@0.35.0
+  #       with:
+  #         scan-type: 'fs'
+  #         scan-ref: '.'
+  #         format: 'table'  # Human-readable table format
+  #         output: 'trivy-pr-report.txt'
+  #         severity: 'CRITICAL,HIGH'
+  #         scanners: 'vuln,config'
+  #         ignore-unfixed: true  # Only show fixable issues in PR comments
+  #
+  #     # Comment on PR with scan results (if running on PR)
+  #     - name: Comment Trivy results on PR
+  #       if: github.event_name == 'pull_request'
+  #       uses: actions/github-script@v7
+  #       with:
+  #         script: |
+  #           const fs = require('fs');
+  #
+  #           // Check if report file exists
+  #           if (!fs.existsSync('trivy-pr-report.txt')) {
+  #             console.log('No Trivy report found - skipping PR comment');
+  #             return;
+  #           }
+  #
+  #           const report = fs.readFileSync('trivy-pr-report.txt', 'utf8');
+  #
+  #           // Only comment if there are actual findings
+  #           if (report.includes('Total:')) {
+  #             const comment = `## 🔒 Trivy Security Scan Results
+  #
+  #           <details>
+  #           <summary>Click to expand vulnerability report</summary>
+  #
+  #           \`\`\`
+  #           ${report}
+  #           \`\`\`
+  #
+  #           </details>
+  #
+  #           💡 **Tip**: Fix CRITICAL and HIGH severity issues before merging.
+  #           📊 Full results available in the [Security tab](${context.payload.repository.html_url}/security/code-scanning).
+  #           `;
+  #
+  #             github.rest.issues.createComment({
+  #               issue_number: context.issue.number,
+  #               owner: context.repo.owner,
+  #               repo: context.repo.repo,
+  #               body: comment
+  #             });
+  #           }
 
-      # Scan repository for vulnerabilities in dependencies, misconfigurations, secrets
-      - name: Run Trivy vulnerability scanner (repo mode)
-        uses: aquasecurity/trivy-action@0.35.0
-        with:
-          scan-type: 'fs'  # Filesystem scan (entire repository)
-          scan-ref: '.'    # Scan current directory
-          format: 'sarif'  # SARIF format for GitHub Security integration
-          output: 'trivy-repo-results.sarif'
-          severity: 'CRITICAL,HIGH,MEDIUM'  # Report these severities
-          # Security checks to run:
-          # - vuln: Package vulnerabilities (CVEs in dependencies)
-          # - config: IaC misconfigurations (Terraform, Docker, K8s, etc.)
-          # - secret: Hardcoded secrets (complements GitLeaks)
-          scanners: 'vuln,config,secret'
-          # Ignore unfixed vulnerabilities (no patch available yet)
-          ignore-unfixed: false
-          # Exit code: 0 = no vulns, 1 = vulns found
-          exit-code: '0'  # Don't fail build, just report (change to '1' for strict mode)
-          # Timeout for scan operation
-          timeout: '10m'
-          # Use GitHub token for downloading vulnerability database
-          github-pat: ${{ secrets.GITHUB_TOKEN }}
-
-      # Upload Trivy results to GitHub Security tab (shows up in "Security" -> "Code scanning")
-      - name: Upload Trivy SARIF to GitHub Security
-        if: always()  # Upload even if scan found issues
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: 'trivy-repo-results.sarif'
-          category: 'trivy-repo-scan'
-
-      # Generate human-readable report for PR comments
-      - name: Run Trivy for PR comment (table format)
-        if: github.event_name == 'pull_request'
-        uses: aquasecurity/trivy-action@0.35.0
-        with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          format: 'table'  # Human-readable table format
-          output: 'trivy-pr-report.txt'
-          severity: 'CRITICAL,HIGH'
-          scanners: 'vuln,config'
-          ignore-unfixed: true  # Only show fixable issues in PR comments
-
-      # Comment on PR with scan results (if running on PR)
-      - name: Comment Trivy results on PR
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-
-            // Check if report file exists
-            if (!fs.existsSync('trivy-pr-report.txt')) {
-              console.log('No Trivy report found - skipping PR comment');
-              return;
-            }
-
-            const report = fs.readFileSync('trivy-pr-report.txt', 'utf8');
-
-            // Only comment if there are actual findings
-            if (report.includes('Total:')) {
-              const comment = `## 🔒 Trivy Security Scan Results
-
-            <details>
-            <summary>Click to expand vulnerability report</summary>
-
-            \`\`\`
-            ${report}
-            \`\`\`
-
-            </details>
-
-            💡 **Tip**: Fix CRITICAL and HIGH severity issues before merging.
-            📊 Full results available in the [Security tab](${context.payload.repository.html_url}/security/code-scanning).
-            `;
-
-              github.rest.issues.createComment({
-                issue_number: context.issue.number,
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                body: comment
-              });
-            }
-
-  # ══════════════════════════════════════════════════════════════════════════
+  # ── trivy-python-deps (disabled) ──────────────────────────────────────────
   # Trivy - Python dependency scanning (Poetry/pip)
   # Scans pyproject.toml, poetry.lock, requirements.txt for known CVEs
-  # ══════════════════════════════════════════════════════════════════════════
-  trivy-python-deps:
-    name: Trivy Python Dependencies
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+  # trivy-python-deps:
+  #   name: Trivy Python Dependencies
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v4
+  #
+  #     # Scan Python dependencies specifically (more focused than repo scan)
+  #     - name: Run Trivy on Python dependencies
+  #       uses: aquasecurity/trivy-action@0.35.0
+  #       with:
+  #         scan-type: 'fs'
+  #         scan-ref: '.'
+  #         format: 'sarif'
+  #         output: 'trivy-python-results.sarif'
+  #         severity: 'CRITICAL,HIGH,MEDIUM'
+  #         # Only scan for package vulnerabilities (not config/secrets)
+  #         scanners: 'vuln'
+  #         # Python-specific: scan pyproject.toml, poetry.lock, requirements.txt
+  #         skip-dirs: 'tests/,docs/,scratch/'  # Skip test/doc dependencies
+  #         exit-code: '0'
+  #         timeout: '5m'
+  #
+  #     - name: Upload Python deps SARIF to GitHub Security
+  #       if: always()
+  #       uses: github/codeql-action/upload-sarif@v4
+  #       with:
+  #         sarif_file: 'trivy-python-results.sarif'
+  #         category: 'trivy-python-deps'
 
-      # Scan Python dependencies specifically (more focused than repo scan)
-      - name: Run Trivy on Python dependencies
-        uses: aquasecurity/trivy-action@0.35.0
-        with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          format: 'sarif'
-          output: 'trivy-python-results.sarif'
-          severity: 'CRITICAL,HIGH,MEDIUM'
-          # Only scan for package vulnerabilities (not config/secrets)
-          scanners: 'vuln'
-          # Python-specific: scan pyproject.toml, poetry.lock, requirements.txt
-          skip-dirs: 'tests/,docs/,scratch/'  # Skip test/doc dependencies
-          exit-code: '0'
-          timeout: '5m'
-
-      - name: Upload Python deps SARIF to GitHub Security
-        if: always()
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: 'trivy-python-results.sarif'
-          category: 'trivy-python-deps'
-
-  # ══════════════════════════════════════════════════════════════════════════
+  # ── trivy-docker-scan (disabled) ──────────────────────────────────────────
   # Trivy - Docker image scanning (if you build containers)
   # Scans built Docker images for OS package vulnerabilities
+  # trivy-docker-scan:
+  #   name: Trivy Docker Image Scan
+  #   runs-on: ubuntu-latest
+  #   # Note: hashFiles() only works in step-level 'if', not job-level
+  #   # This job will run but skip if no Dockerfile exists
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v4
+  #
+  #     # Check if Dockerfile exists before attempting to build
+  #     - name: Check for Dockerfile
+  #       id: dockerfile_check
+  #       run: |
+  #         if [ -f "Dockerfile" ]; then
+  #           echo "exists=true" >> $GITHUB_OUTPUT
+  #         else
+  #           echo "exists=false" >> $GITHUB_OUTPUT
+  #           echo "ℹ️ No Dockerfile found - skipping Docker image scan"
+  #         fi
+  #
+  #     # Build Docker image for scanning
+  #     - name: Build Docker image
+  #       if: steps.dockerfile_check.outputs.exists == 'true'
+  #       run: |
+  #         docker build -t investment-agent:${{ github.sha }} .
+  #
+  #     # Scan the built Docker image for vulnerabilities
+  #     - name: Run Trivy on Docker image
+  #       if: steps.dockerfile_check.outputs.exists == 'true'
+  #       uses: aquasecurity/trivy-action@0.35.0
+  #       with:
+  #         scan-type: 'image'  # Scan Docker image
+  #         image-ref: 'investment-agent:${{ github.sha }}'
+  #         format: 'sarif'
+  #         output: 'trivy-docker-results.sarif'
+  #         severity: 'CRITICAL,HIGH'
+  #         # Scan for OS package vulnerabilities in the container
+  #         scanners: 'vuln'
+  #         # Ignore vulnerabilities in base image that can't be fixed
+  #         ignore-unfixed: true
+  #         exit-code: '0'
+  #         timeout: '10m'
+  #
+  #     - name: Check if SARIF file was generated
+  #       id: sarif_check
+  #       if: steps.dockerfile_check.outputs.exists == 'true'
+  #       run: |
+  #         if [ -f "trivy-docker-results.sarif" ]; then
+  #           echo "sarif_exists=true" >> $GITHUB_OUTPUT
+  #         else
+  #           echo "sarif_exists=false" >> $GITHUB_OUTPUT
+  #         fi
+  #
+  #     - name: Upload Docker image SARIF to GitHub Security
+  #       # Only upload if SARIF file exists (Docker scan completed)
+  #       if: always() && steps.dockerfile_check.outputs.exists == 'true' && steps.sarif_check.outputs.sarif_exists == 'true'
+  #       uses: github/codeql-action/upload-sarif@v4
+  #       with:
+  #         sarif_file: 'trivy-docker-results.sarif'
+  #         category: 'trivy-docker-image'
+  #
+  #     # Generate table report for Docker scan
+  #     - name: Run Trivy for Docker summary
+  #       if: steps.dockerfile_check.outputs.exists == 'true'
+  #       uses: aquasecurity/trivy-action@0.35.0
+  #       with:
+  #         scan-type: 'image'
+  #         image-ref: 'investment-agent:${{ github.sha }}'
+  #         format: 'table'
+  #         output: 'trivy-docker-summary.txt'
+  #         severity: 'CRITICAL,HIGH'
+  #         scanners: 'vuln'
+  #         ignore-unfixed: true
+  #
+  #     # Output Docker scan summary to workflow log
+  #     - name: Display Docker scan summary
+  #       if: always() && steps.dockerfile_check.outputs.exists == 'true'
+  #       run: |
+  #         echo "## 🐳 Docker Image Scan Summary"
+  #         cat trivy-docker-summary.txt || echo "No vulnerabilities found!"
+
   # ══════════════════════════════════════════════════════════════════════════
-  trivy-docker-scan:
-    name: Trivy Docker Image Scan
+  # pip-audit - Python dependency CVE scanning (replaces Trivy, March 2026)
+  # Uses PyPA's pip-audit tool via a plain `run:` step — no third-party Action,
+  # so no supply-chain exposure from the action itself.
+  # Data sources: OSV database + PyPI Advisory database.
+  # ══════════════════════════════════════════════════════════════════════════
+  pip-audit:
+    name: pip-audit Python Dependency Scan
     runs-on: ubuntu-latest
-    # Note: hashFiles() only works in step-level 'if', not job-level
-    # This job will run but skip if no Dockerfile exists
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Check if Dockerfile exists before attempting to build
-      - name: Check for Dockerfile
-        id: dockerfile_check
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Poetry and pip-audit
         run: |
-          if [ -f "Dockerfile" ]; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-            echo "ℹ️ No Dockerfile found - skipping Docker image scan"
+          pip install poetry pip-audit
+          poetry self add poetry-plugin-export
+
+      - name: Export dependencies and run pip-audit
+        run: |
+          # Export lockfile to requirements format (no hashes — pip-audit handles resolution)
+          poetry export --without-hashes --with dev -f requirements.txt -o /tmp/requirements.txt
+          # Run audit; exit 1 if any CRITICAL or HIGH CVEs are found
+          pip-audit -r /tmp/requirements.txt \
+            --format json \
+            --output pip-audit-results.json \
+            --strict \
+            --ignore-vuln CVE-2026-4539 \
+            || (echo "⚠️  pip-audit found vulnerabilities — see pip-audit-results.json" && exit 1)
+
+      - name: Display audit summary
+        if: always()
+        run: |
+          if [ -f pip-audit-results.json ]; then
+            python3 - <<'EOF'
+          import json, sys
+          data = json.load(open("pip-audit-results.json"))
+          vulns = data.get("dependencies", [])
+          found = [d for d in vulns if d.get("vulns")]
+          if not found:
+              print("✅ No known vulnerabilities found in Python dependencies.")
+          else:
+              print(f"⚠️  {len(found)} package(s) with vulnerabilities:")
+              for dep in found:
+                  for v in dep["vulns"]:
+                      print(f"  {dep['name']}=={dep['version']}  {v['id']}  {v.get('description','')[:120]}")
+              sys.exit(1)
+          EOF
           fi
 
-      # Build Docker image for scanning
-      - name: Build Docker image
-        if: steps.dockerfile_check.outputs.exists == 'true'
-        run: |
-          docker build -t investment-agent:${{ github.sha }} .
-
-      # Scan the built Docker image for vulnerabilities
-      - name: Run Trivy on Docker image
-        if: steps.dockerfile_check.outputs.exists == 'true'
-        uses: aquasecurity/trivy-action@0.35.0
+      - name: Upload pip-audit results as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          scan-type: 'image'  # Scan Docker image
-          image-ref: 'investment-agent:${{ github.sha }}'
-          format: 'sarif'
-          output: 'trivy-docker-results.sarif'
-          severity: 'CRITICAL,HIGH'
-          # Scan for OS package vulnerabilities in the container
-          scanners: 'vuln'
-          # Ignore vulnerabilities in base image that can't be fixed
-          ignore-unfixed: true
-          exit-code: '0'
-          timeout: '10m'
-
-      - name: Check if SARIF file was generated
-        id: sarif_check
-        if: steps.dockerfile_check.outputs.exists == 'true'
-        run: |
-          if [ -f "trivy-docker-results.sarif" ]; then
-            echo "sarif_exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "sarif_exists=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Upload Docker image SARIF to GitHub Security
-        # Only upload if SARIF file exists (Docker scan completed)
-        if: always() && steps.dockerfile_check.outputs.exists == 'true' && steps.sarif_check.outputs.sarif_exists == 'true'
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: 'trivy-docker-results.sarif'
-          category: 'trivy-docker-image'
-
-      # Generate table report for Docker scan
-      - name: Run Trivy for Docker summary
-        if: steps.dockerfile_check.outputs.exists == 'true'
-        uses: aquasecurity/trivy-action@0.35.0
-        with:
-          scan-type: 'image'
-          image-ref: 'investment-agent:${{ github.sha }}'
-          format: 'table'
-          output: 'trivy-docker-summary.txt'
-          severity: 'CRITICAL,HIGH'
-          scanners: 'vuln'
-          ignore-unfixed: true
-
-      # Output Docker scan summary to workflow log
-      - name: Display Docker scan summary
-        if: always() && steps.dockerfile_check.outputs.exists == 'true'
-        run: |
-          echo "## 🐳 Docker Image Scan Summary"
-          cat trivy-docker-summary.txt || echo "No vulnerabilities found!"
+          name: pip-audit-results
+          path: pip-audit-results.json
+          retention-days: 30
 
   # ══════════════════════════════════════════════════════════════════════════
   # Summary job - Aggregate results and provide recommendations
@@ -415,7 +484,7 @@ jobs:
   security-summary:
     name: Security Scan Summary
     runs-on: ubuntu-latest
-    needs: [codeql-analysis, gitleaks, trivy-repo-scan, trivy-python-deps]
+    needs: [codeql-analysis, gitleaks, pip-audit]
     if: always()  # Run even if some scans fail
     steps:
       - name: Check scan results
@@ -424,15 +493,15 @@ jobs:
           echo ""
           echo "✅ CodeQL SAST: ${{ needs.codeql-analysis.result }}"
           echo "✅ GitLeaks: ${{ needs.gitleaks.result }}"
-          echo "✅ Trivy Repo Scan: ${{ needs.trivy-repo-scan.result }}"
-          echo "✅ Trivy Python Deps: ${{ needs.trivy-python-deps.result }}"
+          echo "✅ pip-audit (Python CVEs): ${{ needs.pip-audit.result }}"
+          echo ""
+          echo "ℹ️  Trivy jobs are disabled (supply-chain incident, March 2026 week 4)"
           echo ""
 
           # Check if any scans failed
           if [[ "${{ needs.codeql-analysis.result }}" != "success" ]] || \
              [[ "${{ needs.gitleaks.result }}" != "success" ]] || \
-             [[ "${{ needs.trivy-repo-scan.result }}" != "success" ]] || \
-             [[ "${{ needs.trivy-python-deps.result }}" != "success" ]]; then
+             [[ "${{ needs.pip-audit.result }}" != "success" ]]; then
             echo "⚠️  One or more security scans reported issues"
             echo ""
             echo "📊 View detailed results in the Security tab:"

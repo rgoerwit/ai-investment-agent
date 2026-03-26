@@ -558,7 +558,9 @@ def create_writer_llm(
     if "opus-4-6" in model_name:
         # Opus 4.6: adaptive thinking (Claude decides when/how much to think)
         kwargs["thinking"] = {"type": "adaptive"}
-        kwargs["model_kwargs"] = {"output_config": {"effort": "high"}}
+        # langchain-anthropic >=1.3.0: effort is a first-class field that
+        # the library serializes into output_config in the API call.
+        kwargs["effort"] = "high"
         # CRITICAL: Anthropic returns 400 if temperature != 1.0 with thinking.
         # Omit temperature entirely — SDK defaults to 1.0.
         logger.info(

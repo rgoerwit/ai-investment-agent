@@ -4,13 +4,15 @@ Observability module for LLM tracing.
 Provides unified callback handlers for tracing LangGraph executions.
 Currently supports Langfuse (open-source) with graceful degradation.
 
-Updated for Langfuse Python SDK v3 (Jan 2026):
-- CallbackHandler() takes no constructor arguments
+Updated for Langfuse Python SDK v4 (March 2026):
+- CallbackHandler() takes no constructor arguments (unchanged from v3)
 - Session ID, tags, and user ID are passed via LangChain config metadata
   using langfuse_session_id, langfuse_tags, langfuse_user_id keys
 - SDK reads credentials from LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY,
   LANGFUSE_BASE_URL environment variables (exported by config.py)
 - Flush via get_client().flush()
+- v4 note: langfuse.langchain.CallbackHandler and get_client() import paths
+  are unchanged. v4 rewrites internals on OTel but preserves this interface.
 
 Usage:
     from src.observability import get_tracing_callbacks
@@ -53,7 +55,7 @@ def get_tracing_callbacks(
     providers. Pass callbacks to config["callbacks"] and metadata to
     config["metadata"] in graph.ainvoke().
 
-    Langfuse SDK v3 notes:
+    Langfuse SDK v4 notes:
     - CallbackHandler() reads credentials from environment variables
       (exported by config.py's setup_environment)
     - Trace attributes (session_id, tags, user_id) are passed via
@@ -90,13 +92,13 @@ def get_tracing_callbacks(
         # Import here to allow graceful degradation if langfuse not installed
         from langfuse.langchain import CallbackHandler as LangfuseHandler
 
-        # SDK v3: no constructor args. Reads LANGFUSE_PUBLIC_KEY,
+        # SDK v4: no constructor args. Reads LANGFUSE_PUBLIC_KEY,
         # LANGFUSE_SECRET_KEY, LANGFUSE_BASE_URL from os.environ
         # (exported by config.py setup_environment).
         handler = LangfuseHandler()
         callbacks.append(handler)
 
-        # SDK v3: trace attributes go in LangChain config metadata
+        # SDK v4: trace attributes go in LangChain config metadata
         # with langfuse_* prefixed keys
         if session_id:
             metadata["langfuse_session_id"] = session_id
@@ -135,7 +137,7 @@ def flush_traces() -> None:
     Flush any pending traces to the observability backend.
 
     Call this at the end of an analysis to ensure all traces are sent
-    before the process exits. Uses the SDK v3 singleton client.
+    before the process exits. Uses the SDK v4 singleton client.
     """
     if not config.langfuse_enabled:
         return
