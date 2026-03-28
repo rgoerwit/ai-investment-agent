@@ -441,6 +441,48 @@ def test_blocking_refresh_excludes_soft_reject_macro_reviews():
     mock_refresh.assert_not_called()
 
 
+def test_blocking_refresh_includes_stale_sell_items():
+    """Stale SELL/TRIM items in the queue are refreshed under blocking policy."""
+    args = _make_args(recommend=True, report_only=False)
+    stale_sell = ReconciliationItem(
+        ticker="5285.T",
+        action="SELL",
+        reason="Stop breach",
+        urgency="HIGH",
+        ibkr_position=_make_position(ticker="5285.T"),
+        analysis=_make_analysis(ticker="5285.T", age_days=21),
+        sell_type="STOP_BREACH",
+    )
+
+    with (
+        patch("scripts.portfolio_manager.parse_args", return_value=args),
+        patch("scripts.portfolio_manager._configure_logging"),
+        patch("scripts.portfolio_manager._preflight_ibkr_requirements"),
+        patch(
+            "scripts.portfolio_manager._load_analyses_with_progress",
+            side_effect=[{"5285.T": object()}, {"5285.T": object()}],
+        ),
+        patch(
+            "scripts.portfolio_manager._load_ibkr_context",
+            return_value=([], PortfolioSummary(), set(), None, None, []),
+        ),
+        patch(
+            "scripts.portfolio_manager.reconcile",
+            side_effect=[[stale_sell], []],
+        ),
+        patch("scripts.portfolio_manager.compute_portfolio_health", return_value=[]),
+        patch(
+            "scripts.portfolio_manager.refresh_stale_analysis",
+            return_value=True,
+        ) as mock_refresh,
+        patch("scripts.portfolio_manager._store_macro_event_if_detected"),
+        patch("scripts.portfolio_manager.format_report", return_value="report"),
+    ):
+        main()
+
+    mock_refresh.assert_called_once_with("5285.T", quick=False)
+
+
 def test_plain_report_mode_does_not_auto_refresh_by_default():
     """Default report mode stays cheap and does not auto-refresh blocking items."""
     args = _make_args(report_only=True, recommend=False)

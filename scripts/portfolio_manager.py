@@ -544,6 +544,11 @@ def _plan_refresh_activity(
 
     candidates: list[str] = []
     candidates.extend(row.run_ticker for row in summary.blocking_now)
+    candidates.extend(
+        row.run_ticker
+        for row in summary.stale_in_queue
+        if row.action in {"SELL", "TRIM"}
+    )
     if show_recommendations:
         candidates.extend(row.run_ticker for row in summary.candidate_blocked)
     if policy == "proactive":
