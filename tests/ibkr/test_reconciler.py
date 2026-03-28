@@ -2418,8 +2418,8 @@ class TestCorrelatedSellDetection:
         ]
         assert len(hard_sells) == 3  # unchanged
 
-    def test_stop_breach_stays_sell_on_correlated_day(self):
-        """STOP_BREACH SELLs are never demoted, regardless of correlated event."""
+    def test_stop_breach_stays_sell_when_fundamentals_weak_on_correlated_day(self):
+        """STOP_BREACH SELLs on fundamentally weak positions stay SELL even when correlated event fires."""
         positions, analyses, portfolio = _make_multi_sell_scenario(
             n_soft_sells=5,  # triggers event
             n_stop_breaches=2,
@@ -2427,6 +2427,11 @@ class TestCorrelatedSellDetection:
             n_holds=3,
         )
         items = reconcile(positions, analyses, portfolio)
+        # Force weak fundamentals on the stop-breach items so they are NOT demoted
+        for item in items:
+            if item.sell_type == "STOP_BREACH" and item.analysis is not None:
+                item.analysis.health_adj = 35.0
+                item.analysis.growth_adj = 40.0
         compute_portfolio_health(
             positions, analyses, portfolio, reconciliation_items=items
         )
@@ -2434,7 +2439,201 @@ class TestCorrelatedSellDetection:
         stop_sells = [
             i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
         ]
-        assert len(stop_sells) == 2  # unchanged
+        assert len(stop_sells) == 2  # weak fundamentals — unchanged
+
+    def test_stop_breach_demoted_when_fundamentals_strong_on_correlated_day(self):
+        """STOP_BREACH SELLs with health ≥ 50 and growth ≥ 50 are demoted to REVIEW during a correlated event."""
+        positions, analyses, portfolio = _make_multi_sell_scenario(
+            n_soft_sells=5,  # triggers event
+            n_stop_breaches=2,
+            n_hard_rejects=0,
+            n_holds=3,
+        )
+        items = reconcile(positions, analyses, portfolio)
+        # Confirm stop-breach items start as SELL
+        stop_before = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
+        ]
+        assert len(stop_before) == 2
+
+        compute_portfolio_health(
+            positions, analyses, portfolio, reconciliation_items=items
+        )
+
+        # health_adj=70 / growth_adj=65 (set by _make_multi_sell_scenario) → demoted
+        stop_reviews = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "REVIEW"
+        ]
+        stop_sells = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
+        ]
+        assert len(stop_reviews) == 2
+        assert len(stop_sells) == 0
+        assert all("MACRO_STOP" in i.reason for i in stop_reviews)
+        # Reason includes scores
+        assert all("health" in i.reason and "growth" in i.reason for i in stop_reviews)
+
+    def test_stop_breach_preserved_when_no_analysis_on_correlated_day(self):
+        """STOP_BREACH SELL with analysis=None stays SELL during correlated event (unknown fundamentals = conservative)."""
+        positions, analyses, portfolio = _make_multi_sell_scenario(
+            n_soft_sells=5,  # triggers event
+            n_stop_breaches=1,
+            n_hard_rejects=0,
+            n_holds=3,
+        )
+        items = reconcile(positions, analyses, portfolio)
+        # Remove analysis from the stop-breach item
+        for item in items:
+            if item.sell_type == "STOP_BREACH":
+                item.analysis = None
+
+        compute_portfolio_health(
+            positions, analyses, portfolio, reconciliation_items=items
+        )
+
+        stop_sells = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
+        ]
+        assert len(stop_sells) == 1  # no analysis → stays SELL
+
+    def test_stop_breach_not_demoted_without_correlated_event(self):
+        """STOP_BREACH SELL is never demoted when no correlated event is present."""
+        positions, analyses, portfolio = _make_multi_sell_scenario(
+            n_soft_sells=2,  # NOT enough to trigger event (need ≥5)
+            n_stop_breaches=1,
+            n_hard_rejects=0,
+            n_holds=10,
+        )
+        items = reconcile(positions, analyses, portfolio)
+        # health_adj=70 / growth_adj=65 — strong fundamentals, but no correlated event
+        compute_portfolio_health(
+            positions, analyses, portfolio, reconciliation_items=items
+        )
+
+        stop_sells = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
+        ]
+        assert len(stop_sells) == 1  # no correlated event → unchanged
+
+    # ── Boundary / threshold tests ───────────────────────────────────────────
+
+    def _make_stop_breach_at_correlated_event(
+        self, health: float | None, growth: float | None
+    ) -> list:
+        """Return items after compute_portfolio_health, with a STOP_BREACH whose
+        analysis has the specified health_adj and growth_adj values."""
+        positions, analyses, portfolio = _make_multi_sell_scenario(
+            n_soft_sells=5,  # enough to trigger correlated event
+            n_stop_breaches=1,
+            n_hard_rejects=0,
+            n_holds=3,
+        )
+        items = reconcile(positions, analyses, portfolio)
+        for item in items:
+            if item.sell_type == "STOP_BREACH" and item.analysis is not None:
+                item.analysis.health_adj = health
+                item.analysis.growth_adj = growth
+        compute_portfolio_health(
+            positions, analyses, portfolio, reconciliation_items=items
+        )
+        return items
+
+    def test_stop_breach_demoted_at_exact_health_boundary(self):
+        """STOP_BREACH with health_adj=50.0 exactly is demoted (>= not >)."""
+        items = self._make_stop_breach_at_correlated_event(health=50.0, growth=65.0)
+        reviews = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "REVIEW"
+        ]
+        assert len(reviews) == 1
+
+    def test_stop_breach_demoted_at_exact_growth_boundary(self):
+        """STOP_BREACH with growth_adj=50.0 exactly is demoted (>= not >)."""
+        items = self._make_stop_breach_at_correlated_event(health=65.0, growth=50.0)
+        reviews = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "REVIEW"
+        ]
+        assert len(reviews) == 1
+
+    def test_stop_breach_stays_sell_health_just_below_threshold(self):
+        """STOP_BREACH with health_adj=49.9 stays SELL (below 50.0 threshold)."""
+        items = self._make_stop_breach_at_correlated_event(health=49.9, growth=65.0)
+        sells = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
+        ]
+        assert len(sells) == 1
+
+    def test_stop_breach_stays_sell_growth_just_below_threshold(self):
+        """STOP_BREACH with growth_adj=49.9 stays SELL (below 50.0 threshold)."""
+        items = self._make_stop_breach_at_correlated_event(health=65.0, growth=49.9)
+        sells = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
+        ]
+        assert len(sells) == 1
+
+    def test_stop_breach_stays_sell_when_health_weak_growth_strong(self):
+        """STOP_BREACH stays SELL when health<50 even if growth≥50 — both must pass."""
+        items = self._make_stop_breach_at_correlated_event(health=35.0, growth=65.0)
+        sells = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
+        ]
+        assert len(sells) == 1
+
+    def test_stop_breach_stays_sell_when_health_strong_growth_weak(self):
+        """STOP_BREACH stays SELL when growth<50 even if health≥50 — both must pass."""
+        items = self._make_stop_breach_at_correlated_event(health=65.0, growth=35.0)
+        sells = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
+        ]
+        assert len(sells) == 1
+
+    def test_stop_breach_stays_sell_when_health_adj_none(self):
+        """STOP_BREACH with health_adj=None stays SELL (None → 0.0 via 'or 0.0' guard)."""
+        items = self._make_stop_breach_at_correlated_event(health=None, growth=65.0)
+        sells = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
+        ]
+        assert len(sells) == 1
+
+    def test_stop_breach_stays_sell_when_growth_adj_none(self):
+        """STOP_BREACH with growth_adj=None stays SELL (None → 0.0 via 'or 0.0' guard)."""
+        items = self._make_stop_breach_at_correlated_event(health=65.0, growth=None)
+        sells = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
+        ]
+        assert len(sells) == 1
+
+    def test_stop_breach_partial_demotion_mixed_fundamentals(self):
+        """5 STOP_BREACH items: 3 strong (demoted) + 2 weak (stays SELL) — partial demotion."""
+        positions, analyses, portfolio = _make_multi_sell_scenario(
+            n_soft_sells=5,  # triggers event
+            n_stop_breaches=5,
+            n_hard_rejects=0,
+            n_holds=3,
+        )
+        items = reconcile(positions, analyses, portfolio)
+        stop_items = [i for i in items if i.sell_type == "STOP_BREACH"]
+        assert len(stop_items) == 5
+        # Give 3 items strong fundamentals, 2 items weak
+        for i, item in enumerate(stop_items):
+            if item.analysis is not None:
+                if i < 3:
+                    item.analysis.health_adj = 70.0
+                    item.analysis.growth_adj = 65.0
+                else:
+                    item.analysis.health_adj = 30.0
+                    item.analysis.growth_adj = 35.0
+        compute_portfolio_health(
+            positions, analyses, portfolio, reconciliation_items=items
+        )
+        demoted = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "REVIEW"
+        ]
+        remaining_sells = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
+        ]
+        assert len(demoted) == 3
+        assert len(remaining_sells) == 2
+        assert all("MACRO_STOP" in i.reason for i in demoted)
 
     def test_no_reconciliation_items_no_crash(self):
         """compute_portfolio_health with reconciliation_items=None doesn't crash."""

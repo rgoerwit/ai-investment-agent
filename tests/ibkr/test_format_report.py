@@ -189,6 +189,128 @@ class TestFormatReportPanicDay:
         assert "8 REVIEW" not in summary_line
 
 
+class TestFormatReportMacroStopReview:
+    """format_report() bucket/rendering logic for STOP_BREACH items demoted during macro events."""
+
+    def _make_demoted_stop_item(self, ticker: str = "STOP01.T") -> ReconciliationItem:
+        """A STOP_BREACH item already demoted to REVIEW (as compute_portfolio_health would do)."""
+        pos = _make_position(current_price=1500)
+        analysis = _make_analysis(ticker=ticker, verdict="BUY", age_days=0)
+        analysis.health_adj = 70.0
+        analysis.growth_adj = 65.0
+        return ReconciliationItem(
+            ticker=ticker,
+            action="REVIEW",
+            urgency="MEDIUM",
+            reason=(
+                "Stop breached: price 1500.00 < stop 1800.00"
+                "  [MACRO_STOP: stop breach during correlated event"
+                " — fundamentals intact (health 70%, growth 65%); review before executing]"
+            ),
+            ibkr_position=pos,
+            analysis=analysis,
+            sell_type="STOP_BREACH",
+        )
+
+    def test_demoted_stop_appears_in_stop_breaches_under_review_section(self):
+        """REVIEW + STOP_BREACH item renders in 'STOP BREACHES UNDER REVIEW', not in 'STOP BREACHED'."""
+        item = self._make_demoted_stop_item()
+        report = format_report(
+            [item], _make_portfolio(), portfolio_health_flags=[_CORR_FLAG]
+        )
+        assert "STOP BREACHES UNDER REVIEW" in report
+
+    def test_demoted_stop_not_in_mechanical_stop_breached_section(self):
+        """Demoted STOP_BREACH (action=REVIEW) must not appear in the mechanical 'STOP BREACHED' section."""
+        item = self._make_demoted_stop_item()
+        report = format_report(
+            [item], _make_portfolio(), portfolio_health_flags=[_CORR_FLAG]
+        )
+        lines = report.split("\n")
+        # Identify which section the ticker appears in
+        stop_breach_idx = next(
+            (i for i, ln in enumerate(lines) if "SELLS — STOP BREACHED" in ln), None
+        )
+        # Mechanical STOP BREACHED section must be absent (no items with action=SELL)
+        assert (
+            stop_breach_idx is None
+        ), "Mechanical STOP BREACHED section should not appear"
+
+    def test_demoted_stop_not_in_regular_reviews_section(self):
+        """REVIEW + STOP_BREACH must not appear in the regular REVIEWS section."""
+        item = self._make_demoted_stop_item()
+        # Add an unrelated REVIEW item so the regular REVIEWS section renders
+        pos = _make_position(ticker="7203.T", current_price=2100)
+        regular_review = ReconciliationItem(
+            ticker="7203.T",
+            action="REVIEW",
+            urgency="MEDIUM",
+            reason="Needs re-analysis",
+            ibkr_position=pos,
+            sell_type=None,
+        )
+        report = format_report(
+            [item, regular_review],
+            _make_portfolio(),
+            portfolio_health_flags=[_CORR_FLAG],
+        )
+        lines = report.split("\n")
+        # Find where regular REVIEWS section starts
+        reviews_idx = next(
+            (
+                i
+                for i, ln in enumerate(lines)
+                if ln.strip().startswith("REVIEWS") and "STOP" not in ln
+            ),
+            None,
+        )
+        if reviews_idx is not None:
+            section_content = "\n".join(lines[reviews_idx:])
+            assert "STOP01" not in section_content
+
+    def test_macro_stop_annotation_stripped_from_display(self):
+        """The [MACRO_STOP: ...] annotation must not appear in the rendered output."""
+        item = self._make_demoted_stop_item()
+        report = format_report(
+            [item], _make_portfolio(), portfolio_health_flags=[_CORR_FLAG]
+        )
+        assert "[MACRO_STOP:" not in report
+
+    def test_stop_breaches_under_review_section_absent_when_no_demoted_stops(self):
+        """'STOP BREACHES UNDER REVIEW' section must not appear when macro_stop_reviews is empty."""
+        pos = _make_position(current_price=2100)
+        # Only a regular SELL + STOP_BREACH (not demoted) — no macro_stop_reviews
+        items = [
+            ReconciliationItem(
+                ticker="WEAK.T",
+                action="SELL",
+                urgency="HIGH",
+                reason="Stop breached: price 1500.00 < stop 1800.00",
+                ibkr_position=pos,
+                sell_type="STOP_BREACH",
+            )
+        ]
+        report = format_report(
+            items, _make_portfolio(), portfolio_health_flags=[_CORR_FLAG]
+        )
+        assert "STOP BREACHES UNDER REVIEW" not in report
+        # But the regular mechanical section should appear
+        assert "SELLS — STOP BREACHED" in report
+
+    def test_summary_counts_demoted_stop_as_review_not_sell(self):
+        """Demoted STOP_BREACH (action=REVIEW) contributes to REVIEW count, not SELL count."""
+        item = self._make_demoted_stop_item()
+        report = format_report(
+            [item], _make_portfolio(), portfolio_health_flags=[_CORR_FLAG]
+        )
+        summary_line = next(
+            (ln for ln in report.split("\n") if ln.strip().startswith("Summary:")), ""
+        )
+        assert summary_line, "Summary line missing"
+        assert "1 REVIEW" in summary_line
+        assert "SELL" not in summary_line
+
+
 class TestFormatReportNormalDay:
     """format_report() on a normal day — no correlated event, standard item rendering."""
 

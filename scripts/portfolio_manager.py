@@ -1329,6 +1329,10 @@ def format_report(
     macro_reviews = [
         i for i in items if i.action == "REVIEW" and i.sell_type == "SOFT_REJECT"
     ]
+    # STOP_BREACH items demoted to REVIEW when fundamentals are intact during correlated event
+    macro_stop_reviews = [
+        i for i in items if i.action == "REVIEW" and i.sell_type == "STOP_BREACH"
+    ]
     trims = [i for i in items if i.action == "TRIM"]
     removes = [i for i in items if i.action == "REMOVE"]
     adds = [i for i in items if i.action == "ADD"]
@@ -1344,9 +1348,11 @@ def format_report(
     ]
     holds_real = [i for i in items if i.action == "HOLD" and not i.is_watchlist]
     holds_watch = [i for i in items if i.action == "HOLD" and i.is_watchlist]
-    # Exclude macro_reviews from regular REVIEW section (they get their own block below)
+    # Exclude macro_reviews and macro_stop_reviews from regular REVIEW section
     reviews = [
-        i for i in items if i.action == "REVIEW" and i.sell_type != "SOFT_REJECT"
+        i
+        for i in items
+        if i.action == "REVIEW" and i.sell_type not in ("SOFT_REJECT", "STOP_BREACH")
     ]
     freshness_summary = freshness_summary or _classify_analysis_freshness(
         items,
@@ -1877,7 +1883,7 @@ def format_report(
             f"║  {f'{_cnt} positions changed verdict on {_dt}':<{_W}}║",
             f"║  {f'({_pct} of held positions) — probable macro event':<{_W}}║",
             f"║  {'Likely macro event, not individual thesis failure.':<{_W}}║",
-            f"║  {'Execute STOP-BREACH SELLs; review others first.':<{_W}}║",
+            f"║  {'Execute stops (weak only); review strong stops first.':<{_W}}║",
             "╚" + "═" * 54 + "╝",
         ]
         try:
@@ -2035,6 +2041,26 @@ def format_report(
         for item in stop_sells:
             ccy = _item_currency(item)
             lines.append(f"{_order_line(item, ccy)}  {_norm_reason(item.reason)}")
+            sl = _score_line(item)
+            if sl:
+                lines.append(sl)
+            _append_pnl_proceeds(item, ccy)
+            note = _order_note(item)
+            if note:
+                lines.append(note)
+            lines.append("")
+
+    # ── STOP BREACHES UNDER REVIEW (macro event — fundamentals intact) ───────
+    if macro_stop_reviews:
+        _section(
+            "STOP BREACHES UNDER REVIEW",
+            "macro event — fundamentals intact — review before executing",
+        )
+        for item in macro_stop_reviews:
+            ccy = _item_currency(item)
+            # Strip internal MACRO_STOP annotation — section header contextualises it
+            _display_reason = _norm_reason(item.reason.split("  [MACRO_STOP:")[0])
+            lines.append(f"{_order_line(item, ccy)}  {_display_reason}")
             sl = _score_line(item)
             if sl:
                 lines.append(sl)

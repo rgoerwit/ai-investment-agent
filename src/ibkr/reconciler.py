@@ -2005,11 +2005,15 @@ def compute_portfolio_health(
                         f" within {correlated_window_days}d of {peak_anchor.isoformat()}"
                         f" ({peak_count / total_held:.0%} of held"
                         f" positions) — probable macro event. Execute stop-breach SELLs"
-                        f" only; review verdict-change SELLs before acting."
+                        f" on fundamentally weak positions only; review others before acting."
                     )
                     # Demote SOFT_REJECT from SELL to REVIEW — these passed all hard
                     # fundamental checks; the SELL verdict came from the soft-tally
                     # (geopolitical/macro points), not from a thesis failure.
+                    #
+                    # Also demote STOP_BREACH when fundamentals are intact (health ≥ 50
+                    # AND growth ≥ 50) — mechanical stop triggered by market panic, not
+                    # thesis failure.  Fundamentally weak positions keep their SELL.
                     for item in reconciliation_items:
                         if item.action == "SELL" and item.sell_type == "SOFT_REJECT":
                             item.action = "REVIEW"
@@ -2018,6 +2022,22 @@ def compute_portfolio_health(
                                 "  [MACRO_WATCH: demoted from SELL — correlated"
                                 " event detected]"
                             )
+                        elif item.action == "SELL" and item.sell_type == "STOP_BREACH":
+                            analysis = item.analysis
+                            if (
+                                analysis is not None
+                                and (analysis.health_adj or 0.0) >= 50.0
+                                and (analysis.growth_adj or 0.0) >= 50.0
+                            ):
+                                item.action = "REVIEW"
+                                item.urgency = "MEDIUM"
+                                item.reason += (
+                                    "  [MACRO_STOP: stop breach during correlated event"
+                                    " — fundamentals intact (health"
+                                    f" {analysis.health_adj:.0f}%, growth"
+                                    f" {analysis.growth_adj:.0f}%); review before executing]"
+                                )
+                            # else: fundamentally weak — stop breach stands as SELL
                     logger.info(
                         "correlated_sell_event_detected",
                         peak_date=peak_anchor.isoformat(),
