@@ -296,6 +296,52 @@ To check if a capture is usable, open its `run_manifest.json` and look for:
 - `"capture_status": "accepted"`
 - `"usable_for_replay": true`
 
+### Stage 2 Prompt Checks
+
+Stage 2 prompt checks are split into two parts:
+
+- **Stage 2a: deterministic checker library**
+  - validates machine-checkable output contracts such as:
+    - parseable `DATA_BLOCK`
+    - parseable `PM_BLOCK` / PM verdict
+    - parseable `VALUE_TRAP_BLOCK` score
+    - valid Legal Counsel JSON fields
+    - parseable `VALUATION_PARAMS`
+    - parseable `TRADE_BLOCK`
+    - complete Junior raw-data wrapper
+  - uses fixtures and unit tests
+  - does **not** require captures or baseline outputs
+
+- **Stage 2b: live prompt contract evals**
+  - runs real prompt workflows on a small curated suite
+  - applies the deterministic checks to the generated outputs
+  - is **opt-in** and consumes tokens, so do not run it on every change
+
+What Stage 2 does **not** do:
+
+- compare current outputs against saved baselines
+- judge reasoning quality or semantic drift
+- replace Stage 3 LLM-as-judge evaluation
+
+Run the deterministic checker tests:
+
+```bash
+poetry run pytest tests/eval/test_prompt_checks.py -q
+```
+
+Run the opt-in live smoke suite:
+
+```bash
+poetry run python -m src.eval.prompt_checks --suite smoke
+poetry run python -m src.eval.prompt_checks --suite smoke --json-output evals/prompt_checks/latest.json
+```
+
+Notes:
+
+- Stage 2b is meant for prompt work, release candidates, or explicit evaluation runs
+- It should not be part of pre-commit or the normal test suite
+- Semantic quality and “did the reasoning get worse?” questions belong to Stage 3
+
 ### Optional: Local Container Mode
 
 Manual repo mode remains the default. If you prefer stronger runtime isolation, you can also run the project locally in a container. For local use, prefer **Podman** over Docker. It has a tighter default security posture and is the better fit for most developers who are wary of giving a daemon broad control of their workstation.

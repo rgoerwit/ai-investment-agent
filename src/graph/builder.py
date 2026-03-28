@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import structlog
 from langgraph.graph import END, StateGraph
@@ -36,6 +36,7 @@ def create_trading_graph(
     image_dir: Path | None = None,
     skip_charts: bool = False,
     baseline_capture: BaselineCaptureManager | None = None,
+    node_observer: Any | None = None,
 ):
     """
     Create the multi-agent trading analysis graph with parallel analyst execution.
@@ -160,9 +161,12 @@ BEAR RESEARCHER:
         }
 
     def maybe_wrap(node_name: str, node):
-        if baseline_capture is None:
-            return node
-        return baseline_capture.wrap_node(node_name, node)
+        wrapped = node
+        if baseline_capture is not None:
+            wrapped = baseline_capture.wrap_node(node_name, wrapped)
+        if node_observer is not None:
+            wrapped = node_observer.wrap_node(node_name, wrapped)
+        return wrapped
 
     workflow.add_node("Dispatcher", maybe_wrap("Dispatcher", dispatcher_node))
     workflow.add_node("Sync Check", maybe_wrap("Sync Check", sync_check_node))

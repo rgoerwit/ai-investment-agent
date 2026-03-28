@@ -15,7 +15,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import structlog
 from rich import box
@@ -1202,6 +1202,7 @@ async def run_analysis(
     skip_charts: bool = False,
     baseline_capture: BaselineCaptureManager | None = None,
     capture_args: argparse.Namespace | None = None,
+    node_observer: Any | None = None,
 ) -> dict | None:
     """Run the multi-agent analysis workflow.
 
@@ -1281,6 +1282,7 @@ async def run_analysis(
             image_dir=image_dir,
             skip_charts=skip_charts,
             baseline_capture=baseline_capture,
+            node_observer=node_observer,
         )
 
         _base_msg = f"Analyze {ticker} ({company_name}) for investment decision. Current Date: {real_date}."

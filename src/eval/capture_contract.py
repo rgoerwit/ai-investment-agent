@@ -73,7 +73,7 @@ NODE_CAPTURE_SPECS: dict[str, NodeCaptureSpec] = {
         prompt_key="junior_fundamentals_analyst",
         expects_llm_calls=True,
         artifact_fields=("raw_fundamentals_data",),
-        evaluator_scope=("artifact_complete",),
+        evaluator_scope=("artifact_complete", "raw_data_wrapper_complete"),
     ),
     "Foreign Language Analyst": NodeCaptureSpec(
         "Foreign Language Analyst",
@@ -91,7 +91,7 @@ NODE_CAPTURE_SPECS: dict[str, NodeCaptureSpec] = {
         prompt_key="legal_counsel",
         expects_llm_calls=True,
         artifact_fields=("legal_report",),
-        evaluator_scope=("artifact_complete",),
+        evaluator_scope=("artifact_complete", "legal_json_valid"),
     ),
     "Value Trap Detector": NodeCaptureSpec(
         "Value Trap Detector",
@@ -176,7 +176,7 @@ NODE_CAPTURE_SPECS: dict[str, NodeCaptureSpec] = {
         prompt_key="valuation_calculator",
         expects_llm_calls=True,
         artifact_fields=("valuation_params",),
-        evaluator_scope=("artifact_complete",),
+        evaluator_scope=("artifact_complete", "valuation_params_present"),
     ),
     "Consultant": NodeCaptureSpec(
         "Consultant",
@@ -185,7 +185,7 @@ NODE_CAPTURE_SPECS: dict[str, NodeCaptureSpec] = {
         prompt_key="consultant",
         expects_llm_calls=True,
         artifact_fields=("consultant_review",),
-        evaluator_scope=("artifact_complete",),
+        evaluator_scope=("artifact_complete", "consultant_verdict_present"),
     ),
     "Trader": NodeCaptureSpec(
         "Trader",
@@ -194,7 +194,7 @@ NODE_CAPTURE_SPECS: dict[str, NodeCaptureSpec] = {
         prompt_key="trader",
         expects_llm_calls=True,
         artifact_fields=("trader_investment_plan",),
-        evaluator_scope=("artifact_complete",),
+        evaluator_scope=("artifact_complete", "trade_block_present"),
     ),
     "Risky Analyst": NodeCaptureSpec(
         "Risky Analyst",

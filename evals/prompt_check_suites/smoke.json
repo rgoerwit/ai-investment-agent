@@ -1,0 +1,18 @@
+{
+  "suite": "smoke",
+  "description": "Small paid sanity suite for Stage 2 prompt checks",
+  "scenarios": [
+    {
+      "ticker": "0005.HK",
+      "quick": true
+    },
+    {
+      "ticker": "7203.T",
+      "quick": true
+    },
+    {
+      "ticker": "2330.TW",
+      "quick": true
+    }
+  ]
+}
