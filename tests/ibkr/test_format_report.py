@@ -9,7 +9,6 @@ from scripts.portfolio_manager import (
     _analysis_command,
     _compute_dip_score,
     _portfolio_manager_command,
-    _RefreshActivity,
     format_json,
     format_report,
 )
@@ -19,6 +18,7 @@ from src.ibkr.models import (
     ReconciliationItem,
     TradeBlockData,
 )
+from src.ibkr.refresh_service import RefreshActivity
 from src.ibkr.ticker import Ticker
 from tests.ibkr.test_reconciler import (
     _make_analysis,
@@ -2026,7 +2026,7 @@ class TestAnalysisFreshnessReporting:
         report = format_report(
             [item],
             _make_portfolio(),
-            refresh_activity=_RefreshActivity(
+            refresh_activity=RefreshActivity(
                 policy="blocking",
                 limit=10,
                 skipped_read_only=["7203.T"],
@@ -2042,7 +2042,7 @@ class TestAnalysisFreshnessReporting:
         report = format_report(
             [],
             _make_portfolio(),
-            refresh_activity=_RefreshActivity(
+            refresh_activity=RefreshActivity(
                 policy="blocking",
                 limit=10,
                 refreshed=["7203.T"],

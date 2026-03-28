@@ -4,7 +4,7 @@ import json
 import logging
 from argparse import Namespace
 from types import ModuleType
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -15,8 +15,9 @@ from scripts.portfolio_manager import (
     _preflight_ibkr_requirements,
     main,
 )
-from src.ibkr.models import PortfolioSummary, ReconciliationItem
-from tests.ibkr.test_reconciler import _make_analysis, _make_position
+from src.ibkr.models import PortfolioSummary
+from src.ibkr.recommendation_service import PortfolioRecommendationBundle
+from src.ibkr.refresh_service import AnalysisFreshnessSummary, RefreshActivity
 
 
 def _make_args(**overrides) -> Namespace:
@@ -164,7 +165,8 @@ def test_load_ibkr_context_emits_phase_status_and_returns_live_state(capsys):
             assert brokerage_session is False
             self.connected = True
 
-        def get_live_orders(self) -> list[dict]:
+        def get_live_orders(self, account_id: str | None = None) -> list[dict]:
+            assert account_id == "U123456"
             return [{"ticker": "7203", "side": "BUY"}]
 
         def close(self) -> None:
@@ -357,224 +359,125 @@ def test_configure_external_loggers_restores_debug_visibility():
     assert logging.getLogger("ibind_fh").propagate is False
 
 
-def _make_review_item(
-    ticker: str,
-    *,
-    age_days: int = 20,
-    reason: str = "Analysis too old",
-    sell_type: str | None = None,
-) -> ReconciliationItem:
-    return ReconciliationItem(
-        ticker=ticker,
-        action="REVIEW",
-        reason=reason,
-        urgency="MEDIUM",
-        ibkr_position=_make_position(ticker=ticker),
-        analysis=_make_analysis(ticker=ticker, age_days=age_days),
-        sell_type=sell_type,
+def _make_bundle(**overrides) -> PortfolioRecommendationBundle:
+    values = {
+        "portfolio": PortfolioSummary(portfolio_value_usd=1000),
+        "watchlist_tickers": {"7203.T"},
+        "watchlist_name": "watchlist-2026",
+        "watchlist_total": 1,
+        "live_orders": [{"ticker": "7203", "side": "BUY"}],
+        "freshness_summary": AnalysisFreshnessSummary(),
+        "refresh_activity": RefreshActivity(policy="off", limit=10),
+    }
+    values.update(overrides)
+    return PortfolioRecommendationBundle(**values)
+
+
+def test_main_recommend_mode_builds_request_with_blocking_refresh(capsys):
+    """CLI recommend mode should delegate to the recommendation service with the resolved policy."""
+    args = _make_args(
+        recommend=True,
+        report_only=False,
+        refresh_limit=1,
+        watchlist_name="watchlist-2026",
+        cash_buffer=0.08,
+        quick=True,
     )
-
-
-def test_recommend_defaults_to_blocking_refresh_and_ignores_reason_text():
-    """Recommend mode auto-refreshes blocking reviews even if the reason string changes."""
-    args = _make_args(recommend=True, report_only=False)
-    stale_item = _make_review_item("7203.T", reason="Analysis too old")
-
-    with (
-        patch("scripts.portfolio_manager.parse_args", return_value=args),
-        patch("scripts.portfolio_manager._configure_logging"),
-        patch("scripts.portfolio_manager._preflight_ibkr_requirements"),
-        patch(
-            "scripts.portfolio_manager._load_analyses_with_progress",
-            side_effect=[{"7203.T": object()}, {"7203.T": object()}],
-        ),
-        patch(
-            "scripts.portfolio_manager._load_ibkr_context",
-            return_value=([], PortfolioSummary(), set(), None, None, []),
-        ),
-        patch(
-            "scripts.portfolio_manager.reconcile",
-            side_effect=[[stale_item], []],
-        ),
-        patch("scripts.portfolio_manager.compute_portfolio_health", return_value=[]),
-        patch(
-            "scripts.portfolio_manager.refresh_stale_analysis",
-            return_value=True,
-        ) as mock_refresh,
-        patch("scripts.portfolio_manager._store_macro_event_if_detected"),
-        patch("scripts.portfolio_manager.format_report", return_value="report"),
-    ):
-        main()
-
-    mock_refresh.assert_called_once_with("7203.T", quick=False)
-
-
-def test_blocking_refresh_excludes_soft_reject_macro_reviews():
-    """Macro soft-reject reviews are stale-in-queue, not blocking refresh candidates."""
-    args = _make_args(recommend=True, report_only=False)
-    soft_reject = _make_review_item(
-        "7203.T",
-        reason="Verdict → DO_NOT_INITIATE  (2026-03-05)",
-        sell_type="SOFT_REJECT",
+    bundle = _make_bundle(
+        refresh_activity=RefreshActivity(policy="blocking", limit=1),
     )
+    mock_build = AsyncMock(return_value=bundle)
 
     with (
         patch("scripts.portfolio_manager.parse_args", return_value=args),
         patch("scripts.portfolio_manager._configure_logging"),
         patch("scripts.portfolio_manager._preflight_ibkr_requirements"),
         patch(
-            "scripts.portfolio_manager._load_analyses_with_progress",
-            return_value={"7203.T": object()},
+            "scripts.portfolio_manager.PortfolioRecommendationService.build_bundle",
+            mock_build,
         ),
-        patch(
-            "scripts.portfolio_manager._load_ibkr_context",
-            return_value=([], PortfolioSummary(), set(), None, None, []),
-        ),
-        patch("scripts.portfolio_manager.reconcile", return_value=[soft_reject]),
-        patch("scripts.portfolio_manager.compute_portfolio_health", return_value=[]),
-        patch("scripts.portfolio_manager.refresh_stale_analysis") as mock_refresh,
         patch("scripts.portfolio_manager._store_macro_event_if_detected"),
         patch("scripts.portfolio_manager.format_report", return_value="report"),
     ):
         main()
 
-    mock_refresh.assert_not_called()
+    captured = capsys.readouterr()
+    request = mock_build.await_args.args[0]
+    assert request.recommend is True
+    assert request.read_only is False
+    assert request.refresh_policy == "blocking"
+    assert request.refresh_limit == 1
+    assert request.watchlist_name == "watchlist-2026"
+    assert request.cash_buffer == 0.08
+    assert request.quick_mode is True
+    assert callable(mock_build.await_args.kwargs["progress"])
+    assert captured.out.strip() == "report"
 
 
-def test_blocking_refresh_includes_stale_sell_items():
-    """Stale SELL/TRIM items in the queue are refreshed under blocking policy."""
-    args = _make_args(recommend=True, report_only=False)
-    stale_sell = ReconciliationItem(
-        ticker="5285.T",
-        action="SELL",
-        reason="Stop breach",
-        urgency="HIGH",
-        ibkr_position=_make_position(ticker="5285.T"),
-        analysis=_make_analysis(ticker="5285.T", age_days=21),
-        sell_type="STOP_BREACH",
+def test_main_report_mode_uses_service_bundle_in_formatter():
+    """CLI report mode should render the structured bundle returned by the service."""
+    args = _make_args(recommend=False, report_only=True)
+    bundle = _make_bundle(
+        watchlist_tickers={"7203.T", "6758.T"},
+        watchlist_total=2,
+        refresh_activity=RefreshActivity(
+            policy="off",
+            limit=10,
+            skipped_due_to_limit=["6758.T"],
+        ),
     )
+    mock_build = AsyncMock(return_value=bundle)
 
     with (
         patch("scripts.portfolio_manager.parse_args", return_value=args),
         patch("scripts.portfolio_manager._configure_logging"),
         patch("scripts.portfolio_manager._preflight_ibkr_requirements"),
         patch(
-            "scripts.portfolio_manager._load_analyses_with_progress",
-            side_effect=[{"5285.T": object()}, {"5285.T": object()}],
+            "scripts.portfolio_manager.PortfolioRecommendationService.build_bundle",
+            mock_build,
         ),
-        patch(
-            "scripts.portfolio_manager._load_ibkr_context",
-            return_value=([], PortfolioSummary(), set(), None, None, []),
-        ),
-        patch(
-            "scripts.portfolio_manager.reconcile",
-            side_effect=[[stale_sell], []],
-        ),
-        patch("scripts.portfolio_manager.compute_portfolio_health", return_value=[]),
-        patch(
-            "scripts.portfolio_manager.refresh_stale_analysis",
-            return_value=True,
-        ) as mock_refresh,
-        patch("scripts.portfolio_manager._store_macro_event_if_detected"),
-        patch("scripts.portfolio_manager.format_report", return_value="report"),
-    ):
-        main()
-
-    mock_refresh.assert_called_once_with("5285.T", quick=False)
-
-
-def test_plain_report_mode_does_not_auto_refresh_by_default():
-    """Default report mode stays cheap and does not auto-refresh blocking items."""
-    args = _make_args(report_only=True, recommend=False)
-    stale_item = _make_review_item("7203.T")
-
-    with (
-        patch("scripts.portfolio_manager.parse_args", return_value=args),
-        patch("scripts.portfolio_manager._configure_logging"),
-        patch("scripts.portfolio_manager._preflight_ibkr_requirements"),
-        patch(
-            "scripts.portfolio_manager._load_analyses_with_progress",
-            return_value={"7203.T": object()},
-        ),
-        patch(
-            "scripts.portfolio_manager._load_ibkr_context",
-            return_value=([], PortfolioSummary(), set(), None, None, []),
-        ),
-        patch("scripts.portfolio_manager.reconcile", return_value=[stale_item]),
-        patch("scripts.portfolio_manager.compute_portfolio_health", return_value=[]),
-        patch("scripts.portfolio_manager.refresh_stale_analysis") as mock_refresh,
-        patch("scripts.portfolio_manager._store_macro_event_if_detected"),
-        patch("scripts.portfolio_manager.format_report", return_value="report"),
-    ):
-        main()
-
-    mock_refresh.assert_not_called()
-
-
-def test_read_only_mode_reports_skipped_refresh_without_executing():
-    """Read-only mode should surface the refresh plan but never run it."""
-    args = _make_args(read_only=True, refresh_stale=True)
-    stale_item = _make_review_item("7203.T")
-
-    with (
-        patch("scripts.portfolio_manager.parse_args", return_value=args),
-        patch("scripts.portfolio_manager._configure_logging"),
-        patch(
-            "scripts.portfolio_manager._load_analyses_with_progress",
-            return_value={"7203.T": object()},
-        ),
-        patch("scripts.portfolio_manager.reconcile", return_value=[stale_item]),
-        patch("scripts.portfolio_manager.compute_portfolio_health", return_value=[]),
-        patch("scripts.portfolio_manager.refresh_stale_analysis") as mock_refresh,
         patch("scripts.portfolio_manager._store_macro_event_if_detected"),
         patch(
-            "scripts.portfolio_manager.format_report", return_value="report"
+            "scripts.portfolio_manager.format_report",
+            return_value="report",
         ) as mock_report,
     ):
         main()
 
-    mock_refresh.assert_not_called()
-    refresh_activity = mock_report.call_args.kwargs["refresh_activity"]
-    assert refresh_activity.skipped_read_only == ["7203.T"]
+    mock_report.assert_called_once()
+    assert mock_report.call_args.args[0] == bundle.items
+    assert mock_report.call_args.args[1] == bundle.portfolio
+    assert mock_report.call_args.kwargs["watchlist_name"] == "watchlist-2026"
+    assert mock_report.call_args.kwargs["watchlist_total"] == 2
+    assert mock_report.call_args.kwargs["watchlist_tickers"] == {"7203.T", "6758.T"}
+    assert mock_report.call_args.kwargs["refresh_activity"].skipped_due_to_limit == [
+        "6758.T"
+    ]
 
 
-def test_refresh_limit_defers_extra_candidates_deterministically():
-    """Auto-refresh honors the configured limit and defers the remainder in order."""
-    args = _make_args(recommend=True, report_only=False, refresh_limit=1)
-    first = _make_review_item("7203.T")
-    second = _make_review_item("6758.T")
+def test_main_json_mode_uses_service_bundle_in_json_formatter(capsys):
+    """JSON mode should serialize the bundle via format_json instead of format_report."""
+    args = _make_args(json=True)
+    bundle = _make_bundle()
+    mock_build = AsyncMock(return_value=bundle)
 
     with (
         patch("scripts.portfolio_manager.parse_args", return_value=args),
         patch("scripts.portfolio_manager._configure_logging"),
         patch("scripts.portfolio_manager._preflight_ibkr_requirements"),
         patch(
-            "scripts.portfolio_manager._load_analyses_with_progress",
-            side_effect=[
-                {"7203.T": object(), "6758.T": object()},
-                {"7203.T": object()},
-            ],
+            "scripts.portfolio_manager.PortfolioRecommendationService.build_bundle",
+            mock_build,
         ),
-        patch(
-            "scripts.portfolio_manager._load_ibkr_context",
-            return_value=([], PortfolioSummary(), set(), None, None, []),
-        ),
-        patch(
-            "scripts.portfolio_manager.reconcile",
-            side_effect=[[first, second], [second]],
-        ),
-        patch("scripts.portfolio_manager.compute_portfolio_health", return_value=[]),
-        patch(
-            "scripts.portfolio_manager.refresh_stale_analysis",
-            return_value=True,
-        ) as mock_refresh,
         patch("scripts.portfolio_manager._store_macro_event_if_detected"),
         patch(
-            "scripts.portfolio_manager.format_report", return_value="report"
-        ) as mock_report,
+            "scripts.portfolio_manager.format_json", return_value='{"ok": true}'
+        ) as mock_json,
+        patch("scripts.portfolio_manager.format_report") as mock_report,
     ):
         main()
 
-    mock_refresh.assert_called_once_with("7203.T", quick=False)
-    refresh_activity = mock_report.call_args.kwargs["refresh_activity"]
-    assert refresh_activity.skipped_due_to_limit == ["6758.T"]
+    captured = capsys.readouterr()
+    mock_json.assert_called_once()
+    mock_report.assert_not_called()
+    assert captured.out.strip() == '{"ok": true}'
