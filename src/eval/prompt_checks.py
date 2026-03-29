@@ -11,13 +11,20 @@ from typing import Any
 from src.agents.output_validation import validate_required_output
 from src.charts.extractors.pm_block import extract_pm_block, extract_verdict_from_text
 from src.charts.extractors.valuation import _extract_params
-from src.config import validate_environment_variables
+from src.config import config, validate_environment_variables
 from src.data_block_utils import (
     has_parseable_data_block,
     normalize_legacy_data_block_report,
     normalize_structured_block_boundaries,
 )
 from src.eval.capture_contract import NodeCaptureSpec, get_node_capture_spec
+from src.eval.scenario_catalog import (
+    DEFAULT_SUITE_NAME,
+    PromptCheckScenario,
+    PromptCheckSuite,
+    load_prompt_check_suite,
+    load_prompt_check_suite_from_path,
+)
 from src.ibkr.order_builder import parse_trade_block
 from src.main import run_analysis
 from src.validators.red_flag_detector import RedFlagDetector
@@ -61,13 +68,6 @@ class RunCheckReport:
 
 
 @dataclass(frozen=True)
-class PromptCheckScenario:
-    ticker: str
-    quick: bool = True
-    strict: bool = False
-
-
-@dataclass(frozen=True)
 class PromptCheckScenarioReport:
     ticker: str
     quick: bool
@@ -83,6 +83,18 @@ class PromptCheckSuiteReport:
     description: str
     passed: bool
     scenario_reports: tuple[PromptCheckScenarioReport, ...]
+
+
+@dataclass(frozen=True)
+class PromptCheckScenarioExecution:
+    report: PromptCheckScenarioReport
+    outputs: Mapping[str, PromptCheckNodeOutput]
+
+
+@dataclass(frozen=True)
+class PromptCheckSuiteExecution:
+    suite_report: PromptCheckSuiteReport
+    scenario_executions: tuple[PromptCheckScenarioExecution, ...]
 
 
 def _applicable_scopes(spec: NodeCaptureSpec) -> tuple[str, ...]:
@@ -304,30 +316,13 @@ def run_prompt_checks_on_outputs(
 def _load_suite_manifest(
     path: Path,
 ) -> tuple[str, str, tuple[PromptCheckScenario, ...]]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    suite = str(payload.get("suite") or path.stem)
-    description = str(payload.get("description") or "")
-    raw_scenarios = payload.get("scenarios")
-    if not isinstance(raw_scenarios, list) or not raw_scenarios:
-        raise ValueError(f"Suite manifest has no scenarios: {path}")
-
-    scenarios = []
-    for raw in raw_scenarios:
-        if not isinstance(raw, Mapping) or not raw.get("ticker"):
-            raise ValueError(f"Invalid scenario entry in {path}: {raw!r}")
-        scenarios.append(
-            PromptCheckScenario(
-                ticker=str(raw["ticker"]),
-                quick=bool(raw.get("quick", True)),
-                strict=bool(raw.get("strict", False)),
-            )
-        )
-    return suite, description, tuple(scenarios)
+    suite = load_prompt_check_suite_from_path(path)
+    return suite.name, suite.description, suite.scenarios
 
 
 async def _run_prompt_check_scenario(
     scenario: PromptCheckScenario,
-) -> PromptCheckScenarioReport:
+) -> PromptCheckScenarioExecution:
     collector = PromptCheckCollector()
     result = await run_analysis(
         scenario.ticker,
@@ -337,49 +332,53 @@ async def _run_prompt_check_scenario(
         node_observer=collector,
     )
     if not isinstance(result, dict):
-        return PromptCheckScenarioReport(
+        report = PromptCheckScenarioReport(
             ticker=scenario.ticker,
             quick=scenario.quick,
             strict=scenario.strict,
             passed=False,
             error="analysis returned no result",
         )
+        return PromptCheckScenarioExecution(report=report, outputs={})
 
-    run_report = run_prompt_checks_on_outputs(collector.collected_outputs())
-    return PromptCheckScenarioReport(
+    outputs = collector.collected_outputs()
+    run_report = run_prompt_checks_on_outputs(outputs)
+    report = PromptCheckScenarioReport(
         ticker=scenario.ticker,
         quick=scenario.quick,
         strict=scenario.strict,
         passed=run_report.passed,
         run_report=run_report,
     )
+    return PromptCheckScenarioExecution(report=report, outputs=outputs)
+
+
+async def run_prompt_check_suite(
+    suite: PromptCheckSuite,
+) -> PromptCheckSuiteExecution:
+    validate_environment_variables()
+    scenario_executions = [
+        await _run_prompt_check_scenario(scenario) for scenario in suite.scenarios
+    ]
+    suite_report = PromptCheckSuiteReport(
+        suite=suite.name,
+        description=suite.description,
+        passed=all(execution.report.passed for execution in scenario_executions),
+        scenario_reports=tuple(execution.report for execution in scenario_executions),
+    )
+    return PromptCheckSuiteExecution(
+        suite_report=suite_report,
+        scenario_executions=tuple(scenario_executions),
+    )
 
 
 async def run_prompt_check_suite_from_manifest(
     manifest_path: Path,
 ) -> PromptCheckSuiteReport:
-    validate_environment_variables()
-    suite, description, scenarios = _load_suite_manifest(manifest_path)
-    scenario_reports = [
-        await _run_prompt_check_scenario(scenario) for scenario in scenarios
-    ]
-    return PromptCheckSuiteReport(
-        suite=suite,
-        description=description,
-        passed=all(report.passed for report in scenario_reports),
-        scenario_reports=tuple(scenario_reports),
+    execution = await run_prompt_check_suite(
+        load_prompt_check_suite_from_path(manifest_path)
     )
-
-
-def _default_suite_dir() -> Path:
-    return Path("evals") / "prompt_check_suites"
-
-
-def _resolve_suite_manifest(suite_name: str) -> Path:
-    candidate = _default_suite_dir() / f"{suite_name}.json"
-    if not candidate.exists():
-        raise FileNotFoundError(f"Prompt-check suite not found: {candidate}")
-    return candidate
+    return execution.suite_report
 
 
 def _print_suite_report(report: PromptCheckSuiteReport) -> None:
@@ -411,9 +410,17 @@ def _print_suite_report(report: PromptCheckSuiteReport) -> None:
                     )
 
 
-def _write_json_report(path: Path, report: PromptCheckSuiteReport) -> None:
+def _write_json_report(
+    path: Path,
+    *,
+    stage2_report: PromptCheckSuiteReport,
+    stage3_report: Any | None = None,
+) -> None:
+    payload: dict[str, Any] = {"stage2": asdict(stage2_report)}
+    if stage3_report is not None:
+        payload["stage3"] = asdict(stage3_report)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(asdict(report), indent=2), encoding="utf-8")
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -421,7 +428,38 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="Run opt-in deterministic prompt checks on live prompt outputs."
     )
     parser.add_argument(
-        "--suite", required=True, help="Suite name under evals/prompt_check_suites/"
+        "--suite",
+        required=False,
+        default=None,
+        help=f"Suite name under evals/prompt_check_suites/ (default: {DEFAULT_SUITE_NAME}).",
+    )
+    parser.add_argument(
+        "--stage3",
+        action="store_true",
+        help=(
+            "Also compare current outputs against accepted baselines. "
+            "Adds up to 6 judge-model calls per ticker in the default setup."
+        ),
+    )
+    parser.add_argument(
+        "--allow-missing-baseline",
+        action="store_true",
+        help="Mark missing baselines as skipped instead of failing.",
+    )
+    parser.add_argument(
+        "--judge-model",
+        default=None,
+        help=(
+            "Optional model override for the Stage 3 semantic judge. "
+            f"Defaults to QUICK_MODEL (currently: {config.quick_think_llm}). "
+            "Use an OpenAI model name explicitly if you want the consultant-backed judge path."
+        ),
+    )
+    parser.add_argument(
+        "--baseline-warn-age-days",
+        type=int,
+        default=30,
+        help="Warn when an accepted baseline is older than this many days.",
     )
     parser.add_argument(
         "--json-output",
@@ -434,12 +472,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 async def _main_async() -> int:
     args = build_arg_parser().parse_args()
-    report = await run_prompt_check_suite_from_manifest(
-        _resolve_suite_manifest(args.suite)
-    )
+    suite = load_prompt_check_suite(args.suite)
+    execution = await run_prompt_check_suite(suite)
+    report = execution.suite_report
     _print_suite_report(report)
+    stage3_report = None
+    if args.stage3:
+        from src.eval.semantic_judge import (
+            print_stage3_suite_report,
+            run_stage3_suite,
+        )
+
+        stage3_report = await run_stage3_suite(
+            execution,
+            allow_missing_baseline=args.allow_missing_baseline,
+            judge_model=args.judge_model,
+            baseline_warn_age_days=args.baseline_warn_age_days,
+        )
+        print_stage3_suite_report(stage3_report)
     if args.json_output is not None:
-        _write_json_report(args.json_output, report)
+        _write_json_report(
+            args.json_output,
+            stage2_report=report,
+            stage3_report=stage3_report,
+        )
+    if stage3_report is not None:
+        return 0 if report.passed and stage3_report.passed else 1
     return 0 if report.passed else 1
 
 

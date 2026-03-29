@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 pc = importlib.import_module("src.eval.prompt_checks")
+sc = importlib.import_module("src.eval.scenario_catalog")
 
 
 VALID_DATA_BLOCK = """### --- START DATA_BLOCK ---
@@ -277,23 +278,31 @@ async def test_run_prompt_check_suite_from_manifest_uses_scenarios(
         encoding="utf-8",
     )
 
-    async def fake_run_scenario(
-        scenario: pc.PromptCheckScenario,
-    ) -> pc.PromptCheckScenarioReport:
-        return pc.PromptCheckScenarioReport(
-            ticker=scenario.ticker,
-            quick=scenario.quick,
-            strict=scenario.strict,
+    async def fake_run_suite(
+        suite: sc.PromptCheckSuite,
+    ) -> pc.PromptCheckSuiteExecution:
+        report = pc.PromptCheckScenarioReport(
+            ticker=suite.scenarios[0].ticker,
+            quick=suite.scenarios[0].quick,
+            strict=suite.scenarios[0].strict,
             passed=True,
             run_report=pc.RunCheckReport(passed=True, node_reports=()),
+        )
+        execution = pc.PromptCheckScenarioExecution(report=report, outputs={})
+        return pc.PromptCheckSuiteExecution(
+            suite_report=pc.PromptCheckSuiteReport(
+                suite=suite.name,
+                description=suite.description,
+                passed=True,
+                scenario_reports=(report,),
+            ),
+            scenario_executions=(execution,),
         )
 
     monkeypatch.setattr(
         "src.eval.prompt_checks.validate_environment_variables", lambda: None
     )
-    monkeypatch.setattr(
-        "src.eval.prompt_checks._run_prompt_check_scenario", fake_run_scenario
-    )
+    monkeypatch.setattr("src.eval.prompt_checks.run_prompt_check_suite", fake_run_suite)
 
     report = await pc.run_prompt_check_suite_from_manifest(manifest_path)
     assert report.suite == "smoke"
@@ -311,3 +320,55 @@ def test_load_suite_manifest_rejects_empty_scenarios(tmp_path: Path):
 
     with pytest.raises(ValueError, match="has no scenarios"):
         pc._load_suite_manifest(manifest_path)
+
+
+def test_build_arg_parser_defaults_to_smoke_suite():
+    args = pc.build_arg_parser().parse_args([])
+    assert args.suite is None
+    assert args.stage3 is False
+    assert args.allow_missing_baseline is False
+    assert args.baseline_warn_age_days == 30
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_check_suite_returns_execution_objects(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    suite = sc.PromptCheckSuite(
+        name="smoke",
+        description="test suite",
+        scenarios=(sc.PromptCheckScenario(ticker="AAPL", quick=True),),
+    )
+
+    async def fake_run_scenario(
+        scenario: sc.PromptCheckScenario,
+    ) -> pc.PromptCheckScenarioExecution:
+        report = pc.PromptCheckScenarioReport(
+            ticker=scenario.ticker,
+            quick=scenario.quick,
+            strict=scenario.strict,
+            passed=True,
+            run_report=pc.RunCheckReport(passed=True, node_reports=()),
+        )
+        outputs = {
+            "portfolio_manager": pc.PromptCheckNodeOutput(
+                prompt_key="portfolio_manager",
+                node_name="Portfolio Manager",
+                artifact_field="final_trade_decision",
+                artifact_text=VALID_PM_BLOCK,
+                ran=True,
+            )
+        }
+        return pc.PromptCheckScenarioExecution(report=report, outputs=outputs)
+
+    monkeypatch.setattr(
+        "src.eval.prompt_checks.validate_environment_variables", lambda: None
+    )
+    monkeypatch.setattr(
+        "src.eval.prompt_checks._run_prompt_check_scenario", fake_run_scenario
+    )
+
+    execution = await pc.run_prompt_check_suite(suite)
+    assert execution.suite_report.passed is True
+    assert execution.scenario_executions[0].report.ticker == "AAPL"
+    assert "portfolio_manager" in execution.scenario_executions[0].outputs

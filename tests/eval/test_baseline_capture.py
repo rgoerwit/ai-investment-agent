@@ -240,6 +240,29 @@ def test_baseline_eligible_specs_define_evaluator_scope():
     )
 
 
+def test_stage3_rubric_family_annotations_are_valid():
+    allowed = {
+        None,
+        "analysis_report",
+        "legal_structured",
+        "risk_structured",
+        "valuation_structured",
+        "trade_decision",
+        "portfolio_decision",
+    }
+    for spec in NODE_CAPTURE_SPECS.values():
+        assert spec.rubric_family in allowed
+        if spec.rubric_family is None:
+            continue
+        assert spec.baseline_eligible is True
+        assert spec.capture_role == "agent"
+
+    assert (
+        get_node_capture_spec("Portfolio Manager").rubric_family == "portfolio_decision"
+    )
+    assert get_node_capture_spec("PM Fast-Fail").rubric_family == "portfolio_decision"
+
+
 def test_prompt_set_digest_changes_when_prompt_digest_changes():
     digest_one = compute_prompt_set_digest(
         {
@@ -305,6 +328,8 @@ async def test_baseline_capture_accepts_clean_run_and_validator_passes(
     output = _read_json(agent_dir / "output.json")
 
     assert metadata["prompt"]["digest"].startswith("sha256:")
+    assert metadata["prompt"]["prompt_key"] == "research_manager"
+    assert metadata["artifact_fields"] == ["investment_plan"]
     assert metadata["usable_for_replay"] is True
     assert metadata["evaluator_scope"] == ["artifact_complete"]
     assert metadata["llm_call_sequence_ids"] == [1]

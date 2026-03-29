@@ -29,6 +29,7 @@ from src.eval import (
     CURRENT_CAPTURE_SCHEMA_VERSION,
     BaselineCaptureConfig,
     BaselineCaptureManager,
+    BaselinePreflightResult,
     reset_active_capture_manager,
     set_active_capture_manager,
 )
@@ -2000,27 +2001,38 @@ def _report_analysis_failure(args: argparse.Namespace) -> None:
         )
 
 
-async def main() -> int:
-    """Main entry point for the application."""
-    args = None
+async def run_with_args(
+    args: argparse.Namespace,
+    *,
+    perform_capture_preflight: bool = True,
+    capture_preflight_override: BaselinePreflightResult | None = None,
+) -> int:
+    """Run the analysis CLI flow for already-parsed arguments."""
     try:
-        args = parse_arguments()
         _apply_runtime_overrides(args)
         _validate_cli_args(args)
         output_targets = _resolve_output_targets(args)
         provider_preflight = _setup_runtime(args, output_targets)
         baseline_capture = _create_baseline_capture_manager(args)
 
-        preflight_ok, preflight_messages = _run_baseline_capture_preflight(
-            args, baseline_capture
-        )
-        if preflight_messages:
-            _print_capture_preflight_messages(
-                preflight_messages,
-                blocked=not preflight_ok,
-                quiet=args.quiet,
-                brief=args.brief,
+        if baseline_capture is not None and capture_preflight_override is not None:
+            baseline_capture.apply_preflight_result(
+                git_clean=capture_preflight_override.git_clean,
+                cleanup_summary=capture_preflight_override.cleanup_summary,
             )
+
+        preflight_ok = True
+        if perform_capture_preflight:
+            preflight_ok, preflight_messages = _run_baseline_capture_preflight(
+                args, baseline_capture
+            )
+            if preflight_messages:
+                _print_capture_preflight_messages(
+                    preflight_messages,
+                    blocked=not preflight_ok,
+                    quiet=args.quiet,
+                    brief=args.brief,
+                )
 
         if getattr(args, "capture_baseline_cleanup", False) and not getattr(
             args, "capture_baseline", False
@@ -2091,6 +2103,11 @@ async def main() -> int:
             await cleanup_async_resources()
         except Exception:
             pass
+
+
+async def main() -> int:
+    """Main entry point for the application."""
+    return await run_with_args(parse_arguments())
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ class NodeCaptureSpec:
     # Future evaluators should only judge requirements declared here. If a field
     # is absent from evaluator_scope, it is not applicable for that node.
     evaluator_scope: tuple[str, ...] = ()
+    rubric_family: str | None = None
 
 
 _DEFAULT_SPEC = NodeCaptureSpec(
@@ -92,6 +93,7 @@ NODE_CAPTURE_SPECS: dict[str, NodeCaptureSpec] = {
         expects_llm_calls=True,
         artifact_fields=("legal_report",),
         evaluator_scope=("artifact_complete", "legal_json_valid"),
+        rubric_family="legal_structured",
     ),
     "Value Trap Detector": NodeCaptureSpec(
         "Value Trap Detector",
@@ -105,6 +107,7 @@ NODE_CAPTURE_SPECS: dict[str, NodeCaptureSpec] = {
             "value_trap_block_present",
             "value_trap_score_parseable",
         ),
+        rubric_family="risk_structured",
     ),
     "Auditor": NodeCaptureSpec(
         "Auditor",
@@ -123,6 +126,7 @@ NODE_CAPTURE_SPECS: dict[str, NodeCaptureSpec] = {
         expects_llm_calls=True,
         artifact_fields=("fundamentals_report",),
         evaluator_scope=("artifact_complete", "data_block_present"),
+        rubric_family="analysis_report",
     ),
     "Bull Researcher R1": NodeCaptureSpec(
         "Bull Researcher R1",
@@ -177,6 +181,7 @@ NODE_CAPTURE_SPECS: dict[str, NodeCaptureSpec] = {
         expects_llm_calls=True,
         artifact_fields=("valuation_params",),
         evaluator_scope=("artifact_complete", "valuation_params_present"),
+        rubric_family="valuation_structured",
     ),
     "Consultant": NodeCaptureSpec(
         "Consultant",
@@ -195,6 +200,7 @@ NODE_CAPTURE_SPECS: dict[str, NodeCaptureSpec] = {
         expects_llm_calls=True,
         artifact_fields=("trader_investment_plan",),
         evaluator_scope=("artifact_complete", "trade_block_present"),
+        rubric_family="trade_decision",
     ),
     "Risky Analyst": NodeCaptureSpec(
         "Risky Analyst",
@@ -235,6 +241,7 @@ NODE_CAPTURE_SPECS: dict[str, NodeCaptureSpec] = {
             "pm_block_present",
             "pm_verdict_present",
         ),
+        rubric_family="portfolio_decision",
     ),
     "PM Fast-Fail": NodeCaptureSpec(
         "PM Fast-Fail",
@@ -248,6 +255,7 @@ NODE_CAPTURE_SPECS: dict[str, NodeCaptureSpec] = {
             "pm_block_present",
             "pm_verdict_present",
         ),
+        rubric_family="portfolio_decision",
     ),
 }
 
@@ -263,9 +271,26 @@ def get_node_capture_spec(node_name: str) -> NodeCaptureSpec:
             expects_llm_calls=_DEFAULT_SPEC.expects_llm_calls,
             artifact_fields=_DEFAULT_SPEC.artifact_fields,
             evaluator_scope=_DEFAULT_SPEC.evaluator_scope,
+            rubric_family=_DEFAULT_SPEC.rubric_family,
         ),
     )
 
 
 def iter_baseline_eligible_specs() -> list[NodeCaptureSpec]:
     return [spec for spec in NODE_CAPTURE_SPECS.values() if spec.baseline_eligible]
+
+
+def iter_stage3_judge_specs() -> list[NodeCaptureSpec]:
+    specs: list[NodeCaptureSpec] = []
+    seen_prompt_keys: set[str] = set()
+    for spec in NODE_CAPTURE_SPECS.values():
+        prompt_key = spec.prompt_key
+        if not prompt_key:
+            continue
+        if not spec.baseline_eligible or spec.capture_role != "agent":
+            continue
+        if spec.rubric_family is None or prompt_key in seen_prompt_keys:
+            continue
+        seen_prompt_keys.add(prompt_key)
+        specs.append(spec)
+    return specs

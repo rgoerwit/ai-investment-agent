@@ -107,6 +107,12 @@ class CaptureCleanupSummary:
     rejected_paths: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class BaselinePreflightResult:
+    git_clean: bool
+    cleanup_summary: CaptureCleanupSummary | None = None
+
+
 class BaselineCaptureToolHook:
     def __init__(self, manager: BaselineCaptureManager) -> None:
         self.manager = manager
@@ -179,6 +185,16 @@ class BaselineCaptureManager:
     @property
     def cleanup_summary(self) -> CaptureCleanupSummary | None:
         return self._cleanup_summary
+
+    def apply_preflight_result(
+        self,
+        *,
+        git_clean: bool,
+        cleanup_summary: CaptureCleanupSummary | None = None,
+    ) -> None:
+        """Apply a pre-computed preflight result, typically from a batch runner."""
+        self._preflight_git_clean = git_clean
+        self._cleanup_summary = cleanup_summary
 
     def _schema_root(self) -> Path:
         return self.config.output_root / self.config.schema_version
