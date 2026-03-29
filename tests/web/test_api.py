@@ -121,6 +121,18 @@ def test_get_portfolio_returns_payload(tmp_path: Path, sample_bundle):
     assert snapshot_service.force_calls[-1] is True
 
 
+def test_index_busts_static_asset_cache(client):
+    response = client.get("/")
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert "dashboard.css?v=" in body
+    assert "dashboard.js?v=" in body
+    assert "Reload Data" in body
+    assert "Analysis Refresh" in body
+    assert "Reload Snapshot" not in body
+
+
 def test_get_portfolio_returns_loading_response(tmp_path: Path):
     client, _snapshot_service = _make_client(
         tmp_path,

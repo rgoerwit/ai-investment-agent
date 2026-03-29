@@ -243,7 +243,7 @@ def create_refresh_job():
                 {
                     "error": "no_refresh_candidates",
                     "message": (
-                        "No eligible tickers matched that refresh scope in the current snapshot."
+                        "No eligible tickers matched that refresh scope in the current data."
                     ),
                 }
             ),
@@ -294,9 +294,9 @@ def save_settings():
             "saved": True,
             "snapshot_reload_required": snapshot_reload_required,
             "note": (
-                "Settings saved. Snapshot-affecting changes apply to the next load."
+                "Settings saved. Data-affecting changes apply to the next reload."
                 if snapshot_reload_required
-                else "Settings saved. Current snapshot still matches these settings."
+                else "Settings saved. The current data already matches these settings."
             ),
         }
     )
@@ -314,7 +314,7 @@ def _resolve_refresh_tickers(scope: str, payload: dict[str, Any]) -> tuple[str, 
     bundle = _snapshot_service().get_cached_snapshot()
     if bundle is None:
         raise RuntimeError(
-            "Load the portfolio snapshot first before creating a scope-based refresh job."
+            "Load the portfolio data first before creating a scope-based refresh job."
         )
 
     freshness = bundle.freshness_summary

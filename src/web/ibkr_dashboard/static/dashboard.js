@@ -12,6 +12,10 @@ const state = {
   settings: null,
   jobsPollHandle: null,
   snapshotPollHandle: null,
+  concentrationSorts: {
+    sector: { key: "weight", direction: "desc" },
+    exchange: { key: "weight", direction: "desc" },
+  },
 };
 
 const elements = {
@@ -211,6 +215,111 @@ function renderInlineMetrics(title, rows) {
   `;
 }
 
+function getConcentrationEntries(weights) {
+  return Object.entries(weights || {}).map(([label, weight]) => ({
+    label,
+    weight: Number(weight) || 0,
+  }));
+}
+
+function getDefaultConcentrationDirection(key) {
+  return key === "label" ? "asc" : "desc";
+}
+
+function getSortedConcentrationEntries(section, weights) {
+  const sort = state.concentrationSorts[section] || {
+    key: "weight",
+    direction: "desc",
+  };
+  const multiplier = sort.direction === "asc" ? 1 : -1;
+  return getConcentrationEntries(weights).sort((left, right) => {
+    if (sort.key === "label") {
+      const comparison = left.label.localeCompare(right.label, undefined, {
+        sensitivity: "base",
+      });
+      if (comparison !== 0) {
+        return comparison * multiplier;
+      }
+      return right.weight - left.weight;
+    }
+
+    const delta = left.weight - right.weight;
+    if (delta !== 0) {
+      return delta * multiplier;
+    }
+    return left.label.localeCompare(right.label, undefined, {
+      sensitivity: "base",
+    });
+  });
+}
+
+function getSortArrow(section, key) {
+  const sort = state.concentrationSorts[section];
+  if (!sort || sort.key !== key) {
+    return "↕";
+  }
+  return sort.direction === "asc" ? "↑" : "↓";
+}
+
+function renderConcentrationHeader(section, key, label) {
+  const sort = state.concentrationSorts[section];
+  const isActive = sort?.key === key;
+  const ariaSort = isActive
+    ? sort.direction === "asc"
+      ? "ascending"
+      : "descending"
+    : "none";
+  const classes = ["sort-button"];
+  if (isActive) {
+    classes.push("active");
+  }
+  return `
+    <th aria-sort="${ariaSort}">
+      <button
+        type="button"
+        class="${classes.join(" ")}"
+        data-sort-section="${escapeHtml(section)}"
+        data-sort-key="${escapeHtml(key)}"
+        aria-label="${escapeHtml(`Sort ${section} concentration by ${label.toLowerCase()}`)}"
+        title="${escapeHtml(`Sort by ${label}`)}"
+      >
+        <span>${escapeHtml(label)}</span>
+        <span class="sort-indicator" aria-hidden="true">${getSortArrow(section, key)}</span>
+      </button>
+    </th>
+  `;
+}
+
+function renderConcentrationCard(section, title, label, weights, emptyMessage) {
+  const rows = getSortedConcentrationEntries(section, weights)
+    .map(
+      (entry) => `
+        <tr>
+          <td>${escapeHtml(entry.label)}</td>
+          <td>${fmtPct(entry.weight)}</td>
+        </tr>
+      `,
+    )
+    .join("");
+  const body =
+    rows ||
+    `<tr><td colspan="2" class="muted">${escapeHtml(emptyMessage)}</td></tr>`;
+  return `
+    <article class="card">
+      <h3>${escapeHtml(title)}</h3>
+      <table class="concentration-table">
+        <thead>
+          <tr>
+            ${renderConcentrationHeader(section, "label", label)}
+            ${renderConcentrationHeader(section, "weight", "%")}
+          </tr>
+        </thead>
+        <tbody>${body}</tbody>
+      </table>
+    </article>
+  `;
+}
+
 function renderOverview() {
   const snapshot = state.snapshot;
   const portfolio = snapshot.portfolio;
@@ -229,14 +338,6 @@ function renderOverview() {
     { label: "SELL", value: overview.sells ?? snapshot.summary_counts.sells },
     { label: "REVIEW", value: overview.reviews ?? snapshot.summary_counts.reviews },
   ];
-  const sectorRows = Object.entries(portfolio.sector_weights || {})
-    .map(([name, pct]) => `<tr><td>${escapeHtml(name)}</td><td>${fmtPct(pct)}</td></tr>`)
-    .join("");
-  const exchangeRows = Object.entries(portfolio.exchange_weights || {})
-    .map(([name, pct]) => `<tr><td>${escapeHtml(name)}</td><td>${fmtPct(pct)}</td></tr>`)
-    .join("");
-  const sectorTable = sectorRows || "<tr><td colspan='2' class='muted'>No live portfolio positions loaded.</td></tr>";
-  const exchangeTable = exchangeRows || "<tr><td colspan='2' class='muted'>No live portfolio positions loaded.</td></tr>";
   const healthFlags = (snapshot.health_flags || [])
     .map((flag) => `<li>${escapeHtml(flag)}</li>`)
     .join("");
@@ -249,7 +350,7 @@ function renderOverview() {
       : "";
   const candidateNote =
     overview.is_candidate_heavy
-      ? `<p class="muted">This snapshot is candidate-heavy, not portfolio-heavy. It contains ${candidateCount} off-watchlist candidate${candidateCount === 1 ? "" : "s"} and ${newBuyCount} watchlist buy${newBuyCount === 1 ? "" : "s"}.</p>`
+      ? `<p class="muted">This view is candidate-heavy, not portfolio-heavy. It contains ${candidateCount} off-watchlist candidate${candidateCount === 1 ? "" : "s"} and ${newBuyCount} watchlist buy${newBuyCount === 1 ? "" : "s"}.</p>`
       : "";
   return `
     ${renderCards(cards)}
@@ -263,7 +364,7 @@ function renderOverview() {
         { label: "Due soon", value: freshness.due_soon ?? 0 },
         { label: "Fresh count", value: freshness.fresh_count ?? 0 },
       ])}
-      ${renderInlineMetrics("Cash Snapshot", [
+      ${renderInlineMetrics("Cash Overview", [
         { label: "Total cash", value: fmtCurrency(cashSummary.total_cash_usd) },
         { label: "Unsettled", value: fmtCurrency(cashSummary.unsettled_cash_usd) },
         { label: "Buffer reserve", value: fmtCurrency(cashSummary.buffer_reserve_usd) },
@@ -284,14 +385,20 @@ function renderOverview() {
       ${renderCashTimelineTable(snapshot.cash_timeline, "No pending inflows.")}
     </section>
     <section class="cards">
-      <article class="card">
-        <h3>Sector Concentration</h3>
-        <table><tbody>${sectorTable}</tbody></table>
-      </article>
-      <article class="card">
-        <h3>Exchange Concentration</h3>
-        <table><tbody>${exchangeTable}</tbody></table>
-      </article>
+      ${renderConcentrationCard(
+        "sector",
+        "Sector Concentration",
+        "Sector",
+        portfolio.sector_weights,
+        "No live portfolio positions loaded.",
+      )}
+      ${renderConcentrationCard(
+        "exchange",
+        "Exchange Concentration",
+        "Exchange",
+        portfolio.exchange_weights,
+        "No live portfolio positions loaded.",
+      )}
     </section>
   `;
 }
@@ -314,7 +421,7 @@ function renderActions() {
     return `
       <section>
         <h3 class="section-title">Held-Position Actions</h3>
-        <p class="muted">No held-position actions are present in this snapshot. If this is a read-only or candidate-only screen, the useful names are in Watchlist & Candidates.</p>
+        <p class="muted">No held-position actions are present in the current data. If this is a read-only or candidate-only screen, the useful names are in Watchlist & Candidates.</p>
       </section>
       ${renderCandidatePreview("Candidate Preview", actions.watchlist_candidate)}
       ${renderCandidatePreview("Watchlist Buys Ready For Review", actions.watchlist_buy)}
@@ -323,11 +430,17 @@ function renderActions() {
   return `
     ${renderActionTable("Stop Breaches", actions.sell_stop_breach, [
       { label: "Price", render: (item) => fmtNumber(item.suggested_price, 2) },
-      { label: "Settles", render: (item) => escapeHtml(item.settlement_date || "—") },
+      {
+        label: "Would Settle",
+        render: (item) => escapeHtml(item.settlement_date || "—"),
+      },
     ])}
     ${renderActionTable("Fundamental Sells", actions.sell_hard, [
       { label: "Price", render: (item) => fmtNumber(item.suggested_price, 2) },
-      { label: "Settles", render: (item) => escapeHtml(item.settlement_date || "—") },
+      {
+        label: "Would Settle",
+        render: (item) => escapeHtml(item.settlement_date || "—"),
+      },
     ])}
     ${renderActionTable("Soft Rejections", actions.sell_soft_review, [
       { label: "Health", render: (item) => escapeHtml(item.analysis?.health_adj ?? "—") },
@@ -347,7 +460,10 @@ function renderActions() {
     ])}
     ${renderActionTable("Trims", actions.trim, [
       { label: "Price", render: (item) => fmtNumber(item.suggested_price, 2) },
-      { label: "Settles", render: (item) => escapeHtml(item.settlement_date || "—") },
+      {
+        label: "Would Settle",
+        render: (item) => escapeHtml(item.settlement_date || "—"),
+      },
     ])}
     ${renderActionTable("Review Queue", actions.review, [
       { label: "Health", render: (item) => escapeHtml(item.analysis?.health_adj ?? "—") },
@@ -398,9 +514,50 @@ function renderDipWatch(items) {
   `;
 }
 
+function renderLoadedWatchlist(watchlist) {
+  const tickers = watchlist?.tickers || [];
+  const title = watchlist?.name
+    ? `Loaded IBKR Watchlist: ${watchlist.name}`
+    : "Loaded IBKR Watchlist";
+  const subtitle =
+    watchlist?.total !== null && watchlist?.total !== undefined
+      ? `<p class="muted">${watchlist.total} ticker${watchlist.total === 1 ? "" : "s"} loaded from IBKR for the current view.</p>`
+      : "";
+  if (!tickers.length) {
+    return `
+      <section>
+        <h3 class="section-title">${escapeHtml(title)}</h3>
+        ${subtitle}
+        <p class="muted">No tickers were loaded from the named IBKR watchlist.</p>
+      </section>
+    `;
+  }
+  const rows = tickers
+    .map(
+      (ticker) => `
+        <tr>
+          <td>${escapeHtml(ticker)}</td>
+        </tr>
+      `,
+    )
+    .join("");
+  return `
+    <section>
+      <h3 class="section-title">${escapeHtml(title)}</h3>
+      ${subtitle}
+      <table>
+        <thead><tr><th>Ticker</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </section>
+  `;
+}
+
 function renderWatchlist() {
   const actions = state.snapshot.actions;
+  const watchlist = state.snapshot.watchlist || {};
   return `
+    ${renderLoadedWatchlist(watchlist)}
     ${renderActionTable("New Buys", actions.watchlist_buy, [
       { label: "Price", render: (item) => fmtNumber(item.suggested_price, 2) },
       { label: "Cost", render: (item) => fmtCurrency(Math.abs(item.cash_impact_usd ?? 0)) },
@@ -417,6 +574,24 @@ function renderWatchlist() {
 function renderOrders() {
   const orders = state.snapshot.orders || [];
   const cashSummary = state.snapshot.cash_summary || {};
+  const immediateBuyCost = Number(cashSummary.recommended_buy_cost_usd || 0);
+  const spendableRows = [
+    { label: "Settled cash", value: fmtCurrency(cashSummary.settled_cash_usd) },
+    {
+      label: "Immediate ADD / BUY cost",
+      value: immediateBuyCost > 0 ? fmtCurrency(immediateBuyCost) : "None queued",
+    },
+  ];
+  if (immediateBuyCost > 0) {
+    spendableRows.push({
+      label: "After current ADD / BUY actions",
+      value: fmtCurrency(cashSummary.settled_cash_after_recommended_buys_usd),
+    });
+  }
+  const buyWorkflowNote =
+    immediateBuyCost > 0
+      ? "<p class='muted'>Only immediate ADD and watchlist BUY actions reserve cash here.</p>"
+      : "<p class='muted'>Dip-watch ideas and off-watchlist candidates do not reserve cash here. Cash only moves once a name becomes an ADD or a watchlist BUY.</p>";
   const rows = orders
     .map(
       (order) => `
@@ -445,13 +620,7 @@ function renderOrders() {
     <section>
       <h3 class="section-title">Cash Plan</h3>
       <div class="summary-grid">
-        ${renderInlineMetrics("Spendable Today", [
-          { label: "Settled cash", value: fmtCurrency(cashSummary.settled_cash_usd) },
-          {
-            label: "After recommended buys",
-            value: fmtCurrency(cashSummary.settled_cash_after_recommended_buys_usd),
-          },
-        ])}
+        ${renderInlineMetrics("Spendable Today", spendableRows)}
         ${renderInlineMetrics("Pending Inflows", [
           {
             label: "Total pending",
@@ -463,6 +632,7 @@ function renderOrders() {
           },
         ])}
       </div>
+      ${buyWorkflowNote}
       ${renderCashTimelineTable(
         cashSummary.pending_inflows || [],
         "No pending inflows.",
@@ -489,8 +659,8 @@ function renderRefresh() {
     freshness.candidate_blocked.length === 0 &&
     freshness.fresh_count > 0;
   const explainer = allFresh
-    ? "All loaded analyses are fresh. Use a ticker list if you want to force a rerun."
-    : "These counts describe the current snapshot. Refresh jobs appear here only after you queue one.";
+    ? "Reload Data in the top bar only rereads the current dashboard data. The controls here queue background analysis reruns if you want to refresh specific tickers anyway."
+    : "Reload Data in the top bar rereads the current dashboard data. The controls here queue background analysis reruns; finished jobs show up after the next data reload.";
   return `
     ${renderCards([
       { label: "Blocking now", value: freshness.blocking_now.length },
@@ -499,17 +669,17 @@ function renderRefresh() {
       { label: "Fresh count", value: freshness.fresh_count },
     ])}
     <section>
-      <h3 class="section-title">Create Refresh Job</h3>
+      <h3 class="section-title">Queue Analysis Refresh Job</h3>
       <p class="muted">${escapeHtml(explainer)}</p>
       <div class="jobs-controls">
-        <button id="job-stale" type="button" ${staleEligible === 0 ? "disabled" : ""}>Queue stale positions (${staleEligible})</button>
-        <button id="job-due-soon" type="button" ${dueSoonEligible === 0 ? "disabled" : ""}>Queue due soon (${dueSoonEligible})</button>
+        <button id="job-stale" type="button" ${staleEligible === 0 ? "disabled" : ""}>Queue stale analysis reruns (${staleEligible})</button>
+        <button id="job-due-soon" type="button" ${dueSoonEligible === 0 ? "disabled" : ""}>Queue due-soon reruns (${dueSoonEligible})</button>
         <input id="job-ticker-input" type="text" placeholder="7203.T, MEGP.L">
-        <button id="job-custom" type="button">Queue ticker list</button>
+        <button id="job-custom" type="button">Queue ticker rerun list</button>
       </div>
     </section>
     <section>
-      <h3 class="section-title">Refresh Jobs</h3>
+      <h3 class="section-title">Background Analysis Jobs</h3>
       ${renderJobsTable()}
     </section>
   `;
@@ -517,7 +687,7 @@ function renderRefresh() {
 
 function renderJobsTable() {
   if (!state.jobs.length) {
-    return "<p class='muted'>No refresh jobs yet. Queue a job above to start one.</p>";
+    return "<p class='muted'>No background analysis jobs yet. Queue one above, then use Reload Data after it finishes if you want to see the updated view.</p>";
   }
   const rows = state.jobs
     .map(
@@ -540,12 +710,12 @@ function renderSettings() {
   const modeValue = settings.read_only ? "true" : "false";
   return `
     <section>
-      <h3 class="section-title">Snapshot Settings</h3>
-      <p class="muted">These settings control the next snapshot load. Use startup flags when you want a one-off session override.</p>
+      <h3 class="section-title">Dashboard Settings</h3>
+      <p class="muted">These settings control the next data load. Use startup flags when you want a one-off session override.</p>
       <form id="settings-form" class="settings-form">
         <label>IBKR account ID<input name="account_id" value="${escapeHtml(settings.account_id || "")}" placeholder="U20958465"></label>
         <label>Watchlist name<input name="watchlist_name" value="${escapeHtml(settings.watchlist_name || "")}"></label>
-        <label>Snapshot mode
+        <label>Data source
           <select name="read_only">
             <option value="false" ${modeValue === "false" ? "selected" : ""}>Live IBKR portfolio</option>
             <option value="true" ${modeValue === "true" ? "selected" : ""}>Read-only results only</option>
@@ -593,7 +763,7 @@ function renderStructuredSections(structured) {
     return "";
   }
   const sections = [
-    ["Prediction Snapshot", structured.prediction_snapshot],
+    ["Prediction Summary", structured.prediction_snapshot],
     ["Final Decision", structured.final_decision],
     ["Investment Analysis", structured.investment_analysis],
     ["Risk Analysis", structured.risk_analysis],
@@ -706,10 +876,10 @@ function renderActiveTab() {
   if (!state.snapshot && state.activeTab !== "settings") {
     const message =
       state.snapshotMeta.status === "loading"
-        ? "Snapshot loading in background…"
+        ? "Loading current data…"
         : state.snapshotMeta.status === "error"
-          ? "Snapshot unavailable. Use Refresh Snapshot to retry."
-          : "Snapshot not loaded yet. It should load automatically in a moment.";
+          ? "Current data unavailable. Use Reload Data to retry."
+          : "No current data loaded yet. It should load automatically in a moment.";
     elements.tabContent().innerHTML = `<p class="muted">${escapeHtml(message)}</p>`;
     return;
   }
@@ -850,7 +1020,7 @@ async function loadDrilldown(ticker) {
     const payload = await fetchJson(`/api/equities/${encodeURIComponent(ticker)}`);
     if (payload.status === "loading") {
       elements.drilldown().innerHTML =
-        "<p class='muted'>Snapshot is still loading. Try again in a moment.</p>";
+        "<p class='muted'>Current data is still loading. Try again in a moment.</p>";
       return;
     }
     elements.drilldown().innerHTML = renderDrilldown(payload);
@@ -886,7 +1056,7 @@ function updateModeAlert() {
     : "";
   alert.classList.remove("hidden");
   alert.innerHTML =
-    "<strong>Read-only snapshot:</strong> this dashboard is showing saved analysis results from <code>results/</code>, not your live IBKR portfolio. Switch Snapshot mode to live in Settings, or restart with <code>--live</code> / <code>IBKR_DASHBOARD_READ_ONLY=false</code> and working broker credentials."
+    "<strong>Read-only data view:</strong> this dashboard is showing saved analysis results from <code>results/</code>, not your live IBKR portfolio. Switch Data source to live in Settings, or restart with <code>--live</code> / <code>IBKR_DASHBOARD_READ_ONLY=false</code> and working broker credentials."
     + accountHint;
 }
 
@@ -894,17 +1064,17 @@ function updateStatus() {
   const status = elements.status();
   const context = elements.context();
   if (state.snapshotMeta.status === "loading") {
-    status.textContent = "Snapshot loading…";
+    status.textContent = "Loading data…";
     context.textContent = "";
     return;
   }
   if (state.snapshotMeta.status === "error") {
-    status.textContent = "Snapshot load failed";
+    status.textContent = "Data load failed";
     context.textContent = "";
     return;
   }
   if (!state.snapshot) {
-    status.textContent = "No snapshot loaded";
+    status.textContent = "No data loaded";
     const settings = state.settings || {};
     const parts = [];
     if (settings.account_id) parts.push(`Account ${settings.account_id}`);
@@ -917,7 +1087,7 @@ function updateStatus() {
   const freshness = state.snapshotMeta.refreshing ? "refreshing" : "ready";
   const source = state.snapshot.cache_hit ? "cached" : "loaded";
   const mode = state.snapshot.read_only ? "read-only" : "live";
-  status.textContent = `Snapshot ${source} at ${state.snapshot.as_of} (${freshness}, ${mode})`;
+  status.textContent = `Data ${source} at ${state.snapshot.as_of} (${freshness}, ${mode})`;
   const parts = [];
   if (state.snapshot.portfolio?.account_id) {
     parts.push(`Account ${state.snapshot.portfolio.account_id}`);
@@ -925,7 +1095,7 @@ function updateStatus() {
   if (state.snapshot.watchlist?.name) {
     parts.push(`Watchlist ${state.snapshot.watchlist.name}`);
   }
-  parts.push(state.snapshot.read_only ? "Read-only results snapshot" : "Live IBKR snapshot");
+  parts.push(state.snapshot.read_only ? "Read-only results view" : "Live IBKR data");
   context.textContent = parts.join(" • ");
 }
 
@@ -957,6 +1127,29 @@ function bindDynamicHandlers() {
   document.querySelectorAll(".ticker-link[data-ticker]").forEach((button) => {
     button.addEventListener("click", () => loadDrilldown(button.dataset.ticker));
   });
+
+  document.querySelectorAll(".sort-button[data-sort-section][data-sort-key]").forEach(
+    (button) => {
+      button.addEventListener("click", () => {
+        const { sortSection, sortKey } = button.dataset;
+        const current = state.concentrationSorts[sortSection] || {
+          key: "weight",
+          direction: "desc",
+        };
+        const nextDirection =
+          current.key === sortKey
+            ? current.direction === "asc"
+              ? "desc"
+              : "asc"
+            : getDefaultConcentrationDirection(sortKey);
+        state.concentrationSorts[sortSection] = {
+          key: sortKey,
+          direction: nextDirection,
+        };
+        renderActiveTab();
+      });
+    },
+  );
 
   const staleButton = document.getElementById("job-stale");
   if (staleButton) {

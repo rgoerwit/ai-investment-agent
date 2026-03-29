@@ -188,6 +188,42 @@ th {
   color: var(--muted);
 }
 
+.concentration-table th:last-child,
+.concentration-table td:last-child {
+  text-align: right;
+}
+
+.sort-button {
+  width: 100%;
+  border: 0;
+  background: none;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  color: inherit;
+  font: inherit;
+  font-weight: inherit;
+}
+
+.sort-button:hover {
+  background: none;
+}
+
+.sort-button.active {
+  color: var(--accent);
+}
+
+.sort-indicator {
+  min-width: 1ch;
+  color: var(--muted);
+}
+
+.sort-button.active .sort-indicator {
+  color: var(--accent);
+}
+
 .ticker-link {
   border: 0;
   background: none;

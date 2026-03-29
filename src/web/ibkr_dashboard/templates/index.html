@@ -4,18 +4,18 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>IBKR Dashboard</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css', v=dashboard_css_version) }}">
   </head>
   <body>
     <header class="topbar">
       <div>
         <h1>IBKR Dashboard</h1>
-        <p class="subtitle">Portfolio, recommendations, freshness, and drill-down reports.</p>
+        <p class="subtitle">Portfolio, recommendations, freshness, and drill-down reports. Reload Data rereads the current dashboard data; Analysis Refresh reruns analyses in the background.</p>
       </div>
       <div class="topbar-actions">
-        <button id="refresh-portfolio-btn" type="button">Refresh Snapshot</button>
+        <button id="refresh-portfolio-btn" type="button" title="Reload the current dashboard data">Reload Data</button>
         <div class="snapshot-meta">
-          <span id="snapshot-status" class="status-pill">Snapshot loading…</span>
+          <span id="snapshot-status" class="status-pill">Loading data…</span>
           <div id="snapshot-context" class="snapshot-context muted"></div>
         </div>
       </div>
@@ -30,7 +30,7 @@
       <button class="tab" data-tab="watchlist">Watchlist &amp; Candidates</button>
       <button class="tab" data-tab="orders">Orders &amp; Cash</button>
       <button class="tab" data-tab="settings">Settings</button>
-      <button class="tab" data-tab="refresh">Refresh</button>
+      <button class="tab" data-tab="refresh">Analysis Refresh</button>
     </nav>
 
     <main class="layout">
@@ -50,6 +50,6 @@
       </aside>
     </main>
 
-    <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+    <script src="{{ url_for('static', filename='dashboard.js', v=dashboard_js_version) }}"></script>
   </body>
 </html>
