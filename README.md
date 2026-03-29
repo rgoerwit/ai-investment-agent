@@ -302,7 +302,8 @@ For prompt work, there is now a shared default basket and a simple end-to-end op
 
 1. Seed accepted baselines for the shared suite
 2. Change prompts
-3. Run live structural + semantic regression checks against those accepted baselines
+3. Run live deterministic structural checks
+4. Run live semantic regression checks against those accepted baselines
 
 Default baseline seeding command:
 
@@ -327,6 +328,11 @@ The default `smoke` suite is now a globally mixed basket:
 - `0005.HK`
 
 This is the same default basket used by live prompt checks, so a naive user does not need to assemble arguments or invent a ticker list just to seed baselines or check prompt quality.
+
+These generated artifacts are local runtime outputs and should not be committed:
+
+- `evals/captures/`
+- `evals/prompt_checks/`
 
 ### Stage 2 Prompt Checks
 
@@ -427,10 +433,13 @@ Recommended operator flow:
 # 1. Seed the shared default baseline basket once
 poetry run python -m src.eval.baseline_suite
 
-# 2. After prompt edits, run structural + semantic regression checks
+# 2. After prompt edits, run deterministic structural checks only
+poetry run python -m src.eval.prompt_checks
+
+# 3. Then run structural + semantic regression checks with the LLM judge
 poetry run python -m src.eval.prompt_checks --stage3
 
-# 3. Before a release candidate, run the deeper strict suite
+# 4. Before a release candidate, run the deeper strict suite
 poetry run python -m src.eval.prompt_checks --suite strict --stage3 --json-output evals/prompt_checks/latest.json
 ```
 
