@@ -544,8 +544,9 @@ class TestMainOrchestration:
         )
         monkeypatch.setattr(
             "src.main._setup_runtime",
-            lambda passed_args, targets: call_order.append("setup")
-            or {"google": {"dns": "ok"}},
+            lambda passed_args, targets: (
+                call_order.append("setup") or {"google": {"dns": "ok"}}
+            ),
         )
         monkeypatch.setattr(
             "src.main._maybe_run_ticker_retrospective",
@@ -567,8 +568,9 @@ class TestMainOrchestration:
         )
         monkeypatch.setattr(
             "src.main._render_primary_output",
-            lambda result, passed_args, targets, banner: call_order.append("render")
-            or (None, None, None),
+            lambda result, passed_args, targets, banner: (
+                call_order.append("render") or (None, None, None)
+            ),
         )
         monkeypatch.setattr(
             "src.main._persist_analysis_outputs",
@@ -580,12 +582,9 @@ class TestMainOrchestration:
         )
         monkeypatch.setattr(
             "src.main._maybe_generate_article",
-            lambda result,
-            passed_args,
-            targets,
-            company_name,
-            report,
-            reporter: fake_async("article", False),
+            lambda result, passed_args, targets, company_name, report, reporter: (
+                fake_async("article", False)
+            ),
         )
         monkeypatch.setattr(
             "src.main._log_final_summary",
@@ -745,6 +744,8 @@ class TestSavedDiagnostics:
         _attach_run_summary(result, args, provider_preflight={})
 
         assert result["analysis_validity"]["publishable"] is True
+        assert "quick_mode" not in result
+        assert result["run_summary"]["quick_mode"] is True
         assert result["run_summary"]["publishable"] is True
         assert result["run_summary"]["required_failures"] == []
         assert result["run_summary"]["optional_failures"] == ["value_trap_report"]

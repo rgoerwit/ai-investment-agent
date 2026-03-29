@@ -9,7 +9,7 @@ from src.health_check import check_python_version
     ("version_info", "expected_ok", "expected_message"),
     [
         ((3, 10, 14), False, "Requires Python >=3.12,<3.13"),
-        ((3, 11, 11), True, None),
+        ((3, 11, 11), False, "Requires Python >=3.12,<3.13"),
         ((3, 12, 11), True, None),
         ((3, 13, 0), False, "Requires Python >=3.12,<3.13"),
     ],

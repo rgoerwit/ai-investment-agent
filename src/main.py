@@ -958,12 +958,20 @@ def display_results(result: dict, ticker: str):
     console.print("=" * 80 + "\n")
 
 
-def save_results_to_file(result: dict, ticker: str, quick_mode: bool = False) -> Path:
+def save_results_to_file(
+    result: dict,
+    ticker: str,
+    quick_mode: bool = False,
+    *,
+    results_dir: Path | str | None = None,
+) -> Path:
     """Save analysis results to a JSON file in the results directory."""
     from src.memory import get_ticker_memory_stats
     from src.prompts import get_all_prompts
 
-    results_dir = Path(config.results_dir)
+    results_dir = (
+        Path(results_dir) if results_dir is not None else Path(config.results_dir)
+    )
     results_dir.mkdir(parents=True, exist_ok=True)
     previous_dir_mtime_ns = (
         results_dir.stat().st_mtime_ns if results_dir.exists() else None
@@ -1789,12 +1797,6 @@ def _attach_run_summary(
     """Attach the compact run summary before any persistence/output steps."""
     result.setdefault("run_summary", {})
     result["run_summary"]["quick_mode"] = bool(args.quick)
-    result["run_summary"] = build_run_summary(
-        result,
-        quick_mode=args.quick,
-        article_requested=bool(args.article),
-        provider_preflight=provider_preflight,
-    )
     result["analysis_validity"] = build_analysis_validity(result)
     result["run_summary"] = build_run_summary(
         result,
@@ -2001,6 +2003,11 @@ def _report_analysis_failure(args: argparse.Namespace) -> None:
         )
 
 
+async def main() -> int:
+    """Main entry point for the application."""
+    return await run_with_args(parse_arguments())
+
+
 async def run_with_args(
     args: argparse.Namespace,
     *,
@@ -2050,7 +2057,11 @@ async def run_with_args(
         if baseline_capture is None:
             result = await _execute_analysis(args, output_targets)
         else:
-            result = await _execute_analysis(args, output_targets, baseline_capture)
+            result = await _execute_analysis(
+                args,
+                output_targets,
+                baseline_capture=baseline_capture,
+            )
 
         if not result:
             if baseline_capture:
@@ -2103,11 +2114,6 @@ async def run_with_args(
             await cleanup_async_resources()
         except Exception:
             pass
-
-
-async def main() -> int:
-    """Main entry point for the application."""
-    return await run_with_args(parse_arguments())
 
 
 if __name__ == "__main__":

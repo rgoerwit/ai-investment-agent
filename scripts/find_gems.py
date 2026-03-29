@@ -166,13 +166,17 @@ def _to_usd(value, currency, fx_rates):
 # ============================================================
 
 
-_DEFAULT_TIMEOUT = (10, 30)  # (connect, read) seconds
+_DEFAULT_CONNECT_TIMEOUT = 10
+_DEFAULT_READ_TIMEOUT = 30
+_DEFAULT_TOTAL_TIMEOUT = 35
 
 
 class _TimeoutAdapter(requests.adapters.HTTPAdapter):
     """Enforce a default timeout on every request made through the session."""
 
-    def __init__(self, timeout=_DEFAULT_TIMEOUT, **kwargs):
+    def __init__(self, timeout=None, **kwargs):
+        if timeout is None:
+            timeout = _build_timeout()
         self._timeout = timeout
         super().__init__(**kwargs)
 
@@ -181,7 +185,26 @@ class _TimeoutAdapter(requests.adapters.HTTPAdapter):
         return super().send(request, **kwargs)
 
 
-def _get_session():
+def _build_timeout(
+    *,
+    connect_timeout=_DEFAULT_CONNECT_TIMEOUT,
+    read_timeout=_DEFAULT_READ_TIMEOUT,
+    total_timeout=_DEFAULT_TOTAL_TIMEOUT,
+):
+    """Build a requests timeout with both per-phase and total wall-clock limits."""
+    return requests.adapters.TimeoutSauce(
+        connect=connect_timeout,
+        read=read_timeout,
+        total=total_timeout,
+    )
+
+
+def _get_session(
+    *,
+    connect_timeout=_DEFAULT_CONNECT_TIMEOUT,
+    read_timeout=_DEFAULT_READ_TIMEOUT,
+    total_timeout=_DEFAULT_TOTAL_TIMEOUT,
+):
     s = requests.Session()
     s.headers.update(
         {
@@ -191,7 +214,13 @@ def _get_session():
             "Referer": "https://www.google.com/",
         }
     )
-    adapter = _TimeoutAdapter()
+    adapter = _TimeoutAdapter(
+        timeout=_build_timeout(
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+            total_timeout=total_timeout,
+        )
+    )
     s.mount("https://", adapter)
     s.mount("http://", adapter)
     return s
@@ -988,9 +1017,9 @@ def fetch_and_filter(
         "OCF>0",
     ]
     if min_mcap and min_mcap > 0:
-        criteria_parts.append(f"MCap>${min_mcap/1e6:.0f}M")
+        criteria_parts.append(f"MCap>${min_mcap / 1e6:.0f}M")
     if min_volume and min_volume > 0:
-        criteria_parts.append(f"Vol>${min_volume/1e3:.0f}K")
+        criteria_parts.append(f"Vol>${min_volume / 1e3:.0f}K")
     if max_coverage and max_coverage > 0:
         criteria_parts.append(f"Analysts<={max_coverage}")
     print(f"Criteria: {', '.join(criteria_parts)}", file=sys.stderr)

@@ -9,12 +9,30 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.llms import (
-    _is_gemini_v3_or_greater,
-    create_deep_thinking_llm,
-    create_gemini_model,
-    create_quick_thinking_llm,
-)
+
+def _is_gemini_v3_or_greater(model_name: str) -> bool:
+    from src.llms import _is_gemini_v3_or_greater as impl
+
+    return impl(model_name)
+
+
+def _create_quick_thinking_llm(*args, **kwargs):
+    from src.llms import create_quick_thinking_llm
+
+    return create_quick_thinking_llm(*args, **kwargs)
+
+
+def _create_deep_thinking_llm(*args, **kwargs):
+    from src.llms import create_deep_thinking_llm
+
+    return create_deep_thinking_llm(*args, **kwargs)
+
+
+def _create_gemini_model(*args, **kwargs):
+    from src.llms import create_gemini_model
+
+    return create_gemini_model(*args, **kwargs)
+
 
 # Mock data for model names
 GEMINI_3_PRO = "gemini-3-pro-preview"
@@ -23,8 +41,12 @@ GEMINI_2_FLASH = "gemini-2.0-flash"
 
 
 @pytest.fixture(autouse=True)
-def mock_create_gemini_model():
+def mock_create_gemini_model(request):
     """Mocks the core `create_gemini_model` factory to inspect its inputs."""
+    if request.node.name == "test_create_gemini_model_logs_thinking_level_at_debug":
+        yield None
+        return
+
     with patch("src.llms.create_gemini_model") as mock:
         mock.return_value = MagicMock()
         yield mock
@@ -68,7 +90,7 @@ def test_quick_llm_sets_low_thinking_level_on_gemini_3_plus(
     mock_config.quick_think_llm = GEMINI_3_PRO
 
     # Act
-    create_quick_thinking_llm()
+    _create_quick_thinking_llm()
 
     # Assert
     mock_create_gemini_model.assert_called_once()
@@ -87,7 +109,7 @@ def test_quick_llm_has_no_thinking_level_on_gemini_2(
     mock_config.quick_think_llm = GEMINI_2_FLASH
 
     # Act
-    create_quick_thinking_llm()
+    _create_quick_thinking_llm()
 
     # Assert
     mock_create_gemini_model.assert_called_once()
@@ -107,7 +129,7 @@ def test_deep_llm_sets_high_thinking_level_on_gemini_4(
     mock_config.deep_think_llm = GEMINI_4_ULTRA
 
     # Act
-    create_deep_thinking_llm()
+    _create_deep_thinking_llm()
 
     # Assert
     mock_create_gemini_model.assert_called_once()
@@ -126,7 +148,7 @@ def test_deep_llm_has_no_thinking_level_on_gemini_2(
     mock_config.deep_think_llm = GEMINI_2_FLASH
 
     # Act
-    create_deep_thinking_llm()
+    _create_deep_thinking_llm()
 
     # Assert
     mock_create_gemini_model.assert_called_once()
@@ -139,7 +161,7 @@ def test_quick_llm_passes_through_max_output_tokens(
 ):
     mock_config.quick_think_llm = GEMINI_3_PRO
 
-    create_quick_thinking_llm(max_output_tokens=4096)
+    _create_quick_thinking_llm(max_output_tokens=4096)
 
     call_kwargs = mock_create_gemini_model.call_args.kwargs
     assert call_kwargs.get("max_output_tokens") == 4096
@@ -150,7 +172,7 @@ def test_deep_llm_passes_through_max_output_tokens(
 ):
     mock_config.deep_think_llm = GEMINI_4_ULTRA
 
-    create_deep_thinking_llm(max_output_tokens=8192)
+    _create_deep_thinking_llm(max_output_tokens=8192)
 
     call_kwargs = mock_create_gemini_model.call_args.kwargs
     assert call_kwargs.get("max_output_tokens") == 8192
@@ -160,7 +182,7 @@ def test_create_gemini_model_logs_thinking_level_at_debug(caplog):
     with patch("src.llms.ChatGoogleGenerativeAI", return_value=MagicMock()):
         caplog.set_level(logging.DEBUG, logger="src.llms")
 
-        create_gemini_model(
+        _create_gemini_model(
             "gemini-3-pro-preview",
             temperature=0.1,
             timeout=30,

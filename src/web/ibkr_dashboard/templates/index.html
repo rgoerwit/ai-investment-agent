@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>IBKR Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>IBKR Dashboard</h1>
+        <p class="subtitle">Portfolio, recommendations, freshness, and drill-down reports.</p>
+      </div>
+      <div class="topbar-actions">
+        <button id="refresh-portfolio-btn" type="button">Refresh Snapshot</button>
+        <div class="snapshot-meta">
+          <span id="snapshot-status" class="status-pill">Snapshot loading…</span>
+          <div id="snapshot-context" class="snapshot-context muted"></div>
+        </div>
+      </div>
+    </header>
+
+    <section id="macro-alert" class="macro-alert hidden"></section>
+    <section id="mode-alert" class="macro-alert hidden"></section>
+
+    <nav class="tabs" aria-label="Dashboard tabs">
+      <button class="tab active" data-tab="overview">Overview</button>
+      <button class="tab" data-tab="actions">Actions</button>
+      <button class="tab" data-tab="watchlist">Watchlist &amp; Candidates</button>
+      <button class="tab" data-tab="orders">Orders &amp; Cash</button>
+      <button class="tab" data-tab="settings">Settings</button>
+      <button class="tab" data-tab="refresh">Refresh</button>
+    </nav>
+
+    <main class="layout">
+      <section class="main-panel">
+        <div id="loading" class="loading hidden">Loading…</div>
+        <div id="error-banner" class="error hidden"></div>
+        <div id="tab-content"></div>
+      </section>
+
+      <aside class="side-panel">
+        <div class="panel-header">
+          <h2>Equity Drilldown</h2>
+        </div>
+        <div id="drilldown-panel">
+          <p class="muted">Select a ticker from Actions or Watchlist &amp; Candidates.</p>
+        </div>
+      </aside>
+    </main>
+
+    <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+  </body>
+</html>
