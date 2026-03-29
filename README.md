@@ -218,6 +218,13 @@ poetry run python -m src.main --retrospective-only
 
 # Run with real-time logging visible (unbuffered Python output)
 # Redirect to file and monitor with: tail -f scratch/ticker_analysis_info.txt
+
+# Baseline capture for replay/eval fixtures
+poetry run python -m src.main --ticker 0005.HK --quick --capture-baseline
+
+# Cleanup-only mode for stale interrupted captures
+poetry run python -m src.main --capture-baseline-cleanup
+
 # Note: Use --output for the report so that charts are generated
 poetry run python -u -m src.main --ticker 0005.HK --output scratch/report.md >scratch/ticker_analysis_info.txt 2>&1 &
 
@@ -227,6 +234,222 @@ poetry run python -u -m src.main --ticker 0005.HK --output scratch/report.md >sc
 # Run tests to verify installation
 poetry run pytest tests/ -v
 ```
+
+### Baseline Capture
+
+`--capture-baseline` writes replay-oriented capture bundles under `evals/captures/schema_v4/`.
+
+Storage layout:
+
+- `inflight/` contains the temporary working directory while a capture is running
+- `accepted/<date>/<run_id>/` contains finalized replay-eligible captures
+- `rejected/<date>/<run_id>/` contains rejected or interrupted captures for diagnosis
+
+Important behavior:
+
+- Baseline capture requires a **clean local git worktree**
+- This is about local `git status --short`, not pushing to GitHub
+- Modified tracked files and untracked files both count as dirty
+- Stash presence is recorded in capture metadata for awareness, but does **not** block capture
+- Dirty worktrees block capture **before** analysis starts, so you do not waste LLM/API cost
+- `schema_v4` is the current supported capture format
+- Every capture writes a `run_manifest.json` with:
+  - `capture_status`
+  - `usable_for_replay`
+  - `usable_for_promotion`
+  - `rejection_reasons`
+  - `storage_tier`
+  - `code.has_stash` / `code.stash_count`
+  - `prompt_set_digest`
+  - default and observed model provenance
+
+Current capture scope:
+
+- this stage is still about **capture quality**, not regression scoring
+- accepted captures now include enough prompt/model/LLM-call provenance to support later deterministic and judge-based prompt evaluation
+- prompt comparison, model comparison, and baseline promotion remain separate later-stage workflows
+
+Current validation behavior:
+
+- today’s validator checks structural completeness and replay-readiness only
+- it does **not** yet compare one capture to another for regression scoring
+- an accepted capture can therefore be structurally valid and replay-ready without yet being compared to a prior baseline
+
+Cleanup behavior:
+
+- Each `--capture-baseline` run automatically sweeps stale `inflight/` runs from earlier interrupted captures and moves them to `rejected/`
+- `--capture-baseline-cleanup` runs only that cleanup sweep and exits
+- Cleanup does **not** touch accepted capture history and does **not** modify your git worktree
+
+Examples:
+
+```bash
+# Capture a replay-eligible baseline bundle
+poetry run python -m src.main --ticker 0005.HK --quick --capture-baseline
+
+# Clean up stale interrupted inflight captures only
+poetry run python -m src.main --capture-baseline-cleanup
+```
+
+To check if a capture is usable, open its `run_manifest.json` and look for:
+
+- `"capture_status": "accepted"`
+- `"usable_for_replay": true`
+
+### Shared Prompt-Eval Workflow
+
+For prompt work, there is now a shared default basket and a simple end-to-end operator path:
+
+1. Seed accepted baselines for the shared suite
+2. Change prompts
+3. Run live deterministic structural checks
+4. Run live semantic regression checks against those accepted baselines
+
+Default baseline seeding command:
+
+```bash
+poetry run python -m src.eval.baseline_suite
+```
+
+What this does:
+
+- uses the default `smoke` suite with no arguments
+- runs one repo-level cleanup + git-clean preflight before the batch
+- captures six baseline bundles sequentially through the normal analysis path
+- exits non-zero if the batch is blocked or any scenario fails
+
+The default `smoke` suite is now a globally mixed basket:
+
+- `AAPL`
+- `ASML.AS`
+- `SAP.DE`
+- `7203.T`
+- `2330.TW`
+- `0005.HK`
+
+This is the same default basket used by live prompt checks, so a naive user does not need to assemble arguments or invent a ticker list just to seed baselines or check prompt quality.
+
+These generated artifacts are local runtime outputs and should not be committed:
+
+- `evals/captures/`
+- `evals/prompt_checks/`
+
+### Stage 2 Prompt Checks
+
+Stage 2 prompt checks are split into two parts:
+
+- **Stage 2a: deterministic checker library**
+  - validates machine-checkable output contracts such as:
+    - parseable `DATA_BLOCK`
+    - parseable `PM_BLOCK` / PM verdict
+    - parseable `VALUE_TRAP_BLOCK` score
+    - valid Legal Counsel JSON fields
+    - parseable `VALUATION_PARAMS`
+    - parseable `TRADE_BLOCK`
+    - complete Junior raw-data wrapper
+  - uses fixtures and unit tests
+  - does **not** require captures or baseline outputs
+
+- **Stage 2b: live prompt contract evals**
+  - runs real prompt workflows on a small curated suite
+  - applies the deterministic checks to the generated outputs
+  - is **opt-in** and consumes tokens, so do not run it on every change
+
+What Stage 2 does **not** do:
+
+- compare current outputs against saved baselines
+- judge reasoning quality or semantic drift
+- replace Stage 3 LLM-as-judge evaluation
+
+Run the deterministic checker tests:
+
+```bash
+poetry run pytest tests/eval/test_prompt_checks.py -q
+```
+
+Run the opt-in live Stage 2 suite:
+
+```bash
+poetry run python -m src.eval.prompt_checks
+poetry run python -m src.eval.prompt_checks --json-output evals/prompt_checks/latest.json
+```
+
+Notes:
+
+- Stage 2b is meant for prompt work, release candidates, or explicit evaluation runs
+- It should not be part of pre-commit or the normal test suite
+- Semantic quality and “did the reasoning get worse?” questions belong to Stage 3
+- Omitting `--suite` uses the shared default `smoke` suite
+
+### Stage 3 Semantic Prompt Checks
+
+Stage 3 builds on Stage 2. It first re-runs the live prompt workflow and enforces the deterministic structural contracts, then compares a decision-critical subset of current outputs against the latest accepted matching baseline capture for the same:
+
+- ticker
+- `quick` mode
+- `strict` mode
+
+Stage 3 is the answer to: “after I changed prompts, did the important output quality regress relative to my accepted baseline?”
+
+What Stage 3 checks:
+
+- Stage 2 structural contracts are still satisfied
+- accepted baselines exist for the selected scenarios
+- current decision-critical artifacts remain semantically acceptable relative to baseline
+
+What Stage 3 does **not** do:
+
+- replace baseline capture
+- run in CI or pre-commit by default
+- guarantee identical wording run-to-run
+
+Run the default shared Stage 3 suite:
+
+```bash
+poetry run python -m src.eval.prompt_checks --stage3
+```
+
+Write a combined Stage 2 + Stage 3 JSON report:
+
+```bash
+poetry run python -m src.eval.prompt_checks --stage3 --json-output evals/prompt_checks/latest.json
+```
+
+Run a deeper release-candidate suite:
+
+```bash
+poetry run python -m src.eval.prompt_checks --suite strict --stage3 --json-output evals/prompt_checks/latest.json
+```
+
+Useful Stage 3 options:
+
+- `--allow-missing-baseline` marks missing baselines as skipped instead of failing
+- `--judge-model MODEL` overrides the default judge model; by default the judge uses `QUICK_MODEL` and in a stock setup that is usually `gemini-2.0-flash`; an OpenAI judge is used only if you explicitly pass an OpenAI model name
+- `--baseline-warn-age-days N` warns when the accepted baseline is older than `N` days; default is `30`
+
+Recommended operator flow:
+
+```bash
+# 1. Seed the shared default baseline basket once
+poetry run python -m src.eval.baseline_suite
+
+# 2. After prompt edits, run deterministic structural checks only
+poetry run python -m src.eval.prompt_checks
+
+# 3. Then run structural + semantic regression checks with the LLM judge
+poetry run python -m src.eval.prompt_checks --stage3
+
+# 4. Before a release candidate, run the deeper strict suite
+poetry run python -m src.eval.prompt_checks --suite strict --stage3 --json-output evals/prompt_checks/latest.json
+```
+
+Important notes:
+
+- Stage 3 will fail by default if an accepted baseline is missing for a selected scenario
+- the failure message tells you to seed baselines with `python -m src.eval.baseline_suite --suite smoke`
+- both `baseline_suite` and `prompt_checks` use the same default `smoke` basket
+- Stage 3 costs more than Stage 2 because it adds up to 6 judge-model calls per ticker, or up to 36 total across the default `smoke` suite
+- with the default Gemini quick model this is typically cheap; overriding `--judge-model` to an OpenAI model can raise cost noticeably
 
 ### Optional: Local Container Mode
 

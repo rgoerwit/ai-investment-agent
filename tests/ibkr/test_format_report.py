@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 from scripts.portfolio_manager import (
     _analysis_command,
     _compute_dip_score,
     _portfolio_manager_command,
+    format_json,
     format_report,
 )
 from src.ibkr.models import (
@@ -16,8 +18,13 @@ from src.ibkr.models import (
     ReconciliationItem,
     TradeBlockData,
 )
+from src.ibkr.refresh_service import RefreshActivity
 from src.ibkr.ticker import Ticker
-from tests.ibkr.test_reconciler import _make_portfolio, _make_position
+from tests.ibkr.test_reconciler import (
+    _make_analysis,
+    _make_portfolio,
+    _make_position,
+)
 
 # A realistic CORRELATED_SELL_EVENT flag string (matches what compute_portfolio_health emits).
 # Format: "CORRELATED_SELL_EVENT: N positions changed verdict within Xd of DATE (P% of held …"
@@ -180,6 +187,128 @@ class TestFormatReportPanicDay:
         assert "8 MACRO_WATCH" in summary_line
         assert "8 SELL" not in summary_line
         assert "8 REVIEW" not in summary_line
+
+
+class TestFormatReportMacroStopReview:
+    """format_report() bucket/rendering logic for STOP_BREACH items demoted during macro events."""
+
+    def _make_demoted_stop_item(self, ticker: str = "STOP01.T") -> ReconciliationItem:
+        """A STOP_BREACH item already demoted to REVIEW (as compute_portfolio_health would do)."""
+        pos = _make_position(current_price=1500)
+        analysis = _make_analysis(ticker=ticker, verdict="BUY", age_days=0)
+        analysis.health_adj = 70.0
+        analysis.growth_adj = 65.0
+        return ReconciliationItem(
+            ticker=ticker,
+            action="REVIEW",
+            urgency="MEDIUM",
+            reason=(
+                "Stop breached: price 1500.00 < stop 1800.00"
+                "  [MACRO_STOP: stop breach during correlated event"
+                " — fundamentals intact (health 70%, growth 65%); review before executing]"
+            ),
+            ibkr_position=pos,
+            analysis=analysis,
+            sell_type="STOP_BREACH",
+        )
+
+    def test_demoted_stop_appears_in_stop_breaches_under_review_section(self):
+        """REVIEW + STOP_BREACH item renders in 'STOP BREACHES UNDER REVIEW', not in 'STOP BREACHED'."""
+        item = self._make_demoted_stop_item()
+        report = format_report(
+            [item], _make_portfolio(), portfolio_health_flags=[_CORR_FLAG]
+        )
+        assert "STOP BREACHES UNDER REVIEW" in report
+
+    def test_demoted_stop_not_in_mechanical_stop_breached_section(self):
+        """Demoted STOP_BREACH (action=REVIEW) must not appear in the mechanical 'STOP BREACHED' section."""
+        item = self._make_demoted_stop_item()
+        report = format_report(
+            [item], _make_portfolio(), portfolio_health_flags=[_CORR_FLAG]
+        )
+        lines = report.split("\n")
+        # Identify which section the ticker appears in
+        stop_breach_idx = next(
+            (i for i, ln in enumerate(lines) if "SELLS — STOP BREACHED" in ln), None
+        )
+        # Mechanical STOP BREACHED section must be absent (no items with action=SELL)
+        assert (
+            stop_breach_idx is None
+        ), "Mechanical STOP BREACHED section should not appear"
+
+    def test_demoted_stop_not_in_regular_reviews_section(self):
+        """REVIEW + STOP_BREACH must not appear in the regular REVIEWS section."""
+        item = self._make_demoted_stop_item()
+        # Add an unrelated REVIEW item so the regular REVIEWS section renders
+        pos = _make_position(ticker="7203.T", current_price=2100)
+        regular_review = ReconciliationItem(
+            ticker="7203.T",
+            action="REVIEW",
+            urgency="MEDIUM",
+            reason="Needs re-analysis",
+            ibkr_position=pos,
+            sell_type=None,
+        )
+        report = format_report(
+            [item, regular_review],
+            _make_portfolio(),
+            portfolio_health_flags=[_CORR_FLAG],
+        )
+        lines = report.split("\n")
+        # Find where regular REVIEWS section starts
+        reviews_idx = next(
+            (
+                i
+                for i, ln in enumerate(lines)
+                if ln.strip().startswith("REVIEWS") and "STOP" not in ln
+            ),
+            None,
+        )
+        if reviews_idx is not None:
+            section_content = "\n".join(lines[reviews_idx:])
+            assert "STOP01" not in section_content
+
+    def test_macro_stop_annotation_stripped_from_display(self):
+        """The [MACRO_STOP: ...] annotation must not appear in the rendered output."""
+        item = self._make_demoted_stop_item()
+        report = format_report(
+            [item], _make_portfolio(), portfolio_health_flags=[_CORR_FLAG]
+        )
+        assert "[MACRO_STOP:" not in report
+
+    def test_stop_breaches_under_review_section_absent_when_no_demoted_stops(self):
+        """'STOP BREACHES UNDER REVIEW' section must not appear when macro_stop_reviews is empty."""
+        pos = _make_position(current_price=2100)
+        # Only a regular SELL + STOP_BREACH (not demoted) — no macro_stop_reviews
+        items = [
+            ReconciliationItem(
+                ticker="WEAK.T",
+                action="SELL",
+                urgency="HIGH",
+                reason="Stop breached: price 1500.00 < stop 1800.00",
+                ibkr_position=pos,
+                sell_type="STOP_BREACH",
+            )
+        ]
+        report = format_report(
+            items, _make_portfolio(), portfolio_health_flags=[_CORR_FLAG]
+        )
+        assert "STOP BREACHES UNDER REVIEW" not in report
+        # But the regular mechanical section should appear
+        assert "SELLS — STOP BREACHED" in report
+
+    def test_summary_counts_demoted_stop_as_review_not_sell(self):
+        """Demoted STOP_BREACH (action=REVIEW) contributes to REVIEW count, not SELL count."""
+        item = self._make_demoted_stop_item()
+        report = format_report(
+            [item], _make_portfolio(), portfolio_health_flags=[_CORR_FLAG]
+        )
+        summary_line = next(
+            (ln for ln in report.split("\n") if ln.strip().startswith("Summary:")), ""
+        )
+        assert summary_line, "Summary line missing"
+        assert "1 REVIEW" in summary_line
+        assert "SELL" not in summary_line
 
 
 class TestFormatReportNormalDay:
@@ -1842,3 +1971,96 @@ class TestPortfolioManagerOutputTightening:
         report = format_report([high], _make_portfolio(), show_recommendations=True)
         assert "ADD TO WATCHLIST  TOTL" in report
         assert "ADDED TO WATCHLIST" not in report
+
+
+class TestAnalysisFreshnessReporting:
+    def _items(self) -> list[ReconciliationItem]:
+        blocking = ReconciliationItem(
+            ticker="7203.T",
+            action="REVIEW",
+            reason="Stale analysis: age 20d > max_age_days 14",
+            urgency="MEDIUM",
+            ibkr_position=_make_position(ticker="7203.T"),
+            analysis=_make_analysis(ticker="7203.T", age_days=20),
+        )
+        queued = ReconciliationItem(
+            ticker="0005.HK",
+            action="REVIEW",
+            reason="Verdict → DO_NOT_INITIATE  (2026-03-05)",
+            urgency="MEDIUM",
+            ibkr_position=_make_position(ticker="0005.HK"),
+            analysis=_make_analysis(ticker="0005.HK", age_days=20),
+            sell_type="SOFT_REJECT",
+        )
+        due_soon = ReconciliationItem(
+            ticker="GTT.PA",
+            action="HOLD",
+            reason="Position OK",
+            urgency="LOW",
+            ibkr_position=_make_position(ticker="GTT.PA"),
+            analysis=_make_analysis(ticker="GTT.PA", age_days=8),
+        )
+        return [blocking, queued, due_soon]
+
+    def test_analysis_freshness_section_replaces_split_brain_deadlines(self):
+        report = format_report(self._items(), _make_portfolio(), max_age_days=14)
+        assert "ANALYSIS FRESHNESS" in report
+        assert "Blocking now:" in report
+        assert "Already in queue:" in report
+        assert "Due soon:" in report
+        assert "Upcoming review deadlines" not in report
+
+    def test_reviews_subtitle_uses_decision_safe_wording(self):
+        report = format_report(self._items(), _make_portfolio(), max_age_days=14)
+        assert "REVIEWS  (analysis not decision-safe — refresh before acting)" in report
+
+    def test_read_only_refresh_skip_shows_exact_manual_action(self):
+        item = ReconciliationItem(
+            ticker="7203.T",
+            action="REVIEW",
+            reason="Stale analysis: age 20d > max_age_days 14",
+            urgency="MEDIUM",
+            ibkr_position=_make_position(ticker="7203.T"),
+            analysis=_make_analysis(ticker="7203.T", age_days=20),
+        )
+        report = format_report(
+            [item],
+            _make_portfolio(),
+            refresh_activity=RefreshActivity(
+                policy="blocking",
+                limit=10,
+                skipped_read_only=["7203.T"],
+            ),
+        )
+        assert "Skipped (read-only): 7203.T" in report
+        assert (
+            "User action: read-only mode blocked refresh — run "
+            f"{_portfolio_manager_command('--refresh-policy', 'blocking')}"
+        ) in report
+
+    def test_successful_refresh_run_can_leave_no_manual_action(self):
+        report = format_report(
+            [],
+            _make_portfolio(),
+            refresh_activity=RefreshActivity(
+                policy="blocking",
+                limit=10,
+                refreshed=["7203.T"],
+            ),
+        )
+        assert "Refreshed: 7203.T" in report
+        assert "User action: none" in report
+
+    def test_format_json_includes_freshness_summary(self):
+        payload = json.loads(
+            format_json(
+                self._items(),
+                _make_portfolio(),
+                max_age_days=14,
+            )
+        )
+        summary = payload["analysis_freshness_summary"]
+        assert summary["blocking_now_count"] == 1
+        assert summary["stale_in_queue_count"] == 1
+        assert summary["due_soon_count"] == 1
+        assert summary["manual_action_required"] is True

@@ -1136,11 +1136,11 @@ class TestCreateWriterLLM:
             # Should return something (Gemini fallback), not raise
             assert llm is not None
 
-    def test_opus_effort_not_top_level_kwarg(self):
-        """Regression: effort must be inside output_config, not a top-level API param.
+    def test_opus_effort_field(self):
+        """langchain-anthropic >=1.3.0: effort is a first-class ChatAnthropic field.
 
-        anthropic SDK rejects unknown top-level kwargs like 'effort' on Messages.create().
-        The effort parameter must be nested: model_kwargs={"output_config": {"effort": "high"}}.
+        The library serializes it into output_config in the API call internally.
+        It must NOT appear in model_kwargs (which is passed through verbatim).
         """
         from src.llms import create_writer_llm
 
@@ -1151,14 +1151,45 @@ class TestCreateWriterLLM:
             mock_config.api_retry_attempts = 3
 
             llm = create_writer_llm()
-            # effort must NOT be a top-level model_kwarg
-            assert "effort" not in llm.model_kwargs, (
-                "effort must be nested inside output_config, not top-level "
-                "(causes Messages.create() unexpected keyword argument error)"
+            # effort is a direct field, not in model_kwargs
+            assert llm.effort == "high", (
+                "Opus 4.6 effort must be set as a direct ChatAnthropic field "
+                "(langchain-anthropic >=1.3.0 serializes it into output_config)"
             )
-            # effort must be inside output_config
-            assert "output_config" in llm.model_kwargs
-            assert llm.model_kwargs["output_config"]["effort"] == "high"
+            assert "effort" not in llm.model_kwargs, (
+                "effort must not appear in model_kwargs — the library handles "
+                "wrapping it in output_config for the API call"
+            )
+
+    def test_opus_effort_serialized_into_output_config_payload(self):
+        """Wire-format regression: effort must appear in output_config in the API payload.
+
+        Verifies that langchain-anthropic's _get_request_payload() correctly
+        maps self.effort -> payload["output_config"]["effort"] so that the
+        Anthropic API receives the right structure regardless of how the library
+        internally changed between 0.x (model_kwargs workaround) and 1.3.0+
+        (first-class field with built-in serializer).
+        """
+        from langchain_core.messages import HumanMessage
+
+        from src.llms import create_writer_llm
+
+        with patch("src.llms.config") as mock_config:
+            mock_config.get_claude_api_key.return_value = "fake-key"
+            mock_config.writer_model = "claude-opus-4-6"
+            mock_config.api_timeout = 300
+            mock_config.api_retry_attempts = 3
+
+            llm = create_writer_llm()
+            payload = llm._get_request_payload(
+                [HumanMessage(content="test")], stop=None
+            )
+            assert (
+                "output_config" in payload
+            ), "effort=high must produce output_config in the API payload"
+            assert (
+                payload["output_config"].get("effort") == "high"
+            ), f"output_config must contain effort='high', got: {payload['output_config']}"
 
     def test_model_kwargs_are_valid_api_params(self):
         """Regression: all model_kwargs must be valid Anthropic Messages.create() params.

@@ -115,6 +115,10 @@ PERCENT_LIKE_FIELDS = frozenset(
     }
 )
 
+RECENT_SPLIT_WINDOW_DAYS = 180
+SPLIT_RATIO_MATCH_TOLERANCE = 0.25
+QUARTER_DATE_RECONCILE_WINDOW_DAYS = 45
+
 # Source quality rankings (higher = more reliable)
 SOURCE_QUALITY = {
     "yfinance_statements": 10,  # Calculated directly from filings (Highest trust)
@@ -142,6 +146,50 @@ def _normalize_percent_pair(old_val: float, new_val: float) -> tuple[float, floa
     elif abs(new_val) < 1 and abs(old_val) > 1:
         new_val *= 100
     return old_val, new_val
+
+
+def _coerce_epoch_date(value: Any) -> datetime | None:
+    """Convert common epoch/date representations to a naive UTC datetime."""
+    if value in (None, ""):
+        return None
+    try:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            if stripped.isdigit():
+                return datetime.utcfromtimestamp(int(stripped))
+            return datetime.strptime(stripped, "%Y-%m-%d")
+        if isinstance(value, int | float):
+            return datetime.utcfromtimestamp(int(value))
+    except (OverflowError, OSError, TypeError, ValueError):
+        return None
+    return None
+
+
+def _parse_split_factor(value: Any) -> float | None:
+    """Parse split factors like '2:1' into a numeric factor (2.0)."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, int | float):
+        return float(value) if float(value) > 0 else None
+
+    if not isinstance(value, str):
+        return None
+
+    stripped = value.strip()
+    match = re.match(r"^\s*(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)\s*$", stripped)
+    if match:
+        numerator = float(match.group(1))
+        denominator = float(match.group(2))
+        if denominator > 0:
+            return numerator / denominator
+
+    try:
+        numeric = float(stripped)
+        return numeric if numeric > 0 else None
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -2048,6 +2096,90 @@ class SmartMarketDataFetcher(FinancialFetcher):
                 info["debtToEquity"] = de / 100.0
         return info
 
+    def _quarantine_recent_split_forward_metrics(
+        self, info: dict[str, Any], symbol: str
+    ) -> dict[str, Any]:
+        split_date = _coerce_epoch_date(info.get("lastSplitDate"))
+        split_factor = _parse_split_factor(info.get("lastSplitFactor"))
+        if not split_date or not split_factor or split_factor <= 1.0:
+            return info
+
+        reference_dt = (
+            _coerce_epoch_date(info.get("regularMarketTime"))
+            or _coerce_epoch_date(info.get("currentDate"))
+            or datetime.utcnow()
+        )
+        if (reference_dt - split_date).days > RECENT_SPLIT_WINDOW_DAYS:
+            return info
+
+        try:
+            trailing_pe = float(info["trailingPE"])
+            forward_pe = float(info["forwardPE"])
+            trailing_eps = float(info["epsTrailingTwelveMonths"])
+            forward_eps = float(info["forwardEps"])
+        except (KeyError, TypeError, ValueError):
+            return info
+
+        if min(trailing_pe, forward_pe, trailing_eps, forward_eps) <= 0:
+            return info
+
+        pe_ratio = trailing_pe / forward_pe
+        eps_ratio = forward_eps / trailing_eps
+        lower = split_factor * (1 - SPLIT_RATIO_MATCH_TOLERANCE)
+        upper = split_factor * (1 + SPLIT_RATIO_MATCH_TOLERANCE)
+        if not (lower <= pe_ratio <= upper and lower <= eps_ratio <= upper):
+            return info
+
+        notes = info.get("_data_quality_notes")
+        if not isinstance(notes, list):
+            notes = [] if notes in (None, "") else [str(notes)]
+            info["_data_quality_notes"] = notes
+        notes.append(
+            "Recent split detected: forward EPS / forward P/E appear pre-split; "
+            "quarantined forward valuation metrics."
+        )
+        info["_split_sensitive_metrics_quarantined"] = True
+        info["_split_quarantine_reason"] = "recent_split_share_basis_mismatch"
+        info["forwardPE"] = None
+        info["forwardEps"] = None
+        info["pegRatio"] = None
+        logger.warning(
+            "split_sensitive_metrics_quarantined",
+            symbol=symbol,
+            split_factor=split_factor,
+            split_date=split_date.strftime("%Y-%m-%d"),
+            pe_ratio=round(pe_ratio, 3),
+            eps_ratio=round(eps_ratio, 3),
+        )
+        return info
+
+    def _reconcile_latest_quarter_date(
+        self, info: dict[str, Any], symbol: str
+    ) -> dict[str, Any]:
+        latest_dt = _coerce_epoch_date(info.get("latest_quarter_date"))
+        most_recent_dt = _coerce_epoch_date(info.get("mostRecentQuarter"))
+        if not latest_dt or not most_recent_dt:
+            return info
+
+        delta_days = abs((latest_dt - most_recent_dt).days)
+        if delta_days <= QUARTER_DATE_RECONCILE_WINDOW_DAYS:
+            return info
+
+        newer_dt = max(latest_dt, most_recent_dt)
+        if newer_dt == latest_dt:
+            return info
+
+        info["latest_quarter_date"] = newer_dt.strftime("%Y-%m-%d")
+        info["_latest_quarter_date_source"] = "reconciled_most_recent_quarter"
+        logger.info(
+            "latest_quarter_date_reconciled",
+            symbol=symbol,
+            previous=latest_dt.strftime("%Y-%m-%d"),
+            reconciled=info["latest_quarter_date"],
+            source="mostRecentQuarter",
+        )
+        return info
+
     def _normalize_data_integrity(self, info: dict, symbol: str) -> dict:
         info = self._fix_currency_mismatch(info, symbol)
         info = self._fix_debt_equity_scaling(info, symbol)
@@ -2123,6 +2255,9 @@ class SmartMarketDataFetcher(FinancialFetcher):
                     action="keeping_trailing_pe",
                     hint="forward P/E < 5 suggests data error or stale estimate",
                 )
+
+        info = self._quarantine_recent_split_forward_metrics(info, symbol)
+        info = self._reconcile_latest_quarter_date(info, symbol)
 
         return info
 

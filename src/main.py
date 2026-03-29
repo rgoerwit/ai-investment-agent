@@ -15,7 +15,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import structlog
 from rich import box
@@ -25,6 +25,14 @@ from rich.table import Table
 
 # Import config FIRST to set telemetry/system env vars before any library imports
 from src.config import config, validate_environment_variables
+from src.eval import (
+    CURRENT_CAPTURE_SCHEMA_VERSION,
+    BaselineCaptureConfig,
+    BaselineCaptureManager,
+    BaselinePreflightResult,
+    reset_active_capture_manager,
+    set_active_capture_manager,
+)
 from src.report_generator import QuietModeReporter
 from src.runtime_diagnostics import build_analysis_validity, is_publishable_analysis
 
@@ -289,6 +297,24 @@ Examples:
         "a new analysis. Processes all tickers found in results directory.",
     )
 
+    parser.add_argument(
+        "--capture-baseline",
+        action="store_true",
+        help=(
+            "Capture a versioned baseline bundle for this run under evals/captures/. "
+            "Does not perform evaluation or baseline promotion."
+        ),
+    )
+
+    parser.add_argument(
+        "--capture-baseline-cleanup",
+        action="store_true",
+        help=(
+            "Clean up stale inflight baseline captures under evals/captures/ and exit, "
+            "or run cleanup before capture when combined with --capture-baseline."
+        ),
+    )
+
     return parser
 
 
@@ -297,9 +323,16 @@ def parse_arguments() -> argparse.Namespace:
     parser = build_arg_parser()
     args = parser.parse_args()
 
-    # Validate: --ticker is required unless --retrospective-only
-    if not args.retrospective_only and not args.ticker:
-        parser.error("--ticker is required unless --retrospective-only is specified")
+    # Validate: --ticker is required unless --retrospective-only or cleanup-only
+    if (
+        not args.retrospective_only
+        and not args.capture_baseline_cleanup
+        and not args.ticker
+    ):
+        parser.error(
+            "--ticker is required unless --retrospective-only or "
+            "--capture-baseline-cleanup is specified"
+        )
 
     if args.debug:
         args.verbose = True
@@ -583,6 +616,8 @@ def build_run_summary(
 
     return {
         "quick_mode": quick_mode,
+        "quick_model": config.quick_think_llm,
+        "deep_model": config.deep_think_llm,
         "provider_preflight": provider_preflight or {},
         "pre_screening_result": result.get("pre_screening_result", ""),
         "debate_rounds": result.get("investment_debate_state", {}).get("count", 0),
@@ -1166,6 +1201,9 @@ async def run_analysis(
     transparent_charts: bool = False,
     image_dir: Path | None = None,
     skip_charts: bool = False,
+    baseline_capture: BaselineCaptureManager | None = None,
+    capture_args: argparse.Namespace | None = None,
+    node_observer: Any | None = None,
 ) -> dict | None:
     """Run the multi-agent analysis workflow.
 
@@ -1214,6 +1252,22 @@ async def run_analysis(
         # Prepended to the HumanMessage so every agent receives it as session context.
         market_context = await _fetch_market_context(ticker, real_date)
 
+        session_id = f"{ticker}-{real_date}-{uuid.uuid4().hex[:8]}"
+        if baseline_capture:
+            baseline_capture.start_run(
+                ticker=ticker,
+                trade_date=real_date,
+                args=capture_args
+                or argparse.Namespace(
+                    ticker=ticker,
+                    quick=quick_mode,
+                    strict=strict_mode,
+                    no_memory=not config.enable_memory,
+                    capture_baseline=True,
+                ),
+                session_id=session_id,
+            )
+
         graph = create_trading_graph(
             ticker=ticker,  # BUG FIX #1: Pass ticker for isolation
             cleanup_previous=True,  # BUG FIX #1: Cleanup to prevent contamination
@@ -1228,6 +1282,8 @@ async def run_analysis(
             transparent_charts=transparent_charts,
             image_dir=image_dir,
             skip_charts=skip_charts,
+            baseline_capture=baseline_capture,
+            node_observer=node_observer,
         )
 
         _base_msg = f"Analyze {ticker} ({company_name}) for investment decision. Current Date: {real_date}."
@@ -1294,7 +1350,6 @@ async def run_analysis(
         # Get observability callbacks (Langfuse if enabled)
         from src.observability import flush_traces, get_tracing_callbacks
 
-        session_id = f"{ticker}-{real_date}-{uuid.uuid4().hex[:8]}"
         tags = [
             "quick" if quick_mode else "normal",
             f"quick-model:{config.quick_think_llm}",
@@ -1307,15 +1362,23 @@ async def run_analysis(
             tags=tags,
         )
 
-        result = await graph.ainvoke(
-            initial_state,
-            config={
-                "recursion_limit": 100,
-                "configurable": {"context": context},
-                "callbacks": tracing_callbacks,
-                "metadata": tracing_metadata,
-            },
-        )
+        capture_token = None
+        if baseline_capture:
+            capture_token = set_active_capture_manager(baseline_capture)
+
+        try:
+            result = await graph.ainvoke(
+                initial_state,
+                config={
+                    "recursion_limit": 100,
+                    "configurable": {"context": context},
+                    "callbacks": tracing_callbacks,
+                    "metadata": tracing_metadata,
+                },
+            )
+        finally:
+            if capture_token is not None:
+                reset_active_capture_manager(capture_token)
 
         # Flush traces before returning
         flush_traces()
@@ -1334,6 +1397,11 @@ async def run_analysis(
         return result
 
     except Exception as e:
+        if baseline_capture:
+            baseline_capture.reject_run(
+                [f"analysis_exception:{type(e).__name__}"],
+                stage="run_analysis",
+            )
         logger.error("analysis_failed", ticker=ticker, error=str(e), exc_info=True)
         console.print(f"\n[bold red]Error during analysis:[/bold red] {str(e)}\n")
         return None
@@ -1580,18 +1648,137 @@ def _emit_start_banner(args: argparse.Namespace, output_targets: OutputTargets) 
 
 
 async def _execute_analysis(
-    args: argparse.Namespace, output_targets: OutputTargets
+    args: argparse.Namespace,
+    output_targets: OutputTargets,
+    baseline_capture: BaselineCaptureManager | None = None,
 ) -> dict | None:
     """Run the analysis graph for the current CLI request."""
-    return await run_analysis(
-        args.ticker,
-        args.quick,
-        strict_mode=args.strict,
-        chart_format="svg" if args.svg else "png",
-        transparent_charts=args.transparent,
-        image_dir=output_targets.image_dir,
-        skip_charts=output_targets.skip_charts,
+    capture_hook = None
+    original_hooks = None
+    if baseline_capture:
+        from src.tooling.runtime import TOOL_SERVICE
+
+        original_hooks = TOOL_SERVICE.hooks
+        capture_hook = baseline_capture.make_tool_hook()
+        TOOL_SERVICE.set_hooks([*original_hooks, capture_hook])
+
+    try:
+        return await run_analysis(
+            args.ticker,
+            args.quick,
+            strict_mode=args.strict,
+            chart_format="svg" if args.svg else "png",
+            transparent_charts=args.transparent,
+            image_dir=output_targets.image_dir,
+            skip_charts=output_targets.skip_charts,
+            baseline_capture=baseline_capture,
+            capture_args=args,
+        )
+    finally:
+        if baseline_capture and original_hooks is not None:
+            from src.tooling.runtime import TOOL_SERVICE
+
+            TOOL_SERVICE.set_hooks(original_hooks)
+
+
+def _create_baseline_capture_manager(
+    args: argparse.Namespace,
+) -> BaselineCaptureManager | None:
+    if (
+        not getattr(args, "capture_baseline", False)
+        and not getattr(args, "capture_baseline_cleanup", False)
+    ) or getattr(args, "retrospective_only", False):
+        return None
+    return BaselineCaptureManager(
+        BaselineCaptureConfig(
+            enabled=True,
+            schema_version=CURRENT_CAPTURE_SCHEMA_VERSION,
+            output_root=Path("evals") / "captures",
+        )
     )
+
+
+def _run_baseline_capture_preflight(
+    args: argparse.Namespace,
+    baseline_capture: BaselineCaptureManager | None,
+) -> tuple[bool, list[str]]:
+    if baseline_capture is None:
+        return True, []
+
+    cleanup_summary = baseline_capture.cleanup_stale_inflight_runs()
+    messages: list[str] = []
+    if cleanup_summary.moved_to_rejected or cleanup_summary.removed_empty:
+        messages.append(
+            "Cleaned "
+            f"{cleanup_summary.moved_to_rejected} stale inflight capture(s)"
+            f" and removed {cleanup_summary.removed_empty} empty inflight directory(ies)."
+        )
+
+    if not getattr(args, "capture_baseline", False):
+        return True, messages
+
+    ok, errors = baseline_capture.preflight_git_clean()
+    if not ok:
+        messages.extend(errors)
+    return ok, messages
+
+
+def _print_capture_preflight_messages(
+    messages: list[str],
+    *,
+    blocked: bool,
+    quiet: bool,
+    brief: bool,
+) -> None:
+    if not messages:
+        return
+    if quiet or brief:
+        print("\n".join(messages))
+        return
+    if blocked:
+        console.print(
+            "[bold yellow]Baseline capture blocked before analysis[/bold yellow]"
+        )
+        for message in messages:
+            console.print(f"- {message}")
+        console.print()
+    else:
+        for message in messages:
+            console.print(f"[yellow]{message}[/yellow]")
+
+
+def _print_capture_result(
+    args: argparse.Namespace,
+    baseline_capture: BaselineCaptureManager | None,
+    capture_path: Path | None,
+) -> None:
+    if baseline_capture is None or capture_path is None or args.quiet or args.brief:
+        return
+    status = baseline_capture.final_status or "accepted"
+    if status == "accepted":
+        console.print(
+            f"[green]Baseline capture accepted:[/green] [cyan]{capture_path}[/cyan]"
+        )
+        return
+    first_reason = getattr(baseline_capture, "_first_rejection_reason", None)
+    console.print(
+        f"[yellow]Baseline capture rejected:[/yellow] [cyan]{capture_path}[/cyan]"
+    )
+    if first_reason:
+        console.print(f"[yellow]Reason:[/yellow] {first_reason}")
+
+
+def _finalize_baseline_capture(
+    baseline_capture: BaselineCaptureManager | None,
+    result: dict | None,
+) -> Path | None:
+    if not baseline_capture or result is None:
+        return None
+    try:
+        return baseline_capture.finalize_run(result)
+    except Exception as exc:
+        logger.error("baseline_capture_finalize_failed", error=str(exc), exc_info=True)
+        return None
 
 
 def _attach_run_summary(
@@ -1600,6 +1787,15 @@ def _attach_run_summary(
     provider_preflight: dict[str, dict[str, str]],
 ) -> None:
     """Attach the compact run summary before any persistence/output steps."""
+    result.setdefault("run_summary", {})
+    result["run_summary"]["quick_mode"] = bool(args.quick)
+    result["run_summary"] = build_run_summary(
+        result,
+        quick_mode=args.quick,
+        article_requested=bool(args.article),
+        provider_preflight=provider_preflight,
+    )
+    result["analysis_validity"] = build_analysis_validity(result)
     result["run_summary"] = build_run_summary(
         result,
         quick_mode=args.quick,
@@ -1805,28 +2001,75 @@ def _report_analysis_failure(args: argparse.Namespace) -> None:
         )
 
 
-async def main() -> int:
-    """Main entry point for the application."""
-    args = None
+async def run_with_args(
+    args: argparse.Namespace,
+    *,
+    perform_capture_preflight: bool = True,
+    capture_preflight_override: BaselinePreflightResult | None = None,
+) -> int:
+    """Run the analysis CLI flow for already-parsed arguments."""
     try:
-        args = parse_arguments()
         _apply_runtime_overrides(args)
         _validate_cli_args(args)
         output_targets = _resolve_output_targets(args)
         provider_preflight = _setup_runtime(args, output_targets)
+        baseline_capture = _create_baseline_capture_manager(args)
+
+        if baseline_capture is not None and capture_preflight_override is not None:
+            baseline_capture.apply_preflight_result(
+                git_clean=capture_preflight_override.git_clean,
+                cleanup_summary=capture_preflight_override.cleanup_summary,
+            )
+
+        preflight_ok = True
+        if perform_capture_preflight:
+            preflight_ok, preflight_messages = _run_baseline_capture_preflight(
+                args, baseline_capture
+            )
+            if preflight_messages:
+                _print_capture_preflight_messages(
+                    preflight_messages,
+                    blocked=not preflight_ok,
+                    quiet=args.quiet,
+                    brief=args.brief,
+                )
+
+        if getattr(args, "capture_baseline_cleanup", False) and not getattr(
+            args, "capture_baseline", False
+        ):
+            return 0 if preflight_ok else 1
+
+        if not preflight_ok:
+            return 1
 
         if args.retrospective_only:
             return await _run_retrospective_only(args)
 
         await _maybe_run_ticker_retrospective(args)
         welcome_banner = _emit_start_banner(args, output_targets)
-        result = await _execute_analysis(args, output_targets)
+        if baseline_capture is None:
+            result = await _execute_analysis(args, output_targets)
+        else:
+            result = await _execute_analysis(args, output_targets, baseline_capture)
 
         if not result:
+            if baseline_capture:
+                baseline_capture.reject_run(
+                    ["analysis_returned_no_result"], stage="main"
+                )
+                _finalize_baseline_capture(
+                    baseline_capture,
+                    {
+                        "analysis_validity": {"publishable": False},
+                        "artifact_statuses": {},
+                    },
+                )
             _report_analysis_failure(args)
             return 1
 
         _attach_run_summary(result, args, provider_preflight)
+        capture_path = _finalize_baseline_capture(baseline_capture, result)
+        _print_capture_result(args, baseline_capture, capture_path)
         company_name, report, reporter = _render_primary_output(
             result, args, output_targets, welcome_banner
         )
@@ -1839,14 +2082,16 @@ async def main() -> int:
         return 0
 
     except KeyboardInterrupt:
-        if not (args and (args.quiet or args.brief)):
+        if not (
+            args and (getattr(args, "quiet", False) or getattr(args, "brief", False))
+        ):
             console.print("\n[yellow]Analysis interrupted by user.[/yellow]\n")
         return 1
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else 1
     except Exception as exc:
         logger.error("unexpected_error", error=str(exc), exc_info=True)
-        if args and (args.quiet or args.brief):
+        if args and (getattr(args, "quiet", False) or getattr(args, "brief", False)):
             print(f"# Unexpected Error\n\n{str(exc)}")
         else:
             console.print(f"\n[bold red]Unexpected error:[/bold red] {str(exc)}\n")
@@ -1858,6 +2103,11 @@ async def main() -> int:
             await cleanup_async_resources()
         except Exception:
             pass
+
+
+async def main() -> int:
+    """Main entry point for the application."""
+    return await run_with_args(parse_arguments())
 
 
 if __name__ == "__main__":

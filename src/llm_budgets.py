@@ -7,7 +7,7 @@ from fractions import Fraction
 AGENT_OUTPUT_BUDGET_FRACTIONS: dict[str, Fraction] = {
     "Market Analyst": Fraction(1, 16),
     "Sentiment Analyst": Fraction(1, 32),
-    "News Analyst": Fraction(1, 16),
+    "News Analyst": Fraction(1, 8),
     "Foreign Language Analyst": Fraction(1, 16),
     "Legal Counsel": Fraction(1, 16),
     "Value Trap Detector": Fraction(1, 16),

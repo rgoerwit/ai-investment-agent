@@ -692,6 +692,62 @@ Score details here.
         )
         assert "### --- START DATA_BLOCK ---" in result["fundamentals_report"]
 
+    @pytest.mark.asyncio
+    async def test_fundamentals_analyst_enforces_quarantined_forward_metrics_and_quarter_date(
+        self,
+    ):
+        """Deterministic raw-data facts should override regenerated DATA_BLOCK values."""
+        from src.agents import create_analyst_node
+
+        mock_llm = MagicMock()
+        report = (
+            "### --- START DATA_BLOCK ---\n"
+            "SECTOR: Information Technology\n"
+            "PE_RATIO_TTM: 13.49\n"
+            "PE_RATIO_FORWARD: 6.57\n"
+            "PEG_RATIO: 0.69\n"
+            "LATEST_QUARTER_DATE: 2024-12-31\n"
+            "PFIC_RISK: MEDIUM\n"
+            "### --- END DATA_BLOCK ---\n"
+            "### FINANCIAL HEALTH DETAIL\n"
+            "Score details here.\n"
+        )
+        mock_response = SimpleNamespace(content=report, tool_calls=None)
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling",
+            new=AsyncMock(return_value=mock_response),
+        ):
+            node = create_analyst_node(
+                mock_llm,
+                "fundamentals_analyst",
+                [],
+                "fundamentals_report",
+            )
+            state = {
+                "messages": [],
+                "company_of_interest": "4396.T",
+                "trade_date": "2026-03-24",
+                "raw_fundamentals_data": (
+                    '{"_split_sensitive_metrics_quarantined": true, '
+                    '"_latest_quarter_date_source": "reconciled_most_recent_quarter", '
+                    '"latest_quarter_date": "2025-12-31"}'
+                ),
+            }
+            config = {
+                "configurable": {
+                    "context": MagicMock(ticker="4396.T", trade_date="2026-03-24")
+                }
+            }
+
+            result = await node(state, config)
+
+        assert "PE_RATIO_FORWARD: N/A" in result["fundamentals_report"]
+        assert "PEG_RATIO: N/A" in result["fundamentals_report"]
+        assert "LATEST_QUARTER_DATE: 2025-12-31" in result["fundamentals_report"]
+        assert "PE_RATIO_FORWARD: 6.57" not in result["fundamentals_report"]
+        assert "PEG_RATIO: 0.69" not in result["fundamentals_report"]
+
 
 class TestParallelDebateInfrastructure:
     """Test parallel debate state management and merging."""

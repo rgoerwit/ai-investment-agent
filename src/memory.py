@@ -30,6 +30,27 @@ from src.runtime_diagnostics import classify_failure
 
 logger = structlog.get_logger(__name__)
 
+try:
+    from src.eval import get_active_capture_manager as _get_capture_manager
+except ImportError:
+
+    def _get_capture_manager():
+        return None
+
+
+def _record_capture_memory_event(payload: dict[str, Any]) -> None:
+    try:
+        manager = _get_capture_manager()
+        if manager:
+            manager.record_memory_event(payload)
+    except Exception:
+        pass
+
+
+def _is_missing_collection_error(exc: Exception) -> bool:
+    message = str(exc)
+    return "does not exist" in message or "Collection not found" in message
+
 
 class FinancialSituationMemory:
     """
@@ -385,6 +406,16 @@ class FinancialSituationMemory:
         """
         if not self.available:
             logger.debug("memory_query_skipped", collection=self.name)
+            _record_capture_memory_event(
+                {
+                    "event": "query_similar_situations_skipped",
+                    "collection": self.name,
+                    "query_text": query_text,
+                    "n_results": n_results,
+                    "metadata_filter": metadata_filter,
+                    "available": False,
+                }
+            )
             return []
 
         try:
@@ -424,12 +455,46 @@ class FinancialSituationMemory:
                 collection=self.name,
                 results_found=len(formatted_results),
             )
+            _record_capture_memory_event(
+                {
+                    "event": "query_similar_situations",
+                    "collection": self.name,
+                    "query_text": query_text,
+                    "n_results": n_results,
+                    "metadata_filter": metadata_filter,
+                    "results": formatted_results,
+                    "available": True,
+                }
+            )
 
             return formatted_results
 
         except Exception as e:
-            logger.error(
-                "query_similar_situations_failed", collection=self.name, error=str(e)
+            error_kind = "query_failure"
+            if _is_missing_collection_error(e):
+                error_kind = "missing_collection"
+                logger.debug(
+                    "query_similar_situations_no_collection",
+                    collection=self.name,
+                    note="collection not yet created; no lessons available",
+                )
+            else:
+                logger.error(
+                    "query_similar_situations_failed",
+                    collection=self.name,
+                    error=str(e),
+                )
+            _record_capture_memory_event(
+                {
+                    "event": "query_similar_situations_failed",
+                    "collection": self.name,
+                    "query_text": query_text,
+                    "n_results": n_results,
+                    "metadata_filter": metadata_filter,
+                    "error": str(e),
+                    "error_kind": error_kind,
+                    "available": True,
+                }
             )
             return []
 
@@ -593,7 +658,7 @@ class FinancialSituationMemory:
             return {"available": True, "name": self.name, "count": count}
         except Exception as e:
             # FIX: Gracefully handle deleted collections (zombies)
-            if "does not exist" in str(e) or "Collection not found" in str(e):
+            if _is_missing_collection_error(e):
                 logger.debug("collection_deleted_externally", collection=self.name)
                 return {
                     "available": False,
@@ -890,7 +955,7 @@ def get_all_memory_stats() -> dict[str, dict[str, Any]]:
             except Exception as e:
                 name = getattr(collection_item, "name", str(collection_item))
                 # Gracefully handle zombies in all-stats too
-                if "does not exist" in str(e):
+                if _is_missing_collection_error(e):
                     continue
                 logger.error(
                     "get_collection_stats_failed", collection=name, error=str(e)
@@ -1067,6 +1132,13 @@ class MacroEventsStore:
     ) -> list["MacroEvent"]:
         """Return events where expiry > today, optionally filtered by region."""
         if not self.available:
+            _record_capture_memory_event(
+                {
+                    "event": "macro_get_active_events_skipped",
+                    "region_filter": region_filter,
+                    "available": False,
+                }
+            )
             return []
         try:
             from datetime import date as _date
@@ -1085,14 +1157,37 @@ class MacroEventsStore:
                         continue
                 events.append(_meta_to_macro_event(meta))
             events.sort(key=lambda e: e.event_date, reverse=True)
+            _record_capture_memory_event(
+                {
+                    "event": "macro_get_active_events",
+                    "region_filter": region_filter,
+                    "available": True,
+                    "events": [event.__dict__ for event in events],
+                }
+            )
             return events
         except Exception as e:
             logger.warning("macro_events_get_failed", error=str(e))
+            _record_capture_memory_event(
+                {
+                    "event": "macro_get_active_events_failed",
+                    "region_filter": region_filter,
+                    "available": True,
+                    "error": str(e),
+                }
+            )
             return []
 
     def get_structural_events_since(self, since_date: str) -> list["MacroEvent"]:
         """Return STRUCTURAL events detected after since_date (for staleness check)."""
         if not self.available:
+            _record_capture_memory_event(
+                {
+                    "event": "macro_get_structural_events_skipped",
+                    "since_date": since_date,
+                    "available": False,
+                }
+            )
             return []
         try:
             from datetime import date as _date
@@ -1111,9 +1206,25 @@ class MacroEventsStore:
             )
             events = [_meta_to_macro_event(m) for m in results.get("metadatas") or []]
             events.sort(key=lambda e: e.event_date, reverse=True)
+            _record_capture_memory_event(
+                {
+                    "event": "macro_get_structural_events",
+                    "since_date": since_date,
+                    "available": True,
+                    "events": [event.__dict__ for event in events],
+                }
+            )
             return events
         except Exception as e:
             logger.warning("macro_structural_events_get_failed", error=str(e))
+            _record_capture_memory_event(
+                {
+                    "event": "macro_get_structural_events_failed",
+                    "since_date": since_date,
+                    "available": True,
+                    "error": str(e),
+                }
+            )
             return []
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
@@ -42,7 +43,71 @@ Do NOT use markdown tables inside DATA_BLOCK.
 """
 
 
-def _normalize_structured_output(agent_key: str, content: str, ticker: str) -> str:
+def _replace_data_block_key(block: str, key: str, value: str) -> str:
+    pattern = rf"(?m)^({re.escape(key)}:\s*).*$"
+    if re.search(pattern, block):
+        return re.sub(pattern, rf"\g<1>{value}", block, count=1)
+    return block
+
+
+def _extract_raw_json_flag(raw_data: str, key: str) -> bool:
+    match = re.search(
+        rf'"{re.escape(key)}"\s*:\s*(true|false)', raw_data, re.IGNORECASE
+    )
+    return bool(match and match.group(1).lower() == "true")
+
+
+def _extract_raw_json_string(raw_data: str, key: str) -> str | None:
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*"([^"]+)"', raw_data)
+    return match.group(1) if match else None
+
+
+def _enforce_fundamentals_data_block_facts(
+    content: str, raw_data: str, ticker: str
+) -> str:
+    if not raw_data:
+        return content
+
+    data_block = extract_last_data_block(content, include_markers=True)
+    if not data_block:
+        return content
+
+    repaired_block = data_block
+    split_quarantined = _extract_raw_json_flag(
+        raw_data, "_split_sensitive_metrics_quarantined"
+    )
+    if split_quarantined:
+        repaired_block = _replace_data_block_key(
+            repaired_block, "PE_RATIO_FORWARD", "N/A"
+        )
+        repaired_block = _replace_data_block_key(repaired_block, "PEG_RATIO", "N/A")
+
+    reconciled_source = _extract_raw_json_string(
+        raw_data, "_latest_quarter_date_source"
+    )
+    reconciled_date = _extract_raw_json_string(raw_data, "latest_quarter_date")
+    if reconciled_source == "reconciled_most_recent_quarter" and reconciled_date:
+        repaired_block = _replace_data_block_key(
+            repaired_block, "LATEST_QUARTER_DATE", reconciled_date
+        )
+
+    if repaired_block == data_block:
+        return content
+
+    logger.info(
+        "fundamentals_datablock_fact_enforced",
+        ticker=ticker,
+        split_quarantined=split_quarantined,
+        latest_quarter_date=reconciled_date
+        if reconciled_source == "reconciled_most_recent_quarter"
+        else None,
+    )
+    return content.replace(data_block, repaired_block, 1)
+
+
+def _normalize_structured_output(
+    agent_key: str, content: str, ticker: str, raw_data: str = ""
+) -> str:
     """Apply narrow deterministic output repairs for known model-format drift."""
     if agent_key != "fundamentals_analyst":
         return content
@@ -71,6 +136,7 @@ def _normalize_structured_output(agent_key: str, content: str, ticker: str) -> s
             repaired_has_datablock=has_parseable_data_block(boundary_normalized),
         )
     normalized = boundary_normalized
+    normalized = _enforce_fundamentals_data_block_facts(normalized, raw_data, ticker)
     return normalized
 
 
@@ -330,7 +396,14 @@ def create_analyst_node(
                 return new_state
 
             content_str = message_utils.extract_string_content(response.content)
-            content_str = _normalize_structured_output(agent_key, content_str, ticker)
+            raw_data_for_normalization = (
+                state.get("raw_fundamentals_data", "")
+                if agent_key == "fundamentals_analyst"
+                else ""
+            )
+            content_str = _normalize_structured_output(
+                agent_key, content_str, ticker, raw_data_for_normalization
+            )
 
             if (
                 allow_retry
@@ -369,7 +442,7 @@ def create_analyst_node(
                         retry_response.content
                     )
                     retry_content_str = _normalize_structured_output(
-                        agent_key, retry_content_str, ticker
+                        agent_key, retry_content_str, ticker, raw_data_for_normalization
                     )
                     retry_tool_calls = getattr(retry_response, "tool_calls", None)
                     retry_has_tool_calls = (

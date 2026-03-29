@@ -59,6 +59,26 @@ class Toolkit:
 
         return [search_legal_tax_disclosures]
 
+    def get_portfolio_tools(self):
+        """Read-only IBKR/account tools for portfolio-aware workflows."""
+        from src.tools.portfolio import (
+            get_ibkr_account_status,
+            get_ibkr_cash_summary,
+            get_ibkr_holdings,
+            get_ibkr_live_orders,
+            get_ibkr_portfolio_snapshot,
+            get_ibkr_watchlist,
+        )
+
+        return [
+            get_ibkr_holdings,
+            get_ibkr_watchlist,
+            get_ibkr_live_orders,
+            get_ibkr_cash_summary,
+            get_ibkr_account_status,
+            get_ibkr_portfolio_snapshot,
+        ]
+
     def get_value_trap_tools(self):
         """Tools for Value Trap Detector (governance & capital allocation analysis)."""
         from src.tools.news import get_news

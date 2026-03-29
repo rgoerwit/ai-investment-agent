@@ -37,6 +37,7 @@ from pathlib import Path
 # Ensure project root is on path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.ibkr.account_service import IbkrAccountService
 from src.ibkr.exceptions import IBKRAuthError, IBKRError
 from src.ibkr.models import (
     AnalysisRecord,
@@ -44,16 +45,30 @@ from src.ibkr.models import (
     PortfolioSummary,
     ReconciliationItem,
 )
+from src.ibkr.portfolio_data_service import IbkrPortfolioDataService
+from src.ibkr.recommendation_service import (
+    PortfolioRecommendationRequest,
+    PortfolioRecommendationService,
+)
 from src.ibkr.reconciler import (
     AnalysisLoadProgress,
     compute_portfolio_health,
     load_latest_analyses,
     reconcile,
 )
+from src.ibkr.refresh_service import (
+    AnalysisFreshnessSummary,
+    AnalysisRefreshService,
+    RefreshActivity,
+    RefreshPolicy,
+    run_ticker_for,
+)
 
 _IBKR_OAUTH_PORTAL = (
     "https://ndcdyn.interactivebrokers.com/sso/Login?action=OAUTH&RL=1&ip2loc=US"
 )
+
+_refresh_service = AnalysisRefreshService()
 
 
 def _python_command_prefix() -> str:
@@ -315,7 +330,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--refresh-stale",
         action="store_true",
-        help="Re-run evaluator on stale tickers and positions with no analysis",
+        help="Backward-compatible alias for --refresh-policy blocking",
+    )
+    parser.add_argument(
+        "--refresh-policy",
+        choices=("off", "blocking", "proactive"),
+        default=None,
+        help=(
+            "Auto-refresh policy: off (default for reports), blocking "
+            "(default for --recommend), or proactive (also refresh due-soon holds)"
+        ),
+    )
+    parser.add_argument(
+        "--refresh-limit",
+        type=int,
+        default=10,
+        help="Maximum tickers to auto-refresh in one run (default: 10)",
     )
     parser.add_argument(
         "--sector-limit",
@@ -363,7 +393,20 @@ def parse_args() -> argparse.Namespace:
     if args.recommend or args.execute:
         args.report_only = False
 
+    if args.refresh_limit < 1:
+        parser.error("--refresh-limit must be >= 1")
+
     return args
+
+
+def _resolve_refresh_policy(args: argparse.Namespace) -> RefreshPolicy:
+    """Resolve refresh policy from explicit flags and execution mode."""
+    return _refresh_service.resolve_policy(
+        explicit_policy=getattr(args, "refresh_policy", None),
+        refresh_stale=getattr(args, "refresh_stale", False),
+        recommend=getattr(args, "recommend", False),
+        read_only=getattr(args, "read_only", False),
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -998,25 +1041,10 @@ def _display_ticker(item: ReconciliationItem) -> str:
     """Return IBKR-format symbol for all user-visible tickers.
 
     IBKR format (no exchange suffix, e.g. "WDO", "7203", "MEGP") is what the
-    user sees and types in the IBKR UI.  Run commands use _run_ticker_for()
+    user sees and types in the IBKR UI.  Run commands use run_ticker_for()
     which returns yFinance format with exchange suffix (e.g. "WDO.TO").
     """
     return item.ticker.ibkr
-
-
-def _run_ticker_for(item: ReconciliationItem) -> str:
-    """Return yfinance ticker for --ticker run commands.
-
-    item.ticker.yf is canonical when exchange is known (the common case).
-    Fall back to the analysis record ticker when the position's exchange was
-    unresolvable (e.g. SMART for a XETRA stock at ingestion time).
-    """
-    if item.ticker.has_suffix:
-        return item.ticker.yf
-    # Fallback: analysis record may carry the canonical suffixed form
-    if item.analysis and "." in item.analysis.ticker:
-        return item.analysis.ticker
-    return item.ticker.yf  # US/ADR or genuinely unresolvable
 
 
 def format_report(
@@ -1029,6 +1057,8 @@ def format_report(
     watchlist_name: str | None = None,
     watchlist_total: int | None = None,
     watchlist_tickers: set[str] | None = None,
+    freshness_summary: AnalysisFreshnessSummary | None = None,
+    refresh_activity: RefreshActivity | None = None,
 ) -> str:
     """Format reconciliation results as sectioned human-readable text."""
     lines: list[str] = []
@@ -1082,6 +1112,10 @@ def format_report(
     macro_reviews = [
         i for i in items if i.action == "REVIEW" and i.sell_type == "SOFT_REJECT"
     ]
+    # STOP_BREACH items demoted to REVIEW when fundamentals are intact during correlated event
+    macro_stop_reviews = [
+        i for i in items if i.action == "REVIEW" and i.sell_type == "STOP_BREACH"
+    ]
     trims = [i for i in items if i.action == "TRIM"]
     removes = [i for i in items if i.action == "REMOVE"]
     adds = [i for i in items if i.action == "ADD"]
@@ -1097,10 +1131,17 @@ def format_report(
     ]
     holds_real = [i for i in items if i.action == "HOLD" and not i.is_watchlist]
     holds_watch = [i for i in items if i.action == "HOLD" and i.is_watchlist]
-    # Exclude macro_reviews from regular REVIEW section (they get their own block below)
+    # Exclude macro_reviews and macro_stop_reviews from regular REVIEW section
     reviews = [
-        i for i in items if i.action == "REVIEW" and i.sell_type != "SOFT_REJECT"
+        i
+        for i in items
+        if i.action == "REVIEW" and i.sell_type not in ("SOFT_REJECT", "STOP_BREACH")
     ]
+    freshness_summary = freshness_summary or _refresh_service.classify(
+        items,
+        max_age_days=max_age_days,
+    )
+    refresh_activity = refresh_activity or RefreshActivity(policy="off", limit=0)
 
     def _section(title: str, subtitle: str = "") -> None:
         lines.append(_DIVIDER)
@@ -1306,7 +1347,7 @@ def format_report(
         lines.append("")
         lines.append("  → Re-run before acting:")
         for _c in candidates:
-            _run_t = _run_ticker_for(_c)
+            _run_t = run_ticker_for(_c)
             _sfx_warn = (
                 "  ← ⚠ verify exchange suffix (no '.' in ticker)"
                 if "." not in _run_t
@@ -1625,7 +1666,7 @@ def format_report(
             f"║  {f'{_cnt} positions changed verdict on {_dt}':<{_W}}║",
             f"║  {f'({_pct} of held positions) — probable macro event':<{_W}}║",
             f"║  {'Likely macro event, not individual thesis failure.':<{_W}}║",
-            f"║  {'Execute STOP-BREACH SELLs; review others first.':<{_W}}║",
+            f"║  {'Execute stops (weak only); review strong stops first.':<{_W}}║",
             "╚" + "═" * 54 + "╝",
         ]
         try:
@@ -1654,12 +1695,161 @@ def format_report(
             lines.append(bl)
         lines.append("")
 
+    # ── ANALYSIS FRESHNESS ───────────────────────────────────────────────────
+    _blocking_rows = freshness_summary.blocking_now
+    _queue_rows = freshness_summary.stale_in_queue
+    _due_rows = freshness_summary.due_soon
+    _candidate_rows = freshness_summary.candidate_blocked
+    if (
+        _blocking_rows
+        or _queue_rows
+        or _due_rows
+        or _candidate_rows
+        or refresh_activity.refreshed
+        or refresh_activity.failed
+        or refresh_activity.skipped_due_to_policy
+        or refresh_activity.skipped_due_to_limit
+        or refresh_activity.skipped_read_only
+    ):
+        _section(
+            "ANALYSIS FRESHNESS", "what is stale, what is queued, what happens next"
+        )
+
+        lines.append("  Blocking now:")
+        if _blocking_rows:
+            for row in _blocking_rows:
+                detail_bits = [row.reason_family]
+                if row.age_days is not None:
+                    detail_bits.append(f"{row.age_days}d old")
+                if row.expires_date:
+                    detail_bits.append(f"expired {row.expires_date}")
+                lines.append(
+                    f"    {row.display_ticker:<12} {'  ·  '.join(detail_bits)}"
+                    f"  →  {_analysis_command(row.run_ticker)}"
+                )
+        else:
+            lines.append("    None")
+        lines.append("")
+
+        if _candidate_rows:
+            lines.append("  Candidates blocked:")
+            for row in _candidate_rows:
+                detail_bits = [row.reason_family]
+                if row.age_days is not None:
+                    detail_bits.append(f"{row.age_days}d old")
+                lines.append(
+                    f"    {row.display_ticker:<12} {'  ·  '.join(detail_bits)}"
+                    f"  →  {_analysis_command(row.run_ticker)}"
+                )
+            lines.append("")
+
+        lines.append("  Already in queue:")
+        if _queue_rows:
+            for row in _queue_rows:
+                detail_bits = [f"already in {row.action} queue"]
+                if row.age_days is not None:
+                    detail_bits.append(f"{row.age_days}d old")
+                lines.append(
+                    f"    {row.display_ticker:<12} {'  ·  '.join(detail_bits)}"
+                )
+        else:
+            lines.append("    None")
+        lines.append("")
+
+        lines.append("  Due soon:")
+        if _due_rows:
+            for row in sorted(
+                _due_rows,
+                key=lambda current: (
+                    current.days_until_due
+                    if current.days_until_due is not None
+                    else 9999
+                ),
+            ):
+                due_bits: list[str] = []
+                if row.expires_date:
+                    due_bits.append(f"expires {row.expires_date}")
+                if row.days_until_due is not None:
+                    due_bits.append(f"{row.days_until_due}d remaining")
+                lines.append(
+                    f"    {row.display_ticker:<12} {'  ·  '.join(due_bits)}"
+                    f"  →  {_analysis_command(row.run_ticker)}"
+                )
+        else:
+            lines.append("    None")
+        lines.append("")
+
+        lines.append("  Refresh activity this run:")
+        lines.append(
+            f"    Policy: {refresh_activity.policy}"
+            + (f"  ·  limit {refresh_activity.limit}" if refresh_activity.limit else "")
+        )
+        if refresh_activity.refreshed:
+            lines.append(f"    Refreshed: {', '.join(refresh_activity.refreshed)}")
+        if refresh_activity.failed:
+            lines.append(f"    Failed: {', '.join(refresh_activity.failed)}")
+        if refresh_activity.skipped_read_only:
+            lines.append(
+                "    Skipped (read-only): "
+                + ", ".join(refresh_activity.skipped_read_only)
+            )
+        if refresh_activity.skipped_due_to_policy:
+            lines.append(
+                "    Skipped (policy): "
+                + ", ".join(refresh_activity.skipped_due_to_policy)
+            )
+        if refresh_activity.skipped_due_to_limit:
+            lines.append(
+                "    Deferred by limit: "
+                + ", ".join(refresh_activity.skipped_due_to_limit)
+            )
+        if not (
+            refresh_activity.refreshed
+            or refresh_activity.failed
+            or refresh_activity.skipped_read_only
+            or refresh_activity.skipped_due_to_policy
+            or refresh_activity.skipped_due_to_limit
+        ):
+            lines.append("    No refresh actions were needed.")
+        lines.append("")
+
+        lines.append(
+            "  User action: "
+            + _refresh_service.user_action(
+                freshness_summary,
+                refresh_activity,
+                show_recommendations=show_recommendations,
+                command_builder=_portfolio_manager_command,
+            )
+        )
+        lines.append("")
+
     # ── SELLS — STOP BREACHED (mechanical — execute) ─────────────────────────
     if stop_sells:
         _section("SELLS — STOP BREACHED", "mechanical — execute these")
         for item in stop_sells:
             ccy = _item_currency(item)
             lines.append(f"{_order_line(item, ccy)}  {_norm_reason(item.reason)}")
+            sl = _score_line(item)
+            if sl:
+                lines.append(sl)
+            _append_pnl_proceeds(item, ccy)
+            note = _order_note(item)
+            if note:
+                lines.append(note)
+            lines.append("")
+
+    # ── STOP BREACHES UNDER REVIEW (macro event — fundamentals intact) ───────
+    if macro_stop_reviews:
+        _section(
+            "STOP BREACHES UNDER REVIEW",
+            "macro event — fundamentals intact — review before executing",
+        )
+        for item in macro_stop_reviews:
+            ccy = _item_currency(item)
+            # Strip internal MACRO_STOP annotation — section header contextualises it
+            _display_reason = _norm_reason(item.reason.split("  [MACRO_STOP:")[0])
+            lines.append(f"{_order_line(item, ccy)}  {_display_reason}")
             sl = _score_line(item)
             if sl:
                 lines.append(sl)
@@ -1970,12 +2160,12 @@ def format_report(
 
     # ── REVIEWS ───────────────────────────────────────────────────────────────
     if reviews:
-        _section("REVIEWS", "stale or price-drifted — re-run analysis")
+        _section("REVIEWS", "analysis not decision-safe — refresh before acting")
         for item in reviews:
             reason_short = item.reason.replace("Stale analysis: ", "").replace(
                 "Position held but no evaluator analysis found", "no analysis found"
             )
-            _run_t = _run_ticker_for(item)
+            _run_t = run_ticker_for(item)
             _sfx_warn = (
                 "  ← ⚠ exchange unknown, verify suffix" if "." not in _run_t else ""
             )
@@ -2092,10 +2282,9 @@ def format_report(
             lines.append("")
 
     # ── ACTION PLAN ───────────────────────────────────────────────────────────
-    # Show a sequenced action plan: what to do today vs after 2-day settlement,
-    # and which HOLD positions are approaching their staleness deadline.
-    from datetime import date, timedelta
-    from datetime import datetime as _dt
+    # Show a sequenced action plan: what to do today vs after settlement,
+    # plus any pending refresh follow-through the operator still owns.
+    from datetime import date
 
     today_str = date.today().isoformat()
     action_today = [i for i in items if i.action in ("SELL", "TRIM")]
@@ -2115,41 +2304,20 @@ def format_report(
             settle_groups[i.settlement_date] = (
                 settle_groups.get(i.settlement_date, 0.0) + i.cash_impact_usd
             )
-    # Upcoming review deadlines: real HOLD positions (not watchlist) nearing max_age_days
-    upcoming_reviews: list[
-        tuple[str, str, str, int]
-    ] = []  # (disp_sym, run_ticker, expires_date, days_left)
-    for item in items:
-        if item.action == "HOLD" and not item.is_watchlist and item.analysis:
-            remaining_days = max_age_days - item.analysis.age_days
-            if 0 < remaining_days <= 7:
-                try:
-                    expires_dt = _dt.strptime(
-                        item.analysis.analysis_date, "%Y-%m-%d"
-                    ) + timedelta(days=max_age_days)
-                    upcoming_reviews.append(
-                        (
-                            _display_ticker(item),
-                            _run_ticker_for(item),
-                            expires_dt.date().isoformat(),
-                            remaining_days,
-                        )
-                    )
-                except (ValueError, TypeError):
-                    pass
-
     if (
         action_today
         or funded_today
         or dip_candidates
         or settle_groups
-        or upcoming_reviews
         or _cands_deduped
         or removes
+        or refresh_activity.refreshed
+        or refresh_activity.failed
+        or refresh_activity.skipped_due_to_limit
     ):
         _section(
             "ACTION PLAN",
-            "execution orders · watchlist moves · when proceeds clear · re-analysis deadlines",
+            "execution orders · watchlist moves · when proceeds clear · refresh follow-through",
         )
 
         if action_today or funded_today:
@@ -2261,7 +2429,7 @@ def format_report(
                     f"  {_dstars}  score {_dscore:.0f}"
                     f"  H:{_dh}% G:{_dg}%"
                     f"  [{_dqty}]"
-                    f"  →  {_analysis_command(_run_ticker_for(_di))}"
+                    f"  →  {_analysis_command(run_ticker_for(_di))}"
                 )
             if _dips_in_flight:
                 lines.append(
@@ -2286,7 +2454,7 @@ def format_report(
                 lines.append(
                     f"    → ADD TO WATCHLIST  {_display_ticker(i)}"
                     f"  — analysis {i.analysis.analysis_date if i.analysis else '?'} says BUY{_quick_note}"
-                    f"  →  {_analysis_command(_run_ticker_for(i))}"
+                    f"  →  {_analysis_command(run_ticker_for(i))}"
                 )
             skipped = len(_cands_actionable) - len(strong_candidates)
             if skipped > 0:
@@ -2317,17 +2485,24 @@ def format_report(
             lines.append(f"        {_portfolio_manager_command('--recommend')}")
             lines.append("")
 
-        if upcoming_reviews:
-            lines.append("  Upcoming review deadlines:")
-            for disp_sym, yf_t, expires, days_left in sorted(
-                upcoming_reviews, key=lambda x: x[3]
-            ):
-                _sfx_warn = (
-                    "  ← ⚠ exchange unknown, verify suffix" if "." not in yf_t else ""
-                )
+        if (
+            refresh_activity.refreshed
+            or refresh_activity.failed
+            or refresh_activity.skipped_due_to_limit
+        ):
+            lines.append("  ANALYSIS REFRESH:")
+            if refresh_activity.refreshed:
                 lines.append(
-                    f"    → {disp_sym:<14} expires {expires}  ({days_left}d remaining)"
-                    f"  →  {_analysis_command(yf_t)}{_sfx_warn}"
+                    f"    ✓ Refreshed this run: {', '.join(refresh_activity.refreshed)}"
+                )
+            if refresh_activity.failed:
+                lines.append(
+                    f"    → Retry failed refreshes: {', '.join(refresh_activity.failed)}"
+                )
+            if refresh_activity.skipped_due_to_limit:
+                lines.append(
+                    "    → Remaining after limit: "
+                    + ", ".join(refresh_activity.skipped_due_to_limit)
                 )
             lines.append("")
 
@@ -2371,12 +2546,44 @@ def format_report(
 def format_json(
     items: list[ReconciliationItem],
     portfolio: PortfolioSummary,
+    *,
+    freshness_summary: AnalysisFreshnessSummary | None = None,
+    refresh_activity: RefreshActivity | None = None,
+    max_age_days: int = 14,
+    show_recommendations: bool = False,
 ) -> str:
     """Format reconciliation results as JSON."""
+    freshness_summary = freshness_summary or _refresh_service.classify(
+        items,
+        max_age_days=max_age_days,
+    )
+    refresh_activity = refresh_activity or RefreshActivity(policy="off", limit=0)
     data = {
         "timestamp": datetime.now().isoformat(),
         "portfolio": portfolio.model_dump(),
         "items": [item.model_dump() for item in items],
+        "analysis_freshness_summary": {
+            "blocking_now_count": len(freshness_summary.blocking_now),
+            "stale_in_queue_count": len(freshness_summary.stale_in_queue),
+            "due_soon_count": len(freshness_summary.due_soon),
+            "candidate_blocked_count": len(freshness_summary.candidate_blocked),
+            "refreshed_this_run": refresh_activity.refreshed,
+            "refresh_failed": refresh_activity.failed,
+            "refresh_policy": refresh_activity.policy,
+            "manual_action_required": _refresh_service.user_action(
+                freshness_summary,
+                refresh_activity,
+                show_recommendations=show_recommendations,
+                command_builder=_portfolio_manager_command,
+            )
+            != "none",
+            "user_action": _refresh_service.user_action(
+                freshness_summary,
+                refresh_activity,
+                show_recommendations=show_recommendations,
+                command_builder=_portfolio_manager_command,
+            ),
+        },
     }
     return json.dumps(data, indent=2, default=str)
 
@@ -2384,24 +2591,6 @@ def format_json(
 # ══════════════════════════════════════════════════════════════════════════════
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
-
-
-async def refresh_stale_analysis(ticker: str, quick: bool = True) -> bool:
-    """Re-run evaluator on a stale ticker."""
-    try:
-        from src.main import run_analysis, save_results_to_file
-
-        print(f"  Re-analyzing {ticker} (quick={quick})...", file=sys.stderr)
-        result = await run_analysis(ticker=ticker, quick_mode=quick, skip_charts=True)
-        if result:
-            save_results_to_file(result, ticker, quick_mode=quick)
-            print(f"  {ticker} re-analysis complete.", file=sys.stderr)
-            return True
-        print(f"  {ticker} re-analysis returned no result.", file=sys.stderr)
-        return False
-    except Exception as e:
-        print(f"  {ticker} re-analysis failed: {e}", file=sys.stderr)
-        return False
 
 
 def cmd_test_auth(args) -> None:
@@ -2413,8 +2602,6 @@ def cmd_test_auth(args) -> None:
     account information confirming the session is live.
     """
     try:
-        from src.ibkr.client import IbkrClient
-        from src.ibkr.portfolio import build_portfolio_summary
         from src.ibkr_config import ibkr_config
     except ImportError:
         print(
@@ -2434,9 +2621,16 @@ def cmd_test_auth(args) -> None:
     account_id = args.account_id or ibkr_config.ibkr_account_id
 
     print(f"Connecting to IBKR (account: {account_id})...", file=sys.stderr)
+    service = IbkrAccountService(
+        config=ibkr_config,
+    )
     try:
-        client = IbkrClient(ibkr_config)
-        client.connect(brokerage_session=False)
+        status = asyncio.run(
+            service.verify_connection(
+                account_id=account_id,
+                include_key_validation=False,
+            )
+        )
     except IBKRAuthError as e:
         print(f"\nAuthentication error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -2444,33 +2638,22 @@ def cmd_test_auth(args) -> None:
         print(f"\nConnection error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    try:
-        accounts = client.get_accounts()
-        ledger = client.get_ledger(account_id)
-        raw_positions = client.get_positions(account_id)
-    except IBKRError as e:
-        print(f"\nFailed to fetch account data: {e}", file=sys.stderr)
-        client.close()
-        sys.exit(1)
-
-    client.close()
-
-    summary = build_portfolio_summary(ledger, [], account_id)
-
     print()
     print("=== IBKR Authentication: OK ===")
     print()
     print(f"  Configured account:  {account_id}")
-    if accounts:
-        print(f"  Accounts visible:    {', '.join(accounts)}")
+    if status.visible_accounts:
+        print(f"  Accounts visible:    {', '.join(status.visible_accounts)}")
     print(f"  Signature key:       {key_info.get('signature_key', 'N/A')}")
     print(f"  Encryption key:      {key_info.get('encryption_key', 'N/A')}")
-    print(f"  Portfolio value:     ${summary.portfolio_value_usd:,.2f}")
     print(
-        f"  Cash balance:        ${summary.cash_balance_usd:,.2f}"
-        f"  ({summary.cash_pct:.1f}%)"
+        f"  Portfolio value:     ${status.portfolio_summary.portfolio_value_usd:,.2f}"
     )
-    print(f"  Open positions:      {len(raw_positions)}")
+    print(
+        f"  Cash balance:        ${status.portfolio_summary.cash_balance_usd:,.2f}"
+        f"  ({status.portfolio_summary.cash_pct:.1f}%)"
+    )
+    print(f"  Open positions:      {status.raw_position_count}")
     print()
 
 
@@ -2599,99 +2782,71 @@ def _load_ibkr_context(
     list[dict],
 ]:
     """Load live IBKR state with explicit user-visible phase status."""
-    if client_cls is None or read_portfolio_fn is None or read_watchlist_fn is None:
-        from src.ibkr.client import IbkrClient
-        from src.ibkr.portfolio import read_portfolio, read_watchlist
-
-        client_cls = IbkrClient
-        read_portfolio_fn = read_portfolio
-        read_watchlist_fn = read_watchlist
-
     if config is None:
         from src.ibkr_config import ibkr_config
 
         config = ibkr_config
+    from src.ibkr.client import IbkrClient
+    from src.ibkr.portfolio import read_portfolio, read_watchlist
 
-    _print_status("Preparing IBKR client...")
-    _prompt_for_missing_secret(config)
-    client = client_cls(config)
-
-    _print_status("Connecting to IBKR...")
-    client.connect(brokerage_session=False)
-
-    account_id = args.account_id or config.ibkr_account_id
-
-    _print_status("Loading portfolio from IBKR...")
-    positions, portfolio = read_portfolio_fn(
-        client,
-        account_id,
-        args.cash_buffer,
+    service = IbkrPortfolioDataService(
+        config=config,
+        client_cls=client_cls or IbkrClient,
+        read_portfolio_fn=read_portfolio_fn or read_portfolio,
+        read_watchlist_fn=read_watchlist_fn or read_watchlist,
+        prompt_for_missing_secret_fn=_prompt_for_missing_secret,
     )
 
-    watchlist_tickers: set[str] = set()
-    loaded_watchlist_name: str | None = None
-    loaded_watchlist_total: int | None = None
-
-    # args.watchlist_name is None  → user didn't pass the flag; try the default
-    #                                name but don't abort if missing.
-    # args.watchlist_name is a str → explicitly requested; abort if not found.
-    wl_name_hint = (
-        args.watchlist_name
-        if args.watchlist_name is not None
-        else ""  # empty → first available watchlist
-    )
     wl_explicitly_requested = args.watchlist_name is not None
+    snapshot = asyncio.run(
+        service.fetch_snapshot(
+            account_id=args.account_id or config.ibkr_account_id,
+            watchlist_name=args.watchlist_name,
+            explicitly_requested=wl_explicitly_requested,
+            cash_buffer_pct=args.cash_buffer,
+            include_live_orders=args.recommend,
+            progress=_print_status,
+        )
+    )
 
-    _print_status("Loading watchlist from IBKR...")
-    wl_result = read_watchlist_fn(client, wl_name_hint)
-    if wl_result is None:
-        if wl_explicitly_requested:
-            print(
-                f"Error: watchlist '{wl_name_hint}' not found in IBKR.\n"
-                f"Use --watchlist-name with a substring that matches one of your IBKR watchlist names.",
-                file=sys.stderr,
-            )
-            client.close()
-            sys.exit(1)
-    elif len(wl_result) == 0:
-        if wl_explicitly_requested:
-            print(
-                f"Warning: could not load watchlist '{wl_name_hint}' "
-                f"(API error or watchlist is empty — see log above). "
-                f"Continuing without watchlist filtering.",
-                file=sys.stderr,
-            )
-    else:
-        watchlist_tickers = wl_result
-        loaded_watchlist_name = wl_name_hint or None
-        loaded_watchlist_total = len(wl_result)
+    watchlist = snapshot.watchlist
+    if not watchlist.found and wl_explicitly_requested:
+        wl_name_hint = args.watchlist_name or ""
         print(
-            f"Loaded {len(watchlist_tickers)} watchlist tickers from '{wl_name_hint}'",
+            f"Error: watchlist '{wl_name_hint}' not found in IBKR.\n"
+            f"Use --watchlist-name with a substring that matches one of your IBKR watchlist names.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if watchlist.found and not watchlist.tickers and wl_explicitly_requested:
+        wl_name_hint = args.watchlist_name or ""
+        print(
+            f"Warning: could not load watchlist '{wl_name_hint}' "
+            f"(API error or watchlist is empty — see log above). "
+            f"Continuing without watchlist filtering.",
+            file=sys.stderr,
+        )
+    if watchlist.tickers:
+        loaded_name = args.watchlist_name or ""
+        print(
+            f"Loaded {len(watchlist.tickers)} watchlist tickers from '{loaded_name}'",
             file=sys.stderr,
         )
 
-    live_orders_data: list[dict] = []
-    if args.recommend:
-        _print_status("Loading live orders from IBKR...")
-        try:
-            live_orders_data = client.get_live_orders()
-        except Exception:
-            pass  # fail-safe: annotation omitted if unavailable
-
-    client.close()
     return (
-        positions,
-        portfolio,
-        watchlist_tickers,
-        loaded_watchlist_name,
-        loaded_watchlist_total,
-        live_orders_data,
+        snapshot.positions,
+        snapshot.portfolio,
+        watchlist.tickers,
+        watchlist.loaded_name,
+        watchlist.total,
+        snapshot.live_orders,
     )
 
 
 def main() -> None:
     args = parse_args()
     _configure_logging(args.debug)
+    refresh_policy = _resolve_refresh_policy(args)
 
     # --test-auth exits immediately after credential check — no analyses needed.
     if args.test_auth:
@@ -2710,127 +2865,95 @@ def main() -> None:
         _preflight_ibkr_requirements()
 
     results_dir = Path(args.results_dir)
-
-    # Load analyses from disk (always works, no IBKR needed)
-    analyses = _load_analyses_with_progress(results_dir)
-    if not analyses:
-        print(f"No analysis JSONs found in {results_dir}/", file=sys.stderr)
-        print(
-            f"Run some analyses first: {_analysis_command('7203.T')} --output results/7203.T.md",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    # Read IBKR portfolio (or use empty if --read-only)
-    positions: list[NormalizedPosition] = []
-    portfolio = PortfolioSummary()
-
-    watchlist_tickers: set[str] = set()
-    _loaded_watchlist_name: str | None = None  # set when watchlist loads successfully
-    _loaded_watchlist_total: int | None = None  # total tickers on the watchlist
-    _live_orders_data: list[dict] = []
-
     if args.read_only:
         print("Read-only mode: no IBKR connection", file=sys.stderr)
-        # In read-only mode, just show analyses status
-        portfolio = PortfolioSummary(
-            portfolio_value_usd=0,
-            cash_balance_usd=0,
-            available_cash_usd=0,
-        )
-    else:
-        try:
-            (
-                positions,
-                portfolio,
-                watchlist_tickers,
-                _loaded_watchlist_name,
-                _loaded_watchlist_total,
-                _live_orders_data,
-            ) = _load_ibkr_context(args)
 
-        except ImportError:
+    portfolio_service = None
+    if not args.read_only:
+        portfolio_service = IbkrPortfolioDataService(
+            prompt_for_missing_secret_fn=_prompt_for_missing_secret,
+        )
+
+    async def _run_analysis_for_refresh(
+        *,
+        ticker: str,
+        quick_mode: bool,
+        skip_charts: bool,
+    ) -> dict | None:
+        from src.main import run_analysis
+
+        return await run_analysis(
+            ticker=ticker,
+            quick_mode=quick_mode,
+            skip_charts=skip_charts,
+        )
+
+    def _save_refresh_result(result, ticker: str, *, quick_mode: bool) -> Path:
+        from src.main import save_results_to_file
+
+        return save_results_to_file(result, ticker, quick_mode=quick_mode)
+
+    service = PortfolioRecommendationService(
+        portfolio_data_service=portfolio_service,
+        refresh_service=_refresh_service,
+        load_analyses_fn=_load_analyses_with_progress,
+        reconcile_fn=reconcile,
+        compute_portfolio_health_fn=compute_portfolio_health,
+        run_analysis_fn=_run_analysis_for_refresh,
+        save_results_fn=_save_refresh_result,
+    )
+
+    request = PortfolioRecommendationRequest(
+        results_dir=results_dir,
+        account_id=args.account_id or None,
+        watchlist_name=args.watchlist_name,
+        cash_buffer=args.cash_buffer,
+        max_age_days=args.max_age,
+        drift_pct=args.drift_pct,
+        sector_limit_pct=args.sector_limit,
+        exchange_limit_pct=args.exchange_limit,
+        recommend=args.recommend,
+        read_only=args.read_only,
+        quick_mode=args.quick,
+        refresh_policy=refresh_policy,
+        refresh_limit=args.refresh_limit,
+    )
+
+    try:
+        bundle = asyncio.run(service.build_bundle(request, progress=_print_status))
+    except ValueError as e:
+        if str(e).startswith("No analysis JSONs found in "):
+            print(f"No analysis JSONs found in {results_dir}/", file=sys.stderr)
             print(
-                "ibind not installed. Run: poetry install\n"
-                "Or use --read-only for offline mode.",
+                f"Run some analyses first: {_analysis_command('7203.T')} --output results/7203.T.md",
                 file=sys.stderr,
             )
             sys.exit(1)
-        except IBKRAuthError as e:
-            print(f"IBKR auth error: {e}", file=sys.stderr)
-            print("Check IBKR credentials in .env or use --read-only", file=sys.stderr)
-            sys.exit(1)
-        except IBKRError as e:
-            print(f"IBKR error: {e}", file=sys.stderr)
-            sys.exit(1)
-
-    # Reconcile
-    items = reconcile(
-        positions=positions,
-        analyses=analyses,
-        portfolio=portfolio,
-        max_age_days=args.max_age,
-        drift_threshold_pct=args.drift_pct,
-        sector_limit_pct=args.sector_limit,
-        exchange_limit_pct=args.exchange_limit,
-        watchlist_tickers=watchlist_tickers if watchlist_tickers else None,
-    )
-
-    # Compute portfolio-level health flags (uses weights populated by reconcile()).
-    # Pass reconciliation_items so CORRELATED_SELL_EVENT can be detected and
-    # SOFT_REJECT SELLs demoted to REVIEW in-place.
-    health_flags = compute_portfolio_health(
-        positions=positions,
-        analyses=analyses,
-        portfolio=portfolio,
-        max_age_days=args.max_age,
-        reconciliation_items=items,
-    )
-
-    # Handle stale refreshes — also picks up positions with no analysis at all
-    if args.refresh_stale:
-        stale_tickers = [
-            _run_ticker_for(item)
-            for item in items
-            if item.action == "REVIEW"
-            and (
-                "stale" in (item.reason or "").lower()
-                or "no evaluator analysis found" in (item.reason or "").lower()
-                or "no analysis found" in (item.reason or "").lower()
-            )
-        ]
-        if stale_tickers:
+        if "watchlist '" in str(e) and " not found in IBKR" in str(e):
             print(
-                f"\nRefreshing {len(stale_tickers)} stale analyses...", file=sys.stderr
+                f"Error: {str(e)}.\n"
+                "Use --watchlist-name with a substring that matches one of your IBKR watchlist names.",
+                file=sys.stderr,
             )
-            for index, ticker in enumerate(stale_tickers, start=1):
-                _print_status(
-                    f"Refreshing stale analysis {index}/{len(stale_tickers)}: {ticker}"
-                )
-                asyncio.run(refresh_stale_analysis(ticker, quick=args.quick))
+            sys.exit(1)
+        raise
+    except IBKRAuthError as e:
+        print(f"IBKR auth error: {e}", file=sys.stderr)
+        print("Check IBKR credentials in .env or use --read-only", file=sys.stderr)
+        sys.exit(1)
+    except IBKRError as e:
+        print(f"IBKR error: {e}", file=sys.stderr)
+        sys.exit(1)
 
-            # Reload and re-reconcile
-            analyses = _load_analyses_with_progress(
-                results_dir,
-                label="Reloading analyses after refresh",
-            )
-            items = reconcile(
-                positions=positions,
-                analyses=analyses,
-                portfolio=portfolio,
-                max_age_days=args.max_age,
-                drift_threshold_pct=args.drift_pct,
-                sector_limit_pct=args.sector_limit,
-                exchange_limit_pct=args.exchange_limit,
-                watchlist_tickers=watchlist_tickers if watchlist_tickers else None,
-            )
-            health_flags = compute_portfolio_health(
-                positions=positions,
-                analyses=analyses,
-                portfolio=portfolio,
-                max_age_days=args.max_age,
-                reconciliation_items=items,
-            )
+    items = bundle.items
+    portfolio = bundle.portfolio
+    health_flags = bundle.health_flags
+    freshness_summary = bundle.freshness_summary
+    refresh_activity = bundle.refresh_activity
+    watchlist_tickers = bundle.watchlist_tickers
+    _loaded_watchlist_name = bundle.watchlist_name
+    _loaded_watchlist_total = bundle.watchlist_total
+    _live_orders_data = bundle.live_orders
 
     # Detect and store macro events (fail-safe — errors caught internally).
     _store_macro_event_if_detected(health_flags, items)
@@ -2839,7 +2962,14 @@ def main() -> None:
     show_recs = args.recommend
 
     if args.json:
-        output = format_json(items, portfolio)
+        output = format_json(
+            items,
+            portfolio,
+            freshness_summary=freshness_summary,
+            refresh_activity=refresh_activity,
+            max_age_days=args.max_age,
+            show_recommendations=show_recs,
+        )
     else:
         output = format_report(
             items,
@@ -2851,6 +2981,8 @@ def main() -> None:
             watchlist_name=_loaded_watchlist_name,
             watchlist_total=_loaded_watchlist_total,
             watchlist_tickers=watchlist_tickers if watchlist_tickers else None,
+            freshness_summary=freshness_summary,
+            refresh_activity=refresh_activity,
         )
 
     if args.output:

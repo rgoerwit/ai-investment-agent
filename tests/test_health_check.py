@@ -8,10 +8,10 @@ from src.health_check import check_python_version
 @pytest.mark.parametrize(
     ("version_info", "expected_ok", "expected_message"),
     [
-        ((3, 10, 14), False, "Requires Python >=3.11,<3.13"),
+        ((3, 10, 14), False, "Requires Python >=3.12,<3.13"),
         ((3, 11, 11), True, None),
         ((3, 12, 11), True, None),
-        ((3, 13, 0), False, "Requires Python >=3.11,<3.13"),
+        ((3, 13, 0), False, "Requires Python >=3.12,<3.13"),
     ],
 )
 def test_check_python_version_matches_pyproject(

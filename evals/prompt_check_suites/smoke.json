@@ -1,0 +1,48 @@
+{
+  "suite": "smoke",
+  "description": "Global-core sanity suite: 6 tickers across US, Europe, Japan, Taiwan, and Hong Kong.",
+  "scenarios": [
+    {
+      "ticker": "AAPL",
+      "quick": true,
+      "label": "Apple",
+      "region": "US",
+      "market": "NASDAQ"
+    },
+    {
+      "ticker": "ASML.AS",
+      "quick": true,
+      "label": "ASML",
+      "region": "Europe",
+      "market": "Euronext Amsterdam"
+    },
+    {
+      "ticker": "SAP.DE",
+      "quick": true,
+      "label": "SAP",
+      "region": "Europe",
+      "market": "Xetra"
+    },
+    {
+      "ticker": "7203.T",
+      "quick": true,
+      "label": "Toyota",
+      "region": "Japan",
+      "market": "TSE"
+    },
+    {
+      "ticker": "2330.TW",
+      "quick": true,
+      "label": "TSMC",
+      "region": "Taiwan",
+      "market": "TWSE"
+    },
+    {
+      "ticker": "0005.HK",
+      "quick": true,
+      "label": "HSBC",
+      "region": "Hong Kong",
+      "market": "HKEX"
+    }
+  ]
+}

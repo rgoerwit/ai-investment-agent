@@ -27,6 +27,7 @@ from src.llms import _LazyRateLimiterProxy
 from src.memory import (
     FinancialSituationMemory,
     cleanup_all_memories,
+    get_all_memory_stats,
     get_ticker_memory_stats,
 )
 
@@ -359,6 +360,62 @@ class TestSituationQuerying:
         assert results[0]["distance"] == 0.1
         assert results[1]["document"] == "MSFT growing revenue"
 
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Error getting collection: Collection [foo] does not exist.",
+            "Collection not found",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_query_missing_collection_does_not_log_error(self, message):
+        """Missing collections should be treated as an expected empty-slate state."""
+        memory = FinancialSituationMemory("test_memory")
+        memory.available = True
+        memory._get_embedding = AsyncMock(return_value=[0.1] * 768)
+        memory.situation_collection = MagicMock()
+        memory.situation_collection.query.side_effect = Exception(message)
+
+        with (
+            patch("src.memory.logger") as mock_logger,
+            patch("src.memory._record_capture_memory_event") as mock_capture_event,
+        ):
+            results = await memory.query_similar_situations("tech stocks", n_results=2)
+
+        assert results == []
+        mock_logger.debug.assert_called_once()
+        assert (
+            mock_logger.debug.call_args.args[0]
+            == "query_similar_situations_no_collection"
+        )
+        mock_logger.error.assert_not_called()
+        payload = mock_capture_event.call_args.args[0]
+        assert payload["event"] == "query_similar_situations_failed"
+        assert payload["error_kind"] == "missing_collection"
+        assert payload["available"] is True
+
+    @pytest.mark.asyncio
+    async def test_query_non_missing_failure_logs_error(self):
+        """Unexpected query failures should still log an error."""
+        memory = FinancialSituationMemory("test_memory")
+        memory.available = True
+        memory._get_embedding = AsyncMock(return_value=[0.1] * 768)
+        memory.situation_collection = MagicMock()
+        memory.situation_collection.query.side_effect = Exception("connection reset")
+
+        with (
+            patch("src.memory.logger") as mock_logger,
+            patch("src.memory._record_capture_memory_event") as mock_capture_event,
+        ):
+            results = await memory.query_similar_situations("tech stocks")
+
+        assert results == []
+        mock_logger.error.assert_called_once()
+        assert mock_logger.error.call_args.args[0] == "query_similar_situations_failed"
+        payload = mock_capture_event.call_args.args[0]
+        assert payload["error_kind"] == "query_failure"
+        assert payload["available"] is True
+
 
 class TestGetRelevantMemory:
     """Test high-level memory retrieval for agent context."""
@@ -493,3 +550,56 @@ class TestMemoryStats:
         assert stats["available"]
         assert stats["name"] == "test_memory"
         assert stats["count"] == 42
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Error getting collection: Collection [foo] does not exist.",
+            "Collection not found",
+        ],
+    )
+    def test_stats_missing_collection_variants_return_deleted(self, message):
+        """Missing collections should be reported as deleted, not fatal."""
+        memory = FinancialSituationMemory("test_memory")
+        memory.available = True
+        memory.situation_collection = MagicMock()
+        memory.situation_collection.count.side_effect = Exception(message)
+
+        with patch("src.memory.logger") as mock_logger:
+            stats = memory.get_stats()
+
+        assert stats == {
+            "available": False,
+            "name": "test_memory",
+            "count": 0,
+            "status": "deleted",
+        }
+        mock_logger.debug.assert_called_once_with(
+            "collection_deleted_externally", collection="test_memory"
+        )
+        mock_logger.error.assert_not_called()
+
+
+class TestAllMemoryStats:
+    """Test global memory stats collection edge cases."""
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Error getting collection: Collection [foo] does not exist.",
+            "Collection not found",
+        ],
+    )
+    @patch("chromadb.PersistentClient")
+    def test_get_all_stats_skips_missing_collection_variants(
+        self, mock_client_cls, message
+    ):
+        """Missing collections should be skipped regardless of Chroma message wording."""
+        mock_client = MagicMock()
+        mock_client.list_collections.return_value = ["missing_collection"]
+        mock_client.get_collection.side_effect = Exception(message)
+        mock_client_cls.return_value = mock_client
+
+        stats = get_all_memory_stats()
+
+        assert stats == {}

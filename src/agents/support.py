@@ -159,10 +159,35 @@ def compute_data_conflicts(raw_data: str, foreign_data: str) -> str:
                     return None
         return None
 
+    def _extract_json_string(text: str, key: str) -> str | None:
+        for pattern in [
+            rf'"{key}"\s*:\s*"([^"]+)"',
+            rf"'{key}'\s*:\s*'([^']+)'",
+        ]:
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1)
+        return None
+
+    def _extract_json_bool(text: str, key: str) -> bool:
+        for pattern in [
+            rf'"{key}"\s*:\s*(true|false)',
+            rf"'{key}'\s*:\s*(true|false)",
+        ]:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(1).lower() == "true"
+        return False
+
     junior_ocf = _extract_json_number(raw_data, "operatingCashflow")
     junior_analysts = _extract_json_number(raw_data, "numberOfAnalystOpinions")
     junior_peg = _extract_json_number(raw_data, "pegRatio")
     junior_mcap = _extract_json_number(raw_data, "marketCap")
+    junior_latest_quarter_date = _extract_json_string(raw_data, "latest_quarter_date")
+    quarter_date_source = _extract_json_string(raw_data, "_latest_quarter_date_source")
+    split_metrics_quarantined = _extract_json_bool(
+        raw_data, "_split_sensitive_metrics_quarantined"
+    )
 
     filing_ocf = None
     filing_ocf_period = None
@@ -239,6 +264,24 @@ def compute_data_conflicts(raw_data: str, foreign_data: str) -> str:
         conflicts.append(
             f"- PEG: {junior_peg:.2f} [yfinance] — UNRELIABLE ({detail}). "
             f"Do not use PEG to justify valuation."
+        )
+
+    if split_metrics_quarantined:
+        conflicts.append(
+            "- SPLIT_SHARE_BASIS_MISMATCH: Recent split detected; forward EPS, "
+            "forward P/E, and PEG are incompatible with the current share basis. "
+            "Forward EPS / PE / PEG are invalid for this run and must be reported "
+            "as N/A; use trailing metrics only."
+        )
+
+    if quarter_date_source == "reconciled_most_recent_quarter":
+        date_note = (
+            f" ({junior_latest_quarter_date})" if junior_latest_quarter_date else ""
+        )
+        conflicts.append(
+            "- QUARTER_DATE_RECONCILED: Newer quarter metadata supersedes stale "
+            f"statement-derived quarter date{date_note}. LATEST_QUARTER_DATE must "
+            "use the reconciled newer value."
         )
 
     if foreign_data:

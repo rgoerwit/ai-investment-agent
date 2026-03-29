@@ -4,7 +4,7 @@ import json
 import logging
 from argparse import Namespace
 from types import ModuleType
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -16,6 +16,8 @@ from scripts.portfolio_manager import (
     main,
 )
 from src.ibkr.models import PortfolioSummary
+from src.ibkr.recommendation_service import PortfolioRecommendationBundle
+from src.ibkr.refresh_service import AnalysisFreshnessSummary, RefreshActivity
 
 
 def _make_args(**overrides) -> Namespace:
@@ -28,6 +30,8 @@ def _make_args(**overrides) -> Namespace:
         "recommend": False,
         "report_only": True,
         "refresh_stale": False,
+        "refresh_policy": None,
+        "refresh_limit": 10,
         "json": False,
         "output": "",
         "max_age": 14,
@@ -161,7 +165,8 @@ def test_load_ibkr_context_emits_phase_status_and_returns_live_state(capsys):
             assert brokerage_session is False
             self.connected = True
 
-        def get_live_orders(self) -> list[dict]:
+        def get_live_orders(self, account_id: str | None = None) -> list[dict]:
+            assert account_id == "U123456"
             return [{"ticker": "7203", "side": "BUY"}]
 
         def close(self) -> None:
@@ -352,3 +357,127 @@ def test_configure_external_loggers_restores_debug_visibility():
     assert logging.getLogger("ibind.ibkr_client").level == logging.DEBUG
     assert logging.getLogger("ibind_fh").level == logging.DEBUG
     assert logging.getLogger("ibind_fh").propagate is False
+
+
+def _make_bundle(**overrides) -> PortfolioRecommendationBundle:
+    values = {
+        "portfolio": PortfolioSummary(portfolio_value_usd=1000),
+        "watchlist_tickers": {"7203.T"},
+        "watchlist_name": "watchlist-2026",
+        "watchlist_total": 1,
+        "live_orders": [{"ticker": "7203", "side": "BUY"}],
+        "freshness_summary": AnalysisFreshnessSummary(),
+        "refresh_activity": RefreshActivity(policy="off", limit=10),
+    }
+    values.update(overrides)
+    return PortfolioRecommendationBundle(**values)
+
+
+def test_main_recommend_mode_builds_request_with_blocking_refresh(capsys):
+    """CLI recommend mode should delegate to the recommendation service with the resolved policy."""
+    args = _make_args(
+        recommend=True,
+        report_only=False,
+        refresh_limit=1,
+        watchlist_name="watchlist-2026",
+        cash_buffer=0.08,
+        quick=True,
+    )
+    bundle = _make_bundle(
+        refresh_activity=RefreshActivity(policy="blocking", limit=1),
+    )
+    mock_build = AsyncMock(return_value=bundle)
+
+    with (
+        patch("scripts.portfolio_manager.parse_args", return_value=args),
+        patch("scripts.portfolio_manager._configure_logging"),
+        patch("scripts.portfolio_manager._preflight_ibkr_requirements"),
+        patch(
+            "scripts.portfolio_manager.PortfolioRecommendationService.build_bundle",
+            mock_build,
+        ),
+        patch("scripts.portfolio_manager._store_macro_event_if_detected"),
+        patch("scripts.portfolio_manager.format_report", return_value="report"),
+    ):
+        main()
+
+    captured = capsys.readouterr()
+    request = mock_build.await_args.args[0]
+    assert request.recommend is True
+    assert request.read_only is False
+    assert request.refresh_policy == "blocking"
+    assert request.refresh_limit == 1
+    assert request.watchlist_name == "watchlist-2026"
+    assert request.cash_buffer == 0.08
+    assert request.quick_mode is True
+    assert callable(mock_build.await_args.kwargs["progress"])
+    assert captured.out.strip() == "report"
+
+
+def test_main_report_mode_uses_service_bundle_in_formatter():
+    """CLI report mode should render the structured bundle returned by the service."""
+    args = _make_args(recommend=False, report_only=True)
+    bundle = _make_bundle(
+        watchlist_tickers={"7203.T", "6758.T"},
+        watchlist_total=2,
+        refresh_activity=RefreshActivity(
+            policy="off",
+            limit=10,
+            skipped_due_to_limit=["6758.T"],
+        ),
+    )
+    mock_build = AsyncMock(return_value=bundle)
+
+    with (
+        patch("scripts.portfolio_manager.parse_args", return_value=args),
+        patch("scripts.portfolio_manager._configure_logging"),
+        patch("scripts.portfolio_manager._preflight_ibkr_requirements"),
+        patch(
+            "scripts.portfolio_manager.PortfolioRecommendationService.build_bundle",
+            mock_build,
+        ),
+        patch("scripts.portfolio_manager._store_macro_event_if_detected"),
+        patch(
+            "scripts.portfolio_manager.format_report",
+            return_value="report",
+        ) as mock_report,
+    ):
+        main()
+
+    mock_report.assert_called_once()
+    assert mock_report.call_args.args[0] == bundle.items
+    assert mock_report.call_args.args[1] == bundle.portfolio
+    assert mock_report.call_args.kwargs["watchlist_name"] == "watchlist-2026"
+    assert mock_report.call_args.kwargs["watchlist_total"] == 2
+    assert mock_report.call_args.kwargs["watchlist_tickers"] == {"7203.T", "6758.T"}
+    assert mock_report.call_args.kwargs["refresh_activity"].skipped_due_to_limit == [
+        "6758.T"
+    ]
+
+
+def test_main_json_mode_uses_service_bundle_in_json_formatter(capsys):
+    """JSON mode should serialize the bundle via format_json instead of format_report."""
+    args = _make_args(json=True)
+    bundle = _make_bundle()
+    mock_build = AsyncMock(return_value=bundle)
+
+    with (
+        patch("scripts.portfolio_manager.parse_args", return_value=args),
+        patch("scripts.portfolio_manager._configure_logging"),
+        patch("scripts.portfolio_manager._preflight_ibkr_requirements"),
+        patch(
+            "scripts.portfolio_manager.PortfolioRecommendationService.build_bundle",
+            mock_build,
+        ),
+        patch("scripts.portfolio_manager._store_macro_event_if_detected"),
+        patch(
+            "scripts.portfolio_manager.format_json", return_value='{"ok": true}'
+        ) as mock_json,
+        patch("scripts.portfolio_manager.format_report") as mock_report,
+    ):
+        main()
+
+    captured = capsys.readouterr()
+    mock_json.assert_called_once()
+    mock_report.assert_not_called()
+    assert captured.out.strip() == '{"ok": true}'

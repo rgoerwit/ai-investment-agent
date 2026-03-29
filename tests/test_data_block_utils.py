@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from pathlib import Path
+
 from src.data_block_utils import (
     extract_last_data_block,
     extract_last_fenced_block,
@@ -6,6 +10,8 @@ from src.data_block_utils import (
     normalize_legacy_data_block_report,
     normalize_structured_block_boundaries,
 )
+
+_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "data_block_utils"
 
 
 def test_has_parseable_data_block_requires_fenced_block():
@@ -199,3 +205,143 @@ def test_normalize_structured_block_boundaries_leaves_clean_text_unchanged():
     )
 
     assert normalize_structured_block_boundaries(report) == report
+
+
+def test_normalize_legacy_data_block_accepts_subtitled_h3_block():
+    report = """
+### DATA_BLOCK (INTERNAL SCORING — NOT THIRD-PARTY RATINGS)
+SECTOR: Consumer Defensive
+RAW_HEALTH_SCORE: 9/12
+ADJUSTED_HEALTH_SCORE: 75%
+RAW_GROWTH_SCORE: 2/6
+ADJUSTED_GROWTH_SCORE: 33%
+US_REVENUE_PERCENT: Not disclosed
+ANALYST_COVERAGE_ENGLISH: 4
+PE_RATIO_TTM: 1.45
+ADR_EXISTS: NO
+IBKR_ACCESSIBILITY: Direct
+PFIC_RISK: LOW
+
+### FINANCIAL HEALTH DETAIL
+Details.
+"""
+
+    normalized = normalize_legacy_data_block_report(report)
+
+    assert normalized is not None
+    assert has_parseable_data_block(normalized) is True
+    assert "### --- START DATA_BLOCK ---" in normalized
+
+
+def test_normalize_legacy_data_block_accepts_dashed_header_with_explicit_end():
+    report = """
+### --- DATA_BLOCK ---
+SECTOR: Financials
+RAW_HEALTH_SCORE: 10.5/12
+ADJUSTED_HEALTH_SCORE: 87.5%
+RAW_GROWTH_SCORE: 4.5/6
+ADJUSTED_GROWTH_SCORE: 75%
+US_REVENUE_PERCENT: Not disclosed
+ANALYST_COVERAGE_ENGLISH: 9
+PE_RATIO_TTM: 14.68
+ADR_EXISTS: NO
+IBKR_ACCESSIBILITY: Direct
+PFIC_RISK: LOW
+### --- END DATA_BLOCK ---
+
+### FINANCIAL HEALTH DETAIL
+Details.
+"""
+
+    normalized = normalize_legacy_data_block_report(report)
+
+    assert normalized is not None
+    assert has_parseable_data_block(normalized) is True
+    assert normalized.count("### --- END DATA_BLOCK ---") == 1
+
+
+def test_normalize_legacy_data_block_rejects_dashed_header_without_end_marker():
+    report = """
+### --- DATA_BLOCK ---
+SECTOR: Financials
+RAW_HEALTH_SCORE: 10.5/12
+ADJUSTED_HEALTH_SCORE: 87.5%
+RAW_GROWTH_SCORE: 4.5/6
+ADJUSTED_GROWTH_SCORE: 75%
+US_REVENUE_PERCENT: Not disclosed
+ANALYST_COVERAGE_ENGLISH: 9
+PE_RATIO_TTM: 14.68
+ADR_EXISTS: NO
+IBKR_ACCESSIBILITY: Direct
+PFIC_RISK: LOW
+
+### FINANCIAL HEALTH DETAIL
+Details.
+"""
+
+    normalized = normalize_legacy_data_block_report(report)
+
+    assert normalized == report
+    assert has_parseable_data_block(normalized) is False
+
+
+def test_normalize_legacy_data_block_rejects_indented_h3_header():
+    report = """
+  ### DATA_BLOCK
+SECTOR: Energy
+RAW_HEALTH_SCORE: 9/12
+ADJUSTED_HEALTH_SCORE: 79%
+RAW_GROWTH_SCORE: 3/6
+ADJUSTED_GROWTH_SCORE: 50%
+US_REVENUE_PERCENT: Not disclosed
+ANALYST_COVERAGE_ENGLISH: 2
+PE_RATIO_TTM: 12.35
+ADR_EXISTS: YES
+IBKR_ACCESSIBILITY: Direct
+PFIC_RISK: LOW
+"""
+
+    normalized = normalize_legacy_data_block_report(report)
+
+    assert normalized == report
+    assert has_parseable_data_block(normalized) is False
+
+
+def _load_fundamentals_fixture(name: str) -> str:
+    return (_FIXTURE_DIR / name).read_text(encoding="utf-8")
+
+
+def test_real_sample_tsu_to_datablock_becomes_parseable():
+    content = _load_fundamentals_fixture("tsu_to_fundamentals.txt")
+
+    assert has_parseable_data_block(content) is True
+
+
+def test_real_sample_veto_pa_datablock_becomes_parseable():
+    content = _load_fundamentals_fixture("veto_pa_fundamentals.txt")
+
+    assert has_parseable_data_block(content) is True
+
+
+def test_real_sample_vta_as_datablock_becomes_parseable():
+    content = _load_fundamentals_fixture("vta_as_fundamentals.txt")
+
+    assert has_parseable_data_block(content) is True
+
+
+def test_real_sample_2001_hk_datablock_becomes_parseable():
+    content = _load_fundamentals_fixture("2001_hk_fundamentals.txt")
+
+    assert has_parseable_data_block(content) is True
+
+
+def test_real_sample_1616_tw_datablock_becomes_parseable():
+    content = _load_fundamentals_fixture("1616_tw_fundamentals.txt")
+
+    assert has_parseable_data_block(content) is True
+
+
+def test_real_sample_3539_t_stays_non_parseable():
+    content = _load_fundamentals_fixture("3539_t_fundamentals.txt")
+
+    assert has_parseable_data_block(content) is False

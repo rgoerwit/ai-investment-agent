@@ -16,6 +16,40 @@ from src.runtime_diagnostics import (
 
 logger = structlog.get_logger(__name__)
 
+try:
+    from src.eval import get_active_capture_manager as _get_capture_manager
+    from src.eval.llm_capture_meta import (
+        extract_token_usage as _extract_token_usage,
+    )
+    from src.eval.llm_capture_meta import (
+        extract_vendor_reasoning_config as _extract_vendor_reasoning_config,
+    )
+    from src.eval.llm_capture_meta import (
+        normalize_reasoning_level as _normalize_reasoning_level,
+    )
+    from src.eval.serialization import normalize_for_json as _normalize_for_json
+except ImportError:
+
+    def _get_capture_manager():
+        return None
+
+    def _normalize_reasoning_level(runnable, model_name):
+        return None
+
+    def _extract_vendor_reasoning_config(runnable, provider):
+        return None
+
+    def _extract_token_usage(result):
+        return {
+            "input_tokens": None,
+            "output_tokens": None,
+            "thinking_tokens": None,
+            "total_tokens": None,
+        }
+
+    def _normalize_for_json(value):
+        return value
+
 
 async def invoke_with_rate_limit_handling(
     runnable,
@@ -49,6 +83,38 @@ async def invoke_with_rate_limit_handling(
     for attempt in range(max_attempts):
         try:
             result = await runnable.ainvoke(input_data)
+            try:
+                capture_manager = _get_capture_manager()
+                if capture_manager is not None:
+                    token_usage = _extract_token_usage(result)
+                    response_metadata = getattr(result, "response_metadata", None)
+                    response_model = None
+                    if isinstance(response_metadata, dict):
+                        response_model = response_metadata.get(
+                            "model_name"
+                        ) or response_metadata.get("model")
+                    capture_manager.record_llm_call(
+                        {
+                            "status": "success",
+                            "context": context,
+                            "provider": resolved_provider,
+                            "model": resolved_model,
+                            "response_model": response_model,
+                            "runnable_class": class_name,
+                            "reasoning_level": _normalize_reasoning_level(
+                                runnable, resolved_model
+                            ),
+                            "thinking_config_raw": _extract_vendor_reasoning_config(
+                                runnable, resolved_provider
+                            ),
+                            "attempt": attempt + 1,
+                            **token_usage,
+                            "input": _normalize_for_json(input_data),
+                            "response": _normalize_for_json(result),
+                        }
+                    )
+            except Exception:
+                pass
             if not quiet_mode:
                 logger.info(
                     "llm_call_success",
@@ -66,6 +132,38 @@ async def invoke_with_rate_limit_handling(
                 model_name=resolved_model,
                 class_name=class_name,
             )
+            try:
+                capture_manager = _get_capture_manager()
+                if capture_manager is not None:
+                    capture_manager.record_llm_call(
+                        {
+                            "status": "failure",
+                            "context": context,
+                            "provider": resolved_provider,
+                            "model": resolved_model,
+                            "runnable_class": class_name,
+                            "reasoning_level": _normalize_reasoning_level(
+                                runnable, resolved_model
+                            ),
+                            "thinking_config_raw": _extract_vendor_reasoning_config(
+                                runnable, resolved_provider
+                            ),
+                            "attempt": attempt + 1,
+                            "input_tokens": None,
+                            "output_tokens": None,
+                            "thinking_tokens": None,
+                            "total_tokens": None,
+                            "input": _normalize_for_json(input_data),
+                            "failure_kind": details.kind,
+                            "retryable": details.retryable,
+                            "error_type": details.error_type,
+                            "root_cause_type": details.root_cause_type,
+                            "host": details.host,
+                            "error_message": details.message,
+                        }
+                    )
+            except Exception:
+                pass
             try:
                 from src.token_tracker import get_tracker
 

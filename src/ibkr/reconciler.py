@@ -1831,10 +1831,23 @@ def compute_portfolio_health(
     health_count = 0
     growth_count = 0
     stale_count = 0
+    stale_in_queue_count = 0
+    stale_need_refresh_count = 0
     currency_weights: dict[str, float] = {}
     # Per-position scores for detail lines: (ticker, score, is_stale)
     scored_health: list[tuple[str, float, bool]] = []
     scored_growth: list[tuple[str, float, bool]] = []
+    reconciliation_by_ticker: dict[str, tuple[str, str | None]] = {}
+
+    if reconciliation_items:
+        for item in reconciliation_items:
+            ticker = getattr(getattr(item, "ticker", None), "yf", None)
+            if not ticker or ticker in reconciliation_by_ticker:
+                continue
+            reconciliation_by_ticker[ticker] = (
+                getattr(item, "action", ""),
+                getattr(item, "sell_type", None),
+            )
 
     for pos in positions:
         weight = pos.market_value_usd / portfolio.portfolio_value_usd
@@ -1853,6 +1866,13 @@ def compute_portfolio_health(
                 scored_growth.append((pos.ticker.yf, analysis.growth_adj, is_stale))
             if is_stale:
                 stale_count += 1
+                action, sell_type = reconciliation_by_ticker.get(
+                    pos.ticker.yf, ("", None)
+                )
+                if action in {"SELL", "TRIM"} or sell_type == "SOFT_REJECT":
+                    stale_in_queue_count += 1
+                else:
+                    stale_need_refresh_count += 1
 
         ccy = (pos.currency or "USD").upper()
         currency_weights[ccy] = currency_weights.get(ccy, 0.0) + weight * 100
@@ -1900,12 +1920,22 @@ def compute_portfolio_health(
     if positions:
         stale_pct = stale_count / len(positions) * 100
         if stale_pct > 30:
-            flags.append(
+            stale_message = (
                 f"STALE_ANALYSIS_RATIO: {stale_count}/{len(positions)} positions"
                 f" ({stale_pct:.0f}%) have analyses older than {max_age_days}d"
-                " — flying blind on significant chunk of portfolio"
-                " (re-run with --refresh-stale to update)"
             )
+            if reconciliation_items is not None:
+                stale_message += (
+                    f" — {stale_in_queue_count} already in sell/review queue,"
+                    f" {stale_need_refresh_count} still need refreshed analysis"
+                    " before action (see ANALYSIS FRESHNESS section)"
+                )
+            else:
+                stale_message += (
+                    " — flying blind on significant chunk of portfolio"
+                    " (re-run with --refresh-stale to update)"
+                )
+            flags.append(stale_message)
 
     # Geography concentration is already surfaced via portfolio.exchange_weights;
     # flag here only if it exceeds the standard 40% exchange limit.
@@ -1975,11 +2005,15 @@ def compute_portfolio_health(
                         f" within {correlated_window_days}d of {peak_anchor.isoformat()}"
                         f" ({peak_count / total_held:.0%} of held"
                         f" positions) — probable macro event. Execute stop-breach SELLs"
-                        f" only; review verdict-change SELLs before acting."
+                        f" on fundamentally weak positions only; review others before acting."
                     )
                     # Demote SOFT_REJECT from SELL to REVIEW — these passed all hard
                     # fundamental checks; the SELL verdict came from the soft-tally
                     # (geopolitical/macro points), not from a thesis failure.
+                    #
+                    # Also demote STOP_BREACH when fundamentals are intact (health ≥ 50
+                    # AND growth ≥ 50) — mechanical stop triggered by market panic, not
+                    # thesis failure.  Fundamentally weak positions keep their SELL.
                     for item in reconciliation_items:
                         if item.action == "SELL" and item.sell_type == "SOFT_REJECT":
                             item.action = "REVIEW"
@@ -1988,6 +2022,22 @@ def compute_portfolio_health(
                                 "  [MACRO_WATCH: demoted from SELL — correlated"
                                 " event detected]"
                             )
+                        elif item.action == "SELL" and item.sell_type == "STOP_BREACH":
+                            analysis = item.analysis
+                            if (
+                                analysis is not None
+                                and (analysis.health_adj or 0.0) >= 50.0
+                                and (analysis.growth_adj or 0.0) >= 50.0
+                            ):
+                                item.action = "REVIEW"
+                                item.urgency = "MEDIUM"
+                                item.reason += (
+                                    "  [MACRO_STOP: stop breach during correlated event"
+                                    " — fundamentals intact (health"
+                                    f" {analysis.health_adj:.0f}%, growth"
+                                    f" {analysis.growth_adj:.0f}%); review before executing]"
+                                )
+                            # else: fundamentally weak — stop breach stands as SELL
                     logger.info(
                         "correlated_sell_event_detected",
                         peak_date=peak_anchor.isoformat(),

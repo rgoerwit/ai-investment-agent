@@ -320,9 +320,11 @@ class TestDataProviderTypes:
         assert df["price"].dtype in [float, "float64"]
         assert df["volume"].dtype in [int, "int64", float, "float64"]
 
-        # String columns should be object dtype
+        # String columns are object dtype (pandas <3) or StringDtype (pandas >=3)
         df["ticker"] = "TEST.US"
-        assert df["ticker"].dtype == object
+        assert df["ticker"].dtype == object or pd.api.types.is_string_dtype(
+            df["ticker"]
+        )
 
 
 class TestTypeAnnotationConsistency:

@@ -1,0 +1,54 @@
+{
+  "suite": "strict",
+  "description": "Global-core release candidate suite: same 6 tickers in deep strict mode.",
+  "scenarios": [
+    {
+      "ticker": "AAPL",
+      "quick": false,
+      "strict": true,
+      "label": "Apple",
+      "region": "US",
+      "market": "NASDAQ"
+    },
+    {
+      "ticker": "ASML.AS",
+      "quick": false,
+      "strict": true,
+      "label": "ASML",
+      "region": "Europe",
+      "market": "Euronext Amsterdam"
+    },
+    {
+      "ticker": "SAP.DE",
+      "quick": false,
+      "strict": true,
+      "label": "SAP",
+      "region": "Europe",
+      "market": "Xetra"
+    },
+    {
+      "ticker": "7203.T",
+      "quick": false,
+      "strict": true,
+      "label": "Toyota",
+      "region": "Japan",
+      "market": "TSE"
+    },
+    {
+      "ticker": "2330.TW",
+      "quick": false,
+      "strict": true,
+      "label": "TSMC",
+      "region": "Taiwan",
+      "market": "TWSE"
+    },
+    {
+      "ticker": "0005.HK",
+      "quick": false,
+      "strict": true,
+      "label": "HSBC",
+      "region": "Hong Kong",
+      "market": "HKEX"
+    }
+  ]
+}

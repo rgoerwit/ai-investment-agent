@@ -349,6 +349,12 @@ Provide your independent consultant review."""
                                     and not payload.get("skipped")
                                 ):
                                     fmp_alt_disabled_kind = payload["failure_kind"]
+                                    logger.info(
+                                        "consultant_fmp_disabled",
+                                        ticker=ticker,
+                                        tool=tool_call["name"],
+                                        failure_kind=fmp_alt_disabled_kind,
+                                    )
                     if result_failed:
                         had_tool_errors = True
                         if count_failure:

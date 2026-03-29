@@ -458,6 +458,33 @@ class TestComputeDataConflicts:
         assert "AUTOMATED CONFLICT CHECK" in result
         assert "system-generated" in result
 
+    def test_split_quarantine_note_added_from_raw_data(self):
+        """Recent split quarantine marker should produce a deterministic warning."""
+        from src.agents import compute_data_conflicts
+
+        junior = '{"_split_sensitive_metrics_quarantined": true}'
+
+        result = compute_data_conflicts(junior, "")
+
+        assert "SPLIT_SHARE_BASIS_MISMATCH" in result
+        assert "forward EPS" in result
+        assert "must be reported as N/A" in result
+
+    def test_quarter_date_reconciliation_note_added_from_raw_data(self):
+        """Quarter-date reconciliation marker should explain the newer metadata override."""
+        from src.agents import compute_data_conflicts
+
+        junior = (
+            '{"latest_quarter_date": "2025-12-31", '
+            '"_latest_quarter_date_source": "reconciled_most_recent_quarter"}'
+        )
+
+        result = compute_data_conflicts(junior, "")
+
+        assert "QUARTER_DATE_RECONCILED" in result
+        assert "2025-12-31" in result
+        assert "LATEST_QUARTER_DATE must use the reconciled newer value" in result
+
 
 class TestLocalAnalystCoverageConflict:
     """Tests for conflict #5: local analyst coverage detection."""
