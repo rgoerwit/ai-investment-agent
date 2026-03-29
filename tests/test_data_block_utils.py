@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from src.data_block_utils import (
@@ -11,6 +10,8 @@ from src.data_block_utils import (
     normalize_legacy_data_block_report,
     normalize_structured_block_boundaries,
 )
+
+_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "data_block_utils"
 
 
 def test_has_parseable_data_block_requires_fenced_block():
@@ -306,57 +307,41 @@ PFIC_RISK: LOW
     assert has_parseable_data_block(normalized) is False
 
 
-def _load_fundamentals_artifact(path: str) -> str:
-    payload = json.loads(Path(path).read_text())
-    artifact = payload.get("artifact_statuses", {}).get("fundamentals_report", {})
-    return artifact.get("content") or payload.get("reports", {}).get(
-        "fundamentals_report", ""
-    )
+def _load_fundamentals_fixture(name: str) -> str:
+    return (_FIXTURE_DIR / name).read_text(encoding="utf-8")
 
 
 def test_real_sample_tsu_to_datablock_becomes_parseable():
-    content = _load_fundamentals_artifact(
-        "results/TSU.TO_20260321_230515_analysis.json"
-    )
+    content = _load_fundamentals_fixture("tsu_to_fundamentals.txt")
 
     assert has_parseable_data_block(content) is True
 
 
 def test_real_sample_veto_pa_datablock_becomes_parseable():
-    content = _load_fundamentals_artifact(
-        "results/VETO.PA_20260321_234237_analysis.json"
-    )
+    content = _load_fundamentals_fixture("veto_pa_fundamentals.txt")
 
     assert has_parseable_data_block(content) is True
 
 
 def test_real_sample_vta_as_datablock_becomes_parseable():
-    content = _load_fundamentals_artifact(
-        "results/VTA.AS_20260322_000857_analysis.json"
-    )
+    content = _load_fundamentals_fixture("vta_as_fundamentals.txt")
 
     assert has_parseable_data_block(content) is True
 
 
 def test_real_sample_2001_hk_datablock_becomes_parseable():
-    content = _load_fundamentals_artifact(
-        "results/2001.HK_20260320_112335_analysis.json"
-    )
+    content = _load_fundamentals_fixture("2001_hk_fundamentals.txt")
 
     assert has_parseable_data_block(content) is True
 
 
 def test_real_sample_1616_tw_datablock_becomes_parseable():
-    content = _load_fundamentals_artifact(
-        "results/1616.TW_20260320_100744_analysis.json"
-    )
+    content = _load_fundamentals_fixture("1616_tw_fundamentals.txt")
 
     assert has_parseable_data_block(content) is True
 
 
 def test_real_sample_3539_t_stays_non_parseable():
-    content = _load_fundamentals_artifact(
-        "results/3539.T_20260320_173600_analysis.json"
-    )
+    content = _load_fundamentals_fixture("3539_t_fundamentals.txt")
 
     assert has_parseable_data_block(content) is False

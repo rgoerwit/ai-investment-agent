@@ -1,0 +1,31 @@
+### ANALYSIS OF 1616.TW
+
+Manufacturing company with direct Taiwan market access and no ADR wrapper.
+
+### --- DATA_BLOCK ---
+SECTOR: Industrials
+SECTOR_ADJUSTMENTS: Standard thresholds applied
+RAW_HEALTH_SCORE: 9.5/12
+ADJUSTED_HEALTH_SCORE: 79.2% (based on 12 available points)
+RAW_GROWTH_SCORE: 2.0/6
+ADJUSTED_GROWTH_SCORE: 33.3% (based on 6 available points)
+US_REVENUE_PERCENT: Not disclosed
+ANALYST_COVERAGE_ENGLISH: 0
+PE_RATIO_TTM: 15.45
+ADR_EXISTS: NO
+IBKR_ACCESSIBILITY: Restricted
+PFIC_RISK: LOW
+PFIC_ASSET_RATIO: 12.2%
+DE_RATIO: 0.51
+ROA_PERCENT: 8.08%
+NET_MARGIN: 5.64%
+REVENUE_GROWTH_TTM: -8.1%
+EARNINGS_GROWTH_MRQ: -1.43%
+LATEST_QUARTER_DATE: 2025-12-31
+OPERATING_CASH_FLOW: 245.32M TWD
+VIE_STRUCTURE: NO
+JURISDICTION: Taiwan.TWSE
+### --- END DATA_BLOCK ---
+
+### FINANCIAL HEALTH DETAIL
+The fenced block should be detected as parseable.

@@ -1,0 +1,31 @@
+### FINANCIAL ANALYSIS: VOLTA FINANCE (VTA.AS)
+
+Closed-ended investment vehicle with PFIC risk and direct exchange access.
+
+### --- DATA_BLOCK ---
+SECTOR: Financial Services
+SECTOR_ADJUSTMENTS: Financials thresholds adjusted
+RAW_HEALTH_SCORE: 9.5/12
+ADJUSTED_HEALTH_SCORE: 79.2% (based on 12 available points)
+RAW_GROWTH_SCORE: 2.5/6
+ADJUSTED_GROWTH_SCORE: 41.7% (based on 6 available points)
+US_REVENUE_PERCENT: Not disclosed
+ANALYST_COVERAGE_ENGLISH: 0
+PE_RATIO_TTM: 6.02
+ADR_EXISTS: NO
+IBKR_ACCESSIBILITY: Direct
+PFIC_RISK: HIGH
+PFIC_ASSET_RATIO: 98.2%
+DE_RATIO: 0.26
+ROA_PERCENT: 7.38%
+NET_MARGIN: 83.5%
+REVENUE_GROWTH_TTM: -74.8%
+EARNINGS_GROWTH_TTM: -66.4%
+LATEST_QUARTER_DATE: 2025-07-31
+OPERATING_CASH_FLOW: EUR 48.16M
+VIE_STRUCTURE: N/A
+JURISDICTION: Guernsey.AMS
+### --- END DATA_BLOCK ---
+
+### FINANCIAL HEALTH DETAIL
+The fenced block is the part that must remain parseable.
