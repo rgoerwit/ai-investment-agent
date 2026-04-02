@@ -2,9 +2,29 @@
 Tests for the observability module (Langfuse SDK v3 integration).
 """
 
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+def _fake_langfuse_modules(
+    *,
+    callback_handler=None,
+    get_client=None,
+) -> dict[str, ModuleType]:
+    langfuse_module = ModuleType("langfuse")
+    langfuse_langchain_module = ModuleType("langfuse.langchain")
+
+    if get_client is not None:
+        langfuse_module.get_client = get_client
+    if callback_handler is not None:
+        langfuse_langchain_module.CallbackHandler = callback_handler
+
+    return {
+        "langfuse": langfuse_module,
+        "langfuse.langchain": langfuse_langchain_module,
+    }
 
 
 class TestGetTracingCallbacks:
@@ -70,7 +90,10 @@ class TestGetTracingCallbacks:
             mock_config.langfuse_host = "https://cloud.langfuse.com"
 
             mock_handler_cls = MagicMock()
-            with patch("langfuse.langchain.CallbackHandler", mock_handler_cls):
+            with patch.dict(
+                "sys.modules",
+                _fake_langfuse_modules(callback_handler=mock_handler_cls),
+            ):
                 from src.observability import get_tracing_callbacks
 
                 callbacks, metadata = get_tracing_callbacks(
@@ -98,7 +121,10 @@ class TestGetTracingCallbacks:
             mock_config.langfuse_host = "https://cloud.langfuse.com"
 
             mock_handler_cls = MagicMock()
-            with patch("langfuse.langchain.CallbackHandler", mock_handler_cls):
+            with patch.dict(
+                "sys.modules",
+                _fake_langfuse_modules(callback_handler=mock_handler_cls),
+            ):
                 from src.observability import get_tracing_callbacks
 
                 get_tracing_callbacks(ticker="TEST.X")
@@ -155,7 +181,10 @@ class TestFlushTraces:
 
             mock_client = MagicMock()
             mock_get_client = MagicMock(return_value=mock_client)
-            with patch("langfuse.get_client", mock_get_client):
+            with patch.dict(
+                "sys.modules",
+                _fake_langfuse_modules(get_client=mock_get_client),
+            ):
                 from src.observability import flush_traces
 
                 flush_traces()

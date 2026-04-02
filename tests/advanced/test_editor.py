@@ -14,11 +14,34 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from src.editor_tools import (
-    MAX_REFERENCE_CHARS,
-    fetch_reference_content,
-    get_editor_tools,
-)
+
+def _fetch_reference_content_tool():
+    from src.editor_tools import fetch_reference_content
+
+    return fetch_reference_content
+
+
+def _get_editor_tools():
+    from src.editor_tools import get_editor_tools
+
+    return get_editor_tools()
+
+
+def _max_reference_chars() -> int:
+    from src.editor_tools import MAX_REFERENCE_CHARS
+
+    return MAX_REFERENCE_CHARS
+
+
+def _create_article_editor(*, llm=None, tools=None):
+    from src.article_writer import ArticleEditor
+
+    with (
+        patch("src.llms.create_editor_llm", return_value=llm),
+        patch("src.editor_tools.get_editor_tools", return_value=tools or []),
+    ):
+        return ArticleEditor()
+
 
 # =============================================================================
 # Tool Tests
@@ -31,18 +54,20 @@ class TestFetchReferenceContent:
     @pytest.mark.asyncio
     async def test_invalid_url_rejected(self):
         """Invalid URLs should be rejected immediately."""
-        result = await fetch_reference_content.ainvoke({"url": "not-a-url"})
+        tool = _fetch_reference_content_tool()
+        result = await tool.ainvoke({"url": "not-a-url"})
         assert "INVALID_URL" in result
 
-        result = await fetch_reference_content.ainvoke({"url": ""})
+        result = await tool.ainvoke({"url": ""})
         assert "INVALID_URL" in result
 
-        result = await fetch_reference_content.ainvoke({"url": "ftp://example.com"})
+        result = await tool.ainvoke({"url": "ftp://example.com"})
         assert "INVALID_URL" in result
 
     @pytest.mark.asyncio
     async def test_successful_fetch(self):
         """Successful fetch should return cleaned text content."""
+        tool = _fetch_reference_content_tool()
         # Create content that exceeds 100 chars after HTML stripping
         main_content = "This is the main content of the article. " * 10
         important_info = "It contains important information about the company. " * 5
@@ -71,9 +96,7 @@ class TestFetchReferenceContent:
             mock_instance.__aexit__ = AsyncMock(return_value=None)
             mock_client.return_value = mock_instance
 
-            result = await fetch_reference_content.ainvoke(
-                {"url": "https://example.com/article"}
-            )
+            result = await tool.ainvoke({"url": "https://example.com/article"})
 
             # Should contain main content but not nav/footer
             assert "main content" in result
@@ -84,6 +107,7 @@ class TestFetchReferenceContent:
     @pytest.mark.asyncio
     async def test_timeout_handling(self):
         """Timeout should return appropriate error message."""
+        tool = _fetch_reference_content_tool()
         with patch("httpx.AsyncClient") as mock_client:
             mock_instance = AsyncMock()
             mock_instance.get = AsyncMock(side_effect=httpx.TimeoutException("timeout"))
@@ -91,9 +115,7 @@ class TestFetchReferenceContent:
             mock_instance.__aexit__ = AsyncMock(return_value=None)
             mock_client.return_value = mock_instance
 
-            result = await fetch_reference_content.ainvoke(
-                {"url": "https://example.com/slow"}
-            )
+            result = await tool.ainvoke({"url": "https://example.com/slow"})
 
             assert "FETCH_FAILED" in result
             assert "timed out" in result.lower()
@@ -101,6 +123,7 @@ class TestFetchReferenceContent:
     @pytest.mark.asyncio
     async def test_http_error_handling(self):
         """HTTP errors should return status code in error message."""
+        tool = _fetch_reference_content_tool()
         mock_response = MagicMock()
         mock_response.status_code = 404
 
@@ -117,9 +140,7 @@ class TestFetchReferenceContent:
             mock_instance.__aexit__ = AsyncMock(return_value=None)
             mock_client.return_value = mock_instance
 
-            result = await fetch_reference_content.ainvoke(
-                {"url": "https://example.com/missing"}
-            )
+            result = await tool.ainvoke({"url": "https://example.com/missing"})
 
             assert "FETCH_FAILED" in result
             assert "404" in result
@@ -127,6 +148,7 @@ class TestFetchReferenceContent:
     @pytest.mark.asyncio
     async def test_insufficient_content(self):
         """Pages with very little text should return INSUFFICIENT_CONTENT."""
+        tool = _fetch_reference_content_tool()
         mock_html = "<html><body><p>Hi</p></body></html>"
 
         mock_response = MagicMock()
@@ -140,15 +162,15 @@ class TestFetchReferenceContent:
             mock_instance.__aexit__ = AsyncMock(return_value=None)
             mock_client.return_value = mock_instance
 
-            result = await fetch_reference_content.ainvoke(
-                {"url": "https://example.com/empty"}
-            )
+            result = await tool.ainvoke({"url": "https://example.com/empty"})
 
             assert "INSUFFICIENT_CONTENT" in result
 
     @pytest.mark.asyncio
     async def test_content_truncation(self):
         """Long content should be truncated to MAX_REFERENCE_CHARS."""
+        tool = _fetch_reference_content_tool()
+        max_reference_chars = _max_reference_chars()
         # Create content longer than MAX_REFERENCE_CHARS
         long_text = "word " * 2000  # Much longer than 5000 chars
         mock_html = f"<html><body><p>{long_text}</p></body></html>"
@@ -164,13 +186,11 @@ class TestFetchReferenceContent:
             mock_instance.__aexit__ = AsyncMock(return_value=None)
             mock_client.return_value = mock_instance
 
-            result = await fetch_reference_content.ainvoke(
-                {"url": "https://example.com/long"}
-            )
+            result = await tool.ainvoke({"url": "https://example.com/long"})
 
             # Should be truncated with indicator
             assert (
-                len(result) <= MAX_REFERENCE_CHARS + 20
+                len(result) <= max_reference_chars + 20
             )  # Allow for truncation marker
             assert "truncated" in result.lower()
 
@@ -180,13 +200,13 @@ class TestGetEditorTools:
 
     def test_returns_list_of_tools(self):
         """Should return a list with the fetch tool."""
-        tools = get_editor_tools()
+        tools = _get_editor_tools()
         assert isinstance(tools, list)
         assert len(tools) == 2
 
     def test_tool_has_correct_name(self):
         """Tool should have the expected name."""
-        tools = get_editor_tools()
+        tools = _get_editor_tools()
         tool = tools[0]
         assert tool.name == "fetch_reference_content"
 
@@ -308,19 +328,14 @@ class TestArticleEditor:
 
     def test_editor_initialization(self):
         """ArticleEditor should initialize correctly."""
-        from src.article_writer import ArticleEditor
-
-        # This may or may not have LLM depending on environment
-        editor = ArticleEditor()
+        editor = _create_article_editor()
         assert hasattr(editor, "llm")
         assert hasattr(editor, "tools")
         assert hasattr(editor, "is_available")
 
     def test_build_fact_check_context(self):
         """build_fact_check_context should assemble context correctly."""
-        from src.article_writer import ArticleEditor
-
-        editor = ArticleEditor()
+        editor = _create_article_editor()
 
         context = editor.build_fact_check_context(
             data_block="FINANCIAL_HEALTH: 75%\nP/E: 12.5",
@@ -336,18 +351,14 @@ class TestArticleEditor:
 
     def test_build_fact_check_context_empty(self):
         """build_fact_check_context should handle empty inputs."""
-        from src.article_writer import ArticleEditor
-
-        editor = ArticleEditor()
+        editor = _create_article_editor()
         context = editor.build_fact_check_context()
 
         assert context == "No context provided."
 
     def test_parse_editor_response_valid_json(self):
         """_parse_editor_response should parse valid JSON."""
-        from src.article_writer import ArticleEditor
-
-        editor = ArticleEditor()
+        editor = _create_article_editor()
 
         response = '{"verdict": "REVISE", "factual_errors": [], "confidence": 0.9}'
         result = editor._parse_editor_response(response)
@@ -357,9 +368,7 @@ class TestArticleEditor:
 
     def test_parse_editor_response_json_in_code_block(self):
         """_parse_editor_response should extract JSON from code blocks."""
-        from src.article_writer import ArticleEditor
-
-        editor = ArticleEditor()
+        editor = _create_article_editor()
 
         response = """Here is my review:
 
@@ -376,9 +385,7 @@ That's my assessment."""
 
     def test_parse_editor_response_invalid_json(self):
         """_parse_editor_response should handle invalid JSON gracefully."""
-        from src.article_writer import ArticleEditor
-
-        editor = ArticleEditor()
+        editor = _create_article_editor()
 
         response = "This is not valid JSON at all."
         result = editor._parse_editor_response(response)
@@ -389,9 +396,7 @@ That's my assessment."""
 
     def test_is_available_returns_bool(self):
         """is_available should return boolean."""
-        from src.article_writer import ArticleEditor
-
-        editor = ArticleEditor()
+        editor = _create_article_editor()
         result = editor.is_available()
 
         assert isinstance(result, bool)
@@ -493,10 +498,10 @@ class TestEditorialLoopIntegration:
     @pytest.mark.asyncio
     async def test_edit_with_unavailable_editor(self):
         """edit() should return original draft when editor unavailable."""
-        from src.article_writer import ArticleEditor, ArticleWriter
+        from src.article_writer import ArticleWriter
 
         writer = ArticleWriter()
-        editor = ArticleEditor()
+        editor = _create_article_editor()
 
         # Force editor to be unavailable
         editor.llm = None
@@ -515,10 +520,10 @@ class TestEditorialLoopIntegration:
     @pytest.mark.asyncio
     async def test_edit_approves_good_article(self):
         """edit() should approve article when editor says APPROVED."""
-        from src.article_writer import ArticleEditor, ArticleWriter
+        from src.article_writer import ArticleWriter
 
         writer = ArticleWriter()
-        editor = ArticleEditor()
+        editor = _create_article_editor()
 
         # Mock editor to return APPROVED
         async def mock_review(*args, **kwargs):
@@ -541,10 +546,10 @@ class TestEditorialLoopIntegration:
     @pytest.mark.asyncio
     async def test_edit_revises_on_feedback(self):
         """edit() should revise article when editor requests changes."""
-        from src.article_writer import ArticleEditor, ArticleWriter
+        from src.article_writer import ArticleWriter
 
         writer = ArticleWriter()
-        editor = ArticleEditor()
+        editor = _create_article_editor()
 
         revision_count = 0
 
@@ -584,10 +589,10 @@ class TestEditorialLoopIntegration:
     @pytest.mark.asyncio
     async def test_edit_respects_max_revisions(self):
         """edit() should stop after MAX_REVISIONS iterations."""
-        from src.article_writer import ArticleEditor, ArticleWriter
+        from src.article_writer import ArticleWriter
 
         writer = ArticleWriter()
-        editor = ArticleEditor()
+        editor = _create_article_editor()
 
         review_count = 0
 
@@ -1281,9 +1286,7 @@ class TestEditorToolCalling:
     @pytest.mark.asyncio
     async def test_review_calls_tool_for_references(self):
         """When LLM returns tool_calls, tools should be executed and results fed back."""
-        from src.article_writer import ArticleEditor
-
-        editor = ArticleEditor()
+        editor = _create_article_editor()
 
         # First response: tool call for a URL
         tool_call_response = MagicMock()
@@ -1346,9 +1349,7 @@ class TestEditorToolCalling:
     @pytest.mark.asyncio
     async def test_review_handles_tool_error_gracefully(self):
         """When tool returns FETCH_FAILED, editor should still produce valid JSON."""
-        from src.article_writer import ArticleEditor
-
-        editor = ArticleEditor()
+        editor = _create_article_editor()
 
         # First response: tool call
         tool_call_response = MagicMock()
@@ -1411,9 +1412,7 @@ class TestEditorToolCalling:
     @pytest.mark.asyncio
     async def test_review_respects_max_iterations(self):
         """Tool loop should terminate after MAX_TOOL_ITERATIONS even if LLM keeps calling tools."""
-        from src.article_writer import ArticleEditor
-
-        editor = ArticleEditor()
+        editor = _create_article_editor()
 
         # Every response returns tool_calls — should be bounded
         tool_call_response = MagicMock()
@@ -1458,9 +1457,7 @@ class TestEditorToolCalling:
     @pytest.mark.asyncio
     async def test_review_works_without_tools(self):
         """When llm_with_tools is None (no tools), should work like single-shot."""
-        from src.article_writer import ArticleEditor
-
-        editor = ArticleEditor()
+        editor = _create_article_editor()
 
         final_response = MagicMock()
         final_response.tool_calls = []
@@ -1484,9 +1481,7 @@ class TestEditorToolCalling:
     @pytest.mark.asyncio
     async def test_execute_tool_calls_handles_unknown_tool(self):
         """_execute_tool_calls should return error for unknown tools."""
-        from src.article_writer import ArticleEditor
-
-        editor = ArticleEditor()
+        editor = _create_article_editor()
         editor._tools_by_name = {}
 
         results = await editor._execute_tool_calls(
@@ -1499,9 +1494,7 @@ class TestEditorToolCalling:
     @pytest.mark.asyncio
     async def test_execute_tool_calls_caps_per_turn(self):
         """_execute_tool_calls should cap tool calls at MAX_TOOL_CALLS_PER_TURN."""
-        from src.article_writer import ArticleEditor
-
-        editor = ArticleEditor()
+        editor = _create_article_editor()
 
         mock_tool = AsyncMock()
         mock_tool.ainvoke = AsyncMock(return_value="Content")
@@ -1532,9 +1525,7 @@ class TestEditorToolCalling:
     @pytest.mark.asyncio
     async def test_execute_tool_calls_handles_tool_exception(self):
         """_execute_tool_calls should catch exceptions from tool execution."""
-        from src.article_writer import ArticleEditor
-
-        editor = ArticleEditor()
+        editor = _create_article_editor()
 
         mock_tool = AsyncMock()
         mock_tool.ainvoke = AsyncMock(side_effect=RuntimeError("Connection reset"))
@@ -1559,10 +1550,9 @@ class TestEditorToolCalling:
     @pytest.mark.asyncio
     async def test_execute_tool_calls_routes_through_tool_service(self):
         """_execute_tool_calls should use the shared tool execution service."""
-        from src.article_writer import ArticleEditor
         from src.tooling.runtime import ToolResult
 
-        editor = ArticleEditor()
+        editor = _create_article_editor()
 
         mock_tool = AsyncMock()
         mock_tool.ainvoke = AsyncMock(return_value="direct-result")
@@ -1601,9 +1591,7 @@ class TestEditorUrlCache:
     @pytest.mark.asyncio
     async def test_cache_hit_skips_tool_invocation(self):
         """Second fetch of the same URL should be served from cache."""
-        from src.article_writer import ArticleEditor
-
-        editor = ArticleEditor()
+        editor = _create_article_editor()
         editor._url_cache = {"https://reuters.com/test": "FETCH_FAILED: HTTP 401"}
 
         mock_tool = AsyncMock()
@@ -1628,9 +1616,7 @@ class TestEditorUrlCache:
     @pytest.mark.asyncio
     async def test_cache_miss_invokes_tool_and_stores(self):
         """First fetch should invoke the tool and populate the cache."""
-        from src.article_writer import ArticleEditor
-
-        editor = ArticleEditor()
+        editor = _create_article_editor()
         editor._url_cache = {}
 
         mock_tool = AsyncMock()
@@ -1656,9 +1642,7 @@ class TestEditorUrlCache:
     @pytest.mark.asyncio
     async def test_cache_stores_errors(self):
         """Tool exceptions should also be cached to avoid retrying broken URLs."""
-        from src.article_writer import ArticleEditor
-
-        editor = ArticleEditor()
+        editor = _create_article_editor()
         editor._url_cache = {}
 
         mock_tool = AsyncMock()
@@ -1683,9 +1667,7 @@ class TestEditorUrlCache:
     @pytest.mark.asyncio
     async def test_non_fetch_tools_bypass_cache(self):
         """search_claim and other tools should not use the URL cache."""
-        from src.article_writer import ArticleEditor
-
-        editor = ArticleEditor()
+        editor = _create_article_editor()
         editor._url_cache = {}
 
         mock_tool = AsyncMock()
@@ -1709,9 +1691,7 @@ class TestEditorUrlCache:
     @pytest.mark.asyncio
     async def test_editorial_loop_clears_cache(self):
         """Cache should be empty after run_editorial_loop completes."""
-        from src.article_writer import ArticleEditor
-
-        editor = ArticleEditor()
+        editor = _create_article_editor()
 
         # Mock review to approve immediately
         async def mock_review(draft, context):
@@ -1813,7 +1793,7 @@ class TestSearchClaimTool:
 
     def test_get_editor_tools_includes_search_claim(self):
         """get_editor_tools should include both tools."""
-        tools = get_editor_tools()
+        tools = _get_editor_tools()
         tool_names = [t.name for t in tools]
         assert "fetch_reference_content" in tool_names
         assert "search_claim" in tool_names

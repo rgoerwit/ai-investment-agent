@@ -6,8 +6,18 @@ from pathlib import Path
 import pytest
 
 from src.charts.base import ChartConfig, ChartFormat, CurrencyFormat, FootballFieldData
-from src.charts.chart_node import _get_currency_format
-from src.charts.generators.football_field import generate_football_field
+
+
+def _get_currency_format(*args, **kwargs):
+    from src.charts.chart_node import _get_currency_format as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def generate_football_field(*args, **kwargs):
+    from src.charts.generators.football_field import generate_football_field as _impl
+
+    return _impl(*args, **kwargs)
 
 
 class TestFootballFieldData:

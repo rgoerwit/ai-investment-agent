@@ -2,10 +2,6 @@ from __future__ import annotations
 
 import re
 
-import structlog
-
-logger = structlog.get_logger(__name__)
-
 
 def _compile_named_block_pattern(block_name: str) -> re.Pattern[str]:
     escaped_name = re.escape(block_name)
@@ -16,10 +12,14 @@ def _compile_named_block_pattern(block_name: str) -> re.Pattern[str]:
 
 
 DATA_BLOCK_PATTERN = _compile_named_block_pattern("DATA_BLOCK")
-_LEGACY_DATA_BLOCK_HEADER_PATTERN = re.compile(r"(?m)^### DATA_BLOCK\b[^\n]*$")
-_DASHED_DATA_BLOCK_HEADER_PATTERN = re.compile(r"(?m)^### --- DATA_BLOCK ---[ \t]*$")
-_DASHED_DATA_BLOCK_END_PATTERN = re.compile(r"(?m)^### --- END DATA_BLOCK ---")
-_SECTION_HEADER_PATTERN = re.compile(r"(?m)^### ")
+_LEGACY_DATA_BLOCK_HEADER_PATTERN = re.compile(
+    r"(?m)^### DATA_BLOCK(?:\s*\([^\n]*\))?\s*$"
+)
+_DASHED_DATA_BLOCK_HEADER_PATTERN = re.compile(r"(?m)^###\s*---\s*DATA_BLOCK\s*---\s*$")
+_EXPLICIT_DATA_BLOCK_END_PATTERN = re.compile(
+    r"(?m)^###\s*---\s*END DATA_BLOCK\s*---\s*$"
+)
+_SECTION_HEADER_PATTERN = re.compile(r"(?m)^#{3,} ")
 _TABLE_ROW_PATTERN = re.compile(r"^\|(.+)\|$")
 _STRUCTURED_BLOCK_BOUNDARY_NAMES = ("DATA_BLOCK", "PM_BLOCK")
 _LIKELY_DATA_BLOCK_KEYS = (
@@ -37,34 +37,36 @@ _LIKELY_DATA_BLOCK_KEYS = (
 )
 
 
-def _extract_legacy_data_block_body(report: str) -> str | None:
+def _find_legacy_data_block_region(report: str) -> tuple[int, int, str] | None:
     legacy_match = _LEGACY_DATA_BLOCK_HEADER_PATTERN.search(report)
-    if not legacy_match:
-        return None
-
-    body_start = legacy_match.end()
-    next_section = _SECTION_HEADER_PATTERN.search(report, body_start)
-    body_end = next_section.start() if next_section else len(report)
-    body = report[body_start:body_end].strip()
-    return body or None
-
-
-def _extract_dashed_data_block_body(report: str) -> tuple[str, int, int] | None:
     dashed_match = _DASHED_DATA_BLOCK_HEADER_PATTERN.search(report)
-    if not dashed_match:
+    header_match = legacy_match or dashed_match
+    if header_match is None:
         return None
 
-    body_start = dashed_match.end()
-    end_match = _DASHED_DATA_BLOCK_END_PATTERN.search(report, body_start)
-    if not end_match:
-        return None
+    body_start = header_match.end()
+    if dashed_match is not None and header_match is dashed_match:
+        explicit_end = _EXPLICIT_DATA_BLOCK_END_PATTERN.search(report, body_start)
+        if explicit_end is None:
+            return None
+        body_end = explicit_end.start()
+        replace_end = explicit_end.end()
+    else:
+        next_section = _SECTION_HEADER_PATTERN.search(report, body_start)
+        body_end = next_section.start() if next_section else len(report)
+        replace_end = body_end
 
-    body_end = end_match.start()
     body = report[body_start:body_end].strip()
-    if not body or _count_likely_keys(body) < 4:
+    if not body:
         return None
+    return header_match.start(), replace_end, body
 
-    return body, dashed_match.start(), end_match.end()
+
+def _extract_legacy_data_block_body(report: str) -> str | None:
+    region = _find_legacy_data_block_region(report)
+    if region is None:
+        return None
+    return region[2]
 
 
 def _count_likely_keys(body: str) -> int:
@@ -128,9 +130,6 @@ def detect_legacy_data_block_shape(report: str | None) -> str | None:
         return "colon"
     if _parse_legacy_table_body(body):
         return "table"
-    dashed_body = _extract_dashed_data_block_body(report)
-    if dashed_body:
-        return "dashed"
     return None
 
 
@@ -216,44 +215,20 @@ def normalize_legacy_data_block_report(report: str | None) -> str | None:
     ):
         return report
 
-    legacy_match = _LEGACY_DATA_BLOCK_HEADER_PATTERN.search(report)
-    if legacy_match:
-        body = _extract_legacy_data_block_body(report)
-        if body:
-            normalized_body = _parse_legacy_key_value_body(
-                body
-            ) or _parse_legacy_table_body(body)
-            if normalized_body:
-                logger.info(
-                    "data_block_repaired",
-                    repair_kind="legacy_subtitle",
-                    repair_confidence="medium",
-                    key_count=_count_likely_keys(normalized_body),
-                )
-                repaired_block = (
-                    "### --- START DATA_BLOCK ---\n"
-                    f"{normalized_body}\n"
-                    "### --- END DATA_BLOCK ---"
-                )
-                body_start = legacy_match.end()
-                next_section = _SECTION_HEADER_PATTERN.search(report, body_start)
-                body_end = next_section.start() if next_section else len(report)
-                return (
-                    report[: legacy_match.start()] + repaired_block + report[body_end:]
-                )
-
-    dashed_data = _extract_dashed_data_block_body(report)
-    if not dashed_data:
+    region = _find_legacy_data_block_region(report)
+    if region is None:
         return report
 
-    body, block_start, block_end = dashed_data
-    logger.info(
-        "data_block_repaired",
-        repair_kind="dashed_header",
-        repair_confidence="high",
-        key_count=_count_likely_keys(body),
+    region_start, region_end, body = region
+
+    normalized_body = _parse_legacy_key_value_body(body) or _parse_legacy_table_body(
+        body
     )
+    if not normalized_body:
+        return report
+
     repaired_block = (
-        "### --- START DATA_BLOCK ---\n" f"{body}\n" "### --- END DATA_BLOCK ---"
+        f"### --- START DATA_BLOCK ---\n{normalized_body}\n### --- END DATA_BLOCK ---"
     )
-    return report[:block_start] + repaired_block + report[block_end:]
+    repaired_report = report[:region_start] + repaired_block + report[region_end:]
+    return repaired_report

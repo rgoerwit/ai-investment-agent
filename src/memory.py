@@ -1181,13 +1181,6 @@ class MacroEventsStore:
     def get_structural_events_since(self, since_date: str) -> list["MacroEvent"]:
         """Return STRUCTURAL events detected after since_date (for staleness check)."""
         if not self.available:
-            _record_capture_memory_event(
-                {
-                    "event": "macro_get_structural_events_skipped",
-                    "since_date": since_date,
-                    "available": False,
-                }
-            )
             return []
         try:
             from datetime import date as _date

@@ -164,6 +164,7 @@ results/
 reports/
 evals/captures/
 evals/prompt_checks/
+runtime/ibkr_dashboard/
 # Latest-analysis cache index and lock files
 /.*.latest_analyses_index.json
 /.*.latest_analyses_index.lock

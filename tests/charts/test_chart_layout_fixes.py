@@ -10,8 +10,18 @@ import matplotlib
 matplotlib.use("Agg")
 
 from src.charts.base import ChartConfig, ChartFormat, FootballFieldData, RadarChartData
-from src.charts.generators.football_field import generate_football_field
-from src.charts.generators.radar_chart import generate_radar_chart
+
+
+def _generate_football_field(*args, **kwargs):
+    from src.charts.generators.football_field import generate_football_field
+
+    return generate_football_field(*args, **kwargs)
+
+
+def _generate_radar_chart(*args, **kwargs):
+    from src.charts.generators.radar_chart import generate_radar_chart
+
+    return generate_radar_chart(*args, **kwargs)
 
 
 class TestChartLayoutFixes(unittest.TestCase):
@@ -51,7 +61,7 @@ class TestChartLayoutFixes(unittest.TestCase):
             footnote="Long footnote that needs space",
         )
 
-        generate_radar_chart(data, self.config)
+        _generate_radar_chart(data, self.config)
 
         # Verify tight_layout was called with the specific rect parameter
         # to reserve bottom 8% (0.08) for footnotes
@@ -75,7 +85,7 @@ class TestChartLayoutFixes(unittest.TestCase):
             footnote="Footnote",
         )
 
-        generate_football_field(data_with_warnings, self.config)
+        _generate_football_field(data_with_warnings, self.config)
 
         # Expect 1 bar (52-week range) + 0 extra bars (no targets provided).
         # Base top limit = 1 bar - 0.5 = 0.5.
@@ -117,7 +127,7 @@ class TestChartLayoutFixes(unittest.TestCase):
             quality_warnings=None,
         )
 
-        generate_football_field(data_no_warnings, self.config)
+        _generate_football_field(data_no_warnings, self.config)
 
         # 1 bar total (52 week range). Top limit = 1 - 0.5 = 0.5.
         args, _ = mock_ax.set_ylim.call_args
@@ -138,7 +148,7 @@ class TestChartLayoutFixes(unittest.TestCase):
             jurisdiction_score=50,
         )
 
-        output_path = generate_radar_chart(data, self.config)
+        output_path = _generate_radar_chart(data, self.config)
 
         # Verify file exists
         self.assertTrue(output_path.exists())

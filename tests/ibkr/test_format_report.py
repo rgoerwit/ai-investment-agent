@@ -15,9 +15,11 @@ from scripts.portfolio_manager import (
 from src.ibkr.models import (
     AnalysisRecord,
     NormalizedPosition,
+    PortfolioSummary,
     ReconciliationItem,
     TradeBlockData,
 )
+from src.ibkr.portfolio_presentation import build_cash_summary, build_live_order_note
 from src.ibkr.refresh_service import RefreshActivity
 from src.ibkr.ticker import Ticker
 from tests.ibkr.test_reconciler import (
@@ -2064,3 +2066,120 @@ class TestAnalysisFreshnessReporting:
         assert summary["stale_in_queue_count"] == 1
         assert summary["due_soon_count"] == 1
         assert summary["manual_action_required"] is True
+
+
+class TestCashHeaderWording:
+    def test_cash_total_notes_when_unsettled_proceeds_are_present(self):
+        portfolio = PortfolioSummary(
+            account_id="U20958465",
+            portfolio_value_usd=52_436,
+            cash_balance_usd=1_323,
+            settled_cash_usd=500,
+            available_cash_usd=0,
+            cash_pct=2.5,
+            position_count=12,
+        )
+
+        report = format_report([], portfolio)
+
+        assert "Cash (total):     $     1,323" in report
+        assert "includes $823 of unsettled sale proceeds (not yet spendable)" in report
+        assert "Settled cash:     $       500" in report
+
+    def test_cash_total_omits_unsettled_warning_when_all_cash_is_settled(self):
+        portfolio = PortfolioSummary(
+            account_id="U20958465",
+            portfolio_value_usd=52_436,
+            cash_balance_usd=1_323,
+            settled_cash_usd=1_323,
+            available_cash_usd=0,
+            cash_pct=2.5,
+            position_count=12,
+        )
+
+        report = format_report([], portfolio)
+
+        assert "Cash (total):     $     1,323" in report
+        assert "all shown cash is settled" in report
+        assert "not yet spendable" not in report
+
+
+class TestCliUiSharedPresentationAlignment:
+    def test_shared_live_order_note_matches_report_output(self):
+        item = ReconciliationItem(
+            ticker="7203.T",
+            action="SELL",
+            reason="Verdict → DO_NOT_INITIATE",
+            urgency="HIGH",
+            ibkr_position=_make_position(ticker="7203.T", conid=1234),
+            analysis=_make_analysis(ticker="7203.T"),
+            suggested_quantity=100,
+            suggested_price=1950.0,
+            sell_type="HARD_REJECT",
+        )
+        live_orders = [
+            {
+                "conid": 1234,
+                "ticker": "7203",
+                "side": "SELL",
+                "remainingSize": 100,
+                "price": 1950.0,
+                "orderType": "LMT",
+                "status": "Submitted",
+            }
+        ]
+
+        report = format_report(
+            [item],
+            _make_portfolio(),
+            show_recommendations=True,
+            live_orders=live_orders,
+        )
+
+        assert build_live_order_note(item, live_orders) in report
+
+    def test_shared_cash_summary_matches_report_pending_inflows(self):
+        portfolio = PortfolioSummary(
+            account_id="U20958465",
+            portfolio_value_usd=52_436,
+            cash_balance_usd=1_323,
+            settled_cash_usd=1_323,
+            available_cash_usd=0,
+            cash_pct=2.5,
+            position_count=12,
+        )
+        sell_item = ReconciliationItem(
+            ticker="7203.T",
+            action="SELL",
+            reason="Verdict → DO_NOT_INITIATE",
+            urgency="HIGH",
+            ibkr_position=_make_position(ticker="7203.T"),
+            analysis=_make_analysis(ticker="7203.T"),
+            suggested_quantity=100,
+            suggested_price=1950.0,
+            cash_impact_usd=1_300.0,
+            settlement_date="2026-03-31",
+            sell_type="HARD_REJECT",
+        )
+        buy_item = ReconciliationItem(
+            ticker="ASML.AS",
+            action="BUY",
+            reason="Watchlist candidate",
+            urgency="MEDIUM",
+            analysis=_make_analysis(ticker="ASML.AS"),
+            suggested_quantity=10,
+            suggested_price=50.0,
+            cash_impact_usd=-500.0,
+            is_watchlist=True,
+        )
+        shared = build_cash_summary([sell_item, buy_item], portfolio)
+
+        report = format_report(
+            [sell_item, buy_item],
+            portfolio,
+            show_recommendations=True,
+        )
+
+        assert f"${shared.pending_inflows_total_usd:>6,.0f}" in report
+        assert shared.next_settlement_date in report
+        assert f"${shared.settled_cash_after_recommended_buys_usd:>7,.0f}" in report

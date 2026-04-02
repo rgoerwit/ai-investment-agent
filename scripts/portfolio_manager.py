@@ -38,6 +38,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.ibkr.account_service import IbkrAccountService
+from src.ibkr.cli_options import (
+    add_common_portfolio_request_args,
+    portfolio_request_kwargs_from_args,
+    validate_common_portfolio_request_args,
+)
+from src.ibkr.dip_watch import compute_dip_score
 from src.ibkr.exceptions import IBKRAuthError, IBKRError
 from src.ibkr.models import (
     AnalysisRecord,
@@ -46,6 +52,23 @@ from src.ibkr.models import (
     ReconciliationItem,
 )
 from src.ibkr.portfolio_data_service import IbkrPortfolioDataService
+from src.ibkr.portfolio_presentation import (
+    aggregate_sector_weights as shared_aggregate_sector_weights,
+)
+from src.ibkr.portfolio_presentation import (
+    build_action_summary_counts,
+    build_cash_summary,
+    group_portfolio_actions,
+)
+from src.ibkr.portfolio_presentation import (
+    build_live_order_note as shared_build_live_order_note,
+)
+from src.ibkr.portfolio_presentation import (
+    find_live_order as shared_find_live_order,
+)
+from src.ibkr.portfolio_presentation import (
+    normalize_sector_label as shared_normalize_sector_label,
+)
 from src.ibkr.recommendation_service import (
     PortfolioRecommendationRequest,
     PortfolioRecommendationService,
@@ -312,20 +335,26 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Options
-    parser.add_argument(
-        "--max-age", type=int, default=14, help="Max analysis age in days (default: 14)"
-    )
-    parser.add_argument(
-        "--drift-pct",
-        type=float,
-        default=15.0,
-        help="Price drift threshold %% (default: 15)",
-    )
-    parser.add_argument(
-        "--cash-buffer",
-        type=float,
-        default=0.05,
-        help="Cash reserve fraction (default: 0.05)",
+    add_common_portfolio_request_args(
+        parser,
+        mode_flag_style="single",
+        results_dir_default="results/",
+        max_age_default=14,
+        cash_buffer_default=0.05,
+        drift_pct_default=15.0,
+        refresh_limit_default=10,
+        sector_limit_default=30.0,
+        exchange_limit_default=40.0,
+        read_only_default=False,
+        read_only_help="Never create IBKR connection (offline mode)",
+        account_id_help="Override IBKR account ID",
+        results_dir_help="Override results directory (default: results/)",
+        watchlist_help=(
+            "Name of the IBKR watchlist to evaluate "
+            "(case-insensitive substring match). "
+            'If omitted, tries "default watchlist" and silently skips if not found. '
+            "If explicitly provided and not found, aborts."
+        ),
     )
     parser.add_argument(
         "--refresh-stale",
@@ -342,50 +371,13 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--refresh-limit",
-        type=int,
-        default=10,
-        help="Maximum tickers to auto-refresh in one run (default: 10)",
-    )
-    parser.add_argument(
-        "--sector-limit",
-        type=float,
-        default=30.0,
-        help="Warn when a BUY/ADD would push a sector above this %% (default: 30)",
-    )
-    parser.add_argument(
-        "--exchange-limit",
-        type=float,
-        default=40.0,
-        help="Warn when a BUY/ADD would push an exchange above this %% (default: 40)",
-    )
-    parser.add_argument(
         "--quick", action="store_true", help="Use quick mode for re-analysis"
-    )
-    parser.add_argument(
-        "--read-only",
-        action="store_true",
-        help="Never create IBKR connection (offline mode)",
-    )
-    parser.add_argument(
-        "--account-id", type=str, default="", help="Override IBKR account ID"
-    )
-    parser.add_argument(
-        "--results-dir", type=str, default="results/", help="Override results directory"
     )
     parser.add_argument(
         "--output", type=str, default="", help="Write report to file (default: stdout)"
     )
     parser.add_argument("--json", action="store_true", help="Structured JSON output")
     parser.add_argument("--debug", action="store_true", help="Debug output")
-    parser.add_argument(
-        "--watchlist-name",
-        type=str,
-        default=None,
-        help="Name of the IBKR watchlist to evaluate (case-insensitive substring match). "
-        'If omitted, tries "default watchlist" and silently skips if not found. '
-        "If explicitly provided and not found, aborts.",
-    )
 
     args = parser.parse_args()
 
@@ -393,8 +385,7 @@ def parse_args() -> argparse.Namespace:
     if args.recommend or args.execute:
         args.report_only = False
 
-    if args.refresh_limit < 1:
-        parser.error("--refresh-limit must be >= 1")
+    validate_common_portfolio_request_args(parser, args)
 
     return args
 
@@ -967,24 +958,15 @@ def _ccy(currency: str) -> str:
 
 
 def _normalize_sector_label(sector: str) -> str:
-    """Normalize sector labels so equivalent names aggregate cleanly."""
-    normalized = " ".join((sector or "").split()).strip()
-    if not normalized:
-        return "Unknown"
-    if normalized.casefold() in {"healthcare", "health care"}:
-        return "Health Care"
-    return normalized
+    """Backward-compatible wrapper for the shared sector normalizer."""
+    return shared_normalize_sector_label(sector)
 
 
 def _aggregate_sector_weights(
     sector_weights: dict[str, float] | None,
 ) -> dict[str, float]:
-    """Merge sector buckets that differ only by benign label variants."""
-    aggregated: dict[str, float] = {}
-    for sector, pct in (sector_weights or {}).items():
-        label = _normalize_sector_label(sector)
-        aggregated[label] = aggregated.get(label, 0.0) + pct
-    return aggregated
+    """Backward-compatible wrapper for the shared sector aggregation helper."""
+    return shared_aggregate_sector_weights(sector_weights)
 
 
 def _item_currency(item: ReconciliationItem) -> str:
@@ -1008,33 +990,8 @@ def _bar_chart(pct: float, limit: float, width: int = 14) -> str:
 
 
 def _compute_dip_score(item: ReconciliationItem) -> float:
-    """Composite dip quality score [0–100]. Higher = better dip opportunity."""
-    a = item.analysis
-    pos = item.ibkr_position
-    if not a:
-        return 0.0
-
-    health = a.health_adj or 0.0
-    growth = a.growth_adj or 0.0
-    base = health * 0.4 + growth * 0.4  # 0–80 pts from fundamentals
-
-    # Dip-below-entry bonus: more attractive if current price < analyst's entry recommendation
-    price_bonus = 0.0
-    if a.entry_price and pos and pos.current_price_local and a.entry_price > 0:
-        dip_pct = (a.entry_price - pos.current_price_local) / a.entry_price * 100
-        if dip_pct > 0:
-            price_bonus = min(dip_pct * 1.5, 12.0)  # max 12 pts
-
-    # R/R bonus: high upside-to-downside ratio improves ranking
-    rr_bonus = 0.0
-    if a.target_1_price and a.stop_price and pos and pos.current_price_local:
-        current = pos.current_price_local
-        if current > 0 and current > a.stop_price:
-            upside = (a.target_1_price - current) / current
-            downside = max((current - a.stop_price) / current, 0.001)
-            rr_bonus = min((upside / downside) * 2.5, 8.0)  # max 8 pts
-
-    return base + price_bonus + rr_bonus
+    """Backward-compatible alias for the shared dip-watch scorer."""
+    return compute_dip_score(item)
 
 
 def _display_ticker(item: ReconciliationItem) -> str:
@@ -1071,14 +1028,23 @@ def format_report(
     cash = portfolio.cash_balance_usd
     settled = portfolio.settled_cash_usd
     available = portfolio.available_cash_usd
-    buffer_amt = max(0.0, settled - available)
+    cash_summary = build_cash_summary(items, portfolio)
+    buffer_amt = cash_summary.buffer_reserve_usd
+    unsettled_amt = cash_summary.unsettled_cash_usd
 
     lines.append(f"  Account:          {portfolio.account_id or 'N/A'}")
     lines.append(f"  Net liquidation:  ${nlv:>10,.0f}")
     if nlv > 0:
+        if unsettled_amt > 0:
+            cash_note = (
+                f"  includes ${unsettled_amt:,.0f} of unsettled sale proceeds "
+                "(not yet spendable)"
+            )
+        else:
+            cash_note = "  all shown cash is settled"
         lines.append(
             f"  Cash (total):     ${cash:>10,.0f}   ({cash / nlv * 100:.1f}%)"
-            "  includes unsettled sale proceeds (not yet spendable)"
+            f"{cash_note}"
         )
         lines.append(
             f"  Settled cash:     ${settled:>10,.0f}   ({settled / nlv * 100:.1f}%)"
@@ -1098,45 +1064,23 @@ def format_report(
         lines.append(f"  Available:        ${available:,.0f}")
     lines.append("")
 
-    # Split by action — sells are further categorised by sell_type
-    stop_sells = [
-        i for i in items if i.action == "SELL" and i.sell_type == "STOP_BREACH"
-    ]
-    hard_sells = [
-        i for i in items if i.action == "SELL" and i.sell_type in (None, "HARD_REJECT")
-    ]
-    soft_sells = [
-        i for i in items if i.action == "SELL" and i.sell_type == "SOFT_REJECT"
-    ]
-    # SOFT_REJECT items demoted to REVIEW by compute_portfolio_health on correlated days
-    macro_reviews = [
-        i for i in items if i.action == "REVIEW" and i.sell_type == "SOFT_REJECT"
-    ]
-    # STOP_BREACH items demoted to REVIEW when fundamentals are intact during correlated event
-    macro_stop_reviews = [
-        i for i in items if i.action == "REVIEW" and i.sell_type == "STOP_BREACH"
-    ]
-    trims = [i for i in items if i.action == "TRIM"]
-    removes = [i for i in items if i.action == "REMOVE"]
-    adds = [i for i in items if i.action == "ADD"]
-    buys = [
-        i
-        for i in items
-        if i.action == "BUY" and i.ibkr_position is None and i.is_watchlist
-    ]
-    buys_offwatch = [
-        i
-        for i in items
-        if i.action == "BUY" and i.ibkr_position is None and not i.is_watchlist
-    ]
-    holds_real = [i for i in items if i.action == "HOLD" and not i.is_watchlist]
-    holds_watch = [i for i in items if i.action == "HOLD" and i.is_watchlist]
-    # Exclude macro_reviews and macro_stop_reviews from regular REVIEW section
-    reviews = [
-        i
-        for i in items
-        if i.action == "REVIEW" and i.sell_type not in ("SOFT_REJECT", "STOP_BREACH")
-    ]
+    action_groups = group_portfolio_actions(
+        items,
+        watchlist_tickers=watchlist_tickers,
+    )
+    stop_sells = list(action_groups.stop_sells)
+    hard_sells = list(action_groups.hard_sells)
+    soft_sells = list(action_groups.soft_sells)
+    macro_reviews = list(action_groups.macro_reviews)
+    macro_stop_reviews = list(action_groups.macro_stop_reviews)
+    trims = list(action_groups.trims)
+    removes = list(action_groups.removes)
+    adds = list(action_groups.adds)
+    buys = list(action_groups.new_buys)
+    buys_offwatch = list(action_groups.watchlist_candidates)
+    holds_real = list(action_groups.holds_real)
+    holds_watch = list(action_groups.holds_watch)
+    reviews = list(action_groups.reviews)
     freshness_summary = freshness_summary or _refresh_service.classify(
         items,
         max_age_days=max_age_days,
@@ -1367,7 +1311,7 @@ def format_report(
         normed = _norm_reason(r)
         paren = normed.rfind("(")
         if paren != -1 and normed.endswith(")"):
-            return f"analyzed {normed[paren + 1:-1]}"
+            return f"analyzed {normed[paren + 1 : -1]}"
         return normed  # fallback: show full reason
 
     def _score_line(item: ReconciliationItem) -> str | None:
@@ -1539,107 +1483,14 @@ def format_report(
         return "[untracked — new position]"
 
     def _find_live_order(item: ReconciliationItem) -> tuple[dict, str] | None:
-        """Return (order_dict, order_side) for the first live order matching this item, or None.
-
-        Matching strategy (first match wins):
-
-        1. conid — most reliable; used whenever a held position exists and the
-           order dict contains a conid field.
-
-        2. Symbol — best-effort fallback for new BUY items with no position.
-           IBKR's order symbol format can differ from the yfinance ticker in two ways:
-             a. No exchange suffix: "7203" not "7203.T" — handled by splitting on "."
-             b. No zero-padding for HK codes: "5" not "0005" — handled below
-             c. (Rare) Different base entirely: e.g. IBKR "BRK B" vs yf "BRK-B".
-                When a position exists, pos.symbol (the IBKR-native code) is used
-                as the authoritative candidate, avoiding the guessing entirely.
-                For new BUYs with no position, symbol matching is best-effort only;
-                if it misses, the report simply won't annotate the duplicate order.
-        """
-        if not _live_orders:
+        match = shared_find_live_order(item, _live_orders)
+        if match is None:
             return None
-        pos = item.ibkr_position
-        conid = pos.conid if pos else None
-
-        # Build the set of symbol strings we'd expect IBKR to use for this ticker.
-        # • pos.symbol is the authoritative IBKR-native symbol (available for held positions).
-        # • yf_base is the suffix-stripped yfinance base (e.g. "0005" from "0005.HK").
-        # • ibkr_base strips HK zero-padding from yf_base (e.g. "5" from "0005"),
-        #   since IBKR does not zero-pad HK 4-digit codes.
-        yf_base = (
-            item.ticker.ibkr.upper()
-        )  # IBKR bare symbol (no suffix, no zero-padding)
-        hk_padded = item.ticker.yf.split(".")[0].upper()  # e.g. "0005" for HK
-        symbol_candidates: set[str] = {yf_base, hk_padded}
-        if pos and pos.symbol:
-            symbol_candidates.add(pos.symbol.upper())  # authoritative IBKR symbol
-
-        for order in _live_orders:
-            matched = False
-            order_conid = order.get("conid")
-            order_symbol = (order.get("ticker") or order.get("symbol") or "").upper()
-            # Priority 1: conid match (exact, reliable for held positions)
-            if conid and order_conid is not None:
-                try:
-                    if int(order_conid) == int(conid):
-                        matched = True
-                except (TypeError, ValueError):
-                    pass
-            # Priority 2: symbol match (best-effort; may miss if IBKR base differs)
-            if not matched and order_symbol in symbol_candidates:
-                matched = True
-            if not matched:
-                continue
-            order_side = (
-                "SELL" if order.get("side", "").upper() in ("S", "SELL") else "BUY"
-            )
-            return (order, order_side)
-        return None
+        return match.order, match.side
 
     def _order_note(item: ReconciliationItem) -> str | None:
-        """Return a compact order-status note if an open order exists for this ticker.
-
-        When the live order is the SAME side as the recommendation (SELL+SELL or BUY+BUY),
-        warns explicitly that the order is already submitted. When the sides differ,
-        flags as a conflict.
-        """
-        result = _find_live_order(item)
-        if result is None:
-            return None
-        order, order_side = result
-        qty = order.get("remainingSize") or order.get("totalSize") or "?"
-        price = order.get("price") or order.get("auxPrice")
-        otype = order.get("orderType", "LMT")
-        status = order.get("status", "")
-        try:
-            price_str = f" @ {float(price):.2f}" if price else ""
-        except (TypeError, ValueError):
-            price_str = f" @ {price}" if price else ""
-
-        rec_side = "SELL" if item.action in ("SELL", "TRIM") else "BUY"
-        if order_side == rec_side:
-            live_qty: int | None = None
-            try:
-                if qty != "?":
-                    live_qty = int(qty)
-            except (TypeError, ValueError):
-                pass
-            rec_qty = item.suggested_quantity
-            if live_qty is not None and rec_qty is not None and live_qty < rec_qty:
-                need = rec_qty - live_qty
-                return (
-                    f"             [PARTIAL ORDER: {live_qty} of {rec_qty} shares already submitted"
-                    f" — enter {need} more]"
-                )
-            return (
-                f"             [ORDER ALREADY SUBMITTED: {order_side} {qty}{price_str}"
-                f" {otype} ({status}) — do not re-enter]"
-            )
-        # Opposite-side conflict (e.g., recommending SELL but live BUY pending)
-        return (
-            f"             [CONFLICT: live {order_side} order {qty}{price_str}"
-            f" {otype} ({status}) while recommending {rec_side}]"
-        )
+        note = shared_build_live_order_note(item, _live_orders)
+        return f"{_DETAIL_INDENT}{note}" if note else None
 
     # ── MACRO ALERT BANNER (if correlated sell event detected) ───────────────
     _correlated_flag = next(
@@ -1902,22 +1753,9 @@ def format_report(
             lines.append("")
 
     # ── DIP WATCH ────────────────────────────────────────────────────────────
-    dip_candidates: list[ReconciliationItem] = []
-    if _correlated_flag and macro_reviews:
-        dip_candidates = sorted(
-            [
-                i
-                for i in macro_reviews
-                if i.analysis
-                and (i.analysis.health_adj or 0) >= 55
-                and (i.analysis.growth_adj or 0) >= 55
-                and _compute_dip_score(i) >= 50
-            ],
-            key=_compute_dip_score,
-            reverse=True,
-        )[:_MAX_DIP_CANDIDATES]
-        if dip_candidates:
-            _render_dip_watch_section(dip_candidates)
+    dip_candidates: list[ReconciliationItem] = list(action_groups.dip_candidates)
+    if _correlated_flag and dip_candidates:
+        _render_dip_watch_section(dip_candidates)
 
     # ── TRIMS ────────────────────────────────────────────────────────────────
     if trims:
@@ -2006,27 +1844,7 @@ def format_report(
     # Held-position check is belt-and-suspenders: the reconciler's Phase 1 should
     # block these in Phase 2, but ticker-format mismatches (bare "5434" position
     # vs "5434.TW" analysis) can still slip through.
-    _action_bases: frozenset[str] = frozenset(
-        i.ticker.yf.split(".")[0].upper()
-        for i in removes + stop_sells + hard_sells + soft_sells
-    )
-    _held_bases: frozenset[str] = frozenset(
-        i.ticker.yf.split(".")[0].upper() for i in items if i.ibkr_position is not None
-    )
-    # Belt-and-suspenders: exclude candidates whose base symbol is already on
-    # the IBKR watchlist.  The reconciler's Phase 1.5 should have converted
-    # these to is_watchlist=True items already, but if conid resolution fails
-    # (API error on first encounter) the ticker can silently fall through as
-    # a Phase 2 BUY.  Filtering here prevents that leakage.
-    _watchlist_bases: frozenset[str] = frozenset(
-        t.split(".")[0].upper() for t in (watchlist_tickers or set())
-    )
-    _cands_deduped = [
-        i
-        for i in buys_offwatch
-        if i.ticker.yf.split(".")[0].upper()
-        not in (_action_bases | _held_bases | _watchlist_bases)
-    ]
+    _cands_deduped = list(buys_offwatch)
     # Split candidates: exclude any that already have a live BUY order so the
     # ":10" slice is filled with real candidates, not orders already placed.
     _cands_in_flight: list[ReconciliationItem] = []
@@ -2223,10 +2041,6 @@ def format_report(
             and i.cash_impact_usd < 0
             and (i.action != "BUY" or i.is_watchlist)  # exclude unvetted candidates
         ]
-        sell_proceed_items = [
-            i for i in items if i.action in ("SELL", "TRIM") and i.cash_impact_usd > 0
-        ]
-
         lines.append(
             f"  Already-settled cash (spend now):            ${settled:>7,.0f}"
         )
@@ -2251,26 +2065,18 @@ def format_report(
             )
             lines.append("")
 
-        if sell_proceed_items:
-            settle_dates = [
-                i.settlement_date for i in sell_proceed_items if i.settlement_date
-            ]
-            settle_date_str = settle_dates[0] if settle_dates else "in 2 business days"
+        if cash_summary.pending_inflows:
+            settle_date_str = cash_summary.next_settlement_date or "in 2 business days"
             lines.append(
                 f"  Pending inflows (sale proceeds, clears {settle_date_str}):"
             )
-            total_proceeds = 0.0
-            for item in sell_proceed_items:
-                proceeds = item.cash_impact_usd
-                total_proceeds += proceeds
-                qty_str = (
-                    f"({abs(item.suggested_quantity)} sh)"
-                    if item.suggested_quantity
-                    else ""
-                )
-                label = f"    {item.action}  {_display_ticker(item)}  {qty_str}:"
-                lines.append(f"{label:<46}+ ${proceeds:>6,.0f}")
-            lines.append(f"{'  Total pending:':<46}  ${total_proceeds:>6,.0f}")
+            for row in cash_summary.pending_inflows:
+                qty_str = f"({abs(row.quantity)} sh)" if row.quantity else ""
+                label = f"    {row.action}  {row.ticker_ibkr}  {qty_str}:"
+                lines.append(f"{label:<46}+ ${row.cash_impact_usd:>6,.0f}")
+            lines.append(
+                f"{'  Total pending:':<46}  ${cash_summary.pending_inflows_total_usd:>6,.0f}"
+            )
             lines.append("")
             lines.append(
                 "  ⚠  Do NOT spend sale proceeds today — they have not settled yet."
@@ -2507,25 +2313,7 @@ def format_report(
             lines.append("")
 
     # ── Summary line ──────────────────────────────────────────────────────────
-    action_counts: dict[str, int] = {}
-    macro_watch_count = 0
-    for item in items:
-        if item.action == "REVIEW" and item.sell_type == "SOFT_REJECT":
-            macro_watch_count += 1
-        elif (
-            item.action == "BUY"
-            and not item.is_watchlist
-            and item.ibkr_position is None
-        ):
-            # Phase 2 non-watchlist BUYs: counted only if not suppressed by a
-            # same-base-symbol REMOVE or SELL (those are excluded from _cands_deduped).
-            pass
-        else:
-            action_counts[item.action] = action_counts.get(item.action, 0) + 1
-    if _cands_deduped:
-        action_counts["CANDIDATES"] = len(_cands_deduped)
-    if macro_watch_count:
-        action_counts["MACRO_WATCH"] = macro_watch_count
+    action_counts = build_action_summary_counts(action_groups)
     order = [
         "SELL",
         "REMOVE",
@@ -2864,7 +2652,8 @@ def main() -> None:
     if not args.read_only:
         _preflight_ibkr_requirements()
 
-    results_dir = Path(args.results_dir)
+    request_kwargs = portfolio_request_kwargs_from_args(args)
+    results_dir = request_kwargs["results_dir"]
     if args.read_only:
         print("Read-only mode: no IBKR connection", file=sys.stderr)
 
@@ -2904,19 +2693,10 @@ def main() -> None:
     )
 
     request = PortfolioRecommendationRequest(
-        results_dir=results_dir,
-        account_id=args.account_id or None,
-        watchlist_name=args.watchlist_name,
-        cash_buffer=args.cash_buffer,
-        max_age_days=args.max_age,
-        drift_pct=args.drift_pct,
-        sector_limit_pct=args.sector_limit,
-        exchange_limit_pct=args.exchange_limit,
+        **request_kwargs,
         recommend=args.recommend,
-        read_only=args.read_only,
         quick_mode=args.quick,
         refresh_policy=refresh_policy,
-        refresh_limit=args.refresh_limit,
     )
 
     try:
