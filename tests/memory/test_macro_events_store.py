@@ -228,6 +228,18 @@ class TestMacroEventsStoreFiltering:
         dates = [e.event_date for e in events]
         assert dates == sorted(dates, reverse=True)
 
+    def test_get_active_events_records_capture_event_on_success(self):
+        future = (date.today() + timedelta(days=20)).isoformat()
+        store = self._store_with_events([self._meta("2026-03-05", future)])
+        with patch("src.memory._record_capture_memory_event") as mock_capture_event:
+            events = store.get_active_events(region_filter=".HK")
+        assert len(events) == 1
+        payload = mock_capture_event.call_args.args[0]
+        assert payload["event"] == "macro_get_active_events"
+        assert payload["region_filter"] == ".HK"
+        assert payload["available"] is True
+        assert payload["events"][0]["event_date"] == "2026-03-05"
+
     def test_get_structural_events_since_passes_structural_filter(self):
         """get_structural_events_since() includes impact=STRUCTURAL in WHERE clause."""
         future = (date.today() + timedelta(days=90)).isoformat()
@@ -258,7 +270,12 @@ class TestMacroEventsStoreFiltering:
         store.available = True
         store.collection = MagicMock()
         store.collection.get.side_effect = Exception("query error")
-        assert store.get_active_events() == []
+        with patch("src.memory._record_capture_memory_event") as mock_capture_event:
+            assert store.get_active_events() == []
+        payload = mock_capture_event.call_args.args[0]
+        assert payload["event"] == "macro_get_active_events_failed"
+        assert payload["available"] is True
+        assert payload["error"] == "query error"
 
     def test_forced_reanalysis_preserved_in_deserialization(self):
         """forced_reanalysis=True stored in metadata survives round-trip deserialization."""
@@ -292,6 +309,33 @@ class TestMacroEventsStoreFiltering:
         events = store.get_structural_events_since("2026-01-01")
         dates = [e.event_date for e in events]
         assert dates == sorted(dates, reverse=True), "Expected newest-first ordering"
+
+    def test_get_structural_events_since_records_capture_event_on_success(self):
+        future = (date.today() + timedelta(days=90)).isoformat()
+        store = self._store_with_events(
+            [self._meta("2026-03-05", future, impact="STRUCTURAL")]
+        )
+        with patch("src.memory._record_capture_memory_event") as mock_capture_event:
+            events = store.get_structural_events_since("2026-01-01")
+        assert len(events) == 1
+        payload = mock_capture_event.call_args.args[0]
+        assert payload["event"] == "macro_get_structural_events"
+        assert payload["since_date"] == "2026-01-01"
+        assert payload["available"] is True
+        assert payload["events"][0]["impact"] == "STRUCTURAL"
+
+    def test_get_structural_events_since_exception_records_capture_failure(self):
+        store = MacroEventsStore.__new__(MacroEventsStore)
+        store.available = True
+        store.collection = MagicMock()
+        store.collection.get.side_effect = Exception("query error")
+        with patch("src.memory._record_capture_memory_event") as mock_capture_event:
+            assert store.get_structural_events_since("2026-01-01") == []
+        payload = mock_capture_event.call_args.args[0]
+        assert payload["event"] == "macro_get_structural_events_failed"
+        assert payload["since_date"] == "2026-01-01"
+        assert payload["available"] is True
+        assert payload["error"] == "query error"
 
 
 class TestDateToInt:

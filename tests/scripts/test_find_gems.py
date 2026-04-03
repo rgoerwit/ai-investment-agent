@@ -1,6 +1,8 @@
 """Tests for scripts/find_gems.py — screening pipeline."""
 
+import contextlib
 import json
+import signal
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1313,6 +1315,38 @@ def _exchange_ids(exchanges):
 _ENABLED_EXCHANGES = _load_enabled_exchanges()
 
 
+@contextlib.contextmanager
+def _skip_on_wall_clock_timeout(seconds: int, label: str):
+    """Skip live integration checks that exceed a hard wall-clock budget."""
+    if not hasattr(signal, "setitimer") or not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    class _WallClockTimeout(Exception):
+        pass
+
+    def _raise_timeout(_signum, _frame):
+        raise _WallClockTimeout(f"{label} exceeded {seconds}s")
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+    try:
+        signal.signal(signal.SIGALRM, _raise_timeout)
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+        yield
+    except _WallClockTimeout as exc:
+        pytest.skip(f"{label} timed out after {seconds}s: {exc}")
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer != (0.0, 0.0):
+            signal.setitimer(
+                signal.ITIMER_REAL,
+                previous_timer[0],
+                previous_timer[1],
+            )
+
+
 @pytest.mark.integration
 @pytest.mark.slow
 class TestExchangeScrapeIntegration:
@@ -1331,7 +1365,11 @@ class TestExchangeScrapeIntegration:
 
     @pytest.fixture(autouse=True)
     def _session(self):
-        self.session = find_gems._get_session()
+        self.session = find_gems._get_session(
+            connect_timeout=5,
+            read_timeout=10,
+            total_timeout=15,
+        )
 
     @pytest.mark.parametrize(
         "exchange", _ENABLED_EXCHANGES, ids=_exchange_ids(_ENABLED_EXCHANGES)
@@ -1342,36 +1380,37 @@ class TestExchangeScrapeIntegration:
         handler = find_gems._HANDLERS.get(exchange["method"])
         assert handler is not None, f"Unknown method: {exchange['method']}"
 
-        # Skip on any network-level failure — transient outages are not test failures
-        try:
-            df = handler(exchange, self.session)
-        except _req.exceptions.RequestException as exc:
-            pytest.skip(f"{exchange['exchange_name']} unreachable: {exc}")
+        with _skip_on_wall_clock_timeout(20, exchange["exchange_name"]):
+            # Skip on any network-level failure — transient outages are not test failures
+            try:
+                df = handler(exchange, self.session)
+            except _req.exceptions.RequestException as exc:
+                pytest.skip(f"{exchange['exchange_name']} unreachable: {exc}")
 
-        # Handler returning None signals a source-level problem (site down, blocked)
-        # — skip rather than fail since this is outside our control
-        if df is None:
-            pytest.skip(
-                f"{exchange['exchange_name']}: handler returned None "
-                "(source may be temporarily unavailable)"
+            # Handler returning None signals a source-level problem (site down, blocked)
+            # — skip rather than fail since this is outside our control
+            if df is None:
+                pytest.skip(
+                    f"{exchange['exchange_name']}: handler returned None "
+                    "(source may be temporarily unavailable)"
+                )
+
+            # A completely empty raw DataFrame is a serious failure: the handler ran,
+            # got an HTTP response, but extracted zero rows — URL or HTML structure broken
+            assert not df.empty, (
+                f"{exchange['exchange_name']}: handler returned completely empty DataFrame "
+                "(URL may be broken or page HTML structure changed drastically)"
             )
 
-        # A completely empty raw DataFrame is a serious failure: the handler ran,
-        # got an HTTP response, but extracted zero rows — URL or HTML structure broken
-        assert not df.empty, (
-            f"{exchange['exchange_name']}: handler returned completely empty DataFrame "
-            "(URL may be broken or page HTML structure changed drastically)"
-        )
+            # Apply the same filters used by scrape_exchanges()
+            df = find_gems._apply_filters(df, exchange)
 
-        # Apply the same filters used by scrape_exchanges()
-        df = find_gems._apply_filters(df, exchange)
-
-        # After filtering, zero rows is a serious failure: either the filters are
-        # completely misconfigured or the source data format changed beyond recognition
-        assert len(df) > 0, (
-            f"{exchange['exchange_name']}: 0 rows survive after filtering "
-            "(filters may be misconfigured or source data format changed)"
-        )
+            # After filtering, zero rows is a serious failure: either the filters are
+            # completely misconfigured or the source data format changed beyond recognition
+            assert len(df) > 0, (
+                f"{exchange['exchange_name']}: 0 rows survive after filtering "
+                "(filters may be misconfigured or source data format changed)"
+            )
 
 
 # ============================================================
@@ -1530,3 +1569,47 @@ class TestHandleScrapeHtmlPagination:
             assert (
                 ex.get("min_expected_rows", 0) >= 700
             ), f"{name} min_expected_rows too low: {ex.get('min_expected_rows')}"
+
+
+class TestRequestTimeouts:
+    """Unit tests for scraper request timeout behavior."""
+
+    def test_build_timeout_includes_total_connect_and_read_limits(self):
+        timeout = find_gems._build_timeout(
+            connect_timeout=5,
+            read_timeout=10,
+            total_timeout=15,
+        )
+
+        assert timeout.total == 15
+        assert timeout.connect_timeout == 5
+        assert timeout.read_timeout == 10
+
+    def test_timeout_adapter_injects_default_timeout_object(self):
+        adapter = find_gems._TimeoutAdapter(
+            timeout=find_gems._build_timeout(
+                connect_timeout=4,
+                read_timeout=9,
+                total_timeout=12,
+            )
+        )
+
+        with patch(
+            "requests.adapters.HTTPAdapter.send", return_value=MagicMock()
+        ) as send:
+            adapter.send(MagicMock())
+
+        timeout = send.call_args.kwargs["timeout"]
+        assert timeout.total == 12
+        assert timeout.connect_timeout == 4
+        assert timeout.read_timeout == 9
+
+    def test_timeout_adapter_preserves_explicit_call_timeout(self):
+        adapter = find_gems._TimeoutAdapter(timeout=find_gems._build_timeout())
+
+        with patch(
+            "requests.adapters.HTTPAdapter.send", return_value=MagicMock()
+        ) as send:
+            adapter.send(MagicMock(), timeout=3)
+
+        assert send.call_args.kwargs["timeout"] == 3
