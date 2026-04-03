@@ -1,3 +1,6 @@
+# Flask app settings
+runtime/*
+
 # Multi-Agent Investment Analysis System - .gitignore
 CLAUDE.md
 .claude

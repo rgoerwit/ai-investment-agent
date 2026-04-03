@@ -34,6 +34,7 @@ from src.ibkr.reconciler import (
     update_latest_analyses_index,
 )
 from src.ibkr.ticker import Ticker
+from tests.ibkr.lock_helpers import hold_analysis_index_lock
 
 # ── Fixtures ──
 
@@ -110,13 +111,6 @@ def _make_portfolio(
         cash_pct=cash / value if value > 0 else 0,
         available_cash_usd=cash - (value * cash_buffer_pct),
     )
-
-
-def _hold_analysis_index_lock(results_dir: str, hold_seconds: float, ready) -> None:
-    """Helper process that holds the index lock long enough to test blocking."""
-    with _analysis_index_lock(Path(results_dir)):
-        ready.set()
-        time.sleep(hold_seconds)
 
 
 # ── Staleness Tests ──
@@ -1594,7 +1588,7 @@ class TestLoadLatestAnalyses:
         ctx = multiprocessing.get_context("spawn")
         ready = ctx.Event()
         proc = ctx.Process(
-            target=_hold_analysis_index_lock,
+            target=hold_analysis_index_lock,
             args=(str(tmp_path), 0.4, ready),
         )
         proc.start()
