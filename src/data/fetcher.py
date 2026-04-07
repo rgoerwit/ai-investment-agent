@@ -117,6 +117,7 @@ PERCENT_LIKE_FIELDS = frozenset(
         "regularMarketChangePercent",
     }
 )
+NON_FINANCIAL_METADATA_FIELDS = frozenset({"maxAge"})
 
 RECENT_SPLIT_WINDOW_DAYS = 180
 SPLIT_RATIO_MATCH_TOLERANCE = 0.25
@@ -144,11 +145,25 @@ MergeResult = namedtuple("MergeResult", ["data", "gaps_filled"])
 
 def _normalize_percent_pair(old_val: float, new_val: float) -> tuple[float, float]:
     """Normalize decimal-vs-percent representations before comparison."""
-    if abs(old_val) < 1 and abs(new_val) > 1:
-        old_val *= 100
-    elif abs(new_val) < 1 and abs(old_val) > 1:
-        new_val *= 100
-    return old_val, new_val
+    candidates = [
+        (old_val, new_val),
+        (old_val * 100, new_val),
+        (old_val, new_val * 100),
+    ]
+
+    def relative_gap(pair: tuple[float, float]) -> float:
+        left, right = pair
+        baseline = max(abs(left), abs(right), 1e-9)
+        return abs(left - right) / baseline
+
+    return min(candidates, key=relative_gap)
+
+
+def _normalize_history_bound(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
 
 
 def _coerce_epoch_date(value: Any) -> datetime | None:
@@ -411,8 +426,12 @@ class SmartMarketDataFetcher(FinancialFetcher):
         self._mnemonic_cache: dict[str, str] = self._load_mnemonic_cache()
         self._metrics_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._metrics_inflight: dict[str, asyncio.Task[dict[str, Any]]] = {}
-        self._history_cache: dict[tuple[str, str], tuple[float, pd.DataFrame]] = {}
-        self._history_inflight: dict[tuple[str, str], asyncio.Task[pd.DataFrame]] = {}
+        self._history_cache: dict[
+            tuple[str, str, str | None, str | None], tuple[float, pd.DataFrame]
+        ] = {}
+        self._history_inflight: dict[
+            tuple[str, str, str | None, str | None], asyncio.Task[pd.DataFrame]
+        ] = {}
 
         self.fmp_fetcher = get_fmp_fetcher() if FMP_AVAILABLE else None
         self.eodhd_fetcher = get_eodhd_fetcher() if EODHD_AVAILABLE else None
@@ -461,21 +480,55 @@ class SmartMarketDataFetcher(FinancialFetcher):
             copy.deepcopy(payload),
         )
 
-    def _get_cached_history(self, ticker: str, period: str) -> pd.DataFrame | None:
-        cached = self._history_cache.get((ticker, period))
+    def _history_cache_key(
+        self,
+        ticker: str,
+        period: str,
+        start: str | None = None,
+        end: str | None = None,
+    ) -> tuple[str, str, str | None, str | None]:
+        return (
+            ticker,
+            period,
+            _normalize_history_bound(start),
+            _normalize_history_bound(end),
+        )
+
+    def _get_cached_history(
+        self,
+        ticker: str,
+        period: str,
+        start: str | None = None,
+        end: str | None = None,
+    ) -> pd.DataFrame | None:
+        cache_key = self._history_cache_key(ticker, period, start, end)
+        cached = self._history_cache.get(cache_key)
         if not cached:
             return None
         expires_at, frame = cached
         if time.monotonic() >= expires_at:
-            self._history_cache.pop((ticker, period), None)
+            self._history_cache.pop(cache_key, None)
             return None
-        logger.debug("price_history_cache_hit", symbol=ticker, period=period)
+        logger.debug(
+            "price_history_cache_hit",
+            symbol=ticker,
+            period=period,
+            start=start,
+            end=end,
+        )
         return frame.copy(deep=True)
 
-    def _set_cached_history(self, ticker: str, period: str, hist: pd.DataFrame) -> None:
+    def _set_cached_history(
+        self,
+        ticker: str,
+        period: str,
+        hist: pd.DataFrame,
+        start: str | None = None,
+        end: str | None = None,
+    ) -> None:
         if hist is None or hist.empty:
             return
-        self._history_cache[(ticker, period)] = (
+        self._history_cache[self._history_cache_key(ticker, period, start, end)] = (
             time.monotonic() + PRICE_HISTORY_CACHE_TTL_SECONDS,
             hist.copy(deep=True),
         )
@@ -1784,6 +1837,11 @@ class SmartMarketDataFetcher(FinancialFetcher):
                     # Record source conflicts when replacing with >20% variance.
                     # Normalize decimal-vs-percentage fields before comparison.
                     if key in merged and merged[key] is not None and value is not None:
+                        if key in NON_FINANCIAL_METADATA_FIELDS:
+                            merged[key] = value
+                            field_sources[key] = source_name
+                            field_quality[key] = quality
+                            continue
                         try:
                             old_val = float(merged[key])
                             new_val = float(value)
@@ -2607,12 +2665,26 @@ class SmartMarketDataFetcher(FinancialFetcher):
         return copy.deepcopy(result)
 
     async def _get_price_history_uncached(
-        self, ticker: str, period: str = "1y"
+        self,
+        ticker: str,
+        period: str = "1y",
+        start: str | None = None,
+        end: str | None = None,
     ) -> pd.DataFrame:
         """Fetch historical price data."""
         try:
             stock = yf.Ticker(ticker)
-            hist = await asyncio.to_thread(stock.history, period=period)
+            history_kwargs: dict[str, str] = {}
+            normalized_start = _normalize_history_bound(start)
+            normalized_end = _normalize_history_bound(end)
+            if normalized_start is not None:
+                history_kwargs["start"] = normalized_start
+            if normalized_end is not None:
+                history_kwargs["end"] = normalized_end
+            if not history_kwargs:
+                history_kwargs["period"] = period
+
+            hist = await asyncio.to_thread(stock.history, **history_kwargs)
             if hist.empty:
                 resolved = await self._resolve_ticker_via_search(ticker)
                 if resolved:
@@ -2620,39 +2692,85 @@ class SmartMarketDataFetcher(FinancialFetcher):
                         "history_ticker_resolved", original=ticker, resolved=resolved
                     )
                     stock = yf.Ticker(resolved)
-                    hist = await asyncio.to_thread(stock.history, period=period)
+                    hist = await asyncio.to_thread(stock.history, **history_kwargs)
             return hist
         except Exception as e:
             logger.error("history_fetch_failed", ticker=ticker, error=str(e))
             return pd.DataFrame()
 
-    async def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
+    async def get_price_history(
+        self,
+        ticker: str,
+        period: str = "1y",
+        start: str | None = None,
+        end: str | None = None,
+    ) -> pd.DataFrame:
         """Fetch historical price data with short-lived caching and inflight dedupe."""
-        cached = self._get_cached_history(ticker, period)
+        normalized_start = _normalize_history_bound(start)
+        normalized_end = _normalize_history_bound(end)
+        cached = self._get_cached_history(
+            ticker,
+            period,
+            start=normalized_start,
+            end=normalized_end,
+        )
         if cached is not None:
             return cached
 
-        key = (ticker, period)
+        key = self._history_cache_key(
+            ticker,
+            period,
+            start=normalized_start,
+            end=normalized_end,
+        )
         inflight = self._history_inflight.get(key)
         if inflight is not None:
-            logger.debug("price_history_inflight_wait", symbol=ticker, period=period)
+            logger.debug(
+                "price_history_inflight_wait",
+                symbol=ticker,
+                period=period,
+                start=normalized_start,
+                end=normalized_end,
+            )
             return (await inflight).copy(deep=True)
 
-        task = asyncio.create_task(self._get_price_history_uncached(ticker, period))
+        task = asyncio.create_task(
+            self._get_price_history_uncached(
+                ticker,
+                period,
+                start=normalized_start,
+                end=normalized_end,
+            )
+        )
         self._history_inflight[key] = task
         try:
             hist = await task
         finally:
             self._history_inflight.pop(key, None)
 
-        self._set_cached_history(ticker, period, hist)
+        self._set_cached_history(
+            ticker,
+            period,
+            hist,
+            start=normalized_start,
+            end=normalized_end,
+        )
         return hist.copy(deep=True)
 
     # Alias for backward compatibility and interface compliance
     async def get_historical_prices(
-        self, ticker: str, period: str = "1y"
+        self,
+        ticker: str,
+        period: str = "1y",
+        start: str | None = None,
+        end: str | None = None,
     ) -> pd.DataFrame:
-        return await self.get_price_history(ticker, period)
+        return await self.get_price_history(
+            ticker,
+            period=period,
+            start=start,
+            end=end,
+        )
 
     def get_stats(self) -> dict[str, Any]:
         """Get comprehensive statistics on fetcher performance."""

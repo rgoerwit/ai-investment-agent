@@ -344,7 +344,7 @@ class TestConsultantNodeExecution:
 
     @pytest.mark.asyncio
     async def test_consultant_suppresses_repeated_fmp_alt_calls_after_failure(self):
-        """After one FMP alt-source failure, later alt-source calls should be skipped."""
+        """Managed FMP alt-source unavailability should not poison consultant validity."""
         mock_tool_bound_llm = Mock()
         mock_llm = Mock()
         mock_llm.bind_tools.return_value = mock_tool_bound_llm
@@ -444,7 +444,187 @@ class TestConsultantNodeExecution:
         assert skipped_tool_messages
         assert '"skipped": true' in skipped_tool_messages[0].lower()
         assert result["consultant_review"] == "CONSULTANT REVIEW: CONDITIONAL APPROVAL"
-        assert result["consultant_tool_failures"] == 1
+        assert result["consultant_tool_failures"] == 0
+        assert result["artifact_statuses"]["consultant_review"]["ok"] is True
+
+    @pytest.mark.asyncio
+    async def test_consultant_finalizes_after_fully_suppressed_iteration(self):
+        """If an entire tool iteration is suppressed, the node should synthesize and stop."""
+        mock_tool_bound_llm = Mock()
+        mock_llm = Mock()
+        mock_llm.bind_tools.return_value = mock_tool_bound_llm
+
+        tool_call_response = Mock()
+        tool_call_response.content = ""
+        tool_call_response.tool_calls = [
+            {
+                "name": "spot_check_metric_alt",
+                "args": {"ticker": "0005.HK", "metric": "operatingCashflow"},
+                "id": "alt_1",
+            }
+        ]
+        suppressed_follow_up = Mock()
+        suppressed_follow_up.content = ""
+        suppressed_follow_up.tool_calls = [
+            {
+                "name": "spot_check_metric_alt",
+                "args": {"ticker": "0005.HK", "metric": "freeCashflow"},
+                "id": "alt_2",
+            },
+            {
+                "name": "spot_check_metric_alt",
+                "args": {"ticker": "0005.HK", "metric": "netIncome"},
+                "id": "alt_3",
+            },
+        ]
+        final_response = Mock()
+        final_response.content = "CONSULTANT REVIEW: FINALIZED WITH TOOL LIMITS"
+        final_response.tool_calls = []
+
+        async def mock_invoke(*args, **kwargs):
+            call_index = mock_invoke.calls
+            mock_invoke.calls += 1
+            if call_index == 0:
+                return tool_call_response
+            if call_index == 1:
+                return suppressed_follow_up
+            return final_response
+
+        mock_invoke.calls = 0
+
+        mock_alt_tool = Mock()
+        mock_alt_tool.name = "spot_check_metric_alt"
+        mock_alt_tool.ainvoke = AsyncMock()
+
+        exec_mock = AsyncMock(
+            return_value=ToolResult(
+                value='{"error":"FMP alt-source unavailable","provider":"fmp","failure_kind":"auth_error","retryable":false}'
+            )
+        )
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                with patch(
+                    "src.agents.consultant_nodes.TOOL_SERVICE.execute", new=exec_mock
+                ):
+                    mock_prompt = Mock()
+                    mock_prompt.system_message = "You are a consultant."
+                    mock_prompt.agent_name = "External Consultant"
+                    mock_get_prompt.return_value = mock_prompt
+
+                    consultant_node = create_consultant_node(
+                        mock_llm,
+                        "consultant",
+                        tools=[mock_alt_tool],
+                    )
+
+                    state = {
+                        "company_of_interest": "0005.HK",
+                        "company_name": "HSBC Holdings",
+                        "market_report": "Report",
+                        "sentiment_report": "Report",
+                        "news_report": "Report",
+                        "fundamentals_report": "Report",
+                        "investment_debate_state": {"history": "Debate"},
+                        "investment_plan": "Plan",
+                    }
+                    config = RunnableConfig(
+                        configurable={"context": Mock(trade_date="2025-12-13")}
+                    )
+
+                    result = await consultant_node(state, config)
+
+        assert exec_mock.await_count == 1
+        assert mock_invoke.calls == 3
+        assert (
+            result["consultant_review"]
+            == "CONSULTANT REVIEW: FINALIZED WITH TOOL LIMITS"
+        )
+        assert result["consultant_tool_failures"] == 0
+        assert result["artifact_statuses"]["consultant_review"]["ok"] is True
+
+    @pytest.mark.asyncio
+    async def test_consultant_finalizes_in_two_calls_when_suppressed_iteration_has_content(
+        self,
+    ):
+        """A fully suppressed iteration should end in one synthesis call when it returns content."""
+        mock_tool_bound_llm = Mock()
+        mock_llm = Mock()
+        mock_llm.bind_tools.return_value = mock_tool_bound_llm
+
+        tool_call_response = Mock()
+        tool_call_response.content = ""
+        tool_call_response.tool_calls = [
+            {
+                "name": "spot_check_metric_alt",
+                "args": {"ticker": "0005.HK", "metric": "operatingCashflow"},
+                "id": "alt_1",
+            }
+        ]
+        final_response = Mock()
+        final_response.content = "CONSULTANT REVIEW: FINALIZED IMMEDIATELY"
+        final_response.tool_calls = []
+
+        async def mock_invoke(*args, **kwargs):
+            call_index = mock_invoke.calls
+            mock_invoke.calls += 1
+            if call_index == 0:
+                return tool_call_response
+            return final_response
+
+        mock_invoke.calls = 0
+
+        mock_alt_tool = Mock()
+        mock_alt_tool.name = "spot_check_metric_alt"
+        mock_alt_tool.ainvoke = AsyncMock()
+
+        exec_mock = AsyncMock(
+            return_value=ToolResult(
+                value='{"error":"FMP alt-source unavailable","provider":"fmp","failure_kind":"auth_error","retryable":false}'
+            )
+        )
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                with patch(
+                    "src.agents.consultant_nodes.TOOL_SERVICE.execute", new=exec_mock
+                ):
+                    mock_prompt = Mock()
+                    mock_prompt.system_message = "You are a consultant."
+                    mock_prompt.agent_name = "External Consultant"
+                    mock_get_prompt.return_value = mock_prompt
+
+                    consultant_node = create_consultant_node(
+                        mock_llm,
+                        "consultant",
+                        tools=[mock_alt_tool],
+                    )
+
+                    state = {
+                        "company_of_interest": "0005.HK",
+                        "company_name": "HSBC Holdings",
+                        "market_report": "Report",
+                        "sentiment_report": "Report",
+                        "news_report": "Report",
+                        "fundamentals_report": "Report",
+                        "investment_debate_state": {"history": "Debate"},
+                        "investment_plan": "Plan",
+                    }
+                    config = RunnableConfig(
+                        configurable={"context": Mock(trade_date="2025-12-13")}
+                    )
+
+                    result = await consultant_node(state, config)
+
+        assert exec_mock.await_count == 1
+        assert mock_invoke.calls == 2
+        assert result["consultant_review"] == "CONSULTANT REVIEW: FINALIZED IMMEDIATELY"
+        assert result["consultant_tool_failures"] == 0
+        assert result["artifact_statuses"]["consultant_review"]["ok"] is True
 
 
 class TestGraphIntegration:

@@ -284,6 +284,62 @@ class TestGetNews:
 
 
 @pytest.mark.asyncio
+class TestGetYfinanceData:
+    """Tests for raw historical price retrieval."""
+
+    async def test_get_yfinance_data_passes_date_bounds_through(self, mock_fetcher):
+        dates = pd.date_range(start="2025-01-01", periods=2)
+        frame = pd.DataFrame({"Close": [100.0, 101.0]}, index=dates)
+        mock_fetcher.get_historical_prices = AsyncMock(return_value=frame)
+
+        result = await toolkit.get_yfinance_data.ainvoke(
+            {
+                "symbol": "AAPL",
+                "start_date": "2025-01-01",
+                "end_date": "2025-03-31",
+            }
+        )
+
+        mock_fetcher.get_historical_prices.assert_awaited_once_with(
+            "AAPL",
+            start="2025-01-01",
+            end="2025-03-31",
+        )
+        assert "Close" in result
+        assert "100.0" in result
+
+    async def test_get_yfinance_data_returns_no_data_for_empty_frame(
+        self, mock_fetcher
+    ):
+        mock_fetcher.get_historical_prices = AsyncMock(return_value=pd.DataFrame())
+
+        result = await toolkit.get_yfinance_data.ainvoke(
+            {
+                "symbol": "AAPL",
+                "start_date": "2025-01-01",
+                "end_date": "2025-03-31",
+            }
+        )
+
+        assert result == "No data"
+
+    async def test_get_yfinance_data_keeps_default_unbounded_behavior(
+        self, mock_fetcher
+    ):
+        dates = pd.date_range(start="2025-01-01", periods=1)
+        frame = pd.DataFrame({"Close": [100.0]}, index=dates)
+        mock_fetcher.get_historical_prices = AsyncMock(return_value=frame)
+
+        await toolkit.get_yfinance_data.ainvoke({"symbol": "AAPL"})
+
+        mock_fetcher.get_historical_prices.assert_awaited_once_with(
+            "AAPL",
+            start=None,
+            end=None,
+        )
+
+
+@pytest.mark.asyncio
 class TestTechnicalIndicators:
     """Tests for technical analysis calculations."""
 

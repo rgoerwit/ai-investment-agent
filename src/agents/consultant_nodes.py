@@ -270,6 +270,7 @@ Provide your independent consultant review."""
 
                 messages.append(response)
                 capped = tool_calls[:max_tool_calls_per_turn]
+                all_suppressed_this_iter = True
                 if len(tool_calls) > max_tool_calls_per_turn:
                     logger.warning(
                         "consultant_tool_calls_capped",
@@ -294,12 +295,6 @@ Provide your independent consultant review."""
                                 failure_kind=fmp_alt_disabled_kind,
                             )
                             count_failure = False
-                            logger.info(
-                                "consultant_tool_suppressed",
-                                ticker=ticker,
-                                tool=tool_call["name"],
-                                failure_kind=fmp_alt_disabled_kind,
-                            )
                         else:
                             if _remaining_consultant_budget(consultant_deadline) <= 0:
                                 raise TimeoutError(
@@ -340,25 +335,40 @@ Provide your independent consultant review."""
                             except (TypeError, ValueError):
                                 payload = None
                             if isinstance(payload, dict) and payload.get("error"):
-                                result_failed = True
+                                is_managed_unavailability = bool(payload.get("skipped"))
                                 if (
                                     tool_call["name"] == "spot_check_metric_alt"
                                     and payload.get("provider") == "fmp"
                                     and payload.get("failure_kind")
                                     in {"auth_error", "rate_limit"}
-                                    and not payload.get("skipped")
                                 ):
-                                    fmp_alt_disabled_kind = payload["failure_kind"]
+                                    is_managed_unavailability = True
+                                    if fmp_alt_disabled_kind != payload.get(
+                                        "failure_kind"
+                                    ):
+                                        fmp_alt_disabled_kind = payload["failure_kind"]
+                                        logger.info(
+                                            "consultant_fmp_disabled",
+                                            ticker=ticker,
+                                            tool=tool_call["name"],
+                                            failure_kind=fmp_alt_disabled_kind,
+                                        )
+                                result_failed = not is_managed_unavailability
+                                count_failure = not is_managed_unavailability
+                                if is_managed_unavailability:
                                     logger.info(
-                                        "consultant_fmp_disabled",
+                                        "consultant_tool_suppressed",
                                         ticker=ticker,
                                         tool=tool_call["name"],
-                                        failure_kind=fmp_alt_disabled_kind,
+                                        failure_kind=payload.get("failure_kind"),
                                     )
                     if result_failed:
                         had_tool_errors = True
                         if count_failure:
                             tool_failure_count += 1
+                        all_suppressed_this_iter = False
+                    elif count_failure:
+                        all_suppressed_this_iter = False
                     messages.append(TM(content=str(result), tool_call_id=tool_call_id))
 
                 for tool_call in tool_calls[max_tool_calls_per_turn:]:
@@ -376,6 +386,29 @@ Provide your independent consultant review."""
                     iteration=iteration + 1,
                     tools_called=[tool_call["name"] for tool_call in capped],
                 )
+
+                if capped and all_suppressed_this_iter:
+                    messages.append(
+                        HumanMessage(
+                            content=(
+                                "All external verification tools requested in the last "
+                                "turn were unavailable or suppressed. Provide your "
+                                "final consultant review now using the evidence already "
+                                "available and note any verification limits."
+                            )
+                        )
+                    )
+                    response = await _invoke_consultant_with_deadline(
+                        llm,
+                        messages,
+                        context=agent_prompt.agent_name,
+                        provider=fallback_llm_provider,
+                        model_name=fallback_llm_model,
+                        ticker=ticker,
+                        deadline=consultant_deadline,
+                    )
+                    content_str = message_utils.extract_string_content(response.content)
+                    break
 
             if not content_str:
                 response = await _invoke_consultant_with_deadline(

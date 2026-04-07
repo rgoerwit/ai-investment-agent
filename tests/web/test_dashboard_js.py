@@ -18,7 +18,8 @@ _DASHBOARD_JS = (
 
 
 def _run_dashboard_js(expression: str):
-    if shutil.which("node") is None:
+    node = shutil.which("node")
+    if node is None:
         pytest.skip("node is required for dashboard.js regression tests")
 
     script = f"""
@@ -70,10 +71,13 @@ const result = (() => {{
 console.log(JSON.stringify(result));
 """
     completed = subprocess.run(
-        ["node", "-e", script],
+        # Use an absolute executable path and keep file descriptors open so
+        # CPython can take the safer posix_spawn path on macOS/Python 3.12.
+        [node, "-e", script],
         check=True,
         capture_output=True,
         text=True,
+        close_fds=False,
     )
     return json.loads(completed.stdout)
 
