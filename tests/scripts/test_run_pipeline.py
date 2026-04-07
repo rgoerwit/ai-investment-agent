@@ -1,5 +1,6 @@
 """Tests for scripts/run_pipeline.sh — end-to-end screening pipeline."""
 
+import json
 import re
 from pathlib import Path
 
@@ -287,3 +288,50 @@ class TestResumability:
 
         result = self._run_skip_check(outfile, force=False)
         assert result == "SKIP"
+
+
+class TestPipelineMarkerPayload:
+    @staticmethod
+    def _build_marker_payload(
+        screening_date: str,
+        *,
+        ticker_count: int | None,
+        buy_count: int | None,
+        completed_at: str = "2026-04-05T22:14:19Z",
+    ) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "workflow": "run_pipeline",
+            "screening_date": screening_date,
+            "completed_at": completed_at,
+            "candidate_count": ticker_count,
+            "buy_count": buy_count,
+        }
+
+    def test_zero_buy_completion_still_records_marker(self):
+        payload = self._build_marker_payload(
+            "2026-04-05",
+            ticker_count=312,
+            buy_count=0,
+        )
+        assert payload["screening_date"] == "2026-04-05"
+        assert payload["buy_count"] == 0
+
+    def test_stage2_resume_can_leave_candidate_count_unknown(self):
+        payload = self._build_marker_payload(
+            "2026-03-18",
+            ticker_count=None,
+            buy_count=12,
+            completed_at="2026-04-05T22:14:19Z",
+        )
+        assert payload["screening_date"] == "2026-03-18"
+        assert payload["candidate_count"] is None
+
+    def test_marker_payload_is_json_serializable(self):
+        payload = self._build_marker_payload(
+            "2026-04-05",
+            ticker_count=245,
+            buy_count=12,
+        )
+        rendered = json.dumps(payload)
+        assert '"workflow": "run_pipeline"' in rendered

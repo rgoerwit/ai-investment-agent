@@ -462,75 +462,64 @@ class TestFactCheckContext:
     """Tests for fact-check context fetching."""
 
     def test_returns_empty_when_no_api_key(self):
-        """Test returns empty string when Tavily API key is missing."""
-        from unittest.mock import MagicMock, patch
+        """Test returns empty string when Tavily search is unavailable."""
+        from unittest.mock import patch
 
         from src.article_writer import ArticleWriter
 
-        # Mock at the module level where it's imported
-        with patch("src.article_writer.config") as mock_config:
-            mock_config.get_tavily_api_key.return_value = ""
+        with patch("src.article_writer.search_tavily_sync_inspected") as mock_search:
+            mock_search.return_value = None
             writer = ArticleWriter.__new__(ArticleWriter)
             context = writer._fetch_fact_check_context("AAPL", "Apple Inc.")
             assert context == ""
 
     def test_returns_empty_on_exception(self):
         """Test returns empty string on any exception."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         from src.article_writer import ArticleWriter
 
-        with patch("src.article_writer.config") as mock_config:
-            mock_config.get_tavily_api_key.return_value = "fake-key"
-            # Mock TavilyClient import to raise
-            with patch.dict("sys.modules", {"tavily": None}):
-                writer = ArticleWriter.__new__(ArticleWriter)
-                context = writer._fetch_fact_check_context("AAPL", "Apple Inc.")
-                # Should return empty due to ImportError
-                assert context == ""
+        with patch(
+            "src.article_writer.search_tavily_sync_inspected",
+            side_effect=Exception("boom"),
+        ):
+            writer = ArticleWriter.__new__(ArticleWriter)
+            context = writer._fetch_fact_check_context("AAPL", "Apple Inc.")
+            assert context == ""
 
     def test_respects_max_chars_limit(self):
         """Test that context is truncated to max_chars."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         from src.article_writer import ArticleWriter
 
-        mock_tavily = MagicMock()
-        mock_client = MagicMock()
-        mock_client.search.return_value = {
+        response = {
             "answer": "A" * 2000,  # Long answer
             "results": [],
         }
-        mock_tavily.TavilyClient.return_value = mock_client
 
-        with patch("src.article_writer.config") as mock_config:
-            mock_config.get_tavily_api_key.return_value = "fake-key"
-            with patch.dict("sys.modules", {"tavily": mock_tavily}):
-                writer = ArticleWriter.__new__(ArticleWriter)
-                context = writer._fetch_fact_check_context(
-                    "AAPL", "Apple Inc.", max_chars=100
-                )
-                # Should be truncated
-                assert len(context) <= 120  # 100 + "[...truncated]"
-                assert "[...truncated]" in context
+        with patch("src.article_writer.search_tavily_sync_inspected") as mock_search:
+            mock_search.return_value = response
+            writer = ArticleWriter.__new__(ArticleWriter)
+            context = writer._fetch_fact_check_context(
+                "AAPL", "Apple Inc.", max_chars=100
+            )
+            assert len(context) <= 120  # 100 + "[...truncated]"
+            assert "[...truncated]" in context
 
     def test_handles_api_errors_gracefully(self):
         """Test returns empty string on API errors."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         from src.article_writer import ArticleWriter
 
-        mock_tavily = MagicMock()
-        mock_client = MagicMock()
-        mock_client.search.side_effect = Exception("API error")
-        mock_tavily.TavilyClient.return_value = mock_client
-
-        with patch("src.article_writer.config") as mock_config:
-            mock_config.get_tavily_api_key.return_value = "fake-key"
-            with patch.dict("sys.modules", {"tavily": mock_tavily}):
-                writer = ArticleWriter.__new__(ArticleWriter)
-                context = writer._fetch_fact_check_context("AAPL", "Apple Inc.")
-                assert context == ""
+        with patch(
+            "src.article_writer.search_tavily_sync_inspected",
+            side_effect=Exception("API error"),
+        ):
+            writer = ArticleWriter.__new__(ArticleWriter)
+            context = writer._fetch_fact_check_context("AAPL", "Apple Inc.")
+            assert context == ""
 
 
 class TestThinkingModelDetection:

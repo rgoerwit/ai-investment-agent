@@ -38,12 +38,16 @@ def _create_gemini_model(*args, **kwargs):
 GEMINI_3_PRO = "gemini-3-pro-preview"
 GEMINI_4_ULTRA = "gemini-4-ultra"
 GEMINI_2_FLASH = "gemini-2.0-flash"
+GEMINI_2_5_FLASH = "gemini-2.5-flash"
 
 
 @pytest.fixture(autouse=True)
 def mock_create_gemini_model(request):
     """Mocks the core `create_gemini_model` factory to inspect its inputs."""
-    if request.node.name == "test_create_gemini_model_logs_thinking_level_at_debug":
+    if request.node.name in {
+        "test_create_gemini_model_logs_thinking_level_at_debug",
+        "test_create_gemini_model_uses_thinking_budget_for_gemini_2_5",
+    }:
         yield None
         return
 
@@ -118,6 +122,17 @@ def test_quick_llm_has_no_thinking_level_on_gemini_2(
     assert call_kwargs.get("max_output_tokens") is None
 
 
+def test_quick_llm_sets_low_thinking_level_on_gemini_2_5(
+    mock_create_gemini_model, mock_config
+):
+    mock_config.quick_think_llm = GEMINI_2_5_FLASH
+
+    _create_quick_thinking_llm()
+
+    call_kwargs = mock_create_gemini_model.call_args.kwargs
+    assert call_kwargs.get("thinking_level") == "low"
+
+
 def test_deep_llm_sets_high_thinking_level_on_gemini_4(
     mock_create_gemini_model, mock_config
 ):
@@ -154,6 +169,17 @@ def test_deep_llm_has_no_thinking_level_on_gemini_2(
     mock_create_gemini_model.assert_called_once()
     call_kwargs = mock_create_gemini_model.call_args.kwargs
     assert call_kwargs.get("thinking_level") is None
+
+
+def test_deep_llm_sets_high_thinking_level_on_gemini_2_5(
+    mock_create_gemini_model, mock_config
+):
+    mock_config.deep_think_llm = GEMINI_2_5_FLASH
+
+    _create_deep_thinking_llm()
+
+    call_kwargs = mock_create_gemini_model.call_args.kwargs
+    assert call_kwargs.get("thinking_level") == "high"
 
 
 def test_quick_llm_passes_through_max_output_tokens(
@@ -205,3 +231,22 @@ def test_create_gemini_model_logs_thinking_level_at_debug(caplog):
     assert debug_records
     assert "high" in debug_records[0].message
     assert "gemini-3-pro-preview" in debug_records[0].message
+
+
+def test_create_gemini_model_uses_thinking_budget_for_gemini_2_5():
+    with patch("src.llms.ChatGoogleGenerativeAI", return_value=MagicMock()) as mock_llm:
+        with patch("src.llms.config") as mock_config:
+            mock_config.llm_base_output_tokens = 4096
+            mock_config.get_google_api_key.return_value = "test-key"
+
+            _create_gemini_model(
+                GEMINI_2_5_FLASH,
+                temperature=0.1,
+                timeout=30,
+                max_retries=1,
+                thinking_level="medium",
+            )
+
+    call_kwargs = mock_llm.call_args.kwargs
+    assert call_kwargs["thinking_budget"] == 4096
+    assert "thinking_level" not in call_kwargs

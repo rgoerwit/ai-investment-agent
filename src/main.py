@@ -1369,6 +1369,14 @@ async def run_analysis(
             session_id=session_id,
             tags=tags,
         )
+        generic_trace_metadata = {
+            "ticker": ticker,
+            "session_id": session_id,
+            "environment": config.environment,
+            "quick_mode": quick_mode,
+            "deep_model": config.deep_think_llm,
+            "quick_model": config.quick_think_llm,
+        }
 
         capture_token = None
         if baseline_capture:
@@ -1381,7 +1389,8 @@ async def run_analysis(
                     "recursion_limit": 100,
                     "configurable": {"context": context},
                     "callbacks": tracing_callbacks,
-                    "metadata": tracing_metadata,
+                    "tags": tags,
+                    "metadata": {**generic_trace_metadata, **tracing_metadata},
                 },
             )
         finally:

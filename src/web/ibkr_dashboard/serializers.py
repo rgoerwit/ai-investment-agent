@@ -19,6 +19,7 @@ from src.ibkr.portfolio_presentation import (
     group_portfolio_actions,
 )
 from src.ibkr.recommendation_service import PortfolioRecommendationBundle
+from src.ibkr.screening_freshness import ScreeningFreshnessSummary
 from src.web.ibkr_dashboard.drilldown_service import build_structured_sections
 
 _DIP_WATCH_LIMIT = 7
@@ -45,6 +46,9 @@ def serialize_dashboard_snapshot(
         "portfolio": _serialize_portfolio(bundle),
         "overview": _serialize_overview(bundle),
         "macro_alert": macro_alert,
+        "screening_freshness": _serialize_screening_freshness(
+            bundle.screening_freshness
+        ),
         "freshness": _serialize_freshness(bundle),
         "freshness_overview": _serialize_freshness_overview(bundle),
         "actions": _serialize_actions(
@@ -163,6 +167,20 @@ def _serialize_freshness(bundle: PortfolioRecommendationBundle) -> dict[str, Any
             "skipped_due_to_limit": list(bundle.refresh_activity.skipped_due_to_limit),
             "skipped_read_only": list(bundle.refresh_activity.skipped_read_only),
         },
+    }
+
+
+def _serialize_screening_freshness(
+    summary: ScreeningFreshnessSummary,
+) -> dict[str, Any]:
+    return {
+        "status": summary.status,
+        "screening_date": summary.screening_date,
+        "completed_at": summary.completed_at,
+        "age_days": summary.age_days,
+        "stale_after_days": summary.stale_after_days,
+        "candidate_count": summary.candidate_count,
+        "buy_count": summary.buy_count,
     }
 
 

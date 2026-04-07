@@ -46,10 +46,13 @@ import yfinance as yf
 
 from src.config import config
 from src.data.interfaces import FinancialFetcher
+from src.tavily_utils import search_tavily_inspected
 from src.ticker_policy import allows_search_resolution, normalize_exchange_specific_base
 from src.ticker_utils import generate_strict_search_query
+from src.yfinance_runtime import YFRateLimitError, configure_yfinance_defaults
 
 logger = structlog.get_logger(__name__)
+configure_yfinance_defaults()
 
 # --- Optional Dependencies ---
 try:
@@ -402,6 +405,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         return True
 
     def __init__(self):
+        configure_yfinance_defaults()
         self.fx_cache = {}
         self.fx_cache_expiry_time = {}
         self._mnemonic_cache: dict[str, str] = self._load_mnemonic_cache()
@@ -1435,6 +1439,9 @@ class SmartMarketDataFetcher(FinancialFetcher):
             info = {}
             try:
                 info = ticker.info
+            except YFRateLimitError as exc:
+                logger.warning("yfinance_rate_limited", symbol=symbol, error=str(exc))
+                return None
             except Exception:
                 info = {}
 
@@ -1492,6 +1499,9 @@ class SmartMarketDataFetcher(FinancialFetcher):
             self.stats["sources"]["yfinance"] += 1
             return info
 
+        except YFRateLimitError as e:
+            logger.warning("yfinance_rate_limited", symbol=symbol, error=str(e))
+            return None
         except Exception as e:
             logger.error("yfinance_enhanced_failed", symbol=symbol, error=str(e))
             return None
@@ -1913,11 +1923,12 @@ class SmartMarketDataFetcher(FinancialFetcher):
                 query = generate_strict_search_query(symbol, company_name, term)
 
             try:
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(self.tavily_client.search, query, max_results=3),
+                result = await search_tavily_inspected(
+                    query,
+                    profile="finance_deep",
                     timeout=5,
                 )
-                if result and "results" in result:
+                if isinstance(result, dict) and "results" in result:
                     combined = "\n".join(
                         [i.get("content", "") for i in result["results"]]
                     )
@@ -1930,7 +1941,9 @@ class SmartMarketDataFetcher(FinancialFetcher):
 
         all_text = "\n\n".join(search_results.values())
 
-        # Inspect web content before extracting structured metrics from it.
+        # Reinspect the aggregated text before extraction so this call site keeps
+        # an explicit prompt-ingress boundary even though each query result is
+        # already inspected centrally in tavily_utils.
         from src.tooling.inspection_service import INSPECTION_SERVICE
         from src.tooling.inspector import InspectionEnvelope, SourceKind
 

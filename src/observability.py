@@ -4,15 +4,14 @@ Observability module for LLM tracing.
 Provides unified callback handlers for tracing LangGraph executions.
 Currently supports Langfuse (open-source) with graceful degradation.
 
-Updated for Langfuse Python SDK v4 (March 2026):
-- CallbackHandler() takes no constructor arguments (unchanged from v3)
+Updated for Langfuse Python SDK v4 (April 2026):
+- CallbackHandler() still takes no constructor arguments
 - Session ID, tags, and user ID are passed via LangChain config metadata
   using langfuse_session_id, langfuse_tags, langfuse_user_id keys
-- SDK reads credentials from LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY,
-  LANGFUSE_BASE_URL environment variables (exported by config.py)
-- Flush via get_client().flush()
-- v4 note: langfuse.langchain.CallbackHandler and get_client() import paths
-  are unchanged. v4 rewrites internals on OTel but preserves this interface.
+- The client is initialized explicitly from config so sample rate, environment,
+  and debug flags are honored consistently
+- End-of-run cleanup prefers get_client().shutdown() with flush() fallback
+- langfuse.langchain.CallbackHandler and get_client() import paths are unchanged
 
 Usage:
     from src.observability import get_tracing_callbacks
@@ -42,6 +41,21 @@ from src.config import config
 logger = structlog.get_logger(__name__)
 
 
+def _ensure_langfuse_client() -> None:
+    """Initialize the Langfuse SDK with explicit config-backed settings."""
+    from langfuse import Langfuse
+
+    Langfuse(
+        public_key=config.get_langfuse_public_key(),
+        secret_key=config.get_langfuse_secret_key(),
+        base_url=config.langfuse_host,
+        debug=config.langfuse_debug,
+        environment=config.langfuse_environment,
+        sample_rate=config.langfuse_sample_rate,
+        tracing_enabled=config.langfuse_enabled,
+    )
+
+
 def get_tracing_callbacks(
     ticker: str | None = None,
     session_id: str | None = None,
@@ -56,8 +70,7 @@ def get_tracing_callbacks(
     config["metadata"] in graph.ainvoke().
 
     Langfuse SDK v4 notes:
-    - CallbackHandler() reads credentials from environment variables
-      (exported by config.py's setup_environment)
+    - The client is initialized explicitly from config before the callback
     - Trace attributes (session_id, tags, user_id) are passed via
       LangChain's config metadata with langfuse_* prefixed keys
 
@@ -90,11 +103,10 @@ def get_tracing_callbacks(
 
     try:
         # Import here to allow graceful degradation if langfuse not installed
+        _ensure_langfuse_client()
+
         from langfuse.langchain import CallbackHandler as LangfuseHandler
 
-        # SDK v4: no constructor args. Reads LANGFUSE_PUBLIC_KEY,
-        # LANGFUSE_SECRET_KEY, LANGFUSE_BASE_URL from os.environ
-        # (exported by config.py setup_environment).
         handler = LangfuseHandler()
         callbacks.append(handler)
 
@@ -145,7 +157,12 @@ def flush_traces() -> None:
     try:
         from langfuse import get_client
 
-        get_client().flush()
-        logger.debug("langfuse_traces_flushed")
+        client = get_client()
+        if hasattr(client, "shutdown"):
+            client.shutdown()
+            logger.debug("langfuse_traces_shutdown")
+        else:
+            client.flush()
+            logger.debug("langfuse_traces_flushed")
     except Exception as e:
         logger.warning("langfuse_flush_failed", error=str(e))

@@ -1,5 +1,5 @@
 """
-Tests for the observability module (Langfuse SDK v3 integration).
+Tests for the observability module (Langfuse SDK v4 integration).
 """
 
 from types import ModuleType
@@ -10,12 +10,15 @@ import pytest
 
 def _fake_langfuse_modules(
     *,
+    langfuse_ctor=None,
     callback_handler=None,
     get_client=None,
 ) -> dict[str, ModuleType]:
     langfuse_module = ModuleType("langfuse")
     langfuse_langchain_module = ModuleType("langfuse.langchain")
 
+    if langfuse_ctor is not None:
+        langfuse_module.Langfuse = langfuse_ctor
     if get_client is not None:
         langfuse_module.get_client = get_client
     if callback_handler is not None:
@@ -55,31 +58,41 @@ class TestGetTracingCallbacks:
             assert metadata == {}
 
     def test_returns_handler_when_properly_configured(self):
-        """When enabled with valid keys, should return Langfuse handler."""
+        """When enabled with valid keys, should initialize Langfuse and return a handler."""
         with patch("src.observability.config") as mock_config:
             mock_config.langfuse_enabled = True
             mock_config.get_langfuse_public_key.return_value = "pk-lf-test"
             mock_config.get_langfuse_secret_key.return_value = "sk-lf-test"
             mock_config.langfuse_host = "https://cloud.langfuse.com"
+            mock_config.langfuse_debug = True
+            mock_config.langfuse_environment = "test"
+            mock_config.langfuse_sample_rate = 0.25
 
-            # Mock the Langfuse handler import
-            mock_handler = MagicMock()
+            mock_langfuse_ctor = MagicMock()
+            mock_handler_cls = MagicMock()
             with patch.dict(
                 "sys.modules",
-                {"langfuse": MagicMock(), "langfuse.langchain": MagicMock()},
+                _fake_langfuse_modules(
+                    langfuse_ctor=mock_langfuse_ctor,
+                    callback_handler=mock_handler_cls,
+                ),
             ):
-                with patch(
-                    "src.observability.LangfuseHandler", create=True
-                ) as MockHandler:
-                    # Need to re-import after patching
-                    import importlib
+                from src.observability import get_tracing_callbacks
 
-                    import src.observability
+                callbacks, metadata = get_tracing_callbacks(ticker="TEST.X")
 
-                    importlib.reload(src.observability)
-
-                    # This test verifies the logic flow, actual handler creation
-                    # would require real langfuse SDK
+        assert len(callbacks) == 1
+        assert metadata["langfuse_metadata"] == {"ticker": "TEST.X"}
+        mock_langfuse_ctor.assert_called_once_with(
+            public_key="pk-lf-test",
+            secret_key="sk-lf-test",
+            base_url="https://cloud.langfuse.com",
+            debug=True,
+            environment="test",
+            sample_rate=0.25,
+            tracing_enabled=True,
+        )
+        mock_handler_cls.assert_called_once_with()
 
     def test_metadata_contains_session_and_tags(self):
         """When session_id and tags provided, metadata should contain langfuse_* keys."""
@@ -89,10 +102,14 @@ class TestGetTracingCallbacks:
             mock_config.get_langfuse_secret_key.return_value = "sk-lf-test"
             mock_config.langfuse_host = "https://cloud.langfuse.com"
 
+            mock_langfuse_ctor = MagicMock()
             mock_handler_cls = MagicMock()
             with patch.dict(
                 "sys.modules",
-                _fake_langfuse_modules(callback_handler=mock_handler_cls),
+                _fake_langfuse_modules(
+                    langfuse_ctor=mock_langfuse_ctor,
+                    callback_handler=mock_handler_cls,
+                ),
             ):
                 from src.observability import get_tracing_callbacks
 
@@ -113,23 +130,29 @@ class TestGetTracingCallbacks:
                 assert metadata["langfuse_metadata"] == {"ticker": "0005.HK"}
 
     def test_handler_created_with_no_args(self):
-        """SDK v3: CallbackHandler() should be called with no arguments."""
+        """CallbackHandler() should still be called with no arguments."""
         with patch("src.observability.config") as mock_config:
             mock_config.langfuse_enabled = True
             mock_config.get_langfuse_public_key.return_value = "pk-lf-test"
             mock_config.get_langfuse_secret_key.return_value = "sk-lf-test"
             mock_config.langfuse_host = "https://cloud.langfuse.com"
+            mock_config.langfuse_debug = False
+            mock_config.langfuse_environment = "development"
+            mock_config.langfuse_sample_rate = 1.0
 
+            mock_langfuse_ctor = MagicMock()
             mock_handler_cls = MagicMock()
             with patch.dict(
                 "sys.modules",
-                _fake_langfuse_modules(callback_handler=mock_handler_cls),
+                _fake_langfuse_modules(
+                    langfuse_ctor=mock_langfuse_ctor,
+                    callback_handler=mock_handler_cls,
+                ),
             ):
                 from src.observability import get_tracing_callbacks
 
                 get_tracing_callbacks(ticker="TEST.X")
 
-                # v3: no constructor args (reads from env vars)
                 mock_handler_cls.assert_called_once_with()
 
     def test_graceful_degradation_on_import_error(self):
@@ -139,11 +162,12 @@ class TestGetTracingCallbacks:
             mock_config.get_langfuse_public_key.return_value = "pk-lf-test"
             mock_config.get_langfuse_secret_key.return_value = "sk-lf-test"
 
-            # Simulate ImportError by patching the import
-            with patch.dict("sys.modules", {"langfuse.langchain": None}):
+            # Simulate ImportError for both the client and callback imports.
+            with patch.dict(
+                "sys.modules", {"langfuse": None, "langfuse.langchain": None}
+            ):
                 from src.observability import get_tracing_callbacks
 
-                # Force reimport to trigger ImportError path
                 callbacks, metadata = get_tracing_callbacks(ticker="TEST.X")
                 # Should return empty, not raise
                 assert isinstance(callbacks, list)
@@ -175,7 +199,7 @@ class TestFlushTraces:
                 flush_traces()
 
     def test_flush_calls_get_client(self):
-        """Flush should use SDK v3 get_client().flush() pattern."""
+        """Flush should prefer get_client().shutdown() when available."""
         with patch("src.observability.config") as mock_config:
             mock_config.langfuse_enabled = True
 
@@ -190,7 +214,8 @@ class TestFlushTraces:
                 flush_traces()
 
                 mock_get_client.assert_called_once()
-                mock_client.flush.assert_called_once()
+                mock_client.shutdown.assert_called_once()
+                mock_client.flush.assert_not_called()
 
 
 class TestConfigIntegration:

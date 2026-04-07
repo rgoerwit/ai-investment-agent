@@ -10,12 +10,13 @@ Verifies:
 
 import asyncio
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 import pytest
 
 from src.data.fetcher import SmartMarketDataFetcher
+from src.yfinance_runtime import YFRateLimitError
 
 
 @pytest.fixture
@@ -52,6 +53,16 @@ class TestParallelExecution:
         assert result["currentPrice"] == 100
         assert result["pe"] == 15
         assert result["roe"] == 0.2
+
+    @pytest.mark.asyncio
+    async def test_yfinance_rate_limit_returns_none(self, fetcher):
+        with patch(
+            "src.data.fetcher.yf.Ticker",
+            side_effect=YFRateLimitError(),
+        ):
+            result = await fetcher._fetch_yfinance_enhanced("TEST")
+
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_get_financial_metrics_uses_short_lived_cache(self, fetcher):
@@ -340,11 +351,8 @@ class TestPanicMode:
         Verify that _fetch_tavily_gaps correctly filters out DANGEROUS_FIELDS
         even when they're passed in the missing_fields list.
         """
-        # Setup mock Tavily client
+        # Setup mock Tavily state
         fetcher.tavily_client = MagicMock()
-        fetcher.tavily_client.search = MagicMock(
-            return_value={"results": [{"content": "ROE is 15%"}]}
-        )
 
         # Call with both safe and dangerous fields
         missing_fields = [
@@ -358,21 +366,17 @@ class TestPanicMode:
             "debtToEquity",  # SAFE
         ]
 
-        result = await fetcher._fetch_tavily_gaps("TEST", missing_fields)
+        with patch("src.data.fetcher.search_tavily_inspected") as mock_search:
+            mock_search.return_value = {"results": [{"content": "ROE is 15%"}]}
+            result = await fetcher._fetch_tavily_gaps("TEST", missing_fields)
 
-        # Verify that Tavily was NOT called if only dangerous fields remain
-        # OR verify that only safe fields were searched for
-        # The method should filter to only safe fields
-
-        # If tavily_client.search was called, it should only be for safe fields
-        if fetcher.tavily_client.search.called:
-            # Check that queries don't include dangerous field terms
-            for call in fetcher.tavily_client.search.call_args_list:
-                query = call[0][0] if call[0] else call[1].get("query", "")
-                # Dangerous terms shouldn't dominate the query
-                assert not all(
-                    term in query.lower() for term in ["p/e", "price", "market cap"]
-                )
+        # Verify only safe-field searches are issued
+        assert mock_search.called
+        for call in mock_search.call_args_list:
+            query = call.args[0]
+            assert not all(
+                term in query.lower() for term in ["p/e", "price", "market cap"]
+            )
 
 
 class TestCalculatedMetrics:

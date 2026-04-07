@@ -685,9 +685,9 @@ class Settings(BaseSettings):
         if self.langsmith_tracing_enabled and "LANGSMITH_TRACING" not in os.environ:
             os.environ["LANGSMITH_TRACING"] = "true"
 
-        # Export Langfuse settings to os.environ for SDK v3 auto-detection.
-        # The Langfuse SDK v3 reads LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY,
-        # and LANGFUSE_BASE_URL directly from os.environ (no constructor args).
+        # Export Langfuse settings to os.environ for SDK compatibility.
+        # Observability now initializes the client explicitly, but keeping these
+        # env vars populated helps third-party callbacks and local debugging.
         langfuse_public = self.langfuse_public_key.get_secret_value()
         langfuse_secret = self.langfuse_secret_key.get_secret_value()
         if langfuse_public and "LANGFUSE_PUBLIC_KEY" not in os.environ:
@@ -696,6 +696,15 @@ class Settings(BaseSettings):
             os.environ["LANGFUSE_SECRET_KEY"] = langfuse_secret
         if self.langfuse_host and "LANGFUSE_BASE_URL" not in os.environ:
             os.environ["LANGFUSE_BASE_URL"] = self.langfuse_host
+        if "LANGFUSE_SAMPLE_RATE" not in os.environ:
+            os.environ["LANGFUSE_SAMPLE_RATE"] = str(self.langfuse_sample_rate)
+        if "LANGFUSE_DEBUG" not in os.environ:
+            os.environ["LANGFUSE_DEBUG"] = "true" if self.langfuse_debug else "false"
+        if (
+            self.langfuse_environment
+            and "LANGFUSE_TRACING_ENVIRONMENT" not in os.environ
+        ):
+            os.environ["LANGFUSE_TRACING_ENVIRONMENT"] = self.langfuse_environment
 
         # Export EDINET API key for edinet-tools SDK (reads from os.environ).
         edinet_key = self.edinet_api_key.get_secret_value()

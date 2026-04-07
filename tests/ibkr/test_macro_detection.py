@@ -90,27 +90,27 @@ class TestCharacterizeMacroEventLLM:
             mock_llm = MagicMock()
             mock_llm.invoke.return_value = llm_response
             mock_create.return_value = mock_llm
-            with patch("tavily.TavilyClient") as mock_tav:
-                mock_tav.return_value.search.return_value = {
+            with patch(
+                "scripts.portfolio_manager.search_tavily_sync_inspected"
+            ) as mock_search:
+                mock_search.return_value = {
                     "results": [
                         {"title": "Tariffs announced", "content": "US tariffs."}
                     ]
                 }
-                with patch("src.config.config") as mock_cfg:
-                    mock_cfg.get_tavily_api_key.return_value = "test_key"
-                    scope, region, sector, impact, event_type, headline, detail = (
-                        _characterize_macro_event(
-                            "2026-03-05", items, 0.30, peak_count=6
-                        )
-                    )
+                scope, region, sector, impact, event_type, headline, detail = (
+                    _characterize_macro_event("2026-03-05", items, 0.30, peak_count=6)
+                )
         assert event_type == "TARIFF_TRADE"
         assert impact == "TRANSIENT"
 
     def test_no_tavily_key_returns_uncertain_unknown(self):
-        """Tavily API key absent → headline='unknown', impact=UNCERTAIN, type=UNKNOWN."""
+        """Unavailable search results → headline='unknown', impact=UNCERTAIN, type=UNKNOWN."""
         items = [_make_sell_item("7203.T")]
-        with patch("src.config.config") as mock_cfg:
-            mock_cfg.get_tavily_api_key.return_value = ""
+        with patch(
+            "scripts.portfolio_manager.search_tavily_sync_inspected"
+        ) as mock_search:
+            mock_search.return_value = None
             *_, impact, event_type, headline, _ = _characterize_macro_event(
                 "2026-03-05", items, 0.30
             )
@@ -124,8 +124,10 @@ class TestCharacterizeMacroEventLLM:
         with patch(
             "src.llms.create_deep_thinking_llm", side_effect=Exception("LLM fail")
         ):
-            with patch("tavily.TavilyClient") as mock_tav:
-                mock_tav.return_value.search.return_value = {
+            with patch(
+                "scripts.portfolio_manager.search_tavily_sync_inspected"
+            ) as mock_search:
+                mock_search.return_value = {
                     "results": [
                         {
                             "title": "New trade tariffs announced",
@@ -133,11 +135,9 @@ class TestCharacterizeMacroEventLLM:
                         }
                     ]
                 }
-                with patch("src.config.config") as mock_cfg:
-                    mock_cfg.get_tavily_api_key.return_value = "test_key"
-                    *_, impact, event_type, headline, _ = _characterize_macro_event(
-                        "2026-03-05", items, 0.30
-                    )
+                *_, impact, event_type, headline, _ = _characterize_macro_event(
+                    "2026-03-05", items, 0.30
+                )
         assert event_type == "TARIFF_TRADE"
         assert impact == "TRANSIENT"
 
@@ -147,8 +147,10 @@ class TestCharacterizeMacroEventLLM:
         with patch(
             "src.llms.create_deep_thinking_llm", side_effect=ImportError("no llm")
         ):
-            with patch("tavily.TavilyClient") as mock_tav:
-                mock_tav.return_value.search.return_value = {
+            with patch(
+                "scripts.portfolio_manager.search_tavily_sync_inspected"
+            ) as mock_search:
+                mock_search.return_value = {
                     "results": [
                         {
                             "title": "New legislation passed",
@@ -156,11 +158,9 @@ class TestCharacterizeMacroEventLLM:
                         }
                     ]
                 }
-                with patch("src.config.config") as mock_cfg:
-                    mock_cfg.get_tavily_api_key.return_value = "test_key"
-                    *_, impact, event_type, _, _ = _characterize_macro_event(
-                        "2026-03-05", items, 0.30
-                    )
+                *_, impact, event_type, _, _ = _characterize_macro_event(
+                    "2026-03-05", items, 0.30
+                )
         assert event_type == "REGULATORY_SHIFT"
         assert impact == "STRUCTURAL"
 
@@ -181,19 +181,17 @@ class TestCharacterizeMacroEventLLM:
             mock_llm = MagicMock()
             mock_llm.invoke.return_value = llm_response
             mock_create.return_value = mock_llm
-            with patch("tavily.TavilyClient") as mock_tav:
-                mock_tav.return_value.search.return_value = {
+            with patch(
+                "scripts.portfolio_manager.search_tavily_sync_inspected"
+            ) as mock_search:
+                mock_search.return_value = {
                     "results": [
                         {"title": "Tariffs announced", "content": "US tariffs."}
                     ]
                 }
-                with patch("src.config.config") as mock_cfg:
-                    mock_cfg.get_tavily_api_key.return_value = "test_key"
-                    scope, region, sector, impact, event_type, headline, detail = (
-                        _characterize_macro_event(
-                            "2026-03-05", items, 0.30, peak_count=6
-                        )
-                    )
+                scope, region, sector, impact, event_type, headline, detail = (
+                    _characterize_macro_event("2026-03-05", items, 0.30, peak_count=6)
+                )
         # Text block cleanly extracted → LLM JSON parsed successfully
         assert event_type == "TARIFF_TRADE"
         assert impact == "TRANSIENT"
@@ -221,8 +219,10 @@ class TestCharacterizeMacroEventLLM:
             mock_llm = MagicMock()
             mock_llm.invoke.return_value = llm_response
             mock_create.return_value = mock_llm
-            with patch("tavily.TavilyClient") as mock_tav:
-                mock_tav.return_value.search.return_value = {
+            with patch(
+                "scripts.portfolio_manager.search_tavily_sync_inspected"
+            ) as mock_search:
+                mock_search.return_value = {
                     "results": [
                         {
                             "title": "New trade tariffs",
@@ -230,14 +230,9 @@ class TestCharacterizeMacroEventLLM:
                         }
                     ]
                 }
-                with patch("src.config.config") as mock_cfg:
-                    mock_cfg.get_tavily_api_key.return_value = "test_key"
-                    # Must NOT raise AttributeError
-                    scope, region, sector, impact, event_type, headline, detail = (
-                        _characterize_macro_event(
-                            "2026-03-05", items, 0.30, peak_count=6
-                        )
-                    )
+                scope, region, sector, impact, event_type, headline, detail = (
+                    _characterize_macro_event("2026-03-05", items, 0.30, peak_count=6)
+                )
         # Thinking block pollutes extracted text → JSON fails → keyword fallback
         # Keyword "tariff" in headline → TARIFF_TRADE
         assert event_type == "TARIFF_TRADE"
@@ -252,17 +247,17 @@ class TestCharacterizeMacroEventLLM:
             mock_llm = MagicMock()
             mock_llm.invoke.return_value = llm_response
             mock_create.return_value = mock_llm
-            with patch("tavily.TavilyClient") as mock_tav:
-                mock_tav.return_value.search.return_value = {
+            with patch(
+                "scripts.portfolio_manager.search_tavily_sync_inspected"
+            ) as mock_search:
+                mock_search.return_value = {
                     "results": [
                         {"title": "War escalates", "content": "military conflict"}
                     ]
                 }
-                with patch("src.config.config") as mock_cfg:
-                    mock_cfg.get_tavily_api_key.return_value = "test_key"
-                    *_, impact, event_type, _, _ = _characterize_macro_event(
-                        "2026-03-05", items, 0.30
-                    )
+                *_, impact, event_type, _, _ = _characterize_macro_event(
+                    "2026-03-05", items, 0.30
+                )
         # Keyword fallback: "war" → GEOPOLITICAL
         assert event_type == "GEOPOLITICAL"
 

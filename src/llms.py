@@ -25,6 +25,7 @@ from src.config import config
 
 logger = structlog.get_logger(__name__)
 _logged_model_init_configs: set[tuple[str, str, int, int, str | None]] = set()
+_THINKING_BUDGETS = {"low": 512, "medium": 4096, "high": 16384}
 
 # Relax safety settings slightly for financial/market analysis context
 SAFETY_SETTINGS = {
@@ -59,6 +60,23 @@ def _is_gemini_v3_or_greater(model_name: str) -> bool:
         major_version = int(version_str.split(".")[0])
         return major_version >= 3
     except (ValueError, IndexError):
+        return False
+
+
+def _is_gemini_v2_5(model_name: str) -> bool:
+    """Checks if a Gemini model is in the 2.5 family."""
+    if not model_name.startswith("gemini-"):
+        return False
+
+    match = re.search(r"gemini-([0-9]+)\.([0-9]+)", model_name)
+    if not match:
+        return False
+
+    try:
+        major_version = int(match.group(1))
+        minor_version = int(match.group(2))
+        return major_version == 2 and minor_version >= 5
+    except ValueError:
         return False
 
 
@@ -240,9 +258,19 @@ def create_gemini_model(
         logger.debug(
             "thinking_level_applied", thinking_level=thinking_level, model=model_name
         )
+    elif thinking_level and _is_gemini_v2_5(model_name):
+        kwargs["thinking_budget"] = _THINKING_BUDGETS.get(thinking_level, 4096)
+        logger.debug(
+            "thinking_budget_applied",
+            thinking_level=thinking_level,
+            thinking_budget=kwargs["thinking_budget"],
+            model=model_name,
+        )
 
     llm = ChatGoogleGenerativeAI(**kwargs)
     llm._configured_max_output_tokens = kwargs["max_output_tokens"]
+    if thinking_level:
+        llm.thinking_level = thinking_level
 
     # Track instance for cleanup
     _llm_instance_counter += 1
@@ -262,7 +290,7 @@ def create_quick_thinking_llm(
 ) -> BaseChatModel:
     """
     Create a quick thinking LLM.
-    If the QUICK_MODEL is Gemini 3+, this will set thinking_level="low".
+    If the QUICK_MODEL is Gemini 3+ or Gemini 2.5, this will set low reasoning.
     """
     model_name = model or config.quick_think_llm
     final_timeout = timeout if timeout is not None else config.api_timeout
@@ -271,7 +299,7 @@ def create_quick_thinking_llm(
     )
 
     thinking_level = None
-    if _is_gemini_v3_or_greater(model_name):
+    if _is_gemini_v3_or_greater(model_name) or _is_gemini_v2_5(model_name):
         thinking_level = "low"
     elif model_name.startswith("gemini-"):
         # Gemini model but NOT 3+ (likely 2.x)
@@ -301,7 +329,7 @@ def create_deep_thinking_llm(
 ) -> BaseChatModel:
     """
     Create a deep thinking LLM.
-    If the DEEP_MODEL is Gemini 3+, this will set thinking_level="high".
+    If the DEEP_MODEL is Gemini 3+ or Gemini 2.5, this will set high reasoning.
     """
     model_name = model or config.deep_think_llm
     final_timeout = timeout if timeout is not None else config.api_timeout
@@ -310,7 +338,7 @@ def create_deep_thinking_llm(
     )
 
     thinking_level = None
-    if _is_gemini_v3_or_greater(model_name):
+    if _is_gemini_v3_or_greater(model_name) or _is_gemini_v2_5(model_name):
         thinking_level = "high"
 
     _log_model_init_once(
@@ -623,18 +651,21 @@ def create_editor_llm(
 
     logger.info("editor_llm_init", model=model_name)
 
-    return ChatOpenAI(
-        model=model_name,
-        temperature=0.3,  # Slightly creative for style suggestions
-        timeout=120,
-        max_retries=3,
-        api_key=api_key,
-        callbacks=callbacks or [],
-        max_completion_tokens=8192,  # Editor feedback is concise JSON
-        streaming=False,
-        use_responses_api=True,
-        output_version="responses/v1",
-    )
+    kwargs = {
+        "model": model_name,
+        "timeout": 120,
+        "max_retries": 3,
+        "api_key": api_key,
+        "callbacks": callbacks or [],
+        "max_completion_tokens": 8192,
+        "streaming": False,
+        "use_responses_api": True,
+        "output_version": "responses/v1",
+    }
+    if model_name.startswith("gpt-5") and "pro" not in model_name:
+        kwargs["reasoning_effort"] = "medium"
+
+    return ChatOpenAI(**kwargs)
 
 
 # Initialize consultant LLM (lazy initialization to handle missing API key gracefully)
