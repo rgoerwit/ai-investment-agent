@@ -9,6 +9,7 @@ Tests cover:
 """
 
 import json
+import warnings
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -1501,6 +1502,77 @@ class TestEditorToolCalling:
         assert result["confidence"] == 0.95
         # Should use bare LLM
         mock_llm.ainvoke.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_structured_review_suppresses_known_pydantic_warning_when_not_debug(
+        self,
+    ):
+        """Known structured-output serializer noise should stay out of normal runs."""
+        editor = _create_article_editor()
+
+        async def _warn_and_return(_messages):
+            warnings.warn_explicit(
+                (
+                    "Pydantic serializer warnings:\n"
+                    "  PydanticSerializationUnexpectedValue("
+                    "Expected `none` - serialized value may not be as expected)"
+                ),
+                UserWarning,
+                filename="pydantic/main.py",
+                lineno=464,
+                module="pydantic.main",
+            )
+            return {"verdict": "APPROVED", "confidence": 0.91}
+
+        editor.llm = MagicMock()
+        editor.review_llm = AsyncMock()
+        editor.review_llm.ainvoke = AsyncMock(side_effect=_warn_and_return)
+
+        with patch(
+            "src.article_writer._should_emit_editor_structured_output_warnings",
+            return_value=False,
+        ):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                result = await editor._invoke_final_review([])
+
+        assert result["verdict"] == "APPROVED"
+        assert caught == []
+
+    @pytest.mark.asyncio
+    async def test_structured_review_emits_known_pydantic_warning_in_debug(self):
+        """Debug runs should preserve the raw serializer warning for investigation."""
+        editor = _create_article_editor()
+
+        async def _warn_and_return(_messages):
+            warnings.warn_explicit(
+                (
+                    "Pydantic serializer warnings:\n"
+                    "  PydanticSerializationUnexpectedValue("
+                    "Expected `none` - serialized value may not be as expected)"
+                ),
+                UserWarning,
+                filename="pydantic/main.py",
+                lineno=464,
+                module="pydantic.main",
+            )
+            return {"verdict": "APPROVED", "confidence": 0.91}
+
+        editor.llm = MagicMock()
+        editor.review_llm = AsyncMock()
+        editor.review_llm.ainvoke = AsyncMock(side_effect=_warn_and_return)
+
+        with patch(
+            "src.article_writer._should_emit_editor_structured_output_warnings",
+            return_value=True,
+        ):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                result = await editor._invoke_final_review([])
+
+        assert result["verdict"] == "APPROVED"
+        assert len(caught) == 1
+        assert "Pydantic serializer warnings" in str(caught[0].message)
 
     @pytest.mark.asyncio
     async def test_execute_tool_calls_handles_unknown_tool(self):

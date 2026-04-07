@@ -8,6 +8,8 @@ while matching the author's distinctive voice from writing samples.
 import json
 import os
 import random
+import warnings
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal
 
@@ -62,6 +64,10 @@ _REFUSAL_INDICATORS = (
     "I can't offer specific investment recommendations",
 )
 
+_EDITOR_STRUCTURED_OUTPUT_WARNING_PATTERN = (
+    r"(?s)^Pydantic serializer warnings:.*PydanticSerializationUnexpectedValue.*"
+)
+
 
 class EditorFactualError(BaseModel):
     location: str = ""
@@ -83,6 +89,28 @@ class EditorReviewResult(BaseModel):
     cuts: list[str] = Field(default_factory=list)
     style_issues: list[str] = Field(default_factory=list)
     confidence: float = 0.5
+
+
+def _should_emit_editor_structured_output_warnings() -> bool:
+    """Always suppress: these are known-benign Pydantic serializer warnings."""
+    return False
+
+
+@contextmanager
+def _structured_review_warning_policy():
+    """Suppress known benign Pydantic serializer warnings outside debug runs."""
+    if _should_emit_editor_structured_output_warnings():
+        yield
+        return
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=_EDITOR_STRUCTURED_OUTPUT_WARNING_PATTERN,
+            category=UserWarning,
+            module=r"pydantic(\..*)?",
+        )
+        yield
 
 
 def _extract_text_from_response(response) -> str:
@@ -1331,7 +1359,8 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
         ]
 
         if self.review_llm:
-            result = await self.review_llm.ainvoke(final_messages)
+            with _structured_review_warning_policy():
+                result = await self.review_llm.ainvoke(final_messages)
             if isinstance(result, BaseModel):
                 return result.model_dump()
             if isinstance(result, dict):
