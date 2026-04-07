@@ -1094,8 +1094,11 @@ function updateMacroAlert() {
     return;
   }
   alert.classList.remove("hidden");
-  const headline = macro.headline ? `Headline: ${macro.headline}` : "Macro event detected.";
-  alert.innerHTML = `<strong>Macro alert:</strong> ${escapeHtml(headline)} (${escapeHtml(String(macro.correlation_pct || "—"))}% of held positions)`;
+  const escapedHeadline = macro.headline ? escapeHtml(macro.headline) : null;
+  const headline = escapedHeadline
+    ? `Headline: ${escapedHeadline}`
+    : "Macro event detected.";
+  alert.innerHTML = `<strong>Macro alert:</strong> ${headline} (${escapeHtml(String(macro.correlation_pct || "—"))}% of held positions)`;
 }
 
 function updateModeAlert() {
