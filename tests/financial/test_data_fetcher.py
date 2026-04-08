@@ -10,12 +10,13 @@ Verifies:
 
 import asyncio
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 import pytest
 
 from src.data.fetcher import SmartMarketDataFetcher
+from src.yfinance_runtime import YFRateLimitError
 
 
 @pytest.fixture
@@ -52,6 +53,16 @@ class TestParallelExecution:
         assert result["currentPrice"] == 100
         assert result["pe"] == 15
         assert result["roe"] == 0.2
+
+    @pytest.mark.asyncio
+    async def test_yfinance_rate_limit_returns_none(self, fetcher):
+        with patch(
+            "src.data.fetcher.yf.Ticker",
+            side_effect=YFRateLimitError(),
+        ):
+            result = await fetcher._fetch_yfinance_enhanced("TEST")
+
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_get_financial_metrics_uses_short_lived_cache(self, fetcher):
@@ -137,7 +148,67 @@ class TestParallelExecution:
 
         assert first.equals(second)
         assert first is not second
-        fetcher._get_price_history_uncached.assert_awaited_once_with("TEST", "1y")
+        fetcher._get_price_history_uncached.assert_awaited_once_with(
+            "TEST",
+            "1y",
+            start=None,
+            end=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_price_history_uses_distinct_cache_keys_for_date_bounds(
+        self, fetcher
+    ):
+        """Bounded and unbounded history requests should not collide in cache."""
+        fetcher._get_price_history_uncached = AsyncMock(
+            side_effect=[
+                pd.DataFrame({"Close": [1.0]}),
+                pd.DataFrame({"Close": [2.0]}),
+            ]
+        )
+
+        first = await fetcher.get_price_history("TEST", period="1y")
+        second = await fetcher.get_price_history(
+            "TEST",
+            period="1y",
+            start="2025-01-01",
+            end="2025-03-31",
+        )
+
+        assert first.iloc[-1]["Close"] == 1.0
+        assert second.iloc[-1]["Close"] == 2.0
+        assert fetcher._get_price_history_uncached.await_args_list[0].args == (
+            "TEST",
+            "1y",
+        )
+        assert fetcher._get_price_history_uncached.await_args_list[0].kwargs == {
+            "start": None,
+            "end": None,
+        }
+        assert fetcher._get_price_history_uncached.await_args_list[1].kwargs == {
+            "start": "2025-01-01",
+            "end": "2025-03-31",
+        }
+
+    @pytest.mark.asyncio
+    async def test_get_price_history_forwards_start_and_end_to_yfinance(self, fetcher):
+        """Explicit history bounds should use start/end instead of the default period."""
+        mock_stock = MagicMock()
+        expected = pd.DataFrame({"Close": [1.0, 2.0]})
+        mock_stock.history.return_value = expected
+
+        with patch("src.data.fetcher.yf.Ticker", return_value=mock_stock):
+            result = await fetcher.get_price_history(
+                "TEST",
+                start="2025-01-01",
+                end="2025-03-31",
+            )
+
+        mock_stock.history.assert_called_once_with(
+            start="2025-01-01",
+            end="2025-03-31",
+        )
+        assert result.equals(expected)
 
 
 class TestSmartMerge:
@@ -186,6 +257,28 @@ class TestSmartMerge:
 
         assert merged["regularMarketChangePercent"] == -1.4177
         assert "regularMarketChangePercent" not in meta["source_conflicts"]
+
+    def test_percent_like_conflicts_normalize_sub_one_percent_values(self, fetcher):
+        source_results = {
+            "yfinance": {"regularMarketChangePercent": 0.4061},
+            "yahooquery": {"regularMarketChangePercent": 0.0041},
+        }
+
+        merged, meta = fetcher._smart_merge_with_quality(source_results, "7609.T")
+
+        assert merged["regularMarketChangePercent"] == 0.4061
+        assert "regularMarketChangePercent" not in meta["source_conflicts"]
+
+    def test_metadata_only_fields_do_not_emit_source_conflicts(self, fetcher):
+        source_results = {
+            "yfinance": {"maxAge": 86400.0},
+            "yahooquery": {"maxAge": 1.0},
+        }
+
+        merged, meta = fetcher._smart_merge_with_quality(source_results, "TEST")
+
+        assert merged["maxAge"] == 86400.0
+        assert "maxAge" not in meta["source_conflicts"]
 
     def test_return_on_equity_conflicts_are_not_blindly_rescaled(self, fetcher):
         source_results = {
@@ -340,11 +433,8 @@ class TestPanicMode:
         Verify that _fetch_tavily_gaps correctly filters out DANGEROUS_FIELDS
         even when they're passed in the missing_fields list.
         """
-        # Setup mock Tavily client
+        # Setup mock Tavily state
         fetcher.tavily_client = MagicMock()
-        fetcher.tavily_client.search = MagicMock(
-            return_value={"results": [{"content": "ROE is 15%"}]}
-        )
 
         # Call with both safe and dangerous fields
         missing_fields = [
@@ -358,21 +448,17 @@ class TestPanicMode:
             "debtToEquity",  # SAFE
         ]
 
-        result = await fetcher._fetch_tavily_gaps("TEST", missing_fields)
+        with patch("src.data.fetcher.search_tavily_inspected") as mock_search:
+            mock_search.return_value = {"results": [{"content": "ROE is 15%"}]}
+            result = await fetcher._fetch_tavily_gaps("TEST", missing_fields)
 
-        # Verify that Tavily was NOT called if only dangerous fields remain
-        # OR verify that only safe fields were searched for
-        # The method should filter to only safe fields
-
-        # If tavily_client.search was called, it should only be for safe fields
-        if fetcher.tavily_client.search.called:
-            # Check that queries don't include dangerous field terms
-            for call in fetcher.tavily_client.search.call_args_list:
-                query = call[0][0] if call[0] else call[1].get("query", "")
-                # Dangerous terms shouldn't dominate the query
-                assert not all(
-                    term in query.lower() for term in ["p/e", "price", "market cap"]
-                )
+        # Verify only safe-field searches are issued
+        assert mock_search.called
+        for call in mock_search.call_args_list:
+            query = call.args[0]
+            assert not all(
+                term in query.lower() for term in ["p/e", "price", "market cap"]
+            )
 
 
 class TestCalculatedMetrics:

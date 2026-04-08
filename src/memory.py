@@ -108,9 +108,7 @@ class FinancialSituationMemory:
 
             # Check if collection exists with stale embedding model
             existing_collections = self.chroma_client.list_collections()
-            collection_names = [
-                c.name if hasattr(c, "name") else c for c in existing_collections
-            ]
+            collection_names = [c.name for c in existing_collections]
 
             if self.name in collection_names:
                 existing = self.chroma_client.get_collection(name=self.name)

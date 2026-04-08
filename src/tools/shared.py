@@ -21,25 +21,10 @@ if _tavily_api_key:
         tavily_tool = TavilySearch(max_results=5, tavily_api_key=_tavily_api_key)
         TAVILY_AVAILABLE = True
     except ImportError:
-        try:
-            from langchain_community.tools import TavilySearchResults
-
-            tavily_tool = TavilySearchResults(
-                max_results=5, tavily_api_key=_tavily_api_key
-            )
-            TAVILY_AVAILABLE = True
-        except ImportError:
-            try:
-                from langchain_community.tools.tavily_search import TavilySearchResults
-
-                tavily_tool = TavilySearchResults(
-                    max_results=5, tavily_api_key=_tavily_api_key
-                )
-                TAVILY_AVAILABLE = True
-            except ImportError:
-                logger.warning(
-                    "Tavily tools not available. Install langchain-tavily or langchain-community."
-                )
+        logger.warning(
+            "tavily_not_installed",
+            hint="Run 'poetry add langchain-tavily' to enable Tavily search",
+        )
 else:
     logger.warning("TAVILY_API_KEY not set. Tavily tools disabled.")
 

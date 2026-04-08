@@ -24,6 +24,10 @@ from src.ibkr.refresh_service import (
     RefreshPlanOptions,
     RefreshPolicy,
 )
+from src.ibkr.screening_freshness import (
+    ScreeningFreshnessSummary,
+    load_screening_freshness,
+)
 from src.ibkr.types import ProgressCallback
 
 
@@ -62,6 +66,9 @@ class PortfolioRecommendationBundle:
     )
     refresh_activity: RefreshActivity = field(
         default_factory=lambda: RefreshActivity(policy="off", limit=0)
+    )
+    screening_freshness: ScreeningFreshnessSummary = field(
+        default_factory=lambda: ScreeningFreshnessSummary(status="missing")
     )
 
 
@@ -184,6 +191,7 @@ class PortfolioRecommendationService:
             health_flags=health_flags,
             freshness_summary=freshness_summary,
             refresh_activity=refresh_activity,
+            screening_freshness=load_screening_freshness(request.results_dir),
         )
 
     @staticmethod

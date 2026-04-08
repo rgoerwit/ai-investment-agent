@@ -585,8 +585,21 @@ def _load_latest_analyses_from_index(
         emit_rebuild_notice(f"{index_path.name}:path_mismatch")
         return None
     if payload.get("results_dir_mtime_ns") != current_dir_mtime_ns:
-        emit_rebuild_notice(f"{index_path.name}:stale_directory_state")
-        return None
+        indexed_total_files = int(payload.get("total_files") or 0)
+        current_analysis_file_count = sum(
+            1 for _ in results_dir.glob("*_analysis.json")
+        )
+        if indexed_total_files != current_analysis_file_count:
+            emit_rebuild_notice(f"{index_path.name}:stale_directory_state")
+            return None
+        logger.info(
+            "analysis_index_mtime_mismatch_accepted",
+            path=str(index_path),
+            indexed_total_files=indexed_total_files,
+            current_analysis_file_count=current_analysis_file_count,
+            index_dir_mtime_ns=payload.get("results_dir_mtime_ns"),
+            current_dir_mtime_ns=current_dir_mtime_ns,
+        )
 
     analyses: dict[str, AnalysisRecord] = {}
     for ticker, entry in (payload.get("analyses") or {}).items():

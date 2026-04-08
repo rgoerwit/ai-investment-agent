@@ -71,12 +71,20 @@ function fmtPct(value) {
   return `${sign}${Number(value).toFixed(1)}%`;
 }
 
-function escapeHtml(value) {
+function escapeHtmlText(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
 }
+
+function escapeHtmlAttr(value) {
+  return escapeHtmlText(value)
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+const escapeHtml = escapeHtmlText;
 
 function formatDetailValue(value) {
   if (value === null || value === undefined || value === "") {
@@ -111,7 +119,7 @@ function renderCards(cards) {
 
 function renderTickerLink(item) {
   const ticker = item.ticker_yf || item.ticker_ibkr;
-  return `<button type="button" class="ticker-link" data-ticker="${escapeHtml(ticker)}">${escapeHtml(item.ticker_ibkr || ticker)}</button>`;
+  return `<button type="button" class="ticker-link" data-ticker="${escapeHtmlAttr(ticker)}">${escapeHtml(item.ticker_ibkr || ticker)}</button>`;
 }
 
 function renderActionTable(title, items, extraColumns = []) {
@@ -278,10 +286,10 @@ function renderConcentrationHeader(section, key, label) {
       <button
         type="button"
         class="${classes.join(" ")}"
-        data-sort-section="${escapeHtml(section)}"
-        data-sort-key="${escapeHtml(key)}"
-        aria-label="${escapeHtml(`Sort ${section} concentration by ${label.toLowerCase()}`)}"
-        title="${escapeHtml(`Sort by ${label}`)}"
+        data-sort-section="${escapeHtmlAttr(section)}"
+        data-sort-key="${escapeHtmlAttr(key)}"
+        aria-label="${escapeHtmlAttr(`Sort ${section} concentration by ${label.toLowerCase()}`)}"
+        title="${escapeHtmlAttr(`Sort by ${label}`)}"
       >
         <span>${escapeHtml(label)}</span>
         <span class="sort-indicator" aria-hidden="true">${getSortArrow(section, key)}</span>
@@ -650,6 +658,7 @@ function renderOrders() {
 
 function renderRefresh() {
   const freshness = state.snapshot.freshness;
+  const screening = state.snapshot.screening_freshness || {};
   const staleEligible =
     freshness.blocking_now.length + freshness.stale_in_queue.length;
   const dueSoonEligible = freshness.due_soon.length;
@@ -662,6 +671,53 @@ function renderRefresh() {
     ? "Reload Data in the top bar only rereads the current dashboard data. The controls here queue background analysis reruns if you want to refresh specific tickers anyway."
     : "Reload Data in the top bar rereads the current dashboard data. The controls here queue background analysis reruns; finished jobs show up after the next data reload.";
   return `
+    <section>
+      <h3 class="section-title">Last Broad Screening Run</h3>
+      <div class="topbar-actions" style="justify-content: flex-start; margin-bottom: 0.75rem;">
+        <span class="status-pill">${
+          screening.status === "missing"
+            ? "Missing"
+            : screening.status === "stale"
+              ? "Overdue"
+              : "Fresh"
+        }</span>
+      </div>
+      ${renderCards([
+        {
+          label: "Screening date",
+          value: screening.screening_date || "—",
+        },
+        {
+          label: "Age (days)",
+          value:
+            screening.age_days === null || screening.age_days === undefined
+              ? "—"
+              : screening.age_days,
+        },
+        {
+          label: "Candidates screened",
+          value:
+            screening.candidate_count === null ||
+            screening.candidate_count === undefined
+              ? "—"
+              : screening.candidate_count,
+        },
+        {
+          label: "BUYs found",
+          value:
+            screening.buy_count === null || screening.buy_count === undefined
+              ? "—"
+              : screening.buy_count,
+        },
+      ])}
+      <p class="muted">${
+        screening.status === "missing"
+          ? "No completed broad screening sweep is recorded yet. Run ./scripts/run_pipeline.sh when you want new candidate discovery."
+          : screening.status === "stale"
+            ? "Broad candidate discovery looks overdue even if per-ticker analyses are fresh."
+            : "Broad candidate discovery has run recently."
+      }</p>
+    </section>
     ${renderCards([
       { label: "Blocking now", value: freshness.blocking_now.length },
       { label: "Stale in queue", value: freshness.stale_in_queue.length },
@@ -693,7 +749,7 @@ function renderJobsTable() {
     .map(
       (job) => `
       <tr>
-        <td title="${escapeHtml(job.job_id)}">${escapeHtml((job.job_id || "").slice(0, 8) || "—")}</td>
+        <td title="${escapeHtmlAttr(job.job_id)}">${escapeHtml((job.job_id || "").slice(0, 8) || "—")}</td>
         <td>${escapeHtml(job.scope)}</td>
         <td>${escapeHtml(job.status)}</td>
         <td>${escapeHtml(job.created_at)}</td>
@@ -713,16 +769,16 @@ function renderSettings() {
       <h3 class="section-title">Dashboard Settings</h3>
       <p class="muted">These settings control the next data load. Use startup flags when you want a one-off session override.</p>
       <form id="settings-form" class="settings-form">
-        <label>IBKR account ID<input name="account_id" value="${escapeHtml(settings.account_id || "")}" placeholder="U20958465"></label>
-        <label>Watchlist name<input name="watchlist_name" value="${escapeHtml(settings.watchlist_name || "")}"></label>
+        <label>IBKR account ID<input name="account_id" value="${escapeHtmlAttr(settings.account_id || "")}" placeholder="U20958465"></label>
+        <label>Watchlist name<input name="watchlist_name" value="${escapeHtmlAttr(settings.watchlist_name || "")}"></label>
         <label>Data source
           <select name="read_only">
             <option value="false" ${modeValue === "false" ? "selected" : ""}>Live IBKR portfolio</option>
             <option value="true" ${modeValue === "true" ? "selected" : ""}>Read-only results only</option>
           </select>
         </label>
-        <label>Max age days<input name="max_age_days" type="number" value="${escapeHtml(settings.max_age_days ?? 14)}"></label>
-        <label>Refresh limit<input name="refresh_limit" type="number" value="${escapeHtml(settings.refresh_limit ?? 10)}"></label>
+        <label>Max age days<input name="max_age_days" type="number" value="${escapeHtmlAttr(settings.max_age_days ?? 14)}"></label>
+        <label>Refresh limit<input name="refresh_limit" type="number" value="${escapeHtmlAttr(settings.refresh_limit ?? 10)}"></label>
         <label>Quick mode default
           <select name="quick_mode_default">
             <option value="true" ${settings.quick_mode_default ? "selected" : ""}>true</option>
@@ -1038,8 +1094,11 @@ function updateMacroAlert() {
     return;
   }
   alert.classList.remove("hidden");
-  const headline = macro.headline ? `Headline: ${macro.headline}` : "Macro event detected.";
-  alert.innerHTML = `<strong>Macro alert:</strong> ${escapeHtml(headline)} (${escapeHtml(String(macro.correlation_pct || "—"))}% of held positions)`;
+  const escapedHeadline = macro.headline ? escapeHtml(macro.headline) : null;
+  const headline = escapedHeadline
+    ? `Headline: ${escapedHeadline}`
+    : "Macro event detected.";
+  alert.innerHTML = `<strong>Macro alert:</strong> ${headline} (${escapeHtml(String(macro.correlation_pct || "—"))}% of held positions)`;
 }
 
 function updateModeAlert() {

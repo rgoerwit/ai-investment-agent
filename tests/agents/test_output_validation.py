@@ -54,6 +54,14 @@ def test_extract_completion_tokens_tolerates_mock_usage_metadata():
     assert extract_completion_tokens(response) == 0
 
 
+def test_extract_completion_tokens_reads_response_metadata_usage():
+    response = Mock()
+    response.usage_metadata = None
+    response.response_metadata = {"usage": {"output_tokens": 52}}
+
+    assert extract_completion_tokens(response) == 52
+
+
 def test_get_configured_output_cap_ignores_non_numeric_mock_attrs():
     runnable = Mock()
 
@@ -75,6 +83,54 @@ def test_consultant_validation_does_not_fail_closed_on_short_nontruncated_output
             content="CONSULTANT REVIEW: APPROVED",
         )
         is False
+    )
+
+
+def test_auditor_validation_rejects_status_only_stub():
+    content = "STATUS: REVIEW"
+
+    validation = validate_required_output("global_forensic_auditor", content)
+
+    assert validation["ok"] is False
+    assert "forensic_block" in validation["missing"]
+
+
+def test_auditor_validation_accepts_legacy_forensic_block():
+    content = "FORENSIC_DATA_BLOCK:\n" "STATUS: CLEAN\n" "VERDICT: RELY_ON_DATA_BLOCK\n"
+
+    validation = validate_required_output("global_forensic_auditor", content)
+
+    assert validation["ok"] is True
+
+
+def test_auditor_validation_accepts_fenced_forensic_block():
+    content = (
+        "### --- START FORENSIC_DATA_BLOCK ---\n"
+        "STATUS: CLEAN\n"
+        "VERDICT: RELY_ON_DATA_BLOCK\n"
+        "### --- END FORENSIC_DATA_BLOCK ---"
+    )
+
+    validation = validate_required_output("global_forensic_auditor", content)
+
+    assert validation["ok"] is True
+
+
+def test_auditor_validation_fails_closed_for_invalid_structure():
+    validation = {
+        "ok": False,
+        "checks": [("forensic_block", False)],
+        "missing": ["forensic_block"],
+    }
+
+    assert (
+        should_fail_closed(
+            "global_forensic_auditor",
+            validation=validation,
+            truncated=False,
+            content="STATUS: REVIEW",
+        )
+        is True
     )
 
 

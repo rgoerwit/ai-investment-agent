@@ -51,6 +51,10 @@ async def get_fx_rate_yfinance(
     try:
         import yfinance as yf
 
+        from src.yfinance_runtime import YFRateLimitError, configure_yfinance_defaults
+
+        configure_yfinance_defaults()
+
         # Use async thread pool to avoid blocking
         def _fetch_rate():
             ticker = yf.Ticker(fx_ticker)
@@ -80,6 +84,9 @@ async def get_fx_rate_yfinance(
 
     except asyncio.TimeoutError:
         logger.debug("fx_rate_timeout", pair=fx_ticker, timeout_ms=3000)
+        return None
+    except YFRateLimitError as e:
+        logger.debug("fx_rate_rate_limited", pair=fx_ticker, error=str(e))
         return None
     except Exception as e:
         logger.debug("fx_rate_fetch_error", pair=fx_ticker, error=str(e))

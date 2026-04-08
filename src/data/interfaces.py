@@ -30,7 +30,13 @@ class FinancialFetcher(ABC):
         pass
 
     @abstractmethod
-    async def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
+    async def get_price_history(
+        self,
+        ticker: str,
+        period: str = "1y",
+        start: str | None = None,
+        end: str | None = None,
+    ) -> pd.DataFrame:
         """
         Returns OHLC DataFrame with standard columns: Open, High, Low, Close, Volume.
         """

@@ -1081,6 +1081,65 @@ class TestLoadLatestAnalyses:
         second = load_latest_analyses(tmp_path)
         assert second["7203.T"].ticker == "7203.T"
 
+    def test_load_latest_analyses_accepts_benign_dir_mtime_mismatch(
+        self, tmp_path, monkeypatch
+    ):
+        """Directory mtime churn alone should not force a full rebuild."""
+        data = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-03-01",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        (tmp_path / "7203_T_2026-03-01_analysis.json").write_text(json.dumps(data))
+
+        load_latest_analyses(tmp_path)
+        (tmp_path / "notes.txt").write_text("benign churn")
+
+        monkeypatch.setattr(
+            "src.ibkr.reconciler._build_analysis_record_from_file",
+            lambda filepath: (_ for _ in ()).throw(AssertionError("should use index")),
+        )
+
+        with patch("src.ibkr.reconciler.logger", new=MagicMock()) as mock_logger:
+            second = load_latest_analyses(tmp_path)
+
+        assert second["7203.T"].ticker == "7203.T"
+        info_events = [call.args[0] for call in mock_logger.info.call_args_list]
+        assert "analysis_index_mtime_mismatch_accepted" in info_events
+
+    def test_load_latest_analyses_rebuilds_when_analysis_file_count_changes(
+        self, tmp_path
+    ):
+        """Adding a new analysis file should still invalidate the stale index."""
+        first = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-03-01",
+                "verdict": "BUY",
+            },
+            "investment_analysis": {},
+        }
+        second = {
+            "prediction_snapshot": {
+                "ticker": "0005.HK",
+                "analysis_date": "2026-03-01",
+                "verdict": "HOLD",
+            },
+            "investment_analysis": {},
+        }
+        (tmp_path / "7203_T_2026-03-01_analysis.json").write_text(json.dumps(first))
+        load_latest_analyses(tmp_path)
+        (tmp_path / "0005_HK_2026-03-01_analysis.json").write_text(json.dumps(second))
+
+        events: list[AnalysisLoadProgress] = []
+        analyses = load_latest_analyses(tmp_path, progress=events.append)
+
+        assert analyses.keys() == {"7203.T", "0005.HK"}
+        assert any(event.phase == "rebuilding_index" for event in events)
+
     def test_load_latest_analyses_rebuilds_when_index_missing(self, tmp_path):
         """If the cache index is removed, the loader rescans and recreates it."""
         data = {

@@ -309,6 +309,16 @@ def test_main_test_auth_bypasses_analysis_loading():
     mock_load.assert_not_called()
 
 
+def test_configure_logging_keeps_structlog_compatible_with_ibkr_modules():
+    """Portfolio logging must keep imported IBKR structlog loggers on stdlib semantics."""
+    from scripts.portfolio_manager import _configure_logging
+    from src.ibkr.reconciler import logger as reconciler_logger
+
+    _configure_logging(debug=False)
+
+    reconciler_logger.info("analyses_loaded", count=1)
+
+
 def test_preflight_ibkr_requirements_checks_config_before_scanning():
     """Preflight should validate required IBKR config without connecting."""
     fake_client_module = ModuleType("src.ibkr.client")

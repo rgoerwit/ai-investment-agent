@@ -379,9 +379,10 @@ touch .venv/.metadata_never_index results/.metadata_never_index
 These are real features, but they are not required to get started:
 
 - **Container mode**: the repo includes a Dockerfile and supports local bind-mounted runs. Prefer Podman if you want stronger workstation isolation.
-- **Observability**: Langfuse and LangSmith hooks exist for tracing and diagnostics.
+- **Observability**: Langfuse and LangSmith hooks exist for tracing and diagnostics. For sensitive deployments, LangSmith also supports `LANGSMITH_HIDE_INPUTS` and `LANGSMITH_HIDE_OUTPUTS`.
 - **Inspection and tool audit hooks**: see `src/tooling/` if you want to inspect or audit untrusted external content before it reaches LLM context.
 - **Deployment references**: `terraform/` contains reference infrastructure, not a turnkey hosted product.
+- **Dependency note**: `yfinance 1.2.0` still pins `curl-cffi <0.14` upstream. The repo tracks the current SSRF advisory and currently treats it as a constrained transitive risk because Yahoo data paths here are driven by ticker-like symbols, not attacker-controlled URLs.
 
 ## Limitations
 

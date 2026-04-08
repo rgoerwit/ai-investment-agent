@@ -56,7 +56,11 @@ async def get_yfinance_data(
     """Get historical stock price data in LOCAL TRADING CURRENCY (not USD)."""
     try:
         normalized = normalize_ticker(symbol)
-        hist = await market_data_fetcher.get_historical_prices(normalized)
+        hist = await market_data_fetcher.get_historical_prices(
+            normalized,
+            start=start_date,
+            end=end_date,
+        )
         if hist.empty:
             return "No data"
         return hist.reset_index().to_csv(index=False)

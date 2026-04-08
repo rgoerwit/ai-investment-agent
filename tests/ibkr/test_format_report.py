@@ -21,6 +21,7 @@ from src.ibkr.models import (
 )
 from src.ibkr.portfolio_presentation import build_cash_summary, build_live_order_note
 from src.ibkr.refresh_service import RefreshActivity
+from src.ibkr.screening_freshness import ScreeningFreshnessSummary
 from src.ibkr.ticker import Ticker
 from tests.ibkr.test_reconciler import (
     _make_analysis,
@@ -2066,6 +2067,53 @@ class TestAnalysisFreshnessReporting:
         assert summary["stale_in_queue_count"] == 1
         assert summary["due_soon_count"] == 1
         assert summary["manual_action_required"] is True
+
+    def test_format_report_shows_stale_screening_freshness(self):
+        report = format_report(
+            self._items(),
+            _make_portfolio(),
+            max_age_days=14,
+            screening_freshness=ScreeningFreshnessSummary(
+                status="stale",
+                screening_date="2026-01-05",
+                completed_at="2026-01-05T10:30:00Z",
+                age_days=90,
+                stale_after_days=90,
+                candidate_count=245,
+                buy_count=12,
+            ),
+        )
+        assert "SCREENING FRESHNESS" in report
+        assert "Last completed sweep: 2026-01-05  (90 days ago)" in report
+        assert "Candidates screened: 245  ·  BUYs found: 12" in report
+
+    def test_format_report_omits_fresh_screening_freshness(self):
+        report = format_report(
+            self._items(),
+            _make_portfolio(),
+            max_age_days=14,
+            screening_freshness=ScreeningFreshnessSummary(
+                status="fresh",
+                screening_date="2026-04-01",
+                completed_at="2026-04-01T10:30:00Z",
+                age_days=4,
+                stale_after_days=90,
+                candidate_count=245,
+                buy_count=12,
+            ),
+        )
+        assert "SCREENING FRESHNESS" not in report
+
+    def test_format_json_always_includes_screening_freshness(self):
+        payload = json.loads(
+            format_json(
+                self._items(),
+                _make_portfolio(),
+                max_age_days=14,
+                screening_freshness=ScreeningFreshnessSummary(status="missing"),
+            )
+        )
+        assert payload["screening_freshness"]["status"] == "missing"
 
 
 class TestCashHeaderWording:

@@ -123,6 +123,25 @@ report_has_verdict_header() {
     [[ -n "$verdict" ]]
 }
 
+write_pipeline_marker() {
+    local results_dir="${RESULTS_DIR:-results}"
+    local marker="${results_dir}/.pipeline_last_run.json"
+    local candidates="null"
+    local buys="null"
+
+    mkdir -p "$results_dir"
+
+    if [[ -n "${TICKER_LIST:-}" && -f "${TICKER_LIST}" ]]; then
+        candidates=$(grep -c '^[[:space:]]*[^[:space:]#]' "$TICKER_LIST" || echo "0")
+    fi
+    if [[ -n "${BUY_LIST:-}" && -f "${BUY_LIST}" ]]; then
+        buys=$(grep -c '^[[:space:]]*[^[:space:]#]' "$BUY_LIST" || echo "0")
+    fi
+
+    printf '{\n  "schema_version": 1,\n  "workflow": "run_pipeline",\n  "screening_date": "%s",\n  "completed_at": "%s",\n  "candidate_count": %s,\n  "buy_count": %s\n}\n' \
+        "$DATE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$candidates" "$buys" > "$marker"
+}
+
 resolve_python_cmd() {
     if [[ -n "${INVESTMENT_AGENT_CONTAINER:-}" ]] || [[ -f "/.dockerenv" ]] || [[ -f "/run/.containerenv" ]]; then
         PYTHON_CMD=(python)
@@ -606,6 +625,7 @@ if [[ $START_STAGE -le 2 ]]; then
     BUY_TOTAL=$(grep -c '^[[:space:]]*[^[:space:]#]' "$BUY_LIST" || echo "0")
     if [[ "$BUY_TOTAL" -eq 0 ]]; then
         info "No BUY tickers to analyze. Pipeline complete."
+        write_pipeline_marker
         exit 0
     fi
 
@@ -684,6 +704,7 @@ if [[ $START_STAGE -le 2 ]]; then
     done < "$BUY_LIST"
 
     info "Stage 2 complete: $STAGE2_PROCESSED analyzed, $STAGE2_SKIPPED skipped, $STAGE2_FAILED failed"
+    write_pipeline_marker
 fi
 
 # ============================================================

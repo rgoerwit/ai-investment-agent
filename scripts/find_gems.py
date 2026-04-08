@@ -29,9 +29,12 @@ import pandas as pd
 import requests
 import yfinance as yf
 
+from src.yfinance_runtime import YFRateLimitError, configure_yfinance_defaults
+
 # yfinance logs every 404 to stderr at ERROR level — suppress since missing
 # tickers are expected and handled by returning None in _process_row.
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+configure_yfinance_defaults()
 
 # --- CONSTANTS ---
 DEFAULT_CONFIG_PATH = "config/exchanges.json"
@@ -762,6 +765,19 @@ def _process_row(row, *, fx_rates=None, min_mcap=None, min_volume=None, debug=Fa
 
             return row
 
+        except YFRateLimitError as e:
+            if attempt < max_retries:
+                wait_time = (20 * (attempt + 1)) + random.uniform(1, 5)
+                if debug:
+                    print(
+                        f"[RETRY] {yf_symbol}: yfinance rate limited, sleeping {wait_time:.1f}s",
+                        file=sys.stderr,
+                    )
+                time.sleep(wait_time)
+                continue
+            if debug:
+                print(f"[DEBUG] {yf_symbol}: Rate limited {str(e)}", file=sys.stderr)
+            return None
         except Exception as e:
             str_e = str(e)
 

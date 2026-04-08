@@ -9,6 +9,7 @@ Tests cover:
 """
 
 import json
+import warnings
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -485,6 +486,23 @@ class TestCreateEditorLLM:
         assert call_kwargs["api_key"] == "test-key"
         assert call_kwargs["use_responses_api"] is True
         assert call_kwargs["output_version"] == "responses/v1"
+        assert "temperature" not in call_kwargs
+
+    def test_create_editor_llm_sets_reasoning_effort_for_gpt5(self):
+        """Non-pro GPT-5 editor models should opt into medium reasoning effort."""
+        from src.llms import create_editor_llm
+
+        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+            mock_chatgpt.return_value = MagicMock()
+            with patch("src.llms.config") as mock_config:
+                mock_config.enable_consultant = True
+                mock_config.get_openai_api_key.return_value = "test-key"
+                mock_config.editor_model = "gpt-5"
+                mock_config.consultant_model = "gpt-4o"
+
+                create_editor_llm()
+
+        assert mock_chatgpt.call_args.kwargs["reasoning_effort"] == "medium"
 
 
 # =============================================================================
@@ -1299,11 +1317,14 @@ class TestEditorToolCalling:
         ]
         tool_call_response.content = ""
 
-        # Second response: final JSON verdict (no tool calls)
+        # Second response: no more tool calls; final verdict comes from structured pass
         final_response = MagicMock()
         final_response.tool_calls = []
-        final_response.content = json.dumps(
-            {
+        final_response.content = "Done reviewing."
+
+        structured_review_llm = AsyncMock()
+        structured_review_llm.ainvoke = AsyncMock(
+            return_value={
                 "verdict": "APPROVED",
                 "factual_errors": [],
                 "reference_checks": [
@@ -1332,6 +1353,7 @@ class TestEditorToolCalling:
 
         editor.llm = MagicMock()
         editor.llm_with_tools = mock_llm_with_tools
+        editor.review_llm = structured_review_llm
         editor.tools = [mock_tool]
         editor._tools_by_name = {"fetch_reference_content": mock_tool}
 
@@ -1343,8 +1365,9 @@ class TestEditorToolCalling:
         mock_tool.ainvoke.assert_called_once_with(
             {"url": "https://example.com/article"}
         )
-        # LLM should have been called twice (tool call + final)
+        # Tool-bound LLM should have been called twice (tool call + stop signal)
         assert mock_llm_with_tools.ainvoke.call_count == 2
+        structured_review_llm.ainvoke.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_review_handles_tool_error_gracefully(self):
@@ -1362,11 +1385,14 @@ class TestEditorToolCalling:
         ]
         tool_call_response.content = ""
 
-        # Second response: verdict reflecting broken URL
+        # Second response: no more tool calls; verdict comes from structured pass
         final_response = MagicMock()
         final_response.tool_calls = []
-        final_response.content = json.dumps(
-            {
+        final_response.content = "Done reviewing."
+
+        structured_review_llm = AsyncMock()
+        structured_review_llm.ainvoke = AsyncMock(
+            return_value={
                 "verdict": "REVISE",
                 "factual_errors": [
                     {
@@ -1400,6 +1426,7 @@ class TestEditorToolCalling:
 
         editor.llm = MagicMock()
         editor.llm_with_tools = mock_llm_with_tools
+        editor.review_llm = structured_review_llm
         editor.tools = [mock_tool]
         editor._tools_by_name = {"fetch_reference_content": mock_tool}
 
@@ -1425,24 +1452,22 @@ class TestEditorToolCalling:
         ]
         tool_call_response.content = ""
 
-        # Final forced response (no tools)
-        final_response = MagicMock()
-        final_response.tool_calls = []
-        final_response.content = json.dumps({"verdict": "APPROVED", "confidence": 0.7})
+        structured_review_llm = AsyncMock()
+        structured_review_llm.ainvoke = AsyncMock(
+            return_value={"verdict": "APPROVED", "confidence": 0.7}
+        )
 
         mock_llm_with_tools = AsyncMock()
-        # Return tool calls for MAX_TOOL_ITERATIONS, then we fall through to bare LLM
+        # Return tool calls for MAX_TOOL_ITERATIONS, then we fall through to structured review
         mock_llm_with_tools.ainvoke = AsyncMock(return_value=tool_call_response)
-
-        mock_bare_llm = AsyncMock()
-        mock_bare_llm.ainvoke = AsyncMock(return_value=final_response)
 
         mock_tool = AsyncMock()
         mock_tool.ainvoke = AsyncMock(return_value="Some content")
         mock_tool.name = "fetch_reference_content"
 
-        editor.llm = mock_bare_llm
+        editor.llm = MagicMock()
         editor.llm_with_tools = mock_llm_with_tools
+        editor.review_llm = structured_review_llm
         editor.tools = [mock_tool]
         editor._tools_by_name = {"fetch_reference_content": mock_tool}
 
@@ -1451,8 +1476,7 @@ class TestEditorToolCalling:
         assert result["verdict"] == "APPROVED"
         # Tool-bound LLM should have been called exactly MAX_TOOL_ITERATIONS times
         assert mock_llm_with_tools.ainvoke.call_count == editor.MAX_TOOL_ITERATIONS
-        # Bare LLM should have been called once (safety valve)
-        mock_bare_llm.ainvoke.assert_called_once()
+        structured_review_llm.ainvoke.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_review_works_without_tools(self):
@@ -1463,11 +1487,12 @@ class TestEditorToolCalling:
         final_response.tool_calls = []
         final_response.content = json.dumps({"verdict": "APPROVED", "confidence": 0.95})
 
-        mock_llm = AsyncMock()
+        mock_llm = MagicMock()
         mock_llm.ainvoke = AsyncMock(return_value=final_response)
 
         editor.llm = mock_llm
         editor.llm_with_tools = None  # No tools available
+        editor.review_llm = None
         editor.tools = []
         editor._tools_by_name = {}
 
@@ -1477,6 +1502,77 @@ class TestEditorToolCalling:
         assert result["confidence"] == 0.95
         # Should use bare LLM
         mock_llm.ainvoke.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_structured_review_suppresses_known_pydantic_warning_when_not_debug(
+        self,
+    ):
+        """Known structured-output serializer noise should stay out of normal runs."""
+        editor = _create_article_editor()
+
+        async def _warn_and_return(_messages):
+            warnings.warn_explicit(
+                (
+                    "Pydantic serializer warnings:\n"
+                    "  PydanticSerializationUnexpectedValue("
+                    "Expected `none` - serialized value may not be as expected)"
+                ),
+                UserWarning,
+                filename="pydantic/main.py",
+                lineno=464,
+                module="pydantic.main",
+            )
+            return {"verdict": "APPROVED", "confidence": 0.91}
+
+        editor.llm = MagicMock()
+        editor.review_llm = AsyncMock()
+        editor.review_llm.ainvoke = AsyncMock(side_effect=_warn_and_return)
+
+        with patch(
+            "src.article_writer._should_emit_editor_structured_output_warnings",
+            return_value=False,
+        ):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                result = await editor._invoke_final_review([])
+
+        assert result["verdict"] == "APPROVED"
+        assert caught == []
+
+    @pytest.mark.asyncio
+    async def test_structured_review_emits_known_pydantic_warning_in_debug(self):
+        """Debug runs should preserve the raw serializer warning for investigation."""
+        editor = _create_article_editor()
+
+        async def _warn_and_return(_messages):
+            warnings.warn_explicit(
+                (
+                    "Pydantic serializer warnings:\n"
+                    "  PydanticSerializationUnexpectedValue("
+                    "Expected `none` - serialized value may not be as expected)"
+                ),
+                UserWarning,
+                filename="pydantic/main.py",
+                lineno=464,
+                module="pydantic.main",
+            )
+            return {"verdict": "APPROVED", "confidence": 0.91}
+
+        editor.llm = MagicMock()
+        editor.review_llm = AsyncMock()
+        editor.review_llm.ainvoke = AsyncMock(side_effect=_warn_and_return)
+
+        with patch(
+            "src.article_writer._should_emit_editor_structured_output_warnings",
+            return_value=True,
+        ):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                result = await editor._invoke_final_review([])
+
+        assert result["verdict"] == "APPROVED"
+        assert len(caught) == 1
+        assert "Pydantic serializer warnings" in str(caught[0].message)
 
     @pytest.mark.asyncio
     async def test_execute_tool_calls_handles_unknown_tool(self):

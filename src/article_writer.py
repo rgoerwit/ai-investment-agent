@@ -8,14 +8,19 @@ while matching the author's distinctive voice from writing samples.
 import json
 import os
 import random
+import warnings
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Literal
 
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from pydantic import BaseModel, Field
 
 from src.config import config
 from src.llms import create_deep_thinking_llm, create_writer_llm
 from src.runtime_diagnostics import classify_failure, get_model_name, infer_provider
+from src.tavily_utils import search_tavily_sync_inspected
 from src.token_tracker import TokenTrackingCallback, get_tracker
 from src.tooling.runtime import TOOL_SERVICE, ToolInvocation
 
@@ -58,6 +63,54 @@ _REFUSAL_INDICATORS = (
     "I'm not able to provide investment advice",
     "I can't offer specific investment recommendations",
 )
+
+_EDITOR_STRUCTURED_OUTPUT_WARNING_PATTERN = (
+    r"(?s)^Pydantic serializer warnings:.*PydanticSerializationUnexpectedValue.*"
+)
+
+
+class EditorFactualError(BaseModel):
+    location: str = ""
+    claim: str = ""
+    ground_truth: str = ""
+    action: str = ""
+
+
+class EditorReferenceCheck(BaseModel):
+    url: str = ""
+    status: str = ""
+    note: str = ""
+
+
+class EditorReviewResult(BaseModel):
+    verdict: Literal["REVISE", "APPROVED"] = "APPROVED"
+    factual_errors: list[EditorFactualError] = Field(default_factory=list)
+    reference_checks: list[EditorReferenceCheck] = Field(default_factory=list)
+    cuts: list[str] = Field(default_factory=list)
+    style_issues: list[str] = Field(default_factory=list)
+    confidence: float = 0.5
+
+
+def _should_emit_editor_structured_output_warnings() -> bool:
+    """Always suppress: these are known-benign Pydantic serializer warnings."""
+    return False
+
+
+@contextmanager
+def _structured_review_warning_policy():
+    """Suppress known benign Pydantic serializer warnings outside debug runs."""
+    if _should_emit_editor_structured_output_warnings():
+        yield
+        return
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=_EDITOR_STRUCTURED_OUTPUT_WARNING_PATTERN,
+            category=UserWarning,
+            module=r"pydantic(\..*)?",
+        )
+        yield
 
 
 def _extract_text_from_response(response) -> str:
@@ -390,28 +443,19 @@ class ArticleWriter:
         Returns:
             Recent market context as string, or empty string if unavailable
         """
-        api_key = config.get_tavily_api_key()
-        if not api_key:
-            logger.debug("Tavily API key not available, skipping fact-check context")
-            return ""
-
         try:
-            from tavily import TavilyClient
-
-            client = TavilyClient(api_key=api_key)
-
             # Single focused search query
             query = f"{company_name} {ticker} stock latest news financials 2025 2026"
 
             logger.info("Fetching fact-check context", ticker=ticker, query=query[:50])
 
-            # Use Tavily's search with limited results
-            response = client.search(
-                query=query,
-                max_results=3,  # Just 3 results to keep it minimal
-                search_depth="basic",  # Faster than "advanced"
-                include_answer=True,  # Get a summary answer
+            response = search_tavily_sync_inspected(
+                query,
+                profile="news_basic",
+                include_answer=True,
             )
+            if not isinstance(response, dict):
+                return ""
 
             # Build context from results
             context_parts = []
@@ -444,9 +488,6 @@ class ArticleWriter:
 
             return context
 
-        except ImportError:
-            logger.debug("Tavily package not installed, skipping fact-check context")
-            return ""
         except Exception as e:
             logger.warning(
                 "Failed to fetch fact-check context",
@@ -1025,6 +1066,7 @@ class ArticleEditor:
         self.tools = get_editor_tools()
         self.prompt_config = self._load_prompt_config()
         self._url_cache: dict[str, str] = {}
+        self.review_llm = self._build_structured_review_llm()
 
         # Build tool lookup and bind tools to LLM for agentic reference checking
         self._tools_by_name = {t.name: t for t in self.tools}
@@ -1037,6 +1079,17 @@ class ArticleEditor:
             logger.info("ArticleEditor initialized with GPT", tools=len(self.tools))
         else:
             logger.info("ArticleEditor disabled (no OpenAI API key)")
+
+    def _build_structured_review_llm(self):
+        """Build a strict structured-output review model when supported."""
+        if not self.llm or not hasattr(self.llm, "with_structured_output"):
+            return None
+
+        try:
+            return self.llm.with_structured_output(EditorReviewResult, strict=True)
+        except Exception as exc:
+            logger.warning("editor_structured_output_unavailable", error=str(exc))
+            return None
 
     def _load_prompt_config(self) -> dict:
         """Load editor prompt configuration."""
@@ -1257,38 +1310,30 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
         ]
 
         try:
-            # Use tool-bound LLM if available, otherwise plain LLM
-            active_llm = self.llm_with_tools or self.llm
+            if self.llm_with_tools:
+                for iteration in range(self.MAX_TOOL_ITERATIONS):
+                    response = await self.llm_with_tools.ainvoke(messages)
 
-            for iteration in range(self.MAX_TOOL_ITERATIONS):
-                response = await active_llm.ainvoke(messages)
+                    tool_calls = getattr(response, "tool_calls", None)
+                    if not tool_calls:
+                        break
 
-                # Check for tool calls
-                tool_calls = getattr(response, "tool_calls", None)
-                if not tool_calls:
-                    # No tool calls — this is the final response
-                    return self._extract_review_result(response)
+                    logger.info(
+                        "Editor requesting tool calls",
+                        iteration=iteration + 1,
+                        num_calls=len(tool_calls),
+                    )
 
-                logger.info(
-                    "Editor requesting tool calls",
-                    iteration=iteration + 1,
-                    num_calls=len(tool_calls),
-                )
+                    messages.append(response)
+                    tool_messages = await self._execute_tool_calls(tool_calls)
+                    messages.extend(tool_messages)
+                else:
+                    logger.warning(
+                        "Editor hit max tool iterations, forcing final review",
+                        max_iterations=self.MAX_TOOL_ITERATIONS,
+                    )
 
-                # Append AI message (with tool_calls) to conversation
-                messages.append(response)
-
-                # Execute tools and append results
-                tool_messages = await self._execute_tool_calls(tool_calls)
-                messages.extend(tool_messages)
-
-            # Safety valve: max iterations reached, invoke without tools to force JSON
-            logger.warning(
-                "Editor hit max tool iterations, forcing final response",
-                max_iterations=self.MAX_TOOL_ITERATIONS,
-            )
-            response = await self.llm.ainvoke(messages)
-            return self._extract_review_result(response)
+            return await self._invoke_final_review(messages)
 
         except Exception as e:
             logger.error("Editor review failed", error=str(e))
@@ -1298,6 +1343,31 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
                 "confidence": 0.5,
                 "error": str(e),
             }
+
+    async def _invoke_final_review(self, messages: list) -> dict:
+        """Run the final strict review pass without tool calls."""
+        if not self.llm:
+            return {"verdict": "APPROVED", "confidence": 1.0}
+
+        final_messages = messages + [
+            HumanMessage(
+                content=(
+                    "Return only the final review object. "
+                    "Do not call tools in this step."
+                )
+            )
+        ]
+
+        if self.review_llm:
+            with _structured_review_warning_policy():
+                result = await self.review_llm.ainvoke(final_messages)
+            if isinstance(result, BaseModel):
+                return result.model_dump()
+            if isinstance(result, dict):
+                return result
+
+        response = await self.llm.ainvoke(final_messages)
+        return self._extract_review_result(response)
 
     def _extract_review_result(self, response) -> dict:
         """

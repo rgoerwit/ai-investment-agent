@@ -19,6 +19,17 @@ class TestFundamentalsPromptAlignment:
         assert "EARNINGS_GROWTH_TTM < -5%" in prompt.system_message
         assert "acceleration bonus suppressed" in prompt.system_message.lower()
 
+    def test_fundamentals_prompt_uses_exact_data_block_delimiters(self):
+        prompt = get_prompt("fundamentals_analyst")
+        assert prompt is not None
+        assert "### --- START DATA_BLOCK ---" in prompt.system_message
+        assert "### --- END DATA_BLOCK ---" in prompt.system_message
+        assert "Do NOT use `DATA_BLOCK:` as a header" in prompt.system_message
+        assert (
+            "Inside DATA_BLOCK, use plain KEY: VALUE lines only"
+            in prompt.system_message
+        )
+
 
 class TestResearchPromptAlignment:
     def test_bull_prompt_allows_unsponsored_adr_and_uses_consultant(self):

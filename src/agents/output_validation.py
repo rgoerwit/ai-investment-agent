@@ -6,7 +6,7 @@ from typing import Any
 
 import structlog
 
-from src.data_block_utils import has_parseable_data_block
+from src.data_block_utils import has_parseable_data_block, has_parseable_fenced_block
 
 logger = structlog.get_logger(__name__)
 
@@ -58,6 +58,15 @@ def extract_completion_tokens(response: Any) -> int:
                     token_usage.get("output_tokens"),
                 ]
             )
+        usage = response_metadata.get("usage")
+        if isinstance(usage, dict):
+            candidates.extend(
+                [
+                    usage.get("output_tokens"),
+                    usage.get("completion_tokens"),
+                    usage.get("total_output_tokens"),
+                ]
+            )
 
     for candidate in candidates:
         coerced = _coerce_optional_int(candidate)
@@ -76,6 +85,17 @@ def get_configured_output_cap(runnable: Any) -> int | None:
         if coerced is not None:
             return coerced
     return None
+
+
+def _has_parseable_forensic_block(content: str) -> bool:
+    if has_parseable_fenced_block(content, "FORENSIC_DATA_BLOCK"):
+        return True
+
+    if "FORENSIC_DATA_BLOCK:" not in content:
+        return False
+
+    required_fields = ("STATUS:", "VERDICT:")
+    return all(field in content for field in required_fields)
 
 
 def validate_required_output(agent_key: str, content: str) -> dict[str, Any]:
@@ -129,14 +149,9 @@ def validate_required_output(agent_key: str, content: str) -> dict[str, Any]:
     elif agent_key == "global_forensic_auditor":
         checks.extend(
             [
-                ("nonempty", bool(content.strip())),
-                (
-                    "forensic_summary",
-                    "FORENSIC_DATA_BLOCK" in content
-                    or "The Red Flags" in content
-                    or "STATUS:" in content
-                    or "VERDICT:" in content,
-                ),
+                ("forensic_block", _has_parseable_forensic_block(content)),
+                ("status", "STATUS:" in content),
+                ("verdict", "VERDICT:" in content),
             ]
         )
 
@@ -157,7 +172,10 @@ def should_fail_closed(
     if agent_key in {"portfolio_manager", "fundamentals_analyst"}:
         return True
 
-    if agent_key in {"consultant", "global_forensic_auditor"}:
+    if agent_key == "global_forensic_auditor":
+        return truncated or not validation["ok"]
+
+    if agent_key == "consultant":
         return truncated and len(content.strip()) >= 200
 
     return truncated or len(content.strip()) < 200

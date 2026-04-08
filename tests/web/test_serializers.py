@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from src.ibkr.portfolio_presentation import build_cash_summary, build_live_order_note
+from src.ibkr.screening_freshness import ScreeningFreshnessSummary
 from src.web.ibkr_dashboard.serializers import (
     serialize_dashboard_snapshot,
     serialize_equity_drilldown,
@@ -40,6 +41,23 @@ def test_serialize_dashboard_snapshot_handles_empty_lists(sample_bundle):
     assert payload["orders"] == []
     assert payload["freshness"]["candidate_blocked"] == []
     assert payload["macro_alert"] is None
+    assert payload["screening_freshness"]["status"] == "missing"
+
+
+def test_serialize_dashboard_snapshot_includes_screening_freshness(sample_bundle):
+    sample_bundle.screening_freshness = ScreeningFreshnessSummary(
+        status="stale",
+        screening_date="2026-01-05",
+        completed_at="2026-01-05T10:30:00Z",
+        age_days=90,
+        stale_after_days=90,
+        candidate_count=245,
+        buy_count=12,
+    )
+    payload = serialize_dashboard_snapshot(sample_bundle)
+    assert payload["screening_freshness"]["status"] == "stale"
+    assert payload["screening_freshness"]["screening_date"] == "2026-01-05"
+    assert payload["screening_freshness"]["candidate_count"] == 245
 
 
 def test_serialize_dashboard_snapshot_uses_shared_cash_summary(sample_bundle):

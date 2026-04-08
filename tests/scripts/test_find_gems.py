@@ -10,6 +10,8 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+from src.yfinance_runtime import YFRateLimitError
+
 # Add scripts/ to path so we can import find_gems as a module
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 
@@ -513,6 +515,22 @@ class TestFetchAndFilter:
 
         assert len(passing) == 0
         assert len(enriched) == 0
+
+    def test_yfinance_rate_limit_retries_then_gives_up(self):
+        df = self._make_tickers_df("RATE.T")
+
+        with patch(
+            "find_gems.yf.Ticker",
+            side_effect=YFRateLimitError(),
+        ):
+            with patch("find_gems.time.sleep") as mock_sleep:
+                passing, enriched = find_gems.fetch_and_filter(
+                    df, max_pe=18.0, min_roe=13.0, min_roa=6.0, max_de=150.0, workers=1
+                )
+
+        assert len(passing) == 0
+        assert len(enriched) == 0
+        assert mock_sleep.call_count >= 5
 
     def test_empty_info_handled(self):
         df = self._make_tickers_df("EMPTY.T")

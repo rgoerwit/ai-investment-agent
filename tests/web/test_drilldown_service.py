@@ -46,6 +46,18 @@ def test_render_markdown_file_strips_unsafe_link_scheme(tmp_path: Path):
     assert "javascript:" not in html
 
 
+def test_render_markdown_file_keeps_safe_tags_but_strips_event_handlers(tmp_path: Path):
+    path = tmp_path / "report.md"
+    path.write_text(
+        '<table><tr><td onclick="alert(1)">safe</td></tr></table>',
+        encoding="utf-8",
+    )
+    html = render_markdown_file(path)
+    assert "<table>" in html
+    assert "<td>safe</td>" in html
+    assert "onclick" not in html
+
+
 def test_find_markdown_artifacts_returns_paths_when_present(tmp_path: Path):
     analysis = make_analysis(ticker="MEGP.L")
     json_path = tmp_path / "MEGP.L_20260328_000000_analysis.json"

@@ -86,6 +86,8 @@ from src.ibkr.refresh_service import (
     RefreshPolicy,
     run_ticker_for,
 )
+from src.ibkr.screening_freshness import ScreeningFreshnessSummary
+from src.tavily_utils import search_tavily_sync_inspected
 
 _IBKR_OAUTH_PORTAL = (
     "https://ndcdyn.interactivebrokers.com/sso/Login?action=OAUTH&RL=1&ip2loc=US"
@@ -749,33 +751,22 @@ def _characterize_macro_event(
     # News search
     headline, detail = "unknown", ""
     try:
-        from src.config import config as _cfg
-
-        api_key = _cfg.get_tavily_api_key()
-        if api_key:
-            from tavily import TavilyClient
-
-            _region_map = {
-                "T": "Japan",
-                "HK": "Hong Kong",
-                "KS": "Korea",
-                "TW": "Taiwan",
-                "L": "UK",
-                "DE": "Germany",
-                "AS": "Netherlands",
-                "PA": "France",
-            }
-            region_hint = (
-                _region_map.get(top_region.lstrip("."), "")
-                if scope == "REGIONAL"
-                else ""
-            )
-            query = (
-                f"stock market shock {event_date} {region_hint} cause reason".strip()
-            )
-            result = TavilyClient(api_key=api_key).search(
-                query=query, max_results=3, search_depth="basic"
-            )
+        _region_map = {
+            "T": "Japan",
+            "HK": "Hong Kong",
+            "KS": "Korea",
+            "TW": "Taiwan",
+            "L": "UK",
+            "DE": "Germany",
+            "AS": "Netherlands",
+            "PA": "France",
+        }
+        region_hint = (
+            _region_map.get(top_region.lstrip("."), "") if scope == "REGIONAL" else ""
+        )
+        query = f"stock market shock {event_date} {region_hint} cause reason".strip()
+        result = search_tavily_sync_inspected(query, profile="news_basic")
+        if isinstance(result, dict):
             top = (result.get("results", [{}]) if isinstance(result, dict) else [{}])[0]
             headline = (top.get("title") or "")[:120] or "unknown"
             raw_detail = top.get("content") or ""
@@ -1016,6 +1007,7 @@ def format_report(
     watchlist_tickers: set[str] | None = None,
     freshness_summary: AnalysisFreshnessSummary | None = None,
     refresh_activity: RefreshActivity | None = None,
+    screening_freshness: ScreeningFreshnessSummary | None = None,
 ) -> str:
     """Format reconciliation results as sectioned human-readable text."""
     lines: list[str] = []
@@ -1086,6 +1078,9 @@ def format_report(
         max_age_days=max_age_days,
     )
     refresh_activity = refresh_activity or RefreshActivity(policy="off", limit=0)
+    screening_freshness = screening_freshness or ScreeningFreshnessSummary(
+        status="missing"
+    )
 
     def _section(title: str, subtitle: str = "") -> None:
         lines.append(_DIVIDER)
@@ -1544,6 +1539,39 @@ def format_report(
             pass
         for bl in _banner_lines:
             lines.append(bl)
+        lines.append("")
+
+    # ── SCREENING FRESHNESS ──────────────────────────────────────────────────
+    if screening_freshness.status != "fresh":
+        _section("SCREENING FRESHNESS", "last completed broad market sweep")
+        if screening_freshness.status == "missing":
+            lines.append("  No broad-screen completion recorded.")
+            lines.append("  → Run: ./scripts/run_pipeline.sh")
+        else:
+            lines.append(
+                "  Last completed sweep: "
+                f"{screening_freshness.screening_date or 'unknown'}"
+                f"  ({screening_freshness.age_days} days ago)"
+            )
+            if (
+                screening_freshness.candidate_count is not None
+                or screening_freshness.buy_count is not None
+            ):
+                candidate_count = (
+                    screening_freshness.candidate_count
+                    if screening_freshness.candidate_count is not None
+                    else "—"
+                )
+                buy_count = (
+                    screening_freshness.buy_count
+                    if screening_freshness.buy_count is not None
+                    else "—"
+                )
+                lines.append(
+                    f"  Candidates screened: {candidate_count}"
+                    f"  ·  BUYs found: {buy_count}"
+                )
+            lines.append("  → Consider re-running: ./scripts/run_pipeline.sh")
         lines.append("")
 
     # ── ANALYSIS FRESHNESS ───────────────────────────────────────────────────
@@ -2339,6 +2367,7 @@ def format_json(
     refresh_activity: RefreshActivity | None = None,
     max_age_days: int = 14,
     show_recommendations: bool = False,
+    screening_freshness: ScreeningFreshnessSummary | None = None,
 ) -> str:
     """Format reconciliation results as JSON."""
     freshness_summary = freshness_summary or _refresh_service.classify(
@@ -2346,10 +2375,22 @@ def format_json(
         max_age_days=max_age_days,
     )
     refresh_activity = refresh_activity or RefreshActivity(policy="off", limit=0)
+    screening_freshness = screening_freshness or ScreeningFreshnessSummary(
+        status="missing"
+    )
     data = {
         "timestamp": datetime.now().isoformat(),
         "portfolio": portfolio.model_dump(),
         "items": [item.model_dump() for item in items],
+        "screening_freshness": {
+            "status": screening_freshness.status,
+            "screening_date": screening_freshness.screening_date,
+            "completed_at": screening_freshness.completed_at,
+            "age_days": screening_freshness.age_days,
+            "stale_after_days": screening_freshness.stale_after_days,
+            "candidate_count": screening_freshness.candidate_count,
+            "buy_count": screening_freshness.buy_count,
+        },
         "analysis_freshness_summary": {
             "blocking_now_count": len(freshness_summary.blocking_now),
             "stale_in_queue_count": len(freshness_summary.stale_in_queue),
@@ -2460,10 +2501,24 @@ def _configure_logging(debug: bool) -> None:
         format="%(asctime)s [%(levelname)-8s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         level=level,
+        force=True,
     )
     structlog.configure(
-        wrapper_class=structlog.make_filtering_bound_logger(level),
-        logger_factory=structlog.PrintLoggerFactory(),
+        processors=[
+            structlog.stdlib.filter_by_level,
+            structlog.stdlib.add_logger_name,
+            structlog.stdlib.add_log_level,
+            structlog.stdlib.PositionalArgumentsFormatter(),
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.processors.UnicodeDecoder(),
+            structlog.processors.KeyValueRenderer(
+                key_order=["timestamp", "level", "event"]
+            ),
+        ],
+        wrapper_class=structlog.stdlib.BoundLogger,
+        logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
     _configure_external_loggers(debug)
@@ -2730,6 +2785,7 @@ def main() -> None:
     health_flags = bundle.health_flags
     freshness_summary = bundle.freshness_summary
     refresh_activity = bundle.refresh_activity
+    screening_freshness = bundle.screening_freshness
     watchlist_tickers = bundle.watchlist_tickers
     _loaded_watchlist_name = bundle.watchlist_name
     _loaded_watchlist_total = bundle.watchlist_total
@@ -2749,6 +2805,7 @@ def main() -> None:
             refresh_activity=refresh_activity,
             max_age_days=args.max_age,
             show_recommendations=show_recs,
+            screening_freshness=screening_freshness,
         )
     else:
         output = format_report(
@@ -2763,6 +2820,7 @@ def main() -> None:
             watchlist_tickers=watchlist_tickers if watchlist_tickers else None,
             freshness_summary=freshness_summary,
             refresh_activity=refresh_activity,
+            screening_freshness=screening_freshness,
         )
 
     if args.output:
