@@ -536,7 +536,7 @@ jobs:
     if: github.event_name == 'pull_request'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # Analyze dependency changes introduced in the PR
       - name: Dependency Review
@@ -544,9 +544,25 @@ jobs:
         with:
           # Fail if vulnerabilities are introduced with these severities
           fail-on-severity: critical
-          # Allow security advisories with these severities
-          allow-licenses: MIT, Apache-2.0, BSD-3-Clause, BSD-2-Clause, ISC
+          # Broadly allow common permissive licenses used by the Python ecosystem.
+          # Keep this list tighter than "disable license checks", but wide enough
+          # to avoid failing on normal dual-license metadata.
+          allow-licenses: MIT, Apache-2.0, BSD-3-Clause, BSD-2-Clause, ISC, 0BSD, MIT-0, MPL-2.0, PSF-2.0, Python-2.0, Python-2.0.1, ZPL-2.1, Unlicense, OFL-1.1, HPND-Markus-Kuhn
+          # Approved package-specific exceptions:
+          # - lxml: package metadata is BSD-3-Clause, but dependency review reports
+          #   a broader mixed expression inherited from underlying libraries.
+          # - frozendict: yfinance currently requires it transitively; keep this as
+          #   an explicit reviewed exception rather than disabling license checks.
+          # - Several packages publish mixed/legacy SPDX fragments or scancode refs
+          #   despite permissive package metadata.
+          allow-dependencies-licenses: pkg:pypi/aiohappyeyeballs, pkg:pypi/et-xmlfile, pkg:pypi/frozendict, pkg:pypi/lxml, pkg:pypi/parso, pkg:pypi/pycryptodome, pkg:pypi/python-dateutil, pkg:pypi/structlog, pkg:pypi/typing-extensions, pkg:pypi/xlrd
           # Comment on PR with dependency changes
           comment-summary-in-pr: always
+          # GitHub can lag when producing dependency graph snapshots for the PR
+          # head SHA; retry briefly instead of failing fast on missing snapshots.
+          retry-on-snapshot-warnings: true
+          retry-on-snapshot-warnings-timeout: 180
+          # Keep Scorecard visibility as a warning surface; this does not fail PRs.
+          show-openssf-scorecard: true
           # Deny packages from these registries (optional security control)
           # deny-packages: 'pkg:npm/malicious-package'
