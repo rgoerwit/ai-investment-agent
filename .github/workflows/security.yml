@@ -440,17 +440,20 @@ jobs:
 
       - name: Export dependencies and run pip-audit
         run: |
+          # Audit the committed dependency graph. If the lockfile is missing, fail
+          # clearly instead of re-resolving in CI and scanning a moving target.
+          test -f poetry.lock || (echo "poetry.lock is required for reproducible pip-audit runs" && exit 1)
           # Export lockfile to requirements format (no hashes — pip-audit handles resolution)
           poetry export --without-hashes --with dev -f requirements.txt -o /tmp/requirements.txt
-          # Run audit; exit 1 if any CRITICAL or HIGH CVEs are found
+          # Run audit; exit 1 if vulnerabilities remain after approved ignores.
+          # yfinance 1.2.0 still pins curl_cffi<0.14 upstream. This app uses
+          # yfinance with ticker symbols and Yahoo-managed endpoints, not
+          # attacker-controlled URLs, so the internal-IP/redirect exposure in
+          # curl_cffi is not currently a reachable path here.
           pip-audit -r /tmp/requirements.txt \
             --format json \
             --output pip-audit-results.json \
             --strict \
-            # yfinance 1.2.0 still pins curl_cffi<0.14 upstream. This app uses
-            # yfinance with ticker symbols and Yahoo-managed endpoints, not
-            # attacker-controlled URLs, so the internal-IP/redirect exposure in
-            # curl_cffi is not currently a reachable path here.
             --ignore-vuln CVE-2026-33752 \
             --ignore-vuln CVE-2026-4539 \
             || (echo "⚠️  pip-audit found vulnerabilities — see pip-audit-results.json" && exit 1)
