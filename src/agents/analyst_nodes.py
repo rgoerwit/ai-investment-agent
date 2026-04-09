@@ -44,6 +44,13 @@ Do NOT use markdown tables inside DATA_BLOCK.
 """
 
 _QUARANTINED_FORWARD_KEYS = ("PE_RATIO_FORWARD", "PEG_RATIO")
+_HORIZON_FIELD_RAW_KEYS = (
+    ("REVENUE_GROWTH_TTM", "revenueGrowth_TTM"),
+    ("REVENUE_GROWTH_MRQ", "revenueGrowth_MRQ"),
+    ("EARNINGS_GROWTH_TTM", "earningsGrowth_TTM"),
+    ("EARNINGS_GROWTH_MRQ", "earningsGrowth_MRQ"),
+    ("GROWTH_TRAJECTORY", "growth_trajectory"),
+)
 
 
 def _replace_or_append_datablock_line(body: str, key: str, value: str) -> str:
@@ -80,6 +87,14 @@ def _sanitize_fundamentals_output(
     if payload.get("_split_sensitive_metrics_quarantined") is True:
         for key in _QUARANTINED_FORWARD_KEYS:
             updated_body = _replace_or_append_datablock_line(updated_body, key, "N/A")
+
+    for datablock_key, raw_key in _HORIZON_FIELD_RAW_KEYS:
+        if payload.get(raw_key) is None:
+            updated_body = _replace_or_append_datablock_line(
+                updated_body,
+                datablock_key,
+                "N/A",
+            )
 
     latest_quarter_date = payload.get("latest_quarter_date")
     if (
