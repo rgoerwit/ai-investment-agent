@@ -333,7 +333,30 @@ class TickerFormatter:
                 }
                 return normalized, metadata
             else:
-                normalized = ticker if target_format == "yfinance" else ticker
+                # 1-char suffix not in EXCHANGE_SUFFIXES → US share-class separator.
+                # e.g. PBR.A → PBR-A, BRK.B → BRK-B (yfinance hyphen convention for
+                # preferred/class shares and ADRs).  Known single-letter exchange codes
+                # (T=Tokyo, L=London, V=TSX Venture, …) are caught by the
+                # `in EXCHANGE_SUFFIXES` branch above and never reach here.
+                if len(suffix) == 1:
+                    share_class_base = f"{symbol}-{suffix}"
+                    normalized = (
+                        share_class_base
+                        if target_format == "yfinance"
+                        else f"{share_class_base}:SMART"
+                    )
+                    metadata = {
+                        "original": original_ticker,
+                        "symbol": symbol,
+                        "exchange_suffix": f".{suffix}",
+                        "exchange_name": "US Exchange (assumed)",
+                        "country": "United States",
+                        "ibkr_exchange": "SMART",
+                        "format": "share_class",
+                    }
+                    return normalized, metadata
+
+                normalized = ticker
                 metadata = {
                     "original": original_ticker,
                     "symbol": symbol,

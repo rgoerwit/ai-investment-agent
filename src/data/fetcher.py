@@ -1521,8 +1521,14 @@ class SmartMarketDataFetcher(FinancialFetcher):
                 logger.warning("yfinance_no_price", symbol=symbol)
                 info = info or {}
 
-            # ALWAYS extract from statements (for gap-filling and divergence detection)
-            statement_data = self._extract_from_financial_statements(ticker, symbol)
+            # ALWAYS extract from statements (for gap-filling and divergence
+            # detection). These yfinance statement properties can trigger HTTP
+            # fetches, so keep them off the event loop.
+            statement_data = await asyncio.to_thread(
+                self._extract_from_financial_statements,
+                ticker,
+                symbol,
+            )
 
             # Flag significant TTM vs statement divergence for data quality awareness
             fcf_ttm = info.get("freeCashflow")
@@ -1698,18 +1704,20 @@ class SmartMarketDataFetcher(FinancialFetcher):
         }
 
         results = {}
-        failure_reasons: dict[str, str] = {}
+        source_outcomes: dict[str, str] = {}
         for source_name, coro in tasks.items():
             try:
                 # Wait for each task with timeout
                 result = await asyncio.wait_for(coro, timeout=PER_SOURCE_TIMEOUT)
                 results[source_name] = result
                 if result:
+                    source_outcomes[source_name] = "success"
                     logger.info(
                         f"{source_name}_success", symbol=symbol, fields=len(result)
                     )
                 else:
                     # Expected when API key not configured - use debug, not warning
+                    source_outcomes[source_name] = "empty"
                     logger.debug(f"{source_name}_returned_none", symbol=symbol)
             except asyncio.TimeoutError:
                 logger.warning(
@@ -1718,25 +1726,40 @@ class SmartMarketDataFetcher(FinancialFetcher):
                     timeout_seconds=PER_SOURCE_TIMEOUT,
                 )
                 results[source_name] = None
-                failure_reasons[source_name] = f"timeout>{PER_SOURCE_TIMEOUT}s"
+                source_outcomes[source_name] = "timeout"
             except Exception as e:
                 logger.warning(f"{source_name}_error", symbol=symbol, error=str(e))
                 results[source_name] = None
-                failure_reasons[source_name] = type(e).__name__
+                source_outcomes[source_name] = f"error:{type(e).__name__}"
 
-        # Aggregate warning when every configured source produced nothing — almost
-        # always a network-level event (connectivity loss, proxy, firewall change).
         live_sources = [s for s in results if results[s] is not None]
         if not live_sources:
             logger.warning(
                 "all_data_sources_failed",
                 symbol=symbol,
                 sources_attempted=list(tasks.keys()),
-                failure_reasons=failure_reasons,
-                note="Likely network connectivity issue — check proxy, DNS, or firewall",
+                source_outcomes=source_outcomes,
+                suspected_cause=self._classify_aggregate_source_failure(
+                    source_outcomes
+                ),
             )
 
         return results
+
+    def _classify_aggregate_source_failure(
+        self, source_outcomes: dict[str, str]
+    ) -> str:
+        """Classify aggregate source failure conservatively from per-source outcomes."""
+        transient_markers = ("timeout", "connect", "proxy", "ssl", "dns", "socket")
+        non_success = [
+            outcome for outcome in source_outcomes.values() if outcome != "success"
+        ]
+        if non_success and all(
+            any(marker in outcome.lower() for marker in transient_markers)
+            for outcome in non_success
+        ):
+            return "connectivity_or_provider_transient"
+        return "no_data_or_provider_unavailable"
 
     def _normalize_scaling_errors(self, val_a: float, val_b: float) -> float:
         """

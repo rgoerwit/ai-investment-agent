@@ -263,6 +263,29 @@ class TestQuietMode:
                     mock_logger.info.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_quiet_mode_still_logs_terminal_error(self):
+        """Non-retryable failures must still surface as ERROR in quiet mode."""
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(
+            side_effect=Exception("401 Unauthorized: invalid api key")
+        )
+
+        with patch("src.agents.runtime.settings_config") as mock_config:
+            mock_config.quiet_mode = True
+            with patch("src.agents.runtime.logger") as mock_logger:
+                with pytest.raises(Exception, match="401 Unauthorized"):
+                    await invoke_with_rate_limit_handling(
+                        runnable,
+                        {"input": "test"},
+                        max_attempts=2,
+                        context="Test Agent",
+                    )
+
+                mock_logger.error.assert_called_once()
+                assert mock_logger.error.call_args[0][0] == "llm_call_failed"
+                mock_logger.info.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_normal_mode_logs_rate_limits(self):
         """Test that rate limits are logged when not in quiet mode."""
         runnable = AsyncMock()

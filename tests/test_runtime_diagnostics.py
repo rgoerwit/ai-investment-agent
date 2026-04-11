@@ -40,6 +40,71 @@ class TestRuntimeFailureClassification:
         assert details.provider == "openai"
         assert details.retryable is True
 
+    def test_classifies_model_not_found(self):
+        exc = Exception("Model gpt-foo is not found for API version v1beta.")
+
+        details = classify_failure(exc, provider="openai", model_name="gpt-foo")
+
+        assert details.kind == "model_not_found"
+        assert details.provider == "openai"
+        assert details.retryable is False
+
+    def test_generic_404_not_found_is_not_model_not_found(self):
+        exc = Exception("HTTP 404: resource not found")
+
+        details = classify_failure(exc, provider="unknown", model_name=None)
+
+        assert details.kind == "unknown_provider_error"
+        assert details.provider == "unknown"
+        assert details.retryable is False
+
+    def test_classifies_connect_error_for_proxy_ssl_failures(self):
+        exc = Exception("ProxyError: SSL handshake failed with broken pipe")
+
+        details = classify_failure(exc, provider="openai", model_name="gpt-4o")
+
+        assert details.kind == "connect_error"
+        assert details.provider == "openai"
+        assert details.retryable is True
+
+    def test_classifies_auth_error(self):
+        exc = Exception("401 Unauthorized: invalid api key")
+
+        details = classify_failure(exc, provider="openai", model_name="gpt-4o")
+
+        assert details.kind == "auth_error"
+        assert details.provider == "openai"
+        assert details.retryable is False
+
+    def test_classifies_server_error(self):
+        exc = Exception("503 Internal Server Error")
+
+        details = classify_failure(exc, provider="google", model_name="gemini-2.5-pro")
+
+        assert details.kind == "server_error"
+        assert details.provider == "google"
+        assert details.retryable is True
+
+    def test_classifies_timeout(self):
+        exc = Exception("ReadTimeout: request timed out")
+
+        details = classify_failure(
+            exc, provider="anthropic", model_name="claude-sonnet"
+        )
+
+        assert details.kind == "timeout"
+        assert details.provider == "anthropic"
+        assert details.retryable is True
+
+    def test_classifies_bad_request(self):
+        exc = Exception("400 Bad Request: invalid_request_error")
+
+        details = classify_failure(exc, provider="openai", model_name="gpt-4o")
+
+        assert details.kind == "bad_request"
+        assert details.provider == "openai"
+        assert details.retryable is False
+
     def test_classifies_local_rate_limiter_type_error_as_application_error(self):
         exc = TypeError(
             "'_LazyRateLimiterProxy' object does not support the asynchronous context manager protocol"

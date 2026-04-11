@@ -203,8 +203,6 @@ def classify_failure(
     elif any(
         marker in combined
         for marker in (
-            "404",
-            "not found",
             "model not found",
             "is not found for api",
             "no such model",

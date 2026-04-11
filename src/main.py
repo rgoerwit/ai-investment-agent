@@ -86,7 +86,6 @@ def suppress_all_logging():
     logging.getLogger().setLevel(logging.WARNING)
     for name in logging.root.manager.loggerDict:
         logging.getLogger(name).setLevel(logging.WARNING)
-        logging.getLogger(name).propagate = False
     for logger_name in [
         "httpx",
         "openai",
@@ -98,15 +97,23 @@ def suppress_all_logging():
         logging.getLogger(logger_name).setLevel(logging.WARNING)
 
     # Suppress structlog INFO chatter (used by token_tracker and all src/ modules)
-    # but keep WARNING and above so LLM failures and data-source errors are visible
+    # but keep WARNING and above so LLM failures and data-source errors are visible.
+    # processors MUST NOT be empty: an empty chain passes the raw event dict as
+    # **kwargs to PrintLogger.msg(), which only accepts positional args → TypeError.
     import structlog
 
     structlog.configure(
-        processors=[],
+        processors=[
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="%H:%M:%S"),
+            structlog.processors.KeyValueRenderer(
+                key_order=["timestamp", "level", "event"]
+            ),
+        ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING),
         context_class=dict,
         logger_factory=structlog.PrintLoggerFactory(),
-        cache_logger_on_first_use=True,
+        cache_logger_on_first_use=False,  # False: force-apply to already-imported loggers
     )
 
     import warnings
