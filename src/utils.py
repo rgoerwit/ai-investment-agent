@@ -38,6 +38,95 @@ def _ends_with_known_structured_terminator(text: str, agent: str | None) -> bool
     return text.rstrip().endswith(raw_data_end)
 
 
+_TERMINAL_FIELD_PATTERN = re.compile(r"^\s*[A-Z][A-Z0-9_ /()%.\-]{1,80}:\s*(.+?)\s*$")
+_TERMINAL_SCALAR_VALUES = frozenset(
+    {
+        "N/A",
+        "NA",
+        "NONE",
+        "BUY",
+        "SELL",
+        "HOLD",
+        "PASS",
+        "FAIL",
+        "APPROVED",
+        "REJECTED",
+        "CAUTIOUS",
+        "CLEAN",
+        "YES",
+        "NO",
+        "TRUE",
+        "FALSE",
+    }
+)
+_TERMINAL_DANGLING_WORDS = frozenset(
+    {
+        "AND",
+        "OR",
+        "TO",
+        "FOR",
+        "WITH",
+        "BY",
+        "FROM",
+        "DUE",
+        "BECAUSE",
+        "VIA",
+        "THROUGH",
+        "OF",
+        "IN",
+        "ON",
+        "AT",
+        "THE",
+        "A",
+        "AN",
+    }
+)
+
+
+def _last_nonempty_line(text: str) -> str:
+    for line in reversed(text.splitlines()):
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
+
+
+def _is_complete_scalar_terminal_field_line(text: str) -> bool:
+    last_line = _last_nonempty_line(text)
+    if not last_line:
+        return False
+
+    match = _TERMINAL_FIELD_PATTERN.match(last_line)
+    if not match:
+        return False
+
+    value = re.sub(r"\s+", " ", match.group(1)).strip()
+    if not value:
+        return False
+
+    normalized = value.upper()
+    if normalized in _TERMINAL_SCALAR_VALUES:
+        return True
+
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return True
+
+    if re.fullmatch(
+        r"[-+]?[$€£¥]?\d[\d,]*(?:\.\d+)?%?(?:[KMBT]|X)?(?:\s*/\s*[-+]?[$€£¥]?\d[\d,]*(?:\.\d+)?%?(?:[KMBT]|X)?)?",
+        normalized,
+    ):
+        return True
+
+    if re.fullmatch(r"[A-Z0-9][A-Z0-9./_\-]{0,31}", normalized):
+        return True
+
+    words = normalized.split()
+    if words and words[-1] in _TERMINAL_DANGLING_WORDS:
+        return False
+
+    return False
+
+
 class SignalProcessor:
     """
     Parses the final natural language output from the Portfolio Manager into a
@@ -299,6 +388,13 @@ def detect_truncation(text: str, agent: str | None = None) -> dict:
     )  # Markdown/table chars that aren't Unicode punctuation
     stripped = text.rstrip()
     if stripped:
+        if _is_complete_scalar_terminal_field_line(stripped):
+            return {
+                "truncated": False,
+                "source": None,
+                "marker": None,
+                "confidence": "high",
+            }
         last = stripped[-1]
         cat = unicodedata.category(last)
         # Pe=close bracket, Pf=final quote, Po=period/exclamation/etc.

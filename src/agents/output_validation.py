@@ -10,6 +10,10 @@ from src.data_block_utils import has_parseable_data_block, has_parseable_fenced_
 
 logger = structlog.get_logger(__name__)
 
+_FORENSIC_VERDICT_PATTERN = re.compile(
+    r"(?im)^\s*(?:\*\*)?\s*verdict\s*(?:\*\*)?\s*:\s*\S+"
+)
+
 
 def _coerce_optional_int(value: Any) -> int | None:
     if isinstance(value, bool):
@@ -94,8 +98,11 @@ def _has_parseable_forensic_block(content: str) -> bool:
     if "FORENSIC_DATA_BLOCK:" not in content:
         return False
 
-    required_fields = ("STATUS:", "VERDICT:")
-    return all(field in content for field in required_fields)
+    return "STATUS:" in content and _has_forensic_verdict(content)
+
+
+def _has_forensic_verdict(content: str) -> bool:
+    return bool(_FORENSIC_VERDICT_PATTERN.search(content))
 
 
 def validate_required_output(agent_key: str, content: str) -> dict[str, Any]:
@@ -151,7 +158,7 @@ def validate_required_output(agent_key: str, content: str) -> dict[str, Any]:
             [
                 ("forensic_block", _has_parseable_forensic_block(content)),
                 ("status", "STATUS:" in content),
-                ("verdict", "VERDICT:" in content),
+                ("verdict", _has_forensic_verdict(content)),
             ]
         )
 
@@ -179,6 +186,61 @@ def should_fail_closed(
         return truncated and len(content.strip()) >= 200
 
     return truncated or len(content.strip()) < 200
+
+
+def log_truncation_diagnostic(
+    *,
+    agent_key: str,
+    ticker: str,
+    runnable: Any,
+    response: Any,
+    content: str,
+    trunc_info: dict[str, Any],
+) -> None:
+    if not trunc_info.get("truncated"):
+        return
+
+    configured_cap = get_configured_output_cap(runnable)
+    completion_tokens = extract_completion_tokens(response)
+    utilization = (
+        round(completion_tokens / configured_cap, 4)
+        if configured_cap and completion_tokens
+        else None
+    )
+
+    marker = trunc_info.get("marker")
+    explicit_or_structural = trunc_info.get("source") == "code" or (
+        isinstance(marker, str) and marker.startswith("incomplete ")
+    )
+    near_cap = utilization is not None and utilization >= 0.90
+    likely_real = explicit_or_structural or near_cap
+
+    suggestion = None
+    if likely_real:
+        if near_cap:
+            suggestion = "consider increasing max output tokens for this agent"
+        elif trunc_info.get("source") == "code":
+            suggestion = "inspect tool/output size limits or truncation safeguards"
+        else:
+            suggestion = "inspect model output cap / provider response limits"
+
+    payload = {
+        "agent": agent_key,
+        "ticker": ticker,
+        "source": trunc_info.get("source"),
+        "marker": marker,
+        "confidence": trunc_info.get("confidence"),
+        "output_len": len(content),
+        "configured_output_cap": configured_cap,
+        "completion_tokens": completion_tokens,
+        "utilization_ratio": utilization,
+        "suggestion": suggestion,
+    }
+
+    if likely_real:
+        logger.warning("agent_output_truncated", **payload)
+    else:
+        logger.info("agent_output_truncation_suspected", **payload)
 
 
 def log_output_diagnostics(

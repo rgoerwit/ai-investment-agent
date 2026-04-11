@@ -124,6 +124,7 @@ class TestResolveCompanyName:
             ) as mock_yq,
             patch("src.ticker_utils._try_fmp", new_callable=AsyncMock) as mock_fmp,
             patch("src.ticker_utils._try_eodhd", new_callable=AsyncMock) as mock_eodhd,
+            patch("src.ticker_utils.logger") as mock_logger,
         ):
             mock_yf.return_value = None
             mock_yq.return_value = None
@@ -134,6 +135,7 @@ class TestResolveCompanyName:
         assert result.is_resolved is False
         assert result.source == "unresolved"
         assert result.name == "2154.HK"
+        mock_logger.warning.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_ticker_echo_rejected_tries_next(self):

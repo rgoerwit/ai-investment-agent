@@ -25,6 +25,7 @@ from . import message_utils, support
 from . import runtime as agent_runtime
 from .output_validation import (
     log_output_diagnostics,
+    log_truncation_diagnostic,
     should_fail_closed,
     validate_required_output,
 )
@@ -509,16 +510,14 @@ def create_analyst_node(
             from src.utils import detect_truncation
 
             trunc_info = detect_truncation(content_str, agent=agent_key)
-            if trunc_info["truncated"]:
-                logger.warning(
-                    "agent_output_truncated",
-                    agent=agent_key,
-                    ticker=ticker,
-                    source=trunc_info["source"],
-                    marker=trunc_info["marker"],
-                    confidence=trunc_info["confidence"],
-                    output_len=len(content_str),
-                )
+            log_truncation_diagnostic(
+                agent_key=agent_key,
+                ticker=ticker,
+                runnable=llm if response is not None else llm,
+                response=response,
+                content=content_str,
+                trunc_info=trunc_info,
+            )
 
             validation = validate_required_output(agent_key, content_str)
             log_output_diagnostics(

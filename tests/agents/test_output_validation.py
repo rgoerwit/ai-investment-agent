@@ -1,8 +1,9 @@
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from src.agents.output_validation import (
     extract_completion_tokens,
     get_configured_output_cap,
+    log_truncation_diagnostic,
     should_fail_closed,
     validate_required_output,
 )
@@ -103,6 +104,33 @@ def test_auditor_validation_accepts_legacy_forensic_block():
     assert validation["ok"] is True
 
 
+def test_auditor_validation_accepts_markdown_verdict_variant():
+    content = (
+        "FORENSIC_DATA_BLOCK:\n"
+        "STATUS: INSUFFICIENT_DATA\n"
+        "**Verdict**: Unable to complete forensic audit from verified filings.\n"
+    )
+
+    validation = validate_required_output("global_forensic_auditor", content)
+
+    assert validation["ok"] is True
+
+
+def test_auditor_validation_accepts_bold_colon_verdict_variant():
+    content = (
+        "```\n"
+        "FORENSIC_DATA_BLOCK:\n"
+        "STATUS: INSUFFICIENT_DATA\n"
+        "META: N/A\n"
+        "```\n"
+        "**Verdict:** Unable to complete forensic audit from verified filings.\n"
+    )
+
+    validation = validate_required_output("global_forensic_auditor", content)
+
+    assert validation["ok"] is True
+
+
 def test_auditor_validation_accepts_fenced_forensic_block():
     content = (
         "### --- START FORENSIC_DATA_BLOCK ---\n"
@@ -150,3 +178,111 @@ def test_portfolio_manager_validation_fails_closed_when_required_structure_missi
         )
         is True
     )
+
+
+def test_log_truncation_diagnostic_warns_for_code_truncation():
+    runnable = Mock()
+    response = Mock()
+    response.usage_metadata = {}
+    response.response_metadata = {}
+
+    with patch("src.agents.output_validation.logger") as mock_logger:
+        log_truncation_diagnostic(
+            agent_key="consultant",
+            ticker="TEST",
+            runnable=runnable,
+            response=response,
+            content="Some content\n[...TRUNCATED 5000 chars...]",
+            trunc_info={
+                "truncated": True,
+                "source": "code",
+                "marker": "[...TRUNCATED",
+                "confidence": "high",
+            },
+        )
+
+    mock_logger.warning.assert_called_once()
+    assert mock_logger.warning.call_args[0][0] == "agent_output_truncated"
+
+
+def test_log_truncation_diagnostic_warns_near_output_cap_with_upgrade_suggestion():
+    runnable = Mock()
+    runnable._configured_max_completion_tokens = 1000
+    response = Mock()
+    response.usage_metadata = {"completion_tokens": 950}
+    response.response_metadata = {}
+
+    with patch("src.agents.output_validation.logger") as mock_logger:
+        log_truncation_diagnostic(
+            agent_key="news_analyst",
+            ticker="TEST",
+            runnable=runnable,
+            response=response,
+            content="OPPORTUNITY: Benefiting from",
+            trunc_info={
+                "truncated": True,
+                "source": "llm",
+                "marker": "ends with: 'OPPORTUNITY: Benefiting from'",
+                "confidence": "medium",
+            },
+        )
+
+    mock_logger.warning.assert_called_once()
+    assert mock_logger.warning.call_args[0][0] == "agent_output_truncated"
+    assert (
+        mock_logger.warning.call_args[1]["suggestion"]
+        == "consider increasing max output tokens for this agent"
+    )
+    assert mock_logger.warning.call_args[1]["utilization_ratio"] == 0.95
+
+
+def test_log_truncation_diagnostic_downgrades_heuristic_low_utilization_to_info():
+    runnable = Mock()
+    runnable._configured_max_completion_tokens = 1000
+    response = Mock()
+    response.usage_metadata = {"completion_tokens": 200}
+    response.response_metadata = {}
+
+    with patch("src.agents.output_validation.logger") as mock_logger:
+        log_truncation_diagnostic(
+            agent_key="news_analyst",
+            ticker="TEST",
+            runnable=runnable,
+            response=response,
+            content="The company remains exposed to",
+            trunc_info={
+                "truncated": True,
+                "source": "llm",
+                "marker": "ends with: 'The company remains exposed to'",
+                "confidence": "medium",
+            },
+        )
+
+    mock_logger.info.assert_called_once()
+    assert mock_logger.info.call_args[0][0] == "agent_output_truncation_suspected"
+    mock_logger.warning.assert_not_called()
+
+
+def test_log_truncation_diagnostic_warns_for_incomplete_required_block():
+    runnable = Mock()
+    response = Mock()
+    response.usage_metadata = {}
+    response.response_metadata = {}
+
+    with patch("src.agents.output_validation.logger") as mock_logger:
+        log_truncation_diagnostic(
+            agent_key="portfolio_manager",
+            ticker="TEST",
+            runnable=runnable,
+            response=response,
+            content="PM_BLOCK:\nTICKER: TEST",
+            trunc_info={
+                "truncated": True,
+                "source": "llm",
+                "marker": "incomplete PM_BLOCK block (missing ('VERDICT:', 'RISK_ZONE:', 'ZONE:'))",
+                "confidence": "medium",
+            },
+        )
+
+    mock_logger.warning.assert_called_once()
+    assert mock_logger.warning.call_args[0][0] == "agent_output_truncated"

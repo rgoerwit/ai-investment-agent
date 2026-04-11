@@ -13,11 +13,24 @@ import pytest
 from langgraph.types import RunnableConfig
 
 from src.agents import create_consultant_node
+from src.agents.consultant_nodes import _canonicalize_forensic_auditor_output
 from src.report_generator import QuietModeReporter
 
 
 class TestDataFormatEdgeCases:
     """Test consultant handling of unusual data formats."""
+
+    def test_auditor_output_is_canonicalized_to_raw_verdict_field(self):
+        content = (
+            "FORENSIC_DATA_BLOCK:\n"
+            "STATUS: INSUFFICIENT_DATA\n"
+            "**Verdict:** Unable to complete forensic audit.\n"
+        )
+
+        normalized = _canonicalize_forensic_auditor_output(content)
+
+        assert "VERDICT: Unable to complete forensic audit." in normalized
+        assert "**Verdict:**" not in normalized
 
     @pytest.mark.asyncio
     async def test_consultant_handles_empty_reports(self):

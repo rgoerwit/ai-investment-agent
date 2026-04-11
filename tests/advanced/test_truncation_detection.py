@@ -195,6 +195,26 @@ class TestCompleteOutput:
         result = detect_truncation(text)
         assert result["truncated"] is False
 
+    def test_terminal_field_na_not_flagged(self):
+        text = "OPPORTUNITY: N/A"
+        result = detect_truncation(text)
+        assert result["truncated"] is False
+
+    def test_terminal_field_verdict_not_flagged(self):
+        text = "VERDICT: BUY"
+        result = detect_truncation(text)
+        assert result["truncated"] is False
+
+    def test_terminal_field_status_not_flagged(self):
+        text = "STATUS: CLEAN"
+        result = detect_truncation(text)
+        assert result["truncated"] is False
+
+    def test_terminal_field_detail_na_not_flagged(self):
+        text = "DETAIL: N/A"
+        result = detect_truncation(text)
+        assert result["truncated"] is False
+
 
 class TestEdgeCases:
     """Test edge cases and boundary conditions."""
@@ -257,4 +277,14 @@ class TestAgentScoping:
             "The DATA_BLOCK: shows strong margins in the report, but the summary ends"
         )
         result = detect_truncation(text, agent="fundamentals_analyst")
+        assert result["truncated"] is True
+
+    def test_terminal_field_with_dangling_phrase_is_flagged(self):
+        text = "OPPORTUNITY: Benefiting from"
+        result = detect_truncation(text)
+        assert result["truncated"] is True
+
+    def test_terminal_field_with_incomplete_detail_is_flagged(self):
+        text = "DETAIL: Exposure to demand in"
+        result = detect_truncation(text)
         assert result["truncated"] is True

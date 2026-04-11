@@ -19,6 +19,7 @@ from . import message_utils, support
 from . import runtime as agent_runtime
 from .output_validation import (
     log_output_diagnostics,
+    log_truncation_diagnostic,
     should_fail_closed,
     validate_required_output,
 )
@@ -28,6 +29,36 @@ logger = structlog.get_logger(__name__)
 
 CONSULTANT_CALL_TIMEOUT_SECONDS = 90.0
 CONSULTANT_TOTAL_TIMEOUT_SECONDS = 240.0
+
+
+def _canonicalize_forensic_auditor_output(content: str) -> str:
+    lines = content.splitlines()
+    updated = False
+
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("VERDICT:"):
+            return content
+
+        match = (
+            re.match(r"(?i)^(?P<indent>\s*)\*\*verdict:\*\*\s*(?P<value>\S.*)$", line)
+            or re.match(
+                r"(?i)^(?P<indent>\s*)\*\*verdict\*\*:\s*(?P<value>\S.*)$", line
+            )
+            or re.match(r"(?i)^(?P<indent>\s*)verdict:\s*(?P<value>\S.*)$", line)
+        )
+        if match:
+            lines[index] = f"{match.group('indent')}VERDICT: {match.group('value')}"
+            updated = True
+            break
+
+    if not updated:
+        return content
+
+    normalized = "\n".join(lines)
+    if content.endswith("\n"):
+        normalized += "\n"
+    return normalized
 
 
 def _remaining_consultant_budget(deadline: float) -> float:
@@ -425,16 +456,14 @@ Provide your independent consultant review."""
             from src.utils import detect_truncation
 
             trunc_info = detect_truncation(content_str, agent="consultant")
-            if trunc_info["truncated"]:
-                logger.warning(
-                    "agent_output_truncated",
-                    agent="consultant",
-                    ticker=ticker,
-                    source=trunc_info["source"],
-                    marker=trunc_info["marker"],
-                    confidence=trunc_info["confidence"],
-                    output_len=len(content_str),
-                )
+            log_truncation_diagnostic(
+                agent_key="consultant",
+                ticker=ticker,
+                runnable=llm,
+                response=response,
+                content=content_str,
+                trunc_info=trunc_info,
+            )
 
             validation = validate_required_output("consultant", content_str)
             log_output_diagnostics(
@@ -839,22 +868,21 @@ Perform a forensic audit using your tools."""
 
         try:
             response_str = await _run_auditor_loop(llm, agent_prompt.system_message)
+            response_str = _canonicalize_forensic_auditor_output(response_str)
 
             from src.utils import detect_truncation
 
             trunc_info = detect_truncation(
                 response_str, agent="global_forensic_auditor"
             )
-            if trunc_info["truncated"]:
-                logger.warning(
-                    "agent_output_truncated",
-                    agent="global_forensic_auditor",
-                    ticker=ticker,
-                    source=trunc_info["source"],
-                    marker=trunc_info["marker"],
-                    confidence=trunc_info["confidence"],
-                    output_len=len(response_str),
-                )
+            log_truncation_diagnostic(
+                agent_key="global_forensic_auditor",
+                ticker=ticker,
+                runnable=llm,
+                response=None,
+                content=response_str,
+                trunc_info=trunc_info,
+            )
             validation = validate_required_output(
                 "global_forensic_auditor", response_str
             )
@@ -961,6 +989,7 @@ VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
                     response_str = await _run_auditor_loop(
                         fallback_llm, agent_prompt.system_message
                     )
+                    response_str = _canonicalize_forensic_auditor_output(response_str)
                     logger.info(
                         "auditor_complete_after_retry",
                         ticker=ticker,

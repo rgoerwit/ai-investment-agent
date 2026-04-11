@@ -197,10 +197,8 @@ class TestFMPGet:
                     await fetcher._get("ratios", {"symbol": "AAPL"})
 
         assert fetcher._cooldown_until is None
-        warning_calls = " ".join(
-            str(call) for call in mock_logger.warning.call_args_list
-        )
-        assert "fmp_subscription_unavailable" in warning_calls
+        info_calls = " ".join(str(call) for call in mock_logger.info.call_args_list)
+        assert "fmp_subscription_unavailable" in info_calls
 
     @pytest.mark.asyncio
     async def test_get_402_opaque_response_starts_cooldown(self):

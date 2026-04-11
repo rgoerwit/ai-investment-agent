@@ -177,7 +177,7 @@ class FMPFetcher(FinancialFetcher):
                         if response.status == 402 and _is_subscription_preview(
                             response_preview
                         ):
-                            logger.warning(
+                            logger.info(
                                 "fmp_subscription_unavailable",
                                 endpoint=endpoint,
                                 status=response.status,

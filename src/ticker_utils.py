@@ -670,9 +670,5 @@ async def resolve_company_name(ticker: str) -> CompanyNameResult:
                 error=str(e),
             )
 
-    logger.warning(
-        "company_name_unresolved",
-        ticker=ticker,
-        message="No source could resolve company name — LLM hallucination risk",
-    )
+    logger.debug("company_name_unresolved", ticker=ticker)
     return CompanyNameResult(name=ticker, source="unresolved", is_resolved=False)
