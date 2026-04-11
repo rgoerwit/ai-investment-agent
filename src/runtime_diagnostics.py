@@ -16,6 +16,7 @@ FailureKind = Literal[
     "rate_limit",
     "quota_error",
     "server_error",
+    "model_not_found",
     "bad_request",
     "application_error",
     "unknown_provider_error",
@@ -200,6 +201,18 @@ def classify_failure(
         kind = "server_error"
         retryable = True
     elif any(
+        marker in combined
+        for marker in (
+            "404",
+            "not found",
+            "model not found",
+            "is not found for api",
+            "no such model",
+        )
+    ):
+        kind = "model_not_found"
+        retryable = False
+    elif any(
         marker in combined for marker in ("400", "bad request", "invalid_request_error")
     ):
         kind = "bad_request"
@@ -211,6 +224,14 @@ def classify_failure(
             "connecterror",
             "cannot connect to host",
             "connection reset",
+            "connection aborted",
+            "remotedisconnected",
+            "ssl",
+            "certificate",
+            "handshake",
+            "eof occurred in violation",
+            "broken pipe",
+            "proxy",
         )
     ):
         kind = "connect_error"

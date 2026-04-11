@@ -1491,7 +1491,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
             ticker = yf.Ticker(symbol)
             info = {}
             try:
-                info = ticker.info
+                info = await asyncio.to_thread(lambda: ticker.info)
             except YFRateLimitError as exc:
                 logger.warning("yfinance_rate_limited", symbol=symbol, error=str(exc))
                 return None
@@ -1509,7 +1509,8 @@ class SmartMarketDataFetcher(FinancialFetcher):
 
             if not has_price and hasattr(ticker, "fast_info"):
                 try:
-                    fast_price = ticker.fast_info.get("lastPrice")
+                    fast_info = await asyncio.to_thread(lambda: ticker.fast_info)
+                    fast_price = fast_info.get("lastPrice")
                     if fast_price:
                         info["currentPrice"] = fast_price
                         has_price = True
@@ -1548,6 +1549,16 @@ class SmartMarketDataFetcher(FinancialFetcher):
 
             if "symbol" not in info:
                 info["symbol"] = symbol
+
+            trading_curr = info.get("currency", "").upper()
+            financial_curr = info.get("financialCurrency", "").upper()
+            if trading_curr and financial_curr and trading_curr != financial_curr:
+                info["cross_listing_note"] = (
+                    f"Price data is in {trading_curr} ({info.get('exchange', 'unknown exchange')}). "
+                    f"Financial statements are reported in {financial_curr}. "
+                    f"This is a cross-listing — the company's primary exchange may use {financial_curr}. "
+                    f"All price and liquidity data refers to the {trading_curr} listing only."
+                )
 
             self.stats["sources"]["yfinance"] += 1
             return info
@@ -1687,6 +1698,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         }
 
         results = {}
+        failure_reasons: dict[str, str] = {}
         for source_name, coro in tasks.items():
             try:
                 # Wait for each task with timeout
@@ -1700,11 +1712,29 @@ class SmartMarketDataFetcher(FinancialFetcher):
                     # Expected when API key not configured - use debug, not warning
                     logger.debug(f"{source_name}_returned_none", symbol=symbol)
             except asyncio.TimeoutError:
-                logger.warning(f"{source_name}_timeout", symbol=symbol)
+                logger.warning(
+                    f"{source_name}_timeout",
+                    symbol=symbol,
+                    timeout_seconds=PER_SOURCE_TIMEOUT,
+                )
                 results[source_name] = None
+                failure_reasons[source_name] = f"timeout>{PER_SOURCE_TIMEOUT}s"
             except Exception as e:
                 logger.warning(f"{source_name}_error", symbol=symbol, error=str(e))
                 results[source_name] = None
+                failure_reasons[source_name] = type(e).__name__
+
+        # Aggregate warning when every configured source produced nothing — almost
+        # always a network-level event (connectivity loss, proxy, firewall change).
+        live_sources = [s for s in results if results[s] is not None]
+        if not live_sources:
+            logger.warning(
+                "all_data_sources_failed",
+                symbol=symbol,
+                sources_attempted=list(tasks.keys()),
+                failure_reasons=failure_reasons,
+                note="Likely network connectivity issue — check proxy, DNS, or firewall",
+            )
 
         return results
 
@@ -2489,6 +2519,19 @@ class SmartMarketDataFetcher(FinancialFetcher):
     async def _get_financial_metrics_uncached(
         self, ticker: str, timeout: int = 30
     ) -> dict[str, Any]:
+        """Hard wall-clock limit on the entire metrics fetch cycle."""
+        try:
+            return await asyncio.wait_for(
+                self._fetch_metrics_inner(ticker),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "get_financial_metrics_total_timeout", ticker=ticker, timeout=timeout
+            )
+            return {}
+
+    async def _fetch_metrics_inner(self, ticker: str) -> dict[str, Any]:
         """
         UNIFIED APPROACH: Main entry point with parallel sources and mandatory gap-filling.
         Includes EODHD fallback and Smart Ticker Resolution.

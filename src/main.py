@@ -82,10 +82,10 @@ def _cost_suffix() -> str:
 
 
 def suppress_all_logging():
-    """Suppress all logging output for quiet mode."""
-    logging.getLogger().setLevel(logging.CRITICAL)
+    """Suppress INFO and below for quiet mode; WARNING/ERROR/CRITICAL still surface."""
+    logging.getLogger().setLevel(logging.WARNING)
     for name in logging.root.manager.loggerDict:
-        logging.getLogger(name).setLevel(logging.CRITICAL)
+        logging.getLogger(name).setLevel(logging.WARNING)
         logging.getLogger(name).propagate = False
     for logger_name in [
         "httpx",
@@ -95,14 +95,15 @@ def suppress_all_logging():
         "langgraph",
         "google",
     ]:
-        logging.getLogger(logger_name).setLevel(logging.CRITICAL)
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
 
-    # Suppress structlog (used by token_tracker)
+    # Suppress structlog INFO chatter (used by token_tracker and all src/ modules)
+    # but keep WARNING and above so LLM failures and data-source errors are visible
     import structlog
 
     structlog.configure(
         processors=[],
-        wrapper_class=structlog.make_filtering_bound_logger(logging.CRITICAL),
+        wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING),
         context_class=dict,
         logger_factory=structlog.PrintLoggerFactory(),
         cache_logger_on_first_use=True,

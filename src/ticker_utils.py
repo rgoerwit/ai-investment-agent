@@ -138,6 +138,19 @@ class TickerFormatter:
         "JK": (".JK", "Indonesia Stock Exchange", "Indonesia", "IDX"),
         "KL": (".KL", "Bursa Malaysia", "Malaysia", "KLSE"),
         "BK": (".BK", "Stock Exchange of Thailand", "Thailand", "SET"),
+        # Scandinavian exchanges
+        "OL": (".OL", "Oslo Børs", "Norway", "OSL"),
+        "ST": (".ST", "Nasdaq Stockholm", "Sweden", "STO"),
+        "HE": (".HE", "Nasdaq Helsinki", "Finland", "HEL"),
+        "CO": (".CO", "Nasdaq Copenhagen", "Denmark", "CPH"),
+        # Eastern European exchanges
+        "VI": (".VI", "Wiener Börse", "Austria", "WBAG"),
+        "WA": (".WA", "Warsaw Stock Exchange", "Poland", "WSE"),
+        "PR": (".PR", "Prague Stock Exchange", "Czech Republic", "PSE"),
+        "BD": (".BD", "Budapest Stock Exchange", "Hungary", "BSE2"),
+        "RO": (".RO", "Bucharest Stock Exchange", "Romania", "BVB"),
+        # Taiwan OTC
+        "TWO": (".TWO", "Taipei Exchange", "Taiwan", "TPEx"),
     }
 
     # IBKR exchange code to yfinance suffix mapping.
@@ -215,7 +228,7 @@ class TickerFormatter:
     # Alternative ticker format patterns
     TICKER_PATTERNS = {
         "reuters": re.compile(r"^([A-Z0-9]+)\.([A-Z]+)-([A-Z]{2})$"),
-        "standard": re.compile(r"^([A-Z0-9]+)\.([A-Z]+)$"),
+        "standard": re.compile(r"^([A-Z0-9][A-Z0-9-]*)\.([A-Z]+)$"),
         "plain": re.compile(r"^([A-Z0-9]+)$"),
         "ibkr": re.compile(r"^([A-Z0-9]+):([A-Z]+)$"),
     }
@@ -247,6 +260,19 @@ class TickerFormatter:
                 ticker = corrected
         except ImportError:
             logger.debug("ticker_corrections_module_not_available")
+
+        # Normalize multi-dot share-class tickers: NIL.B.ST → NIL-B.ST
+        # Scandinavian and other exchanges use a dot before the share-class letter
+        # (A, B, C …); yfinance expects a hyphen in that position instead.
+        # Only fires when the final segment is a known exchange suffix — US and
+        # unknown-suffix tickers are unaffected.
+        _parts = ticker.split(".")
+        if len(_parts) > 2 and _parts[-1] in cls.EXCHANGE_SUFFIXES:
+            _rejoined = "-".join(_parts[:-1]) + "." + _parts[-1]
+            logger.info(
+                "multi_dot_ticker_normalised", original=ticker, normalised=_rejoined
+            )
+            ticker = _rejoined
 
         # Try IBKR format (e.g., "NOVN:SWX")
         ibkr_match = cls.TICKER_PATTERNS["ibkr"].match(ticker)
