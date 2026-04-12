@@ -1,9 +1,11 @@
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from src.agents.consultant_nodes import _canonicalize_forensic_auditor_output
 from src.agents.output_validation import (
     extract_completion_tokens,
     get_configured_output_cap,
+    log_output_diagnostics,
     log_truncation_diagnostic,
     should_fail_closed,
     validate_required_output,
@@ -252,6 +254,7 @@ def test_log_truncation_diagnostic_warns_for_code_truncation():
 def test_log_truncation_diagnostic_warns_near_output_cap_with_upgrade_suggestion():
     runnable = Mock()
     runnable._configured_max_completion_tokens = 1000
+    runnable._configured_api_completion_tokens = 1000
     response = Mock()
     response.usage_metadata = {"completion_tokens": 950}
     response.response_metadata = {}
@@ -278,11 +281,14 @@ def test_log_truncation_diagnostic_warns_near_output_cap_with_upgrade_suggestion
         == "consider increasing max output tokens for this agent"
     )
     assert mock_logger.warning.call_args[1]["utilization_ratio"] == 0.95
+    assert mock_logger.warning.call_args[1]["intent_utilization_ratio"] is None
+    assert mock_logger.warning.call_args[1]["api_utilization_ratio"] == 0.95
 
 
 def test_log_truncation_diagnostic_downgrades_heuristic_low_utilization_to_info():
     runnable = Mock()
     runnable._configured_max_completion_tokens = 1000
+    runnable._configured_api_completion_tokens = 1000
     response = Mock()
     response.usage_metadata = {"completion_tokens": 200}
     response.response_metadata = {}
@@ -330,3 +336,74 @@ def test_log_truncation_diagnostic_warns_for_incomplete_required_block():
 
     mock_logger.warning.assert_called_once()
     assert mock_logger.warning.call_args[0][0] == "agent_output_truncated"
+
+
+def test_log_truncation_diagnostic_prefers_reserve_suggestion_when_thinking_consumes_cap():
+    runnable = Mock()
+    runnable._configured_max_output_tokens = 2048
+    runnable._configured_api_output_tokens = 4096
+    response = Mock()
+    response.usage_metadata = {
+        "output_tokens": 3900,
+        "output_token_details": {"reasoning": 3700},
+    }
+    response.response_metadata = {}
+
+    with patch("src.agents.output_validation.logger") as mock_logger:
+        log_truncation_diagnostic(
+            agent_key="market_analyst",
+            ticker="Y92.SI",
+            runnable=runnable,
+            response=response,
+            content="### LIQUIDITY ASSESSMENT\n**Trading Regularity",
+            trunc_info={
+                "truncated": True,
+                "source": "llm",
+                "marker": "ends with: 'Trading Regularity'",
+                "confidence": "medium",
+            },
+        )
+
+    payload = mock_logger.warning.call_args[1]
+    assert (
+        payload["suggestion"]
+        == "consider increasing reasoning reserve / API output cap"
+    )
+    assert payload["thinking_tokens"] == 3700
+    assert payload["visible_output_tokens"] == 200
+    assert payload["intent_utilization_ratio"] == 0.0977
+    assert payload["api_utilization_ratio"] == 0.9521
+
+
+def test_log_output_diagnostics_reads_openai_object_metadata_on_final_response():
+    runnable = Mock()
+    runnable._configured_max_completion_tokens = 8192
+    runnable._configured_api_completion_tokens = 10240
+    response = Mock()
+    response.usage_metadata = None
+    response.response_metadata = SimpleNamespace(
+        token_usage=SimpleNamespace(
+            prompt_tokens=1077,
+            completion_tokens=834,
+            total_tokens=1911,
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=516),
+        )
+    )
+
+    with patch("src.agents.output_validation.logger") as mock_logger:
+        log_output_diagnostics(
+            agent_key="global_forensic_auditor",
+            ticker="Y92.SI",
+            runnable=runnable,
+            response=response,
+            content="FORENSIC_DATA_BLOCK:\nSTATUS: CLEAN",
+            truncated=False,
+            validation={"ok": True, "missing": []},
+        )
+
+    payload = mock_logger.info.call_args[1]
+    assert payload["completion_tokens_total"] == 834
+    assert payload["thinking_tokens"] == 516
+    assert payload["visible_output_tokens"] == 318
+    assert payload["intent_utilization_ratio"] == 0.0388
+    assert payload["api_utilization_ratio"] == 0.0814

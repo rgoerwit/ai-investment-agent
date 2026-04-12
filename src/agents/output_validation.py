@@ -7,6 +7,7 @@ from typing import Any
 import structlog
 
 from src.data_block_utils import has_parseable_data_block, has_parseable_fenced_block
+from src.llm_usage import extract_token_usage_breakdown
 
 logger = structlog.get_logger(__name__)
 
@@ -29,61 +30,25 @@ def _coerce_optional_int(value: Any) -> int | None:
 
 
 def extract_completion_tokens(response: Any) -> int:
-    if response is None:
-        return 0
-
-    usage_metadata = getattr(response, "usage_metadata", None)
-    candidates: list[Any] = []
-
-    if isinstance(usage_metadata, dict):
-        candidates.extend(
-            [
-                usage_metadata.get("output_tokens"),
-                usage_metadata.get("completion_tokens"),
-                usage_metadata.get("total_output_tokens"),
-            ]
-        )
-    elif usage_metadata is not None and not callable(usage_metadata):
-        candidates.extend(
-            [
-                getattr(usage_metadata, "output_tokens", None),
-                getattr(usage_metadata, "completion_tokens", None),
-                getattr(usage_metadata, "total_output_tokens", None),
-            ]
-        )
-
-    response_metadata = getattr(response, "response_metadata", None)
-    if isinstance(response_metadata, dict):
-        token_usage = response_metadata.get("token_usage")
-        if isinstance(token_usage, dict):
-            candidates.extend(
-                [
-                    token_usage.get("completion_tokens"),
-                    token_usage.get("output_tokens"),
-                ]
-            )
-        usage = response_metadata.get("usage")
-        if isinstance(usage, dict):
-            candidates.extend(
-                [
-                    usage.get("output_tokens"),
-                    usage.get("completion_tokens"),
-                    usage.get("total_output_tokens"),
-                ]
-            )
-
-    for candidate in candidates:
-        coerced = _coerce_optional_int(candidate)
-        if coerced is not None:
-            return coerced
-
-    return 0
+    usage = extract_token_usage_breakdown(response)
+    return usage.total_output_tokens or 0
 
 
 def get_configured_output_cap(runnable: Any) -> int | None:
     for attr in (
         "_configured_max_output_tokens",
         "_configured_max_completion_tokens",
+    ):
+        coerced = _coerce_optional_int(getattr(runnable, attr, None))
+        if coerced is not None:
+            return coerced
+    return None
+
+
+def get_configured_api_output_cap(runnable: Any) -> int | None:
+    for attr in (
+        "_configured_api_output_tokens",
+        "_configured_api_completion_tokens",
     ):
         coerced = _coerce_optional_int(getattr(runnable, attr, None))
         if coerced is not None:
@@ -200,11 +165,22 @@ def log_truncation_diagnostic(
     if not trunc_info.get("truncated"):
         return
 
-    configured_cap = get_configured_output_cap(runnable)
-    completion_tokens = extract_completion_tokens(response)
-    utilization = (
-        round(completion_tokens / configured_cap, 4)
-        if configured_cap and completion_tokens
+    configured_intent_cap = get_configured_output_cap(runnable)
+    configured_api_cap = (
+        get_configured_api_output_cap(runnable) or configured_intent_cap
+    )
+    usage = extract_token_usage_breakdown(response)
+    completion_tokens = usage.total_output_tokens or 0
+    thinking_tokens = usage.thinking_tokens
+    visible_output_tokens = usage.visible_output_tokens
+    intent_utilization = (
+        round(visible_output_tokens / configured_intent_cap, 4)
+        if configured_intent_cap and visible_output_tokens is not None
+        else None
+    )
+    api_utilization = (
+        round(completion_tokens / configured_api_cap, 4)
+        if configured_api_cap and completion_tokens
         else None
     )
 
@@ -212,12 +188,14 @@ def log_truncation_diagnostic(
     explicit_or_structural = trunc_info.get("source") == "code" or (
         isinstance(marker, str) and marker.startswith("incomplete ")
     )
-    near_cap = utilization is not None and utilization >= 0.90
+    near_cap = api_utilization is not None and api_utilization >= 0.90
     likely_real = explicit_or_structural or near_cap
 
     suggestion = None
     if likely_real:
-        if near_cap:
+        if near_cap and intent_utilization is not None and intent_utilization < 0.90:
+            suggestion = "consider increasing reasoning reserve / API output cap"
+        elif near_cap:
             suggestion = "consider increasing max output tokens for this agent"
         elif trunc_info.get("source") == "code":
             suggestion = "inspect tool/output size limits or truncation safeguards"
@@ -231,9 +209,18 @@ def log_truncation_diagnostic(
         "marker": marker,
         "confidence": trunc_info.get("confidence"),
         "output_len": len(content),
-        "configured_output_cap": configured_cap,
+        "configured_output_cap": configured_intent_cap,
+        "configured_output_intent_cap": configured_intent_cap,
+        "configured_api_output_cap": configured_api_cap,
         "completion_tokens": completion_tokens,
-        "utilization_ratio": utilization,
+        "completion_tokens_total": completion_tokens,
+        "thinking_tokens": thinking_tokens,
+        "visible_output_tokens": visible_output_tokens,
+        "utilization_ratio": (
+            intent_utilization if intent_utilization is not None else api_utilization
+        ),
+        "intent_utilization_ratio": intent_utilization,
+        "api_utilization_ratio": api_utilization,
         "suggestion": suggestion,
     }
 
@@ -253,11 +240,22 @@ def log_output_diagnostics(
     truncated: bool,
     validation: dict[str, Any] | None,
 ) -> None:
-    configured_cap = get_configured_output_cap(runnable)
-    completion_tokens = extract_completion_tokens(response)
-    utilization = (
-        round(completion_tokens / configured_cap, 4)
-        if configured_cap and completion_tokens
+    configured_intent_cap = get_configured_output_cap(runnable)
+    configured_api_cap = (
+        get_configured_api_output_cap(runnable) or configured_intent_cap
+    )
+    usage = extract_token_usage_breakdown(response)
+    completion_tokens = usage.total_output_tokens or 0
+    thinking_tokens = usage.thinking_tokens
+    visible_output_tokens = usage.visible_output_tokens
+    intent_utilization = (
+        round(visible_output_tokens / configured_intent_cap, 4)
+        if configured_intent_cap and visible_output_tokens is not None
+        else None
+    )
+    api_utilization = (
+        round(completion_tokens / configured_api_cap, 4)
+        if configured_api_cap and completion_tokens
         else None
     )
 
@@ -265,9 +263,18 @@ def log_output_diagnostics(
         "agent_output_diagnostics",
         agent=agent_key,
         ticker=ticker,
-        configured_output_cap=configured_cap,
+        configured_output_cap=configured_intent_cap,
+        configured_output_intent_cap=configured_intent_cap,
+        configured_api_output_cap=configured_api_cap,
         completion_tokens=completion_tokens,
-        utilization_ratio=utilization,
+        completion_tokens_total=completion_tokens,
+        thinking_tokens=thinking_tokens,
+        visible_output_tokens=visible_output_tokens,
+        utilization_ratio=(
+            intent_utilization if intent_utilization is not None else api_utilization
+        ),
+        intent_utilization_ratio=intent_utilization,
+        api_utilization_ratio=api_utilization,
         truncated=truncated,
         required_structure_ok=validation["ok"] if validation is not None else None,
         missing_sections=validation["missing"] if validation is not None else [],

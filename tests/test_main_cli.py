@@ -11,7 +11,7 @@ import sys
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -68,6 +68,48 @@ class TestStrictModeCLI:
 
 
 class TestOutputCompanyNameLookup:
+    def test_load_company_name_for_output_retries_normalized_alias(self):
+        from src.main import _load_company_name_for_output
+
+        requested_symbols = []
+
+        class _Ticker:
+            def __init__(self, symbol):
+                self.info = (
+                    {"longName": "Truecaller AB"} if symbol == "TRUE-B.ST" else {}
+                )
+
+        class _Future:
+            def __init__(self, fn):
+                self._fn = fn
+
+            def result(self, timeout=None):
+                return self._fn()
+
+        class _Executor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def submit(self, fn):
+                return _Future(fn)
+
+        fake_yfinance = MagicMock()
+
+        def _ticker_factory(symbol):
+            requested_symbols.append(symbol)
+            return _Ticker(symbol)
+
+        fake_yfinance.Ticker.side_effect = _ticker_factory
+
+        with patch.dict(sys.modules, {"yfinance": fake_yfinance}):
+            with patch("src.main.ThreadPoolExecutor", return_value=_Executor()):
+                assert _load_company_name_for_output("TRUE.B.ST") == "Truecaller AB"
+
+        assert requested_symbols == ["TRUE.B.ST", "TRUE-B.ST"]
+
     def test_load_company_name_for_output_returns_none_on_timeout(self):
         from src.main import _load_company_name_for_output
 
@@ -83,6 +125,61 @@ class TestOutputCompanyNameLookup:
         with patch.dict(sys.modules, {"yfinance": fake_yfinance}):
             with patch("src.main.ThreadPoolExecutor", return_value=mock_executor):
                 assert _load_company_name_for_output("SNTIA.OL") is None
+
+    def test_run_analysis_warns_with_lookup_candidates_after_company_name_exhaustion(
+        self,
+    ):
+        from src.main import run_analysis
+        from src.ticker_utils import CompanyNameResult
+
+        fake_tracker = MagicMock()
+        fake_graph = MagicMock()
+        fake_graph.ainvoke = AsyncMock(return_value={})
+
+        with (
+            patch("src.main.logger") as mock_logger,
+            patch(
+                "src.ticker_utils.resolve_company_name",
+                new=AsyncMock(
+                    return_value=CompanyNameResult(
+                        name="TRUE.B.ST",
+                        source="unresolved",
+                        is_resolved=False,
+                    )
+                ),
+            ),
+            patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
+            patch("src.graph.create_trading_graph", return_value=fake_graph),
+            patch("src.token_tracker.get_tracker", return_value=fake_tracker),
+            patch(
+                "src.observability.get_tracing_callbacks",
+                return_value=([], {}),
+            ),
+            patch("src.observability.flush_traces"),
+            patch("src.main.build_analysis_validity", return_value={"ok": True}),
+        ):
+            result = asyncio.run(
+                run_analysis(
+                    ticker="TRUE.B.ST",
+                    quick_mode=True,
+                    strict_mode=False,
+                    skip_charts=True,
+                )
+            )
+
+        assert result == {"analysis_validity": {"ok": True}}
+        warning_calls = [
+            call
+            for call in mock_logger.warning.call_args_list
+            if call.args and call.args[0] == "company_name_unresolved_at_startup"
+        ]
+        assert len(warning_calls) == 1
+        assert warning_calls[0].kwargs["requested_ticker"] == "TRUE.B.ST"
+        assert warning_calls[0].kwargs["lookup_candidates"] == [
+            "TRUE.B.ST",
+            "TRUE-B.ST",
+            "TRUE.ST",
+        ]
 
     def test_strict_and_quick_composable(self):
         """--strict --quick can be combined without conflict."""

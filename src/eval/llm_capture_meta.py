@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.llm_usage import extract_token_usage_breakdown
+
 
 def normalize_reasoning_level(runnable: Any, model_name: str | None) -> str | None:
     """Normalize provider-specific reasoning configuration into coarse buckets."""
@@ -72,66 +74,10 @@ def extract_vendor_reasoning_config(
 
 def extract_token_usage(result: Any) -> dict[str, int | None]:
     """Best-effort token usage extraction across LangChain provider wrappers."""
-    usage = getattr(result, "usage_metadata", None)
-    if isinstance(usage, dict):
-        input_tokens = usage.get("input_tokens")
-        output_tokens = usage.get("output_tokens")
-        total_tokens = usage.get("total_tokens")
-        output_details = usage.get("output_token_details") or {}
-        thinking_tokens = output_details.get("reasoning")
-        return {
-            "input_tokens": _to_int(input_tokens),
-            "output_tokens": _to_int(output_tokens),
-            "thinking_tokens": _to_int(thinking_tokens),
-            "total_tokens": _to_int(total_tokens),
-        }
-
-    response_metadata = getattr(result, "response_metadata", None)
-    if isinstance(response_metadata, dict):
-        token_usage = response_metadata.get("token_usage")
-        if isinstance(token_usage, dict):
-            input_tokens = token_usage.get("input_tokens") or token_usage.get(
-                "prompt_tokens"
-            )
-            output_tokens = token_usage.get("output_tokens") or token_usage.get(
-                "completion_tokens"
-            )
-            completion_details = token_usage.get("completion_tokens_details") or {}
-            thinking_tokens = completion_details.get("reasoning_tokens")
-            return {
-                "input_tokens": _to_int(input_tokens),
-                "output_tokens": _to_int(output_tokens),
-                "thinking_tokens": _to_int(thinking_tokens),
-                "total_tokens": _to_int(token_usage.get("total_tokens")),
-            }
-
-        usage = response_metadata.get("usage")
-        if isinstance(usage, dict):
-            return {
-                "input_tokens": _to_int(usage.get("input_tokens")),
-                "output_tokens": _to_int(usage.get("output_tokens")),
-                "thinking_tokens": None,
-                "total_tokens": _to_int(usage.get("input_tokens"))
-                + _to_int(usage.get("output_tokens"))
-                if _to_int(usage.get("input_tokens")) is not None
-                and _to_int(usage.get("output_tokens")) is not None
-                else None,
-            }
-
+    usage = extract_token_usage_breakdown(result)
     return {
-        "input_tokens": None,
-        "output_tokens": None,
-        "thinking_tokens": None,
-        "total_tokens": None,
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.total_output_tokens,
+        "thinking_tokens": usage.thinking_tokens,
+        "total_tokens": usage.total_tokens,
     }
-
-
-def _to_int(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None

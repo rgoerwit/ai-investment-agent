@@ -1254,7 +1254,10 @@ async def run_analysis(
         # CRITICAL FIX: Fetch and verify company name BEFORE graph execution
         # Multi-source resolution prevents identity hallucination when yfinance fails
         # (e.g., delisted tickers like 2154.HK where agents guess different companies)
-        from src.ticker_utils import resolve_company_name
+        from src.ticker_utils import (
+            _company_name_lookup_candidates,
+            resolve_company_name,
+        )
 
         name_result = await resolve_company_name(ticker)
         company_name = name_result.name
@@ -1263,6 +1266,11 @@ async def run_analysis(
             logger.warning(
                 "company_name_unresolved_at_startup",
                 ticker=ticker,
+                requested_ticker=ticker,
+                lookup_candidates=[
+                    symbol
+                    for symbol, _strategy in _company_name_lookup_candidates(ticker)
+                ],
                 message="No source could resolve company name — LLM hallucination risk",
             )
 
@@ -1830,10 +1838,26 @@ def _load_company_name_for_output(ticker: str) -> str | None:
     try:
         import yfinance as yf
 
+        from src.ticker_utils import (
+            _company_name_lookup_candidates,
+            _is_valid_company_name,
+            normalize_company_name,
+        )
+
         with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(lambda: yf.Ticker(ticker).info)
-            info = future.result(timeout=5)
-        return info.get("longName") or info.get("shortName")
+            for lookup_ticker, _lookup_strategy in _company_name_lookup_candidates(
+                ticker
+            ):
+                future = executor.submit(
+                    lambda symbol=lookup_ticker: yf.Ticker(symbol).info
+                )
+                info = future.result(timeout=5)
+                if not info:
+                    continue
+                raw_name = info.get("longName") or info.get("shortName")
+                if _is_valid_company_name(raw_name, lookup_ticker):
+                    return normalize_company_name(raw_name)
+        return None
     except FuturesTimeoutError:
         return None
     except Exception:

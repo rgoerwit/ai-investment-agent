@@ -979,7 +979,10 @@ class TestConsultantQuickMode:
                 call_kwargs = mock_chatgpt.call_args[1]
                 assert call_kwargs["model"] == "gpt-5.4"
                 assert call_kwargs["reasoning_effort"] == "medium"
-                assert call_kwargs["max_completion_tokens"] == 8192
+                assert call_kwargs["max_completion_tokens"] == 10240
+                assert llm._configured_max_completion_tokens == 8192
+                assert llm._configured_api_completion_tokens == 10240
+                assert llm._configured_reasoning_reserve_tokens == 2048
 
     def test_get_consultant_llm_respects_quick_mode(self):
         """Test that get_consultant_llm passes quick_mode to create_consultant_llm."""

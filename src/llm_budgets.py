@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from fractions import Fraction
+from typing import Literal
 
 # These fractions intentionally preserve large headroom for structured and
 # final-decision nodes while tightening naturally short-form agents.
@@ -29,6 +31,13 @@ AGENT_OUTPUT_BUDGET_FRACTIONS: dict[str, Fraction] = {
 DEFAULT_AGENT_BUDGET_FRACTION = Fraction(1, 1)
 
 
+@dataclass(frozen=True)
+class GenerationBudget:
+    intent_tokens: int
+    reserve_tokens: int
+    api_cap_tokens: int
+
+
 def get_agent_output_budget(agent_name: str, base_tokens: int) -> int:
     """Return the configured output budget for the given agent."""
     fraction = AGENT_OUTPUT_BUDGET_FRACTIONS.get(
@@ -40,4 +49,24 @@ def get_agent_output_budget(agent_name: str, base_tokens: int) -> int:
         256,
         (base_tokens * fraction.numerator + fraction.denominator - 1)
         // fraction.denominator,
+    )
+
+
+def get_generation_budget(
+    *,
+    intent_tokens: int,
+    reserve_class: Literal["default", "deep"],
+    reserve_enabled: bool,
+    default_reserve_tokens: int,
+    deep_reserve_tokens: int,
+) -> GenerationBudget:
+    reserve_tokens = 0
+    if reserve_enabled:
+        reserve_tokens = (
+            deep_reserve_tokens if reserve_class == "deep" else default_reserve_tokens
+        )
+    return GenerationBudget(
+        intent_tokens=intent_tokens,
+        reserve_tokens=reserve_tokens,
+        api_cap_tokens=intent_tokens + reserve_tokens,
     )

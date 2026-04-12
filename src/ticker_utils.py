@@ -12,6 +12,11 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
+_COMPANY_NAME_BASE_FALLBACK_SUFFIXES = frozenset({".ST"})
+_NORMALIZED_SHARE_CLASS_TICKER_PATTERN = re.compile(
+    r"^([A-Z0-9][A-Z0-9-]*)-([A-Z])(\.[A-Z]+)$"
+)
+
 # Legal entity suffixes to strip for cleaner search queries
 LEGAL_SUFFIXES = [
     r"\s+Company\s+Limited",
@@ -538,6 +543,32 @@ class CompanyNameResult:
     is_resolved: bool  # True if a real name was found (not just ticker echoed back)
 
 
+def _company_name_lookup_candidates(ticker: str) -> list[tuple[str, str]]:
+    """Return ordered lookup aliases for company-name resolution."""
+    cleaned = ticker.strip().upper()
+    candidates: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(symbol: str, strategy: str) -> None:
+        if symbol and symbol not in seen:
+            candidates.append((symbol, strategy))
+            seen.add(symbol)
+
+    add(cleaned, "exact")
+
+    normalized = normalize_ticker(cleaned)
+    if normalized != cleaned:
+        add(normalized, "normalized_alias")
+
+    match = _NORMALIZED_SHARE_CLASS_TICKER_PATTERN.match(normalized)
+    if match:
+        base_symbol, _share_class, exchange_suffix = match.groups()
+        if exchange_suffix in _COMPANY_NAME_BASE_FALLBACK_SUFFIXES:
+            add(f"{base_symbol}{exchange_suffix}", "base_ticker_fallback")
+
+    return candidates
+
+
 def _is_valid_company_name(name: str | None, ticker: str) -> bool:
     """Check if a resolved name is valid (not empty, not just the ticker echoed back)."""
     if not name or not name.strip():
@@ -639,36 +670,52 @@ async def resolve_company_name(ticker: str) -> CompanyNameResult:
         ("fmp", _try_fmp),
         ("eodhd", _try_eodhd),
     ]
+    lookup_candidates = _company_name_lookup_candidates(ticker)
 
-    for source_name, resolver in sources:
-        try:
-            raw_name = await resolver(ticker)
-            if _is_valid_company_name(raw_name, ticker):
-                normalized = normalize_company_name(raw_name)
-                logger.info(
-                    "company_name_resolved",
-                    ticker=ticker,
-                    name=normalized,
-                    source=source_name,
-                )
-                return CompanyNameResult(
-                    name=normalized, source=source_name, is_resolved=True
-                )
-            elif raw_name:
+    for lookup_ticker, lookup_strategy in lookup_candidates:
+        for source_name, resolver in sources:
+            try:
+                raw_name = await resolver(lookup_ticker)
+                if _is_valid_company_name(raw_name, lookup_ticker):
+                    normalized = normalize_company_name(raw_name)
+                    logger.info(
+                        "company_name_resolved",
+                        ticker=ticker,
+                        requested_ticker=ticker,
+                        lookup_ticker=lookup_ticker,
+                        lookup_strategy=lookup_strategy,
+                        name=normalized,
+                        source=source_name,
+                    )
+                    return CompanyNameResult(
+                        name=normalized, source=source_name, is_resolved=True
+                    )
+                if raw_name:
+                    logger.debug(
+                        "company_name_rejected",
+                        ticker=ticker,
+                        requested_ticker=ticker,
+                        lookup_ticker=lookup_ticker,
+                        lookup_strategy=lookup_strategy,
+                        raw_name=raw_name,
+                        source=source_name,
+                        reason="name matches lookup ticker string",
+                    )
+            except Exception as e:
                 logger.debug(
-                    "company_name_rejected",
+                    "company_name_source_error",
                     ticker=ticker,
-                    raw_name=raw_name,
+                    requested_ticker=ticker,
+                    lookup_ticker=lookup_ticker,
+                    lookup_strategy=lookup_strategy,
                     source=source_name,
-                    reason="name matches ticker string",
+                    error=str(e),
                 )
-        except Exception as e:
-            logger.debug(
-                "company_name_source_error",
-                ticker=ticker,
-                source=source_name,
-                error=str(e),
-            )
 
-    logger.debug("company_name_unresolved", ticker=ticker)
+    logger.debug(
+        "company_name_unresolved",
+        ticker=ticker,
+        requested_ticker=ticker,
+        lookup_candidates=[symbol for symbol, _strategy in lookup_candidates],
+    )
     return CompanyNameResult(name=ticker, source="unresolved", is_resolved=False)

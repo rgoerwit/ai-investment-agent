@@ -436,6 +436,24 @@ class Settings(BaseSettings):
             "Increasing this scales fractional agent budgets proportionally."
         ),
     )
+    llm_default_reasoning_reserve_tokens: int = Field(
+        default=2048,
+        ge=0,
+        validation_alias="LLM_DEFAULT_REASONING_RESERVE_TOKENS",
+        description=(
+            "Additional API-side token reserve for models whose hidden reasoning "
+            "shares the same output/completion token pool."
+        ),
+    )
+    llm_deep_reasoning_reserve_tokens: int = Field(
+        default=8192,
+        ge=0,
+        validation_alias="LLM_DEEP_REASONING_RESERVE_TOKENS",
+        description=(
+            "Additional API-side token reserve for deep-model paths when hidden "
+            "reasoning shares the same output/completion token pool."
+        ),
+    )
 
     # --- Rate Limiting ---
     # Free tier: 15 RPM | Paid tier 1: 360 RPM | Tier 2: 1000+ RPM

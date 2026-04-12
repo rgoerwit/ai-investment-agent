@@ -493,7 +493,8 @@ class TestCreateEditorLLM:
         from src.llms import create_editor_llm
 
         with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
-            mock_chatgpt.return_value = MagicMock()
+            llm = MagicMock()
+            mock_chatgpt.return_value = llm
             with patch("src.llms.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.get_openai_api_key.return_value = "test-key"
@@ -503,6 +504,9 @@ class TestCreateEditorLLM:
                 create_editor_llm()
 
         assert mock_chatgpt.call_args.kwargs["reasoning_effort"] == "medium"
+        assert mock_chatgpt.call_args.kwargs["max_completion_tokens"] == 10240
+        assert llm._configured_max_completion_tokens == 8192
+        assert llm._configured_api_completion_tokens == 10240
 
 
 # =============================================================================

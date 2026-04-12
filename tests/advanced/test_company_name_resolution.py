@@ -11,6 +11,7 @@ import pytest
 
 from src.ticker_utils import (
     CompanyNameResult,
+    _company_name_lookup_candidates,
     _is_valid_company_name,
     resolve_company_name,
 )
@@ -45,6 +46,39 @@ class TestIsValidCompanyName:
 
 class TestResolveCompanyName:
     """Test the multi-source resolution chain."""
+
+    def test_company_name_lookup_candidates_include_normalized_and_base_fallback_for_st(
+        self,
+    ):
+        assert _company_name_lookup_candidates("TRUE.B.ST") == [
+            ("TRUE.B.ST", "exact"),
+            ("TRUE-B.ST", "normalized_alias"),
+            ("TRUE.ST", "base_ticker_fallback"),
+        ]
+
+    def test_company_name_lookup_candidates_include_normalized_and_base_fallback_for_zz(
+        self,
+    ):
+        assert _company_name_lookup_candidates("ZZ.B.ST") == [
+            ("ZZ.B.ST", "exact"),
+            ("ZZ-B.ST", "normalized_alias"),
+            ("ZZ.ST", "base_ticker_fallback"),
+        ]
+
+    def test_company_name_lookup_candidates_include_normalized_alias_only_for_us_share_class(
+        self,
+    ):
+        assert _company_name_lookup_candidates("BRK.B") == [
+            ("BRK.B", "exact"),
+            ("BRK-B", "normalized_alias"),
+        ]
+
+    def test_company_name_lookup_candidates_do_not_add_base_fallback_for_non_reproducer(
+        self,
+    ):
+        assert _company_name_lookup_candidates("VOW3.DE") == [
+            ("VOW3.DE", "exact"),
+        ]
 
     @pytest.mark.asyncio
     async def test_yfinance_resolves_name(self):
@@ -181,6 +215,98 @@ class TestResolveCompanyName:
 
         assert result.is_resolved is True
         assert result.source == "yahooquery"
+
+    @pytest.mark.asyncio
+    async def test_normalized_alias_resolves_after_exact_candidate_fails(self):
+        call_order = []
+
+        async def yf_side_effect(symbol):
+            call_order.append(("yfinance", symbol))
+            if symbol == "TRUE-B.ST":
+                return "Truecaller AB"
+            return None
+
+        async def yq_side_effect(symbol):
+            call_order.append(("yahooquery", symbol))
+            return None
+
+        async def fmp_side_effect(symbol):
+            call_order.append(("fmp", symbol))
+            return None
+
+        async def eodhd_side_effect(symbol):
+            call_order.append(("eodhd", symbol))
+            return None
+
+        with (
+            patch("src.ticker_utils._try_yfinance", side_effect=yf_side_effect),
+            patch("src.ticker_utils._try_yahooquery", side_effect=yq_side_effect),
+            patch("src.ticker_utils._try_fmp", side_effect=fmp_side_effect),
+            patch("src.ticker_utils._try_eodhd", side_effect=eodhd_side_effect),
+        ):
+            result = await resolve_company_name("TRUE.B.ST")
+
+        assert result.is_resolved is True
+        assert result.source == "yfinance"
+        assert result.name == "Truecaller AB"
+        assert call_order == [
+            ("yfinance", "TRUE.B.ST"),
+            ("yahooquery", "TRUE.B.ST"),
+            ("fmp", "TRUE.B.ST"),
+            ("eodhd", "TRUE.B.ST"),
+            ("yfinance", "TRUE-B.ST"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_base_ticker_fallback_resolves_after_alias_fails(self):
+        async def yf_side_effect(symbol):
+            if symbol == "TRUE.ST":
+                return "Truecaller AB"
+            return None
+
+        with (
+            patch("src.ticker_utils._try_yfinance", side_effect=yf_side_effect),
+            patch(
+                "src.ticker_utils._try_yahooquery", new_callable=AsyncMock
+            ) as mock_yq,
+            patch("src.ticker_utils._try_fmp", new_callable=AsyncMock) as mock_fmp,
+            patch("src.ticker_utils._try_eodhd", new_callable=AsyncMock) as mock_eodhd,
+        ):
+            mock_yq.return_value = None
+            mock_fmp.return_value = None
+            mock_eodhd.return_value = None
+            result = await resolve_company_name("TRUE.B.ST")
+
+        assert result.is_resolved is True
+        assert result.source == "yfinance"
+        assert result.name == "Truecaller AB"
+
+    @pytest.mark.asyncio
+    async def test_unresolved_logs_lookup_candidates_after_candidate_exhaustion(self):
+        with (
+            patch("src.ticker_utils._try_yfinance", new_callable=AsyncMock) as mock_yf,
+            patch(
+                "src.ticker_utils._try_yahooquery", new_callable=AsyncMock
+            ) as mock_yq,
+            patch("src.ticker_utils._try_fmp", new_callable=AsyncMock) as mock_fmp,
+            patch("src.ticker_utils._try_eodhd", new_callable=AsyncMock) as mock_eodhd,
+            patch("src.ticker_utils.logger") as mock_logger,
+        ):
+            mock_yf.return_value = None
+            mock_yq.return_value = None
+            mock_fmp.return_value = None
+            mock_eodhd.return_value = None
+            result = await resolve_company_name("TRUE.B.ST")
+
+        assert result.is_resolved is False
+        assert result.source == "unresolved"
+        assert result.name == "TRUE.B.ST"
+        mock_logger.debug.assert_any_call(
+            "company_name_unresolved",
+            ticker="TRUE.B.ST",
+            requested_ticker="TRUE.B.ST",
+            lookup_candidates=["TRUE.B.ST", "TRUE-B.ST", "TRUE.ST"],
+        )
 
 
 class TestFMPGetCompanyName:
