@@ -523,6 +523,9 @@ def create_auditor_llm(
         "output_version": "responses/v1",
     }
 
+    if model_name.startswith("gpt-5") and "pro" not in model_name:
+        kwargs["reasoning_effort"] = "medium"
+
     llm = ChatOpenAI(**kwargs)
     llm._configured_max_completion_tokens = kwargs["max_completion_tokens"]
     return llm

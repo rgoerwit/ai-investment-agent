@@ -10,6 +10,7 @@ Tests cover:
 6. Graph integration
 """
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -166,6 +167,57 @@ class TestGetOwnershipStructureTool:
 
         assert data.get("data_quality") in ["PARTIAL", "COMPLETE"]
         assert isinstance(data.get("institutional_holders"), list)
+
+    @pytest.mark.asyncio
+    @patch("src.tools.ownership.yf.Ticker")
+    @patch("src.tools.ownership._load_ownership_property", new_callable=AsyncMock)
+    async def test_tool_marks_single_timed_out_section_partial(
+        self, mock_load_property, mock_ticker
+    ):
+        """One timed-out ownership section should degrade cleanly to PARTIAL."""
+        from src.toolkit import get_ownership_structure
+
+        mock_ticker.return_value = MagicMock()
+        mock_load_property.side_effect = [
+            asyncio.TimeoutError(),
+            pd.DataFrame(),
+            pd.DataFrame([["12%", "Institutions"]]),
+        ]
+
+        result = await get_ownership_structure.ainvoke({"ticker": "TEST"})
+        data = json.loads(result)
+
+        assert data["institutional_holders_status"] == "DATA_UNAVAILABLE"
+        assert data["insider_transactions_status"] == "EMPTY"
+        assert data["major_holders_status"] == "FOUND"
+        assert data["data_quality"] == "PARTIAL"
+
+    @pytest.mark.asyncio
+    @patch("src.tools.ownership.yf.Ticker")
+    @patch("src.tools.ownership._load_ownership_property", new_callable=AsyncMock)
+    async def test_tool_handles_multiple_timed_out_sections(
+        self, mock_load_property, mock_ticker
+    ):
+        """Multiple timed-out sections should still return valid JSON."""
+        from src.toolkit import get_ownership_structure
+
+        mock_ticker.return_value = MagicMock()
+        mock_load_property.side_effect = [
+            asyncio.TimeoutError(),
+            asyncio.TimeoutError(),
+            asyncio.TimeoutError(),
+        ]
+
+        result = await get_ownership_structure.ainvoke({"ticker": "TEST"})
+        data = json.loads(result)
+
+        assert data["institutional_holders_status"] == "DATA_UNAVAILABLE"
+        assert data["insider_transactions_status"] == "DATA_UNAVAILABLE"
+        assert data["major_holders_status"] == "DATA_UNAVAILABLE"
+        assert data["data_quality"] == "PARTIAL"
+        assert data["institutional_holders"] == []
+        assert data["insider_transactions"] == []
+        assert data["major_holders"] == {}
 
 
 class TestExtractValueTrapScore:

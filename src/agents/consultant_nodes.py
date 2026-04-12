@@ -30,35 +30,141 @@ logger = structlog.get_logger(__name__)
 CONSULTANT_CALL_TIMEOUT_SECONDS = 90.0
 CONSULTANT_TOTAL_TIMEOUT_SECONDS = 240.0
 
+_RECOVERABLE_AUDITOR_STATUSES = frozenset(
+    {"INSUFFICIENT_DATA", "UNAVAILABLE", "CONTEXT_LIMIT_EXCEEDED"}
+)
 
-def _canonicalize_forensic_auditor_output(content: str) -> str:
-    lines = content.splitlines()
-    updated = False
 
-    for index, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("VERDICT:"):
-            return content
-
-        match = (
-            re.match(r"(?i)^(?P<indent>\s*)\*\*verdict:\*\*\s*(?P<value>\S.*)$", line)
-            or re.match(
-                r"(?i)^(?P<indent>\s*)\*\*verdict\*\*:\s*(?P<value>\S.*)$", line
-            )
-            or re.match(r"(?i)^(?P<indent>\s*)verdict:\s*(?P<value>\S.*)$", line)
-        )
-        if match:
-            lines[index] = f"{match.group('indent')}VERDICT: {match.group('value')}"
-            updated = True
-            break
-
-    if not updated:
+def _inject_forensic_verdict_if_missing(content: str) -> str:
+    if "FORENSIC_DATA_BLOCK:" not in content:
         return content
 
-    normalized = "\n".join(lines)
-    if content.endswith("\n"):
+    status_match = re.search(r"(?im)^\s*STATUS:\s*([A-Z_]+)\s*$", content)
+    if not status_match:
+        return content
+
+    status = status_match.group(1)
+    if status not in _RECOVERABLE_AUDITOR_STATUSES:
+        return content
+    if re.search(r"(?im)^\s*VERDICT:\s*\S+", content):
+        return content
+
+    if status == "INSUFFICIENT_DATA":
+        verdict = (
+            "VERDICT: Unable to perform comprehensive forensic audit from "
+            "verified primary source documents."
+        )
+    else:
+        verdict = "VERDICT: Rely on DATA_BLOCK metrics for this ticker."
+
+    content = content.rstrip()
+    return f"{content}\n{verdict}\n"
+
+
+def _expand_inline_forensic_stub(content: str) -> str:
+    match = re.search(
+        r"(?is)^\s*FORENSIC_DATA_BLOCK:\s*STATUS\s*=\s*(?P<status>[A-Z_]+)"
+        r"(?P<rest>.*)$",
+        content.strip(),
+    )
+    if not match:
+        return content
+
+    status = match.group("status")
+    rest = match.group("rest").strip()
+    if not rest:
+        return f"FORENSIC_DATA_BLOCK:\nSTATUS: {status}\n"
+
+    meta_parts: list[str] = []
+    detail_lines: list[str] = []
+    for part in [piece.strip(" ,") for piece in rest.split(",") if piece.strip(" ,")]:
+        if "=" not in part:
+            detail_lines.append(part)
+            continue
+        key, value = [segment.strip() for segment in part.split("=", 1)]
+        key_upper = key.upper()
+        if key_upper == "REASON":
+            detail_lines.append(f"REASON: {value}")
+        else:
+            meta_parts.append(f"{key_upper}={value}")
+
+    rebuilt = ["FORENSIC_DATA_BLOCK:", f"STATUS: {status}"]
+    if meta_parts:
+        rebuilt.append(f"META: {' | '.join(meta_parts)}")
+    rebuilt.extend(detail_lines)
+    return "\n".join(rebuilt) + "\n"
+
+
+def _canonicalize_forensic_auditor_output(content: str) -> str:
+    normalized = content
+    replacements = (
+        (
+            r"(?im)^(?P<indent>\s*)(?:\*\*)?\s*FORENSIC(?:[ _]DATA)?[ _]?BLOCK\s*(?:\*\*)?\s*:?\s*$",
+            r"\g<indent>FORENSIC_DATA_BLOCK:",
+        ),
+        (
+            r"(?im)^(?P<indent>\s*)##+\s*FORENSIC_DATA_BLOCK\s*:?\s*$",
+            r"\g<indent>FORENSIC_DATA_BLOCK:",
+        ),
+        (
+            r"(?im)^(?P<indent>\s*)(?:\*\*)?\s*STATUS\s*(?:\*\*)?\s*:\s*(?P<value>\S.*)$",
+            r"\g<indent>STATUS: \g<value>",
+        ),
+        (
+            r"(?im)^(?P<indent>\s*)STATUS:\s*\*\*(?P<value>.+?)\*\*\s*$",
+            r"\g<indent>STATUS: \g<value>",
+        ),
+        (
+            r"(?im)^(?P<indent>\s*)\*\*verdict:\*\*\s*(?P<value>\S.*)$",
+            r"\g<indent>VERDICT: \g<value>",
+        ),
+        (
+            r"(?im)^(?P<indent>\s*)\*\*verdict\*\*:\s*(?P<value>\S.*)$",
+            r"\g<indent>VERDICT: \g<value>",
+        ),
+        (
+            r"(?im)^(?P<indent>\s*)verdict:\s*(?P<value>\S.*)$",
+            r"\g<indent>VERDICT: \g<value>",
+        ),
+        (
+            r"(?im)^(?P<indent>\s*)VERDICT:\s*\*\*(?P<value>.+?)\*\*\s*$",
+            r"\g<indent>VERDICT: \g<value>",
+        ),
+    )
+    for pattern, replacement in replacements:
+        normalized = re.sub(pattern, replacement, normalized)
+
+    normalized = _expand_inline_forensic_stub(normalized)
+    normalized = _inject_forensic_verdict_if_missing(normalized)
+
+    if content.endswith("\n") and not normalized.endswith("\n"):
         normalized += "\n"
     return normalized
+
+
+async def _repair_forensic_auditor_output(
+    llm,
+    *,
+    invalid_output: str,
+) -> str:
+    repair_instruction = (
+        "Rewrite the following forensic auditor output into a final compliant report. "
+        "Preserve the factual content. "
+        "If the content indicates missing, stale, incomplete, unavailable, or "
+        "unverified filings, emit the canonical INSUFFICIENT_DATA fallback form. "
+        "Output only the repaired final report. "
+        "Do not call tools. "
+        "End with raw labels exactly as FORENSIC_DATA_BLOCK:, STATUS:, and VERDICT:."
+    )
+    response = await _invoke_agent_loop_llm(
+        llm,
+        [
+            SystemMessage(content=repair_instruction),
+            HumanMessage(content=invalid_output),
+        ],
+        context="global_forensic_auditor_repair",
+    )
+    return message_utils.extract_string_content(response.content)
 
 
 def _remaining_consultant_budget(deadline: float) -> float:
@@ -869,6 +975,21 @@ Perform a forensic audit using your tools."""
         try:
             response_str = await _run_auditor_loop(llm, agent_prompt.system_message)
             response_str = _canonicalize_forensic_auditor_output(response_str)
+            validation = validate_required_output(
+                "global_forensic_auditor", response_str
+            )
+
+            if not validation["ok"]:
+                repaired = await _repair_forensic_auditor_output(
+                    llm,
+                    invalid_output=response_str,
+                )
+                repaired = _canonicalize_forensic_auditor_output(repaired)
+                repaired_validation = validate_required_output(
+                    "global_forensic_auditor", repaired
+                )
+                response_str = repaired
+                validation = repaired_validation
 
             from src.utils import detect_truncation
 
@@ -882,9 +1003,6 @@ Perform a forensic audit using your tools."""
                 response=None,
                 content=response_str,
                 trunc_info=trunc_info,
-            )
-            validation = validate_required_output(
-                "global_forensic_auditor", response_str
             )
             log_output_diagnostics(
                 agent_key="global_forensic_auditor",
@@ -905,6 +1023,7 @@ Perform a forensic audit using your tools."""
                     "auditor_invalid_structure",
                     ticker=ticker,
                     missing_sections=validation["missing"],
+                    output_preview=response_str[:400].replace("\n", " "),
                 )
                 result = failure_artifact(
                     "auditor_report",

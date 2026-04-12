@@ -1,5 +1,6 @@
 from unittest.mock import Mock, patch
 
+from src.agents.consultant_nodes import _canonicalize_forensic_auditor_output
 from src.agents.output_validation import (
     extract_completion_tokens,
     get_configured_output_cap,
@@ -142,6 +143,49 @@ def test_auditor_validation_accepts_fenced_forensic_block():
     validation = validate_required_output("global_forensic_auditor", content)
 
     assert validation["ok"] is True
+
+
+def test_auditor_validation_accepts_canonicalized_skt_style_fallback():
+    content = (
+        "## FORENSIC AUDITOR REPORT\n\n"
+        "**STATUS**: INSUFFICIENT_DATA\n\n"
+        "FORENSIC_DATA_BLOCK:\n"
+        "STATUS: INSUFFICIENT_DATA\n"
+        "META: UNKNOWN | Report_Date: UNKNOWN\n"
+    )
+
+    validation = validate_required_output(
+        "global_forensic_auditor",
+        _canonicalize_forensic_auditor_output(content),
+    )
+
+    assert validation["ok"] is True
+
+
+def test_auditor_validation_accepts_canonicalized_inline_stub():
+    content = (
+        "FORENSIC_DATA_BLOCK: STATUS=INSUFFICIENT_DATA, "
+        "REASON=STALE_DATA, REPORT_DATE=2025-06-30, AGE=9 months"
+    )
+
+    validation = validate_required_output(
+        "global_forensic_auditor",
+        _canonicalize_forensic_auditor_output(content),
+    )
+
+    assert validation["ok"] is True
+
+
+def test_auditor_validation_rejects_prose_only_output():
+    content = "I could not verify the statements or auditor report for this ticker."
+
+    validation = validate_required_output(
+        "global_forensic_auditor",
+        _canonicalize_forensic_auditor_output(content),
+    )
+
+    assert validation["ok"] is False
+    assert "forensic_block" in validation["missing"]
 
 
 def test_auditor_validation_fails_closed_for_invalid_structure():

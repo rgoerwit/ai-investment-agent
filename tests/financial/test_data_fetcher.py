@@ -293,6 +293,48 @@ class TestSmartMerge:
         conflict = meta["source_conflicts"]["returnOnEquity"]
         assert {conflict["old"], conflict["new"]} == {2.0, 0.2}
 
+    def test_microstructure_fields_do_not_emit_source_conflicts(self, fetcher):
+        source_results = {
+            "yfinance": {
+                "bidSize": 10760.0,
+                "askSize": 10000.0,
+                "bid": 1.23,
+                "ask": 1.25,
+            },
+            "yahooquery": {
+                "bidSize": 1076000.0,
+                "askSize": 1000000.0,
+                "bid": 123.0,
+                "ask": 125.0,
+            },
+        }
+
+        merged, meta = fetcher._smart_merge_with_quality(source_results, "RY4C.DE")
+
+        assert merged["bidSize"] == 10760.0
+        assert merged["askSize"] == 10000.0
+        assert merged["bid"] == 1.23
+        assert merged["ask"] == 1.25
+        assert "bidSize" not in meta["source_conflicts"]
+        assert "askSize" not in meta["source_conflicts"]
+        assert "bid" not in meta["source_conflicts"]
+        assert "ask" not in meta["source_conflicts"]
+
+    def test_resolved_by_quality_forward_pe_conflicts_stay_in_metadata(self, fetcher):
+        source_results = {
+            "yfinance": {"forwardPE": 8.1212},
+            "yahooquery": {"forwardPE": 77.9191},
+        }
+
+        merged, meta = fetcher._smart_merge_with_quality(source_results, "SEA1.OL")
+
+        assert merged["forwardPE"] == 8.1212
+        conflict = meta["source_conflicts"]["forwardPE"]
+        assert conflict["field_class"] == "valuation"
+        assert conflict["resolved_by_quality"] is True
+        assert conflict["winner_quality"] == 9
+        assert conflict["loser_quality"] == 6
+
 
 class TestTavilyGapFilling:
     """Verify mandatory gap filling logic."""
@@ -459,6 +501,43 @@ class TestPanicMode:
             assert not all(
                 term in query.lower() for term in ["p/e", "price", "market cap"]
             )
+
+    @pytest.mark.asyncio
+    async def test_tavily_gap_fill_name_lookup_timeout_falls_back_to_symbol(
+        self, fetcher
+    ):
+        """Timed-out company-name lookups should not block gap filling."""
+        fetcher.tavily_client = MagicMock()
+        original_wait_for = asyncio.wait_for
+
+        async def slow_to_thread(_func):
+            await asyncio.sleep(1)
+
+        async def fast_timeout(awaitable, timeout):
+            return await original_wait_for(awaitable, timeout=0.01)
+
+        with patch("src.data.fetcher.yf.Ticker", return_value=MagicMock()):
+            with patch(
+                "src.data.fetcher.asyncio.to_thread",
+                side_effect=slow_to_thread,
+            ):
+                with patch(
+                    "src.data.fetcher.asyncio.wait_for", side_effect=fast_timeout
+                ):
+                    with patch(
+                        "src.data.fetcher.generate_strict_search_query",
+                        side_effect=lambda symbol, company_name, term: (
+                            f"{symbol}|{company_name}|{term}"
+                        ),
+                    ):
+                        with patch(
+                            "src.data.fetcher.search_tavily_inspected"
+                        ) as mock_search:
+                            mock_search.return_value = {"results": []}
+                            await fetcher._fetch_tavily_gaps("TEST", ["returnOnEquity"])
+
+        query = mock_search.call_args.args[0]
+        assert query.startswith("TEST|TEST|")
 
 
 class TestCalculatedMetrics:

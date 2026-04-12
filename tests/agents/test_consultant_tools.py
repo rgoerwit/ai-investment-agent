@@ -4,6 +4,7 @@ Tests for consultant verification tools.
 Tests both spot_check_metric (yfinance) and spot_check_metric_alt (FMP) tools.
 """
 
+import asyncio
 import json
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -46,6 +47,30 @@ class TestSpotCheckMetric:
         assert result["ticker"] == "7203.T"
         assert result["metric"] == "trailingPE"
         assert result["source"] == "yfinance_direct"
+
+    @pytest.mark.asyncio
+    async def test_timeout_returns_error_payload(self):
+        """Stalled yfinance access should return structured timeout JSON."""
+
+        async def slow_to_thread(_func):
+            await asyncio.sleep(1)
+
+        with patch("src.consultant_tools.yf.Ticker") as mock_ticker:
+            mock_ticker.return_value.info = {"trailingPE": 12.5}
+            with patch("src.consultant_tools.SPOT_CHECK_TIMEOUT_SECONDS", 0.01):
+                with patch(
+                    "src.consultant_tools.asyncio.to_thread",
+                    side_effect=slow_to_thread,
+                ):
+                    result = json.loads(
+                        await spot_check_metric.ainvoke(
+                            {"ticker": "7203.T", "metric": "trailingPE"}
+                        )
+                    )
+
+        assert result["ticker"] == "7203.T"
+        assert result["metric"] == "trailingPE"
+        assert "timed out" in result["error"].lower()
 
 
 class TestSpotCheckMetricAlt:

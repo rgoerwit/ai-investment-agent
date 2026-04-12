@@ -12,6 +12,8 @@ from src.tools import shared
 
 logger = structlog.get_logger(__name__)
 
+OFFICIAL_FILINGS_TIMEOUT_SECONDS = 20.0
+
 
 @tool
 async def search_foreign_sources(
@@ -92,7 +94,21 @@ async def get_official_filings(
     normalized = normalize_ticker(ticker)
     logger.info("official_filings_lookup", ticker=normalized)
 
-    result = await registry.fetch(normalized)
+    try:
+        result = await asyncio.wait_for(
+            registry.fetch(normalized),
+            timeout=OFFICIAL_FILINGS_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "official_filings_timeout",
+            ticker=normalized,
+            timeout_seconds=OFFICIAL_FILINGS_TIMEOUT_SECONDS,
+        )
+        return (
+            f"Official filing lookup timed out for {normalized}. "
+            "Use search_foreign_sources instead."
+        )
     if result is None:
         return (
             f"No official filing API available for {normalized}. "

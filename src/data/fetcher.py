@@ -118,10 +118,42 @@ PERCENT_LIKE_FIELDS = frozenset(
     }
 )
 NON_FINANCIAL_METADATA_FIELDS = frozenset({"maxAge"})
+NON_ACTIONABLE_CONFLICT_FIELDS = frozenset(
+    {
+        "bidSize",
+        "askSize",
+        "bid",
+        "ask",
+        "regularMarketBidSize",
+        "regularMarketAskSize",
+    }
+)
+CRITICAL_ANALYSIS_FIELDS = (
+    "trailingPE",
+    "forwardPE",
+    "priceToBook",
+    "pegRatio",
+    "returnOnEquity",
+    "returnOnAssets",
+    "debtToEquity",
+    "currentRatio",
+    "operatingMargins",
+    "grossMargins",
+    "profitMargins",
+    "revenueGrowth",
+    "earningsGrowth",
+    "operatingCashflow",
+    "freeCashflow",
+    "numberOfAnalystOpinions",
+)
+ANALYSIS_CRITICAL_CONFLICT_FIELDS = frozenset(CRITICAL_ANALYSIS_FIELDS)
 
 RECENT_SPLIT_WINDOW_DAYS = 180
 SPLIT_RATIO_MATCH_TOLERANCE = 0.25
 QUARTER_DATE_RECONCILE_WINDOW_DAYS = 45
+FORWARD_PE_OUTLIER_THRESHOLD = 200.0
+FORWARD_PE_REFERENCE_MAX = 100.0
+FORWARD_PE_OUTLIER_RATIO = 5.0
 
 # Source quality rankings (higher = more reliable)
 SOURCE_QUALITY = {
@@ -157,6 +189,31 @@ def _normalize_percent_pair(old_val: float, new_val: float) -> tuple[float, floa
         return abs(left - right) / baseline
 
     return min(candidates, key=relative_gap)
+
+
+def _coerce_positive_float(value: Any) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if numeric > 0 else None
+
+
+def _conflict_field_class(field: str) -> str:
+    if field in NON_ACTIONABLE_CONFLICT_FIELDS:
+        return "microstructure"
+    if field in ANALYSIS_CRITICAL_CONFLICT_FIELDS:
+        return "valuation"
+    return "other"
+
+
+def _is_actionable_conflict(
+    field: str, left_quality: float, right_quality: float
+) -> bool:
+    if field not in ANALYSIS_CRITICAL_CONFLICT_FIELDS:
+        return False
+    quality_gap = abs(left_quality - right_quality)
+    return quality_gap <= 1.0 or (left_quality >= 9 and right_quality >= 9)
 
 
 def _normalize_history_bound(value: str | None) -> str | None:
@@ -1796,6 +1853,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         PHASE 3: Intelligent merge with quality scoring.
         Updated to include EODHD and Alpha Vantage in the priority logic and field-specific override checks.
         """
+        source_results = self._quarantine_forward_pe_outlier(source_results, symbol)
         merged = {}
         field_sources = {}
         field_quality = {}
@@ -1887,36 +1945,58 @@ class SmartMarketDataFetcher(FinancialFetcher):
                         except (ValueError, TypeError):
                             pass
 
-                    # Record source conflicts when replacing with >20% variance.
-                    # Normalize decimal-vs-percentage fields before comparison.
-                    if key in merged and merged[key] is not None and value is not None:
-                        if key in NON_FINANCIAL_METADATA_FIELDS:
-                            merged[key] = value
-                            field_sources[key] = source_name
-                            field_quality[key] = quality
-                            continue
-                        try:
-                            old_val = float(merged[key])
-                            new_val = float(value)
-                            if key in PERCENT_LIKE_FIELDS:
-                                old_val, new_val = _normalize_percent_pair(
-                                    old_val, new_val
-                                )
-                            if (
-                                old_val != 0
-                                and abs(new_val - old_val) / abs(old_val) > 0.20
-                            ):
-                                source_conflicts[key] = {
-                                    "old": round(old_val, 4),
-                                    "old_source": field_sources.get(key, "unknown"),
-                                    "new": round(new_val, 4),
-                                    "new_source": source_name,
-                                    "variance_pct": round(
-                                        abs(new_val - old_val) / abs(old_val) * 100, 1
-                                    ),
-                                }
-                        except (ValueError, TypeError):
-                            pass  # Non-numeric fields — skip
+                    if key in NON_FINANCIAL_METADATA_FIELDS:
+                        merged[key] = value
+                        field_sources[key] = source_name
+                        field_quality[key] = quality
+                        continue
+
+                # Record source conflicts when values differ by >20%.
+                # Keep analysis-relevant conflicts in metadata even when the merge
+                # winner is obvious by source quality.
+                if (
+                    key in merged
+                    and merged[key] is not None
+                    and value is not None
+                    and key not in NON_FINANCIAL_METADATA_FIELDS
+                    and key not in NON_ACTIONABLE_CONFLICT_FIELDS
+                ):
+                    try:
+                        old_val = float(merged[key])
+                        new_val = float(value)
+                        if key in PERCENT_LIKE_FIELDS:
+                            old_val, new_val = _normalize_percent_pair(old_val, new_val)
+                        if (
+                            old_val != 0
+                            and abs(new_val - old_val) / abs(old_val) > 0.20
+                        ):
+                            old_source = field_sources.get(key, "unknown")
+                            old_quality = field_quality.get(key, quality)
+                            if should_use:
+                                winner_quality = quality
+                                loser_quality = old_quality
+                            else:
+                                winner_quality = old_quality
+                                loser_quality = quality
+                            source_conflicts[key] = {
+                                "old": round(old_val, 4),
+                                "old_source": old_source,
+                                "new": round(new_val, 4),
+                                "new_source": source_name,
+                                "variance_pct": round(
+                                    abs(new_val - old_val) / abs(old_val) * 100, 1
+                                ),
+                                "field_class": _conflict_field_class(key),
+                                "resolved_by_quality": not _is_actionable_conflict(
+                                    key, old_quality, quality
+                                ),
+                                "winner_quality": winner_quality,
+                                "loser_quality": loser_quality,
+                            }
+                    except (ValueError, TypeError):
+                        pass  # Non-numeric fields — skip
+
+                if should_use:
                     merged[key] = value
                     field_sources[key] = source_name
                     field_quality[key] = quality
@@ -1931,14 +2011,36 @@ class SmartMarketDataFetcher(FinancialFetcher):
         }
 
         if source_conflicts:
-            logger.warning(
-                "source_data_conflicts",
-                symbol=symbol,
-                conflicts={
-                    k: f"{v['old_source']}={v['old']} vs {v['new_source']}={v['new']} (Δ{v['variance_pct']}%)"
-                    for k, v in source_conflicts.items()
-                },
-            )
+            formatted_conflicts = {
+                k: f"{v['old_source']}={v['old']} vs {v['new_source']}={v['new']} (Δ{v['variance_pct']}%)"
+                for k, v in source_conflicts.items()
+            }
+            actionable_conflicts = {
+                key: value
+                for key, value in source_conflicts.items()
+                if not value["resolved_by_quality"]
+            }
+            resolved_conflicts = {
+                key: value
+                for key, value in source_conflicts.items()
+                if value["resolved_by_quality"]
+            }
+            if actionable_conflicts:
+                logger.warning(
+                    "source_data_conflicts",
+                    symbol=symbol,
+                    conflicts={
+                        key: formatted_conflicts[key] for key in actionable_conflicts
+                    },
+                )
+            if resolved_conflicts:
+                logger.debug(
+                    "source_data_conflicts_resolved",
+                    symbol=symbol,
+                    conflicts={
+                        key: formatted_conflicts[key] for key in resolved_conflicts
+                    },
+                )
 
         logger.info(
             "smart_merge_complete",
@@ -1949,6 +2051,66 @@ class SmartMarketDataFetcher(FinancialFetcher):
         )
 
         return merged, metadata
+
+    def _quarantine_forward_pe_outlier(
+        self, source_results: dict[str, dict | None], symbol: str
+    ) -> dict[str, dict | None]:
+        candidates: list[tuple[str, float]] = []
+        for source_name, source_data in source_results.items():
+            if not source_data:
+                continue
+            forward_pe = _coerce_positive_float(source_data.get("forwardPE"))
+            if forward_pe is not None:
+                candidates.append((source_name, forward_pe))
+
+        if len(candidates) < 2:
+            return source_results
+
+        reference_candidates = [
+            (source_name, value)
+            for source_name, value in candidates
+            if value <= FORWARD_PE_REFERENCE_MAX
+        ]
+        if not reference_candidates:
+            return source_results
+
+        outliers = [
+            (source_name, value)
+            for source_name, value in candidates
+            if value > FORWARD_PE_OUTLIER_THRESHOLD
+            and any(
+                value / reference_value >= FORWARD_PE_OUTLIER_RATIO
+                for _, reference_value in reference_candidates
+            )
+        ]
+        if len(outliers) != 1:
+            return source_results
+
+        outlier_source, outlier_value = outliers[0]
+        sanitized_results: dict[str, dict | None] = {}
+        for source_name, source_data in source_results.items():
+            if not source_data:
+                sanitized_results[source_name] = source_data
+                continue
+            updated = source_data.copy()
+            if source_name == outlier_source:
+                updated["forwardPE"] = None
+                updated["_forwardPE_quarantine_reason"] = (
+                    "single_source_outlier_vs_plausible_peer"
+                )
+            sanitized_results[source_name] = updated
+
+        logger.info(
+            "forward_pe_outlier_quarantined",
+            symbol=symbol,
+            source=outlier_source,
+            forward_pe=round(outlier_value, 4),
+            reference_values={
+                source_name: round(value, 4)
+                for source_name, value in reference_candidates
+            },
+        )
+        return sanitized_results
 
     def _calculate_coverage(self, data: dict) -> float:
         """Calculate percentage of IMPORTANT_FIELDS present."""
@@ -1961,25 +2123,11 @@ class SmartMarketDataFetcher(FinancialFetcher):
 
     def _identify_critical_gaps(self, data: dict) -> list[str]:
         """Identify which critical fields are missing."""
-        critical = [
-            "trailingPE",
-            "forwardPE",
-            "priceToBook",
-            "pegRatio",
-            "returnOnEquity",
-            "returnOnAssets",
-            "debtToEquity",
-            "currentRatio",
-            "operatingMargins",
-            "grossMargins",
-            "profitMargins",
-            "revenueGrowth",
-            "earningsGrowth",
-            "operatingCashflow",
-            "freeCashflow",
-            "numberOfAnalystOpinions",
+        return [
+            field
+            for field in CRITICAL_ANALYSIS_FIELDS
+            if field not in data or data[field] is None
         ]
-        return [f for f in critical if f not in data or data[f] is None]
 
     async def _fetch_tavily_gaps(
         self, symbol: str, missing_fields: list[str]
@@ -2004,11 +2152,11 @@ class SmartMarketDataFetcher(FinancialFetcher):
             import yfinance as yf
 
             ticker_obj = yf.Ticker(symbol)
-            company_name = (
-                ticker_obj.info.get("longName")
-                or ticker_obj.info.get("shortName")
-                or symbol
+            info = await asyncio.wait_for(
+                asyncio.to_thread(lambda: ticker_obj.info),
+                timeout=5,
             )
+            company_name = info.get("longName") or info.get("shortName") or symbol
         except Exception:
             company_name = symbol
 

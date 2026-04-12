@@ -32,6 +32,48 @@ class TestDataFormatEdgeCases:
         assert "VERDICT: Unable to complete forensic audit." in normalized
         assert "**Verdict:**" not in normalized
 
+    def test_auditor_output_injects_recoverable_fallback_verdict(self):
+        content = (
+            "## FORENSIC AUDITOR REPORT\n\n"
+            "**STATUS**: INSUFFICIENT_DATA\n\n"
+            "FORENSIC_DATA_BLOCK:\n"
+            "STATUS: INSUFFICIENT_DATA\n"
+            "META: N/A\n"
+        )
+
+        normalized = _canonicalize_forensic_auditor_output(content)
+
+        assert "STATUS: INSUFFICIENT_DATA" in normalized
+        assert (
+            "VERDICT: Unable to perform comprehensive forensic audit from "
+            "verified primary source documents."
+        ) in normalized
+
+    def test_auditor_output_expands_inline_stub(self):
+        content = (
+            "FORENSIC_DATA_BLOCK: STATUS=INSUFFICIENT_DATA, "
+            "REASON=STALE_DATA, REPORT_DATE=2025-06-30, AGE=9 months"
+        )
+
+        normalized = _canonicalize_forensic_auditor_output(content)
+
+        assert "FORENSIC_DATA_BLOCK:" in normalized
+        assert "STATUS: INSUFFICIENT_DATA" in normalized
+        assert "REASON: STALE_DATA" in normalized
+        assert "META: REPORT_DATE=2025-06-30 | AGE=9 months" in normalized
+
+    def test_auditor_output_normalizes_block_and_status_labels(self):
+        content = (
+            "FORENSIC BLOCK:\n"
+            "STATUS: **UNAVAILABLE**\n"
+            "META: CONTEXT_LIMIT_EXCEEDED\n"
+        )
+
+        normalized = _canonicalize_forensic_auditor_output(content)
+
+        assert "FORENSIC_DATA_BLOCK:" in normalized
+        assert "STATUS: UNAVAILABLE" in normalized
+
     @pytest.mark.asyncio
     async def test_consultant_handles_empty_reports(self):
         """Test consultant gracefully handles empty analyst reports."""

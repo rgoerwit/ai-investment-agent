@@ -12,6 +12,8 @@ import os
 import socket
 import sys
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -1828,9 +1830,12 @@ def _load_company_name_for_output(ticker: str) -> str | None:
     try:
         import yfinance as yf
 
-        ticker_obj = yf.Ticker(ticker)
-        info = ticker_obj.info
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(lambda: yf.Ticker(ticker).info)
+            info = future.result(timeout=5)
         return info.get("longName") or info.get("shortName")
+    except FuturesTimeoutError:
+        return None
     except Exception:
         return None
 

@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -186,3 +187,28 @@ async def test_execute_logs_structured_failure_details_when_runner_fails():
     assert kwargs["failure_kind"] == "rate_limit"
     assert kwargs["retryable"] is True
     assert kwargs["error_type"] == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_execute_times_out_runner_and_skips_after_hooks():
+    events: list[str] = []
+    service = ToolExecutionService(hooks=[PassThroughHook("audit", events)])
+
+    async def slow_runner(_args):
+        await asyncio.sleep(1)
+
+    with patch("src.tooling.runtime.TOOL_CALL_TIMEOUT_SECONDS", 0.01):
+        with patch("src.tooling.runtime.logger") as mock_logger:
+            with pytest.raises(TimeoutError, match="get_news"):
+                await service.execute(
+                    ToolInvocation(
+                        name="get_news", args={"ticker": "AAPL"}, source="editor"
+                    ),
+                    runner=slow_runner,
+                )
+
+    assert events == ["before:audit"]
+    mock_logger.warning.assert_called_once()
+    kwargs = mock_logger.warning.call_args.kwargs
+    assert kwargs["tool"] == "get_news"
+    assert kwargs["timeout_seconds"] == 0.01

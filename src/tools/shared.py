@@ -11,6 +11,8 @@ from src.ticker_utils import normalize_company_name
 
 logger = structlog.get_logger(__name__)
 
+DDG_SEARCH_TIMEOUT_SECONDS = 8.0
+
 TAVILY_AVAILABLE = False
 tavily_tool = None
 _tavily_api_key = config.get_tavily_api_key()
@@ -196,12 +198,22 @@ async def _ddg_search(query: str, max_results: int = 5) -> list[dict]:
         from ddgs import DDGS
 
         def _sync_search():
-            return DDGS().text(query, max_results=max_results)
+            return DDGS(timeout=5).text(query, max_results=max_results)
 
-        results = await asyncio.to_thread(_sync_search)
+        results = await asyncio.wait_for(
+            asyncio.to_thread(_sync_search),
+            timeout=DDG_SEARCH_TIMEOUT_SECONDS,
+        )
         return results if results else []
     except ImportError:
         logger.debug("ddgs_not_installed")
+        return []
+    except asyncio.TimeoutError:
+        logger.debug(
+            "ddg_search_timeout",
+            query=query[:100],
+            timeout_seconds=DDG_SEARCH_TIMEOUT_SECONDS,
+        )
         return []
     except Exception as exc:
         logger.debug("ddg_search_error", error=str(exc))

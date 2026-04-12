@@ -1,5 +1,6 @@
 """Ownership-analysis tool implementations."""
 
+import asyncio
 import json
 from typing import Annotated
 
@@ -11,6 +12,27 @@ from langchain_core.tools import tool
 from src.ticker_utils import normalize_ticker
 
 logger = structlog.get_logger(__name__)
+
+OWNERSHIP_SECTION_TIMEOUT_SECONDS = 8.0
+
+
+async def _load_ownership_property(
+    yf_ticker: yf.Ticker, property_name: str, ticker: str
+) -> object:
+    """Bound blocking yfinance ownership-property access."""
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(lambda: getattr(yf_ticker, property_name)),
+            timeout=OWNERSHIP_SECTION_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.debug(
+            "ownership_structure_timeout",
+            ticker=ticker,
+            section=property_name,
+            timeout_seconds=OWNERSHIP_SECTION_TIMEOUT_SECONDS,
+        )
+        raise
 
 
 @tool
@@ -42,7 +64,9 @@ async def get_ownership_structure(
         yf_ticker = yf.Ticker(normalized)
 
         try:
-            inst = yf_ticker.institutional_holders
+            inst = await _load_ownership_property(
+                yf_ticker, "institutional_holders", normalized
+            )
             if inst is None:
                 result["institutional_holders_status"] = "DATA_UNAVAILABLE"
                 result["data_quality"] = "PARTIAL"
@@ -66,7 +90,9 @@ async def get_ownership_structure(
             result["data_quality"] = "PARTIAL"
 
         try:
-            insider = yf_ticker.insider_transactions
+            insider = await _load_ownership_property(
+                yf_ticker, "insider_transactions", normalized
+            )
             if insider is None:
                 result["insider_transactions_status"] = "DATA_UNAVAILABLE"
                 result["data_quality"] = "PARTIAL"
@@ -106,7 +132,9 @@ async def get_ownership_structure(
             result["data_quality"] = "PARTIAL"
 
         try:
-            major = yf_ticker.major_holders
+            major = await _load_ownership_property(
+                yf_ticker, "major_holders", normalized
+            )
             if major is None:
                 result["major_holders_status"] = "DATA_UNAVAILABLE"
                 result["data_quality"] = "PARTIAL"

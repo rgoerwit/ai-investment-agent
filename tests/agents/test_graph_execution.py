@@ -473,6 +473,32 @@ class TestAuditorEnablementContract:
         assert llm is not None
         assert llm.model_name == "gpt-5-mini"
 
+    def test_auditor_gpt5_uses_medium_reasoning_effort(self, monkeypatch):
+        import src.llms as llms
+
+        stub_module = ModuleType("langchain_openai")
+        captured = {}
+
+        class StubChatOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+                self.model_name = kwargs["model"]
+
+        stub_module.ChatOpenAI = StubChatOpenAI
+
+        monkeypatch.setitem(sys.modules, "langchain_openai", stub_module)
+        monkeypatch.setattr(llms.config, "enable_consultant", True)
+        monkeypatch.setattr(
+            type(llms.config), "get_openai_api_key", lambda self: "fake-key"
+        )
+        monkeypatch.setattr(llms.config, "auditor_model", "gpt-5-mini")
+        monkeypatch.setattr(llms.config, "consultant_model", "gpt-5")
+
+        llm = llms.create_auditor_llm()
+
+        assert llm is not None
+        assert captured["reasoning_effort"] == "medium"
+
 
 class TestTradingContext:
     """Test TradingContext dataclass."""

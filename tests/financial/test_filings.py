@@ -565,6 +565,67 @@ class TestDdgSearch:
             assert len(result) == 1
             assert result[0]["title"] == "Test"
 
+    @pytest.mark.asyncio
+    async def test_ddg_search_timeout_returns_empty_list(self):
+        """Outer timeout should turn stalled DDG search into an empty result."""
+        from src.tools.shared import _ddg_search
+
+        async def slow_to_thread(_func):
+            await asyncio.sleep(1)
+
+        with patch("src.tools.shared.DDG_SEARCH_TIMEOUT_SECONDS", 0.01):
+            with patch(
+                "src.tools.shared.asyncio.to_thread",
+                side_effect=slow_to_thread,
+            ):
+                result = await _ddg_search("test query")
+
+        assert result == []
+
+
+class TestForeignSourceSearch:
+    @pytest.mark.asyncio
+    async def test_search_foreign_sources_returns_tavily_when_ddg_stalls(self):
+        from src.tools.research import search_foreign_sources
+
+        mock_ticker = MagicMock()
+        mock_ticker.ticker = "SNTIA.OL"
+
+        with patch("src.tools.research.yf.Ticker", return_value=mock_ticker):
+            with patch(
+                "src.tools.research.shared.extract_company_name_async",
+                new=AsyncMock(return_value="Sentia ASA"),
+            ):
+                with patch("src.tools.research.shared.tavily_tool", object()):
+                    with patch(
+                        "src.tools.research.shared._tavily_search_with_timeout",
+                        new=AsyncMock(
+                            return_value={
+                                "results": [
+                                    {
+                                        "title": "IR page",
+                                        "url": "https://example.com/ir",
+                                        "content": "Official annual report link",
+                                    }
+                                ]
+                            }
+                        ),
+                    ):
+                        with patch(
+                            "src.tools.research.shared._ddg_search",
+                            new=AsyncMock(return_value=[]),
+                        ):
+                            result = await search_foreign_sources.ainvoke(
+                                {
+                                    "ticker": "SNTIA.OL",
+                                    "search_query": "annual report investor relations",
+                                }
+                            )
+
+        assert "Foreign Source Search Results" in result
+        assert "IR page" in result
+        assert "Tavily" in result
+
 
 # ============================================================================
 # get_official_filings Tool Tests
@@ -607,6 +668,24 @@ class TestGetOfficialFilingsTool:
             assert "Bandai Namco" in result
             assert "49.12%" in result
             assert "10,910,000,000" in result
+
+    @pytest.mark.asyncio
+    async def test_timeout_returns_degraded_message(self):
+        """Timeout should degrade instead of hanging."""
+        from src.toolkit import get_official_filings
+
+        async def slow_fetch(_ticker):
+            await asyncio.sleep(1)
+
+        mock_registry = MagicMock()
+        mock_registry.fetch = slow_fetch
+
+        with patch("src.tools.research.OFFICIAL_FILINGS_TIMEOUT_SECONDS", 0.01):
+            with patch("src.data.filings.registry", mock_registry):
+                result = await get_official_filings.ainvoke({"ticker": "SNTIA.OL"})
+
+        assert "timed out" in result.lower()
+        assert "search_foreign_sources" in result
 
 
 # ============================================================================

@@ -8,9 +8,10 @@ import asyncio
 import json
 import logging
 import sys
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -64,6 +65,24 @@ class TestStrictModeCLI:
         parser = build_arg_parser()
         args = parser.parse_args(["--ticker", "0005.HK"])
         assert args.strict is False
+
+
+class TestOutputCompanyNameLookup:
+    def test_load_company_name_for_output_returns_none_on_timeout(self):
+        from src.main import _load_company_name_for_output
+
+        fake_yfinance = MagicMock()
+        fake_yfinance.Ticker.return_value.info = {"longName": "Should Not Return"}
+
+        mock_future = MagicMock()
+        mock_future.result.side_effect = FuturesTimeoutError()
+
+        mock_executor = MagicMock()
+        mock_executor.__enter__.return_value.submit.return_value = mock_future
+
+        with patch.dict(sys.modules, {"yfinance": fake_yfinance}):
+            with patch("src.main.ThreadPoolExecutor", return_value=mock_executor):
+                assert _load_company_name_for_output("SNTIA.OL") is None
 
     def test_strict_and_quick_composable(self):
         """--strict --quick can be combined without conflict."""
