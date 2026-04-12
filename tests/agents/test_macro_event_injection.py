@@ -50,11 +50,11 @@ def _run_injection_block(ticker: str, events: list) -> str:
 
         try:
             from src.memory import create_macro_events_store
-            from src.retrospective import _get_ticker_suffix
+            from src.ticker_policy import get_ticker_suffix
 
             _mstore = create_macro_events_store()
             if _mstore.available:
-                _region = _get_ticker_suffix(ticker)
+                _region = get_ticker_suffix(ticker)
                 _events = _mstore.get_active_events(region_filter=_region or None)
                 if _events:
                     _lines = ["### MACRO EVENT CONTEXT (portfolio-detected)"]

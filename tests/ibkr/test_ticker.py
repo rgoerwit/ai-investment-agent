@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.ibkr.ticker import _CURRENCY_TO_SUFFIX, Ticker
+from src.ibkr.ticker import Ticker
 
 # ── TestTickerFromIbkr ────────────────────────────────────────────────────────
 
@@ -83,6 +83,11 @@ class TestTickerFromIbkr:
     def test_currency_fallback_nok(self):
         t = Ticker.from_ibkr("STB", "UNKNOWN_EXCH", "NOK")
         assert t.suffix == ".OL"
+
+    def test_currency_fallback_chf(self):
+        t = Ticker.from_ibkr("NESN", "UNKNOWN_EXCH", "CHF")
+        assert t.suffix == ".SW"
+        assert t.yf == "NESN.SW"
 
     def test_currency_fallback_pln(self):
         t = Ticker.from_ibkr("PKN", "UNKNOWN_EXCH", "PLN")
@@ -272,38 +277,25 @@ class TestTickerProperties:
 # ── TestCurrencyToSuffixExported ──────────────────────────────────────────────
 
 
-class TestCurrencyToSuffixExported:
-    """Tests for the _CURRENCY_TO_SUFFIX module-level dict in ticker.py."""
+class TestCurrencyFallbackPolicy:
+    """Tests for public currency-fallback behavior in Ticker.from_ibkr()."""
 
-    def test_importable(self):
-        from src.ibkr.ticker import _CURRENCY_TO_SUFFIX as CTS  # noqa: N811
+    def test_unique_currency_fallback_resolves_switzerland(self):
+        ticker = Ticker.from_ibkr("NESN", "UNKNOWN_EXCH", "CHF")
+        assert ticker.suffix == ".SW"
+        assert ticker.yf == "NESN.SW"
 
-        assert isinstance(CTS, dict)
+    def test_explicit_override_prefers_tw_over_two(self):
+        ticker = Ticker.from_ibkr("2330", "UNKNOWN_EXCH", "TWD")
+        assert ticker.suffix == ".TW"
+        assert ticker.yf == "2330.TW"
 
-    def test_hkd_maps_to_hk(self):
-        assert _CURRENCY_TO_SUFFIX["HKD"] == ".HK"
+    def test_ambiguous_eur_stays_bare(self):
+        ticker = Ticker.from_ibkr("ASML", "UNKNOWN_EXCH", "EUR")
+        assert ticker.suffix == ""
+        assert ticker.yf == "ASML"
 
-    def test_jpy_maps_to_t(self):
-        assert _CURRENCY_TO_SUFFIX["JPY"] == ".T"
-
-    def test_gbx_maps_to_l(self):
-        assert _CURRENCY_TO_SUFFIX["GBX"] == ".L"
-
-    def test_gbp_maps_to_l(self):
-        assert _CURRENCY_TO_SUFFIX["GBP"] == ".L"
-
-    def test_eur_not_present(self):
-        """EUR spans multiple exchanges — must NOT be in the dict."""
-        assert "EUR" not in _CURRENCY_TO_SUFFIX
-
-    def test_chf_not_present(self):
-        """CHF spans multiple exchanges — must NOT be in the dict."""
-        assert "CHF" not in _CURRENCY_TO_SUFFIX
-
-    def test_cad_not_present(self):
-        """CAD spans multiple exchanges — must NOT be in the dict."""
-        assert "CAD" not in _CURRENCY_TO_SUFFIX
-
-    def test_min_entry_count(self):
-        """Dict should have at least 14 entries (all unambiguous single-exchange currencies)."""
-        assert len(_CURRENCY_TO_SUFFIX) >= 14
+    def test_ambiguous_cad_stays_bare(self):
+        ticker = Ticker.from_ibkr("MTL", "UNKNOWN_EXCH", "CAD")
+        assert ticker.suffix == ""
+        assert ticker.yf == "MTL"

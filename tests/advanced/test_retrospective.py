@@ -26,7 +26,6 @@ from src.retrospective import (
     _extract_bear_risks,
     _extract_data_block_field,
     _extract_data_block_float,
-    _get_ticker_suffix,
     _lesson_already_processed,
     compare_to_reality,
     compute_confidence,
@@ -38,6 +37,7 @@ from src.retrospective import (
     run_retrospective,
     store_lesson,
 )
+from src.ticker_policy import get_ticker_suffix
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Test Helpers
@@ -369,10 +369,10 @@ class TestExchangeBenchmarkMapping:
             assert EXCHANGE_CURRENCY.get(suffix) == currency, f"Failed for {suffix}"
 
     def test_ticker_suffix_extraction(self):
-        assert _get_ticker_suffix("7203.T") == ".T"
-        assert _get_ticker_suffix("0005.HK") == ".HK"
-        assert _get_ticker_suffix("AAPL") == ""
-        assert _get_ticker_suffix("BRK.B") == ".B"
+        assert get_ticker_suffix("7203.T") == ".T"
+        assert get_ticker_suffix("0005.HK") == ".HK"
+        assert get_ticker_suffix("AAPL") == ""
+        assert get_ticker_suffix("BRK.B") == ".B"
 
 
 # ══════════════════════════════════════════════════════════════════════════════

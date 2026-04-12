@@ -347,11 +347,11 @@ def create_analyst_node(
             if agent_key == "news_analyst":
                 try:
                     from src.memory import create_macro_events_store
-                    from src.retrospective import _get_ticker_suffix
+                    from src.ticker_policy import get_ticker_suffix
 
                     macro_store = create_macro_events_store()
                     if macro_store.available:
-                        region = _get_ticker_suffix(ticker)
+                        region = get_ticker_suffix(ticker)
                         events = macro_store.get_active_events(
                             region_filter=region or None
                         )

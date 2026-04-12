@@ -1184,10 +1184,10 @@ async def _fetch_market_context(ticker: str, trade_date: str) -> str:
         from src.retrospective import (
             EXCHANGE_BENCHMARK,
             FALLBACK_BENCHMARK,
-            _get_ticker_suffix,
         )
+        from src.ticker_policy import get_ticker_suffix
 
-        suffix = _get_ticker_suffix(ticker)
+        suffix = get_ticker_suffix(ticker)
         benchmark = EXCHANGE_BENCHMARK.get(suffix, FALLBACK_BENCHMARK)
         hist = await asyncio.to_thread(
             lambda: yf.Ticker(benchmark).history(period="2d")

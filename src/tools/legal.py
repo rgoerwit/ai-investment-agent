@@ -6,6 +6,7 @@ from typing import Annotated
 import structlog
 from langchain_core.tools import tool
 
+from src.ticker_policy import CHINA_SUFFIXES, ticker_in_group
 from src.tools import shared
 
 logger = structlog.get_logger(__name__)
@@ -81,7 +82,6 @@ async def search_legal_tax_disclosures(
         "Private Equity",
         "Venture Capital",
     ]
-    china_suffixes = (".HK", ".SS", ".SZ")
     china_domiciles = [
         "china",
         "hong kong",
@@ -94,8 +94,7 @@ async def search_legal_tax_disclosures(
         keyword.lower() in sector.lower() for keyword in pfic_risk_keywords
     )
     is_china_connected = (
-        any(ticker.upper().endswith(suffix) for suffix in china_suffixes)
-        or country.lower() in china_domiciles
+        ticker_in_group(ticker, CHINA_SUFFIXES) or country.lower() in china_domiciles
     )
 
     country_lower = country.lower().strip()

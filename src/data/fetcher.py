@@ -52,7 +52,12 @@ from src.fx_normalization import (
     normalize_minor_unit_amount,
 )
 from src.tavily_utils import search_tavily_inspected
-from src.ticker_policy import allows_search_resolution, normalize_exchange_specific_base
+from src.ticker_policy import (
+    FRAGILE_EXCHANGE_SUFFIXES,
+    allows_search_resolution,
+    get_ticker_suffix,
+    normalize_exchange_specific_base,
+)
 from src.ticker_utils import generate_strict_search_query
 from src.yfinance_runtime import YFRateLimitError, configure_yfinance_defaults
 
@@ -2895,9 +2900,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
 
             # Panic Mode: full vacuum (any market) OR basics missing for fragile exchanges
             basics_failed = not all(k in merged for k in self.REQUIRED_BASICS)
-            is_fragile_exchange = ticker.endswith(
-                (".HK", ".TW", ".TWO", ".KS", ".T", ".L")
-            )
+            is_fragile_exchange = get_ticker_suffix(ticker) in FRAGILE_EXCHANGE_SUFFIXES
 
             if not merged or (is_fragile_exchange and basics_failed):
                 panic_reason = "total data vacuum" if not merged else "basics missing"

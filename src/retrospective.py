@@ -28,7 +28,9 @@ import structlog
 
 from src.config import config
 from src.data_block_utils import extract_last_data_block
+from src.exchange_metadata import SUFFIX_TO_CURRENCY_CODE
 from src.runtime_diagnostics import classify_failure
+from src.ticker_policy import get_ticker_suffix
 
 logger = structlog.get_logger(__name__)
 
@@ -86,25 +88,7 @@ EXCHANGE_BENCHMARK: dict[str, str] = {
 }
 FALLBACK_BENCHMARK = "^GSPC"
 
-EXCHANGE_CURRENCY: dict[str, str] = {
-    ".T": "JPY",
-    ".HK": "HKD",
-    ".TW": "TWD",
-    ".TWO": "TWD",  # Taipei Exchange (OTC board) — same currency as TWSE
-    ".KS": "KRW",
-    ".KQ": "KRW",  # KOSDAQ — same currency as KOSPI
-    ".SS": "CNY",  # Shanghai Stock Exchange
-    ".SZ": "CNY",  # Shenzhen Stock Exchange
-    ".AS": "EUR",
-    ".DE": "EUR",
-    ".L": "GBP",
-    ".PA": "EUR",
-    ".TO": "CAD",
-    ".AX": "AUD",
-    ".SI": "SGD",
-    ".MI": "EUR",
-    ".ST": "SEK",
-}
+EXCHANGE_CURRENCY: dict[str, str] = dict(SUFFIX_TO_CURRENCY_CODE)
 FALLBACK_CURRENCY = "USD"
 
 MODEL_QUALITY: dict[str, float] = {
@@ -169,16 +153,6 @@ _LESSONS_MEMORY_INSTANCE: Any | None = None
 # ══════════════════════════════════════════════════════════════════════════════
 # Component 1: Prediction Snapshot Extraction
 # ══════════════════════════════════════════════════════════════════════════════
-
-
-def _get_ticker_suffix(ticker: str) -> str:
-    """Extract exchange suffix from ticker (e.g., '.T' from '7203.T')."""
-    dot_idx = ticker.rfind(".")
-    if dot_idx >= 0:
-        return ticker[dot_idx:]
-    return ""
-
-
 def _extract_bear_risks(result: dict) -> str:
     """Extract first ~500 chars of bear thesis key risks from debate history."""
     debate = result.get("investment_debate_state", {})
@@ -332,7 +306,7 @@ def extract_snapshot(
     fundamentals = result.get("fundamentals_report", "") or ""
 
     # Exchange/currency/benchmark mapping
-    suffix = _get_ticker_suffix(ticker)
+    suffix = get_ticker_suffix(ticker)
     currency = EXCHANGE_CURRENCY.get(suffix, FALLBACK_CURRENCY)
     benchmark = EXCHANGE_BENCHMARK.get(suffix, FALLBACK_BENCHMARK)
 
@@ -1350,7 +1324,7 @@ async def format_lessons_for_injection(
         return ""
 
     # Apply geographic boost and confidence filtering
-    suffix = _get_ticker_suffix(ticker)
+    suffix = get_ticker_suffix(ticker)
     current_exchange = suffix.lstrip(".") if suffix else "US"
     current_currency = EXCHANGE_CURRENCY.get(suffix, FALLBACK_CURRENCY)
 
