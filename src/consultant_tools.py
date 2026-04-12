@@ -240,7 +240,7 @@ async def spot_check_metric_alt(
         )
 
     except FMPSubscriptionUnavailableError as e:
-        logger.warning(
+        logger.debug(
             "spot_check_alt_subscription_unavailable",
             ticker=ticker,
             metric=metric,
