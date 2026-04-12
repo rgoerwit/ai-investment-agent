@@ -38,6 +38,16 @@ def _ends_with_known_structured_terminator(text: str, agent: str | None) -> bool
     return text.rstrip().endswith(raw_data_end)
 
 
+_CODE_TRUNCATION_MARKERS = (
+    "[...TRUNCATED",
+    "[...truncated",
+    "[... truncated",
+    "...truncated for efficiency]",
+    "...truncated for display",
+    "[NOTE: Data truncated",
+)
+
+
 _TERMINAL_FIELD_PATTERN = re.compile(r"^\s*[A-Z][A-Z0-9_ /()%.\-]{1,80}:\s*(.+?)\s*$")
 _TERMINAL_SCALAR_VALUES = frozenset(
     {
@@ -89,6 +99,51 @@ def _last_nonempty_line(text: str) -> str:
         if stripped:
             return stripped
     return ""
+
+
+def _find_last_code_truncation_marker(text: str) -> tuple[str, int] | None:
+    last_marker = None
+    last_index = -1
+    for marker in _CODE_TRUNCATION_MARKERS:
+        index = text.rfind(marker)
+        if index > last_index:
+            last_marker = marker
+            last_index = index
+    if last_marker is None:
+        return None
+    return last_marker, last_index
+
+
+def _marker_is_inside_complete_tavily_wrapper(text: str, marker_index: int) -> bool:
+    wrapper_start = text.rfind("<search_results", 0, marker_index)
+    if wrapper_start < 0:
+        return False
+
+    tag_end = text.find(">", wrapper_start, marker_index)
+    if tag_end < 0:
+        return False
+
+    opening_tag = text[wrapper_start : tag_end + 1]
+    if 'source="tavily"' not in opening_tag:
+        return False
+
+    wrapper_end = text.find("</search_results>", marker_index)
+    if wrapper_end < 0:
+        return False
+
+    return tag_end < marker_index < wrapper_end
+
+
+def _has_incomplete_junior_raw_data_wrapper(text: str, agent: str | None) -> bool:
+    if agent != "junior_fundamentals_analyst":
+        return False
+    if "=== RAW FINANCIAL DATA FOR " not in text:
+        return False
+    if "### TOOL 1: get_financial_metrics" not in text:
+        return False
+    if "### TOOL 2: get_fundamental_analysis" not in text:
+        return False
+    return not _ends_with_known_structured_terminator(text, agent)
 
 
 def _is_complete_scalar_terminal_field_line(text: str) -> bool:
@@ -273,17 +328,12 @@ def detect_truncation(text: str, agent: str | None = None) -> dict:
 
     text = text.strip()
 
-    # Code-level truncation markers (HIGH confidence)
-    code_markers = [
-        "[...TRUNCATED",
-        "[...truncated",
-        "[... truncated",
-        "...truncated for efficiency]",
-        "...truncated for display",
-        "[NOTE: Data truncated",
-    ]
-    for marker in code_markers:
-        if marker in text:
+    # Code-level truncation markers (HIGH confidence), except when the marker is
+    # embedded inside a complete Tavily payload that the agent is relaying.
+    last_code_marker = _find_last_code_truncation_marker(text)
+    if last_code_marker is not None:
+        marker, marker_index = last_code_marker
+        if not _marker_is_inside_complete_tavily_wrapper(text, marker_index):
             return {
                 "truncated": True,
                 "source": "code",
@@ -297,6 +347,14 @@ def detect_truncation(text: str, agent: str | None = None) -> dict:
             "source": None,
             "marker": None,
             "confidence": "high",
+        }
+
+    if _has_incomplete_junior_raw_data_wrapper(text, agent):
+        return {
+            "truncated": True,
+            "source": "llm",
+            "marker": "incomplete RAW DATA wrapper (missing === END RAW DATA ===)",
+            "confidence": "medium",
         }
 
     # Check for incomplete structured blocks FIRST (MEDIUM confidence)

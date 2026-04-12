@@ -601,3 +601,212 @@ class TestFXCaching:
 
         # Verify
         assert rate == 0.85
+
+
+class TestQuoteUnitNormalization:
+    def test_normalize_quote_unit_mismatch_stj_like_case(self, fetcher):
+        info = {
+            "currency": "GBp",
+            "financialCurrency": "GBP",
+            "currentPrice": 1260.0,
+            "regularMarketPrice": 1260.0,
+            "previousClose": 1250.0,
+            "bookValue": 2.852,
+            "trailingEps": 0.99,
+            "forwardEps": 1.00582,
+            "epsCurrentYear": 0.78033,
+            "sharesOutstanding": 513052162,
+            "marketCap": 6467597312,
+            "priceToBook": 441.79523,
+            "priceEpsCurrentYear": 1614.7014,
+        }
+
+        result = fetcher._normalize_data_integrity(info.copy(), "STJ.L")
+
+        assert result["currency"] == "GBP"
+        assert result["currentPrice"] == pytest.approx(12.6)
+        assert result["regularMarketPrice"] == pytest.approx(12.6)
+        assert result["previousClose"] == pytest.approx(12.5)
+        assert result["priceToBook"] == pytest.approx(12.6 / 2.852)
+        assert result["priceEpsCurrentYear"] == pytest.approx(12.6 / 0.78033)
+        assert result["trailingPE"] == pytest.approx(12.6 / 0.99)
+        assert result["forwardPE"] == pytest.approx(12.6 / 1.00582)
+        assert result["_unit_normalization"]["reason"] == (
+            "triangle_verified_quote_unit_mismatch"
+        )
+
+    def test_normalize_quote_unit_mismatch_requires_corroboration_without_alias(
+        self, fetcher
+    ):
+        info = {
+            "currency": "USD",
+            "financialCurrency": "USD",
+            "currentPrice": 1000.0,
+            "sharesOutstanding": 100,
+            "marketCap": 1000.0,
+            "trailingEps": 50.0,
+            "trailingPE": 9.0,
+        }
+
+        result = fetcher._normalize_data_integrity(info.copy(), "TEST")
+
+        assert result["currentPrice"] == 1000.0
+        assert "_unit_normalization" not in result
+
+    def test_normalize_quote_unit_mismatch_skips_when_corrected_triangle_fails(
+        self, fetcher
+    ):
+        info = {
+            "currency": "GBp",
+            "financialCurrency": "GBP",
+            "currentPrice": 1260.0,
+            "sharesOutstanding": 100,
+            "marketCap": 250.0,
+            "trailingEps": 0.99,
+            "trailingPE": 12.727273,
+        }
+
+        result = fetcher._normalize_data_integrity(info.copy(), "TEST.L")
+
+        assert result["currentPrice"] == 1260.0
+        assert "_unit_normalization" not in result
+
+    def test_pe_divergence_suspicious_does_not_trigger_unit_normalization(
+        self, fetcher
+    ):
+        info = {
+            "currency": "CAD",
+            "financialCurrency": "CAD",
+            "currentPrice": 16.0,
+            "sharesOutstanding": 100,
+            "marketCap": 1600.0,
+            "trailingPE": 7.777777,
+            "forwardPE": 2.109826,
+        }
+
+        result = fetcher._normalize_data_integrity(info.copy(), "STGO.TO")
+
+        assert result["currentPrice"] == 16.0
+        assert result["trailingPE"] == pytest.approx(7.777777)
+        assert result["forwardPE"] == pytest.approx(2.109826)
+        assert "_unit_normalization" not in result
+
+    @pytest.mark.asyncio
+    async def test_get_financial_metrics_normalizes_before_triangle_and_skips_eodhd(
+        self, fetcher
+    ):
+        stj_like = {
+            "symbol": "STJ.L",
+            "currency": "GBp",
+            "financialCurrency": "GBP",
+            "currentPrice": 1260.0,
+            "regularMarketPrice": 1260.0,
+            "previousClose": 1250.0,
+            "bookValue": 2.852,
+            "trailingEps": 0.99,
+            "forwardEps": 1.00582,
+            "epsCurrentYear": 0.78033,
+            "sharesOutstanding": 513052162,
+            "marketCap": 6467597312,
+            "priceToBook": 441.79523,
+            "priceEpsCurrentYear": 1614.7014,
+            "sector": "Healthcare",
+            "industry": "Medical Devices",
+            "returnOnEquity": 0.15,
+            "revenueGrowth": 0.08,
+            "profitMargins": 0.12,
+            "debtToEquity": 0.4,
+            "currentRatio": 1.4,
+            "freeCashflow": 1_000_000.0,
+            "operatingCashflow": 1_500_000.0,
+            "numberOfAnalystOpinions": 7,
+        }
+
+        fetcher._fetch_all_sources_parallel = AsyncMock(
+            return_value={"yfinance": stj_like}
+        )
+        fetcher._fetch_tavily_gaps = AsyncMock(return_value={})
+        fetcher.eodhd_fetcher = MagicMock()
+        fetcher.eodhd_fetcher.verify_anchor_metrics = AsyncMock(
+            return_value={"marketCap": 1.0}
+        )
+
+        result = await fetcher.get_financial_metrics("STJ.L")
+
+        assert result["currency"] == "GBP"
+        assert result["currentPrice"] == pytest.approx(12.6)
+        assert result["_unit_normalization"]["reason"] == (
+            "triangle_verified_quote_unit_mismatch"
+        )
+        assert "_eodhd_arbitration" not in result
+        assert "_data_quality_flag" not in result
+        fetcher.eodhd_fetcher.verify_anchor_metrics.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_get_financial_metrics_exposes_coherent_normalized_snapshot(
+        self, fetcher
+    ):
+        stj_like = {
+            "symbol": "STJ.L",
+            "currency": "GBp",
+            "financialCurrency": "GBP",
+            "currentPrice": 1260.0,
+            "regularMarketPrice": 1260.0,
+            "previousClose": 1250.0,
+            "bid": 1258.0,
+            "ask": 1262.0,
+            "fiftyDayAverage": 1180.0,
+            "twoHundredDayAverage": 1105.0,
+            "fiftyTwoWeekLow": 980.0,
+            "fiftyTwoWeekHigh": 1290.0,
+            "bookValue": 2.852,
+            "trailingEps": 0.99,
+            "forwardEps": 1.00582,
+            "epsCurrentYear": 0.78033,
+            "sharesOutstanding": 513052162,
+            "marketCap": 6467597312,
+            "priceToBook": 441.79523,
+            "priceEpsCurrentYear": 1614.7014,
+            "sector": "Healthcare",
+            "industry": "Medical Devices",
+            "returnOnEquity": 0.15,
+            "revenueGrowth": 0.08,
+            "profitMargins": 0.12,
+            "debtToEquity": 0.4,
+            "currentRatio": 1.4,
+            "freeCashflow": 1_000_000.0,
+            "operatingCashflow": 1_500_000.0,
+            "numberOfAnalystOpinions": 7,
+        }
+
+        fetcher._fetch_all_sources_parallel = AsyncMock(
+            return_value={"yfinance": stj_like}
+        )
+        fetcher._fetch_tavily_gaps = AsyncMock(return_value={})
+
+        result = await fetcher.get_financial_metrics("STJ.L")
+
+        assert result["currentPrice"] == pytest.approx(12.6)
+        assert result["regularMarketPrice"] == pytest.approx(12.6)
+        assert result["previousClose"] == pytest.approx(12.5)
+        assert result["bid"] == pytest.approx(12.58)
+        assert result["ask"] == pytest.approx(12.62)
+        assert result["fiftyDayAverage"] == pytest.approx(11.8)
+        assert result["twoHundredDayAverage"] == pytest.approx(11.05)
+        assert result["fiftyTwoWeekLow"] == pytest.approx(9.8)
+        assert result["fiftyTwoWeekHigh"] == pytest.approx(12.9)
+        assert result["priceToBook"] == pytest.approx(12.6 / 2.852)
+        assert result["priceEpsCurrentYear"] == pytest.approx(12.6 / 0.78033)
+        assert result["trailingPE"] == pytest.approx(12.6 / 0.99)
+        assert result["forwardPE"] == pytest.approx(12.6 / 1.00582)
+        assert result["_unit_normalization"]["kind"] == "quote_minor_to_major"
+        assert result["_unit_normalization"]["scale_factor"] == 0.01
+        assert result["_unit_normalization"]["from_currency"] == "GBp"
+        assert result["_unit_normalization"]["to_currency"] == "GBP"
+        assert (
+            result["_unit_normalization"]["reason"]
+            == "triangle_verified_quote_unit_mismatch"
+        )
+        assert "currency_alias:GBp" in result["_unit_normalization"]["evidence"]
+        assert "financial_currency_match" in result["_unit_normalization"]["evidence"]
+        assert result["_sources_used"] == ["yfinance"]

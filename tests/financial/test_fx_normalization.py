@@ -18,7 +18,10 @@ from src.fx_normalization import (
     get_fx_rate,
     get_fx_rate_fallback,
     get_fx_rate_yfinance,
+    is_near_minor_unit_ratio,
     normalize_financial_dict,
+    normalize_minor_unit_amount,
+    normalize_minor_unit_currency,
     normalize_to_usd,
 )
 
@@ -82,6 +85,11 @@ class TestFXRateFetching:
         """Test fallback returns None for unsupported currency."""
         rate = get_fx_rate_fallback("ZZZ", "USD")
         assert rate is None
+
+    def test_get_fx_rate_fallback_gbx_uses_major_currency_alias(self):
+        """GBX should be resolved through the GBP fallback rate."""
+        rate = get_fx_rate_fallback("GBX", "USD")
+        assert rate == pytest.approx(FALLBACK_RATES_TO_USD["GBP"] * 0.01)
 
     @pytest.mark.asyncio
     async def test_get_fx_rate_unified_yfinance_success(self):
@@ -202,6 +210,23 @@ class TestNormalizeToUSD:
                 assert result == value
                 assert metadata["fx_source"] == "unavailable"
                 assert metadata["normalized"] is False
+
+
+class TestMinorUnitNormalizationHelpers:
+    def test_normalize_minor_unit_currency_gbp_aliases(self):
+        assert normalize_minor_unit_currency("GBp") == ("GBP", 0.01)
+        assert normalize_minor_unit_currency("GBX") == ("GBP", 0.01)
+
+    def test_normalize_minor_unit_amount_scales_value(self):
+        value, currency, scale = normalize_minor_unit_amount(10000, "GBp")
+        assert value == 100.0
+        assert currency == "GBP"
+        assert scale == 0.01
+
+    def test_is_near_minor_unit_ratio(self):
+        assert is_near_minor_unit_ratio(100.0) is True
+        assert is_near_minor_unit_ratio(95.0) is True
+        assert is_near_minor_unit_ratio(50.0) is False
 
 
 # ══════════════════════════════════════════════════════════════════════════════

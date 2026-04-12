@@ -29,6 +29,7 @@ import pandas as pd
 import requests
 import yfinance as yf
 
+from src.fx_normalization import normalize_minor_unit_amount
 from src.ticker_utils import to_yfinance
 from src.yfinance_runtime import YFRateLimitError, configure_yfinance_defaults
 
@@ -155,10 +156,7 @@ def _to_usd(value, currency, fx_rates):
     """Convert *value* in *currency* to USD. Returns None for unknown currencies."""
     if value is None or currency is None:
         return None
-    # Normalize GBp (pence) → GBP
-    if currency == "GBp":
-        currency = "GBP"
-        value = value / 100.0
+    value, currency, _ = normalize_minor_unit_amount(value, currency)
     rate = fx_rates.get(currency)
     if rate is None:
         return None

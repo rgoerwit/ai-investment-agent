@@ -31,6 +31,7 @@ it reads fx_rate_to_usd from analysis snapshots and src/fx_normalization.py.
 import asyncio
 import copy
 import json
+import math
 import re
 import statistics
 import time
@@ -46,6 +47,10 @@ import yfinance as yf
 
 from src.config import config
 from src.data.interfaces import FinancialFetcher
+from src.fx_normalization import (
+    is_near_minor_unit_ratio,
+    normalize_minor_unit_amount,
+)
 from src.tavily_utils import search_tavily_inspected
 from src.ticker_policy import allows_search_resolution, normalize_exchange_specific_base
 from src.ticker_utils import generate_strict_search_query
@@ -147,6 +152,24 @@ CRITICAL_ANALYSIS_FIELDS = (
     "numberOfAnalystOpinions",
 )
 ANALYSIS_CRITICAL_CONFLICT_FIELDS = frozenset(CRITICAL_ANALYSIS_FIELDS)
+QUOTE_PRICE_FIELDS = (
+    "currentPrice",
+    "regularMarketPrice",
+    "previousClose",
+    "regularMarketPreviousClose",
+    "open",
+    "regularMarketOpen",
+    "dayLow",
+    "dayHigh",
+    "regularMarketDayLow",
+    "regularMarketDayHigh",
+    "bid",
+    "ask",
+    "fiftyDayAverage",
+    "twoHundredDayAverage",
+    "fiftyTwoWeekLow",
+    "fiftyTwoWeekHigh",
+)
 
 RECENT_SPLIT_WINDOW_DAYS = 180
 SPLIT_RATIO_MATCH_TOLERANCE = 0.25
@@ -197,6 +220,31 @@ def _coerce_positive_float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return numeric if numeric > 0 else None
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _identity_match_from_price(
+    price: float | None,
+    denominator: Any,
+    reported_ratio: Any,
+    tolerance: float = 0.15,
+) -> bool:
+    price_f = _safe_float(price)
+    denom_f = _safe_float(denominator)
+    ratio_f = _safe_float(reported_ratio)
+    if price_f is None or denom_f is None or ratio_f is None:
+        return False
+    if price_f <= 0 or denom_f <= 0 or ratio_f <= 0:
+        return False
+    expected = price_f / denom_f
+    return abs(expected - ratio_f) / ratio_f <= tolerance
 
 
 def _conflict_field_class(field: str) -> str:
@@ -1833,12 +1881,12 @@ class SmartMarketDataFetcher(FinancialFetcher):
             ratio = val_a / val_b
             # Case 1: val_a is ~100x val_b (e.g. 201 Sen vs 2.01 Ringgit)
             # Use val_b (the base currency value)
-            if 90 < ratio < 110:
+            if is_near_minor_unit_ratio(ratio):
                 return val_b
 
             # Case 2: val_b is ~100x val_a (e.g. 2.01 Ringgit vs 201 Sen)
             # Use val_a (the base currency value)
-            if 0.009 < ratio < 0.011:
+            if is_near_minor_unit_ratio(1 / ratio):
                 return val_a
 
             # No obvious scaling error -> return val_b (the new candidate value)
@@ -2324,6 +2372,112 @@ class SmartMarketDataFetcher(FinancialFetcher):
                         gaps += 1
         return MergeResult(merged, gaps)
 
+    def _recompute_quote_derived_metrics(self, info: dict[str, Any]) -> None:
+        price = _safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
+        if price is None or price <= 0:
+            return
+
+        ratio_denominators = {
+            "trailingPE": info.get("trailingEps"),
+            "forwardPE": info.get("forwardEps"),
+            "priceEpsCurrentYear": info.get("epsCurrentYear"),
+            "priceToBook": info.get("bookValue"),
+        }
+        for field, denominator in ratio_denominators.items():
+            denom = _safe_float(denominator)
+            if denom is not None and denom > 0:
+                info[field] = price / denom
+
+    def _normalize_quote_unit_mismatch(
+        self, info: dict[str, Any], symbol: str
+    ) -> dict[str, Any]:
+        price = _safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
+        shares = _safe_float(info.get("sharesOutstanding"))
+        market_cap = _safe_float(info.get("marketCap"))
+        raw_currency = info.get("currency")
+        financial_currency = info.get("financialCurrency")
+
+        if not all([price, shares, market_cap]) or market_cap == 0:
+            return info
+
+        corrected_price, major_currency, scale = normalize_minor_unit_amount(
+            price, raw_currency
+        )
+        if scale != 0.01 or major_currency is None or corrected_price is None:
+            return info
+
+        raw_ratio = (price * shares) / market_cap
+        if not is_near_minor_unit_ratio(raw_ratio):
+            return info
+
+        corrected_ratio = (corrected_price * shares) / market_cap
+        if not (0.85 < corrected_ratio < 1.15):
+            return info
+
+        evidence: list[str] = []
+        normalized_financial_currency = (
+            financial_currency.strip().upper()
+            if isinstance(financial_currency, str)
+            else None
+        )
+        has_alias_support = (
+            normalized_financial_currency is None
+            or normalized_financial_currency == major_currency
+        )
+        if has_alias_support:
+            evidence.append(f"currency_alias:{raw_currency}")
+        if normalized_financial_currency == major_currency:
+            evidence.append("financial_currency_match")
+
+        identity_checks = {
+            "trailing_pe_identity": _identity_match_from_price(
+                corrected_price, info.get("trailingEps"), info.get("trailingPE")
+            ),
+            "forward_pe_identity": _identity_match_from_price(
+                corrected_price, info.get("forwardEps"), info.get("forwardPE")
+            ),
+            "current_year_pe_identity": _identity_match_from_price(
+                corrected_price,
+                info.get("epsCurrentYear"),
+                info.get("priceEpsCurrentYear"),
+            ),
+            "price_to_book_identity": _identity_match_from_price(
+                corrected_price, info.get("bookValue"), info.get("priceToBook")
+            ),
+        }
+        evidence.extend(name for name, matched in identity_checks.items() if matched)
+        identity_count = sum(identity_checks.values())
+
+        if not has_alias_support and identity_count < 2:
+            return info
+
+        for field in QUOTE_PRICE_FIELDS:
+            value = _safe_float(info.get(field))
+            if value is not None:
+                info[field] = value * scale
+
+        info["currency"] = major_currency
+        self._recompute_quote_derived_metrics(info)
+        info["_unit_normalization"] = {
+            "kind": "quote_minor_to_major",
+            "scale_factor": scale,
+            "from_currency": raw_currency,
+            "to_currency": major_currency,
+            "reason": "triangle_verified_quote_unit_mismatch",
+            "evidence": evidence,
+        }
+        logger.info(
+            "quote_unit_normalized",
+            symbol=symbol,
+            from_currency=raw_currency,
+            to_currency=major_currency,
+            scale_factor=scale,
+            raw_ratio=round(raw_ratio, 4),
+            corrected_ratio=round(corrected_ratio, 4),
+            evidence=evidence,
+        )
+        return info
+
     def _fix_currency_mismatch(self, info: dict, symbol: str) -> dict:
         """Fix currency mismatch."""
         trading_curr = info.get("currency", "USD").upper()
@@ -2453,6 +2607,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         return info
 
     def _normalize_data_integrity(self, info: dict, symbol: str) -> dict:
+        info = self._normalize_quote_unit_mismatch(info, symbol)
         info = self._fix_currency_mismatch(info, symbol)
         info = self._fix_debt_equity_scaling(info, symbol)
 

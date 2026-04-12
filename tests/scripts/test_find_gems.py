@@ -883,6 +883,11 @@ class TestToUsd:
         # 10000 pence = 100 GBP * 1.27 = 127 USD
         assert result == pytest.approx(100 * 1.27)
 
+    def test_gbx_normalization_uses_same_major_currency_path(self):
+        rates = {"USD": 1.0, "GBP": 1.27}
+        result = find_gems._to_usd(10000, "GBX", rates)
+        assert result == pytest.approx(100 * 1.27)
+
     def test_none_value_returns_none(self):
         rates = {"USD": 1.0, "JPY": 0.0067}
         assert find_gems._to_usd(None, "JPY", rates) is None
