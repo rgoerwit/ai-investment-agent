@@ -155,7 +155,7 @@ class TickerFormatter:
         "BD": (".BD", "Budapest Stock Exchange", "Hungary", "BSE2"),
         "RO": (".RO", "Bucharest Stock Exchange", "Romania", "BVB"),
         # Taiwan OTC
-        "TWO": (".TWO", "Taipei Exchange", "Taiwan", "TPEx"),
+        "TWO": (".TWO", "Taipei Exchange", "Taiwan", "TPEX"),
     }
 
     # IBKR exchange code to yfinance suffix mapping.
@@ -195,7 +195,7 @@ class TickerFormatter:
         "KRX": ".KS",  # Korea Stock Exchange
         "KOSDAQ": ".KQ",  # KOSDAQ (South Korea)
         "TWSE": ".TW",  # Taiwan Stock Exchange
-        "TPEx": ".TWO",  # Taipei Exchange (OTC board, Taiwan)
+        "TPEX": ".TWO",  # Taipei Exchange (OTC board, Taiwan)
         "SGX": ".SI",  # Singapore Exchange
         "ASX": ".AX",  # Australian Securities Exchange
         "NZE": ".NZ",  # New Zealand Exchange

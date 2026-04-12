@@ -69,7 +69,11 @@ EXCHANGE_BENCHMARK: dict[str, str] = {
     ".T": "^N225",
     ".HK": "^HSI",
     ".TW": "^TWII",
+    ".TWO": "^TWII",  # Taipei Exchange (OTC board) — same broad market benchmark
     ".KS": "^KS11",
+    ".KQ": "^KS11",  # KOSDAQ — use KOSPI as broad Korea market proxy
+    ".SS": "000001.SS",  # Shanghai SSE Composite
+    ".SZ": "399001.SZ",  # Shenzhen Component Index
     ".AS": "^AEX",
     ".DE": "^GDAXI",
     ".L": "^FTSE",
@@ -86,7 +90,11 @@ EXCHANGE_CURRENCY: dict[str, str] = {
     ".T": "JPY",
     ".HK": "HKD",
     ".TW": "TWD",
+    ".TWO": "TWD",  # Taipei Exchange (OTC board) — same currency as TWSE
     ".KS": "KRW",
+    ".KQ": "KRW",  # KOSDAQ — same currency as KOSPI
+    ".SS": "CNY",  # Shanghai Stock Exchange
+    ".SZ": "CNY",  # Shenzhen Stock Exchange
     ".AS": "EUR",
     ".DE": "EUR",
     ".L": "GBP",

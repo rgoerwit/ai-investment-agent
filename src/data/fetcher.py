@@ -2895,7 +2895,9 @@ class SmartMarketDataFetcher(FinancialFetcher):
 
             # Panic Mode: full vacuum (any market) OR basics missing for fragile exchanges
             basics_failed = not all(k in merged for k in self.REQUIRED_BASICS)
-            is_fragile_exchange = ticker.endswith((".HK", ".TW", ".KS", ".T", ".L"))
+            is_fragile_exchange = ticker.endswith(
+                (".HK", ".TW", ".TWO", ".KS", ".T", ".L")
+            )
 
             if not merged or (is_fragile_exchange and basics_failed):
                 panic_reason = "total data vacuum" if not merged else "basics missing"

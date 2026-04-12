@@ -1256,6 +1256,7 @@ async def run_analysis(
         # (e.g., delisted tickers like 2154.HK where agents guess different companies)
         from src.ticker_utils import (
             _company_name_lookup_candidates,
+            get_ticker_info,
             resolve_company_name,
         )
 
@@ -1312,7 +1313,14 @@ async def run_analysis(
             node_observer=node_observer,
         )
 
-        _base_msg = f"Analyze {ticker} ({company_name}) for investment decision. Current Date: {real_date}."
+        _tinfo = get_ticker_info(ticker)
+        _exch = _tinfo.get("exchange_name", "")
+        _exch_note = (
+            f" [{_exch}]"
+            if _exch and _exch not in ("Unknown", "US Exchange (assumed)")
+            else ""
+        )
+        _base_msg = f"Analyze {ticker}{_exch_note} ({company_name}) for investment decision. Current Date: {real_date}."
         if market_context:
             _base_msg += f" {market_context}"
         initial_state = AgentState(
