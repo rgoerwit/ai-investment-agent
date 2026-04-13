@@ -1768,6 +1768,18 @@ class TestWatchlistCandidatesInFlight:
         assert "WDO" in report
         assert "not on watchlist" in report
 
+    def test_empty_section_shown_when_cash_policy_blocked_candidates(self):
+        report = format_report(
+            [],
+            _make_portfolio(),
+            show_recommendations=True,
+            watchlist_candidates_blocked_by_cash=2,
+        )
+
+        assert "WATCHLIST CANDIDATES" in report
+        assert "available cash is insufficient" in report
+        assert "[not on watchlist" not in report
+
     def test_in_flight_candidate_excluded_from_watchlist_moves(self):
         """In-flight candidates must not appear in WATCHLIST MOVES (ADDED TO WATCHLIST)."""
         item = _make_offwatch_buy("WDO.TO", conviction="High")

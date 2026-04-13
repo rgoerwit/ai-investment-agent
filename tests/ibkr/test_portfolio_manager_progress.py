@@ -375,6 +375,7 @@ def _make_bundle(**overrides) -> PortfolioRecommendationBundle:
         "watchlist_tickers": {"7203.T"},
         "watchlist_name": "watchlist-2026",
         "watchlist_total": 1,
+        "watchlist_candidates_blocked_by_cash": 0,
         "live_orders": [{"ticker": "7203", "side": "BUY"}],
         "freshness_summary": AnalysisFreshnessSummary(),
         "refresh_activity": RefreshActivity(policy="off", limit=10),
@@ -460,6 +461,7 @@ def test_main_report_mode_uses_service_bundle_in_formatter():
     assert mock_report.call_args.kwargs["watchlist_name"] == "watchlist-2026"
     assert mock_report.call_args.kwargs["watchlist_total"] == 2
     assert mock_report.call_args.kwargs["watchlist_tickers"] == {"7203.T", "6758.T"}
+    assert mock_report.call_args.kwargs["watchlist_candidates_blocked_by_cash"] == 0
     assert mock_report.call_args.kwargs["refresh_activity"].skipped_due_to_limit == [
         "6758.T"
     ]

@@ -18,6 +18,7 @@ from src.ibkr.models import (
 )
 from src.ibkr.reconciler import (
     AnalysisLoadProgress,
+    ReconciliationDiagnostics,
     _analysis_index_lock,
     _analysis_index_lock_path,
     _analysis_index_path,
@@ -740,6 +741,26 @@ class TestHeldPositionBlocksCandidate:
         phase2_buys = [i for i in items if i.action == "BUY" and not i.is_watchlist]
         assert len(phase2_buys) == 1
         assert phase2_buys[0].ticker.yf == "WDO.TO"
+
+
+class TestPhase2CashBlockedCandidates:
+    def test_offwatch_buy_is_counted_when_cash_policy_blocks_it(self):
+        portfolio = _make_portfolio(value=100_000, cash=0)
+        portfolio.exchange_weights = {}
+        portfolio.sector_weights = {}
+        diagnostics = ReconciliationDiagnostics()
+        buy = _make_analysis(ticker="WDO.TO", verdict="BUY", age_days=1)
+
+        items = reconcile(
+            positions=[],
+            analyses={"WDO.TO": buy},
+            portfolio=portfolio,
+            diagnostics=diagnostics,
+        )
+
+        phase2_buys = [i for i in items if i.action == "BUY" and not i.is_watchlist]
+        assert not phase2_buys
+        assert diagnostics.cash_blocked_offwatch_buy_count == 1
 
 
 # ── Analysis Loading Tests ──

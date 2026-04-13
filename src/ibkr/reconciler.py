@@ -1089,6 +1089,11 @@ def _classify_sell_type(analysis: AnalysisRecord | None, stop_breached: bool) ->
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+@dataclass
+class ReconciliationDiagnostics:
+    cash_blocked_offwatch_buy_count: int = 0
+
+
 def reconcile(
     positions: list[NormalizedPosition],
     analyses: dict[str, AnalysisRecord],
@@ -1100,6 +1105,7 @@ def reconcile(
     sector_limit_pct: float = 30.0,
     exchange_limit_pct: float = 40.0,
     watchlist_tickers: set[str] | None = None,
+    diagnostics: ReconciliationDiagnostics | None = None,
 ) -> list[ReconciliationItem]:
     """
     Compare IBKR positions against evaluator recommendations.
@@ -1715,6 +1721,8 @@ def reconcile(
         # (in --read-only mode portfolio_value_usd=0, so buys still surface)
         has_portfolio = portfolio.portfolio_value_usd > 0
         if has_portfolio and remaining_cash <= 0:
+            if diagnostics is not None:
+                diagnostics.cash_blocked_offwatch_buy_count += 1
             continue
 
         entry_price = analysis.entry_price or analysis.current_price
