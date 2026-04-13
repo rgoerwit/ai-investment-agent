@@ -25,6 +25,7 @@ from . import message_utils, support
 from . import runtime as agent_runtime
 from .output_validation import (
     log_output_diagnostics,
+    log_truncation_diagnostic,
     should_fail_closed,
     validate_required_output,
 )
@@ -44,6 +45,13 @@ Do NOT use markdown tables inside DATA_BLOCK.
 """
 
 _QUARANTINED_FORWARD_KEYS = ("PE_RATIO_FORWARD", "PEG_RATIO")
+_HORIZON_FIELD_RAW_KEYS = (
+    ("REVENUE_GROWTH_TTM", "revenueGrowth_TTM"),
+    ("REVENUE_GROWTH_MRQ", "revenueGrowth_MRQ"),
+    ("EARNINGS_GROWTH_TTM", "earningsGrowth_TTM"),
+    ("EARNINGS_GROWTH_MRQ", "earningsGrowth_MRQ"),
+    ("GROWTH_TRAJECTORY", "growth_trajectory"),
+)
 
 
 def _replace_or_append_datablock_line(body: str, key: str, value: str) -> str:
@@ -80,6 +88,14 @@ def _sanitize_fundamentals_output(
     if payload.get("_split_sensitive_metrics_quarantined") is True:
         for key in _QUARANTINED_FORWARD_KEYS:
             updated_body = _replace_or_append_datablock_line(updated_body, key, "N/A")
+
+    for datablock_key, raw_key in _HORIZON_FIELD_RAW_KEYS:
+        if payload.get(raw_key) is None:
+            updated_body = _replace_or_append_datablock_line(
+                updated_body,
+                datablock_key,
+                "N/A",
+            )
 
     latest_quarter_date = payload.get("latest_quarter_date")
     if (
@@ -331,11 +347,11 @@ def create_analyst_node(
             if agent_key == "news_analyst":
                 try:
                     from src.memory import create_macro_events_store
-                    from src.retrospective import _get_ticker_suffix
+                    from src.ticker_policy import get_ticker_suffix
 
                     macro_store = create_macro_events_store()
                     if macro_store.available:
-                        region = _get_ticker_suffix(ticker)
+                        region = get_ticker_suffix(ticker)
                         events = macro_store.get_active_events(
                             region_filter=region or None
                         )
@@ -494,16 +510,14 @@ def create_analyst_node(
             from src.utils import detect_truncation
 
             trunc_info = detect_truncation(content_str, agent=agent_key)
-            if trunc_info["truncated"]:
-                logger.warning(
-                    "agent_output_truncated",
-                    agent=agent_key,
-                    ticker=ticker,
-                    source=trunc_info["source"],
-                    marker=trunc_info["marker"],
-                    confidence=trunc_info["confidence"],
-                    output_len=len(content_str),
-                )
+            log_truncation_diagnostic(
+                agent_key=agent_key,
+                ticker=ticker,
+                runnable=llm if response is not None else llm,
+                response=response,
+                content=content_str,
+                trunc_info=trunc_info,
+            )
 
             validation = validate_required_output(agent_key, content_str)
             log_output_diagnostics(

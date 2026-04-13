@@ -1005,6 +1005,7 @@ def format_report(
     watchlist_name: str | None = None,
     watchlist_total: int | None = None,
     watchlist_tickers: set[str] | None = None,
+    watchlist_candidates_blocked_by_cash: int = 0,
     freshness_summary: AnalysisFreshnessSummary | None = None,
     refresh_activity: RefreshActivity | None = None,
     screening_freshness: ScreeningFreshnessSummary | None = None,
@@ -1884,7 +1885,11 @@ def format_report(
         else:
             _cands_actionable.append(_c)
 
-    if _cands_actionable or _cands_in_flight:
+    if (
+        _cands_actionable
+        or _cands_in_flight
+        or watchlist_candidates_blocked_by_cash > 0
+    ):
         _CONVICTION_RANK = {"high": 0, "medium": 1, "low": 2}
         _top_candidates = sorted(
             _cands_actionable,
@@ -1938,6 +1943,12 @@ def format_report(
             cl = _cost_line(item)
             if cl:
                 lines.append(cl)
+            lines.append("")
+        if not _top_candidates and not _cands_in_flight:
+            lines.append(
+                "  No off-watch BUY candidates shown — available cash is insufficient"
+                " for new watchlist additions this run."
+            )
             lines.append("")
         if _cands_in_flight:
             _if_syms = ", ".join(_display_ticker(i) for i in _cands_in_flight)
@@ -2789,6 +2800,7 @@ def main() -> None:
     watchlist_tickers = bundle.watchlist_tickers
     _loaded_watchlist_name = bundle.watchlist_name
     _loaded_watchlist_total = bundle.watchlist_total
+    _watchlist_candidates_blocked_by_cash = bundle.watchlist_candidates_blocked_by_cash
     _live_orders_data = bundle.live_orders
 
     # Detect and store macro events (fail-safe — errors caught internally).
@@ -2818,6 +2830,7 @@ def main() -> None:
             watchlist_name=_loaded_watchlist_name,
             watchlist_total=_loaded_watchlist_total,
             watchlist_tickers=watchlist_tickers if watchlist_tickers else None,
+            watchlist_candidates_blocked_by_cash=_watchlist_candidates_blocked_by_cash,
             freshness_summary=freshness_summary,
             refresh_activity=refresh_activity,
             screening_freshness=screening_freshness,

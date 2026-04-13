@@ -197,10 +197,55 @@ class TestFMPGet:
                     await fetcher._get("ratios", {"symbol": "AAPL"})
 
         assert fetcher._cooldown_until is None
-        warning_calls = " ".join(
-            str(call) for call in mock_logger.warning.call_args_list
+        assert "ratios" in fetcher._subscription_blocked_endpoints
+        info_calls = " ".join(str(call) for call in mock_logger.info.call_args_list)
+        assert "fmp_subscription_unavailable" in info_calls
+
+    @pytest.mark.asyncio
+    async def test_get_402_subscription_paywall_cached_endpoint_skips_repeat_request(
+        self,
+    ):
+        """A blocked endpoint should not hit the network or re-log on later calls."""
+        fetcher = FMPFetcher(api_key="test-key")
+        fetcher._subscription_blocked_endpoints.add("ratios")
+
+        with patch("aiohttp.ClientSession") as mock_session:
+            with patch("src.data.fmp_fetcher.logger") as mock_logger:
+                result = await fetcher._get("ratios", {"symbol": "AAPL"})
+
+        assert result is None
+        mock_session.assert_not_called()
+        mock_logger.info.assert_not_called()
+        mock_logger.debug.assert_called_once_with(
+            "fmp_subscription_unavailable_cached",
+            endpoint="ratios",
+            reason="subscription_paywall",
         )
-        assert "fmp_subscription_unavailable" in warning_calls
+
+    @pytest.mark.asyncio
+    async def test_blocked_endpoint_does_not_block_other_endpoints(self):
+        """Endpoint blocking is scoped to one endpoint, not the whole fetcher."""
+        fetcher = FMPFetcher(api_key="test-key")
+        fetcher._subscription_blocked_endpoints.add("ratios")
+
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.json = AsyncMock(return_value=[{"companyName": "Apple Inc."}])
+
+        mock_response_cm = AsyncMock()
+        mock_response_cm.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response_cm.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=mock_response_cm)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            result = await fetcher._get("profile", {"symbol": "AAPL"})
+
+        assert result == [{"companyName": "Apple Inc."}]
+        mock_session.get.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_402_opaque_response_starts_cooldown(self):

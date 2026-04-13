@@ -548,8 +548,47 @@ class TestTokenTrackingCallback:
         ]
         assert len(budget_logs) == 1
         assert budget_logs[0].kwargs["configured_output_cap"] == 1000
+        assert budget_logs[0].kwargs["configured_output_intent_cap"] == 1000
+        assert budget_logs[0].kwargs["configured_api_output_cap"] == 1000
         assert budget_logs[0].kwargs["completion_tokens"] == 500
         assert budget_logs[0].kwargs["utilization_ratio"] == 0.5
+        assert budget_logs[0].kwargs["api_utilization_ratio"] == 0.5
+
+    def test_callback_records_thinking_tokens_separately(self):
+        tracker = TokenTracker()
+        tracker.reset()
+
+        callback = TokenTrackingCallback(
+            agent_name="test_agent",
+            tracker=tracker,
+            output_token_cap=1000,
+        )
+        callback.api_output_token_cap = 3000
+        llm_result = LLMResult(
+            generations=[],
+            llm_output={
+                "model_name": "gemini-3.1-flash-lite-preview",
+                "usage_metadata": {
+                    "input_tokens": 1000,
+                    "output_tokens": 2700,
+                    "output_token_details": {"reasoning": 2400},
+                },
+            },
+        )
+
+        with patch("src.token_tracker.logger.info") as mock_info:
+            callback.on_llm_end(llm_result)
+
+        budget_logs = [
+            call
+            for call in mock_info.call_args_list
+            if call.args and call.args[0] == "llm_output_budget_usage"
+        ]
+        assert len(budget_logs) == 1
+        assert budget_logs[0].kwargs["thinking_tokens"] == 2400
+        assert budget_logs[0].kwargs["visible_output_tokens"] == 300
+        assert budget_logs[0].kwargs["intent_utilization_ratio"] == 0.3
+        assert budget_logs[0].kwargs["api_utilization_ratio"] == 0.9
 
     def test_callback_with_custom_tracker(self):
         """Test creating callback with custom tracker instance."""

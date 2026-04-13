@@ -26,7 +26,6 @@ from src.retrospective import (
     _extract_bear_risks,
     _extract_data_block_field,
     _extract_data_block_float,
-    _get_ticker_suffix,
     _lesson_already_processed,
     compare_to_reality,
     compute_confidence,
@@ -38,6 +37,7 @@ from src.retrospective import (
     run_retrospective,
     store_lesson,
 )
+from src.ticker_policy import get_ticker_suffix
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Test Helpers
@@ -194,6 +194,10 @@ class TestExtractSnapshot:
         assert snapshot["exchange"] == "US"
         assert snapshot["currency"] == "USD"
         assert snapshot["benchmark_index"] == "^GSPC"
+
+    def test_extract_snapshot_persists_trace_id(self):
+        snapshot = extract_snapshot(_make_result(), "2767.T", trace_id="trace-123")
+        assert snapshot["trace_id"] == "trace-123"
 
 
 @pytest.mark.asyncio
@@ -369,10 +373,10 @@ class TestExchangeBenchmarkMapping:
             assert EXCHANGE_CURRENCY.get(suffix) == currency, f"Failed for {suffix}"
 
     def test_ticker_suffix_extraction(self):
-        assert _get_ticker_suffix("7203.T") == ".T"
-        assert _get_ticker_suffix("0005.HK") == ".HK"
-        assert _get_ticker_suffix("AAPL") == ""
-        assert _get_ticker_suffix("BRK.B") == ".B"
+        assert get_ticker_suffix("7203.T") == ".T"
+        assert get_ticker_suffix("0005.HK") == ".HK"
+        assert get_ticker_suffix("AAPL") == ""
+        assert get_ticker_suffix("BRK.B") == ".B"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1246,6 +1250,56 @@ class TestEarlyDedupInRetrospective:
         # compare_to_reality SHOULD have been called
         mock_compare.assert_called_once()
         assert len(lessons) == 1
+
+    @pytest.mark.asyncio
+    async def test_deferred_scores_written_for_snapshots_with_trace_id(self):
+        snapshot = _make_snapshot(
+            analysis_date=(datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d"),
+            trace_id="trace-123",
+        )
+        snapshot["_source_file"] = "test.json"
+        snapshots = {"2767.T": [snapshot]}
+
+        mock_memory = MagicMock()
+        mock_memory.available = True
+        mock_memory.situation_collection.get.return_value = {"ids": [], "documents": []}
+        mock_memory.add_situations = AsyncMock(return_value=True)
+
+        comparison = _make_snapshot(
+            ticker="2767.T",
+            analysis_date=snapshot["analysis_date"],
+            excess_return_pct=22.5,
+            days_elapsed=180,
+            trace_id="trace-123",
+        )
+        comparison["_confidence"] = 0.9
+
+        with (
+            patch("src.retrospective.load_past_snapshots", return_value=snapshots),
+            patch(
+                "src.retrospective.compare_to_reality",
+                new_callable=AsyncMock,
+                return_value=comparison,
+            ),
+            patch(
+                "src.retrospective.generate_lesson",
+                new_callable=AsyncMock,
+                return_value=(
+                    "Watch cyclical peaks more closely.",
+                    "missed_risk",
+                    "CYCLICAL_PEAK",
+                ),
+            ),
+            patch("src.observability.create_deferred_score") as mock_create_score,
+        ):
+            lessons = await run_retrospective("2767.T", Path("/fake"), mock_memory)
+
+        assert len(lessons) == 1
+        assert mock_create_score.call_count == 2
+        assert {call.kwargs["name"] for call in mock_create_score.call_args_list} == {
+            "excess_return_6m",
+            "prediction_correct",
+        }
 
 
 # ══════════════════════════════════════════════════════════════════════════════

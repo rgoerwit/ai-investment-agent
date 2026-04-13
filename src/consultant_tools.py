@@ -25,6 +25,8 @@ from src.runtime_diagnostics import classify_failure
 
 logger = structlog.get_logger(__name__)
 
+SPOT_CHECK_TIMEOUT_SECONDS = 8.0
+
 # Fields the consultant is allowed to spot-check (decision-critical metrics only)
 ALLOWED_FIELDS = frozenset(
     {
@@ -114,7 +116,10 @@ async def spot_check_metric(
 
     try:
         stock = yf.Ticker(ticker)
-        info = await asyncio.to_thread(lambda: stock.info)
+        info = await asyncio.wait_for(
+            asyncio.to_thread(lambda: stock.info),
+            timeout=SPOT_CHECK_TIMEOUT_SECONDS,
+        )
         value = info.get(metric)
 
         return json.dumps(
@@ -123,6 +128,20 @@ async def spot_check_metric(
                 "metric": metric,
                 "value": value,
                 "source": "yfinance_direct",
+            }
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "spot_check_timeout",
+            ticker=ticker,
+            metric=metric,
+            timeout_seconds=SPOT_CHECK_TIMEOUT_SECONDS,
+        )
+        return json.dumps(
+            {
+                "error": "Timed out loading yfinance info",
+                "ticker": ticker,
+                "metric": metric,
             }
         )
     except Exception as e:
@@ -221,7 +240,7 @@ async def spot_check_metric_alt(
         )
 
     except FMPSubscriptionUnavailableError as e:
-        logger.warning(
+        logger.debug(
             "spot_check_alt_subscription_unavailable",
             ticker=ticker,
             metric=metric,

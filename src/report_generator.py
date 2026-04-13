@@ -19,6 +19,7 @@ import structlog
 
 from src.data_block_utils import normalize_structured_block_boundaries
 from src.runtime_diagnostics import is_publishable_analysis
+from src.ticker_policy import CHINA_SUFFIXES, KOREA_SUFFIXES, ticker_in_group
 
 logger = structlog.get_logger(__name__)
 
@@ -412,18 +413,10 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
             jurisdiction = 100.0
 
             # Infer jurisdiction risk from ticker suffix or explicit field
-            ticker_upper = self.ticker.upper()
-
             # High-risk jurisdictions (authoritarian, sanctions risk)
-            if any(
-                suffix in ticker_upper
-                for suffix in [".SS", ".SZ", ".HK"]  # China mainland, HK
-            ):
+            if ticker_in_group(self.ticker, CHINA_SUFFIXES):
                 jurisdiction -= 25
-            elif any(
-                suffix in ticker_upper
-                for suffix in [".KS", ".KQ"]  # Korea
-            ):
+            elif ticker_in_group(self.ticker, KOREA_SUFFIXES):
                 jurisdiction -= 10  # Moderate geopolitical risk
 
             # Low-risk developed markets get no penalty

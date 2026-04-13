@@ -9,7 +9,8 @@ UPDATED: Added OpenAI consultant LLM for cross-validation (Dec 2025).
 import re
 from collections.abc import Callable
 from importlib.util import find_spec
-from typing import Any
+from numbers import Real
+from typing import Any, Literal
 
 import structlog
 from langchain_core.callbacks import BaseCallbackHandler
@@ -22,6 +23,7 @@ from langchain_google_genai import (
 )
 
 from src.config import config
+from src.llm_budgets import GenerationBudget, get_generation_budget
 
 logger = structlog.get_logger(__name__)
 _logged_model_init_configs: set[tuple[str, str, int, int, str | None]] = set()
@@ -179,6 +181,77 @@ _llm_instances: dict = {}
 _llm_instance_counter: int = 0
 
 
+def _coerce_int_setting(value: Any, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, Real):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return default
+    return default
+
+
+def _reasoning_counts_against_completion_cap(
+    *,
+    provider: str,
+    model_name: str,
+    thinking_level: str | None = None,
+    reasoning_effort: str | None = None,
+    thinking: Any = None,
+    thinking_budget: int | None = None,
+) -> bool:
+    if provider == "google":
+        return bool(thinking_level and _is_gemini_v3_or_greater(model_name))
+    if provider == "openai":
+        return reasoning_effort is not None
+    if provider == "anthropic":
+        return thinking is not None and thinking_budget is None
+    return False
+
+
+def _resolve_generation_budget(
+    *,
+    intent_tokens: int,
+    reserve_class: Literal["default", "deep"],
+    reserve_enabled: bool,
+) -> GenerationBudget:
+    return get_generation_budget(
+        intent_tokens=intent_tokens,
+        reserve_class=reserve_class,
+        reserve_enabled=reserve_enabled,
+        default_reserve_tokens=_coerce_int_setting(
+            getattr(config, "llm_default_reasoning_reserve_tokens", None),
+            2048,
+        ),
+        deep_reserve_tokens=_coerce_int_setting(
+            getattr(config, "llm_deep_reasoning_reserve_tokens", None),
+            8192,
+        ),
+    )
+
+
+def _stamp_budget_metadata(
+    llm: BaseChatModel,
+    *,
+    callbacks: list[BaseCallbackHandler] | None,
+    budget: GenerationBudget,
+    intent_attr: str,
+    api_attr: str,
+) -> None:
+    setattr(llm, intent_attr, budget.intent_tokens)
+    setattr(llm, api_attr, budget.api_cap_tokens)
+    llm._configured_reasoning_reserve_tokens = budget.reserve_tokens
+
+    for callback in callbacks or []:
+        if hasattr(callback, "output_token_cap"):
+            callback.output_token_cap = budget.intent_tokens
+            callback.api_output_token_cap = budget.api_cap_tokens
+            callback.reasoning_reserve_tokens = budget.reserve_tokens
+
+
 class _LazyLLMProxy:
     """Lazily construct a default LLM on first use."""
 
@@ -227,6 +300,7 @@ def create_gemini_model(
     callbacks: list[BaseCallbackHandler] | None = None,
     thinking_level: str | None = None,
     max_output_tokens: int | None = None,
+    reserve_class: Literal["default", "deep"] = "default",
 ) -> BaseChatModel:
     """
     Generic factory for Gemini models.
@@ -239,6 +313,22 @@ def create_gemini_model(
     """
     global _llm_instance_counter
 
+    intent_tokens = max_output_tokens or config.llm_base_output_tokens
+    thinking_budget = None
+    if thinking_level and _is_gemini_v2_5(model_name):
+        thinking_budget = _THINKING_BUDGETS.get(thinking_level, 4096)
+
+    budget = _resolve_generation_budget(
+        intent_tokens=intent_tokens,
+        reserve_class=reserve_class,
+        reserve_enabled=_reasoning_counts_against_completion_cap(
+            provider="google",
+            model_name=model_name,
+            thinking_level=thinking_level,
+            thinking_budget=thinking_budget,
+        ),
+    )
+
     kwargs = {
         "model": model_name,
         "temperature": temperature,
@@ -248,7 +338,7 @@ def create_gemini_model(
         "streaming": streaming,
         "rate_limiter": GLOBAL_RATE_LIMITER,
         "convert_system_message_to_human": False,
-        "max_output_tokens": max_output_tokens or config.llm_base_output_tokens,
+        "max_output_tokens": budget.api_cap_tokens,
         "callbacks": callbacks or [],
         "api_key": config.get_google_api_key(),  # Explicit API key from config
     }
@@ -259,7 +349,7 @@ def create_gemini_model(
             "thinking_level_applied", thinking_level=thinking_level, model=model_name
         )
     elif thinking_level and _is_gemini_v2_5(model_name):
-        kwargs["thinking_budget"] = _THINKING_BUDGETS.get(thinking_level, 4096)
+        kwargs["thinking_budget"] = thinking_budget
         logger.debug(
             "thinking_budget_applied",
             thinking_level=thinking_level,
@@ -268,7 +358,13 @@ def create_gemini_model(
         )
 
     llm = ChatGoogleGenerativeAI(**kwargs)
-    llm._configured_max_output_tokens = kwargs["max_output_tokens"]
+    _stamp_budget_metadata(
+        llm,
+        callbacks=kwargs["callbacks"],
+        budget=budget,
+        intent_attr="_configured_max_output_tokens",
+        api_attr="_configured_api_output_tokens",
+    )
     if thinking_level:
         llm.thinking_level = thinking_level
 
@@ -316,6 +412,7 @@ def create_quick_thinking_llm(
         callbacks=callbacks,
         thinking_level=thinking_level,
         max_output_tokens=max_output_tokens,
+        reserve_class="default",
     )
 
 
@@ -352,6 +449,7 @@ def create_deep_thinking_llm(
         callbacks=callbacks,
         thinking_level=thinking_level,
         max_output_tokens=max_output_tokens,
+        reserve_class="deep",
     )
 
 
@@ -466,8 +564,25 @@ def create_consultant_llm(
     if model_name.startswith("gpt-5") and "pro" not in model_name:
         kwargs["reasoning_effort"] = "medium"
 
+    budget = _resolve_generation_budget(
+        intent_tokens=kwargs["max_completion_tokens"],
+        reserve_class="default",
+        reserve_enabled=_reasoning_counts_against_completion_cap(
+            provider="openai",
+            model_name=model_name,
+            reasoning_effort=kwargs.get("reasoning_effort"),
+        ),
+    )
+    kwargs["max_completion_tokens"] = budget.api_cap_tokens
+
     llm = ChatOpenAI(**kwargs)
-    llm._configured_max_completion_tokens = kwargs["max_completion_tokens"]
+    _stamp_budget_metadata(
+        llm,
+        callbacks=kwargs["callbacks"],
+        budget=budget,
+        intent_attr="_configured_max_completion_tokens",
+        api_attr="_configured_api_completion_tokens",
+    )
 
     return llm
 
@@ -523,8 +638,28 @@ def create_auditor_llm(
         "output_version": "responses/v1",
     }
 
+    if model_name.startswith("gpt-5") and "pro" not in model_name:
+        kwargs["reasoning_effort"] = "medium"
+
+    budget = _resolve_generation_budget(
+        intent_tokens=kwargs["max_completion_tokens"],
+        reserve_class="default",
+        reserve_enabled=_reasoning_counts_against_completion_cap(
+            provider="openai",
+            model_name=model_name,
+            reasoning_effort=kwargs.get("reasoning_effort"),
+        ),
+    )
+    kwargs["max_completion_tokens"] = budget.api_cap_tokens
+
     llm = ChatOpenAI(**kwargs)
-    llm._configured_max_completion_tokens = kwargs["max_completion_tokens"]
+    _stamp_budget_metadata(
+        llm,
+        callbacks=kwargs["callbacks"],
+        budget=budget,
+        intent_attr="_configured_max_completion_tokens",
+        api_attr="_configured_api_completion_tokens",
+    )
     return llm
 
 
@@ -603,6 +738,11 @@ def create_writer_llm(
         logger.info("writer_llm_no_thinking", model=model_name, temperature=temperature)
 
     llm = ChatAnthropic(**kwargs)
+    llm._configured_reasoning_reserve_tokens = (
+        kwargs.get("thinking", {}).get("budget_tokens") or 0
+        if isinstance(kwargs.get("thinking"), dict)
+        else 0
+    )
 
     # Track instance for cleanup (consistent with Gemini tracking)
     global _llm_instance_counter
@@ -664,8 +804,26 @@ def create_editor_llm(
     }
     if model_name.startswith("gpt-5") and "pro" not in model_name:
         kwargs["reasoning_effort"] = "medium"
+    budget = _resolve_generation_budget(
+        intent_tokens=kwargs["max_completion_tokens"],
+        reserve_class="default",
+        reserve_enabled=_reasoning_counts_against_completion_cap(
+            provider="openai",
+            model_name=model_name,
+            reasoning_effort=kwargs.get("reasoning_effort"),
+        ),
+    )
+    kwargs["max_completion_tokens"] = budget.api_cap_tokens
 
-    return ChatOpenAI(**kwargs)
+    llm = ChatOpenAI(**kwargs)
+    _stamp_budget_metadata(
+        llm,
+        callbacks=kwargs["callbacks"],
+        budget=budget,
+        intent_attr="_configured_max_completion_tokens",
+        api_attr="_configured_api_completion_tokens",
+    )
+    return llm
 
 
 # Initialize consultant LLM (lazy initialization to handle missing API key gracefully)

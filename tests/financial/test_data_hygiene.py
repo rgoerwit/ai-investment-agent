@@ -56,6 +56,8 @@ class TestTriangleValidation:
             "currentPrice": 1000.0,  # Actually in Pence, should be 10.0 Pounds
             "sharesOutstanding": 100,
             "marketCap": 1000.0,
+            "currency": "GBp",
+            "financialCurrency": "GBP",
         }
         result = self.validator._validate_triangle(data, "BP.L")
 
@@ -63,6 +65,8 @@ class TestTriangleValidation:
         assert len(result.issues) == 1
         assert "Unit mismatch (100x)" in result.issues[0]
         assert "Pence/Cents" in result.issues[0]
+        assert "currency='GBp'" in result.issues[0]
+        assert "financialCurrency='GBP'" in result.issues[0]
 
     def test_triangle_large_divergence(self):
         """Large divergence (not 100x): calc 10k vs reported 1M."""

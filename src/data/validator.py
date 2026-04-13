@@ -423,8 +423,11 @@ class FineGrainedValidator:
 
         # Specific trap: UK stocks in Pence (100x error)
         if 90 < ratio < 110:
+            currency = data.get("currency")
+            financial_currency = data.get("financialCurrency")
             result.issues.append(
                 f"Unit mismatch (100x): Price likely in Pence/Cents. "
+                f"currency={currency!r} financialCurrency={financial_currency!r}. "
                 f"Calc {calc_cap:,.0f} vs Reported {reported_cap:,.0f}"
             )
         else:

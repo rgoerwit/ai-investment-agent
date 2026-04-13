@@ -46,6 +46,8 @@ Read in this order:
 
 `src/main.py` owns CLI parsing, logging setup, runtime overrides, execution, and output saving.
 
+For runtime/control-plane state design, use `docs/RUNTIME_MODEL.md` as the canonical Stage 0 model before changing storage or orchestration seams.
+
 `src/graph/` owns:
 
 - routing and sync barriers

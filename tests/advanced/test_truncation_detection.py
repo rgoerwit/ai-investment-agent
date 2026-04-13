@@ -195,6 +195,63 @@ class TestCompleteOutput:
         result = detect_truncation(text)
         assert result["truncated"] is False
 
+    def test_terminal_field_na_not_flagged(self):
+        text = "OPPORTUNITY: N/A"
+        result = detect_truncation(text)
+        assert result["truncated"] is False
+
+    def test_terminal_field_verdict_not_flagged(self):
+        text = "VERDICT: BUY"
+        result = detect_truncation(text)
+        assert result["truncated"] is False
+
+    def test_terminal_field_status_not_flagged(self):
+        text = "STATUS: CLEAN"
+        result = detect_truncation(text)
+        assert result["truncated"] is False
+
+    def test_terminal_field_detail_na_not_flagged(self):
+        text = "DETAIL: N/A"
+        result = detect_truncation(text)
+        assert result["truncated"] is False
+
+    def test_complete_tavily_wrapper_with_truncation_marker_not_flagged(self):
+        text = (
+            '<search_results source="tavily" data_type="external_web_content">\n'
+            "<result><summary>Example</summary></result>\n"
+            "[...truncated]\n"
+            "</search_results>"
+        )
+        result = detect_truncation(text)
+        assert result["truncated"] is False
+
+    def test_complete_tavily_wrapper_with_mid_result_marker_not_flagged(self):
+        text = (
+            '<search_results source="tavily" data_type="external_web_content">\n'
+            "<result><summary>Example</summary></result>\n"
+            "[...truncated mid-result]\n"
+            "</search_results>"
+        )
+        result = detect_truncation(text)
+        assert result["truncated"] is False
+
+    def test_complete_junior_raw_wrapper_with_embedded_tavily_truncation_not_flagged(
+        self,
+    ):
+        text = (
+            "=== RAW FINANCIAL DATA FOR TEST ===\n\n"
+            "### TOOL 1: get_financial_metrics\n"
+            '{"currency": "USD"}\n\n'
+            "### TOOL 2: get_fundamental_analysis\n"
+            '<search_results source="tavily" data_type="external_web_content">\n'
+            "<result><summary>Example</summary></result>\n"
+            "[...truncated]\n"
+            "</search_results>\n\n"
+            "=== END RAW DATA ==="
+        )
+        result = detect_truncation(text, agent="junior_fundamentals_analyst")
+        assert result["truncated"] is False
+
 
 class TestEdgeCases:
     """Test edge cases and boundary conditions."""
@@ -258,3 +315,47 @@ class TestAgentScoping:
         )
         result = detect_truncation(text, agent="fundamentals_analyst")
         assert result["truncated"] is True
+
+    def test_terminal_field_with_dangling_phrase_is_flagged(self):
+        text = "OPPORTUNITY: Benefiting from"
+        result = detect_truncation(text)
+        assert result["truncated"] is True
+
+    def test_terminal_field_with_incomplete_detail_is_flagged(self):
+        text = "DETAIL: Exposure to demand in"
+        result = detect_truncation(text)
+        assert result["truncated"] is True
+
+    def test_incomplete_junior_raw_wrapper_is_flagged(self):
+        text = (
+            "=== RAW FINANCIAL DATA FOR TEST ===\n\n"
+            "### TOOL 1: get_financial_metrics\n"
+            '{"currency": "USD"}\n\n'
+            "### TOOL 2: get_fundamental_analysis\n"
+            '<search_results source="tavily" data_type="external_web_content">\n'
+            "<result><summary>Example</summary></result>\n"
+            "[...truncated]\n"
+            "</search_results>"
+        )
+        result = detect_truncation(text, agent="junior_fundamentals_analyst")
+        assert result["truncated"] is True
+        assert "RAW DATA wrapper" in result["marker"]
+
+    def test_plain_code_truncation_marker_outside_wrapper_still_flagged(self):
+        text = "Some content\n[...TRUNCATED 5000 chars...]\nMore content"
+        result = detect_truncation(text)
+        assert result["truncated"] is True
+        assert result["source"] == "code"
+
+    def test_consultant_style_code_truncation_marker_outside_wrapper_still_flagged(
+        self,
+    ):
+        text = (
+            "CONSULTANT REVIEW\n"
+            "Important content\n"
+            "[...TRUNCATED 5000 chars...]\n"
+            "[NOTE: Data truncated due to size limits. Partial analysis may still be useful.]"
+        )
+        result = detect_truncation(text, agent="consultant")
+        assert result["truncated"] is True
+        assert result["source"] == "code"

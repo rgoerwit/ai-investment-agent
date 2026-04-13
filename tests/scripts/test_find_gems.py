@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+from src.ticker_utils import to_yfinance
 from src.yfinance_runtime import YFRateLimitError
 
 # Add scripts/ to path so we can import find_gems as a module
@@ -757,21 +758,39 @@ class TestGenerateYfTicker:
 
 # ============================================================
 class TestNormalizeTicker:
-    """Tests for _normalize_ticker() utility."""
+    """Ticker normalisation as used by find_gems._process_row.
+
+    find_gems no longer defines its own _normalize_ticker; it delegates to
+    src.ticker_utils.to_yfinance (called with str() coercion on the raw value).
+    These tests pin the contract that find_gems._process_row relies on so that
+    any future breakage in the normalisation chain surfaces here first.
+    """
 
     def test_standard_suffix_unchanged(self):
-        assert find_gems._normalize_ticker("7203.T") == "7203.T"
-        assert find_gems._normalize_ticker("0005.HK") == "0005.HK"
+        assert to_yfinance("7203.T") == "7203.T"
+        assert to_yfinance("0005.HK") == "0005.HK"
 
     def test_multi_dot_becomes_dash(self):
-        assert find_gems._normalize_ticker("A.B.TO") == "A-B.TO"
+        assert to_yfinance("A.B.TO") == "A-B.TO"
 
     def test_single_char_suffix_becomes_dash(self):
         # e.g., "BRK.B" -> "BRK-B" (single char, not exchange suffix)
-        assert find_gems._normalize_ticker("BRK.B") == "BRK-B"
+        assert to_yfinance("BRK.B") == "BRK-B"
 
     def test_non_string_converted(self):
-        assert find_gems._normalize_ticker(12345) == "12345"
+        # find_gems._process_row always calls str() before to_yfinance; mirror that here.
+        assert to_yfinance(str(12345)) == "12345"
+
+    def test_find_gems_process_row_uses_to_yfinance(self):
+        """Regression: _process_row must resolve symbol through to_yfinance, not a
+        private helper.  If find_gems.to_yfinance ever stops pointing at the
+        canonical src.ticker_utils implementation this test will fail."""
+        import inspect
+
+        import src.ticker_utils as tu
+
+        # find_gems imports to_yfinance at module level; verify it is the same object
+        assert find_gems.to_yfinance is tu.to_yfinance
 
 
 # ============================================================
@@ -862,6 +881,11 @@ class TestToUsd:
         rates = {"USD": 1.0, "GBP": 1.27}
         result = find_gems._to_usd(10000, "GBp", rates)
         # 10000 pence = 100 GBP * 1.27 = 127 USD
+        assert result == pytest.approx(100 * 1.27)
+
+    def test_gbx_normalization_uses_same_major_currency_path(self):
+        rates = {"USD": 1.0, "GBP": 1.27}
+        result = find_gems._to_usd(10000, "GBX", rates)
         assert result == pytest.approx(100 * 1.27)
 
     def test_none_value_returns_none(self):

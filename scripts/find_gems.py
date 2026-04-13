@@ -29,6 +29,8 @@ import pandas as pd
 import requests
 import yfinance as yf
 
+from src.fx_normalization import normalize_minor_unit_amount
+from src.ticker_utils import to_yfinance
 from src.yfinance_runtime import YFRateLimitError, configure_yfinance_defaults
 
 # yfinance logs every 404 to stderr at ERROR level — suppress since missing
@@ -154,10 +156,7 @@ def _to_usd(value, currency, fx_rates):
     """Convert *value* in *currency* to USD. Returns None for unknown currencies."""
     if value is None or currency is None:
         return None
-    # Normalize GBp (pence) → GBP
-    if currency == "GBp":
-        currency = "GBP"
-        value = value / 100.0
+    value, currency, _ = normalize_minor_unit_amount(value, currency)
     rate = fx_rates.get(currency)
     if rate is None:
         return None
@@ -549,58 +548,6 @@ def scrape_exchanges(config: dict, *, exclude_us: bool = True) -> pd.DataFrame:
 # ============================================================
 
 
-def _normalize_ticker(ticker):
-    """Converts exchange formats to Yahoo format."""
-    if not isinstance(ticker, str):
-        return str(ticker)
-
-    parts = ticker.split(".")
-    if len(parts) > 2:
-        symbol = "-".join(parts[:-1])
-        suffix = parts[-1]
-        return f"{symbol}.{suffix}"
-    elif len(parts) == 2:
-        p1, p2 = parts
-        exchange_suffixes = {
-            "V",
-            "T",
-            "L",
-            "K",
-            "S",
-            "AX",
-            "TO",
-            "HK",
-            "DE",
-            "PA",
-            "AS",
-            "BR",
-            "MI",
-            "MC",
-            "SW",
-            "OL",
-            "ST",
-            "CO",
-            "NZ",
-            "JO",
-            "KS",
-            "KQ",
-            "TW",
-            "TWO",
-            "SI",
-            "LS",
-            "KL",
-            "BK",
-            "JK",
-            "NS",
-            "BO",
-        }
-        if p2 in exchange_suffixes:
-            return ticker
-        if len(p2) == 1:
-            return f"{p1}-{p2}"
-    return ticker
-
-
 def _process_row(row, *, fx_rates=None, min_mcap=None, min_volume=None, debug=False):
     """Fetch financials for a single ticker via yfinance.
 
@@ -613,7 +560,7 @@ def _process_row(row, *, fx_rates=None, min_mcap=None, min_volume=None, debug=Fa
     if pd.isna(ticker_symbol) or not ticker_symbol or str(ticker_symbol).strip() == "":
         return None
 
-    yf_symbol = _normalize_ticker(str(ticker_symbol))
+    yf_symbol = to_yfinance(str(ticker_symbol))
     if fx_rates is None:
         fx_rates = {"USD": 1.0}
 

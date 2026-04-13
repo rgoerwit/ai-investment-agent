@@ -19,7 +19,12 @@ stocktwits_api = StockTwitsAPI()
 
 @tool
 async def get_news(
-    ticker: Annotated[str, "Stock ticker symbol"],
+    ticker: Annotated[
+        str,
+        "Exact ticker with exchange suffix — e.g. '3217.TWO' (Taiwan OTC/TPEx),"
+        " '7203.T' (Japan), '0005.HK' (HK), '2330.TW' (Taiwan TWSE)."
+        " Use exactly as provided; never alter or drop the suffix.",
+    ],
     search_query: Annotated[str, "Specific query"] = None,
 ) -> str:
     """

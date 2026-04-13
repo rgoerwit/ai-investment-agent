@@ -14,32 +14,35 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.ticker_utils import TickerFormatter
+from src.exchange_metadata import (
+    IBKR_TO_YFINANCE,
+    SUFFIX_TO_CURRENCY_CODE,
+    YFINANCE_TO_IBKR,
+)
 
-# Single-exchange currencies that unambiguously resolve to one yfinance suffix.
-# EUR, CHF, CAD are intentionally omitted — each spans multiple exchanges.
-_CURRENCY_TO_SUFFIX: dict[str, str] = {
-    "HKD": ".HK",  # Hong Kong dollar → SEHK
-    "JPY": ".T",  # Japanese yen → TSE
-    "TWD": ".TW",  # Taiwan dollar → TWSE
-    "KRW": ".KS",  # Korean won → KRX
-    "SGD": ".SI",  # Singapore dollar → SGX
-    "AUD": ".AX",  # Australian dollar → ASX
-    "NZD": ".NZ",  # New Zealand dollar → NZX
-    "BRL": ".SA",  # Brazilian real → B3
-    "MXN": ".MX",  # Mexican peso → BMV
-    "MYR": ".KL",  # Malaysian ringgit → Bursa Malaysia
-    "PLN": ".WA",  # Polish złoty → Warsaw Stock Exchange
-    "SEK": ".ST",  # Swedish krona → Nasdaq Stockholm
-    "NOK": ".OL",  # Norwegian krone → Oslo Børs
-    "DKK": ".CO",  # Danish krone → Nasdaq Copenhagen
-    # GBX and GBP: London Stock Exchange only. IBKR stores LSE prices in GBP
-    # (pounds); portfolio.py multiplies by 100 to convert to GBX (pence) and
-    # sets currency="GBX".  Both map to ".L" — GBP is included as defence-in-
-    # depth in case a position arrives before the ×100 conversion.
-    "GBX": ".L",  # British pence (IBKR-normalized) → LSE
-    "GBP": ".L",  # British pound → LSE
-}
+
+def _build_currency_to_suffix() -> dict[str, str]:
+    """Build the IBKR currency fallback map from canonical exchange facts."""
+    grouped: dict[str, set[str]] = {}
+    for suffix, currency in SUFFIX_TO_CURRENCY_CODE.items():
+        grouped.setdefault(currency, set()).add(suffix)
+
+    derived = {
+        currency: sorted(suffixes)[0]
+        for currency, suffixes in grouped.items()
+        if len(suffixes) == 1
+    }
+
+    # Shared-currency exchanges need explicit policy rather than arbitrary inversion.
+    return {
+        **derived,
+        "TWD": ".TW",
+        "GBP": ".L",
+        "GBX": ".L",
+    }
+
+
+_CURRENCY_TO_SUFFIX: dict[str, str] = _build_currency_to_suffix()
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +68,7 @@ class Ticker:
         """Return the yfinance exchange suffix (e.g. '.HK', '.T', '').
 
         Lookup order:
-        1. TickerFormatter.IBKR_TO_YFINANCE[exchange] — static, authoritative.
+        1. IBKR_TO_YFINANCE[exchange] — static, authoritative.
            Returns "" for US venues (NASDAQ, NYSE, SMART, …) — that is a valid
            result meaning "no suffix".  Returns None (missing key) for completely
            unknown exchange codes → fall through to step 2.
@@ -73,7 +76,7 @@ class Ticker:
            currencies when the exchange code is unknown.
         3. "" — US/ADR or genuinely unresolvable.
         """
-        sfx = TickerFormatter.IBKR_TO_YFINANCE.get(self.exchange)
+        sfx = IBKR_TO_YFINANCE.get(self.exchange)
         if sfx is not None:
             # Explicit entry: "" means US (no suffix), non-empty means the exchange.
             return sfx
@@ -115,7 +118,7 @@ class Ticker:
         exchange code)".  Use it to suppress false ⚠ suffix warnings for US
         equities.
         """
-        return TickerFormatter.IBKR_TO_YFINANCE.get(self.exchange) is not None
+        return IBKR_TO_YFINANCE.get(self.exchange) is not None
 
     def __str__(self) -> str:
         return self.yf
@@ -147,7 +150,7 @@ class Ticker:
 
         # Determine if this is an HK stock so we can strip zero-padding.
         # IBKR can occasionally send "0005" instead of "5" for SEHK positions.
-        sfx = TickerFormatter.IBKR_TO_YFINANCE.get(exch)
+        sfx = IBKR_TO_YFINANCE.get(exch)
         if sfx is None and ccy:
             sfx = _CURRENCY_TO_SUFFIX.get(ccy, "")
         if sfx == ".HK":
@@ -172,7 +175,7 @@ class Ticker:
         if "." in yf_str:
             sym_part, sfx_part = yf_str.rsplit(".", 1)
             suffix = f".{sfx_part}"
-            ibkr_exchange = TickerFormatter.YFINANCE_TO_IBKR.get(suffix, "SMART")
+            ibkr_exchange = YFINANCE_TO_IBKR.get(suffix, "SMART")
             # Strip HK zero-padding: "0005" → "5" (re-applied by .yf)
             symbol = (sym_part.lstrip("0") or "0") if suffix == ".HK" else sym_part
         else:

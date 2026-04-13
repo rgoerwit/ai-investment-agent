@@ -4,6 +4,7 @@ Tests for consultant verification tools.
 Tests both spot_check_metric (yfinance) and spot_check_metric_alt (FMP) tools.
 """
 
+import asyncio
 import json
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -46,6 +47,30 @@ class TestSpotCheckMetric:
         assert result["ticker"] == "7203.T"
         assert result["metric"] == "trailingPE"
         assert result["source"] == "yfinance_direct"
+
+    @pytest.mark.asyncio
+    async def test_timeout_returns_error_payload(self):
+        """Stalled yfinance access should return structured timeout JSON."""
+
+        async def slow_to_thread(_func):
+            await asyncio.sleep(1)
+
+        with patch("src.consultant_tools.yf.Ticker") as mock_ticker:
+            mock_ticker.return_value.info = {"trailingPE": 12.5}
+            with patch("src.consultant_tools.SPOT_CHECK_TIMEOUT_SECONDS", 0.01):
+                with patch(
+                    "src.consultant_tools.asyncio.to_thread",
+                    side_effect=slow_to_thread,
+                ):
+                    result = json.loads(
+                        await spot_check_metric.ainvoke(
+                            {"ticker": "7203.T", "metric": "trailingPE"}
+                        )
+                    )
+
+        assert result["ticker"] == "7203.T"
+        assert result["metric"] == "trailingPE"
+        assert "timed out" in result["error"].lower()
 
 
 class TestSpotCheckMetricAlt:
@@ -175,8 +200,12 @@ class TestSpotCheckMetricAlt:
         assert result["retryable"] is False
 
     @pytest.mark.asyncio
-    async def test_fmp_subscription_failure_returns_non_retryable_auth_error(self):
-        """Subscription/paywall failures should not look retryable."""
+    async def test_fmp_subscription_failure_returns_non_retryable_auth_error(
+        self, caplog
+    ):
+        """Subscription/paywall failures should not look retryable and must not warn."""
+        import logging
+
         mock_fmp = MagicMock()
         mock_fmp.is_available.return_value = True
         mock_fmp._get = AsyncMock(
@@ -186,16 +215,28 @@ class TestSpotCheckMetricAlt:
         )
 
         with patch("src.data.fmp_fetcher.get_fmp_fetcher", return_value=mock_fmp):
-            result = json.loads(
-                await spot_check_metric_alt.ainvoke(
-                    {"ticker": "AGS.SI", "metric": "operatingCashflow"}
+            with caplog.at_level(logging.WARNING, logger="src.consultant_tools"):
+                result = json.loads(
+                    await spot_check_metric_alt.ainvoke(
+                        {"ticker": "AGS.SI", "metric": "operatingCashflow"}
+                    )
                 )
-            )
 
         assert result["provider"] == "fmp"
         assert result["failure_kind"] == "auth_error"
         assert result["retryable"] is False
         assert "current fmp plan does not cover" in result["suggestion"].lower()
+
+        # Subscription limits are operator-known — must not surface as warnings.
+        warning_events = [
+            r
+            for r in caplog.records
+            if r.levelno >= logging.WARNING
+            and "spot_check_alt_subscription_unavailable" in r.message
+        ]
+        assert (
+            warning_events == []
+        ), "FMPSubscriptionUnavailableError should log at debug, not warning"
 
     @pytest.mark.asyncio
     async def test_fmp_generic_failure_returns_endpoint_details(self):

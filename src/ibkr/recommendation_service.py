@@ -12,6 +12,7 @@ from src.ibkr.models import (
 )
 from src.ibkr.portfolio_data_service import IbkrPortfolioDataService, PortfolioSnapshot
 from src.ibkr.reconciler import (
+    ReconciliationDiagnostics,
     compute_portfolio_health,
     load_latest_analyses,
     reconcile,
@@ -58,6 +59,7 @@ class PortfolioRecommendationBundle:
     watchlist_tickers: set[str] = field(default_factory=set)
     watchlist_name: str | None = None
     watchlist_total: int | None = None
+    watchlist_candidates_blocked_by_cash: int = 0
     live_orders: list[dict] = field(default_factory=list)
     items: list[ReconciliationItem] = field(default_factory=list)
     health_flags: list[str] = field(default_factory=list)
@@ -136,7 +138,12 @@ class PortfolioRecommendationService:
             watchlist_total = snapshot.watchlist.total
             live_orders = snapshot.live_orders
 
-        items, health_flags, freshness_summary = self._reconcile_and_classify(
+        (
+            items,
+            health_flags,
+            freshness_summary,
+            watchlist_candidates_blocked_by_cash,
+        ) = self._reconcile_and_classify(
             request=request,
             analyses=analyses,
             positions=positions,
@@ -171,7 +178,12 @@ class PortfolioRecommendationService:
                 progress=progress,
             )
             analyses = self._load_analyses_fn(request.results_dir)
-            items, health_flags, freshness_summary = self._reconcile_and_classify(
+            (
+                items,
+                health_flags,
+                freshness_summary,
+                watchlist_candidates_blocked_by_cash,
+            ) = self._reconcile_and_classify(
                 request=request,
                 analyses=analyses,
                 positions=positions,
@@ -186,6 +198,7 @@ class PortfolioRecommendationService:
             watchlist_tickers=watchlist_tickers,
             watchlist_name=watchlist_name,
             watchlist_total=watchlist_total,
+            watchlist_candidates_blocked_by_cash=watchlist_candidates_blocked_by_cash,
             live_orders=live_orders,
             items=items,
             health_flags=health_flags,
@@ -211,7 +224,8 @@ class PortfolioRecommendationService:
         positions: list[NormalizedPosition],
         portfolio: PortfolioSummary,
         watchlist_tickers: set[str],
-    ) -> tuple[list[ReconciliationItem], list[str], AnalysisFreshnessSummary]:
+    ) -> tuple[list[ReconciliationItem], list[str], AnalysisFreshnessSummary, int]:
+        diagnostics = ReconciliationDiagnostics()
         items = self._reconcile_fn(
             positions=positions,
             analyses=analyses,
@@ -223,6 +237,7 @@ class PortfolioRecommendationService:
             sector_limit_pct=request.sector_limit_pct,
             exchange_limit_pct=request.exchange_limit_pct,
             watchlist_tickers=watchlist_tickers or None,
+            diagnostics=diagnostics,
         )
         health_flags = self._compute_portfolio_health_fn(
             positions=positions,
@@ -235,4 +250,9 @@ class PortfolioRecommendationService:
             items,
             max_age_days=request.max_age_days,
         )
-        return items, health_flags, freshness_summary
+        return (
+            items,
+            health_flags,
+            freshness_summary,
+            diagnostics.cash_blocked_offwatch_buy_count,
+        )

@@ -16,6 +16,16 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
+MINOR_UNIT_CURRENCY_ALIASES = {
+    "GBp": "GBP",
+    "GBX": "GBP",
+}
+
+MINOR_UNIT_SCALE = {
+    "GBp": 0.01,
+    "GBX": 0.01,
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
 # TIER 1: Dynamic FX Rates (yfinance - always up-to-date)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -115,7 +125,6 @@ FALLBACK_RATES_TO_USD = {
     # European currencies
     "EUR": 1.09,  # Euro
     "GBP": 1.27,  # British Pound
-    "GBX": 0.0127,  # British Pence (100 GBX = 1 GBP)
     "CHF": 1.13,  # Swiss Franc
     "SEK": 0.093,  # Swedish Krona (SEK 10.75 = $1)
     "NOK": 0.092,  # Norwegian Krone (NOK 10.87 = $1)
@@ -136,6 +145,31 @@ FALLBACK_RATES_TO_USD = {
 }
 
 
+def normalize_minor_unit_currency(currency: str | None) -> tuple[str | None, float]:
+    """Return major-unit currency code and scale factor for minor-unit aliases."""
+    if not currency:
+        return currency, 1.0
+    normalized = MINOR_UNIT_CURRENCY_ALIASES.get(currency)
+    if normalized is None:
+        return currency, 1.0
+    return normalized, MINOR_UNIT_SCALE[currency]
+
+
+def normalize_minor_unit_amount(
+    value: float | None, currency: str | None
+) -> tuple[float | None, str | None, float]:
+    """Scale a monetary value to the major currency unit when needed."""
+    normalized_currency, scale = normalize_minor_unit_currency(currency)
+    if value is None:
+        return value, normalized_currency, scale
+    return value * scale, normalized_currency, scale
+
+
+def is_near_minor_unit_ratio(ratio: float, tolerance: float = 0.10) -> bool:
+    """Return True when a ratio is close to a 100x minor-unit mismatch."""
+    return (100 * (1 - tolerance)) < ratio < (100 * (1 + tolerance))
+
+
 def get_fx_rate_fallback(from_currency: str, to_currency: str = "USD") -> float | None:
     """
     Get FX rate from hardcoded fallback table.
@@ -145,6 +179,20 @@ def get_fx_rate_fallback(from_currency: str, to_currency: str = "USD") -> float 
     """
     if from_currency == to_currency:
         return 1.0
+
+    normalized_currency, scale = normalize_minor_unit_currency(from_currency)
+    if scale != 1.0:
+        major_rate = FALLBACK_RATES_TO_USD.get(normalized_currency)
+        if major_rate:
+            rate = major_rate * scale
+            logger.warning(
+                "fx_rate_using_fallback",
+                from_currency=from_currency,
+                to_currency=to_currency,
+                rate=rate,
+                warning="Fallback rate may be stale - update FALLBACK_RATES_TO_USD quarterly",
+            )
+            return rate
 
     rate = FALLBACK_RATES_TO_USD.get(from_currency)
     if rate:

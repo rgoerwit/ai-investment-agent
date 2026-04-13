@@ -10,7 +10,18 @@ from dataclasses import dataclass
 
 import structlog
 
+from src.exchange_metadata import (
+    EXCHANGES_BY_SUFFIX,
+    IBKR_TO_YFINANCE,
+    canonical_suffix_for_token,
+)
+
 logger = structlog.get_logger(__name__)
+
+_COMPANY_NAME_BASE_FALLBACK_SUFFIXES = frozenset({".ST"})
+_NORMALIZED_SHARE_CLASS_TICKER_PATTERN = re.compile(
+    r"^([A-Z0-9][A-Z0-9-]*)-([A-Z])(\.[A-Z]+)$"
+)
 
 # Legal entity suffixes to strip for cleaner search queries
 LEGAL_SUFFIXES = [
@@ -101,121 +112,10 @@ def generate_strict_search_query(ticker: str, raw_name: str, topic: str) -> str:
 class TickerFormatter:
     """Handles international ticker format conversion and validation."""
 
-    # Common exchange suffix mappings
-    # Format: "exchange_code": ("yfinance_suffix", "exchange_name", "country", "ibkr_code")
-    EXCHANGE_SUFFIXES = {
-        # European exchanges
-        "SW": (".SW", "SIX Swiss Exchange", "Switzerland", "SWX"),
-        "SWX": (".SW", "SIX Swiss Exchange", "Switzerland", "SWX"),
-        "VX": (".SW", "SIX Swiss Exchange", "Switzerland", "SWX"),
-        "DE": (".DE", "XETRA", "Germany", "IBIS"),
-        "F": (".F", "Frankfurt Stock Exchange", "Germany", "FWB"),
-        "PA": (".PA", "Euronext Paris", "France", "SBF"),
-        "AS": (".AS", "Euronext Amsterdam", "Netherlands", "AEB"),
-        "BR": (".BR", "Euronext Brussels", "Belgium", "EBR"),
-        "LS": (".LS", "Euronext Lisbon", "Portugal", "BVLP"),
-        "MI": (".MI", "Borsa Italiana", "Italy", "BVME"),
-        "MC": (".MC", "Bolsa de Madrid", "Spain", "BM"),
-        "L": (".L", "London Stock Exchange", "UK", "LSE"),
-        # Asian exchanges
-        "T": (".T", "Tokyo Stock Exchange", "Japan", "TSE"),
-        "HK": (".HK", "Hong Kong Stock Exchange", "Hong Kong", "SEHK"),
-        "SS": (".SS", "Shanghai Stock Exchange", "China", "SSE"),
-        "SZ": (".SZ", "Shenzhen Stock Exchange", "China", "SZSE"),
-        "KS": (".KS", "Korea Stock Exchange", "South Korea", "KRX"),
-        "KQ": (".KQ", "KOSDAQ", "South Korea", "KOSDAQ"),
-        "TW": (".TW", "Taiwan Stock Exchange", "Taiwan", "TWSE"),
-        "SI": (".SI", "Singapore Exchange", "Singapore", "SGX"),
-        "BO": (".BO", "Bombay Stock Exchange", "India", "BSE"),
-        "NS": (".NS", "National Stock Exchange of India", "India", "NSE"),
-        # Other major exchanges
-        "TO": (".TO", "Toronto Stock Exchange", "Canada", "TSX"),
-        "V": (".V", "TSX Venture Exchange", "Canada", "VENTURE"),
-        "AX": (".AX", "Australian Securities Exchange", "Australia", "ASX"),
-        "NZ": (".NZ", "New Zealand Exchange", "New Zealand", "NZE"),
-        "SA": (".SA", "B3 (Brazil)", "Brazil", "BVMF"),
-        "MX": (".MX", "Bolsa Mexicana de Valores", "Mexico", "MEXI"),
-        "JK": (".JK", "Indonesia Stock Exchange", "Indonesia", "IDX"),
-        "KL": (".KL", "Bursa Malaysia", "Malaysia", "KLSE"),
-        "BK": (".BK", "Stock Exchange of Thailand", "Thailand", "SET"),
-    }
-
-    # IBKR exchange code to yfinance suffix mapping.
-    # When IBKR reports a listingExchange for a position, this dict converts it
-    # to the yfinance suffix.  Add entries here whenever a new exchange code
-    # appears in IBKR portfolio responses that isn't already covered.
-    IBKR_TO_YFINANCE = {
-        # ── Germany ──────────────────────────────────────────────────────────
-        "IBIS": ".DE",  # XETRA electronic trading system (primary)
-        "IBIS2": ".DE",  # XETRA (second segment; some IBKR positions use this)
-        "FWB": ".F",  # Frankfurt Stock Exchange (floor)
-        "FWB2": ".F",  # Frankfurt (alternative segment)
-        # ── Other Continental Europe ─────────────────────────────────────────
-        "SWX": ".SW",  # SIX Swiss Exchange
-        "EBS": ".SW",  # SIX (alternative IBKR code)
-        "SBF": ".PA",  # Euronext Paris
-        "AEB": ".AS",  # Euronext Amsterdam
-        "EBR": ".BR",  # Euronext Brussels
-        "BVLP": ".LS",  # Euronext Lisbon
-        "BVME": ".MI",  # Borsa Italiana (Milan)
-        "BM": ".MC",  # Bolsa Madrid (BME)
-        "SIBE": ".MC",  # Bolsa Madrid electronic order book
-        "OSL": ".OL",  # Oslo Børs (Norway)
-        "STO": ".ST",  # Nasdaq Stockholm (Sweden)
-        "HEL": ".HE",  # Nasdaq Helsinki (Finland)
-        "CPH": ".CO",  # Nasdaq Copenhagen (Denmark)
-        "ENEXT.BE": ".BR",  # Euronext Brussels (long-form code)
-        # ── United Kingdom ───────────────────────────────────────────────────
-        "LSE": ".L",  # London Stock Exchange
-        "LSEETF": ".L",  # LSE ETF segment
-        # ── Asia-Pacific ─────────────────────────────────────────────────────
-        "TSE": ".T",  # Tokyo Stock Exchange
-        "OSE.JPN": ".T",  # Osaka Exchange (merged into TSE)
-        "SEHK": ".HK",  # Stock Exchange of Hong Kong
-        "SSE": ".SS",  # Shanghai Stock Exchange
-        "SZSE": ".SZ",  # Shenzhen Stock Exchange
-        "KRX": ".KS",  # Korea Stock Exchange
-        "KOSDAQ": ".KQ",  # KOSDAQ (South Korea)
-        "TWSE": ".TW",  # Taiwan Stock Exchange
-        "TPEx": ".TWO",  # Taipei Exchange (OTC board, Taiwan)
-        "SGX": ".SI",  # Singapore Exchange
-        "ASX": ".AX",  # Australian Securities Exchange
-        "NZE": ".NZ",  # New Zealand Exchange
-        "BSE": ".BO",  # BSE (Bombay Stock Exchange)
-        "NSE": ".NS",  # NSE (National Stock Exchange, India)
-        "IDX": ".JK",  # Indonesia Stock Exchange
-        "KLSE": ".KL",  # Bursa Malaysia
-        "SET": ".BK",  # Stock Exchange of Thailand
-        # ── Eastern Europe ───────────────────────────────────────────────────
-        "WBAG": ".VI",  # Wiener Börse AG (Vienna Stock Exchange)
-        "VSE": ".VI",  # Vienna Stock Exchange (alternative IBKR code)
-        "WSE": ".WA",  # Warsaw Stock Exchange
-        "PSE": ".PR",  # Prague Stock Exchange
-        "BVB": ".RO",  # Bucharest Stock Exchange
-        "BSE2": ".BD",  # Budapest Stock Exchange
-        # ── Americas ─────────────────────────────────────────────────────────
-        "TSX": ".TO",  # Toronto Stock Exchange
-        "VENTURE": ".V",  # TSX Venture Exchange
-        "BVMF": ".SA",  # B3 (São Paulo)
-        "MEXI": ".MX",  # Bolsa Mexicana de Valores
-        # ── US (no suffix in yfinance) ───────────────────────────────────────
-        "NASDAQ": "",
-        "NYSE": "",
-        "ARCA": "",
-        "AMEX": "",
-        "SMART": "",  # IBKR Smart Order Routing — treated as US by default
-        "IEXG": "",  # IEX (US alternative venue)
-        "CBOE": "",  # CBOE (US options/equities)
-    }
-
-    # Reverse mapping: yfinance to IBKR
-    YFINANCE_TO_IBKR = {v: k for k, v in IBKR_TO_YFINANCE.items() if v}
-    YFINANCE_TO_IBKR[""] = "SMART"
-
     # Alternative ticker format patterns
     TICKER_PATTERNS = {
         "reuters": re.compile(r"^([A-Z0-9]+)\.([A-Z]+)-([A-Z]{2})$"),
-        "standard": re.compile(r"^([A-Z0-9]+)\.([A-Z]+)$"),
+        "standard": re.compile(r"^([A-Z0-9][A-Z0-9-]*)\.([A-Z]+)$"),
         "plain": re.compile(r"^([A-Z0-9]+)$"),
         "ibkr": re.compile(r"^([A-Z0-9]+):([A-Z]+)$"),
     }
@@ -247,6 +147,19 @@ class TickerFormatter:
                 ticker = corrected
         except ImportError:
             logger.debug("ticker_corrections_module_not_available")
+
+        # Normalize multi-dot share-class tickers: NIL.B.ST → NIL-B.ST
+        # Scandinavian and other exchanges use a dot before the share-class letter
+        # (A, B, C …); yfinance expects a hyphen in that position instead.
+        # Only fires when the final segment is a known exchange suffix — US and
+        # unknown-suffix tickers are unaffected.
+        _parts = ticker.split(".")
+        if len(_parts) > 2 and canonical_suffix_for_token(_parts[-1]):
+            _rejoined = "-".join(_parts[:-1]) + "." + _parts[-1]
+            logger.info(
+                "multi_dot_ticker_normalised", original=ticker, normalised=_rejoined
+            )
+            ticker = _rejoined
 
         # Try IBKR format (e.g., "NOVN:SWX")
         ibkr_match = cls.TICKER_PATTERNS["ibkr"].match(ticker)
@@ -286,28 +199,52 @@ class TickerFormatter:
         if standard_match:
             symbol, suffix = standard_match.groups()
 
-            if suffix in cls.EXCHANGE_SUFFIXES:
-                exchange_info = cls.EXCHANGE_SUFFIXES[suffix]
+            canonical_suffix = canonical_suffix_for_token(suffix)
+            if canonical_suffix:
+                exchange_info = EXCHANGES_BY_SUFFIX[canonical_suffix]
 
                 if target_format == "yfinance":
-                    normalized = f"{symbol}{exchange_info[0]}"
+                    normalized = f"{symbol}{exchange_info.yf_suffix}"
                 elif target_format == "ibkr":
-                    normalized = f"{symbol}:{exchange_info[3]}"
+                    normalized = f"{symbol}:{exchange_info.ibkr_code}"
                 else:
                     normalized = ticker
 
                 metadata = {
                     "original": original_ticker,
                     "symbol": symbol,
-                    "exchange_suffix": exchange_info[0],
-                    "exchange_name": exchange_info[1],
-                    "country": exchange_info[2],
-                    "ibkr_exchange": exchange_info[3],
+                    "exchange_suffix": exchange_info.yf_suffix,
+                    "exchange_name": exchange_info.exchange_name,
+                    "country": exchange_info.country,
+                    "ibkr_exchange": exchange_info.ibkr_code,
                     "format": "standard",
                 }
                 return normalized, metadata
             else:
-                normalized = ticker if target_format == "yfinance" else ticker
+                # 1-char suffix not recognised as an exchange → US share-class separator.
+                # e.g. PBR.A → PBR-A, BRK.B → BRK-B (yfinance hyphen convention for
+                # preferred/class shares and ADRs).  Known single-letter exchange codes
+                # (T=Tokyo, L=London, V=TSX Venture, …) are caught by the
+                # canonical exchange-suffix branch above and never reach here.
+                if len(suffix) == 1:
+                    share_class_base = f"{symbol}-{suffix}"
+                    normalized = (
+                        share_class_base
+                        if target_format == "yfinance"
+                        else f"{share_class_base}:SMART"
+                    )
+                    metadata = {
+                        "original": original_ticker,
+                        "symbol": symbol,
+                        "exchange_suffix": f".{suffix}",
+                        "exchange_name": "US Exchange (assumed)",
+                        "country": "United States",
+                        "ibkr_exchange": "SMART",
+                        "format": "share_class",
+                    }
+                    return normalized, metadata
+
+                normalized = ticker
                 metadata = {
                     "original": original_ticker,
                     "symbol": symbol,
@@ -351,25 +288,38 @@ class TickerFormatter:
         cls, symbol: str, exchange: str, target_format: str, original_ticker: str
     ) -> tuple[str, dict[str, str]]:
         """Convert from IBKR format to target format."""
-        for _suffix_key, info in cls.EXCHANGE_SUFFIXES.items():
-            if info[3] == exchange:
-                if target_format == "yfinance":
-                    normalized = f"{symbol}{info[0]}"
-                elif target_format == "ibkr":
-                    normalized = f"{symbol}:{exchange}"
-                else:
-                    normalized = f"{symbol}:{exchange}"
+        suffix = IBKR_TO_YFINANCE.get(exchange)
+        if suffix:
+            info = EXCHANGES_BY_SUFFIX[suffix]
+            if target_format == "yfinance":
+                normalized = f"{symbol}{info.yf_suffix}"
+            else:
+                normalized = f"{symbol}:{exchange}"
 
-                metadata = {
-                    "original": original_ticker,
-                    "symbol": symbol,
-                    "exchange_suffix": info[0],
-                    "exchange_name": info[1],
-                    "country": info[2],
-                    "ibkr_exchange": exchange,
-                    "format": "ibkr",
-                }
-                return normalized, metadata
+            metadata = {
+                "original": original_ticker,
+                "symbol": symbol,
+                "exchange_suffix": info.yf_suffix,
+                "exchange_name": info.exchange_name,
+                "country": info.country,
+                "ibkr_exchange": exchange,
+                "format": "ibkr",
+            }
+            return normalized, metadata
+        if suffix == "":
+            normalized = (
+                symbol if target_format == "yfinance" else f"{symbol}:{exchange}"
+            )
+            metadata = {
+                "original": original_ticker,
+                "symbol": symbol,
+                "exchange_suffix": "",
+                "exchange_name": "US Exchange (assumed)",
+                "country": "United States",
+                "ibkr_exchange": exchange,
+                "format": "ibkr",
+            }
+            return normalized, metadata
 
         if target_format == "yfinance":
             normalized = symbol
@@ -489,6 +439,32 @@ class CompanyNameResult:
     is_resolved: bool  # True if a real name was found (not just ticker echoed back)
 
 
+def _company_name_lookup_candidates(ticker: str) -> list[tuple[str, str]]:
+    """Return ordered lookup aliases for company-name resolution."""
+    cleaned = ticker.strip().upper()
+    candidates: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(symbol: str, strategy: str) -> None:
+        if symbol and symbol not in seen:
+            candidates.append((symbol, strategy))
+            seen.add(symbol)
+
+    add(cleaned, "exact")
+
+    normalized = normalize_ticker(cleaned)
+    if normalized != cleaned:
+        add(normalized, "normalized_alias")
+
+    match = _NORMALIZED_SHARE_CLASS_TICKER_PATTERN.match(normalized)
+    if match:
+        base_symbol, _share_class, exchange_suffix = match.groups()
+        if exchange_suffix in _COMPANY_NAME_BASE_FALLBACK_SUFFIXES:
+            add(f"{base_symbol}{exchange_suffix}", "base_ticker_fallback")
+
+    return candidates
+
+
 def _is_valid_company_name(name: str | None, ticker: str) -> bool:
     """Check if a resolved name is valid (not empty, not just the ticker echoed back)."""
     if not name or not name.strip():
@@ -590,40 +566,52 @@ async def resolve_company_name(ticker: str) -> CompanyNameResult:
         ("fmp", _try_fmp),
         ("eodhd", _try_eodhd),
     ]
+    lookup_candidates = _company_name_lookup_candidates(ticker)
 
-    for source_name, resolver in sources:
-        try:
-            raw_name = await resolver(ticker)
-            if _is_valid_company_name(raw_name, ticker):
-                normalized = normalize_company_name(raw_name)
-                logger.info(
-                    "company_name_resolved",
-                    ticker=ticker,
-                    name=normalized,
-                    source=source_name,
-                )
-                return CompanyNameResult(
-                    name=normalized, source=source_name, is_resolved=True
-                )
-            elif raw_name:
+    for lookup_ticker, lookup_strategy in lookup_candidates:
+        for source_name, resolver in sources:
+            try:
+                raw_name = await resolver(lookup_ticker)
+                if _is_valid_company_name(raw_name, lookup_ticker):
+                    normalized = normalize_company_name(raw_name)
+                    logger.info(
+                        "company_name_resolved",
+                        ticker=ticker,
+                        requested_ticker=ticker,
+                        lookup_ticker=lookup_ticker,
+                        lookup_strategy=lookup_strategy,
+                        name=normalized,
+                        source=source_name,
+                    )
+                    return CompanyNameResult(
+                        name=normalized, source=source_name, is_resolved=True
+                    )
+                if raw_name:
+                    logger.debug(
+                        "company_name_rejected",
+                        ticker=ticker,
+                        requested_ticker=ticker,
+                        lookup_ticker=lookup_ticker,
+                        lookup_strategy=lookup_strategy,
+                        raw_name=raw_name,
+                        source=source_name,
+                        reason="name matches lookup ticker string",
+                    )
+            except Exception as e:
                 logger.debug(
-                    "company_name_rejected",
+                    "company_name_source_error",
                     ticker=ticker,
-                    raw_name=raw_name,
+                    requested_ticker=ticker,
+                    lookup_ticker=lookup_ticker,
+                    lookup_strategy=lookup_strategy,
                     source=source_name,
-                    reason="name matches ticker string",
+                    error=str(e),
                 )
-        except Exception as e:
-            logger.debug(
-                "company_name_source_error",
-                ticker=ticker,
-                source=source_name,
-                error=str(e),
-            )
 
-    logger.warning(
+    logger.debug(
         "company_name_unresolved",
         ticker=ticker,
-        message="No source could resolve company name — LLM hallucination risk",
+        requested_ticker=ticker,
+        lookup_candidates=[symbol for symbol, _strategy in lookup_candidates],
     )
     return CompanyNameResult(name=ticker, source="unresolved", is_resolved=False)

@@ -8,9 +8,10 @@ import asyncio
 import json
 import logging
 import sys
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -64,6 +65,116 @@ class TestStrictModeCLI:
         parser = build_arg_parser()
         args = parser.parse_args(["--ticker", "0005.HK"])
         assert args.strict is False
+
+
+class TestOutputCompanyNameLookup:
+    def test_load_company_name_for_output_retries_normalized_alias(self):
+        from src.main import _load_company_name_for_output
+
+        requested_symbols = []
+
+        class _Ticker:
+            def __init__(self, symbol):
+                self.info = (
+                    {"longName": "Truecaller AB"} if symbol == "TRUE-B.ST" else {}
+                )
+
+        class _Future:
+            def __init__(self, fn):
+                self._fn = fn
+
+            def result(self, timeout=None):
+                return self._fn()
+
+        class _Executor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def submit(self, fn):
+                return _Future(fn)
+
+        fake_yfinance = MagicMock()
+
+        def _ticker_factory(symbol):
+            requested_symbols.append(symbol)
+            return _Ticker(symbol)
+
+        fake_yfinance.Ticker.side_effect = _ticker_factory
+
+        with patch.dict(sys.modules, {"yfinance": fake_yfinance}):
+            with patch("src.main.ThreadPoolExecutor", return_value=_Executor()):
+                assert _load_company_name_for_output("TRUE.B.ST") == "Truecaller AB"
+
+        assert requested_symbols == ["TRUE.B.ST", "TRUE-B.ST"]
+
+    def test_load_company_name_for_output_returns_none_on_timeout(self):
+        from src.main import _load_company_name_for_output
+
+        fake_yfinance = MagicMock()
+        fake_yfinance.Ticker.return_value.info = {"longName": "Should Not Return"}
+
+        mock_future = MagicMock()
+        mock_future.result.side_effect = FuturesTimeoutError()
+
+        mock_executor = MagicMock()
+        mock_executor.__enter__.return_value.submit.return_value = mock_future
+
+        with patch.dict(sys.modules, {"yfinance": fake_yfinance}):
+            with patch("src.main.ThreadPoolExecutor", return_value=mock_executor):
+                assert _load_company_name_for_output("SNTIA.OL") is None
+
+    def test_run_analysis_warns_with_lookup_candidates_after_company_name_exhaustion(
+        self,
+    ):
+        from src.main import run_analysis
+        from src.ticker_utils import CompanyNameResult
+
+        fake_tracker = MagicMock()
+        fake_graph = MagicMock()
+        fake_graph.ainvoke = AsyncMock(return_value={})
+
+        with (
+            patch("src.main.logger") as mock_logger,
+            patch(
+                "src.ticker_utils.resolve_company_name",
+                new=AsyncMock(
+                    return_value=CompanyNameResult(
+                        name="TRUE.B.ST",
+                        source="unresolved",
+                        is_resolved=False,
+                    )
+                ),
+            ),
+            patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
+            patch("src.graph.create_trading_graph", return_value=fake_graph),
+            patch("src.token_tracker.get_tracker", return_value=fake_tracker),
+            patch("src.main.build_analysis_validity", return_value={"ok": True}),
+        ):
+            result = asyncio.run(
+                run_analysis(
+                    ticker="TRUE.B.ST",
+                    quick_mode=True,
+                    strict_mode=False,
+                    skip_charts=True,
+                )
+            )
+
+        assert result == {"analysis_validity": {"ok": True}}
+        warning_calls = [
+            call
+            for call in mock_logger.warning.call_args_list
+            if call.args and call.args[0] == "company_name_unresolved_at_startup"
+        ]
+        assert len(warning_calls) == 1
+        assert warning_calls[0].kwargs["requested_ticker"] == "TRUE.B.ST"
+        assert warning_calls[0].kwargs["lookup_candidates"] == [
+            "TRUE.B.ST",
+            "TRUE-B.ST",
+            "TRUE.ST",
+        ]
 
     def test_strict_and_quick_composable(self):
         """--strict --quick can be combined without conflict."""
@@ -121,6 +232,29 @@ class TestStrictModeCLI:
         args = parser.parse_args(["--ticker", "0005.HK", "--capture-baseline-cleanup"])
         assert args.capture_baseline_cleanup is True
 
+    def test_enable_langfuse_flag_parsed_from_cli(self):
+        from src.main import build_arg_parser
+
+        parser = build_arg_parser()
+        args = parser.parse_args(["--ticker", "0005.HK", "--enable-langfuse"])
+        assert args.enable_langfuse is True
+
+    def test_resolve_langfuse_session_id_prefers_env_override(self, monkeypatch):
+        from src.main import _resolve_langfuse_session_id
+
+        monkeypatch.setenv("LANGFUSE_SESSION_ID", "batch-session-123")
+
+        assert _resolve_langfuse_session_id("default-session") == "batch-session-123"
+
+    def test_resolve_langfuse_session_id_uses_default_when_env_missing(
+        self, monkeypatch
+    ):
+        from src.main import _resolve_langfuse_session_id
+
+        monkeypatch.delenv("LANGFUSE_SESSION_ID", raising=False)
+
+        assert _resolve_langfuse_session_id("default-session") == "default-session"
+
     def test_parse_arguments_allows_cleanup_without_ticker(self, monkeypatch):
         from src.main import parse_arguments
 
@@ -161,6 +295,103 @@ class TestStrictAddendaContent:
         from src.agents import _STRICT_RM_ADDENDUM
 
         assert "bear" in _STRICT_RM_ADDENDUM.lower()
+
+
+class TestTracingMetadataFlow:
+    def test_run_analysis_uses_passed_tracing_metadata_without_rebuilding(self):
+        from src.main import run_analysis
+        from src.ticker_utils import CompanyNameResult
+
+        fake_tracker = MagicMock()
+        fake_graph = MagicMock()
+        fake_graph.ainvoke = AsyncMock(return_value={})
+        tracing_metadata = {"ticker": "0005.HK", "session_id": "session-1"}
+
+        with (
+            patch(
+                "src.ticker_utils.resolve_company_name",
+                new=AsyncMock(
+                    return_value=CompanyNameResult(
+                        name="HSBC Holdings",
+                        source="lookup",
+                        is_resolved=True,
+                    )
+                ),
+            ),
+            patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
+            patch("src.graph.create_trading_graph", return_value=fake_graph),
+            patch("src.token_tracker.get_tracker", return_value=fake_tracker),
+            patch("src.main.build_analysis_validity", return_value={"ok": True}),
+            patch(
+                "src.main._build_analysis_trace_metadata",
+                side_effect=AssertionError("should not rebuild metadata"),
+            ),
+        ):
+            result = asyncio.run(
+                run_analysis(
+                    ticker="0005.HK",
+                    quick_mode=True,
+                    strict_mode=False,
+                    skip_charts=True,
+                    session_id="session-1",
+                    tracing_metadata=tracing_metadata,
+                )
+            )
+
+        assert result == {"analysis_validity": {"ok": True}}
+        assert (
+            fake_graph.ainvoke.await_args.kwargs["config"]["metadata"]
+            == tracing_metadata
+        )
+
+    def test_run_analysis_builds_metadata_when_tracing_metadata_missing(self):
+        from src.main import run_analysis
+        from src.ticker_utils import CompanyNameResult
+
+        fake_tracker = MagicMock()
+        fake_graph = MagicMock()
+        fake_graph.ainvoke = AsyncMock(return_value={})
+
+        with (
+            patch(
+                "src.ticker_utils.resolve_company_name",
+                new=AsyncMock(
+                    return_value=CompanyNameResult(
+                        name="HSBC Holdings",
+                        source="lookup",
+                        is_resolved=True,
+                    )
+                ),
+            ),
+            patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
+            patch("src.graph.create_trading_graph", return_value=fake_graph),
+            patch("src.token_tracker.get_tracker", return_value=fake_tracker),
+            patch("src.main.build_analysis_validity", return_value={"ok": True}),
+            patch(
+                "src.main._build_analysis_trace_metadata",
+                return_value={"ticker": "0005.HK", "session_id": "session-1"},
+            ) as mock_builder,
+        ):
+            result = asyncio.run(
+                run_analysis(
+                    ticker="0005.HK",
+                    quick_mode=True,
+                    strict_mode=False,
+                    skip_charts=True,
+                    session_id="session-1",
+                )
+            )
+
+        assert result == {"analysis_validity": {"ok": True}}
+        mock_builder.assert_called_once_with(
+            ticker="0005.HK",
+            session_id="session-1",
+            quick_mode=True,
+        )
+        assert fake_graph.ainvoke.await_args.kwargs["config"]["metadata"] == {
+            "ticker": "0005.HK",
+            "session_id": "session-1",
+        }
 
 
 class TestToolAuditLogging:
@@ -390,6 +621,7 @@ class TestRuntimeOverrides:
             quick_model="new-quick",
             deep_model="new-deep",
             no_memory=True,
+            enable_langfuse=False,
             trace_langfuse=True,
         )
 
@@ -398,6 +630,22 @@ class TestRuntimeOverrides:
         assert config.quick_think_llm == "new-quick"
         assert config.deep_think_llm == "new-deep"
         assert config.enable_memory is False
+        assert config.langfuse_enabled is True
+
+    def test_enable_langfuse_flag_updates_config(self, monkeypatch):
+        from src.main import _apply_runtime_overrides, config
+
+        monkeypatch.setattr(config, "langfuse_enabled", False)
+        args = SimpleNamespace(
+            quick_model=None,
+            deep_model=None,
+            no_memory=False,
+            enable_langfuse=True,
+            trace_langfuse=False,
+        )
+
+        _apply_runtime_overrides(args)
+
         assert config.langfuse_enabled is True
 
 
@@ -558,7 +806,7 @@ class TestMainOrchestration:
         )
         monkeypatch.setattr(
             "src.main._execute_analysis",
-            lambda passed_args, targets: fake_async(
+            lambda passed_args, targets, **kwargs: fake_async(
                 "execute", {"analysis_validity": {"publishable": True}}
             ),
         )
@@ -574,17 +822,21 @@ class TestMainOrchestration:
         )
         monkeypatch.setattr(
             "src.main._persist_analysis_outputs",
-            lambda result, passed_args: call_order.append("persist"),
+            lambda result, passed_args, **kwargs: call_order.append("persist"),
         )
         monkeypatch.setattr(
             "src.main._maybe_save_rejection_record",
-            lambda result, passed_args: fake_async("rejection"),
+            lambda result, passed_args, **kwargs: fake_async("rejection"),
         )
         monkeypatch.setattr(
             "src.main._maybe_generate_article",
-            lambda result, passed_args, targets, company_name, report, reporter: (
-                fake_async("article", False)
-            ),
+            lambda result,
+            passed_args,
+            targets,
+            company_name,
+            report,
+            reporter,
+            **kwargs: (fake_async("article", False)),
         )
         monkeypatch.setattr(
             "src.main._log_final_summary",
@@ -664,7 +916,7 @@ class TestMainOrchestration:
         )
         monkeypatch.setattr(
             "src.main._execute_analysis",
-            lambda passed_args, targets: _async_result(None),
+            lambda passed_args, targets, **kwargs: _async_result(None),
         )
         monkeypatch.setattr(
             "src.cleanup.cleanup_async_resources", lambda: _async_none()

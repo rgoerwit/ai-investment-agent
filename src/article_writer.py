@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Literal
 
 import structlog
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, Field
 
@@ -180,6 +181,8 @@ class ArticleWriter:
         samples_dir: Path | None = None,
         images_dir: Path | None = None,
         use_github_urls: bool = False,
+        callbacks: list[BaseCallbackHandler] | None = None,
+        tracing_metadata: dict[str, object] | None = None,
     ):
         """
         Initialize ArticleWriter.
@@ -196,6 +199,8 @@ class ArticleWriter:
         self.samples_dir = samples_dir or self._find_samples_dir()
         self.images_dir = images_dir or config.images_dir
         self.use_github_urls = use_github_urls
+        self._callbacks = callbacks or []
+        self._tracing_metadata = dict(tracing_metadata or {})
 
         self.prompt_config = self._load_prompt_config()
         self.llm = self._create_llm()
@@ -206,6 +211,7 @@ class ArticleWriter:
             samples_dir=str(self.samples_dir),
             images_dir=str(self.images_dir),
             use_github_urls=use_github_urls,
+            tracing_callbacks=len(self._callbacks),
         )
 
     def _find_samples_dir(self) -> Path:
@@ -271,8 +277,20 @@ class ArticleWriter:
             temperature=temperature,
             timeout=config.api_timeout,
             max_retries=config.api_retry_attempts,
-            callbacks=[TokenTrackingCallback("Article Writer", get_tracker())],
+            callbacks=[
+                TokenTrackingCallback("Article Writer", get_tracker()),
+                *self._callbacks,
+            ],
         )
+
+    def _invoke_config(self, *, workflow: str) -> dict[str, object]:
+        return {
+            "metadata": {
+                **self._tracing_metadata,
+                "workflow": workflow,
+                "component": "article_writer",
+            }
+        }
 
     def _load_voice_samples(self, max_chars: int | None = None) -> str:
         """
@@ -511,7 +529,10 @@ class ArticleWriter:
                 runnable_class=type(self.llm).__name__,
                 max_attempts=1,
             )
-            response = self.llm.invoke(messages)
+            response = self.llm.invoke(
+                messages,
+                config=self._invoke_config(workflow="article_primary"),
+            )
             logger.info(
                 "llm_call_success",
                 context="article_writer_primary",
@@ -586,7 +607,10 @@ class ArticleWriter:
                     runnable_class=type(fallback_llm).__name__,
                     max_attempts=1,
                 )
-                response = fallback_llm.invoke(messages)
+                response = fallback_llm.invoke(
+                    messages,
+                    config=self._invoke_config(workflow="article_fallback"),
+                )
                 logger.info(
                     "llm_call_success",
                     context="article_writer_fallback",
@@ -1055,13 +1079,23 @@ class ArticleEditor:
     # Maximum tool calls to execute per single LLM turn (prevents parallel call floods)
     MAX_TOOL_CALLS_PER_TURN = 3
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        callbacks: list[BaseCallbackHandler] | None = None,
+        tracing_metadata: dict[str, object] | None = None,
+    ):
         """Initialize the ArticleEditor."""
         from src.editor_tools import get_editor_tools
         from src.llms import create_editor_llm
 
+        self._callbacks = callbacks or []
+        self._tracing_metadata = dict(tracing_metadata or {})
         self.llm = create_editor_llm(
-            callbacks=[TokenTrackingCallback("Article Editor", get_tracker())],
+            callbacks=[
+                TokenTrackingCallback("Article Editor", get_tracker()),
+                *self._callbacks,
+            ],
         )
         self.tools = get_editor_tools()
         self.prompt_config = self._load_prompt_config()
@@ -1079,6 +1113,15 @@ class ArticleEditor:
             logger.info("ArticleEditor initialized with GPT", tools=len(self.tools))
         else:
             logger.info("ArticleEditor disabled (no OpenAI API key)")
+
+    def _invoke_config(self, *, workflow: str) -> dict[str, object]:
+        return {
+            "metadata": {
+                **self._tracing_metadata,
+                "workflow": workflow,
+                "component": "article_editor",
+            }
+        }
 
     def _build_structured_review_llm(self):
         """Build a strict structured-output review model when supported."""
@@ -1312,7 +1355,10 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
         try:
             if self.llm_with_tools:
                 for iteration in range(self.MAX_TOOL_ITERATIONS):
-                    response = await self.llm_with_tools.ainvoke(messages)
+                    response = await self.llm_with_tools.ainvoke(
+                        messages,
+                        config=self._invoke_config(workflow="editor_tool_review"),
+                    )
 
                     tool_calls = getattr(response, "tool_calls", None)
                     if not tool_calls:
@@ -1360,13 +1406,19 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
 
         if self.review_llm:
             with _structured_review_warning_policy():
-                result = await self.review_llm.ainvoke(final_messages)
+                result = await self.review_llm.ainvoke(
+                    final_messages,
+                    config=self._invoke_config(workflow="editor_structured_review"),
+                )
             if isinstance(result, BaseModel):
                 return result.model_dump()
             if isinstance(result, dict):
                 return result
 
-        response = await self.llm.ainvoke(final_messages)
+        response = await self.llm.ainvoke(
+            final_messages,
+            config=self._invoke_config(workflow="editor_final_review"),
+        )
         return self._extract_review_result(response)
 
     def _extract_review_result(self, response) -> dict:
@@ -1596,12 +1648,42 @@ def generate_article(
     Returns:
         Generated article as Markdown string
     """
-    writer = ArticleWriter(use_github_urls=use_github_urls)
-    return writer.write(
+    from src.observability import flush_traces, get_observability_runtime
+
+    runtime = get_observability_runtime(config)
+    session_id = f"article-{ticker}-{trade_date}"
+    trace_context = runtime.start_article_trace(
         ticker=ticker,
-        company_name=company_name,
-        report_text=report_text,
-        trade_date=trade_date,
-        output_path=Path(output_path) if output_path else None,
-        valuation_context=valuation_context,
+        session_id=session_id,
+        tags=["article", f"ticker:{ticker}"],
+        metadata={
+            "ticker": ticker,
+            "environment": config.environment,
+            "run_mode": "article_only",
+            "prompt_source": (
+                "langfuse" if config.langfuse_prompt_fetch_enabled else "local"
+            ),
+            "release": config.app_release,
+        },
+        input_payload={"ticker": ticker, "trade_date": trade_date},
     )
+    try:
+        writer = ArticleWriter(
+            use_github_urls=use_github_urls,
+            callbacks=trace_context.callbacks,
+            tracing_metadata={
+                **trace_context.graph_metadata,
+                "workflow": "article_only",
+            },
+        )
+        return writer.write(
+            ticker=ticker,
+            company_name=company_name,
+            report_text=report_text,
+            trade_date=trade_date,
+            output_path=Path(output_path) if output_path else None,
+            valuation_context=valuation_context,
+        )
+    finally:
+        trace_context.close()
+        flush_traces()

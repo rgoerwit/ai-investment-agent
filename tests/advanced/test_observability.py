@@ -1,26 +1,70 @@
-"""
-Tests for the observability module (Langfuse SDK v4 integration).
-"""
+"""Tests for the Langfuse observability runtime."""
 
+from __future__ import annotations
+
+import importlib
+import sys
+from contextlib import nullcontext
 from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 
+class _FakeContextManager:
+    def __init__(
+        self,
+        label: str,
+        *,
+        enter_error: Exception | None = None,
+        exit_error: Exception | None = None,
+    ):
+        self.label = label
+        self.entered = False
+        self.exited = False
+        self.enter_error = enter_error
+        self.exit_error = exit_error
+
+    def __enter__(self):
+        self.entered = True
+        if self.enter_error is not None:
+            raise self.enter_error
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.exited = True
+        if self.exit_error is not None:
+            raise self.exit_error
+        return False
+
+
+class _MinimalTraceClient:
+    def __init__(self, root_ctx: object):
+        self._root_ctx = root_ctx
+
+    def start_as_current_observation(self, **_: object):
+        return self._root_ctx
+
+    def get_current_trace_id(self):
+        return "trace-123"
+
+    def get_trace_url(self, *, trace_id: str):
+        return f"https://langfuse/{trace_id}"
+
+
 def _fake_langfuse_modules(
     *,
-    langfuse_ctor=None,
-    callback_handler=None,
-    get_client=None,
+    client: object | None = None,
+    callback_handler: object | None = None,
+    propagate_attributes: object | None = None,
 ) -> dict[str, ModuleType]:
     langfuse_module = ModuleType("langfuse")
     langfuse_langchain_module = ModuleType("langfuse.langchain")
 
-    if langfuse_ctor is not None:
-        langfuse_module.Langfuse = langfuse_ctor
-    if get_client is not None:
-        langfuse_module.get_client = get_client
+    if client is not None:
+        langfuse_module.get_client = MagicMock(return_value=client)
+    if propagate_attributes is not None:
+        langfuse_module.propagate_attributes = propagate_attributes
     if callback_handler is not None:
         langfuse_langchain_module.CallbackHandler = callback_handler
 
@@ -30,248 +74,409 @@ def _fake_langfuse_modules(
     }
 
 
-class TestGetTracingCallbacks:
-    """Test get_tracing_callbacks function."""
+def _reload_observability():
+    import src.observability as observability
 
-    def test_returns_empty_when_disabled(self):
-        """When LANGFUSE_ENABLED=false, should return empty callbacks and metadata."""
-        with patch("src.observability.config") as mock_config:
+    return importlib.reload(observability)
+
+
+class TestObservabilityRuntime:
+    def test_get_observability_runtime_returns_noop_when_disabled(self):
+        with patch("src.config.config") as mock_config:
             mock_config.langfuse_enabled = False
 
-            from src.observability import get_tracing_callbacks
+            observability = _reload_observability()
+            runtime = observability.get_observability_runtime()
+            trace = runtime.start_analysis_trace(
+                ticker="TEST.X",
+                session_id="session-1",
+                tags=["analysis"],
+                metadata={},
+                input_payload={"ticker": "TEST.X"},
+            )
 
-            callbacks, metadata = get_tracing_callbacks(ticker="TEST.X")
-            assert callbacks == []
-            assert metadata == {}
+        assert trace.enabled is False
+        assert trace.callbacks == []
 
-    def test_returns_empty_when_keys_missing(self):
-        """When enabled but keys missing, should return empty and warn."""
-        with patch("src.observability.config") as mock_config:
+    def test_get_observability_runtime_returns_noop_when_keys_missing(self):
+        with patch("src.config.config") as mock_config:
             mock_config.langfuse_enabled = True
             mock_config.get_langfuse_public_key.return_value = ""
             mock_config.get_langfuse_secret_key.return_value = ""
 
-            from src.observability import get_tracing_callbacks
+            observability = _reload_observability()
+            runtime = observability.get_observability_runtime()
 
-            callbacks, metadata = get_tracing_callbacks(ticker="TEST.X")
-            assert callbacks == []
-            assert metadata == {}
+        assert type(runtime).__name__ == "NoopObservabilityRuntime"
 
-    def test_returns_handler_when_properly_configured(self):
-        """When enabled with valid keys, should initialize Langfuse and return a handler."""
-        with patch("src.observability.config") as mock_config:
+    def test_start_analysis_trace_creates_root_context_and_callback(self):
+        mock_client = MagicMock()
+        mock_root_ctx = _FakeContextManager("root")
+        mock_propagation_ctx = _FakeContextManager("propagation")
+        mock_callback_cls = MagicMock(return_value=MagicMock(name="callback"))
+        mock_client.start_as_current_observation.return_value = mock_root_ctx
+        mock_client.get_current_trace_id.return_value = "trace-123"
+        mock_client.get_trace_url.return_value = "https://langfuse/trace-123"
+
+        with patch("src.config.config") as mock_config:
             mock_config.langfuse_enabled = True
-            mock_config.get_langfuse_public_key.return_value = "pk-lf-test"
-            mock_config.get_langfuse_secret_key.return_value = "sk-lf-test"
-            mock_config.langfuse_host = "https://cloud.langfuse.com"
-            mock_config.langfuse_debug = True
-            mock_config.langfuse_environment = "test"
-            mock_config.langfuse_sample_rate = 0.25
-
-            mock_langfuse_ctor = MagicMock()
-            mock_handler_cls = MagicMock()
+            mock_config.get_langfuse_public_key.return_value = "pk-test"
+            mock_config.get_langfuse_secret_key.return_value = "sk-test"
+            mock_config.app_release = "3.1.0"
             with patch.dict(
-                "sys.modules",
+                sys.modules,
                 _fake_langfuse_modules(
-                    langfuse_ctor=mock_langfuse_ctor,
-                    callback_handler=mock_handler_cls,
+                    client=mock_client,
+                    callback_handler=mock_callback_cls,
+                    propagate_attributes=MagicMock(return_value=mock_propagation_ctx),
                 ),
             ):
-                from src.observability import get_tracing_callbacks
-
-                callbacks, metadata = get_tracing_callbacks(ticker="TEST.X")
-
-        assert len(callbacks) == 1
-        assert metadata["langfuse_metadata"] == {"ticker": "TEST.X"}
-        mock_langfuse_ctor.assert_called_once_with(
-            public_key="pk-lf-test",
-            secret_key="sk-lf-test",
-            base_url="https://cloud.langfuse.com",
-            debug=True,
-            environment="test",
-            sample_rate=0.25,
-            tracing_enabled=True,
-        )
-        mock_handler_cls.assert_called_once_with()
-
-    def test_metadata_contains_session_and_tags(self):
-        """When session_id and tags provided, metadata should contain langfuse_* keys."""
-        with patch("src.observability.config") as mock_config:
-            mock_config.langfuse_enabled = True
-            mock_config.get_langfuse_public_key.return_value = "pk-lf-test"
-            mock_config.get_langfuse_secret_key.return_value = "sk-lf-test"
-            mock_config.langfuse_host = "https://cloud.langfuse.com"
-
-            mock_langfuse_ctor = MagicMock()
-            mock_handler_cls = MagicMock()
-            with patch.dict(
-                "sys.modules",
-                _fake_langfuse_modules(
-                    langfuse_ctor=mock_langfuse_ctor,
-                    callback_handler=mock_handler_cls,
-                ),
-            ):
-                from src.observability import get_tracing_callbacks
-
-                callbacks, metadata = get_tracing_callbacks(
+                observability = _reload_observability()
+                runtime = observability.get_observability_runtime()
+                trace = runtime.start_analysis_trace(
                     ticker="0005.HK",
-                    session_id="0005.HK-2026-01-28-abc12345",
-                    tags=["quick", "deep-model:gemini-3-pro-preview"],
-                    user_id="test-user",
+                    session_id="batch-1",
+                    tags=["analysis", "quick"],
+                    metadata={"ticker": "0005.HK", "run_mode": "quick"},
+                    input_payload={"ticker": "0005.HK"},
                 )
 
-                assert len(callbacks) == 1
-                assert metadata["langfuse_session_id"] == "0005.HK-2026-01-28-abc12345"
-                assert metadata["langfuse_tags"] == [
-                    "quick",
-                    "deep-model:gemini-3-pro-preview",
-                ]
-                assert metadata["langfuse_user_id"] == "test-user"
-                assert metadata["langfuse_metadata"] == {"ticker": "0005.HK"}
+                current = observability.get_current_trace_context()
+                merged = observability.build_langchain_config(
+                    metadata={"workflow": "article"}
+                )
+                trace.close()
 
-    def test_handler_created_with_no_args(self):
-        """CallbackHandler() should still be called with no arguments."""
-        with patch("src.observability.config") as mock_config:
+        assert trace.enabled is True
+        assert trace.trace_id == "trace-123"
+        assert trace.trace_url == "https://langfuse/trace-123"
+        assert len(trace.callbacks) == 1
+        assert current is trace
+        assert merged["callbacks"] == trace.callbacks
+        assert merged["metadata"]["ticker"] == "0005.HK"
+        assert merged["metadata"]["workflow"] == "article"
+        assert mock_root_ctx.entered is True
+        assert mock_root_ctx.exited is True
+        assert mock_propagation_ctx.entered is True
+        assert mock_propagation_ctx.exited is True
+        mock_client.start_as_current_observation.assert_called_once()
+        mock_callback_cls.assert_called_once_with()
+
+    def test_start_analysis_trace_sanitizes_propagated_metadata(self):
+        mock_client = MagicMock()
+        mock_root_ctx = _FakeContextManager("root")
+        mock_propagation_ctx = _FakeContextManager("propagation")
+        mock_propagate = MagicMock(return_value=mock_propagation_ctx)
+        mock_client.start_as_current_observation.return_value = mock_root_ctx
+        mock_client.get_current_trace_id.return_value = "trace-123"
+        mock_client.get_trace_url.return_value = "https://langfuse/trace-123"
+
+        with patch("src.config.config") as mock_config:
             mock_config.langfuse_enabled = True
-            mock_config.get_langfuse_public_key.return_value = "pk-lf-test"
-            mock_config.get_langfuse_secret_key.return_value = "sk-lf-test"
-            mock_config.langfuse_host = "https://cloud.langfuse.com"
-            mock_config.langfuse_debug = False
-            mock_config.langfuse_environment = "development"
-            mock_config.langfuse_sample_rate = 1.0
-
-            mock_langfuse_ctor = MagicMock()
-            mock_handler_cls = MagicMock()
+            mock_config.get_langfuse_public_key.return_value = "pk-test"
+            mock_config.get_langfuse_secret_key.return_value = "sk-test"
+            mock_config.app_release = "3.1.0"
             with patch.dict(
-                "sys.modules",
+                sys.modules,
                 _fake_langfuse_modules(
-                    langfuse_ctor=mock_langfuse_ctor,
-                    callback_handler=mock_handler_cls,
+                    client=mock_client,
+                    callback_handler=MagicMock(return_value=MagicMock()),
+                    propagate_attributes=mock_propagate,
                 ),
             ):
-                from src.observability import get_tracing_callbacks
+                observability = _reload_observability()
+                trace = observability.get_observability_runtime().start_analysis_trace(
+                    ticker="0005.HK",
+                    session_id="batch-1",
+                    tags=["analysis"],
+                    metadata={
+                        "ticker": "0005.HK",
+                        "quick_mode": True,
+                        "release": "3.1.0",
+                        "ignored": {"nested": "object"},
+                    },
+                    input_payload={"ticker": "0005.HK"},
+                )
+                trace.close()
 
-                get_tracing_callbacks(ticker="TEST.X")
+        propagated_metadata = mock_propagate.call_args.kwargs["metadata"]
+        assert propagated_metadata == {
+            "ticker": "0005.HK",
+            "quick_mode": "true",
+            "release": "3.1.0",
+        }
 
-                mock_handler_cls.assert_called_once_with()
+    def test_start_analysis_trace_fails_soft_on_capability_gap(self):
+        mock_client = object()
 
-    def test_graceful_degradation_on_import_error(self):
-        """When langfuse not installed, should return empty tuple gracefully."""
-        with patch("src.observability.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.langfuse_enabled = True
-            mock_config.get_langfuse_public_key.return_value = "pk-lf-test"
-            mock_config.get_langfuse_secret_key.return_value = "sk-lf-test"
-
-            # Simulate ImportError for both the client and callback imports.
+            mock_config.get_langfuse_public_key.return_value = "pk-test"
+            mock_config.get_langfuse_secret_key.return_value = "sk-test"
+            mock_config.app_release = "3.1.0"
             with patch.dict(
-                "sys.modules", {"langfuse": None, "langfuse.langchain": None}
+                sys.modules,
+                _fake_langfuse_modules(
+                    client=mock_client,
+                    callback_handler=MagicMock(),
+                    propagate_attributes=MagicMock(return_value=nullcontext()),
+                ),
             ):
-                from src.observability import get_tracing_callbacks
+                observability = _reload_observability()
+                runtime = observability.get_observability_runtime()
+                trace = runtime.start_analysis_trace(
+                    ticker="TEST.X",
+                    session_id="session-1",
+                    tags=["analysis"],
+                    metadata={"ticker": "TEST.X"},
+                    input_payload={"ticker": "TEST.X"},
+                )
 
-                callbacks, metadata = get_tracing_callbacks(ticker="TEST.X")
-                # Should return empty, not raise
-                assert isinstance(callbacks, list)
-                assert isinstance(metadata, dict)
+        assert trace.enabled is False
+
+    def test_start_analysis_trace_allows_missing_optional_feature_methods(self):
+        mock_root_ctx = _FakeContextManager("root")
+        mock_propagation_ctx = _FakeContextManager("propagation")
+        mock_client = _MinimalTraceClient(mock_root_ctx)
+
+        with patch("src.config.config") as mock_config:
+            mock_config.langfuse_enabled = True
+            mock_config.get_langfuse_public_key.return_value = "pk-test"
+            mock_config.get_langfuse_secret_key.return_value = "sk-test"
+            mock_config.app_release = "3.1.0"
+            with patch.dict(
+                sys.modules,
+                _fake_langfuse_modules(
+                    client=mock_client,
+                    callback_handler=MagicMock(return_value=MagicMock()),
+                    propagate_attributes=MagicMock(return_value=mock_propagation_ctx),
+                ),
+            ):
+                observability = _reload_observability()
+                trace = observability.get_observability_runtime().start_analysis_trace(
+                    ticker="TEST.X",
+                    session_id="session-1",
+                    tags=["analysis"],
+                    metadata={"ticker": "TEST.X"},
+                    input_payload={"ticker": "TEST.X"},
+                )
+                trace.close()
+
+        assert trace.enabled is True
+        assert mock_root_ctx.exited is True
+        assert mock_propagation_ctx.exited is True
+
+    def test_start_analysis_trace_cleans_up_root_when_propagation_enter_fails(self):
+        mock_client = MagicMock()
+        mock_root_ctx = _FakeContextManager("root")
+        mock_propagation_ctx = _FakeContextManager(
+            "propagation", enter_error=RuntimeError("propagation boom")
+        )
+        mock_client.start_as_current_observation.return_value = mock_root_ctx
+
+        with patch("src.config.config") as mock_config:
+            mock_config.langfuse_enabled = True
+            mock_config.get_langfuse_public_key.return_value = "pk-test"
+            mock_config.get_langfuse_secret_key.return_value = "sk-test"
+            mock_config.app_release = "3.1.0"
+            with patch.dict(
+                sys.modules,
+                _fake_langfuse_modules(
+                    client=mock_client,
+                    callback_handler=MagicMock(return_value=MagicMock()),
+                    propagate_attributes=MagicMock(return_value=mock_propagation_ctx),
+                ),
+            ):
+                observability = _reload_observability()
+                with patch.object(observability, "logger") as mock_logger:
+                    trace = (
+                        observability.get_observability_runtime().start_analysis_trace(
+                            ticker="TEST.X",
+                            session_id="session-1",
+                            tags=["analysis"],
+                            metadata={"ticker": "TEST.X"},
+                            input_payload={"ticker": "TEST.X"},
+                        )
+                    )
+
+        assert trace.enabled is False
+        assert mock_root_ctx.entered is True
+        assert mock_root_ctx.exited is True
+        assert mock_propagation_ctx.entered is True
+        assert mock_propagation_ctx.exited is False
+        mock_logger.warning.assert_any_call(
+            "langfuse_trace_start_failed", error="propagation boom"
+        )
+
+    def test_score_trace_prefers_score_current_trace(self):
+        mock_client = MagicMock()
+        mock_root_ctx = _FakeContextManager("root")
+        mock_propagation_ctx = _FakeContextManager("propagation")
+        mock_client.start_as_current_observation.return_value = mock_root_ctx
+        mock_client.get_current_trace_id.return_value = "trace-123"
+        mock_client.get_trace_url.return_value = "https://langfuse/trace-123"
+
+        with patch("src.config.config") as mock_config:
+            mock_config.langfuse_enabled = True
+            mock_config.get_langfuse_public_key.return_value = "pk-test"
+            mock_config.get_langfuse_secret_key.return_value = "sk-test"
+            mock_config.app_release = "3.1.0"
+            with patch.dict(
+                sys.modules,
+                _fake_langfuse_modules(
+                    client=mock_client,
+                    callback_handler=MagicMock(return_value=MagicMock()),
+                    propagate_attributes=MagicMock(return_value=mock_propagation_ctx),
+                ),
+            ):
+                observability = _reload_observability()
+                trace = observability.get_observability_runtime().start_analysis_trace(
+                    ticker="TEST.X",
+                    session_id="session-1",
+                    tags=["analysis"],
+                    metadata={"ticker": "TEST.X"},
+                    input_payload={"ticker": "TEST.X"},
+                )
+                trace.score_trace(
+                    name="pm_verdict",
+                    value="BUY",
+                    data_type="CATEGORICAL",
+                )
+                trace.close()
+
+        mock_client.score_current_trace.assert_called_once()
+        mock_client.create_score.assert_not_called()
+
+    def test_score_trace_falls_back_to_create_score(self):
+        mock_client = MagicMock()
+        mock_root_ctx = _FakeContextManager("root")
+        mock_propagation_ctx = _FakeContextManager("propagation")
+        mock_client.start_as_current_observation.return_value = mock_root_ctx
+        mock_client.get_current_trace_id.return_value = "trace-123"
+        mock_client.get_trace_url.return_value = "https://langfuse/trace-123"
+        del mock_client.score_current_trace
+
+        with patch("src.config.config") as mock_config:
+            mock_config.langfuse_enabled = True
+            mock_config.get_langfuse_public_key.return_value = "pk-test"
+            mock_config.get_langfuse_secret_key.return_value = "sk-test"
+            mock_config.app_release = "3.1.0"
+            with patch.dict(
+                sys.modules,
+                _fake_langfuse_modules(
+                    client=mock_client,
+                    callback_handler=MagicMock(return_value=MagicMock()),
+                    propagate_attributes=MagicMock(return_value=mock_propagation_ctx),
+                ),
+            ):
+                observability = _reload_observability()
+                trace = observability.get_observability_runtime().start_analysis_trace(
+                    ticker="TEST.X",
+                    session_id="session-1",
+                    tags=["analysis"],
+                    metadata={"ticker": "TEST.X"},
+                    input_payload={"ticker": "TEST.X"},
+                )
+                trace.score_trace(
+                    name="analysis_validity",
+                    value=1.0,
+                    data_type="BOOLEAN",
+                )
+                trace.close()
+
+        mock_client.create_score.assert_called_once()
+
+    def test_close_attempts_both_context_exits_independently(self):
+        mock_client = MagicMock()
+        mock_root_ctx = _FakeContextManager(
+            "root", exit_error=RuntimeError("root exit")
+        )
+        mock_propagation_ctx = _FakeContextManager(
+            "propagation", exit_error=RuntimeError("prop exit")
+        )
+        mock_client.start_as_current_observation.return_value = mock_root_ctx
+        mock_client.get_current_trace_id.return_value = "trace-123"
+        mock_client.get_trace_url.return_value = "https://langfuse/trace-123"
+
+        with patch("src.config.config") as mock_config:
+            mock_config.langfuse_enabled = True
+            mock_config.get_langfuse_public_key.return_value = "pk-test"
+            mock_config.get_langfuse_secret_key.return_value = "sk-test"
+            mock_config.app_release = "3.1.0"
+            with patch.dict(
+                sys.modules,
+                _fake_langfuse_modules(
+                    client=mock_client,
+                    callback_handler=MagicMock(return_value=MagicMock()),
+                    propagate_attributes=MagicMock(return_value=mock_propagation_ctx),
+                ),
+            ):
+                observability = _reload_observability()
+                with patch.object(observability, "logger") as mock_logger:
+                    trace = (
+                        observability.get_observability_runtime().start_analysis_trace(
+                            ticker="TEST.X",
+                            session_id="session-1",
+                            tags=["analysis"],
+                            metadata={"ticker": "TEST.X"},
+                            input_payload={"ticker": "TEST.X"},
+                        )
+                    )
+                    trace.close()
+
+        assert mock_root_ctx.exited is True
+        assert mock_propagation_ctx.exited is True
+        mock_logger.warning.assert_any_call(
+            "langfuse_propagation_ctx_exit_failed", error="prop exit"
+        )
+        mock_logger.warning.assert_any_call(
+            "langfuse_root_ctx_exit_failed", error="root exit"
+        )
+
+
+class TestToolObservation:
+    def test_start_tool_observation_is_noop_without_active_trace(self):
+        observability = _reload_observability()
+        ctx = observability.start_tool_observation(
+            tool_name="get_news",
+            input_payload={"ticker": "0005.HK"},
+        )
+        assert isinstance(ctx, type(nullcontext()))
 
 
 class TestFlushTraces:
-    """Test flush_traces function."""
-
-    def test_does_nothing_when_disabled(self):
-        """When LANGFUSE_ENABLED=false, flush should do nothing."""
-        with patch("src.observability.config") as mock_config:
+    def test_flush_traces_is_noop_when_disabled(self):
+        with patch("src.config.config") as mock_config:
             mock_config.langfuse_enabled = False
+            observability = _reload_observability()
+            observability.flush_traces()
 
-            from src.observability import flush_traces
-
-            # Should not raise
-            flush_traces()
-
-    def test_graceful_degradation_on_error(self):
-        """Flush should not raise even if Langfuse fails."""
-        with patch("src.observability.config") as mock_config:
+    def test_flush_traces_prefers_shutdown(self):
+        mock_client = MagicMock()
+        with patch("src.config.config") as mock_config:
             mock_config.langfuse_enabled = True
-
-            with patch.dict("sys.modules", {"langfuse": None}):
-                from src.observability import flush_traces
-
-                # Should not raise
-                flush_traces()
-
-    def test_flush_calls_get_client(self):
-        """Flush should prefer get_client().shutdown() when available."""
-        with patch("src.observability.config") as mock_config:
-            mock_config.langfuse_enabled = True
-
-            mock_client = MagicMock()
-            mock_get_client = MagicMock(return_value=mock_client)
             with patch.dict(
-                "sys.modules",
-                _fake_langfuse_modules(get_client=mock_get_client),
+                sys.modules,
+                _fake_langfuse_modules(client=mock_client),
             ):
-                from src.observability import flush_traces
+                observability = _reload_observability()
+                observability.flush_traces()
 
-                flush_traces()
-
-                mock_get_client.assert_called_once()
-                mock_client.shutdown.assert_called_once()
-                mock_client.flush.assert_not_called()
+        mock_client.shutdown.assert_called_once()
 
 
 class TestConfigIntegration:
-    """Test that config properly exposes Langfuse settings."""
-
-    def test_langfuse_settings_exist_in_config(self):
-        """Config should have all Langfuse settings."""
-        from src.config import config
-
-        # These should exist and have defaults
-        assert hasattr(config, "langfuse_enabled")
-        assert hasattr(config, "langfuse_host")
-        assert hasattr(config, "langfuse_sample_rate")
-        assert hasattr(config, "langfuse_debug")
-        assert hasattr(config, "langfuse_environment")
-
-        # Getters should exist
-        assert hasattr(config, "get_langfuse_public_key")
-        assert hasattr(config, "get_langfuse_secret_key")
-
     def test_langfuse_defaults_are_safe(self, monkeypatch):
-        """Default values should be safe (disabled, etc.)."""
-        # Clear Langfuse env vars to test true defaults
         monkeypatch.delenv("LANGFUSE_ENABLED", raising=False)
         monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
         monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
 
         from src.config import Settings
 
-        # Create fresh instance without .env file pollution
-        # _env_file=None disables Pydantic's automatic .env loading
         fresh_config = Settings(_env_file=None)
 
-        # Should default to disabled
         assert fresh_config.langfuse_enabled is False
-
-        # Sample rate should default to 1.0 (full tracing when enabled)
         assert fresh_config.langfuse_sample_rate == 1.0
-
-        # Debug should default to off
         assert fresh_config.langfuse_debug is False
-
-    def test_langfuse_sample_rate_validation(self):
-        """Sample rate should be validated to 0.0-1.0 range."""
-        from pydantic import ValidationError
-
-        from src.config import Settings
-
-        # Valid values should work
-        Settings(langfuse_sample_rate=0.0)
-        Settings(langfuse_sample_rate=0.5)
-        Settings(langfuse_sample_rate=1.0)
-
-        # Invalid values should raise
-        with pytest.raises(ValidationError):
-            Settings(langfuse_sample_rate=-0.1)
-
-        with pytest.raises(ValidationError):
-            Settings(langfuse_sample_rate=1.1)
+        assert fresh_config.langfuse_prompt_fetch_enabled is False
+        assert fresh_config.langfuse_prompt_label == "production"

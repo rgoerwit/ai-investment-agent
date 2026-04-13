@@ -187,60 +187,57 @@ async def invoke_with_rate_limit_handling(
             if is_rate_limit and attempt < max_attempts - 1:
                 jitter = random.uniform(1, 10)
                 wait_time = (60 * (attempt + 1)) + jitter
-                if not quiet_mode:
-                    logger.warning(
-                        "llm_call_retry",
-                        context=context,
-                        provider=resolved_provider,
-                        model=resolved_model,
-                        attempt=attempt + 1,
-                        max_attempts=max_attempts,
-                        failure_kind=details.kind,
-                        host=details.host,
-                        retryable=details.retryable,
-                        wait_seconds=f"{wait_time:.1f}",
-                        error_type=details.error_type,
-                        root_cause_type=details.root_cause_type,
-                        error_message=details.message,
-                    )
-                await asyncio.sleep(wait_time)
-                continue
-
-            if is_transient and attempt < max_attempts - 1:
-                wait_time = 5 * (attempt + 1) + random.uniform(1, 3)
-                if not quiet_mode:
-                    logger.warning(
-                        "llm_call_retry",
-                        context=context,
-                        provider=resolved_provider,
-                        model=resolved_model,
-                        attempt=attempt + 1,
-                        max_attempts=max_attempts,
-                        failure_kind=details.kind,
-                        host=details.host,
-                        retryable=details.retryable,
-                        wait_seconds=f"{wait_time:.1f}",
-                        error_type=details.error_type,
-                        root_cause_type=details.root_cause_type,
-                        error_message=details.message,
-                    )
-                await asyncio.sleep(wait_time)
-                continue
-
-            if not quiet_mode:
-                logger.error(
-                    "llm_call_failed",
+                logger.warning(
+                    "llm_call_retry",
                     context=context,
                     provider=resolved_provider,
                     model=resolved_model,
-                    runnable_class=class_name,
                     attempt=attempt + 1,
                     max_attempts=max_attempts,
                     failure_kind=details.kind,
                     host=details.host,
                     retryable=details.retryable,
+                    wait_seconds=f"{wait_time:.1f}",
                     error_type=details.error_type,
                     root_cause_type=details.root_cause_type,
                     error_message=details.message,
                 )
+                await asyncio.sleep(wait_time)
+                continue
+
+            if is_transient and attempt < max_attempts - 1:
+                wait_time = 5 * (attempt + 1) + random.uniform(1, 3)
+                logger.warning(
+                    "llm_call_retry",
+                    context=context,
+                    provider=resolved_provider,
+                    model=resolved_model,
+                    attempt=attempt + 1,
+                    max_attempts=max_attempts,
+                    failure_kind=details.kind,
+                    host=details.host,
+                    retryable=details.retryable,
+                    wait_seconds=f"{wait_time:.1f}",
+                    error_type=details.error_type,
+                    root_cause_type=details.root_cause_type,
+                    error_message=details.message,
+                )
+                await asyncio.sleep(wait_time)
+                continue
+
+            logger.error(
+                "llm_call_failed",
+                context=context,
+                provider=resolved_provider,
+                model=resolved_model,
+                runnable_class=class_name,
+                attempt=attempt + 1,
+                max_attempts=max_attempts,
+                failure_kind=details.kind,
+                host=details.host,
+                retryable=details.retryable,
+                error_type=details.error_type,
+                root_cause_type=details.root_cause_type,
+                error_message=details.message,
+            )
             raise

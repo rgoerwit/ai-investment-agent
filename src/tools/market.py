@@ -28,7 +28,14 @@ def extract_from_dataframe(
 
 
 @tool
-async def get_financial_metrics(ticker: Annotated[str, "Stock ticker symbol"]) -> str:
+async def get_financial_metrics(
+    ticker: Annotated[
+        str,
+        "Exact ticker with exchange suffix — e.g. '3217.TWO' (Taiwan OTC/TPEx),"
+        " '7203.T' (Japan), '0005.HK' (HK), '2330.TW' (Taiwan TWSE)."
+        " Use exactly as provided; never alter or drop the suffix.",
+    ],
+) -> str:
     """Get key financial ratios and metrics as a JSON string.
 
     Currency note: price fields (currentPrice, 52-week range, moving averages) are
@@ -51,7 +58,13 @@ async def get_financial_metrics(ticker: Annotated[str, "Stock ticker symbol"]) -
 
 @tool
 async def get_yfinance_data(
-    symbol: str, start_date: str = None, end_date: str = None
+    symbol: Annotated[
+        str,
+        "Exact ticker with exchange suffix — e.g. '3217.TWO', '7203.T', '0005.HK'."
+        " Use exactly as provided; never alter or drop the suffix.",
+    ],
+    start_date: str = None,
+    end_date: str = None,
 ) -> str:
     """Get historical stock price data in LOCAL TRADING CURRENCY (not USD)."""
     try:
@@ -69,7 +82,13 @@ async def get_yfinance_data(
 
 
 @tool
-async def get_technical_indicators(symbol: str) -> str:
+async def get_technical_indicators(
+    symbol: Annotated[
+        str,
+        "Exact ticker with exchange suffix — e.g. '3217.TWO', '7203.T', '0005.HK'."
+        " Use exactly as provided; never alter or drop the suffix.",
+    ],
+) -> str:
     """Get RSI, MACD, Bollinger Bands, and Moving Averages."""
     try:
         normalized = normalize_ticker(symbol)
@@ -122,7 +141,11 @@ async def get_technical_indicators(symbol: str) -> str:
 
 @tool
 async def get_fundamental_analysis(
-    ticker: Annotated[str, "Stock ticker symbol"],
+    ticker: Annotated[
+        str,
+        "Exact ticker with exchange suffix — e.g. '3217.TWO', '7203.T', '0005.HK'."
+        " Use exactly as provided; never alter or drop the suffix.",
+    ],
 ) -> str:
     """
     Perform web search for qualitative fundamental factors (Analyst coverage, ADRs).

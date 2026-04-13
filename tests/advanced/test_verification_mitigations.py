@@ -95,6 +95,186 @@ class TestSourceConflictDetection:
         conflicts = metadata.get("source_conflicts", {})
         assert "sector" not in conflicts
 
+    def test_forward_pe_single_source_outlier_is_quarantined(self):
+        """A single outrageous forwardPE should be dropped when a sane peer exists."""
+        from src.data.fetcher import SmartMarketDataFetcher as MarketDataFetcher
+
+        fetcher = MarketDataFetcher.__new__(MarketDataFetcher)
+        fetcher.stats = {"basics_ok": 0, "basics_failed": 0}
+
+        source_results = {
+            "yahooquery": {"forwardPE": 896.7947},
+            "yfinance": {"forwardPE": 11.9197},
+        }
+
+        merged, metadata = fetcher._smart_merge_with_quality(source_results, "RIO.L")
+
+        assert merged["forwardPE"] == 11.9197
+        assert metadata["field_sources"]["forwardPE"] == "yfinance"
+        assert "forwardPE" not in metadata.get("source_conflicts", {})
+
+    def test_forward_pe_higher_quality_outlier_is_also_quarantined(self):
+        """Quarantine should key off single-source implausibility, not source rank."""
+        from src.data.fetcher import SmartMarketDataFetcher as MarketDataFetcher
+
+        fetcher = MarketDataFetcher.__new__(MarketDataFetcher)
+        fetcher.stats = {"basics_ok": 0, "basics_failed": 0}
+
+        source_results = {
+            "yahooquery": {"forwardPE": 11.9197},
+            "yfinance": {"forwardPE": 896.7947},
+        }
+
+        merged, metadata = fetcher._smart_merge_with_quality(source_results, "RIO.L")
+
+        assert merged["forwardPE"] == 11.9197
+        assert metadata["field_sources"]["forwardPE"] == "yahooquery"
+        assert "forwardPE" not in metadata.get("source_conflicts", {})
+
+    def test_forward_pe_not_quarantined_when_multiple_sources_are_outrageous(self):
+        """If sources agree the forwardPE is extreme, keep it and record normal conflicts."""
+        from src.data.fetcher import SmartMarketDataFetcher as MarketDataFetcher
+
+        fetcher = MarketDataFetcher.__new__(MarketDataFetcher)
+        fetcher.stats = {"basics_ok": 0, "basics_failed": 0}
+
+        source_results = {
+            "yahooquery": {"forwardPE": 900.0},
+            "yfinance": {"forwardPE": 500.0},
+        }
+
+        merged, metadata = fetcher._smart_merge_with_quality(source_results, "TEST.L")
+
+        assert merged["forwardPE"] == 500.0
+        assert metadata["field_sources"]["forwardPE"] == "yfinance"
+        assert metadata["source_conflicts"]["forwardPE"]["variance_pct"] == 44.4
+
+    def test_forward_pe_outlier_thresholds_respect_boundaries(self):
+        """Do not quarantine at the exact threshold or below the ratio cutoff."""
+        from src.data.fetcher import SmartMarketDataFetcher as MarketDataFetcher
+
+        fetcher = MarketDataFetcher.__new__(MarketDataFetcher)
+        fetcher.stats = {"basics_ok": 0, "basics_failed": 0}
+
+        threshold_case = {
+            "yahooquery": {"forwardPE": 200.0},
+            "yfinance": {"forwardPE": 20.0},
+        }
+        merged_threshold, metadata_threshold = fetcher._smart_merge_with_quality(
+            threshold_case, "BOUNDARY.L"
+        )
+        assert merged_threshold["forwardPE"] == 20.0
+        assert "forwardPE" in metadata_threshold.get("source_conflicts", {})
+
+        ratio_case = {
+            "yahooquery": {"forwardPE": 250.0},
+            "yfinance": {"forwardPE": 60.0},
+        }
+        merged_ratio, metadata_ratio = fetcher._smart_merge_with_quality(
+            ratio_case, "BOUNDARY.L"
+        )
+        assert merged_ratio["forwardPE"] == 60.0
+        assert "forwardPE" in metadata_ratio.get("source_conflicts", {})
+
+    def test_microstructure_conflicts_are_suppressed_from_metadata_and_warnings(self):
+        """Bid/ask size mismatches should not pollute operator conflict logs."""
+        from src.data.fetcher import SmartMarketDataFetcher as MarketDataFetcher
+
+        fetcher = MarketDataFetcher.__new__(MarketDataFetcher)
+        fetcher.stats = {"basics_ok": 0, "basics_failed": 0}
+
+        source_results = {
+            "yahooquery": {
+                "bidSize": 1076000.0,
+                "askSize": 1000000.0,
+                "bid": 123.0,
+                "ask": 125.0,
+            },
+            "yfinance": {
+                "bidSize": 10760.0,
+                "askSize": 10000.0,
+                "bid": 1.23,
+                "ask": 1.25,
+            },
+        }
+
+        with patch("src.data.fetcher.logger") as mock_logger:
+            merged, metadata = fetcher._smart_merge_with_quality(
+                source_results, "RY4C.DE"
+            )
+
+        assert merged["bidSize"] == 10760.0
+        assert merged["askSize"] == 10000.0
+        assert metadata["field_sources"]["bidSize"] == "yfinance"
+        assert metadata["field_sources"]["askSize"] == "yfinance"
+        assert "bidSize" not in metadata["source_conflicts"]
+        assert "askSize" not in metadata["source_conflicts"]
+        assert "bid" not in metadata["source_conflicts"]
+        assert "ask" not in metadata["source_conflicts"]
+        assert not any(
+            call.args and call.args[0] == "source_data_conflicts"
+            for call in mock_logger.warning.call_args_list
+        )
+
+    def test_forward_pe_conflict_kept_in_metadata_but_downgraded_when_resolved(self):
+        """Lower-trust forwardPE disagreements should stay in metadata but not warn."""
+        from src.data.fetcher import SmartMarketDataFetcher as MarketDataFetcher
+
+        fetcher = MarketDataFetcher.__new__(MarketDataFetcher)
+        fetcher.stats = {"basics_ok": 0, "basics_failed": 0}
+
+        source_results = {
+            "yahooquery": {"forwardPE": 77.9191},
+            "yfinance": {"forwardPE": 8.1212},
+        }
+
+        with patch("src.data.fetcher.logger") as mock_logger:
+            merged, metadata = fetcher._smart_merge_with_quality(
+                source_results, "SEA1.OL"
+            )
+
+        assert merged["forwardPE"] == 8.1212
+        conflict = metadata["source_conflicts"]["forwardPE"]
+        assert conflict["field_class"] == "valuation"
+        assert conflict["resolved_by_quality"] is True
+        assert conflict["winner_quality"] == 9
+        assert conflict["loser_quality"] == 6
+        assert not any(
+            call.args and call.args[0] == "source_data_conflicts"
+            for call in mock_logger.warning.call_args_list
+        )
+        assert any(
+            call.args and call.args[0] == "source_data_conflicts_resolved"
+            for call in mock_logger.debug.call_args_list
+        )
+
+    def test_critical_peer_conflict_still_warns(self):
+        """Near-peer high-trust conflicts should remain warning-level visible."""
+        from src.data.fetcher import SmartMarketDataFetcher as MarketDataFetcher
+
+        fetcher = MarketDataFetcher.__new__(MarketDataFetcher)
+        fetcher.stats = {"basics_ok": 0, "basics_failed": 0}
+
+        source_results = {
+            "alpha_vantage": {"forwardPE": 10.0},
+            "yfinance": {"forwardPE": 15.0},
+        }
+
+        with patch("src.data.fetcher.logger") as mock_logger:
+            merged, metadata = fetcher._smart_merge_with_quality(
+                source_results, "PEER.L"
+            )
+
+        assert merged["forwardPE"] == 10.0
+        conflict = metadata["source_conflicts"]["forwardPE"]
+        assert conflict["resolved_by_quality"] is False
+        assert conflict["winner_quality"] == 9
+        assert conflict["loser_quality"] == 9
+        assert any(
+            call.args and call.args[0] == "source_data_conflicts"
+            for call in mock_logger.warning.call_args_list
+        )
+
 
 # =============================================================================
 # Conflict Table Formatting (agents.format_conflict_table)
@@ -160,6 +340,40 @@ class TestFormatConflictTable:
 
         result = format_conflict_table(messages)
         assert result == ""
+
+    def test_forward_pe_conflicts_with_annotations_remain_visible(self):
+        """Conflict-table rendering should ignore new metadata annotations."""
+        from langchain_core.messages import ToolMessage
+
+        from src.agents import format_conflict_table
+
+        tool_content = json.dumps(
+            {
+                "forwardPE": 8.1212,
+                "bidSize": 10760.0,
+                "_source_conflicts": {
+                    "forwardPE": {
+                        "old": 77.9191,
+                        "old_source": "yahooquery",
+                        "new": 8.1212,
+                        "new_source": "yfinance",
+                        "variance_pct": 89.6,
+                        "field_class": "valuation",
+                        "resolved_by_quality": True,
+                        "winner_quality": 9,
+                        "loser_quality": 6,
+                    }
+                },
+                "_field_sources": {"forwardPE": "yfinance", "bidSize": "yfinance"},
+            }
+        )
+        messages = [ToolMessage(content=tool_content, tool_call_id="call_1")]
+
+        result = format_conflict_table(messages)
+        assert "forwardPE" in result
+        assert "yahooquery" in result
+        assert "yfinance" in result
+        assert "bidSize" not in result
 
 
 # =============================================================================

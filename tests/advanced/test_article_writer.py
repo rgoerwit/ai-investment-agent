@@ -1,9 +1,10 @@
 """Tests for Article Writer module."""
 
+import asyncio
 import re
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -333,6 +334,23 @@ class TestArticlePathResolution:
 
 class TestArticleGeneration:
     """Tests for article generation (mocked LLM)."""
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_article_writer_passes_extra_callbacks_to_llm(self, mock_create_llm):
+        from src.article_writer import ArticleWriter
+
+        mock_create_llm.return_value = MagicMock()
+        tracing_callback = MagicMock()
+
+        ArticleWriter(
+            samples_dir=Path("writing_samples")
+            if Path("writing_samples").exists()
+            else None,
+            callbacks=[tracing_callback],
+        )
+
+        callbacks = mock_create_llm.call_args.kwargs["callbacks"]
+        assert tracing_callback in callbacks
 
     @patch("src.article_writer.create_writer_llm")
     def test_generates_article_with_all_components(self, mock_create_llm):
@@ -694,3 +712,73 @@ class TestClaudeToGeminiFallback:
 
         with pytest.raises(ValueError, match="Some unrelated error"):
             writer._invoke_writer([MagicMock()])
+
+
+class TestArticleEditorTracing:
+    @patch("src.article_writer.create_writer_llm")
+    def test_article_writer_invokes_llm_with_tracing_config(self, mock_create_writer):
+        from src.article_writer import ArticleWriter
+
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(content="ok")
+        mock_create_writer.return_value = mock_llm
+
+        writer = ArticleWriter(
+            samples_dir=Path("writing_samples")
+            if Path("writing_samples").exists()
+            else None,
+            tracing_metadata={"source_trace_id": "trace-123"},
+        )
+
+        writer._invoke_with_fallback([MagicMock()])
+
+        mock_llm.invoke.assert_called_once()
+        assert mock_llm.invoke.call_args.kwargs["config"] == {
+            "metadata": {
+                "source_trace_id": "trace-123",
+                "workflow": "article_primary",
+                "component": "article_writer",
+            }
+        }
+
+    @patch("src.llms.create_editor_llm")
+    @patch("src.editor_tools.get_editor_tools", return_value=[])
+    def test_article_editor_passes_extra_callbacks_to_llm(
+        self, mock_get_tools, mock_create_llm
+    ):
+        from src.article_writer import ArticleEditor
+
+        mock_create_llm.return_value = MagicMock()
+        tracing_callback = MagicMock()
+
+        ArticleEditor(callbacks=[tracing_callback])
+
+        callbacks = mock_create_llm.call_args.kwargs["callbacks"]
+        assert tracing_callback in callbacks
+
+    @patch("src.llms.create_editor_llm")
+    @patch("src.editor_tools.get_editor_tools", return_value=[])
+    def test_article_editor_final_review_invokes_llm_with_tracing_config(
+        self, mock_get_tools, mock_create_llm
+    ):
+        from src.article_writer import ArticleEditor
+
+        mock_llm = MagicMock()
+        mock_llm.ainvoke = AsyncMock(return_value=MagicMock())
+        mock_create_llm.return_value = mock_llm
+
+        editor = ArticleEditor(tracing_metadata={"source_trace_id": "trace-123"})
+        editor.review_llm = None
+        editor._extract_review_result = MagicMock(return_value={"verdict": "APPROVED"})
+
+        result = asyncio.run(editor._invoke_final_review([MagicMock()]))
+
+        assert result == {"verdict": "APPROVED"}
+        mock_llm.ainvoke.assert_called_once()
+        assert mock_llm.ainvoke.call_args.kwargs["config"] == {
+            "metadata": {
+                "source_trace_id": "trace-123",
+                "workflow": "editor_final_review",
+                "component": "article_editor",
+            }
+        }

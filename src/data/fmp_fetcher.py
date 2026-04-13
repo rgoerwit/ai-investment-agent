@@ -73,6 +73,7 @@ class FMPFetcher(FinancialFetcher):
         self.base_url = "https://financialmodelingprep.com/stable"
         self._key_validated = False
         self._cooldown_until: datetime | None = None
+        self._subscription_blocked_endpoints: set[str] = set()
 
     def is_available(self) -> bool:
         """Check if FMP is configured (API key present)."""
@@ -120,6 +121,13 @@ class FMPFetcher(FinancialFetcher):
             ValueError: If API key is invalid (403 on first request)
         """
         if not self.is_available():
+            return None
+        if endpoint in self._subscription_blocked_endpoints:
+            logger.debug(
+                "fmp_subscription_unavailable_cached",
+                endpoint=endpoint,
+                reason="subscription_paywall",
+            )
             return None
 
         url = f"{self.base_url}/{endpoint}"
@@ -177,7 +185,8 @@ class FMPFetcher(FinancialFetcher):
                         if response.status == 402 and _is_subscription_preview(
                             response_preview
                         ):
-                            logger.warning(
+                            self._subscription_blocked_endpoints.add(endpoint)
+                            logger.info(
                                 "fmp_subscription_unavailable",
                                 endpoint=endpoint,
                                 status=response.status,

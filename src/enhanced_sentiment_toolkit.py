@@ -16,6 +16,13 @@ import structlog
 from langchain_core.tools import tool
 
 from src.tavily_utils import tavily_search_with_timeout as _tavily_search_with_timeout
+from src.ticker_policy import (
+    CHINA_SUFFIXES,
+    INDIA_SUFFIXES,
+    KOREA_SUFFIXES,
+    TAIWAN_SUFFIXES,
+    ticker_in_group,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -120,15 +127,15 @@ def detect_market_region(ticker: str) -> str:
     # Asia
     if ticker.endswith(".HK"):
         return "hong_kong"
-    if ticker.endswith(".KS") or ticker.endswith(".KQ"):
+    if ticker_in_group(ticker, KOREA_SUFFIXES):
         return "south_korea"
     if ticker.endswith(".T"):
         return "japan"
-    if ticker.endswith(".TW") or ticker.endswith(".TWO"):
+    if ticker_in_group(ticker, TAIWAN_SUFFIXES):
         return "taiwan"
-    if ticker.endswith(".SS") or ticker.endswith(".SZ"):
+    if ticker_in_group(ticker, CHINA_SUFFIXES - {".HK"}):
         return "china"
-    if ticker.endswith(".NS") or ticker.endswith(".BO"):
+    if ticker_in_group(ticker, INDIA_SUFFIXES):
         return "india"
     if ticker.endswith(".BK"):
         return "thailand"

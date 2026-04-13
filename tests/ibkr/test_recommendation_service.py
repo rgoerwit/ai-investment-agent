@@ -90,6 +90,30 @@ async def test_recommend_mode_includes_live_orders_from_snapshot():
 
 
 @pytest.mark.asyncio
+async def test_build_bundle_preserves_cash_blocked_watchlist_candidate_count():
+    snapshot = PortfolioSnapshot(
+        portfolio=PortfolioSummary(portfolio_value_usd=1000),
+        watchlist=WatchlistSnapshot(found=True, explicitly_requested=False),
+    )
+    portfolio_service = FakePortfolioDataService(snapshot)
+
+    def fake_reconcile(**kwargs):
+        kwargs["diagnostics"].cash_blocked_offwatch_buy_count = 3
+        return []
+
+    service = PortfolioRecommendationService(
+        portfolio_data_service=portfolio_service,
+        load_analyses_fn=lambda path: {"7203.T": _make_analysis(ticker="7203.T")},
+        reconcile_fn=fake_reconcile,
+        compute_portfolio_health_fn=lambda **kwargs: [],
+    )
+
+    bundle = await service.build_bundle(_make_request())
+
+    assert bundle.watchlist_candidates_blocked_by_cash == 3
+
+
+@pytest.mark.asyncio
 async def test_refresh_runs_and_rereconciles():
     snapshot = PortfolioSnapshot(
         positions=[_make_position(ticker="7203.T")],

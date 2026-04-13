@@ -15,6 +15,7 @@ from pathlib import Path
 
 import structlog
 
+from src.exchange_metadata import IBKR_TO_YFINANCE
 from src.ibkr.exceptions import IBKRTickerResolutionError
 from src.ibkr.order_builder import parse_price
 from src.ibkr.ticker import _CURRENCY_TO_SUFFIX  # noqa: F401 — re-exported for compat
@@ -76,7 +77,7 @@ def ibkr_symbol_to_yf(symbol: str, exchange: str, currency: str = "") -> str:
     """
     Convert an IBKR symbol + exchange to yfinance ticker format.
 
-    Uses TickerFormatter.IBKR_TO_YFINANCE mapping.
+    Uses the canonical IBKR_TO_YFINANCE mapping.
     Handles HK zero-padding (e.g., IBKR "5" on SEHK → "0005.HK").
 
     Args:
@@ -88,7 +89,7 @@ def ibkr_symbol_to_yf(symbol: str, exchange: str, currency: str = "") -> str:
     Returns:
         yfinance ticker string (e.g., "0005.HK", "7203.T", "ASML.AS")
     """
-    suffix = TickerFormatter.IBKR_TO_YFINANCE.get(exchange, "")
+    suffix = IBKR_TO_YFINANCE.get(exchange, "")
 
     # Fallback: derive suffix from unambiguous currency when exchange is unknown
     if not suffix and currency:

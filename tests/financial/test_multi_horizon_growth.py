@@ -529,6 +529,19 @@ class TestPEGReEnablement:
 
         assert "pegRatio" not in calculated
 
+    def test_peg_not_derived_from_annual_growth_only(self):
+        """Annual earnings growth alone must not backfill a TTM PEG."""
+        fetcher = SmartMarketDataFetcher()
+        data = {
+            "trailingPE": 8.25,
+            "earningsGrowth": 0.988,
+            "earningsGrowth_TTM": None,
+        }
+
+        calculated = fetcher._calculate_derived_metrics(data, "TEST")
+
+        assert "pegRatio" not in calculated
+
 
 class TestRedFlagDetectorIntegration:
     """Test DATA_BLOCK parsing of new fields and GROWTH_CLIFF flag."""

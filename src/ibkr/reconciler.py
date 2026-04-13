@@ -34,6 +34,7 @@ from typing import Any
 
 import structlog
 
+from src.exchange_metadata import IBKR_TO_YFINANCE
 from src.fx_normalization import get_fx_rate_fallback
 from src.ibkr.models import (
     AnalysisRecord,
@@ -49,7 +50,6 @@ from src.ibkr.order_builder import (
 )
 from src.ibkr.ticker import Ticker
 from src.ticker_policy import is_safe_symbol_crossmatch_base, split_ticker
-from src.ticker_utils import TickerFormatter
 
 logger = structlog.get_logger(__name__)
 _ANALYSIS_INDEX_VERSION = 2
@@ -301,7 +301,7 @@ def _exchange_from_position(pos: NormalizedPosition) -> str:
     Priority:
     1. ticker.yf suffix — always correct when normalize_positions() set it via
        Ticker.from_ibkr() (which already consulted IBKR_TO_YFINANCE).
-    2. IBKR listingExchange (ticker.exchange) via TickerFormatter.IBKR_TO_YFINANCE —
+    2. IBKR listingExchange (ticker.exchange) via IBKR_TO_YFINANCE —
        corrects cases where an analysis was run without an exchange suffix, causing
        the ticker-based inference to fall through to the wrong "US" default.
     3. Currency heuristic — handles IBKR exchanges not in the static map (e.g. some
@@ -317,7 +317,7 @@ def _exchange_from_position(pos: NormalizedPosition) -> str:
 
     # 2. IBKR listingExchange via static map
     if pos.ticker.exchange:
-        ibkr_suffix = TickerFormatter.IBKR_TO_YFINANCE.get(pos.ticker.exchange, None)
+        ibkr_suffix = IBKR_TO_YFINANCE.get(pos.ticker.exchange, None)
         if ibkr_suffix is not None:
             # Empty string means a US venue (NASDAQ, NYSE, etc.)
             return ibkr_suffix.lstrip(".") if ibkr_suffix else "US"
@@ -1089,6 +1089,11 @@ def _classify_sell_type(analysis: AnalysisRecord | None, stop_breached: bool) ->
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+@dataclass
+class ReconciliationDiagnostics:
+    cash_blocked_offwatch_buy_count: int = 0
+
+
 def reconcile(
     positions: list[NormalizedPosition],
     analyses: dict[str, AnalysisRecord],
@@ -1100,6 +1105,7 @@ def reconcile(
     sector_limit_pct: float = 30.0,
     exchange_limit_pct: float = 40.0,
     watchlist_tickers: set[str] | None = None,
+    diagnostics: ReconciliationDiagnostics | None = None,
 ) -> list[ReconciliationItem]:
     """
     Compare IBKR positions against evaluator recommendations.
@@ -1715,6 +1721,8 @@ def reconcile(
         # (in --read-only mode portfolio_value_usd=0, so buys still surface)
         has_portfolio = portfolio.portfolio_value_usd > 0
         if has_portfolio and remaining_cash <= 0:
+            if diagnostics is not None:
+                diagnostics.cash_blocked_offwatch_buy_count += 1
             continue
 
         entry_price = analysis.entry_price or analysis.current_price

@@ -47,6 +47,7 @@ def mock_create_gemini_model(request):
     if request.node.name in {
         "test_create_gemini_model_logs_thinking_level_at_debug",
         "test_create_gemini_model_uses_thinking_budget_for_gemini_2_5",
+        "test_create_gemini_model_adds_default_reserve_for_gemini_3",
     }:
         yield None
         return
@@ -191,6 +192,7 @@ def test_quick_llm_passes_through_max_output_tokens(
 
     call_kwargs = mock_create_gemini_model.call_args.kwargs
     assert call_kwargs.get("max_output_tokens") == 4096
+    assert call_kwargs.get("reserve_class") == "default"
 
 
 def test_deep_llm_passes_through_max_output_tokens(
@@ -202,6 +204,7 @@ def test_deep_llm_passes_through_max_output_tokens(
 
     call_kwargs = mock_create_gemini_model.call_args.kwargs
     assert call_kwargs.get("max_output_tokens") == 8192
+    assert call_kwargs.get("reserve_class") == "deep"
 
 
 def test_create_gemini_model_logs_thinking_level_at_debug(caplog):
@@ -237,6 +240,8 @@ def test_create_gemini_model_uses_thinking_budget_for_gemini_2_5():
     with patch("src.llms.ChatGoogleGenerativeAI", return_value=MagicMock()) as mock_llm:
         with patch("src.llms.config") as mock_config:
             mock_config.llm_base_output_tokens = 4096
+            mock_config.llm_default_reasoning_reserve_tokens = 2048
+            mock_config.llm_deep_reasoning_reserve_tokens = 8192
             mock_config.get_google_api_key.return_value = "test-key"
 
             _create_gemini_model(
@@ -250,3 +255,31 @@ def test_create_gemini_model_uses_thinking_budget_for_gemini_2_5():
     call_kwargs = mock_llm.call_args.kwargs
     assert call_kwargs["thinking_budget"] == 4096
     assert "thinking_level" not in call_kwargs
+    assert call_kwargs["max_output_tokens"] == 4096
+
+
+def test_create_gemini_model_adds_default_reserve_for_gemini_3():
+    llm = MagicMock()
+
+    with patch("src.llms.ChatGoogleGenerativeAI", return_value=llm) as mock_llm:
+        with patch("src.llms.config") as mock_config:
+            mock_config.llm_base_output_tokens = 4096
+            mock_config.llm_default_reasoning_reserve_tokens = 2048
+            mock_config.llm_deep_reasoning_reserve_tokens = 8192
+            mock_config.get_google_api_key.return_value = "test-key"
+
+            _create_gemini_model(
+                GEMINI_3_PRO,
+                temperature=0.1,
+                timeout=30,
+                max_retries=1,
+                thinking_level="low",
+                max_output_tokens=2048,
+                reserve_class="default",
+            )
+
+    call_kwargs = mock_llm.call_args.kwargs
+    assert call_kwargs["max_output_tokens"] == 4096
+    assert llm._configured_max_output_tokens == 2048
+    assert llm._configured_api_output_tokens == 4096
+    assert llm._configured_reasoning_reserve_tokens == 2048

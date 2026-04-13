@@ -1,7 +1,7 @@
-"""Regression guards for research_manager prompt — TRANSIENT/STRUCTURAL instruction.
+"""Regression guards for prompt content with behavior-critical instructions.
 
 These tests fail the moment someone accidentally removes or corrupts the
-TRANSIENT risk-duration instruction from the research_manager prompt.
+specific prompt instructions that underpin deterministic review assumptions.
 No LLM is called; only the prompt JSON on disk is inspected.
 """
 
@@ -53,3 +53,30 @@ class TestResearchManagerPromptContent:
             "Geopolitical example missing from research_manager prompt. "
             "Examples anchor the LLM's classification of TRANSIENT vs STRUCTURAL."
         )
+
+
+class TestFundamentalsPromptContent:
+    """Guard prompt rules for multi-horizon growth fidelity."""
+
+    def test_fundamentals_prompt_forbids_fy_to_ttm_copying(self):
+        prompt = get_prompt("fundamentals_analyst")
+        assert (
+            "do not copy FY values into TTM or MRQ fields" in prompt.system_message
+        ), "Fundamentals prompt must forbid copying FY growth into TTM/MRQ labels."
+
+    def test_fundamentals_prompt_mentions_event_driven_normalization(self):
+        prompt = get_prompt("fundamentals_analyst")
+        assert "event-driven normalization" in prompt.system_message, (
+            "Fundamentals prompt must distinguish named one-time-event normalization "
+            "from generic cyclical decline."
+        )
+
+
+class TestPortfolioManagerPromptContent:
+    """Guard PM handling of consultant no-coverage cases."""
+
+    def test_portfolio_manager_prompt_makes_no_coverage_neutral(self):
+        prompt = get_prompt("portfolio_manager")
+        assert (
+            "should be noted without adding +0.25" in prompt.system_message
+        ), "PM prompt must keep plain ex-US no-coverage consultant cases neutral."

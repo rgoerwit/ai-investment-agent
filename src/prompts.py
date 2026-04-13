@@ -31,6 +31,10 @@ class AgentPrompt:
     category: str = "general"
     requires_tools: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+    source: str = "local"
+    langfuse_name: str | None = None
+    langfuse_label: str | None = None
+    langfuse_version: str | None = None
 
     def __post_init__(self):
         if self.metadata is None:
@@ -2269,13 +2273,72 @@ You are NOT permanent staff. You have:
                     "Failed to load custom prompt", file=json_file.name, error=str(e)
                 )
 
+    def _langfuse_prompt_enabled(self) -> bool:
+        return bool(
+            config.langfuse_enabled
+            and config.langfuse_prompt_fetch_enabled
+            and config.get_langfuse_public_key()
+            and config.get_langfuse_secret_key()
+        )
+
+    def _resolve_langfuse_prompt(
+        self, agent_key: str, prompt: AgentPrompt | None
+    ) -> AgentPrompt | None:
+        if prompt is None or not self._langfuse_prompt_enabled():
+            return prompt
+
+        try:
+            from langfuse import get_client
+
+            client = get_client()
+            if not hasattr(client, "get_prompt"):
+                raise RuntimeError("Langfuse client does not support prompt fetch")
+            prompt_client = client.get_prompt(
+                name=agent_key,
+                label=config.langfuse_prompt_label,
+                type="text",
+                cache_ttl_seconds=config.langfuse_prompt_cache_ttl_seconds,
+                fallback=prompt.system_message,
+            )
+            resolved_text = (
+                getattr(prompt_client, "prompt", None) or prompt.system_message
+            )
+            langfuse_version = getattr(prompt_client, "version", None)
+            merged_metadata = {
+                **prompt.metadata,
+                "prompt_source": "langfuse",
+                "prompt_name": agent_key,
+                "prompt_label": config.langfuse_prompt_label,
+                "local_prompt_version": prompt.version,
+            }
+            return AgentPrompt(
+                agent_key=prompt.agent_key,
+                agent_name=prompt.agent_name,
+                version=prompt.version,
+                system_message=resolved_text,
+                category=prompt.category,
+                requires_tools=prompt.requires_tools,
+                metadata=merged_metadata,
+                source="langfuse",
+                langfuse_name=agent_key,
+                langfuse_label=config.langfuse_prompt_label,
+                langfuse_version=str(langfuse_version) if langfuse_version else None,
+            )
+        except Exception as exc:
+            logger.warning(
+                "langfuse_prompt_fetch_failed",
+                agent_key=agent_key,
+                error=str(exc),
+            )
+            return prompt
+
     def get(self, agent_key: str) -> AgentPrompt | None:
         """Get prompt by agent key, checking env var override first."""
         env_var = f"PROMPT_{agent_key.upper()}"
         if env_var in os.environ:
             base_prompt = self.prompts.get(agent_key)
             if base_prompt:
-                return AgentPrompt(
+                prompt = AgentPrompt(
                     agent_key=agent_key,
                     agent_name=base_prompt.agent_name,
                     version=f"{base_prompt.version}-env",
@@ -2283,9 +2346,11 @@ You are NOT permanent staff. You have:
                     category=base_prompt.category,
                     requires_tools=base_prompt.requires_tools,
                     metadata={"source": "environment"},
+                    source="environment",
                 )
+                return prompt
 
-        return self.prompts.get(agent_key)
+        return self._resolve_langfuse_prompt(agent_key, self.prompts.get(agent_key))
 
     def get_all(self) -> dict[str, AgentPrompt]:
         """Get all registered prompts."""

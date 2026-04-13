@@ -11,6 +11,8 @@ import structlog
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
 
+from src.llm_usage import extract_token_usage_breakdown
+
 logger = structlog.get_logger(__name__)
 
 
@@ -337,25 +339,17 @@ class TokenTrackingCallback(BaseCallbackHandler):
         self.agent_name = agent_name
         self.tracker = tracker or TokenTracker()
         self.output_token_cap = output_token_cap
+        self.api_output_token_cap = output_token_cap
+        self.reasoning_reserve_tokens = 0
 
     def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
         """Called when LLM completes a generation."""
-        # Extract token usage from response
-        # For Gemini API, usage_metadata is in the message, not llm_output
-        usage_metadata = {}
         model_name = "unknown"
 
-        # Try to get usage from generations first (Gemini's structure)
         if response.generations and len(response.generations) > 0:
             first_generation_list = response.generations[0]
             if first_generation_list and len(first_generation_list) > 0:
                 first_generation = first_generation_list[0]
-
-                # Check if it's an AIMessage with usage_metadata
-                if hasattr(first_generation, "message") and hasattr(
-                    first_generation.message, "usage_metadata"
-                ):
-                    usage_metadata = first_generation.message.usage_metadata or {}
 
                 # Get model name from generation_info or response_metadata
                 # CRITICAL: Check for None before calling .get() - hasattr returns True for None values
@@ -370,41 +364,50 @@ class TokenTrackingCallback(BaseCallbackHandler):
                     if resp_meta is not None:
                         model_name = resp_meta.get("model_name", "unknown")
 
-        # Fallback to llm_output (for other LLM providers like OpenAI)
-        if not usage_metadata and response.llm_output:
-            usage_metadata = response.llm_output.get("usage_metadata", {})
-            if not usage_metadata:
-                # OpenAI uses "token_usage" key
-                usage_metadata = response.llm_output.get("token_usage", {})
-            if model_name == "unknown":
-                model_name = response.llm_output.get("model_name", "unknown")
+        if response.llm_output and model_name == "unknown":
+            model_name = response.llm_output.get("model_name", "unknown")
 
-        if usage_metadata:
-            prompt_tokens = usage_metadata.get("input_tokens", 0) or usage_metadata.get(
-                "prompt_tokens", 0
+        usage = extract_token_usage_breakdown(response)
+        prompt_tokens = usage.input_tokens or 0
+        completion_tokens = usage.total_output_tokens or 0
+
+        if prompt_tokens > 0 or completion_tokens > 0:
+            self.tracker.record_usage(
+                agent_name=self.agent_name,
+                model_name=model_name,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
             )
-            completion_tokens = usage_metadata.get(
-                "output_tokens", 0
-            ) or usage_metadata.get("completion_tokens", 0)
-
-            if prompt_tokens > 0 or completion_tokens > 0:
-                self.tracker.record_usage(
-                    agent_name=self.agent_name,
-                    model_name=model_name,
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
+            if self.output_token_cap and completion_tokens > 0:
+                intent_utilization = (
+                    round(usage.visible_output_tokens / self.output_token_cap, 4)
+                    if usage.visible_output_tokens is not None
+                    else None
                 )
-                if self.output_token_cap and completion_tokens > 0:
-                    logger.info(
-                        "llm_output_budget_usage",
-                        agent=self.agent_name,
-                        model=model_name,
-                        configured_output_cap=self.output_token_cap,
-                        completion_tokens=completion_tokens,
-                        utilization_ratio=round(
-                            completion_tokens / self.output_token_cap, 4
-                        ),
-                    )
+                api_utilization = (
+                    round(completion_tokens / self.api_output_token_cap, 4)
+                    if self.api_output_token_cap
+                    else None
+                )
+                logger.info(
+                    "llm_output_budget_usage",
+                    agent=self.agent_name,
+                    model=model_name,
+                    configured_output_cap=self.output_token_cap,
+                    configured_output_intent_cap=self.output_token_cap,
+                    configured_api_output_cap=self.api_output_token_cap,
+                    completion_tokens=completion_tokens,
+                    completion_tokens_total=completion_tokens,
+                    thinking_tokens=usage.thinking_tokens,
+                    visible_output_tokens=usage.visible_output_tokens,
+                    utilization_ratio=(
+                        intent_utilization
+                        if intent_utilization is not None
+                        else api_utilization
+                    ),
+                    intent_utilization_ratio=intent_utilization,
+                    api_utilization_ratio=api_utilization,
+                )
 
 
 # Global singleton instance (lazy initialization to respect quiet mode)

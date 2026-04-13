@@ -216,13 +216,22 @@ Avg Daily Turnover (USD): N/A
         if reasons:
             status_line = f"{status} - {'; '.join(reasons)}"
 
+        agent_note = ""
+        if fails_zero_vol or fails_flat_price:
+            agent_note = (
+                "\nAGENT INSTRUCTION: This is a definitive hard fail based on measured "
+                "exchange data. Do not substitute volume, turnover, or liquidity figures "
+                "from another listing, a different exchange, or your training knowledge. "
+                "Report this ticker as illiquid on this exchange."
+            )
+
         return f"""Liquidity Analysis for {ticker}:
 Status: {status_line}
 Avg Daily Volume (3mo): {int(avg_volume):,}
 Avg Daily Turnover (USD): ${int(avg_turnover_usd):,}
 Trading Regularity: {pct_zero:.0f}% zero-volume days, {pct_flat:.0f}% flat-price days (last 3mo)
 Details: {currency} turnover converted at FX rate {fx_rate:.6f} (source: {fx_source})
-Thresholds: $100,000 USD minimum (MARGINAL), $250,000 USD recommended (PASS), <15% zero-volume days, <30% flat-price days
+Thresholds: $100,000 USD minimum (MARGINAL), $250,000 USD recommended (PASS), <15% zero-volume days, <30% flat-price days{agent_note}
 """
 
     except Exception as e:

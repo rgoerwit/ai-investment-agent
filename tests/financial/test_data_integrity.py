@@ -183,6 +183,11 @@ class TestScalingCorrection:
         corrected = fetcher._normalize_scaling_errors(10.0, 15.0)
         assert corrected == 15.0  # Returns the 'new' candidate value
 
+    def test_normalize_scaling_errors_accepts_minor_unit_tolerance_band(self, fetcher):
+        """Values within the shared 10% minor-unit tolerance should normalize."""
+        corrected = fetcher._normalize_scaling_errors(95.0, 1.0)
+        assert corrected == 1.0
+
     def test_smart_merge_integrates_scaling(self, fetcher):
         """Verify that _smart_merge_with_quality actually applies the correction."""
         # Setup source results to simulate a replace with scaling correction

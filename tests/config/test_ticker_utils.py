@@ -204,11 +204,60 @@ def test_normalize_ticker(input_ticker, expected_normalized, expected_metadata_k
         "plain",
         "unknown",
         "invalid",
+        "share_class",
     ]
     assert metadata["country"] != "Unknown" or metadata["format"] in [
         "unknown",
         "invalid",
     ]
+
+
+@pytest.mark.parametrize(
+    "input_ticker, expected_normalized, expected_format, expected_country, expected_exchange",
+    [
+        # Multi-dot → hyphen normalization (the core fix)
+        ("NIL.B.ST", "NIL-B.ST", "standard", "Sweden", "Nasdaq Stockholm"),
+        ("VOLV.A.ST", "VOLV-A.ST", "standard", "Sweden", "Nasdaq Stockholm"),
+        ("HM.B.ST", "HM-B.ST", "standard", "Sweden", "Nasdaq Stockholm"),
+        ("NOVO.B.CO", "NOVO-B.CO", "standard", "Denmark", "Nasdaq Copenhagen"),
+        ("NOK.A.HE", "NOK-A.HE", "standard", "Finland", "Nasdaq Helsinki"),
+        ("SALM.A.OL", "SALM-A.OL", "standard", "Norway", "Oslo Børs"),
+        # Already-correct hyphenated form: unchanged, now properly recognised
+        ("VOLV-B.ST", "VOLV-B.ST", "standard", "Sweden", "Nasdaq Stockholm"),
+        ("NOVO-B.CO", "NOVO-B.CO", "standard", "Denmark", "Nasdaq Copenhagen"),
+        # Previously-missing single-dot Scandinavian: now get correct metadata
+        ("EQNR.OL", "EQNR.OL", "standard", "Norway", "Oslo Børs"),
+        # Unknown suffix with two dots: must NOT fire (XX not in EXCHANGE_SUFFIXES)
+        # Two-dot ticker with unknown suffix falls through all patterns → "invalid"
+        ("SOME.THING.XX", "SOME.THING.XX", "invalid", "Unknown", "Unknown"),
+        # Must-not-break cases
+        ("BP.L", "BP.L", "standard", "UK", "London Stock Exchange"),
+        ("NOVN.SW", "NOVN.SW", "standard", "Switzerland", "SIX Swiss Exchange"),
+        ("7203.T", "7203.T", "standard", "Japan", "Tokyo Stock Exchange"),
+        ("NOVN.N-CH", "NOVN.SW", "reuters", "Switzerland", "SIX Swiss Exchange"),
+        ("AAPL", "AAPL", "plain", "United States", "US Exchange (assumed)"),
+        # US share-class / ADR preferred shares (1-char unknown suffix → hyphen)
+        ("PBR.A", "PBR-A", "share_class", "United States", "US Exchange (assumed)"),
+        ("BRK.B", "BRK-B", "share_class", "United States", "US Exchange (assumed)"),
+        ("BBD.A", "BBD-A", "share_class", "United States", "US Exchange (assumed)"),
+        # Known single-char exchange codes must NOT become share-class
+        ("BP.L", "BP.L", "standard", "UK", "London Stock Exchange"),  # L=London
+        ("7203.T", "7203.T", "standard", "Japan", "Tokyo Stock Exchange"),  # T=Tokyo
+        ("EQNR.V", "EQNR.V", "standard", "Canada", "TSX Venture Exchange"),  # V=TSX
+    ],
+)
+def test_normalize_ticker_multidot(
+    input_ticker,
+    expected_normalized,
+    expected_format,
+    expected_country,
+    expected_exchange,
+):
+    normalized, metadata = TickerFormatter.normalize_ticker(input_ticker)
+    assert normalized == expected_normalized
+    assert metadata["format"] == expected_format
+    assert metadata["country"] == expected_country
+    assert metadata["exchange_name"] == expected_exchange
 
 
 @pytest.mark.parametrize(
@@ -220,6 +269,21 @@ def test_normalize_ticker(input_ticker, expected_normalized, expected_metadata_k
         ("AAPL", "AAPL"),
         ("7203.T", "7203.T"),
         ("INVALID", "INVALID"),
+        # Scandinavian multi-dot normalisation
+        ("NIL.B.ST", "NIL-B.ST"),
+        ("HM.B.ST", "HM-B.ST"),
+        # Already-hyphenated form: pass through unchanged
+        ("VOLV-B.ST", "VOLV-B.ST"),
+        # Single-dot Scandinavian: unchanged symbol, now correctly tagged
+        ("EQNR.OL", "EQNR.OL"),
+        # US share-class / ADR preferred shares: dot → hyphen
+        ("PBR.A", "PBR-A"),
+        ("BRK.B", "BRK-B"),
+        ("BBD.A", "BBD-A"),
+        # Regression: known single-char exchange codes must NOT be treated as share-class
+        ("BP.L", "BP.L"),  # L = London Stock Exchange
+        ("7203.T", "7203.T"),  # T = Tokyo Stock Exchange
+        ("EQNR.V", "EQNR.V"),  # V = TSX Venture Exchange
     ],
 )
 def test_to_yfinance(input_ticker, expected):
@@ -251,6 +315,12 @@ def test_to_ibkr(input_ticker, expected):
         ("AAPL", "United States", "US Exchange (assumed)"),
         ("0700.HK", "Hong Kong", "Hong Kong Stock Exchange"),
         ("UNKNOWN.XX", "Unknown", "Unknown"),
+        # Scandinavian exchanges — previously returned Unknown
+        ("EQNR.OL", "Norway", "Oslo Børs"),
+        ("VOLV-B.ST", "Sweden", "Nasdaq Stockholm"),
+        ("NOVO-B.CO", "Denmark", "Nasdaq Copenhagen"),
+        # US share-class / ADR preferred
+        ("PBR.A", "United States", "US Exchange (assumed)"),
     ],
 )
 def test_get_ticker_info(input_ticker, expected_country, expected_exchange):
@@ -267,6 +337,8 @@ def test_get_ticker_info(input_ticker, expected_country, expected_exchange):
         ("7203.T", True),
         ("UNKNOWN.XX", True),  # Defaults to Unknown -> True
         ("MSFT", False),
+        ("PBR.A", False),  # US share-class (ADR preferred) — not international
+        ("BRK.B", False),  # US share-class (Berkshire B) — not international
     ],
 )
 def test_is_international(ticker, expected):

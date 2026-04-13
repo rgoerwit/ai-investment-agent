@@ -1,3 +1,5 @@
+import asyncio
+from contextlib import nullcontext
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -186,3 +188,60 @@ async def test_execute_logs_structured_failure_details_when_runner_fails():
     assert kwargs["failure_kind"] == "rate_limit"
     assert kwargs["retryable"] is True
     assert kwargs["error_type"] == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_execute_wraps_runner_in_tool_observation():
+    service = ToolExecutionService()
+    runner = AsyncMock(return_value={"ok": True})
+
+    with patch(
+        "src.tooling.runtime.start_tool_observation",
+        return_value=nullcontext(),
+    ) as mock_observation:
+        result = await service.execute(
+            ToolInvocation(
+                name="get_news",
+                args={"ticker": "AAPL"},
+                source="editor",
+                agent_key="news_analyst",
+            ),
+            runner=runner,
+        )
+
+    mock_observation.assert_called_once_with(
+        tool_name="get_news",
+        input_payload={"ticker": "AAPL"},
+        metadata={
+            "tool_name": "get_news",
+            "tool_source": "editor",
+            "agent_key": "news_analyst",
+        },
+    )
+    runner.assert_awaited_once_with({"ticker": "AAPL"})
+    assert result == ToolResult(value={"ok": True}, blocked=False, findings=None)
+
+
+@pytest.mark.asyncio
+async def test_execute_times_out_runner_and_skips_after_hooks():
+    events: list[str] = []
+    service = ToolExecutionService(hooks=[PassThroughHook("audit", events)])
+
+    async def slow_runner(_args):
+        await asyncio.sleep(1)
+
+    with patch("src.tooling.runtime.TOOL_CALL_TIMEOUT_SECONDS", 0.01):
+        with patch("src.tooling.runtime.logger") as mock_logger:
+            with pytest.raises(TimeoutError, match="get_news"):
+                await service.execute(
+                    ToolInvocation(
+                        name="get_news", args={"ticker": "AAPL"}, source="editor"
+                    ),
+                    runner=slow_runner,
+                )
+
+    assert events == ["before:audit"]
+    mock_logger.warning.assert_called_once()
+    kwargs = mock_logger.warning.call_args.kwargs
+    assert kwargs["tool"] == "get_news"
+    assert kwargs["timeout_seconds"] == 0.01

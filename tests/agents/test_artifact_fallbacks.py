@@ -109,3 +109,95 @@ class TestArtifactFallbacks:
         assert result["auditor_report"] == "retry success"
         assert invoke_mock.await_count == 2
         mock_chat.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("src.prompts.get_prompt")
+    async def test_auditor_repairs_recoverable_invalid_structure(self, mock_get_prompt):
+        mock_get_prompt.return_value = SimpleNamespace(system_message="auditor prompt")
+
+        initial_llm = SimpleNamespace(model_name="gpt-4o")
+        initial_response = SimpleNamespace(
+            content=(
+                "## FORENSIC AUDITOR REPORT\n\n"
+                "**STATUS**: INSUFFICIENT_DATA\n\n"
+                "The primary filings and auditor report could not be verified.\n"
+                "Data remains unavailable from authoritative source documents.\n"
+            ),
+            tool_calls=None,
+        )
+        repaired_response = SimpleNamespace(
+            content=(
+                "## FORENSIC AUDITOR REPORT\n\n"
+                "STATUS: INSUFFICIENT_DATA\n\n"
+                "FORENSIC_DATA_BLOCK:\n"
+                "STATUS: INSUFFICIENT_DATA\n"
+                "META: UNKNOWN | REPORT_DATE=UNKNOWN\n"
+                "VERDICT: Unable to perform comprehensive forensic audit from "
+                "verified primary source documents.\n"
+            ),
+            tool_calls=None,
+        )
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling",
+            new=AsyncMock(side_effect=[initial_response, repaired_response]),
+        ) as invoke_mock:
+            with patch.object(
+                create_auditor_node.__globals__["TOOL_SERVICE"],
+                "execute",
+                new=AsyncMock(),
+            ) as mock_execute:
+                node = create_auditor_node(initial_llm, [])
+                result = await node(
+                    {
+                        "company_of_interest": "SKT.NZ",
+                        "company_name": "Sky Network Television",
+                        "company_name_resolved": True,
+                    },
+                    {},
+                )
+
+        status = result["artifact_statuses"]["auditor_report"]
+
+        assert status["complete"] is True
+        assert status["ok"] is True
+        assert "VERDICT:" in result["auditor_report"]
+        assert invoke_mock.await_count == 2
+        mock_execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("src.prompts.get_prompt")
+    async def test_auditor_unrecoverable_invalid_structure_logs_preview(
+        self, mock_get_prompt
+    ):
+        mock_get_prompt.return_value = SimpleNamespace(system_message="auditor prompt")
+
+        initial_llm = SimpleNamespace(model_name="gpt-4o")
+        invalid_response = SimpleNamespace(content="nonsense output", tool_calls=None)
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling",
+            new=AsyncMock(side_effect=[invalid_response, invalid_response]),
+        ):
+            with patch("src.agents.consultant_nodes.logger") as mock_logger:
+                node = create_auditor_node(initial_llm, [])
+                result = await node(
+                    {
+                        "company_of_interest": "BAD.TICKER",
+                        "company_name": "Bad Ticker",
+                        "company_name_resolved": True,
+                    },
+                    {},
+                )
+
+        status = result["artifact_statuses"]["auditor_report"]
+        assert status["complete"] is True
+        assert status["ok"] is False
+
+        invalid_calls = [
+            call
+            for call in mock_logger.error.call_args_list
+            if call.args[0] == "auditor_invalid_structure"
+        ]
+        assert invalid_calls
+        assert invalid_calls[-1].kwargs["output_preview"] == "nonsense output"

@@ -83,6 +83,7 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+pytest-of-*/
 cover/
 
 # MyPy
@@ -169,6 +170,7 @@ reports/
 evals/captures/
 evals/prompt_checks/
 runtime/ibkr_dashboard/
+!docs/ROADMAP_OPERATOR_WORKBENCH.md
 # Latest-analysis cache index and lock files
 /.*.latest_analyses_index.json
 /.*.latest_analyses_index.lock
@@ -178,4 +180,3 @@ runtime/ibkr_dashboard/
 # Local configuration overrides
 local_config.py
 config.local.py
-docs/ROADMAP_OPERATOR_WORKBENCH.md

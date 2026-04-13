@@ -37,7 +37,7 @@ REUTERS_CORRECTIONS = {
     "VOW3.DE": ("VOW3", "DE", "Volkswagen AG"),
     "BAYN.DE": ("BAYN", "DE", "Bayer AG"),
     # UK Securities (London Stock Exchange)
-    "BP.L": ("BP.", "L", "BP plc"),
+    "BP.L": ("BP", "L", "BP plc"),
     "HSBA.L": ("HSBA", "L", "HSBC Holdings plc"),
     "ULVR.L": ("ULVR", "L", "Unilever PLC"),
     "AZN.L": ("AZN", "L", "AstraZeneca PLC"),

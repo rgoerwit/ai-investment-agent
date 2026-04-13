@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, TypeAlias
 
 import structlog
 
+from src.observability import start_tool_observation
 from src.runtime_diagnostics import classify_failure
 
 logger = structlog.get_logger(__name__)
+
+TOOL_CALL_TIMEOUT_SECONDS = 45.0
 
 ToolSource: TypeAlias = Literal[
     "toolnode", "consultant", "editor", "legal_counsel", "auditor"
@@ -90,7 +94,31 @@ class ToolExecutionService:
             )
 
         try:
-            result = ToolResult(value=await runner(call.args))
+            with start_tool_observation(
+                tool_name=call.name,
+                input_payload=call.args,
+                metadata={
+                    "tool_name": call.name,
+                    "tool_source": call.source,
+                    "agent_key": call.agent_key,
+                },
+            ):
+                result = ToolResult(
+                    value=await asyncio.wait_for(
+                        runner(call.args), timeout=TOOL_CALL_TIMEOUT_SECONDS
+                    )
+                )
+        except asyncio.TimeoutError as exc:
+            logger.warning(
+                "tool_call_timeout",
+                tool=call.name,
+                source=call.source,
+                agent_key=call.agent_key,
+                timeout_seconds=TOOL_CALL_TIMEOUT_SECONDS,
+            )
+            raise TimeoutError(
+                f"Tool call '{call.name}' exceeded {TOOL_CALL_TIMEOUT_SECONDS:.1f}s"
+            ) from exc
         except Exception as exc:
             # after() hooks only run for successfully produced tool outputs.
             # Failed executions propagate immediately so callers keep the original
