@@ -123,6 +123,28 @@ poetry run python -m src.main --ticker 7203.T --quick --output results/7203.T.md
 
 That command exercises the main runtime and writes a markdown report. Saved analysis JSONs in `results/` are also what later power `portfolio_manager.py` and the dashboard.
 
+### Optional Langfuse Tracing
+
+Langfuse is the primary tracing path when you explicitly enable it for a run.
+
+```bash
+poetry run python -m src.main --ticker 0005.HK --enable-langfuse
+```
+
+Set these env vars before using it:
+
+- `LANGFUSE_PUBLIC_KEY`
+- `LANGFUSE_SECRET_KEY`
+- `LANGFUSE_BASE_URL` if you are not using the default Langfuse Cloud host
+
+Practical notes:
+
+- Langfuse is bypassed unless `--enable-langfuse` is supplied.
+- `--trace-langfuse` still works as a deprecated alias during the transition.
+- Set `LANGFUSE_SESSION_ID` if you want multiple CLI invocations to land in one shared Langfuse session, for example in a batch runner.
+- Prompt fetch from Langfuse is off by default; local prompts remain authoritative unless you enable remote prompt fetch in config.
+- Traced runs log a trace URL when Langfuse returns one.
+
 ### Choose Your Workflow
 
 - **Analyze one ticker**: use `python -m src.main --ticker ...`

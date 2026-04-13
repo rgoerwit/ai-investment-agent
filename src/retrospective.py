@@ -273,7 +273,11 @@ def _extract_trade_block_fields(trader_plan: str) -> dict[str, Any]:
 
 
 def extract_snapshot(
-    result: dict, ticker: str, is_quick_mode: bool = False
+    result: dict,
+    ticker: str,
+    is_quick_mode: bool = False,
+    *,
+    trace_id: str | None = None,
 ) -> dict[str, Any]:
     """
     Extract a compact prediction snapshot from an analysis result.
@@ -378,6 +382,7 @@ def extract_snapshot(
         "deep_model": config.deep_think_llm,
         "quick_model": config.quick_think_llm,
         "is_quick_mode": is_quick_mode,
+        "trace_id": trace_id,
     }
 
     logger.info(
@@ -830,6 +835,21 @@ def compute_confidence(comparison: dict[str, Any]) -> float:
     return final
 
 
+def _prediction_is_directionally_correct(comparison: dict[str, Any]) -> bool:
+    """Return a simple correctness judgment for deferred retrospective scoring."""
+    verdict = (comparison.get("verdict") or "").upper()
+    excess_return_pct = float(comparison.get("excess_return_pct") or 0.0)
+
+    if verdict == "BUY":
+        return excess_return_pct > 0
+    if verdict in {"SELL", "DO_NOT_INITIATE"}:
+        return excess_return_pct < 0
+    if verdict == "HOLD":
+        wrong_threshold = THRESHOLDS.get("HOLD", {}).get("wrong", 25.0)
+        return abs(excess_return_pct) <= wrong_threshold
+    return False
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Component 4: Lesson Generation (single LLM call)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -870,11 +890,23 @@ FAILURE_MODE: CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_BLEED | OPERATIONAL_MISS | 
 
     try:
         from src.llms import create_quick_thinking_llm
+        from src.observability import build_langchain_config
 
         llm = create_quick_thinking_llm()
         from langchain_core.messages import HumanMessage
 
-        response = await llm.ainvoke([HumanMessage(content=prompt)])
+        invoke_config = build_langchain_config(
+            metadata={
+                "workflow": "retrospective_lesson",
+                "ticker": comparison.get("ticker"),
+            }
+        )
+        if invoke_config:
+            response = await llm.ainvoke(
+                [HumanMessage(content=prompt)], config=invoke_config
+            )
+        else:
+            response = await llm.ainvoke([HumanMessage(content=prompt)])
 
         from src.agents import extract_string_content
 
@@ -1570,6 +1602,28 @@ async def run_retrospective(
 
             if stored:
                 ticker_lessons += 1
+
+            trace_id = comparison.get("trace_id")
+            if trace_id:
+                from src.observability import create_deferred_score
+
+                create_deferred_score(
+                    trace_id=trace_id,
+                    name="excess_return_6m",
+                    value=float(comparison.get("excess_return_pct") or 0.0),
+                    data_type="NUMERIC",
+                    comment=f"benchmark={comparison.get('benchmark_used', 'UNKNOWN')}",
+                    metadata={"ticker": snap_ticker},
+                )
+                create_deferred_score(
+                    trace_id=trace_id,
+                    name="prediction_correct",
+                    value=1.0
+                    if _prediction_is_directionally_correct(comparison)
+                    else 0.0,
+                    data_type="BOOLEAN",
+                    metadata={"ticker": snap_ticker},
+                )
 
     stored_count = sum(1 for lesson in generated_lessons if lesson.get("stored"))
     logger.info(

@@ -27,10 +27,54 @@ Freeze the runtime state model before storage, scheduling, and observability wor
 | Dashboard refresh jobs | `runtime/ibkr_dashboard/jobs.sqlite` | `src.web.ibkr_dashboard.job_store.RefreshJobStore` | Dashboard API/UI, dashboard worker | Separate SQLite store today. |
 | Pipeline freshness marker | `results/.pipeline_last_run.json` | `scripts/run_pipeline.sh` | `src.ibkr.screening_freshness.load_screening_freshness()` | Marker-only programmatic API today. |
 | Token/cost data | In-memory singleton in `src.token_tracker.py` | `src.token_tracker.TokenTracker` | `src.main`, report/logging paths | No durable persistence today. |
-| Observability traces | External provider callbacks via `src.observability.py` | Langfuse callback setup at graph invocation | External provider UI and logs | Not persisted locally by the app. |
+| Observability traces | SDK-managed Langfuse root trace context via `src.observability.py` | Workflow entrypoints such as `src.main.run_with_args()` plus nested LangChain callbacks and explicit tool observations | External Langfuse UI, logs, article/retrospective flows, and operator diagnostics | Langfuse is opt-in per run; when disabled the app uses a no-op observability runtime and skips tracing overhead. |
 | Eval run identity | Capture manifests under `evals/captures/...` | `src.eval.baseline_capture` | Eval/capture tooling | Current eval `run_id` is a separate concept from future pipeline run identity. |
 
 ## Current Compatibility Baselines
+
+## Current Observability Shape
+
+The app now treats Langfuse as the primary observability system when explicitly enabled.
+
+Current rules:
+
+- `src.observability.py` owns the Langfuse adapter and the no-op fallback.
+- Workflow boundaries create root traces; lower-level helpers consume callbacks or the active trace context.
+- `src.main.py` owns the root analysis trace for normal CLI analysis runs.
+- Standalone article and retrospective entrypoints create their own root traces.
+- `src.tooling/runtime.py` owns explicit tool observations for the shared tool execution seam.
+- When Langfuse is disabled, callbacks, prompt fetches, scores, and flush work are bypassed.
+
+Current trace contract:
+
+- Trace names:
+  - `analysis:{ticker}`
+  - `article:{ticker}`
+  - `retrospective:{ticker}`
+- Stable tags:
+  - workflow (`analysis`, `article`, `retrospective`)
+  - run mode (`quick`, `full`, `article_only`, `retrospective_only`)
+  - coarse operator toggles such as consultant/auditor enablement
+- Stable metadata:
+  - `ticker`
+  - `session_id`
+  - `environment`
+  - `run_mode`
+  - `deep_model`
+  - `quick_model`
+  - `prompt_source`
+  - `release`
+
+Batch/session note:
+
+- `LANGFUSE_SESSION_ID` may be supplied by an operator or batch runner to group multiple CLI invocations under one Langfuse session.
+- If it is not set, the CLI uses its normal per-run generated session identifier.
+
+Known boundary:
+
+- Local `src.token_tracker.py` remains the repo-owned accounting source.
+- Langfuse callback-based generation tracking may undercount vendor-specific reasoning or "thinking" tokens.
+- The app intentionally avoids adding duplicate explicit Langfuse generations around normal LangChain-traced LLM calls.
 
 ### Reconciler latest-analysis cache
 

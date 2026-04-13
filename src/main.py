@@ -166,7 +166,7 @@ Examples:
   python -m src.main --ticker TSLA --quick-model gemini-2.5-flash --deep-model gemini-3-pro-preview
 
   # Enable Langfuse tracing for this run
-  python -m src.main --ticker 0005.HK --trace-langfuse
+  python -m src.main --ticker 0005.HK --enable-langfuse
 
   # Batch retrospective: process all past tickers
   python -m src.main --retrospective-only
@@ -266,12 +266,18 @@ Examples:
     )
 
     parser.add_argument(
-        "--trace-langfuse",
+        "--enable-langfuse",
         action="store_true",
         help=(
-            "Enable Langfuse tracing for this run (overrides LANGFUSE_ENABLED in .env). "
-            "Requires LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY in .env."
+            "Enable Langfuse tracing for this run. Requires LANGFUSE_PUBLIC_KEY "
+            "and LANGFUSE_SECRET_KEY."
         ),
+    )
+
+    parser.add_argument(
+        "--trace-langfuse",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
 
     parser.add_argument(
@@ -488,6 +494,46 @@ def configure_tool_audit_logging(enabled: bool) -> None:
         TOOL_SERVICE.set_hooks(hooks)
 
 
+def _resolve_langfuse_session_id(default_session_id: str) -> str:
+    """Resolve the session ID, honoring batch/session overrides."""
+    return os.getenv("LANGFUSE_SESSION_ID") or default_session_id
+
+
+def _build_analysis_trace_tags(quick_mode: bool) -> list[str]:
+    """Return stable tags for an analysis trace."""
+    return [
+        "analysis",
+        "quick" if quick_mode else "full",
+        f"quick-model:{config.quick_think_llm}",
+        f"deep-model:{config.deep_think_llm}",
+        f"memory:{'on' if config.enable_memory else 'off'}",
+        f"consultant:{'on' if config.enable_consultant else 'off'}",
+        f"auditor:{'on' if bool(config.auditor_model) else 'off'}",
+    ]
+
+
+def _build_analysis_trace_metadata(
+    *,
+    ticker: str,
+    session_id: str,
+    quick_mode: bool,
+) -> dict[str, Any]:
+    """Return the stable metadata attached to an analysis trace."""
+    return {
+        "ticker": ticker,
+        "session_id": session_id,
+        "environment": config.environment,
+        "run_mode": "quick" if quick_mode else "full",
+        "quick_mode": quick_mode,
+        "deep_model": config.deep_think_llm,
+        "quick_model": config.quick_think_llm,
+        "prompt_source": (
+            "langfuse" if config.langfuse_prompt_fetch_enabled else "local"
+        ),
+        "release": config.app_release,
+    }
+
+
 def configure_content_inspection_from_config() -> None:
     """Wire up content inspection from config settings.
 
@@ -669,6 +715,8 @@ async def handle_article_generation(
     trade_date: str,
     valuation_context: str | None = None,
     analysis_result: dict | None = None,
+    tracing_callbacks: list[Any] | None = None,
+    tracing_metadata: dict[str, Any] | None = None,
 ) -> None:
     """
     Generate article if --article flag is set, then run Editor-in-Chief review.
@@ -694,7 +742,11 @@ async def handle_article_generation(
 
         # Default to local paths so markdown renders immediately in editors
         # Users who want GitHub URLs can set GITHUB_RAW_BASE env var
-        writer = ArticleWriter(use_github_urls=False)
+        writer = ArticleWriter(
+            use_github_urls=False,
+            callbacks=tracing_callbacks,
+            tracing_metadata=tracing_metadata,
+        )
         draft_article = writer.write(
             ticker=ticker,
             company_name=company_name,
@@ -705,7 +757,10 @@ async def handle_article_generation(
         )
 
         # Run Editor-in-Chief review loop
-        editor = ArticleEditor()
+        editor = ArticleEditor(
+            callbacks=tracing_callbacks,
+            tracing_metadata=tracing_metadata,
+        )
         final_article = draft_article  # Default to draft if editor unavailable or fails
 
         if editor.is_available():
@@ -974,6 +1029,7 @@ def save_results_to_file(
     quick_mode: bool = False,
     *,
     results_dir: Path | str | None = None,
+    trace_id: str | None = None,
 ) -> Path:
     """Save analysis results to a JSON file in the results directory."""
     from src.memory import get_ticker_memory_stats
@@ -1103,7 +1159,12 @@ def save_results_to_file(
     try:
         from src.retrospective import extract_snapshot
 
-        save_data["prediction_snapshot"] = extract_snapshot(result, ticker, quick_mode)
+        save_data["prediction_snapshot"] = extract_snapshot(
+            result,
+            ticker,
+            quick_mode,
+            trace_id=trace_id,
+        )
     except Exception as e:
         logger.warning("snapshot_extraction_failed", error=str(e))
 
@@ -1222,6 +1283,9 @@ async def run_analysis(
     baseline_capture: BaselineCaptureManager | None = None,
     capture_args: argparse.Namespace | None = None,
     node_observer: Any | None = None,
+    session_id: str | None = None,
+    tracing_callbacks: list[Any] | None = None,
+    tracing_metadata: dict[str, Any] | None = None,
 ) -> dict | None:
     """Run the multi-agent analysis workflow.
 
@@ -1279,7 +1343,9 @@ async def run_analysis(
         # Prepended to the HumanMessage so every agent receives it as session context.
         market_context = await _fetch_market_context(ticker, real_date)
 
-        session_id = f"{ticker}-{real_date}-{uuid.uuid4().hex[:8]}"
+        session_id = _resolve_langfuse_session_id(
+            session_id or f"{ticker}-{real_date}-{uuid.uuid4().hex[:8]}"
+        )
         if baseline_capture:
             baseline_capture.start_run(
                 ticker=ticker,
@@ -1381,28 +1447,16 @@ async def run_analysis(
             "multi_agent_analysis_starting", ticker=ticker, trade_date=real_date
         )
 
-        # Get observability callbacks (Langfuse if enabled)
-        from src.observability import flush_traces, get_tracing_callbacks
-
-        tags = [
-            "quick" if quick_mode else "normal",
-            f"quick-model:{config.quick_think_llm}",
-            f"deep-model:{config.deep_think_llm}",
-            f"memory:{'on' if config.enable_memory else 'off'}",
-        ]
-        tracing_callbacks, tracing_metadata = get_tracing_callbacks(
-            ticker=ticker,
-            session_id=session_id,
-            tags=tags,
+        tags = _build_analysis_trace_tags(quick_mode)
+        graph_metadata = (
+            dict(tracing_metadata)
+            if tracing_metadata is not None
+            else _build_analysis_trace_metadata(
+                ticker=ticker,
+                session_id=session_id,
+                quick_mode=quick_mode,
+            )
         )
-        generic_trace_metadata = {
-            "ticker": ticker,
-            "session_id": session_id,
-            "environment": config.environment,
-            "quick_mode": quick_mode,
-            "deep_model": config.deep_think_llm,
-            "quick_model": config.quick_think_llm,
-        }
 
         capture_token = None
         if baseline_capture:
@@ -1414,17 +1468,14 @@ async def run_analysis(
                 config={
                     "recursion_limit": 100,
                     "configurable": {"context": context},
-                    "callbacks": tracing_callbacks,
+                    "callbacks": tracing_callbacks or [],
                     "tags": tags,
-                    "metadata": {**generic_trace_metadata, **tracing_metadata},
+                    "metadata": graph_metadata,
                 },
             )
         finally:
             if capture_token is not None:
                 reset_active_capture_manager(capture_token)
-
-        # Flush traces before returning
-        flush_traces()
 
         logger.info("analysis_completed", ticker=ticker)
 
@@ -1473,7 +1524,9 @@ def _apply_runtime_overrides(args: argparse.Namespace) -> None:
         config.deep_think_llm = args.deep_model
     if args.no_memory:
         config.enable_memory = False
-    if args.trace_langfuse:
+    if getattr(args, "enable_langfuse", False) or getattr(
+        args, "trace_langfuse", False
+    ):
         config.langfuse_enabled = True
 
 
@@ -1573,6 +1626,7 @@ def _setup_runtime(
 async def _run_retrospective_only(args: argparse.Namespace) -> int:
     """Run retrospective-only mode and return the process exit code."""
     try:
+        from src.observability import flush_traces, get_observability_runtime
         from src.retrospective import SnapshotLoadProgress, run_retrospective
 
         def report(update: SnapshotLoadProgress) -> None:
@@ -1606,11 +1660,30 @@ async def _run_retrospective_only(args: argparse.Namespace) -> int:
                 "[cyan]Running retrospective evaluation on all past analyses...[/cyan]"
             )
 
-        lessons = await run_retrospective(
-            ticker=None,
-            results_dir=results_dir,
-            progress=report if not (args.quiet or args.brief) else None,
+        runtime = get_observability_runtime(config)
+        trace_context = runtime.start_retrospective_trace(
+            ticker="all",
+            session_id=_resolve_langfuse_session_id(
+                f"retrospective-all-{datetime.now().strftime('%Y-%m-%d')}-{uuid.uuid4().hex[:8]}"
+            ),
+            tags=["retrospective", "batch"],
+            metadata={
+                "ticker": "all",
+                "environment": config.environment,
+                "run_mode": "retrospective_only",
+                "release": config.app_release,
+            },
+            input_payload={"ticker": None, "results_dir": str(results_dir)},
         )
+        try:
+            lessons = await run_retrospective(
+                ticker=None,
+                results_dir=results_dir,
+                progress=report if not (args.quiet or args.brief) else None,
+            )
+        finally:
+            trace_context.close()
+            flush_traces()
 
         if lessons:
             if not args.quiet and not args.brief:
@@ -1650,6 +1723,7 @@ async def _maybe_run_ticker_retrospective(args: argparse.Namespace) -> None:
         return
 
     try:
+        from src.observability import flush_traces, get_observability_runtime
         from src.retrospective import SnapshotLoadProgress, run_retrospective
 
         def report(update: SnapshotLoadProgress) -> None:
@@ -1663,11 +1737,30 @@ async def _maybe_run_ticker_retrospective(args: argparse.Namespace) -> None:
             )
 
         results_dir = Path(config.results_dir)
-        lessons = await run_retrospective(
+        runtime = get_observability_runtime(config)
+        trace_context = runtime.start_retrospective_trace(
             ticker=args.ticker,
-            results_dir=results_dir,
-            progress=report,
+            session_id=_resolve_langfuse_session_id(
+                f"retrospective-{args.ticker}-{datetime.now().strftime('%Y-%m-%d')}-{uuid.uuid4().hex[:8]}"
+            ),
+            tags=["retrospective", "single_ticker"],
+            metadata={
+                "ticker": args.ticker,
+                "environment": config.environment,
+                "run_mode": "retrospective_single_ticker",
+                "release": config.app_release,
+            },
+            input_payload={"ticker": args.ticker, "results_dir": str(results_dir)},
         )
+        try:
+            lessons = await run_retrospective(
+                ticker=args.ticker,
+                results_dir=results_dir,
+                progress=report,
+            )
+        finally:
+            trace_context.close()
+            flush_traces()
         if lessons and not args.quiet and not args.brief:
             console.print(
                 f"\n[green]Generated {len(lessons)} new lesson(s) from past analyses[/green]"
@@ -1694,6 +1787,10 @@ async def _execute_analysis(
     args: argparse.Namespace,
     output_targets: OutputTargets,
     baseline_capture: BaselineCaptureManager | None = None,
+    *,
+    session_id: str | None = None,
+    tracing_callbacks: list[Any] | None = None,
+    tracing_metadata: dict[str, Any] | None = None,
 ) -> dict | None:
     """Run the analysis graph for the current CLI request."""
     capture_hook = None
@@ -1716,6 +1813,9 @@ async def _execute_analysis(
             skip_charts=output_targets.skip_charts,
             baseline_capture=baseline_capture,
             capture_args=args,
+            session_id=session_id,
+            tracing_callbacks=tracing_callbacks,
+            tracing_metadata=tracing_metadata,
         )
     finally:
         if baseline_capture and original_hooks is not None:
@@ -1841,6 +1941,40 @@ def _attach_run_summary(
     )
 
 
+def _score_analysis_trace(result: dict, trace_context: Any) -> None:
+    """Attach high-signal trace scores after analysis completion."""
+    if not getattr(trace_context, "enabled", False):
+        return
+
+    from src.charts.extractors.pm_block import (
+        extract_pm_block,
+        extract_verdict_from_text,
+    )
+
+    pm_output = result.get("final_trade_decision", "") or ""
+    pm_data = extract_pm_block(pm_output)
+    verdict = pm_data.verdict or extract_verdict_from_text(pm_output) or "UNKNOWN"
+    pre_screening = result.get("pre_screening_result", "")
+    validity = (result.get("analysis_validity") or {}).get("publishable", False)
+
+    trace_context.score_trace(
+        name="pm_verdict",
+        value=verdict,
+        data_type="CATEGORICAL",
+        comment=f"ticker={result.get('company_of_interest') or 'unknown'}",
+    )
+    trace_context.score_trace(
+        name="pre_screening_pass",
+        value=1.0 if pre_screening == "PASS" else 0.0,
+        data_type="BOOLEAN",
+    )
+    trace_context.score_trace(
+        name="analysis_validity",
+        value=1.0 if validity else 0.0,
+        data_type="BOOLEAN",
+    )
+
+
 def _load_company_name_for_output(ticker: str) -> str | None:
     """Best-effort company-name lookup for markdown output contexts."""
     try:
@@ -1934,10 +2068,20 @@ def _render_primary_output(
     return company_name, report, reporter
 
 
-def _persist_analysis_outputs(result: dict, args: argparse.Namespace) -> None:
+def _persist_analysis_outputs(
+    result: dict,
+    args: argparse.Namespace,
+    *,
+    trace_id: str | None = None,
+) -> None:
     """Persist JSON artifacts and rejection records."""
     try:
-        filepath = save_results_to_file(result, args.ticker, quick_mode=args.quick)
+        filepath = save_results_to_file(
+            result,
+            args.ticker,
+            quick_mode=args.quick,
+            trace_id=trace_id,
+        )
         if not args.quiet and not args.brief:
             console.print(
                 f"[green]Results saved to:[/green] [cyan]{filepath}[/cyan]{_cost_suffix()}"
@@ -1950,7 +2094,12 @@ def _persist_analysis_outputs(result: dict, args: argparse.Namespace) -> None:
             )
 
 
-async def _maybe_save_rejection_record(result: dict, args: argparse.Namespace) -> None:
+async def _maybe_save_rejection_record(
+    result: dict,
+    args: argparse.Namespace,
+    *,
+    trace_id: str | None = None,
+) -> None:
     """Persist non-BUY verdicts as retrospective rejection records."""
     try:
         from src.retrospective import (
@@ -1959,7 +2108,12 @@ async def _maybe_save_rejection_record(result: dict, args: argparse.Namespace) -
             save_rejection_record,
         )
 
-        snapshot = extract_snapshot(result, args.ticker, is_quick_mode=args.quick)
+        snapshot = extract_snapshot(
+            result,
+            args.ticker,
+            is_quick_mode=args.quick,
+            trace_id=trace_id,
+        )
         verdict = snapshot.get("verdict", "")
         if verdict and verdict != "BUY":
             rejection_memory = create_lessons_memory()
@@ -1975,6 +2129,8 @@ async def _maybe_generate_article(
     company_name: str | None,
     report: str | None,
     reporter: QuietModeReporter | None,
+    tracing_callbacks: list[Any] | None = None,
+    tracing_metadata: dict[str, Any] | None = None,
 ) -> bool:
     """Generate an article from a publishable analysis when requested."""
     if not args.article:
@@ -2030,6 +2186,8 @@ async def _maybe_generate_article(
         trade_date=trade_date,
         valuation_context=reporter.get_valuation_context(),
         analysis_result=result,
+        tracing_callbacks=tracing_callbacks,
+        tracing_metadata=tracing_metadata,
     )
     return True
 
@@ -2108,41 +2266,96 @@ async def run_with_args(
 
         await _maybe_run_ticker_retrospective(args)
         welcome_banner = _emit_start_banner(args, output_targets)
-        if baseline_capture is None:
-            result = await _execute_analysis(args, output_targets)
-        else:
-            result = await _execute_analysis(
+        from src.observability import flush_traces, get_observability_runtime
+
+        default_session_id = f"{args.ticker}-{datetime.now().strftime('%Y-%m-%d')}-{uuid.uuid4().hex[:8]}"
+        session_id = _resolve_langfuse_session_id(default_session_id)
+        trace_tags = _build_analysis_trace_tags(args.quick)
+        trace_metadata = _build_analysis_trace_metadata(
+            ticker=args.ticker,
+            session_id=session_id,
+            quick_mode=args.quick,
+        )
+        trace_runtime = get_observability_runtime(config)
+        trace_context = trace_runtime.start_analysis_trace(
+            ticker=args.ticker,
+            session_id=session_id,
+            tags=trace_tags,
+            metadata=trace_metadata,
+            input_payload={"ticker": args.ticker, "quick_mode": args.quick},
+        )
+
+        try:
+            if baseline_capture is None:
+                result = await _execute_analysis(
+                    args,
+                    output_targets,
+                    session_id=session_id,
+                    tracing_callbacks=trace_context.callbacks,
+                    tracing_metadata=trace_context.graph_metadata,
+                )
+            else:
+                result = await _execute_analysis(
+                    args,
+                    output_targets,
+                    baseline_capture=baseline_capture,
+                    session_id=session_id,
+                    tracing_callbacks=trace_context.callbacks,
+                    tracing_metadata=trace_context.graph_metadata,
+                )
+
+            if not result:
+                if baseline_capture:
+                    baseline_capture.reject_run(
+                        ["analysis_returned_no_result"], stage="main"
+                    )
+                    _finalize_baseline_capture(
+                        baseline_capture,
+                        {
+                            "analysis_validity": {"publishable": False},
+                            "artifact_statuses": {},
+                        },
+                    )
+                _report_analysis_failure(args)
+                return 1
+
+            _attach_run_summary(result, args, provider_preflight)
+            _score_analysis_trace(result, trace_context)
+            capture_path = _finalize_baseline_capture(baseline_capture, result)
+            _print_capture_result(args, baseline_capture, capture_path)
+            company_name, report, reporter = _render_primary_output(
+                result, args, output_targets, welcome_banner
+            )
+            _persist_analysis_outputs(result, args, trace_id=trace_context.trace_id)
+            await _maybe_save_rejection_record(
+                result,
+                args,
+                trace_id=trace_context.trace_id,
+            )
+            article_generated = await _maybe_generate_article(
+                result,
                 args,
                 output_targets,
-                baseline_capture=baseline_capture,
+                company_name,
+                report,
+                reporter,
+                tracing_callbacks=trace_context.callbacks,
+                tracing_metadata={
+                    **trace_context.graph_metadata,
+                    "workflow": "article",
+                    "source_trace_id": trace_context.trace_id,
+                },
             )
-
-        if not result:
-            if baseline_capture:
-                baseline_capture.reject_run(
-                    ["analysis_returned_no_result"], stage="main"
+        finally:
+            trace_context.close()
+            if trace_context.trace_url:
+                logger.info(
+                    "langfuse_trace_ready",
+                    trace_id=trace_context.trace_id,
+                    trace_url=trace_context.trace_url,
                 )
-                _finalize_baseline_capture(
-                    baseline_capture,
-                    {
-                        "analysis_validity": {"publishable": False},
-                        "artifact_statuses": {},
-                    },
-                )
-            _report_analysis_failure(args)
-            return 1
+            flush_traces()
 
-        _attach_run_summary(result, args, provider_preflight)
-        capture_path = _finalize_baseline_capture(baseline_capture, result)
-        _print_capture_result(args, baseline_capture, capture_path)
-        company_name, report, reporter = _render_primary_output(
-            result, args, output_targets, welcome_banner
-        )
-        _persist_analysis_outputs(result, args)
-        await _maybe_save_rejection_record(result, args)
-        article_generated = await _maybe_generate_article(
-            result, args, output_targets, company_name, report, reporter
-        )
         _log_final_summary(result, args, article_generated)
         return 0
 

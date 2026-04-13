@@ -497,7 +497,7 @@ class TestChartNodeIntegration:
             "red_flags": [],
         }
 
-        result = asyncio.get_event_loop().run_until_complete(node(state, {}))
+        result = asyncio.run(node(state, {}))
         assert result == {"chart_paths": {}}
 
     def test_chart_node_with_quick_mode(self):
@@ -516,5 +516,5 @@ class TestChartNodeIntegration:
             "red_flags": [],
         }
 
-        result = asyncio.get_event_loop().run_until_complete(node(state, {}))
+        result = asyncio.run(node(state, {}))
         assert result == {"chart_paths": {}}

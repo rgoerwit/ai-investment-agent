@@ -479,6 +479,11 @@ class Settings(BaseSettings):
         validation_alias="ENVIRONMENT",
         description="Environment (dev, prod, test)",
     )
+    app_release: str = Field(
+        default="3.1.0",
+        validation_alias="APP_RELEASE",
+        description="Application release/version tag for observability",
+    )
 
     # --- Runtime Flags ---
     quiet_mode: bool = Field(
@@ -591,6 +596,22 @@ class Settings(BaseSettings):
         default="development",
         validation_alias="LANGFUSE_TRACING_ENVIRONMENT",
         description="Environment tag for filtering in Langfuse dashboard",
+    )
+    langfuse_prompt_fetch_enabled: bool = Field(
+        default=False,
+        validation_alias="LANGFUSE_PROMPT_FETCH_ENABLED",
+        description="Enable fetching prompts from Langfuse at runtime",
+    )
+    langfuse_prompt_label: str = Field(
+        default="production",
+        validation_alias="LANGFUSE_PROMPT_LABEL",
+        description="Langfuse prompt label to resolve when prompt fetch is enabled",
+    )
+    langfuse_prompt_cache_ttl_seconds: int = Field(
+        default=60,
+        ge=0,
+        validation_alias="LANGFUSE_PROMPT_CACHE_TTL_SECONDS",
+        description="Cache TTL in seconds for Langfuse prompt fetches",
     )
 
     # --- API Keys (SecretStr prevents accidental logging) ---

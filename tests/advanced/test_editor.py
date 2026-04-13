@@ -1514,7 +1514,7 @@ class TestEditorToolCalling:
         """Known structured-output serializer noise should stay out of normal runs."""
         editor = _create_article_editor()
 
-        async def _warn_and_return(_messages):
+        async def _warn_and_return(_messages, config=None):
             warnings.warn_explicit(
                 (
                     "Pydantic serializer warnings:\n"
@@ -1548,7 +1548,7 @@ class TestEditorToolCalling:
         """Debug runs should preserve the raw serializer warning for investigation."""
         editor = _create_article_editor()
 
-        async def _warn_and_return(_messages):
+        async def _warn_and_return(_messages, config=None):
             warnings.warn_explicit(
                 (
                     "Pydantic serializer warnings:\n"

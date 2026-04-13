@@ -9,6 +9,7 @@ from typing import Any, Literal, Protocol, TypeAlias
 
 import structlog
 
+from src.observability import start_tool_observation
 from src.runtime_diagnostics import classify_failure
 
 logger = structlog.get_logger(__name__)
@@ -93,11 +94,20 @@ class ToolExecutionService:
             )
 
         try:
-            result = ToolResult(
-                value=await asyncio.wait_for(
-                    runner(call.args), timeout=TOOL_CALL_TIMEOUT_SECONDS
+            with start_tool_observation(
+                tool_name=call.name,
+                input_payload=call.args,
+                metadata={
+                    "tool_name": call.name,
+                    "tool_source": call.source,
+                    "agent_key": call.agent_key,
+                },
+            ):
+                result = ToolResult(
+                    value=await asyncio.wait_for(
+                        runner(call.args), timeout=TOOL_CALL_TIMEOUT_SECONDS
+                    )
                 )
-            )
         except asyncio.TimeoutError as exc:
             logger.warning(
                 "tool_call_timeout",
