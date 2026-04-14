@@ -2044,7 +2044,7 @@ def _render_primary_output(
     report = reporter.generate_report(result, brief_mode=args.brief)
 
     if output_targets.output_file:
-        full_content = welcome_banner + "\n" + report
+        full_content = report
         try:
             if output_targets.output_file.parent != Path("."):
                 output_targets.output_file.parent.mkdir(parents=True, exist_ok=True)

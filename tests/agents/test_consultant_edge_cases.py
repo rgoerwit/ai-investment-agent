@@ -511,6 +511,69 @@ class TestReportGeneration:
         assert "TEST" in report
         assert "External Consultant Review" not in report
 
+    def test_rendered_report_strips_reasoning_dict_repr_single_quotes(self):
+        """Single-quote Python repr of a reasoning dict is stripped from rendered output (A3)."""
+        leaked_line = "{'id': 'rs_abc123', 'summary': [], 'type': 'reasoning'}"
+        review = f"Analysis is thorough and well-supported.\n{leaked_line}\nRisk is acceptable."
+        reporter = QuietModeReporter(ticker="TEST", company_name="Test Company")
+        result = {
+            "company_of_interest": "TEST",
+            "consultant_review": review,
+            "final_trade_decision": "FINAL DECISION: BUY",
+        }
+        report = reporter.generate_report(result, brief_mode=False)
+        assert "rs_abc123" not in report
+        assert "Analysis is thorough" in report
+        assert "Risk is acceptable" in report
+
+    def test_rendered_report_strips_reasoning_dict_repr_double_quotes(self):
+        """JSON-style double-quote repr of a reasoning dict is stripped from rendered output (A3)."""
+        leaked_line = '{"id": "rs_xyz999", "summary": [], "type": "reasoning"}'
+        review = f"Cross-validation complete.\n{leaked_line}\nNo anomalies found."
+        reporter = QuietModeReporter(ticker="TEST", company_name="Test Company")
+        result = {
+            "company_of_interest": "TEST",
+            "consultant_review": review,
+            "final_trade_decision": "FINAL DECISION: BUY",
+        }
+        report = reporter.generate_report(result, brief_mode=False)
+        assert "rs_xyz999" not in report
+        assert "Cross-validation complete" in report
+        assert "No anomalies found" in report
+
+    def test_rendered_report_preserves_legitimate_review_text(self):
+        """Legitimate review prose is preserved when a leaked reasoning line is stripped."""
+        leaked_line = "{'id': 'rs_abc123', 'summary': [], 'type': 'reasoning'}"
+        review = (
+            "The analysis correctly identifies key risks.\n"
+            f"{leaked_line}\n"
+            "Valuation metrics support the BUY recommendation."
+        )
+        reporter = QuietModeReporter(ticker="TEST", company_name="Test Company")
+        result = {
+            "company_of_interest": "TEST",
+            "consultant_review": review,
+            "final_trade_decision": "FINAL DECISION: BUY",
+        }
+        report = reporter.generate_report(result, brief_mode=False)
+        assert "correctly identifies key risks" in report
+        assert "Valuation metrics support" in report
+
+    def test_sanitizer_does_not_strip_unrelated_dict_like_lines(self):
+        """Lines that look like dicts but lack rs_ prefix and reasoning type are preserved."""
+        review = (
+            'Analysis summary: {"key": "value", "score": 95}\nConclusion: strong BUY.'
+        )
+        reporter = QuietModeReporter(ticker="TEST", company_name="Test Company")
+        result = {
+            "company_of_interest": "TEST",
+            "consultant_review": review,
+            "final_trade_decision": "FINAL DECISION: BUY",
+        }
+        report = reporter.generate_report(result, brief_mode=False)
+        assert '{"key": "value"' in report or '"key": "value"' in report
+        assert "Conclusion: strong BUY" in report
+
     def test_report_omits_research_manager_recommendation_when_pm_decision_exists(self):
         """The public report should not publish a second recommendation section."""
         reporter = QuietModeReporter(ticker="TEST", company_name="Test Company")

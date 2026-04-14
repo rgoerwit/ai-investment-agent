@@ -105,6 +105,9 @@ def extract_string_content(content: Any) -> str:
             if isinstance(parts, list):
                 text_parts = [extract_string_content(p) for p in parts]
                 return "\n".join(filter(None, text_parts))
+        # Typed non-text blocks (e.g. OpenAI reasoning summary) — no textual payload
+        if content.get("type") in ("reasoning",):
+            return ""
         logger.debug("response_content_is_dict", keys=list(content.keys()))
         return str(content)
 

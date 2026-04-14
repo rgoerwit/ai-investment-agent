@@ -1459,5 +1459,114 @@ class TestSavedDiagnostics:
         )
 
 
+class TestSavedFileBannerRemoval:
+    """
+    Saved .md files must contain only the report body — no startup banner (A1 fix).
+
+    The banner is already emitted to stdout by _emit_start_banner(); prepending it
+    to the file was redundant and polluted saved reports.
+    """
+
+    BANNER_SENTINEL = "# Multi-Agent Investment Analysis System"
+
+    def _make_report_result(self):
+        return {
+            "final_trade_decision": "Action: BUY\n\nStrong fundamentals.",
+            "market_report": "RSI at 55.",
+            "fundamentals_report": "P/E: 14.",
+        }
+
+    def _make_output_targets(self, output_file):
+        from src.main import OutputTargets
+
+        return OutputTargets(
+            output_file=output_file,
+            image_dir=output_file.parent / "images",
+            skip_charts=True,
+        )
+
+    def test_saved_markdown_does_not_start_with_banner(self, tmp_path):
+        """Written file must not begin with the startup banner block."""
+        from types import SimpleNamespace
+
+        from src.main import _render_primary_output, get_welcome_banner
+
+        output_file = tmp_path / "report.md"
+        args = SimpleNamespace(
+            ticker="TST",
+            brief=False,
+            quiet=False,
+            quick=False,
+            svg=False,
+            transparent=False,
+        )
+        welcome_banner = get_welcome_banner("TST", quick_mode=False)
+        _render_primary_output(
+            self._make_report_result(),
+            args,
+            self._make_output_targets(output_file),
+            welcome_banner,
+        )
+        content = output_file.read_text()
+        assert not content.startswith(
+            self.BANNER_SENTINEL
+        ), "Saved file must not start with the startup banner"
+
+    def test_saved_markdown_starts_with_report_title(self, tmp_path):
+        """First non-blank line of the saved file must be the report title (# TICKER ...)."""
+        from types import SimpleNamespace
+
+        from src.main import _render_primary_output, get_welcome_banner
+
+        output_file = tmp_path / "report.md"
+        args = SimpleNamespace(
+            ticker="TST",
+            brief=False,
+            quiet=False,
+            quick=False,
+            svg=False,
+            transparent=False,
+        )
+        welcome_banner = get_welcome_banner("TST", quick_mode=False)
+        _render_primary_output(
+            self._make_report_result(),
+            args,
+            self._make_output_targets(output_file),
+            welcome_banner,
+        )
+        content = output_file.read_text()
+        first_non_blank = next(
+            (line for line in content.splitlines() if line.strip()), ""
+        )
+        assert first_non_blank.startswith(
+            "# "
+        ), f"First non-blank line should be a markdown title, got: {first_non_blank!r}"
+
+    def test_brief_mode_saved_file_no_banner(self, tmp_path):
+        """Brief mode with --output also writes report-only (no banner)."""
+        from types import SimpleNamespace
+
+        from src.main import _render_primary_output, get_welcome_banner
+
+        output_file = tmp_path / "brief.md"
+        args = SimpleNamespace(
+            ticker="TST",
+            brief=True,
+            quiet=False,
+            quick=False,
+            svg=False,
+            transparent=False,
+        )
+        welcome_banner = get_welcome_banner("TST", quick_mode=False)
+        _render_primary_output(
+            self._make_report_result(),
+            args,
+            self._make_output_targets(output_file),
+            welcome_banner,
+        )
+        content = output_file.read_text()
+        assert self.BANNER_SENTINEL not in content
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
