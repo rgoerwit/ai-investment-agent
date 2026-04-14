@@ -635,3 +635,43 @@ Key local highlight: Management maintained full-year guidance.
         # Should achieve significant reduction
         reduction_pct = (1 - len(highlights) / len(typical_report)) * 100
         assert reduction_pct > 50, f"Expected >50% reduction, got {reduction_pct:.1f}%"
+
+
+class TestSummarizeForPm:
+    """Tests for block-preserving report summarization used downstream."""
+
+    def test_preserves_data_block_when_max_chars_is_reduced(self):
+        from src.agents import summarize_for_pm
+
+        report = (
+            "INTRO\n" + ("A" * 6_000) + "\n\n### --- START DATA_BLOCK ---\n"
+            "SECTOR: Industrials\n"
+            "REVENUE_GROWTH_TTM: 12%\n"
+            "### --- END DATA_BLOCK ---\n"
+        )
+
+        result = summarize_for_pm(report, "fundamentals", max_chars=4000)
+
+        assert "### --- START DATA_BLOCK ---" in result
+        assert "SECTOR: Industrials" in result
+        assert "### --- END DATA_BLOCK ---" in result
+
+    def test_preserves_pm_block_when_max_chars_is_reduced(self):
+        from src.agents import summarize_for_pm
+
+        report = "INTRO\n" + ("B" * 6_000) + "\n\nPM_BLOCK:\nVERDICT: BUY\nTARGET: 5%\n"
+
+        result = summarize_for_pm(report, "research", max_chars=4000)
+
+        assert "PM_BLOCK:" in result
+        assert "VERDICT: BUY" in result
+
+    def test_reduced_max_chars_shortens_report_without_structured_blocks(self):
+        from src.agents import summarize_for_pm
+
+        report = "C" * 10_000
+
+        result = summarize_for_pm(report, "market", max_chars=4000)
+
+        assert len(result) < len(report)
+        assert "[...summarized...]" in result

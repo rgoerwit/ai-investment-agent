@@ -15,6 +15,7 @@ Usage:
             await cleanup_async_resources()
 """
 
+import asyncio
 from collections.abc import Awaitable, Callable
 
 import structlog
@@ -23,6 +24,7 @@ logger = structlog.get_logger(__name__)
 
 # Registry of cleanup functions
 _cleanup_functions: list[Callable[[], Awaitable[None]]] = []
+GENAI_CLIENT_CLOSE_TIMEOUT_SECONDS = 2.0
 
 
 def register_cleanup(cleanup_fn: Callable[[], Awaitable[None]]) -> None:
@@ -108,10 +110,26 @@ async def _cleanup_genai_clients() -> None:
                 if hasattr(llm, "async_client") and llm.async_client is not None:
                     client = llm.async_client
                     if hasattr(client, "aclose"):
-                        await client.aclose()
-                        logger.debug(
-                            "cleanup_closed", resource=f"genai_async_client_{name}"
-                        )
+                        try:
+                            await asyncio.wait_for(
+                                client.aclose(),
+                                timeout=GENAI_CLIENT_CLOSE_TIMEOUT_SECONDS,
+                            )
+                            logger.debug(
+                                "cleanup_closed",
+                                resource=f"genai_async_client_{name}",
+                            )
+                        except TimeoutError:
+                            logger.warning(
+                                "cleanup_timeout",
+                                resource=f"genai_async_client_{name}",
+                                timeout_seconds=GENAI_CLIENT_CLOSE_TIMEOUT_SECONDS,
+                            )
+                        finally:
+                            try:
+                                llm.async_client = None
+                            except Exception:
+                                pass
             except Exception as e:
                 logger.debug("cleanup_error", resource=f"genai_{name}", error=str(e))
 

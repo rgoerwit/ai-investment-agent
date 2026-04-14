@@ -497,7 +497,7 @@ NEWS ANALYST REPORT:
 {support.summarize_for_pm(news, "news", 2000) if news else "N/A"}
 
 FUNDAMENTALS ANALYST REPORT:
-{support.summarize_for_pm(fundamentals, "fundamentals", 6000) if fundamentals else "N/A"}{attribution_table}{conflict_table}
+{support.summarize_for_pm(fundamentals, "fundamentals", 4000) if fundamentals else "N/A"}{attribution_table}{conflict_table}
 
 VALUE TRAP ANALYSIS:
 {support.extract_value_trap_verdict(value_trap)}{support.summarize_for_pm(value_trap, "value_trap", 2500) if value_trap else "N/A"}{red_flag_section}

@@ -13,6 +13,8 @@ The fix: Check `msg.name == agent_key` in addition to tool name intersection.
 These tests ensure this bug doesn't regress.
 """
 
+import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -228,6 +230,100 @@ class TestAgentToolNodeFiltering:
             "blocked": False,
             "findings": [],
         }
+
+    @pytest.mark.asyncio
+    async def test_executes_tool_calls_concurrently_and_preserves_order(self):
+        """Multiple tool calls should run concurrently without reordering results."""
+        first_tool = MagicMock()
+        first_tool.name = "get_news"
+
+        async def _first(_args):
+            await asyncio.sleep(0.07)
+            return "news-result"
+
+        first_tool.ainvoke = AsyncMock(side_effect=_first)
+
+        second_tool = MagicMock()
+        second_tool.name = "get_macroeconomic_news"
+
+        async def _second(_args):
+            await asyncio.sleep(0.07)
+            return "macro-result"
+
+        second_tool.ainvoke = AsyncMock(side_effect=_second)
+
+        agent_tool_node = create_agent_tool_node(
+            [first_tool, second_tool], "news_analyst"
+        )
+        state = {
+            "messages": [
+                HumanMessage(content="Analyze"),
+                AIMessage(
+                    name="news_analyst",
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "get_news",
+                            "args": {"ticker": "AAPL"},
+                            "id": "first",
+                            "type": "tool_call",
+                        },
+                        {
+                            "name": "get_macroeconomic_news",
+                            "args": {"trade_date": "2026-04-13"},
+                            "id": "second",
+                            "type": "tool_call",
+                        },
+                    ],
+                ),
+            ]
+        }
+
+        start = time.perf_counter()
+        result = await agent_tool_node(state, {"configurable": {}})
+        elapsed = time.perf_counter() - start
+
+        assert elapsed < 0.11
+        assert [msg.tool_call_id for msg in result["messages"]] == ["first", "second"]
+        assert [msg.content for msg in result["messages"]] == [
+            "news-result",
+            "macro-result",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_large_tool_output_is_truncated_with_head_and_tail(self):
+        """Oversized tool payloads should be trimmed deterministically."""
+        tool = MagicMock()
+        tool.name = "get_news"
+        tool.ainvoke = AsyncMock(return_value=("A" * 17_500) + ("B" * 4_500))
+
+        agent_tool_node = create_agent_tool_node([tool], "news_analyst")
+        state = {
+            "messages": [
+                HumanMessage(content="Analyze"),
+                AIMessage(
+                    name="news_analyst",
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "get_news",
+                            "args": {"ticker": "AAPL"},
+                            "id": "tool-1",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+            ]
+        }
+
+        result = await agent_tool_node(state, {"configurable": {}})
+
+        assert len(result["messages"]) == 1
+        content = result["messages"][0].content
+        assert len(content) > 19_500
+        assert "TRUNCATED" in content
+        assert content.startswith("A" * 100)
+        assert content.endswith("B" * 100)
 
 
 class TestCrossAgentToolUsage:
