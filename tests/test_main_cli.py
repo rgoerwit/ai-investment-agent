@@ -1568,5 +1568,79 @@ class TestSavedFileBannerRemoval:
         assert self.BANNER_SENTINEL not in content
 
 
+# ---------------------------------------------------------------------------
+# rich API smoke tests
+# These exercise every rich symbol imported by src/main.py.  If a future
+# rich major version removes or renames Console, Panel, Table, or box.ROUNDED
+# the relevant test will fail with an AttributeError or ImportError before
+# any analysis code runs, making the breakage immediately obvious.
+# ---------------------------------------------------------------------------
+
+
+class TestRichApiSurface:
+    """Smoke-tests for the rich symbols used in src/main.py."""
+
+    def test_console_importable_and_instantiable(self):
+        import io
+
+        from rich.console import Console
+
+        buf = io.StringIO()
+        c = Console(file=buf, width=80)
+        assert c is not None
+
+    def test_panel_importable_and_renderable(self):
+        import io
+
+        from rich.console import Console
+        from rich.panel import Panel
+
+        buf = io.StringIO()
+        c = Console(file=buf, width=80)
+        panel = Panel("content text", title="Test Title", border_style="green")
+        c.print(panel)
+        output = buf.getvalue()
+        assert "content text" in output
+        assert "Test Title" in output
+
+    def test_table_add_column_and_row(self):
+        import io
+
+        from rich import box
+        from rich.console import Console
+        from rich.table import Table
+
+        buf = io.StringIO()
+        c = Console(file=buf, width=120)
+        t = Table(show_header=True, box=box.ROUNDED)
+        t.add_column("Agent", style="cyan")
+        t.add_column("Value", style="green", justify="right")
+        t.add_row("test-agent", "42")
+        c.print(t)
+        output = buf.getvalue()
+        assert "Agent" in output
+        assert "test-agent" in output
+        assert "42" in output
+
+    def test_box_rounded_attribute_exists(self):
+        from rich import box
+
+        assert hasattr(box, "ROUNDED"), "box.ROUNDED removed from rich"
+
+    def test_console_markup_styling(self):
+        """console.print with markup strings must not raise."""
+        import io
+
+        from rich.console import Console
+
+        buf = io.StringIO()
+        c = Console(file=buf, width=80)
+        # These markup patterns appear verbatim in main.py
+        c.print("[bold cyan]Token Usage Summary:[/bold cyan]")
+        c.print("[yellow]Warning: test[/yellow]")
+        c.print("[dim]Word count: 123 words[/dim]")
+        assert buf.getvalue()  # non-empty output
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

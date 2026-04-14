@@ -665,7 +665,13 @@ class TestReportGeneration:
 
         report = reporter.generate_report(result, brief_mode=False)
 
-        assert "#### --- END DATA_BLOCK ---\n\n#### FINANCIAL HEALTH DETAIL" in report
+        # Both the DATA_BLOCK content and the prose section must survive
+        assert "SECTOR: Energy" in report
+        assert "FINANCIAL HEALTH DETAIL" in report
+        # DATA_BLOCK is repositioned to end of section — prose appears before it
+        assert report.index("FINANCIAL HEALTH DETAIL") < report.index(
+            "START DATA_BLOCK"
+        )
 
 
 class TestBackwardsCompatibility:

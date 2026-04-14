@@ -1110,25 +1110,43 @@ Re-run analysis with verbose logging: `python -m src.main --ticker {self.ticker}
             flags=re.MULTILINE,
         )
 
-        # Strip PM_BLOCK structured block (consumed by code; not reader-facing)
+        # Strip PM_BLOCK structured block (consumed by code; not reader-facing).
+        # Handles ##/###/#### headers, optional label line, optional code fence,
+        # and the bare START/END pair — LLMs drift between 3 and 4 hashes.
+        # Line-count cap (30 lines) prevents runaway matching if END is absent/malformed.
+        _pm_content = r"(?:[^\n]*\n){0,30}"
+        _pm_start = r"#{2,6}\s+---\s+START PM_BLOCK\s*:?\s*---"
+        _pm_end = r"#{2,6}\s+---\s+END PM_BLOCK\s*:?\s*---"
         text = re.sub(
-            r"(?:####\s+PM_BLOCK[^\n]*\n)?```[^\n]*\n?#### --- START PM_BLOCK ---.*?#### --- END PM_BLOCK ---\n?```?"
-            r"|#### --- START PM_BLOCK ---.*?#### --- END PM_BLOCK ---",
+            r"(?:#{2,6}\s+PM_BLOCK[^\n]*\n)?```[^\n]*\n?"
+            + _pm_start
+            + r"\n"
+            + _pm_content
+            + _pm_end
+            + r"[^\n]*\n?```?"
+            r"|" + _pm_start + r"\n" + _pm_content + _pm_end + r"[^\n]*",
             "",
             text,
             flags=re.DOTALL,
         )
 
-        # Strip CONSULTANT_RESOLUTION machine-readable blocks
+        # Strip CONSULTANT_RESOLUTION machine-readable blocks.
+        # Handles: bare, #### prefix, **bold** wrapping, colon inside or outside bold.
         text = re.sub(
-            r"CONSULTANT_RESOLUTION:\s*\n(?:-[^\n]+\n)+",
+            r"^[#*\s]*CONSULTANT_RESOLUTION[*:]*\s*\n(?:-[^\n]+\n)+",
             "",
             text,
+            flags=re.MULTILINE,
         )
 
-        # Strip "Analyzing TICKER - Company" openers (redundant with report title)
+        # Strip "Analyzing TICKER - Company" openers (redundant with report title).
+        # Matches ticker by requiring a dot-delimited exchange suffix (e.g. .HK, .T, .DE).
+        # Also handles bold variant: Analyzing **0148.HK (Company Name)**
         text = re.sub(
-            r"^Analyzing\s+\S+\s+[-\u2014]\s+[^\n]+\n?", "", text, flags=re.MULTILINE
+            r"^Analyzing\s+\**\S*\.[A-Z]{1,3}[A-Z0-9.-]*\**.*\n?",
+            "",
+            text,
+            flags=re.MULTILINE,
         )
 
         # Normalize DECISION LOGIC blocks - ensure they're properly fenced
@@ -1180,7 +1198,7 @@ Re-run analysis with verbose logging: `python -m src.main --ticker {self.ticker}
         or remove it entirely (TRIGGERED=NO).
         """
         match = re.search(
-            r"####\s+MACRO_DETECTION\s*\n((?:[A-Z_]+:[^\n]*\n?)+)",
+            r"#{1,6}\s+MACRO_DETECTION\s*:?\s*\n((?:[A-Z_]+:[^\n]*\n?)+)",
             text,
             re.IGNORECASE,
         )
@@ -1200,9 +1218,16 @@ Re-run analysis with verbose logging: `python -m src.main --ticker {self.ticker}
 
     @staticmethod
     def _move_data_block_to_end(text: str) -> str:
-        """Extract DATA_BLOCK from wherever it appears and re-append at end."""
+        """Extract DATA_BLOCK from wherever it appears and re-append at end.
+
+        Matches both `####` and `###` headers, and tolerates a parenthetical
+        annotation after START DATA_BLOCK (e.g. '(INTERNAL SCORING…)').
+        Missing or malformed END markers cause no match — nothing is moved.
+        """
         match = re.search(
-            r"(#### --- START DATA_BLOCK ---.*?#### --- END DATA_BLOCK ---\n?)",
+            r"(#{2,6}\s+---\s+START DATA_BLOCK[^\n]*---"
+            r"(?:[^\n]*\n){0,120}"  # bounded: at most ~120 lines of content
+            r"#{2,6}\s+---\s+END DATA_BLOCK[^\n]*---\n?)",
             text,
             re.DOTALL,
         )
