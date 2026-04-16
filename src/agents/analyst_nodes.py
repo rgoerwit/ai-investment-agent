@@ -302,7 +302,10 @@ def create_analyst_node(
                     )
 
                 if news_report:
-                    news_highlights = support.extract_news_highlights(news_report)
+                    news_highlights = support.extract_news_highlights(
+                        news_report,
+                        max_chars=5000,
+                    )
                     extra_context += (
                         "\n\n### NEWS HIGHLIGHTS (for Qualitative Growth Scoring)"
                         f"\n{news_highlights}\n"

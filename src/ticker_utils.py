@@ -82,7 +82,7 @@ def normalize_company_name(raw_name: str) -> str:
         for suffix in sorted_suffixes:
             clean_name = re.sub(suffix + "$", "", clean_name, flags=re.IGNORECASE)
 
-    clean_name = clean_name.strip()
+    clean_name = clean_name.strip().rstrip(",").strip()
 
     # Safety valve: If we stripped everything (e.g. company was just named "Holdings"), revert
     if len(clean_name) < 2:

@@ -122,6 +122,33 @@ class TestExtractStringContentDictHandling:
         assert "SECTOR: Healthcare" in result
         assert "DATA_BLOCK" in result
 
+    def test_reasoning_type_dict_returns_empty_string(self):
+        """OpenAI reasoning metadata dicts must not leak into output (A2 fix)."""
+        reasoning_dict = {"type": "reasoning", "id": "rs_abc123", "summary": []}
+        result = extract_string_content(reasoning_dict)
+        assert result == ""
+        assert "rs_abc123" not in result
+        assert "reasoning" not in result
+
+    def test_reasoning_type_dict_with_extra_keys_returns_empty_string(self):
+        """Extra keys alongside type=reasoning are still filtered."""
+        reasoning_dict = {
+            "type": "reasoning",
+            "id": "rs_xyz",
+            "summary": [],
+            "extra_field": "should be ignored",
+        }
+        result = extract_string_content(reasoning_dict)
+        assert result == ""
+
+    def test_dict_without_type_key_still_uses_str_fallback(self):
+        """Non-reasoning unknown dicts still fall back to str() — no regression."""
+        input_dict = {"unknown_key": "some value", "another": 123}
+        result = extract_string_content(input_dict)
+        # Should contain the dict representation
+        assert "unknown_key" in result
+        assert "some value" in result
+
     def test_dict_fallback_to_str(self):
         """Dict without known keys should fall back to str() representation."""
         input_dict = {"unknown_key": "some value", "another": 123}
@@ -140,6 +167,39 @@ class TestExtractStringContentDictHandling:
         input_dict = {"text": None}
         result = extract_string_content(input_dict)
         assert result == "None"  # str(None)
+
+
+class TestReasoningTypeFilteringInLists:
+    """Test that reasoning-type dicts are silently dropped when mixed into lists."""
+
+    def test_list_with_reasoning_then_text_returns_only_text(self):
+        """Reasoning dict before text content is filtered; text is returned."""
+        reasoning = {"type": "reasoning", "id": "rs_001", "summary": []}
+        result = extract_string_content([reasoning, "Review text here"])
+        assert result == "Review text here"
+        assert "rs_001" not in result
+
+    def test_list_with_text_then_reasoning_returns_only_text(self):
+        """Reasoning dict after text content is filtered; text is returned."""
+        reasoning = {"type": "reasoning", "id": "rs_002", "summary": []}
+        result = extract_string_content(["Review text here", reasoning])
+        assert result == "Review text here"
+
+    def test_list_of_only_reasoning_dicts_returns_empty_string(self):
+        """A list containing only reasoning dicts produces an empty string."""
+        result = extract_string_content(
+            [
+                {"type": "reasoning", "id": "rs_a", "summary": []},
+                {"type": "reasoning", "id": "rs_b", "summary": []},
+            ]
+        )
+        assert result == ""
+
+    def test_dict_with_output_text_type_not_filtered(self):
+        """type='output_text' is not a reasoning block; text key wins."""
+        d = {"type": "output_text", "text": "hello"}
+        result = extract_string_content(d)
+        assert result == "hello"
 
 
 class TestExtractStringContentListHandling:

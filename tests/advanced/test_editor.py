@@ -1151,7 +1151,12 @@ class TestCreateWriterLLM:
         """Should fall back to Gemini when CLAUDE_KEY is not set."""
         from src.llms import create_writer_llm
 
-        with patch("src.llms.config") as mock_config:
+        mock_llm = MagicMock()
+        with (
+            patch("src.llms.config") as mock_config,
+            # Prevent ChatGoogleGenerativeAI from probing network/proxy at construction time
+            patch("src.llms.ChatGoogleGenerativeAI", return_value=mock_llm),
+        ):
             mock_config.get_claude_api_key.return_value = None
             mock_config.deep_think_llm = "gemini-3-pro-preview"
             mock_config.api_timeout = 300

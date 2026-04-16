@@ -987,12 +987,20 @@ Re-run analysis with verbose logging: `python -m src.main --ticker {self.ticker}
 
                 fund_report = self._normalize_string(fund_report)
                 fund_report = clean_duplicate_data_blocks(fund_report)
+                fund_report = self._move_data_block_to_end(fund_report)
                 result["fundamentals_report"] = fund_report
             except ImportError:
                 pass  # Fallback if utils not available
 
         add_section("fundamentals_report", "Fundamental Analysis")
         add_section("sentiment_report", "Market Sentiment")
+
+        # Reformat MACRO_DETECTION block before rendering news section
+        news_report = result.get("news_report", "")
+        if news_report:
+            result["news_report"] = self._reformat_macro_detection(
+                self._normalize_string(news_report)
+            )
         add_section("news_report", "News & Catalysts")
         if not self._has_primary_final_decision(result):
             add_section("investment_plan", "Investment Recommendation")
@@ -1094,6 +1102,53 @@ Re-run analysis with verbose logging: `python -m src.main --ticker {self.ticker}
             flags=re.MULTILINE,
         )
 
+        # Strip raw OpenAI reasoning-metadata lines that leaked via str(dict) fallback
+        text = re.sub(
+            r"^\s*\{['\"]id['\"]\s*:\s*['\"]rs_[^'\"]+['\"]\s*,.*?['\"]type['\"]\s*:\s*['\"]reasoning['\"].*?\}\s*\n?",
+            "",
+            text,
+            flags=re.MULTILINE,
+        )
+
+        # Strip PM_BLOCK structured block (consumed by code; not reader-facing).
+        # Handles ##/###/#### headers, optional label line, optional code fence,
+        # and the bare START/END pair — LLMs drift between 3 and 4 hashes.
+        # Line-count cap (30 lines) prevents runaway matching if END is absent/malformed.
+        _pm_content = r"(?:[^\n]*\n){0,30}"
+        _pm_start = r"#{2,6}\s+---\s+START PM_BLOCK\s*:?\s*---"
+        _pm_end = r"#{2,6}\s+---\s+END PM_BLOCK\s*:?\s*---"
+        text = re.sub(
+            r"(?:#{2,6}\s+PM_BLOCK[^\n]*\n)?```[^\n]*\n?"
+            + _pm_start
+            + r"\n"
+            + _pm_content
+            + _pm_end
+            + r"[^\n]*\n?```?"
+            r"|" + _pm_start + r"\n" + _pm_content + _pm_end + r"[^\n]*",
+            "",
+            text,
+            flags=re.DOTALL,
+        )
+
+        # Strip CONSULTANT_RESOLUTION machine-readable blocks.
+        # Handles: bare, #### prefix, **bold** wrapping, colon inside or outside bold.
+        text = re.sub(
+            r"^[#*\s]*CONSULTANT_RESOLUTION[*:]*\s*\n(?:-[^\n]+\n)+",
+            "",
+            text,
+            flags=re.MULTILINE,
+        )
+
+        # Strip "Analyzing TICKER - Company" openers (redundant with report title).
+        # Matches ticker by requiring a dot-delimited exchange suffix (e.g. .HK, .T, .DE).
+        # Also handles bold variant: Analyzing **0148.HK (Company Name)**
+        text = re.sub(
+            r"^Analyzing\s+\**\S*\.[A-Z]{1,3}[A-Z0-9.-]*\**.*\n?",
+            "",
+            text,
+            flags=re.MULTILINE,
+        )
+
         # Normalize DECISION LOGIC blocks - ensure they're properly fenced
         # Fix orphaned code block markers from truncated content
         text = self._normalize_code_blocks(text)
@@ -1135,6 +1190,52 @@ Re-run analysis with verbose logging: `python -m src.main --ticker {self.ticker}
                 return lines[1].lstrip("\n") if len(lines) > 1 else ""
 
         return text
+
+    @staticmethod
+    def _reformat_macro_detection(text: str) -> str:
+        """
+        Replace raw MACRO_DETECTION key=value block with a prose callout (TRIGGERED=YES)
+        or remove it entirely (TRIGGERED=NO).
+        """
+        match = re.search(
+            r"#{1,6}\s+MACRO_DETECTION\s*:?\s*\n((?:[A-Z_]+:[^\n]*\n?)+)",
+            text,
+            re.IGNORECASE,
+        )
+        if not match:
+            return text
+        block = match.group(1)
+        fields = dict(
+            m.groups() for m in re.finditer(r"^([A-Z_]+):\s*(.*)$", block, re.MULTILINE)
+        )
+        text = text[: match.start()] + text[match.end() :]
+        if fields.get("TRIGGERED", "NO").upper() == "YES":
+            headline = fields.get("HEADLINE", "")
+            impact = fields.get("THESIS_IMPACT", "")
+            callout = f"\n> **Macro event detected** ({impact}): {headline}\n"
+            text = text.rstrip() + callout
+        return text
+
+    @staticmethod
+    def _move_data_block_to_end(text: str) -> str:
+        """Extract DATA_BLOCK from wherever it appears and re-append at end.
+
+        Matches both `####` and `###` headers, and tolerates a parenthetical
+        annotation after START DATA_BLOCK (e.g. '(INTERNAL SCORING…)').
+        Missing or malformed END markers cause no match — nothing is moved.
+        """
+        match = re.search(
+            r"(#{2,6}\s+---\s+START DATA_BLOCK[^\n]*---"
+            r"(?:[^\n]*\n){0,120}"  # bounded: at most ~120 lines of content
+            r"#{2,6}\s+---\s+END DATA_BLOCK[^\n]*---\n?)",
+            text,
+            re.DOTALL,
+        )
+        if not match:
+            return text
+        block = match.group(1)
+        text = text[: match.start()] + text[match.end() :]
+        return text.rstrip() + "\n\n" + block
 
     def _normalize_code_blocks(self, text: str) -> str:
         """

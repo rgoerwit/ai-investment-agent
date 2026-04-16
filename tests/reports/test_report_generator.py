@@ -1206,3 +1206,494 @@ class TestTraderSectionVerdictGating:
             self._result("VERDICT: DO_NOT_INITIATE\n\nFails thesis.")
         )
         assert "## Trading Strategy" in report
+
+
+# ---------------------------------------------------------------------------
+# New tests for report output cleanup (A3–A6, B1, B3)
+# ---------------------------------------------------------------------------
+
+
+class TestCleanTextPMBlock:
+    """_clean_text() strips PM_BLOCK in all its forms (A4)."""
+
+    def setup_method(self):
+        self.reporter = QuietModeReporter("TST")
+
+    def _clean(self, text):
+        return self.reporter._clean_text(text)
+
+    def test_strips_pm_block_unescaped(self):
+        text = "Prose before.\n#### --- START PM_BLOCK ---\nVERDICT: BUY\n#### --- END PM_BLOCK ---\nProse after."
+        result = self._clean(text)
+        assert "START PM_BLOCK" not in result
+        assert "END PM_BLOCK" not in result
+        assert "Prose before." in result
+        assert "Prose after." in result
+
+    def test_strips_pm_block_in_code_fence(self):
+        text = "```\n#### --- START PM_BLOCK ---\nVERDICT: BUY\n#### --- END PM_BLOCK ---\n```"
+        result = self._clean(text)
+        assert "START PM_BLOCK" not in result
+
+    def test_strips_pm_block_with_label_heading(self):
+        text = (
+            "#### PM_BLOCK (REQUIRED - Machine-Readable Summary)\n"
+            "```\n"
+            "#### --- START PM_BLOCK ---\n"
+            "VERDICT: BUY\n"
+            "#### --- END PM_BLOCK ---\n"
+            "```"
+        )
+        result = self._clean(text)
+        assert "START PM_BLOCK" not in result
+
+    def test_preserves_content_before_pm_block(self):
+        text = "Important verdict prose.\n#### --- START PM_BLOCK ---\nDATA\n#### --- END PM_BLOCK ---"
+        result = self._clean(text)
+        assert "Important verdict prose." in result
+
+    def test_preserves_content_after_pm_block(self):
+        text = "#### --- START PM_BLOCK ---\nDATA\n#### --- END PM_BLOCK ---\nTrailing content here."
+        result = self._clean(text)
+        assert "Trailing content here." in result
+
+    def test_no_pm_block_unchanged(self):
+        text = "Normal text with no machine-readable blocks.\n"
+        result = self._clean(text)
+        assert "Normal text with no machine-readable blocks." in result
+
+    def test_truncated_pm_block_no_crash(self):
+        """No closing marker — must not raise, and must not eat trailing content."""
+        text = "#### --- START PM_BLOCK ---\nVERDICT: BUY\nImportant prose after."
+        result = self._clean(text)  # should not raise
+        assert isinstance(result, str)
+        # If block is unstripped (missing END), the trailing prose must survive
+        if "START PM_BLOCK" in result:
+            assert "Important prose after." in result
+
+    def test_strips_pm_block_with_three_hash_markers(self):
+        """### (3-hash) PM_BLOCK — common LLM drift variant — must be stripped."""
+        text = (
+            "Verdict prose.\n"
+            "### --- START PM_BLOCK ---\n"
+            "VERDICT: BUY\nRISK_ZONE: LOW\n"
+            "### --- END PM_BLOCK ---\n"
+            "Trailing prose."
+        )
+        result = self._clean(text)
+        assert "START PM_BLOCK" not in result
+        assert "Verdict prose." in result
+        assert "Trailing prose." in result
+
+    def test_strips_pm_block_label_with_three_hash(self):
+        """### PM_BLOCK label + fenced block — also stripped."""
+        text = (
+            "### PM_BLOCK (REQUIRED - Machine-Readable Summary)\n"
+            "```\n"
+            "### --- START PM_BLOCK ---\n"
+            "VERDICT: HOLD\n"
+            "### --- END PM_BLOCK ---\n"
+            "```\n"
+            "Following prose."
+        )
+        result = self._clean(text)
+        assert "START PM_BLOCK" not in result
+        assert "Following prose." in result
+
+    def test_generate_report_pm_block_absent_from_executive_summary(self):
+        reporter = QuietModeReporter("TST")
+        result_dict = {
+            "final_trade_decision": (
+                "Action: BUY\n\nStrong value opportunity.\n\n"
+                "#### --- START PM_BLOCK ---\n"
+                "VERDICT: BUY\nRISK_ZONE: LOW\n"
+                "#### --- END PM_BLOCK ---\n"
+                "\nDecision rationale follows."
+            ),
+        }
+        report = reporter.generate_report(result_dict)
+        assert "START PM_BLOCK" not in report
+        assert "END PM_BLOCK" not in report
+
+    def test_verdict_extraction_unaffected_by_pm_block_strip(self):
+        """extract_decision() runs on raw text; PM_BLOCK strip happens later in _clean_text."""
+        reporter = QuietModeReporter("TST")
+        raw = (
+            "Action: BUY\n\n"
+            "#### --- START PM_BLOCK ---\nVERDICT: BUY\n#### --- END PM_BLOCK ---"
+        )
+        verdict = reporter.extract_decision(raw)
+        assert verdict == "BUY"
+
+
+class TestCleanTextConsultantResolution:
+    """_clean_text() strips CONSULTANT_RESOLUTION blocks (A5)."""
+
+    def setup_method(self):
+        self.reporter = QuietModeReporter("TST")
+
+    def _clean(self, text):
+        return self.reporter._clean_text(text)
+
+    def test_strips_single_consultant_resolution_block(self):
+        text = (
+            "#### PORTFOLIO MANAGER VERDICT: BUY\n\n"
+            "CONSULTANT_RESOLUTION:\n"
+            "- CONCERN: High leverage\n"
+            "- DATA_CHECK: D/E confirmed\n"
+            "- VERDICT: UNVERIFIABLE (+0.25)\n"
+            "\nDecision rationale here."
+        )
+        result = self._clean(text)
+        assert "CONSULTANT_RESOLUTION:" not in result
+        assert "PORTFOLIO MANAGER VERDICT: BUY" in result
+        assert "Decision rationale here." in result
+
+    def test_strips_multiple_consultant_resolution_blocks(self):
+        block = "CONSULTANT_RESOLUTION:\n- CONCERN: X\n- DATA_CHECK: Y\n- VERDICT: Z\n"
+        text = f"{block}\nSome prose.\n\n{block}\n{block}"
+        result = self._clean(text)
+        assert "CONSULTANT_RESOLUTION:" not in result
+        assert "Some prose." in result
+
+    def test_strips_resolution_block_at_top(self):
+        text = "CONSULTANT_RESOLUTION:\n- CONCERN: X\n- DATA_CHECK: Y\n\nVerdict prose follows."
+        result = self._clean(text)
+        assert "CONSULTANT_RESOLUTION:" not in result
+        assert "Verdict prose follows." in result
+
+    def test_strips_resolution_block_at_bottom(self):
+        text = "Decision rationale is strong.\n\nCONSULTANT_RESOLUTION:\n- CONCERN: X\n- VERDICT: UNVERIFIABLE\n"
+        result = self._clean(text)
+        assert "CONSULTANT_RESOLUTION:" not in result
+        assert "Decision rationale is strong." in result
+
+    def test_partial_resolution_block_no_crash(self):
+        """Header only (no following bullet lines) must not raise."""
+        text = "CONSULTANT_RESOLUTION:\n"
+        result = self._clean(text)  # should not raise
+        assert isinstance(result, str)
+
+    def test_strips_resolution_with_hash_prefix(self):
+        """#### CONSULTANT_RESOLUTION: (hash-prefixed) is stripped."""
+        text = (
+            "#### CONSULTANT_RESOLUTION:\n"
+            "- CONCERN: Coverage gap\n"
+            "- DATA_CHECK: Null response\n"
+            "- VERDICT: UNVERIFIABLE (+0.0)\n"
+            "\nVerdict prose."
+        )
+        result = self._clean(text)
+        assert "CONSULTANT_RESOLUTION" not in result
+        assert "Verdict prose." in result
+
+    def test_strips_resolution_hash_no_colon(self):
+        """#### CONSULTANT_RESOLUTION (no trailing colon) is also stripped."""
+        text = (
+            "#### CONSULTANT_RESOLUTION\n"
+            "- CONCERN: X\n"
+            "- VERDICT: REJECTED\n"
+            "\nProse."
+        )
+        result = self._clean(text)
+        assert "CONSULTANT_RESOLUTION" not in result
+        assert "Prose." in result
+
+    def test_strips_resolution_bold_colon_inside(self):
+        """**CONSULTANT_RESOLUTION:** (bold, colon inside) is stripped."""
+        text = (
+            "**CONSULTANT_RESOLUTION:**\n"
+            "- CONCERN: High leverage\n"
+            "- VERDICT: CONFIRMED_RISK (+1.0)\n"
+            "\nProse."
+        )
+        result = self._clean(text)
+        assert "CONSULTANT_RESOLUTION" not in result
+        assert "Prose." in result
+
+    def test_strips_resolution_bold_colon_outside(self):
+        """**CONSULTANT_RESOLUTION**: (bold, colon outside) is stripped."""
+        text = (
+            "**CONSULTANT_RESOLUTION**:\n"
+            "- CONCERN: Narrative bias\n"
+            "- VERDICT: CONFIRMED_RISK (+1.0)\n"
+            "\nProse."
+        )
+        result = self._clean(text)
+        assert "CONSULTANT_RESOLUTION" not in result
+        assert "Prose." in result
+
+    def test_generate_report_no_consultant_resolution_in_output(self):
+        reporter = QuietModeReporter("TST")
+        result_dict = {
+            "final_trade_decision": (
+                "CONSULTANT_RESOLUTION:\n"
+                "- CONCERN: Leverage elevated\n"
+                "- DATA_CHECK: D/E 450%\n"
+                "- VERDICT: UNVERIFIABLE (+0.25)\n\n"
+                "#### PORTFOLIO MANAGER VERDICT: BUY\n\n"
+                "Strong thesis supported by fundamentals."
+            ),
+        }
+        report = reporter.generate_report(result_dict)
+        assert "CONSULTANT_RESOLUTION:" not in report
+
+
+class TestReformatMacroDetection:
+    """_reformat_macro_detection() removes NO blocks and renders YES as callout (A6)."""
+
+    def setup_method(self):
+        self.reporter = QuietModeReporter("TST")
+
+    def test_triggered_no_renders_nothing(self):
+        text = (
+            "News content here.\n\n"
+            "#### MACRO_DETECTION\n"
+            "TRIGGERED: NO\n"
+            "SOURCE: NONE\n"
+            "HEADLINE: N/A\n"
+            "THESIS_IMPACT: N/A\n"
+        )
+        result = self.reporter._reformat_macro_detection(text)
+        assert "MACRO_DETECTION" not in result
+        assert "TRIGGERED:" not in result
+        assert "News content here." in result
+
+    def test_triggered_yes_renders_callout(self):
+        text = (
+            "News content here.\n\n"
+            "#### MACRO_DETECTION\n"
+            "TRIGGERED: YES\n"
+            "SOURCE: FED\n"
+            "HEADLINE: Fed raises rates 50bps\n"
+            "THESIS_IMPACT: NEGATIVE\n"
+        )
+        result = self.reporter._reformat_macro_detection(text)
+        assert "MACRO_DETECTION" not in result
+        assert "TRIGGERED:" not in result
+        assert "**Macro event detected**" in result
+        assert "Fed raises rates 50bps" in result
+
+    def test_callout_contains_thesis_impact(self):
+        text = (
+            "#### MACRO_DETECTION\n"
+            "TRIGGERED: YES\n"
+            "HEADLINE: Trade war escalation\n"
+            "THESIS_IMPACT: SIGNIFICANT_NEGATIVE\n"
+        )
+        result = self.reporter._reformat_macro_detection(text)
+        assert "SIGNIFICANT_NEGATIVE" in result
+
+    def test_triggered_yes_empty_headline_no_crash(self):
+        text = (
+            "#### MACRO_DETECTION\n"
+            "TRIGGERED: YES\n"
+            "HEADLINE: \n"
+            "THESIS_IMPACT: UNKNOWN\n"
+        )
+        result = self.reporter._reformat_macro_detection(text)  # must not raise
+        assert isinstance(result, str)
+
+    def test_missing_block_no_change(self):
+        text = "Regular news content with no detection block."
+        result = self.reporter._reformat_macro_detection(text)
+        assert result == text
+
+    def test_partial_block_no_crash(self):
+        """Block with only TRIGGERED: and no subsequent fields must not raise."""
+        text = "#### MACRO_DETECTION\nTRIGGERED: YES\n"
+        result = self.reporter._reformat_macro_detection(text)  # must not raise
+        assert isinstance(result, str)
+
+    def test_macro_detection_raw_block_absent_from_final_report(self):
+        reporter = QuietModeReporter("TST")
+        result_dict = {
+            "final_trade_decision": "Action: BUY",
+            "news_report": (
+                "Market news here.\n\n"
+                "#### MACRO_DETECTION\n"
+                "TRIGGERED: NO\n"
+                "SOURCE: NONE\n"
+                "HEADLINE: N/A\n"
+                "THESIS_IMPACT: N/A\n"
+            ),
+        }
+        report = reporter.generate_report(result_dict)
+        assert "MACRO_DETECTION" not in report
+        assert "TRIGGERED:" not in report
+
+    def test_triggered_no_with_three_hash_header(self):
+        """### MACRO_DETECTION (3 hashes, actual LLM output) is also stripped."""
+        text = (
+            "News content here.\n\n"
+            "### MACRO_DETECTION\n"
+            "TRIGGERED: NO\n"
+            "SOURCE: NONE\n"
+            "HEADLINE: N/A\n"
+        )
+        result = self.reporter._reformat_macro_detection(text)
+        assert "MACRO_DETECTION" not in result
+        assert "TRIGGERED:" not in result
+        assert "News content here." in result
+
+
+class TestMoveDataBlockToEnd:
+    """_move_data_block_to_end() normalizes DATA_BLOCK position (B1)."""
+
+    def test_moves_data_block_from_top_to_end(self):
+        text = (
+            "#### --- START DATA_BLOCK ---\n"
+            "PE_RATIO: 15\n"
+            "#### --- END DATA_BLOCK ---\n\n"
+            "Score breakdown prose here."
+        )
+        result = QuietModeReporter._move_data_block_to_end(text)
+        data_pos = result.find("START DATA_BLOCK")
+        prose_pos = result.find("Score breakdown prose here.")
+        assert prose_pos < data_pos
+
+    def test_data_block_already_at_end_stays_at_end(self):
+        text = (
+            "Score breakdown prose here.\n\n"
+            "#### --- START DATA_BLOCK ---\n"
+            "PE_RATIO: 15\n"
+            "#### --- END DATA_BLOCK ---\n"
+        )
+        result = QuietModeReporter._move_data_block_to_end(text)
+        assert result.index("START DATA_BLOCK") > result.index(
+            "Score breakdown prose here."
+        )
+
+    def test_preserves_content_before_data_block(self):
+        text = (
+            "Section one content.\n\n"
+            "#### --- START DATA_BLOCK ---\nDATA\n#### --- END DATA_BLOCK ---\n\n"
+            "Section two content."
+        )
+        result = QuietModeReporter._move_data_block_to_end(text)
+        assert "Section one content." in result
+        assert "Section two content." in result
+
+    def test_no_block_unchanged(self):
+        text = "Content with no data block at all."
+        result = QuietModeReporter._move_data_block_to_end(text)
+        assert result == text
+
+    def test_preserves_block_contents(self):
+        text = (
+            "#### --- START DATA_BLOCK ---\n"
+            "PE_RATIO: 15\nROE: 18%\nDEBT_TO_EQUITY: 45%\n"
+            "#### --- END DATA_BLOCK ---\n\n"
+            "Prose follows."
+        )
+        result = QuietModeReporter._move_data_block_to_end(text)
+        assert "PE_RATIO: 15" in result
+        assert "ROE: 18%" in result
+        assert "DEBT_TO_EQUITY: 45%" in result
+
+    def test_does_not_duplicate_block(self):
+        text = (
+            "#### --- START DATA_BLOCK ---\nDATA\n#### --- END DATA_BLOCK ---\n\n"
+            "Prose."
+        )
+        result = QuietModeReporter._move_data_block_to_end(text)
+        assert result.count("START DATA_BLOCK") == 1
+        assert result.count("END DATA_BLOCK") == 1
+
+    def test_moves_data_block_with_three_hash_markers(self):
+        """### (3-hash) DATA_BLOCK markers — common LLM drift — are moved correctly."""
+        text = (
+            "### --- START DATA_BLOCK ---\n"
+            "SECTOR: Financials\n"
+            "### --- END DATA_BLOCK ---\n\n"
+            "Prose section follows."
+        )
+        result = QuietModeReporter._move_data_block_to_end(text)
+        assert result.index("Prose section follows.") < result.index("START DATA_BLOCK")
+        assert result.count("START DATA_BLOCK") == 1
+
+    def test_moves_data_block_with_parenthetical_annotation(self):
+        """DATA_BLOCK (INTERNAL SCORING…) parenthetical variant is moved correctly."""
+        text = (
+            "#### --- START DATA_BLOCK (INTERNAL SCORING \u2014 NOT THIRD-PARTY RATINGS) ---\n"
+            "SECTOR: Energy\n"
+            "#### --- END DATA_BLOCK ---\n\n"
+            "Prose follows."
+        )
+        result = QuietModeReporter._move_data_block_to_end(text)
+        assert "SECTOR: Energy" in result
+        assert result.index("Prose follows.") < result.index("START DATA_BLOCK")
+
+    def test_generate_report_data_block_at_end_of_fundamentals(self):
+        """DATA_BLOCK at top of fundamentals should be moved to end in output."""
+        reporter = QuietModeReporter("TST")
+        result_dict = {
+            "final_trade_decision": "Action: BUY",
+            "fundamentals_report": (
+                "#### --- START DATA_BLOCK ---\n"
+                "PE_RATIO: 12\nROE: 15%\n"
+                "#### --- END DATA_BLOCK ---\n\n"
+                "Financial health is strong. Growth metrics are positive."
+            ),
+        }
+        report = reporter.generate_report(result_dict)
+        data_pos = report.find("START DATA_BLOCK")
+        prose_pos = report.find("Financial health is strong.")
+        assert data_pos != -1
+        assert prose_pos < data_pos
+
+
+class TestCleanTextAnalyzingOpener:
+    """_clean_text() strips 'Analyzing TICKER - Company' openers (B3)."""
+
+    def setup_method(self):
+        self.reporter = QuietModeReporter("TST")
+
+    def _clean(self, text):
+        return self.reporter._clean_text(text)
+
+    def test_strips_analyzing_hyphen_opener(self):
+        text = "Analyzing 4776.T - Cybozu, Inc.\nSection content starts here."
+        result = self._clean(text)
+        assert "Analyzing 4776.T" not in result
+        assert "Section content starts here." in result
+
+    def test_strips_analyzing_emdash_opener(self):
+        text = "Analyzing KRN.DE \u2014 Krones AG\nContent follows."
+        result = self._clean(text)
+        assert "Analyzing KRN.DE" not in result
+        assert "Content follows." in result
+
+    def test_strips_analyzing_opener_in_multiline(self):
+        """Opener appearing as start of a later line is also stripped."""
+        text = (
+            "First line.\nAnalyzing 6782.TW - Holtek Semiconductor Inc.\nBody content."
+        )
+        result = self._clean(text)
+        assert "Analyzing 6782.TW" not in result
+        assert "First line." in result
+        assert "Body content." in result
+
+    def test_preserves_content_after_opener(self):
+        text = "Analyzing 0005.HK - HSBC Holdings plc\nHSBC remains well-capitalised."
+        result = self._clean(text)
+        assert "HSBC remains well-capitalised." in result
+
+    def test_does_not_strip_analyzing_mid_sentence(self):
+        """'Analyzing' not at line start with TICKER pattern is NOT stripped."""
+        text = "We are analyzing the market conditions carefully.\n"
+        result = self._clean(text)
+        assert "We are analyzing the market conditions carefully." in result
+
+    def test_strips_analyzing_bold_ticker_with_parens(self):
+        """Analyzing **0148.HK (Kingboard Holdings Limited)** bold variant is stripped."""
+        text = "Analyzing **0148.HK (Kingboard Holdings Limited)**\nSection content."
+        result = self._clean(text)
+        assert "Analyzing **0148.HK" not in result
+        assert "Section content." in result
+
+    def test_does_not_strip_analyzing_without_ticker_dot(self):
+        """'Analyzing' lines without an exchange-suffix dot are not touched."""
+        text = "Analyzing the quarterly results in detail.\n"
+        result = self._clean(text)
+        assert "Analyzing the quarterly results in detail." in result

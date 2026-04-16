@@ -88,6 +88,56 @@ class TestAnalystNode:
         )  # Simplified assertion - mock works, exact value check complex
         assert result["sender"] == "market_analyst"
 
+    @pytest.mark.asyncio
+    async def test_fundamentals_analyst_caps_news_highlights_in_context(self):
+        """Senior fundamentals should request a bounded news highlight payload."""
+        from src.agents import create_analyst_node
+
+        mock_llm = MagicMock()
+        mock_response = SimpleNamespace(content="Test analysis report", tool_calls=None)
+        captured_inputs = []
+
+        async def _capture_invoke(_runnable, payload, **_kwargs):
+            captured_inputs.append(payload)
+            return mock_response
+
+        with (
+            patch(
+                "src.agents.runtime.invoke_with_rate_limit_handling",
+                new=AsyncMock(side_effect=_capture_invoke),
+            ),
+            patch(
+                "src.agents.support.extract_news_highlights",
+                return_value="HIGHLIGHTS",
+            ) as mock_highlights,
+        ):
+            node = create_analyst_node(
+                mock_llm,
+                "fundamentals_analyst",
+                [],
+                "fundamentals_report",
+            )
+            state = {
+                "messages": [],
+                "company_of_interest": "6782.TW",
+                "trade_date": "2026-04-13",
+                "raw_fundamentals_data": '{"operatingCashflow": 123}',
+                "news_report": "N" * 30_000,
+            }
+            config = {
+                "configurable": {
+                    "context": MagicMock(ticker="6782.TW", trade_date="2026-04-13")
+                }
+            }
+
+            await node(state, config)
+
+        mock_highlights.assert_called_once_with("N" * 30_000, max_chars=5000)
+        invocation_messages = captured_inputs[0]["messages"]
+        system_message = invocation_messages[0].content
+        assert "### NEWS HIGHLIGHTS" in system_message
+        assert "HIGHLIGHTS" in system_message
+
 
 class TestResearcherNode:
     """Test researcher node creation."""
