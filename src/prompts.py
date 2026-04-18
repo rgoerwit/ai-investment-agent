@@ -363,7 +363,7 @@ Analyzing [TICKER] - [COMPANY NAME]
         self.prompts["news_analyst"] = AgentPrompt(
             agent_key="news_analyst",
             agent_name="News Analyst",
-            version="4.6",
+            version="5.2",
             category="fundamental",
             requires_tools=True,
             system_message="""You are a NEWS & CATALYST ANALYST focused on events and their implications for value-to-growth ex-US equities.
@@ -396,7 +396,12 @@ You have access to news monitoring tools:
 - If both have data but they conflict, **Prioritize Local News** (they're closer to the story).
 - Explicitly cite "Local Source" in your output when you find unique info there.
 
-### STEP 2: Synthesize and Structure
+### STEP 2: Use `get_news()` again with targeted searches for earnings-call hits or misses, major broker upgrades or downgrades, Morningstar ratings, and recent ownership-change events that can matter to minority holders.
+- Treat `director dealing`, `insider sale`, `stake sale`, `block trade`, `share placement`, `major shareholder`, and `beneficial ownership` as search terms when relevant.
+- For non-US markets, include local regulatory or market terms when relevant: HK/CN `股權披露` `權益變動` `董事交易` `減持` `配售`; JP `大量保有報告書` `変更報告書` `株式売却` `立会外分売`; KR `지분 변동` `대량보유` `임원 주식` `블록딜`; TW `股權申報` `持股變動` `董監事` `鉅額交易`; EU/UK `directors' dealings` `PDMR` `TR-1` `major holdings` `accelerated bookbuild`.
+- If a recent insider or controlling-shareholder sale has a date, seller, and size, treat it as a material event even if it was an off-market block trade.
+
+### STEP 3: Synthesize and Structure
 
 From the news results, identify:
 - **Material events** (what happened)
@@ -457,6 +462,7 @@ You analyze primarily NON-US companies.
 - Earnings highlights and guidance
 - M&A, partnerships, deals
 - Regulatory developments
+- Ownership changes, block trades, director dealings, or substantial-holder disclosures
 - Product launches
 - Macroeconomic events impacting this security
 - **UPCOMING CATALYSTS** (next 6 months)
@@ -627,6 +633,7 @@ Analyzing [TICKER] - [COMPANY NAME]
 **Other Notable Events**:
 - [Event 1] - [Date] - [Source]
 - [Event 2] - [Date] - [Source]
+- [Ownership/insider event if material] - [Date] - [Source]
 
 ### UPCOMING CATALYSTS (Next 6 Months)
 
@@ -664,10 +671,10 @@ Analyzing [TICKER] - [COMPANY NAME]
 Date: [Current date]
 Asset: [Ticker]""",
             metadata={
-                "last_updated": "2025-11-26",
-                "thesis_version": "4.6",
+                "last_updated": "2026-04-17",
+                "thesis_version": "5.2",
                 "critical_outputs": ["us_revenue", "catalysts", "local_insights"],
-                "changes": "FULL PROMPT RESTORED: Includes Tool Protocol, Data Handling, Ex-US Context, Exclusive Domain, and Detailed Output Structure.",
+                "changes": "v5.2: Added targeted ownership-change / insider-dealing / block-trade search guidance across markets so material shareholding events are treated as news. FULL PROMPT RESTORED: Includes Tool Protocol, Data Handling, Ex-US Context, Exclusive Domain, and Detailed Output Structure.",
             },
         )
 
@@ -1230,7 +1237,7 @@ The Senior Analyst depends on receiving complete raw data to perform accurate an
         self.prompts["foreign_language_analyst"] = AgentPrompt(
             agent_key="foreign_language_analyst",
             agent_name="Foreign Language Analyst",
-            version="1.0",
+            version="1.7",
             category="fundamental",
             requires_tools=True,
             system_message="""You are a FOREIGN LANGUAGE ANALYST. Your role is to find financial data from NATIVE-LANGUAGE sources that English-only tools miss.
@@ -1264,7 +1271,17 @@ Use `search_foreign_sources` tool with:
 2. Target official sources: IR pages, exchange filings, government databases
 3. Include date in query to get RECENT data
 
-**STEP 3: FALLBACK (if native sources fail)**
+**STEP 3: OWNERSHIP / GOVERNANCE EVENT SEARCH**
+Run one additional `search_foreign_sources` query aimed at RECENT ownership-change events that English-only searches often miss:
+- EN: `{company} director dealings insider sale stake sale block trade disclosure of interests major shareholder`
+- HK/CN: `{company} 股權披露 權益變動 董事交易 減持 配售`
+- JP: `{company} 大量保有報告書 変更報告書 株式売却 立会外分売`
+- KR: `{company} 지분 변동 대량보유 임원 주식 블록딜`
+- TW: `{company} 股權申報 持股變動 董監事 鉅額交易`
+- EU/UK: `{company} directors' dealings PDMR TR-1 major holdings accelerated bookbuild`
+- Extract: recent insider/director/substantial-shareholder buys or sells, date, share count or % if disclosed, and whether it was on-market, off-market, or block trade.
+
+**STEP 4: FALLBACK (if native sources fail)**
 Search English premium sources WITHOUT login/API:
 - "site:bloomberg.com {ticker} financials"
 - "site:morningstar.com {ticker} key statistics"
@@ -1272,13 +1289,14 @@ Search English premium sources WITHOUT login/API:
 - "site:seekingalpha.com {ticker} analysis"
 These sometimes expose data not in free APIs.
 
-**STEP 4: EXTRACT & REPORT**
+**STEP 5: EXTRACT & REPORT**
 From results, extract:
 - Revenue (latest available)
 - Net Income
 - Total Debt / Equity
 - Free Cash Flow
 - Any sector/guidance info
+- Any recent insider / director / substantial-holder ownership changes with dates
 - Date of source
 
 ## OUTPUT FORMAT
@@ -1300,6 +1318,13 @@ From results, extract:
 - Free Cash Flow: [Value]
 - Other: [Any relevant metrics found]
 
+**OWNERSHIP STRUCTURE** (if found)
+- Controlling Shareholder: [Name] ([X]%)
+- Parent Company: [Name] or NONE
+- Relationship: [subsidiary / equity method / independent]
+- Recent Ownership Changes: [details with date/size] or NONE
+- Insider/Director Dealings: [details with date/size] or NONE
+
 **RELIABILITY**
 - Source Quality: [Official/Premium/News]
 - Data Freshness: [Current/Outdated/Unknown]
@@ -1312,12 +1337,13 @@ From results, extract:
 2. **DO NOT duplicate Junior Analyst data**: Your value is DIFFERENT sources, not confirmation.
 3. **Document dates**: Old data (>1 year) should be flagged.
 4. **No hacking/bypassing paywalls**: Only use freely accessible pages.
-5. **Admit failure clearly**: If no useful data found, say so - do not fabricate.""",
+5. **Admit failure clearly**: If no useful data found, say so - do not fabricate.
+6. **Do not confuse static ownership with a recent transaction**: only report ownership changes or insider dealings when you have a dated disclosure, filing, or article describing the event.""",
             metadata={
-                "last_updated": "2025-12-17",
+                "last_updated": "2026-04-17",
                 "thesis_version": "7.0",
                 "critical_output": "foreign_language_report",
-                "changes": "v1.0: Initial version for supplemental foreign-source data gathering",
+                "changes": "v1.7: Added ownership-change / insider-dealing search guidance across markets and ownership-event output fields. v1.0: Initial version for supplemental foreign-source data gathering",
             },
         )
 

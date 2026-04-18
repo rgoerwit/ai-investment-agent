@@ -145,34 +145,34 @@ def build_arg_parser() -> argparse.ArgumentParser:
         epilog="""
 Examples:
   # Basic analysis
-  python -m src.main --ticker AAPL
+  poetry run python -m src.main --ticker AAPL
 
   # Quick analysis mode (Gemini Flash)
-  python -m src.main --ticker NVDA --quick
+  poetry run python -m src.main --ticker NVDA --quick
 
   # Strict quality gate (tighter thresholds, fewer BUYs, token savings on rejects)
-  python -m src.main --ticker 0005.HK --strict
+  poetry run python -m src.main --ticker 0005.HK --strict
 
   # Composable: strict quality bar + quick/cheap models
-  python -m src.main --ticker 0005.HK --strict --quick
+  poetry run python -m src.main --ticker 0005.HK --strict --quick
 
   # Quiet mode (markdown report only)
-  python -m src.main --ticker AAPL --quiet
+  poetry run python -m src.main --ticker AAPL --quiet
 
   # Brief mode (header, summary, decision only)
-  python -m src.main --ticker AAPL --brief
+  poetry run python -m src.main --ticker AAPL --brief
 
   # Custom models
-  python -m src.main --ticker TSLA --quick-model gemini-2.5-flash --deep-model gemini-3-pro-preview
+  poetry run python -m src.main --ticker TSLA --quick-model gemini-2.5-flash --deep-model gemini-3-pro-preview
 
   # Enable Langfuse tracing for this run
-  python -m src.main --ticker 0005.HK --enable-langfuse
+  poetry run python -m src.main --ticker 0005.HK --enable-langfuse
 
   # Batch retrospective: process all past tickers
-  python -m src.main --retrospective-only
+  poetry run python -m src.main --retrospective-only
 
-  # With Poetry
-  poetry run python -m src.main --ticker MSFT --quick
+  # Activated venv alternative
+  python -m src.main --ticker MSFT --quick
         """,
     )
 

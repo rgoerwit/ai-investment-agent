@@ -9,6 +9,7 @@ from scripts.portfolio_manager import (
     _analysis_command,
     _compute_dip_score,
     _portfolio_manager_command,
+    _portfolio_manager_recommend_command,
     format_json,
     format_report,
 )
@@ -92,13 +93,33 @@ class TestRuntimeCommandHints:
         monkeypatch.setenv("INVESTMENT_AGENT_CONTAINER", "1")
         assert _analysis_command("7203.T") == "python -m src.main --ticker 7203.T"
 
+    def test_analysis_command_uses_poetry_on_host_even_with_virtual_env(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("VIRTUAL_ENV", "/tmp/fake-venv")
+        monkeypatch.delenv("INVESTMENT_AGENT_CONTAINER", raising=False)
+        with patch("scripts.portfolio_manager.Path.exists", return_value=False):
+            assert (
+                _analysis_command("7203.T")
+                == "poetry run python -m src.main --ticker 7203.T"
+            )
+
     def test_portfolio_manager_command_falls_back_to_poetry_on_host(self, monkeypatch):
-        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.setenv("VIRTUAL_ENV", "/tmp/fake-venv")
         monkeypatch.delenv("INVESTMENT_AGENT_CONTAINER", raising=False)
         with patch("scripts.portfolio_manager.Path.exists", return_value=False):
             assert (
                 _portfolio_manager_command("--recommend")
                 == "poetry run python scripts/portfolio_manager.py --recommend"
+            )
+
+    def test_portfolio_manager_recommend_command_preserves_watchlist(self, monkeypatch):
+        monkeypatch.setenv("VIRTUAL_ENV", "/tmp/fake-venv")
+        monkeypatch.delenv("INVESTMENT_AGENT_CONTAINER", raising=False)
+        with patch("scripts.portfolio_manager.Path.exists", return_value=False):
+            assert (
+                _portfolio_manager_recommend_command(watchlist_name="watchlist-2026")
+                == 'poetry run python scripts/portfolio_manager.py --recommend --watchlist-name "watchlist-2026"'
             )
 
 
@@ -161,13 +182,14 @@ class TestFormatReportPanicDay:
     def test_reviews_section_excludes_soft_reject_items(self):
         """SOFT00.T appears only in SOFT REJECTION — not in the regular REVIEWS section.
 
-        The regular REVIEWS section uses 'python -m src.main' command suggestions.
+        The regular REVIEWS section uses 'poetry run python -m src.main' command suggestions.
         SOFT REJECTION section does not. Checking for this distinguishes the two.
         """
         report = self._report_with_flag()
         lines = report.split("\n")
         soft00_in_reviews_format = any(
-            "SOFT00.T" in line and "python -m src.main" in line for line in lines
+            "SOFT00.T" in line and "poetry run python -m src.main" in line
+            for line in lines
         )
         assert not soft00_in_reviews_format
 

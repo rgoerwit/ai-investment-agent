@@ -40,9 +40,9 @@ async def get_news(
         company_name = await shared.extract_company_name_async(ticker_obj)
 
         local_source_hints = {
-            ".KS": "site:pulsenews.co.kr OR site:koreatimes.co.kr OR site:koreaherald.com",
-            ".HK": "site:scmp.com OR site:thestandard.com.hk OR site:ejinsight.com",
-            ".T": "site:japantimes.co.jp OR site:nikkei.com",
+            ".KS": "site:pulsenews.co.kr OR site:koreatimes.co.kr OR site:koreaherald.com OR site:mk.co.kr",
+            ".HK": "site:scmp.com OR site:thestandard.com.hk OR site:ejinsight.com OR site:aastocks.com OR site:etnet.com.hk",
+            ".T": "site:japantimes.co.jp OR site:nikkei.com OR site:minkabu.jp OR site:kabutan.jp",
             ".L": "site:ft.com OR site:bbc.co.uk/news/business",
             ".PA": "site:france24.com OR site:lemonde.fr",
             ".DE": "site:dw.com OR site:handelsblatt.com",

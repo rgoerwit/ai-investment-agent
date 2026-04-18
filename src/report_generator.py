@@ -698,7 +698,7 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
 4. Memory/resource constraints
 
 **Action Required**:
-Re-run analysis with verbose logging: `python -m src.main --ticker {self.ticker}` (or prefix with `poetry run` in manual repo mode)
+Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {self.ticker}` (or plain `python -m src.main ...` inside an activated venv/container)
 """
         return error_msg
 

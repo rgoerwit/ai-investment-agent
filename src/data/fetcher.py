@@ -876,7 +876,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         # --- CAPITAL EFFICIENCY SIGNALS ---
         # Calculate ROIC and leverage quality from statements
         capital_signals = self._calculate_capital_efficiency_signals(
-            financials, balance_sheet, extracted, symbol
+            financials, balance_sheet, extracted, symbol, cashflow=cashflow
         )
         for key, value in capital_signals.items():
             extracted[key] = value
@@ -1236,9 +1236,10 @@ class SmartMarketDataFetcher(FinancialFetcher):
         balance_sheet: "pd.DataFrame",
         info: dict[str, Any],
         symbol: str,
+        cashflow: "pd.DataFrame | None" = None,
     ) -> dict[str, Any]:
         """
-        Calculate capital efficiency metrics: ROIC and leverage quality.
+        Calculate capital efficiency metrics: ROIC, leverage quality, and idle-cash context.
 
         Detects value destruction (ROIC < 0 with positive ROE) and financial
         engineering (ROE >> ROIC). Uses hurdle rate as WACC proxy to avoid
@@ -1262,6 +1263,14 @@ class SmartMarketDataFetcher(FinancialFetcher):
             ebit: float | None = None
             tax_rate: float | None = None
             invested_capital: float | None = None
+            total_debt = _safe_float(info.get("totalDebt"))
+            cash = _safe_float(
+                info.get("cashAndShortTermInvestments") or info.get("totalCash")
+            )
+            total_assets = _safe_float(info.get("totalAssets"))
+            market_cap = _safe_float(info.get("marketCap"))
+            capex: float | None = None
+            d_and_a: float | None = None
 
             if not income_stmt.empty and len(income_stmt.columns) > 0:
                 if "EBIT" in income_stmt.index:
@@ -1279,6 +1288,73 @@ class SmartMarketDataFetcher(FinancialFetcher):
                     val = balance_sheet.loc["Invested Capital"].iloc[0]
                     if pd.notna(val) and val > 0:
                         invested_capital = float(val)
+
+                if total_debt is None:
+                    if "Total Debt" in balance_sheet.index:
+                        val = balance_sheet.loc["Total Debt"].iloc[0]
+                        if pd.notna(val):
+                            total_debt = float(val)
+                    elif "Long Term Debt" in balance_sheet.index:
+                        long_term = balance_sheet.loc["Long Term Debt"].iloc[0]
+                        short_term = (
+                            balance_sheet.loc["Current Debt"].iloc[0]
+                            if "Current Debt" in balance_sheet.index
+                            else 0
+                        )
+                        if pd.notna(long_term) and pd.notna(short_term):
+                            total_debt = float(long_term) + float(short_term)
+
+                if total_assets is None and "Total Assets" in balance_sheet.index:
+                    val = balance_sheet.loc["Total Assets"].iloc[0]
+                    if pd.notna(val):
+                        total_assets = float(val)
+
+                if cash is None:
+                    used_combined_cash_row = False
+                    cash_rows = [
+                        "Cash And Short Term Investments",
+                        "Cash And Cash Equivalents",
+                        "Cash",
+                    ]
+                    for cash_row in cash_rows:
+                        if cash_row in balance_sheet.index:
+                            val = balance_sheet.loc[cash_row].iloc[0]
+                            if pd.notna(val):
+                                cash = float(val)
+                                used_combined_cash_row = (
+                                    cash_row == "Cash And Short Term Investments"
+                                )
+                                break
+                    if (
+                        cash is not None
+                        and not used_combined_cash_row
+                        and "Short Term Investments" in balance_sheet.index
+                    ):
+                        sti = balance_sheet.loc["Short Term Investments"].iloc[0]
+                        if pd.notna(sti):
+                            cash += float(sti)
+
+            if (
+                cashflow is not None
+                and not cashflow.empty
+                and len(cashflow.columns) > 0
+            ):
+                if "Capital Expenditure" in cashflow.index:
+                    val = cashflow.loc["Capital Expenditure"].iloc[0]
+                    if pd.notna(val):
+                        capex = float(val)
+
+                for da_row in (
+                    "Depreciation And Amortization",
+                    "Depreciation Amortization Depletion",
+                    "Depreciation & Amortization",
+                    "Depreciation",
+                ):
+                    if da_row in cashflow.index:
+                        val = cashflow.loc[da_row].iloc[0]
+                        if pd.notna(val):
+                            d_and_a = float(val)
+                            break
 
             # ROA and ROE from info dict
             # roa = info.get("returnOnAssets")
@@ -1339,6 +1415,29 @@ class SmartMarketDataFetcher(FinancialFetcher):
                         signals["capital_leverageQuality"] = "CONSERVATIVE"
                     else:
                         signals["capital_leverageQuality"] = "GENUINE"
+
+            if (
+                cash is not None
+                and total_debt is not None
+                and market_cap
+                and market_cap > 0
+            ):
+                signals["capital_netCashToMarketCap"] = round(
+                    (cash - total_debt) / market_cap, 4
+                )
+
+            if cash is not None and total_assets and total_assets > 0:
+                signals["capital_cashToAssets"] = round(cash / total_assets, 4)
+
+            if capex is not None and d_and_a not in (None, 0):
+                capex_to_da_ratio = abs(capex) / abs(d_and_a)
+                signals["capital_capexToDaRatio"] = round(capex_to_da_ratio, 2)
+                if capex_to_da_ratio < config.capex_to_da_underinvesting_threshold:
+                    signals["capital_capexToDaStatus"] = "UNDERINVESTING"
+                elif capex_to_da_ratio > config.capex_to_da_growth_threshold:
+                    signals["capital_capexToDaStatus"] = "GROWTH_INVESTING"
+                else:
+                    signals["capital_capexToDaStatus"] = "MAINTENANCE"
 
             if signals:
                 logger.debug(

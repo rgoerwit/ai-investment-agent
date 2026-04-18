@@ -254,6 +254,35 @@ class TestGetNews:
             # Should not show local section if no local results
             assert result.count("===") == 2  # Only one section divider (GENERAL NEWS)
 
+    async def test_news_hk_local_query_includes_market_specific_sources(
+        self, mock_tavily
+    ):
+        """HK local query should include local financial media that often covers stake changes."""
+        with patch(
+            "src.tools.shared.extract_company_name_async", new_callable=AsyncMock
+        ) as mock_name:
+            mock_name.return_value = "Modern Dental"
+
+            seen_queries = []
+
+            async def side_effect(query_dict):
+                query = query_dict["query"]
+                seen_queries.append(query)
+                if "site:" in query:
+                    return "Local HK News: AASTOCKS and ET Net mention a shareholding disclosure."
+                return "General News: Results announcement."
+
+            mock_tavily.side_effect = side_effect
+
+            result = await toolkit.get_news.ainvoke({"ticker": "3600.HK"})
+
+            local_queries = [q for q in seen_queries if "site:" in q]
+            assert local_queries
+            local_query = local_queries[0]
+            assert "site:aastocks.com" in local_query
+            assert "site:etnet.com.hk" in local_query
+            assert "shareholding disclosure" in result
+
     async def test_news_tavily_error(self, mock_tavily):
         """Test handling of Tavily API errors."""
         with patch(

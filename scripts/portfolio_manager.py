@@ -100,7 +100,6 @@ def _python_command_prefix() -> str:
     """Return the user-facing Python launcher for the current runtime."""
     if (
         os.getenv("INVESTMENT_AGENT_CONTAINER")
-        or os.getenv("VIRTUAL_ENV")
         or Path("/.dockerenv").exists()
         or Path("/run/.containerenv").exists()
     ):
@@ -116,6 +115,13 @@ def _portfolio_manager_command(*args: str) -> str:
     suffix = " ".join(args).strip()
     base = f"{_python_command_prefix()} scripts/portfolio_manager.py"
     return f"{base} {suffix}".strip()
+
+
+def _portfolio_manager_recommend_command(*, watchlist_name: str | None = None) -> str:
+    args = ["--recommend"]
+    if watchlist_name:
+        args.extend(["--watchlist-name", f'"{watchlist_name}"'])
+    return _portfolio_manager_command(*args)
 
 
 def _prompt_for_missing_secret(config) -> None:
@@ -2327,7 +2333,9 @@ def format_report(
                     "  (see DIP OPPORTUNITIES above)"
                 )
             lines.append("    → Run before placing any additional buys:")
-            lines.append(f"        {_portfolio_manager_command('--recommend')}")
+            lines.append(
+                f"        {_portfolio_manager_recommend_command(watchlist_name=watchlist_name)}"
+            )
             lines.append("")
 
         if (

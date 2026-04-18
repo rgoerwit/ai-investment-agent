@@ -147,7 +147,7 @@ Practical notes:
 
 ### Choose Your Workflow
 
-- **Analyze one ticker**: use `python -m src.main --ticker ...`
+- **Analyze one ticker**: use `poetry run python -m src.main --ticker ...`
 - **Screen a broader universe**: use `scripts/run_pipeline.sh` with or without `scripts/find_gems.py`
 - **Reconcile a portfolio**: use `scripts/portfolio_manager.py`
 - **Use the browser UI**: run `python -m src.web.ibkr_dashboard.app`, and start the worker only if you want queued refresh jobs

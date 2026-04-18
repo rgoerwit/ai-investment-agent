@@ -240,6 +240,31 @@ class RedFlagDetector:
         return value
 
     @staticmethod
+    def _parse_ratio_or_percent(raw_value: str) -> float | None:
+        """Parse a ratio that may be expressed as either a decimal or percentage."""
+        if raw_value is None:
+            return None
+
+        text = raw_value.strip()
+        if not text or text.upper() == "N/A":
+            return None
+
+        has_percent = text.endswith("%")
+        if has_percent:
+            text = text[:-1].strip()
+
+        try:
+            value = float(text)
+        except ValueError:
+            return None
+
+        if has_percent:
+            return value / 100
+        if abs(value) >= 2.0:
+            return value / 100
+        return value
+
+    @staticmethod
     def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
         """
         Extract financial metrics from Fundamentals Analyst DATA_BLOCK.
@@ -292,7 +317,13 @@ class RedFlagDetector:
             "analyst_coverage_total_est": None,
             "growth_trajectory": None,
             "revenue_growth_ttm": None,
+            "revenue_backlog_coverage": None,
             "latest_quarter_date": None,
+            "net_cash_to_market_cap": None,
+            "cash_to_assets": None,
+            "capex_to_da": None,
+            "capex_to_da_status": None,
+            "capital_plan_status": None,
             "sector": None,  # SECTOR string from DATA_BLOCK (for strict-mode REIT check)
             "industry": None,  # INDUSTRY string from DATA_BLOCK (for strict-mode REIT check)
             "_raw_report": fundamentals_report,  # For downstream data quality checks
@@ -478,12 +509,65 @@ class RedFlagDetector:
         if rev_ttm_match:
             metrics["revenue_growth_ttm"] = float(rev_ttm_match.group(1))
 
+        backlog_coverage_match = re.search(
+            r"REVENUE_BACKLOG_COVERAGE:\s*([0-9]+(?:\.\d+)?)", data_block
+        )
+        if backlog_coverage_match:
+            metrics["revenue_backlog_coverage"] = float(backlog_coverage_match.group(1))
+
         # Extract LATEST_QUARTER_DATE for staleness checks
         quarter_date_match = re.search(
             r"LATEST_QUARTER_DATE:\s*(\d{4}-\d{2}-\d{2})", data_block
         )
         if quarter_date_match:
             metrics["latest_quarter_date"] = quarter_date_match.group(1)
+
+        net_cash_to_mc_match = re.search(
+            r"NET_CASH_TO_MARKET_CAP:\s*([^\n]+)", data_block, re.IGNORECASE
+        )
+        if net_cash_to_mc_match:
+            metrics["net_cash_to_market_cap"] = RedFlagDetector._parse_ratio_or_percent(
+                net_cash_to_mc_match.group(1)
+            )
+
+        cash_to_assets_match = re.search(
+            r"CASH_TO_ASSETS:\s*([^\n]+)", data_block, re.IGNORECASE
+        )
+        if cash_to_assets_match:
+            metrics["cash_to_assets"] = RedFlagDetector._parse_ratio_or_percent(
+                cash_to_assets_match.group(1)
+            )
+
+        capex_to_da_match = re.search(
+            r"CAPEX_TO_DA:\s*([^\n]+)", data_block, re.IGNORECASE
+        )
+        if capex_to_da_match:
+            raw_value = capex_to_da_match.group(1).strip()
+            if raw_value.upper() != "N/A":
+                try:
+                    metrics["capex_to_da"] = float(raw_value)
+                except ValueError:
+                    pass
+
+        capex_status_match = re.search(
+            r"CAPEX_TO_DA_STATUS:\s*(UNDERINVESTING|MAINTENANCE|GROWTH_INVESTING|N/A)",
+            data_block,
+            re.IGNORECASE,
+        )
+        if capex_status_match:
+            val = capex_status_match.group(1).upper()
+            if val != "N/A":
+                metrics["capex_to_da_status"] = val
+
+        plan_status_match = re.search(
+            r"CAPITAL_PLAN_STATUS:\s*(EXPLICIT|NONE|UNKNOWN|N/A)",
+            data_block,
+            re.IGNORECASE,
+        )
+        if plan_status_match:
+            val = plan_status_match.group(1).upper()
+            if val != "N/A":
+                metrics["capital_plan_status"] = val
 
         # Extract SECTOR string (for strict-mode REIT/ETF check)
         sector_str_match = re.search(r"SECTOR:\s*(.+?)(?:\n|$)", data_block)
@@ -1594,6 +1678,11 @@ class RedFlagDetector:
             "activist_present": None,
             "insider_trend": None,
             "has_catalyst": False,
+            "capital_allocation_rating": None,
+            "buyback_context": None,
+            "payout_trend": None,
+            "cash_position": None,
+            "mid_term_plan": None,
         }
 
         if not value_trap_report:
@@ -1647,6 +1736,46 @@ class RedFlagDetector:
         )
         if insider_match:
             metrics["insider_trend"] = insider_match.group(1).upper()
+
+        capital_allocation_match = re.search(
+            r"RATING:\s*(POOR|MIXED|GOOD|UNKNOWN)", value_trap_report, re.IGNORECASE
+        )
+        if capital_allocation_match:
+            metrics["capital_allocation_rating"] = capital_allocation_match.group(
+                1
+            ).upper()
+
+        buyback_match = re.search(
+            r"BUYBACK_CONTEXT:\s*(.+?)(?:\n|$)", value_trap_report, re.IGNORECASE
+        )
+        if buyback_match:
+            value = buyback_match.group(1).strip()
+            if value.upper() not in ("NONE", "N/A"):
+                metrics["buyback_context"] = value
+
+        payout_trend_match = re.search(
+            r"PAYOUT_TREND:\s*(.+?)(?:\n|$)", value_trap_report, re.IGNORECASE
+        )
+        if payout_trend_match:
+            value = payout_trend_match.group(1).strip()
+            if value.upper() not in ("NONE", "N/A"):
+                metrics["payout_trend"] = value
+
+        cash_position_match = re.search(
+            r"CASH_POSITION:\s*(.+?)(?:\n|$)", value_trap_report, re.IGNORECASE
+        )
+        if cash_position_match:
+            value = cash_position_match.group(1).strip()
+            if value.upper() not in ("NONE", "N/A"):
+                metrics["cash_position"] = value
+
+        mid_term_plan_match = re.search(
+            r"MID_TERM_PLAN:\s*(.+?)(?:\n|$)", value_trap_report, re.IGNORECASE
+        )
+        if mid_term_plan_match:
+            value = mid_term_plan_match.group(1).strip()
+            if value.upper() not in ("NONE", "N/A"):
+                metrics["mid_term_plan"] = value
 
         # Check for catalysts (any non-NONE value in CATALYSTS section)
         catalysts_section = re.search(
@@ -2092,11 +2221,73 @@ class RedFlagDetector:
             except ValueError:
                 pass
 
+        net_cash_to_mc_match = re.search(
+            r"NET_CASH_TO_MARKET_CAP:\s*([^\n]+)", data_block, re.IGNORECASE
+        )
+        if net_cash_to_mc_match:
+            value = RedFlagDetector._parse_ratio_or_percent(
+                net_cash_to_mc_match.group(1)
+            )
+            if value is not None:
+                signals["net_cash_to_market_cap"] = value
+
+        cash_to_assets_match = re.search(
+            r"CASH_TO_ASSETS:\s*([^\n]+)", data_block, re.IGNORECASE
+        )
+        if cash_to_assets_match:
+            value = RedFlagDetector._parse_ratio_or_percent(
+                cash_to_assets_match.group(1)
+            )
+            if value is not None:
+                signals["cash_to_assets"] = value
+
+        capex_to_da_match = re.search(
+            r"CAPEX_TO_DA:\s*([^\n]+)", data_block, re.IGNORECASE
+        )
+        if capex_to_da_match:
+            raw_value = capex_to_da_match.group(1).strip()
+            if raw_value.upper() != "N/A":
+                try:
+                    signals["capex_to_da"] = float(raw_value)
+                except ValueError:
+                    pass
+
+        capex_status_match = re.search(
+            r"CAPEX_TO_DA_STATUS:\s*(UNDERINVESTING|MAINTENANCE|GROWTH_INVESTING|N/A)",
+            data_block,
+            re.IGNORECASE,
+        )
+        if capex_status_match:
+            val = capex_status_match.group(1).upper()
+            if val != "N/A":
+                signals["capex_to_da_status"] = val
+
+        backlog_coverage_match = re.search(
+            r"REVENUE_BACKLOG_COVERAGE:\s*([0-9]+(?:\.\d+)?)",
+            data_block,
+            re.IGNORECASE,
+        )
+        if backlog_coverage_match:
+            signals["revenue_backlog_coverage"] = float(backlog_coverage_match.group(1))
+
+        capital_plan_match = re.search(
+            r"CAPITAL_PLAN_STATUS:\s*(EXPLICIT|NONE|UNKNOWN|N/A)",
+            data_block,
+            re.IGNORECASE,
+        )
+        if capital_plan_match:
+            val = capital_plan_match.group(1).upper()
+            if val != "N/A":
+                signals["capital_plan_status"] = val
+
         return signals
 
     @staticmethod
     def detect_capital_efficiency_flags(
-        fundamentals_report: str, ticker: str = "UNKNOWN"
+        fundamentals_report: str,
+        ticker: str = "UNKNOWN",
+        value_trap_report: str | None = None,
+        sector: Sector | None = None,
     ) -> list[dict]:
         """
         Detect capital efficiency red flags and bonuses.
@@ -2118,9 +2309,13 @@ class RedFlagDetector:
         """
         flags: list[dict] = []
 
+        from src.config import config
+
         metrics = RedFlagDetector.extract_capital_efficiency_signals(
             fundamentals_report
         )
+        base_metrics = RedFlagDetector.extract_metrics(fundamentals_report)
+        value_trap_metrics = RedFlagDetector.extract_value_trap_score(value_trap_report)
 
         if not metrics:
             return flags
@@ -2129,6 +2324,16 @@ class RedFlagDetector:
         leverage_quality = metrics.get("leverage_quality")
         roic = metrics.get("roic")
         roe_roic_ratio = metrics.get("roe_roic_ratio")
+        net_cash_to_mc = metrics.get("net_cash_to_market_cap")
+        cash_to_assets = metrics.get("cash_to_assets")
+        capex_to_da_status = metrics.get("capex_to_da_status")
+        revenue_backlog_coverage = metrics.get("revenue_backlog_coverage")
+        payout_ratio = base_metrics.get("payout_ratio")
+        capital_plan_status = metrics.get("capital_plan_status")
+        if capital_plan_status is None and value_trap_metrics.get("mid_term_plan"):
+            capital_plan_status = "EXPLICIT"
+        if sector is None:
+            sector = RedFlagDetector.detect_sector(fundamentals_report)
 
         # --- FLAG 1: Value Destruction (most severe) ---
         if leverage_quality == "VALUE_DESTRUCTION":
@@ -2246,6 +2451,94 @@ class RedFlagDetector:
                 ticker=ticker,
                 roic=roic,
                 leverage_quality=leverage_quality,
+            )
+
+        excess_cash = (
+            net_cash_to_mc is not None
+            and net_cash_to_mc >= config.idle_cash_net_cash_to_mc_threshold
+        ) or (
+            cash_to_assets is not None
+            and cash_to_assets >= config.idle_cash_cash_to_assets_threshold
+        )
+        weak_deployment = roic_quality in {"WEAK", "DESTRUCTIVE"} or (
+            roic_quality == "ADEQUATE" and capex_to_da_status != "GROWTH_INVESTING"
+        )
+        weak_shareholder_return = (
+            payout_ratio is None or payout_ratio < config.idle_cash_min_payout_ratio
+        )
+        mitigated = (
+            capital_plan_status == "EXPLICIT"
+            or capex_to_da_status == "GROWTH_INVESTING"
+            or (
+                revenue_backlog_coverage is not None and revenue_backlog_coverage >= 1.0
+            )
+        )
+
+        severe_idle_cash = (
+            net_cash_to_mc is not None
+            and net_cash_to_mc >= config.idle_cash_severe_net_cash_to_mc_threshold
+            and roic_quality in {"WEAK", "DESTRUCTIVE"}
+            and capital_plan_status == "NONE"
+            and (payout_ratio is None or payout_ratio < 10.0)
+            and not mitigated
+        )
+
+        if sector in FINANCIALS_SECTORS:
+            return flags
+
+        if severe_idle_cash:
+            flags.append(
+                {
+                    "type": "CAPITAL_IDLE_CASH_SEVERE",
+                    "severity": "HIGH",
+                    "detail": (
+                        "Extreme excess cash with weak deployment and no credible "
+                        "capital allocation plan."
+                    ),
+                    "action": "RISK_ADJUST",
+                    "risk_penalty": 1.0,
+                    "rationale": (
+                        "Large excess cash relative to market value combined with weak "
+                        "returns, weak shareholder distributions, and no explicit use "
+                        "plan suggests capital is being warehoused rather than deployed."
+                    ),
+                }
+            )
+            logger.info(
+                "capital_flag_idle_cash_severe",
+                ticker=ticker,
+                net_cash_to_market_cap=net_cash_to_mc,
+                cash_to_assets=cash_to_assets,
+            )
+        elif (
+            excess_cash
+            and weak_deployment
+            and weak_shareholder_return
+            and capital_plan_status == "NONE"
+            and not mitigated
+        ):
+            flags.append(
+                {
+                    "type": "CAPITAL_IDLE_CASH_RISK",
+                    "severity": "MEDIUM",
+                    "detail": (
+                        "Excess cash with weak deployment, weak payout, and no "
+                        "credible capital allocation plan."
+                    ),
+                    "action": "RISK_ADJUST",
+                    "risk_penalty": 0.5,
+                    "rationale": (
+                        "Cash-rich balance sheets are not automatically a problem, but "
+                        "retained capital with weak ROIC, low payout, and no disclosed "
+                        "deployment plan can become a value trap."
+                    ),
+                }
+            )
+            logger.info(
+                "capital_flag_idle_cash_risk",
+                ticker=ticker,
+                net_cash_to_market_cap=net_cash_to_mc,
+                cash_to_assets=cash_to_assets,
             )
 
         return flags

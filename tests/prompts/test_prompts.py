@@ -623,3 +623,10 @@ class TestNewsAnalystPromptV5:
 
     def test_triggered_field_in_output_block(self, prompt):
         assert "TRIGGERED:" in prompt["system_message"]
+
+    def test_news_prompt_mentions_ownership_change_searches(self, prompt):
+        msg = prompt["system_message"]
+        assert "director dealing" in msg
+        assert "block trade" in msg
+        assert "PDMR" in msg
+        assert "股權披露" in msg
