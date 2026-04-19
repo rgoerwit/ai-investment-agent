@@ -1817,7 +1817,7 @@ def compute_portfolio_health(
     portfolio: PortfolioSummary,
     max_age_days: int = 14,
     reconciliation_items: list | None = None,
-    correlated_window_days: int = 7,
+    correlated_window_days: int = 14,
 ) -> list[str]:
     """
     Compute portfolio-level health flags using data already in held analyses.
@@ -1831,8 +1831,8 @@ def compute_portfolio_health(
     Args:
         correlated_window_days: Window width for grouping nearby sell dates.
             Sells whose analysis_date falls within this many days of an anchor date
-            are counted as a single correlated event.  Default 7 prevents batch
-            re-analyses run over consecutive nights from fragmenting the same event.
+            are counted as a single correlated event.  Default 14 accommodates batch
+            re-analyses spread over multiple nightly runs during the same macro event.
 
     Flags:
         LOW_HEALTH_AVERAGE      Weighted avg health_adj < 60 across holdings
@@ -1840,7 +1840,9 @@ def compute_portfolio_health(
         CURRENCY_CONCENTRATION  >50% of portfolio in a single currency
         STALE_ANALYSIS_RATIO    >30% of positions have analyses older than max_age_days
         CORRELATED_SELL_EVENT   ≥5 and ≥25% of held positions flipped verdict within
-                                correlated_window_days of the same anchor date
+                                correlated_window_days of the same anchor date, OR
+                                ≥8 and ≥40% of held positions are verdict sells
+                                (gradual accumulation during extended macro events)
     """
     if not positions or portfolio.portfolio_value_usd <= 0:
         return []
@@ -2015,11 +2017,26 @@ def compute_portfolio_health(
                         peak_count = count
                         peak_anchor = anchor
 
+                # Primary: sliding window catches sudden shocks.
                 correlated_event = (
                     peak_count >= 5
                     and total_held > 0
                     and peak_count / total_held >= 0.25
                 )
+                # Secondary: absolute ratio catches gradual accumulation
+                # during extended macro events where batch re-analyses
+                # spread over multiple weeks.
+                if not correlated_event and total_held > 0:
+                    total_verdict_ratio = len(verdict_sells) / total_held
+                    correlated_event = (
+                        len(verdict_sells) >= 8 and total_verdict_ratio >= 0.40
+                    )
+                    if correlated_event:
+                        # Use the most recent sell date as the anchor for
+                        # the flag message when triggering via ratio.
+                        peak_count = len(verdict_sells)
+                        peak_anchor = max(all_dates)
+
                 if correlated_event and peak_anchor is not None:
                     flags.append(
                         f"CORRELATED_SELL_EVENT: {peak_count} positions changed verdict"

@@ -2114,6 +2114,11 @@ def format_report(
             lines.append(
                 f"{'  Total pending:':<46}  ${cash_summary.pending_inflows_total_usd:>6,.0f}"
             )
+            if cash_summary.conditional_proceeds_usd > 0:
+                lines.append(
+                    f"{'  Conditional (soft-sell reviews):':<46}"
+                    f"  ${cash_summary.conditional_proceeds_usd:>6,.0f}"
+                )
             lines.append("")
             lines.append(
                 "  ⚠  Do NOT spend sale proceeds today — they have not settled yet."
@@ -2122,6 +2127,13 @@ def format_report(
                 f"     If orders fill by market close, funds clear {settle_date_str}."
             )
             lines.append("     Place additional BUYs only after that settlement date.")
+            lines.append("")
+        elif cash_summary.conditional_proceeds_usd > 0:
+            lines.append("  No confirmed sale proceeds pending.")
+            lines.append(
+                f"  Conditional (soft-sell reviews if executed):"
+                f"  ~${cash_summary.conditional_proceeds_usd:>6,.0f}"
+            )
             lines.append("")
 
     # ── ACTION PLAN ───────────────────────────────────────────────────────────
@@ -2140,18 +2152,25 @@ def format_report(
             i.action != "BUY" or i.is_watchlist
         )  # unvetted BUYs go to WATCHLIST CANDIDATES, not here
     ]
-    # Sell proceeds grouped by settlement date
+    # Sell proceeds grouped by settlement date (confirmed only; soft sells separate)
     settle_groups: dict[str, float] = {}
+    settle_conditional: dict[str, float] = {}
     for i in action_today:
         if i.settlement_date and i.cash_impact_usd > 0:
-            settle_groups[i.settlement_date] = (
-                settle_groups.get(i.settlement_date, 0.0) + i.cash_impact_usd
-            )
+            if i.sell_type == "SOFT_REJECT":
+                settle_conditional[i.settlement_date] = (
+                    settle_conditional.get(i.settlement_date, 0.0) + i.cash_impact_usd
+                )
+            else:
+                settle_groups[i.settlement_date] = (
+                    settle_groups.get(i.settlement_date, 0.0) + i.cash_impact_usd
+                )
     if (
         action_today
         or funded_today
         or dip_candidates
         or settle_groups
+        or settle_conditional
         or _cands_deduped
         or removes
         or refresh_activity.refreshed
@@ -2313,11 +2332,23 @@ def format_report(
                 )
             lines.append("")
 
-        for settle_date, proceeds in sorted(settle_groups.items()):
+        all_settle_dates = sorted(set(settle_groups) | set(settle_conditional))
+        for settle_date in all_settle_dates:
+            confirmed = settle_groups.get(settle_date, 0.0)
+            conditional = settle_conditional.get(settle_date, 0.0)
             lines.append(
                 f"  {settle_date} — sale proceeds from today's sells/trims clear:"
             )
-            lines.append(f"    → ${proceeds:,.0f} available on this date")
+            if confirmed > 0:
+                lines.append(f"    → ${confirmed:,.0f} available on this date")
+            if conditional > 0:
+                lines.append(
+                    f"    → ~${conditional:,.0f} additional if soft-sell reviews are executed"
+                )
+            if confirmed == 0 and conditional > 0:
+                lines.append(
+                    "    → No confirmed proceeds — review soft sells before counting on this cash"
+                )
             if dip_candidates:
                 top_tickers = "  ".join(_display_ticker(i) for i in dip_candidates[:3])
                 lines.append(

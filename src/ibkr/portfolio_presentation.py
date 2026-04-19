@@ -48,6 +48,7 @@ class CashSummaryView:
     settled_cash_after_recommended_buys_usd: float
     pending_inflows: tuple[CashTimelineEntry, ...]
     pending_inflows_total_usd: float
+    conditional_proceeds_usd: float  # soft-sell proceeds (review before acting)
     next_settlement_date: str | None
 
 
@@ -234,6 +235,12 @@ def build_action_summary_counts(groups: PortfolioActionGroups) -> dict[str, int]
 def build_cash_timeline(
     items: list[ReconciliationItem],
 ) -> tuple[CashTimelineEntry, ...]:
+    """Build confirmed pending inflows from sells/trims.
+
+    SOFT_REJECT sells are excluded — they are "review before acting" and
+    should not be counted as confirmed liquidity.  Their individual proceeds
+    are still shown in the soft-sell display section.
+    """
     rows = [
         CashTimelineEntry(
             ticker_yf=item.ticker.yf,
@@ -245,11 +252,23 @@ def build_cash_timeline(
         )
         for item in items
         if item.action in {"SELL", "TRIM"}
+        and item.sell_type != "SOFT_REJECT"
         and item.cash_impact_usd > 0
         and item.settlement_date
     ]
     rows.sort(key=lambda row: (row.settlement_date or "", row.ticker_yf))
     return tuple(rows)
+
+
+def _soft_sell_proceeds_usd(items: list[ReconciliationItem]) -> float:
+    """Total USD proceeds from SOFT_REJECT sells (conditional, not confirmed)."""
+    return sum(
+        item.cash_impact_usd
+        for item in items
+        if item.action == "SELL"
+        and item.sell_type == "SOFT_REJECT"
+        and item.cash_impact_usd > 0
+    )
 
 
 def build_cash_summary(
@@ -279,6 +298,7 @@ def build_cash_summary(
         settled_cash_after_recommended_buys_usd=settled_cash - recommended_buy_cost,
         pending_inflows=pending_inflows,
         pending_inflows_total_usd=sum(row.cash_impact_usd for row in pending_inflows),
+        conditional_proceeds_usd=_soft_sell_proceeds_usd(items),
         next_settlement_date=(
             min(
                 (row.settlement_date for row in pending_inflows if row.settlement_date),

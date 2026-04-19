@@ -2265,3 +2265,122 @@ class TestCliUiSharedPresentationAlignment:
         assert f"${shared.pending_inflows_total_usd:>6,.0f}" in report
         assert shared.next_settlement_date in report
         assert f"${shared.settled_cash_after_recommended_buys_usd:>7,.0f}" in report
+
+    def test_soft_sell_excluded_from_pending_inflows(self):
+        """SOFT_REJECT sells should not appear in pending_inflows."""
+        portfolio = PortfolioSummary(
+            account_id="U20958465",
+            portfolio_value_usd=50_000,
+            cash_balance_usd=500,
+            settled_cash_usd=500,
+            available_cash_usd=0,
+            cash_pct=1.0,
+            position_count=10,
+        )
+        hard_sell = ReconciliationItem(
+            ticker="7203.T",
+            action="SELL",
+            reason="Verdict → DO_NOT_INITIATE",
+            urgency="HIGH",
+            ibkr_position=_make_position(ticker="7203.T"),
+            analysis=_make_analysis(ticker="7203.T"),
+            suggested_quantity=100,
+            suggested_price=2000.0,
+            cash_impact_usd=1_400.0,
+            settlement_date="2026-04-21",
+            sell_type="HARD_REJECT",
+        )
+        soft_sell = ReconciliationItem(
+            ticker="0005.HK",
+            action="SELL",
+            reason="Verdict → DO_NOT_INITIATE",
+            urgency="HIGH",
+            ibkr_position=_make_position(ticker="0005.HK", currency="HKD"),
+            analysis=_make_analysis(ticker="0005.HK"),
+            suggested_quantity=200,
+            suggested_price=50.0,
+            cash_impact_usd=1_300.0,
+            settlement_date="2026-04-21",
+            sell_type="SOFT_REJECT",
+        )
+        summary = build_cash_summary([hard_sell, soft_sell], portfolio)
+
+        # Only hard sell in pending inflows
+        assert summary.pending_inflows_total_usd == 1_400.0
+        assert len(summary.pending_inflows) == 1
+        assert summary.pending_inflows[0].ticker_yf == "7203.T"
+        # Soft sell in conditional
+        assert summary.conditional_proceeds_usd == 1_300.0
+
+    def test_hard_sells_and_stops_included_in_pending(self):
+        """HARD_REJECT and STOP_BREACH sells appear in pending_inflows."""
+        portfolio = PortfolioSummary(
+            account_id="U20958465",
+            portfolio_value_usd=50_000,
+            cash_balance_usd=500,
+            settled_cash_usd=500,
+            available_cash_usd=0,
+            cash_pct=1.0,
+            position_count=10,
+        )
+        hard = ReconciliationItem(
+            ticker="7203.T",
+            action="SELL",
+            reason="test",
+            urgency="HIGH",
+            ibkr_position=_make_position(ticker="7203.T"),
+            analysis=_make_analysis(ticker="7203.T"),
+            cash_impact_usd=1_000.0,
+            settlement_date="2026-04-21",
+            sell_type="HARD_REJECT",
+        )
+        stop = ReconciliationItem(
+            ticker="0005.HK",
+            action="SELL",
+            reason="test",
+            urgency="HIGH",
+            ibkr_position=_make_position(ticker="0005.HK", currency="HKD"),
+            analysis=_make_analysis(ticker="0005.HK"),
+            cash_impact_usd=800.0,
+            settlement_date="2026-04-21",
+            sell_type="STOP_BREACH",
+        )
+        summary = build_cash_summary([hard, stop], portfolio)
+        assert summary.pending_inflows_total_usd == 1_800.0
+        assert len(summary.pending_inflows) == 2
+        assert summary.conditional_proceeds_usd == 0.0
+
+    def test_conditional_proceeds_shown_in_report(self):
+        """When soft sells exist, report shows conditional proceeds line."""
+        portfolio = PortfolioSummary(
+            account_id="U20958465",
+            portfolio_value_usd=50_000,
+            cash_balance_usd=500,
+            settled_cash_usd=500,
+            available_cash_usd=0,
+            cash_pct=1.0,
+            position_count=5,
+        )
+        soft_sell = ReconciliationItem(
+            ticker="0005.HK",
+            action="SELL",
+            reason="Verdict → DO_NOT_INITIATE",
+            urgency="HIGH",
+            ibkr_position=_make_position(ticker="0005.HK", currency="HKD"),
+            analysis=_make_analysis(ticker="0005.HK", verdict="DO_NOT_INITIATE"),
+            suggested_quantity=200,
+            suggested_price=50.0,
+            cash_impact_usd=1_300.0,
+            settlement_date="2026-04-21",
+            sell_type="SOFT_REJECT",
+        )
+        report = format_report(
+            [soft_sell],
+            portfolio,
+            show_recommendations=True,
+        )
+        # Soft sells should NOT be in "Total pending" — instead conditional
+        assert (
+            "Conditional (soft-sell reviews)" in report
+            or "No confirmed sale proceeds" in report
+        )
