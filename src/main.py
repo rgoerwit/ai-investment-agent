@@ -693,6 +693,12 @@ def build_run_summary(
         "llm_provider": providers_used[0]
         if len(providers_used) == 1
         else "multi-provider",
+        "macro_context_status": result.get("macro_context_status", "failed"),
+        "macro_context_region": result.get("macro_context_region", "GLOBAL"),
+        "macro_context_report_present": bool(result.get("macro_context_report")),
+        "macro_context_injected_into_news": bool(
+            result.get("macro_context_injected_into_news", False)
+        ),
         "publishable": result.get("analysis_validity", {}).get("publishable", False),
         "required_failures": sorted(
             (result.get("analysis_validity", {}) or {})
@@ -704,6 +710,35 @@ def build_run_summary(
             .get("optional_failures", {})
             .keys()
         ),
+    }
+
+
+def _normalize_macro_context_metadata(result: dict[str, Any]) -> dict[str, Any]:
+    """Return one normalized macro-context metadata view for persistence."""
+    from src.macro_context import get_macro_context_cache_dir
+
+    run_summary = result.get("run_summary", {}) or {}
+    status = result.get("macro_context_status")
+    region = result.get("macro_context_region")
+    report_present = result.get("macro_context_report")
+
+    if status is None:
+        status = run_summary.get("macro_context_status", "failed")
+    if region is None:
+        region = run_summary.get("macro_context_region", "GLOBAL")
+    if report_present is None:
+        report_present = run_summary.get("macro_context_report_present", False)
+
+    return {
+        "status": status,
+        "region": region,
+        "report_present": bool(report_present),
+        "injected_into_news": bool(
+            result.get("macro_context_injected_into_news", False)
+        ),
+        "llm_invoked": bool(result.get("macro_context_llm_invoked", False)),
+        "generated_at": result.get("macro_context_generated_at"),
+        "cache_dir": str(get_macro_context_cache_dir()),
     }
 
 
@@ -1101,13 +1136,17 @@ def save_results_to_file(
             ),
         },
         "token_usage": token_stats,
+        "macro_context": _normalize_macro_context_metadata(result),
         "prompts_metadata": {
             "prompts_used": prompts_used,
             "available_prompts": available_prompts,
             "custom_prompts_loaded": custom_prompts_loaded,
             "prompts_directory": str(prompts_dir),
             "total_agents": len(prompts_used),
-            "note": "system_message field contains the actual prompt text used by each agent",
+            "note": (
+                "system_message field contains the actual prompt text used by each "
+                "graph agent or pre-graph helper"
+            ),
         },
         "memory_statistics": memory_stats,
         "reports": {
@@ -1154,6 +1193,74 @@ def save_results_to_file(
         "analysis_validity": result.get("analysis_validity", {}),
         "artifact_statuses": result.get("artifact_statuses", {}),
     }
+
+    run_summary = save_data.get("run_summary", {}) or {}
+    macro_context_payload = save_data.get("macro_context", {}) or {}
+    prompt_records = (save_data.get("prompts_metadata", {}) or {}).get(
+        "prompts_used", {}
+    ) or {}
+    token_agents = (save_data.get("token_usage", {}) or {}).get("agents", {}) or {}
+    has_run_summary_macro_fields = all(
+        field in run_summary
+        for field in (
+            "macro_context_status",
+            "macro_context_region",
+            "macro_context_report_present",
+            "macro_context_injected_into_news",
+        )
+    )
+    has_macro_context_block = all(
+        field in macro_context_payload
+        for field in (
+            "status",
+            "region",
+            "report_present",
+            "injected_into_news",
+            "llm_invoked",
+            "generated_at",
+            "cache_dir",
+        )
+    )
+    has_macro_prompt_metadata = "macro_context_analyst" in prompt_records
+    has_macro_token_row = "Macro Context Analyst" in token_agents
+
+    logger.info(
+        "analysis_artifact_macro_snapshot",
+        ticker=ticker,
+        has_macro_context_block=has_macro_context_block,
+        has_run_summary_macro_fields=has_run_summary_macro_fields,
+        has_macro_prompt_metadata=has_macro_prompt_metadata,
+        has_macro_token_row=has_macro_token_row,
+    )
+
+    macro_expected = bool(
+        result.get("macro_context_llm_invoked", False)
+        or result.get("macro_context_injected_into_news", False)
+        or result.get("macro_context_report")
+    )
+    macro_mismatch = macro_expected and (
+        not has_macro_context_block
+        or not has_run_summary_macro_fields
+        or (
+            result.get("macro_context_llm_invoked", False)
+            and not has_macro_prompt_metadata
+        )
+        or (result.get("macro_context_llm_invoked", False) and not has_macro_token_row)
+    )
+    if macro_mismatch:
+        logger.warning(
+            "analysis_artifact_macro_mismatch",
+            ticker=ticker,
+            macro_expected=macro_expected,
+            macro_llm_invoked=bool(result.get("macro_context_llm_invoked", False)),
+            macro_context_injected_into_news=bool(
+                result.get("macro_context_injected_into_news", False)
+            ),
+            has_macro_context_block=has_macro_context_block,
+            has_run_summary_macro_fields=has_run_summary_macro_fields,
+            has_macro_prompt_metadata=has_macro_prompt_metadata,
+            has_macro_token_row=has_macro_token_row,
+        )
 
     # Extract prediction snapshot for future retrospective evaluation (zero LLM cost)
     try:
@@ -1342,16 +1449,38 @@ async def run_analysis(
         # Fetch benchmark context once (non-blocking) before graph starts.
         # Prepended to the HumanMessage so every agent receives it as session context.
         market_context = await _fetch_market_context(ticker, real_date)
+        # The macro brief remains advisory News Analyst context, but its LLM call
+        # should still flow through the same callback-based cost/tracing surface.
         macro_context_report = ""
         macro_context_region = "GLOBAL"
         macro_context_status = "failed"
+        macro_context_generated_at = None
+        macro_context_llm_invoked = False
+        macro_context_prompt_used = None
         try:
             from src.macro_context import get_macro_context
 
-            macro_context = await get_macro_context(ticker, real_date)
+            macro_context = await get_macro_context(
+                ticker,
+                real_date,
+                callbacks=tracing_callbacks,
+            )
             macro_context_report = macro_context.report
             macro_context_region = macro_context.region
             macro_context_status = macro_context.status
+            macro_context_generated_at = macro_context.generated_at
+            macro_context_llm_invoked = macro_context.llm_invoked
+            macro_context_prompt_used = macro_context.prompt_used
+            logger.info(
+                "macro_context_prefetch_complete",
+                ticker=ticker,
+                trade_date=real_date,
+                region=macro_context_region,
+                status=macro_context_status,
+                llm_invoked=macro_context_llm_invoked,
+                generated_at=macro_context_generated_at,
+                prompt_recorded=bool(macro_context_prompt_used),
+            )
         except Exception as exc:
             logger.warning(
                 "macro_context_prefetch_failed",
@@ -1448,6 +1577,7 @@ async def run_analysis(
             legal_report="",
             auditor_report="",
             value_trap_report="",
+            macro_context_injected_into_news=False,
         )
 
         context = TradingContext(
@@ -1505,6 +1635,18 @@ async def run_analysis(
         tracker.print_summary()
 
         if isinstance(result, dict):
+            result["macro_context_report"] = macro_context_report
+            result["macro_context_region"] = macro_context_region
+            result["macro_context_status"] = macro_context_status
+            result["macro_context_generated_at"] = macro_context_generated_at
+            result["macro_context_llm_invoked"] = macro_context_llm_invoked
+            result["macro_context_injected_into_news"] = bool(
+                result.get("macro_context_injected_into_news", False)
+            )
+            if macro_context_llm_invoked and macro_context_prompt_used:
+                prompts_used = dict(result.get("prompts_used", {}) or {})
+                prompts_used["macro_context_analyst"] = macro_context_prompt_used
+                result["prompts_used"] = prompts_used
             result["analysis_validity"] = build_analysis_validity(result)
 
         return result

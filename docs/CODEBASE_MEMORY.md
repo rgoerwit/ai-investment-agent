@@ -125,6 +125,7 @@ Macro surfaces are intentionally split:
 
 - `MacroEventsStore` holds sparse portfolio-detected discrete shocks
 - `src/macro_context.py` holds a short cached regional regime brief under `results/.macro_context_cache/`
+- saved analysis JSON records macro-context status/region metadata separately so operator review can tell whether the pre-graph summarizer ran
 
 ### Reporting
 

@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Macro Context Observability / Reporting Alignment** — Pre-graph `Macro Context Analyst` runs now participate in the standard callback path for token/cost tracking and active trace callbacks. Saved analysis artifacts now record macro-context execution metadata alongside the normal run summary.
+
+### Changed
+
+- **Documentation / Architecture Refresh** — README and supporting docs now describe cached regional macro context explicitly, including the pre-graph execution step, News Analyst-only injection path, and the distinction from `MacroEventsStore`.
+
 ## [3.9.10] - 2026-04-12
 
 ### Changed

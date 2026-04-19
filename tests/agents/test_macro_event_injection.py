@@ -93,6 +93,36 @@ class TestNewsAnalystMacroInjection:
         regional_idx = extra_context.index("### REGIONAL MACRO CONTEXT")
         assert portfolio_idx < regional_idx
 
+    def test_regional_macro_injection_log_includes_audit_fields(self):
+        from src.agents.analyst_nodes import _build_news_macro_extra_context
+
+        with (
+            patch("src.memory.create_macro_events_store") as mock_create,
+            patch("src.agents.analyst_nodes.logger") as mock_logger,
+        ):
+            mock_store = MagicMock()
+            mock_store.available = True
+            mock_store.get_active_events.return_value = [_active_event()]
+            mock_create.return_value = mock_store
+
+            context = SimpleNamespace(
+                macro_context_report="### EQUITY REGIME\n- Summary: Risk appetite improving.",
+                macro_context_region="JAPAN",
+                macro_context_status="generated",
+            )
+            _build_news_macro_extra_context("7203.T", context)
+
+        mock_logger.info.assert_any_call(
+            "macro_context_injected",
+            ticker="7203.T",
+            region="JAPAN",
+            status="generated",
+            report_len=len(context.macro_context_report),
+            agent="news_analyst",
+            portfolio_macro_event_present=True,
+            regional_macro_context_present=True,
+        )
+
     def test_no_context_produces_empty_string(self):
         from src.agents.analyst_nodes import _build_news_macro_extra_context
 

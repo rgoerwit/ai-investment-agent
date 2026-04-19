@@ -232,13 +232,6 @@ def _build_regional_macro_context_block(context: Any | None, ticker: str) -> str
         return ""
 
     macro_region = getattr(context, "macro_context_region", "GLOBAL") or "GLOBAL"
-    macro_status = getattr(context, "macro_context_status", "disabled") or "disabled"
-    logger.info(
-        "macro_context_injected",
-        ticker=ticker,
-        region=macro_region,
-        status=macro_status,
-    )
     return "### REGIONAL MACRO CONTEXT\n" f"Region: {macro_region}\n" f"{macro_report}"
 
 
@@ -251,11 +244,28 @@ def _build_news_macro_extra_context(ticker: str, context: Any | None) -> str:
     """
     blocks = []
     portfolio_block = _build_portfolio_macro_event_context(ticker)
+    portfolio_macro_event_present = bool(portfolio_block)
     if portfolio_block:
         blocks.append(portfolio_block)
 
     regional_block = _build_regional_macro_context_block(context, ticker)
+    regional_macro_context_present = bool(regional_block)
     if regional_block:
+        macro_region = getattr(context, "macro_context_region", "GLOBAL") or "GLOBAL"
+        macro_status = (
+            getattr(context, "macro_context_status", "disabled") or "disabled"
+        )
+        macro_report = getattr(context, "macro_context_report", "") if context else ""
+        logger.info(
+            "macro_context_injected",
+            ticker=ticker,
+            region=macro_region,
+            status=macro_status,
+            report_len=len(macro_report),
+            agent="news_analyst",
+            portfolio_macro_event_present=portfolio_macro_event_present,
+            regional_macro_context_present=regional_macro_context_present,
+        )
         blocks.append(regional_block)
 
     if not blocks:
@@ -331,6 +341,7 @@ def create_analyst_node(
             company_resolved = state.get("company_name_resolved", True)
 
             extra_context = ""
+            macro_context_injected_into_news = False
 
             if agent_key == "junior_fundamentals_analyst":
                 news_report = state.get("news_report", "")
@@ -423,7 +434,11 @@ def create_analyst_node(
                     )
 
             if agent_key == "news_analyst":
-                extra_context += _build_news_macro_extra_context(ticker, context)
+                news_macro_context = _build_news_macro_extra_context(ticker, context)
+                extra_context += news_macro_context
+                macro_context_injected_into_news = (
+                    "### REGIONAL MACRO CONTEXT" in news_macro_context
+                )
 
             full_system_instruction = (
                 f"{agent_prompt.system_message}\n\n"
@@ -452,6 +467,10 @@ def create_analyst_node(
                 "messages": [response],
                 "prompts_used": prompts_used,
             }
+            if agent_key == "news_analyst":
+                new_state["macro_context_injected_into_news"] = (
+                    macro_context_injected_into_news
+                )
 
             tool_calls = getattr(response, "tool_calls", None)
             has_tool_calls = isinstance(tool_calls, list) and len(tool_calls) > 0

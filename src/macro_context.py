@@ -6,6 +6,10 @@ This cache is intentionally separate from ``MacroEventsStore``:
 
 The cache is file-backed under ``results/.macro_context_cache`` so it stays near
 other runtime artifacts without cluttering the user-facing result list.
+
+Summarizer invocations use the same callback path as other traced LLM surfaces
+so token/cost reporting and Langfuse generation tracing stay aligned with the
+rest of the analysis run.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import structlog
+from langchain_core.callbacks import BaseCallbackHandler
 
 from src.config import config
 from src.macro_regions import infer_macro_region
@@ -32,16 +37,44 @@ _FINGERPRINT_SCHEMA = "MACRO_QUERY_V1\nMACRO_OUTPUT_V1"
 
 @dataclass(frozen=True, slots=True)
 class MacroContextResult:
-    """Result of pre-graph macro-context lookup/generation."""
+    """Result of pre-graph macro-context lookup/generation.
+
+    This path is advisory prompt context, not a publishable artifact. The extra
+    metadata keeps saved analysis reporting honest about whether the summarizer
+    actually ran.
+    """
 
     report: str
     region: str
     status: str  # cached | generated | generated_fallback | failed
     generated_at: str | None = None
+    llm_invoked: bool = False
+    prompt_used: dict[str, Any] | None = None
 
 
 def _cache_path(region: str) -> Path:
     return _CACHE_DIR / f"{region}.json"
+
+
+def get_macro_context_cache_dir() -> Path:
+    """Return the on-disk cache directory for regional macro briefs."""
+    return Path(config.results_dir) / ".macro_context_cache"
+
+
+def _prompt_metadata() -> dict[str, Any] | None:
+    from src.prompts import get_prompt
+
+    prompt = get_prompt("macro_context_analyst")
+    if not prompt:
+        return None
+    return {
+        "agent_name": prompt.agent_name,
+        "version": prompt.version,
+        "category": prompt.category,
+        "requires_tools": prompt.requires_tools,
+        "source": prompt.source,
+        "execution_path": "pre_graph",
+    }
 
 
 def _utc_now() -> datetime:
@@ -146,6 +179,38 @@ def _write_cache(
     return generated_at
 
 
+def _merge_macro_callbacks(
+    callbacks: list[BaseCallbackHandler] | None = None,
+) -> list[BaseCallbackHandler]:
+    """Merge token tracking, active trace callbacks, and caller overrides."""
+    from src.observability import get_current_trace_context
+    from src.token_tracker import TokenTrackingCallback, get_tracker
+
+    merged: list[BaseCallbackHandler] = [
+        TokenTrackingCallback(
+            "Macro Context Analyst",
+            get_tracker(),
+            output_token_cap=900,
+        )
+    ]
+    seen = {id(merged[0])}
+    trace_context = get_current_trace_context()
+
+    for callback in (trace_context.callbacks if trace_context else []) or []:
+        if id(callback) in seen:
+            continue
+        merged.append(callback)
+        seen.add(id(callback))
+
+    for callback in callbacks or []:
+        if id(callback) in seen:
+            continue
+        merged.append(callback)
+        seen.add(id(callback))
+
+    return merged
+
+
 async def _fetch_macro_raw(trade_date: str, region: str) -> str:
     """Call the shared Tavily-backed macro tool with an optional region hint."""
     from src.tools.news import get_macroeconomic_news
@@ -167,7 +232,13 @@ def _is_thin(raw: str | None) -> bool:
     return text.count("<result") < 2 or len(text) < _THIN_MIN_CHARS
 
 
-async def _summarize(raw: str, region: str, trade_date: str) -> str:
+async def _summarize(
+    raw: str,
+    region: str,
+    trade_date: str,
+    *,
+    callbacks: list[BaseCallbackHandler] | None = None,
+) -> tuple[str, bool, dict[str, Any] | None]:
     from langchain_core.messages import HumanMessage, SystemMessage
 
     from src.agents.message_utils import extract_string_content
@@ -178,9 +249,13 @@ async def _summarize(raw: str, region: str, trade_date: str) -> str:
     prompt = get_prompt("macro_context_analyst")
     if not prompt:
         logger.warning("macro_context_prompt_missing")
-        return ""
+        return "", False, None
 
-    llm = create_quick_thinking_llm(temperature=0.1, max_output_tokens=900)
+    llm = create_quick_thinking_llm(
+        temperature=0.1,
+        max_output_tokens=900,
+        callbacks=_merge_macro_callbacks(callbacks),
+    )
     response = await invoke_with_rate_limit_handling(
         llm,
         [
@@ -195,7 +270,11 @@ async def _summarize(raw: str, region: str, trade_date: str) -> str:
         ],
         context=prompt.agent_name,
     )
-    return extract_string_content(getattr(response, "content", response)).strip()
+    return (
+        extract_string_content(getattr(response, "content", response)).strip(),
+        True,
+        _prompt_metadata(),
+    )
 
 
 async def get_macro_context(
@@ -203,6 +282,7 @@ async def get_macro_context(
     trade_date: str,
     *,
     ttl_hours: int = _DEFAULT_TTL_HOURS,
+    callbacks: list[BaseCallbackHandler] | None = None,
 ) -> MacroContextResult:
     """Return a cached or freshly generated regional macro brief.
 
@@ -219,7 +299,12 @@ async def get_macro_context(
         ttl_hours=ttl_hours,
     )
     if cached is not None:
-        logger.info("macro_context_cache_hit", ticker=ticker, region=region)
+        logger.info(
+            "macro_context_cache_hit",
+            ticker=ticker,
+            region=region,
+            cache_path=str(_cache_path(region)),
+        )
         return MacroContextResult(
             report=str(cached.get("report", "")),
             region=region,
@@ -232,7 +317,13 @@ async def get_macro_context(
         status = "generated"
 
         if region != "GLOBAL" and _is_thin(raw):
-            logger.info("macro_context_regional_thin", ticker=ticker, region=region)
+            logger.info(
+                "macro_context_regional_thin",
+                ticker=ticker,
+                region=region,
+                trade_date=trade_date,
+                cache_path=str(_cache_path(region)),
+            )
             fallback_raw = await _fetch_macro_raw(trade_date, "GLOBAL")
             if not _is_thin(fallback_raw):
                 raw = fallback_raw
@@ -240,14 +331,35 @@ async def get_macro_context(
 
         if _is_thin(raw):
             logger.warning(
-                "macro_context_generation_failed", ticker=ticker, region=region
+                "macro_context_generation_failed",
+                ticker=ticker,
+                region=region,
+                trade_date=trade_date,
+                cache_path=str(_cache_path(region)),
             )
             return MacroContextResult("", region, "failed")
 
-        report = await _summarize(raw, region, trade_date)
+        report, llm_invoked, prompt_used = await _summarize(
+            raw,
+            region,
+            trade_date,
+            callbacks=callbacks,
+        )
         if not report:
-            logger.warning("macro_context_summary_empty", ticker=ticker, region=region)
-            return MacroContextResult("", region, "failed")
+            logger.warning(
+                "macro_context_summary_empty",
+                ticker=ticker,
+                region=region,
+                trade_date=trade_date,
+                llm_invoked=llm_invoked,
+            )
+            return MacroContextResult(
+                "",
+                region,
+                "failed",
+                llm_invoked=llm_invoked,
+                prompt_used=prompt_used,
+            )
 
         generated_at = _write_cache(
             region,
@@ -261,18 +373,24 @@ async def get_macro_context(
             ticker=ticker,
             region=region,
             status=status,
+            used_global_fallback=(status == "generated_fallback"),
+            cache_path=str(_cache_path(region)),
+            generated_at=generated_at,
         )
         return MacroContextResult(
             report=report,
             region=region,
             status=status,
             generated_at=generated_at,
+            llm_invoked=llm_invoked,
+            prompt_used=prompt_used,
         )
     except Exception as exc:
         logger.warning(
             "macro_context_failed",
             ticker=ticker,
             region=region,
+            trade_date=trade_date,
             error=str(exc),
         )
         return MacroContextResult("", region, "failed")

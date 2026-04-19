@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,10 +12,13 @@ import pytest
 from src.macro_context import (
     _compute_fingerprint,
     _is_thin,
+    _merge_macro_callbacks,
     _read_cache,
+    _summarize,
     _write_cache,
     get_macro_context,
 )
+from src.token_tracker import TokenTrackingCallback
 
 
 class TestIsThin:
@@ -166,7 +170,13 @@ class TestGetMacroContext:
             patch("src.macro_context._fetch_macro_raw", side_effect=_fetch) as fetch,
             patch(
                 "src.macro_context._summarize",
-                new=AsyncMock(return_value="summarized brief"),
+                new=AsyncMock(
+                    return_value=(
+                        "summarized brief",
+                        True,
+                        {"agent_name": "Macro Context Analyst", "version": "1.0"},
+                    )
+                ),
             ),
         ):
             result = await get_macro_context("7203.T", "2026-04-18")
@@ -203,7 +213,13 @@ class TestGetMacroContext:
             ) as fetch,
             patch(
                 "src.macro_context._summarize",
-                new=AsyncMock(return_value="global brief"),
+                new=AsyncMock(
+                    return_value=(
+                        "global brief",
+                        True,
+                        {"agent_name": "Macro Context Analyst", "version": "1.0"},
+                    )
+                ),
             ),
         ):
             result = await get_macro_context("AAPL", "2026-04-18")
@@ -229,6 +245,156 @@ class TestGetMacroContext:
             result = await get_macro_context("7203.T", "2026-04-18")
 
         assert result.status == "failed"
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_logs_cache_path(self, tmp_path):
+        with (
+            patch("src.macro_context._CACHE_DIR", tmp_path),
+            patch("src.macro_context._compute_fingerprint", return_value="fp123"),
+            patch("src.macro_context.logger") as mock_logger,
+        ):
+            _write_cache(
+                "JAPAN",
+                trade_date="2026-04-18",
+                fingerprint="fp123",
+                report="cached brief",
+                status="generated",
+            )
+            await get_macro_context("7203.T", "2026-04-18")
+
+        mock_logger.info.assert_any_call(
+            "macro_context_cache_hit",
+            ticker="7203.T",
+            region="JAPAN",
+            cache_path=str(tmp_path / "JAPAN.json"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_generated_logs_fallback_and_cache_path(self, tmp_path):
+        with (
+            patch("src.macro_context._CACHE_DIR", tmp_path),
+            patch("src.macro_context._compute_fingerprint", return_value="fp123"),
+            patch(
+                "src.macro_context._fetch_macro_raw",
+                side_effect=[
+                    "too short",
+                    "<result>a</result>\n<result>b</result>" + ("x" * 700),
+                ],
+            ),
+            patch(
+                "src.macro_context._summarize",
+                new=AsyncMock(
+                    return_value=(
+                        "brief",
+                        True,
+                        {"agent_name": "Macro Context Analyst", "version": "1.0"},
+                    )
+                ),
+            ),
+            patch("src.macro_context.logger") as mock_logger,
+        ):
+            await get_macro_context("7203.T", "2026-04-18")
+
+        generated_calls = [
+            call
+            for call in mock_logger.info.call_args_list
+            if call.args and call.args[0] == "macro_context_generated"
+        ]
+        assert len(generated_calls) == 1
+        assert generated_calls[0].kwargs["used_global_fallback"] is True
+        assert generated_calls[0].kwargs["cache_path"] == str(tmp_path / "JAPAN.json")
+
+
+class TestSummarizeCallbacks:
+    @pytest.mark.asyncio
+    async def test_token_tracking_callback_attached(self):
+        prompt = MagicMock(
+            agent_name="Macro Context Analyst",
+            version="1.0",
+            category="macro",
+            requires_tools=False,
+            source="local",
+            system_message="system",
+        )
+        fake_llm = MagicMock()
+
+        with (
+            patch("src.prompts.get_prompt", return_value=prompt),
+            patch(
+                "src.llms.create_quick_thinking_llm",
+                return_value=fake_llm,
+            ) as create_llm,
+            patch(
+                "src.agents.runtime.invoke_with_rate_limit_handling",
+                new=AsyncMock(return_value=MagicMock(content="brief")),
+            ),
+            patch(
+                "src.observability.get_current_trace_context",
+                return_value=None,
+            ),
+        ):
+            report, llm_invoked, prompt_used = await _summarize(
+                "raw",
+                "JAPAN",
+                "2026-04-18",
+            )
+
+        callbacks = create_llm.call_args.kwargs["callbacks"]
+        assert report == "brief"
+        assert llm_invoked is True
+        assert prompt_used["agent_name"] == "Macro Context Analyst"
+        assert any(isinstance(cb, TokenTrackingCallback) for cb in callbacks)
+
+    @pytest.mark.asyncio
+    async def test_external_callbacks_forwarded(self):
+        prompt = MagicMock(
+            agent_name="Macro Context Analyst",
+            version="1.0",
+            category="macro",
+            requires_tools=False,
+            source="local",
+            system_message="system",
+        )
+        fake_llm = MagicMock()
+        external_callback = MagicMock()
+
+        with (
+            patch("src.prompts.get_prompt", return_value=prompt),
+            patch(
+                "src.llms.create_quick_thinking_llm",
+                return_value=fake_llm,
+            ) as create_llm,
+            patch(
+                "src.agents.runtime.invoke_with_rate_limit_handling",
+                new=AsyncMock(return_value=MagicMock(content="brief")),
+            ),
+            patch(
+                "src.observability.get_current_trace_context",
+                return_value=None,
+            ),
+        ):
+            await _summarize(
+                "raw",
+                "JAPAN",
+                "2026-04-18",
+                callbacks=[external_callback],
+            )
+
+        callbacks = create_llm.call_args.kwargs["callbacks"]
+        assert external_callback in callbacks
+
+    def test_active_trace_callbacks_merged_without_duplicates(self):
+        shared_callback = MagicMock()
+        trace_context = SimpleNamespace(callbacks=[shared_callback])
+
+        with patch(
+            "src.observability.get_current_trace_context",
+            return_value=trace_context,
+        ):
+            callbacks = _merge_macro_callbacks([shared_callback])
+
+        assert callbacks.count(shared_callback) == 1
+        assert any(isinstance(cb, TokenTrackingCallback) for cb in callbacks)
 
 
 class TestFingerprint:

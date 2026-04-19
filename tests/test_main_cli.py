@@ -11,7 +11,7 @@ import sys
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -162,7 +162,9 @@ class TestOutputCompanyNameLookup:
                 )
             )
 
-        assert result == {"analysis_validity": {"ok": True}}
+        assert result["analysis_validity"] == {"ok": True}
+        assert result["macro_context_status"] == "failed"
+        assert result["macro_context_region"]
         warning_calls = [
             call
             for call in mock_logger.warning.call_args_list
@@ -194,6 +196,9 @@ class TestOutputCompanyNameLookup:
         macro_result.report = "### EQUITY REGIME\n- Summary: Risk appetite is mixed."
         macro_result.region = "JAPAN"
         macro_result.status = "cached"
+        macro_result.generated_at = None
+        macro_result.llm_invoked = False
+        macro_result.prompt_used = None
 
         with (
             patch(
@@ -224,7 +229,10 @@ class TestOutputCompanyNameLookup:
                 )
             )
 
-        assert result == {"analysis_validity": {"ok": True}}
+        assert result["analysis_validity"] == {"ok": True}
+        assert result["macro_context_status"] == "cached"
+        assert result["macro_context_region"] == "JAPAN"
+        assert result["macro_context_injected_into_news"] is False
         context = captured_context["context"]
         assert context.macro_context_report == macro_result.report
         assert context.macro_context_region == "JAPAN"
@@ -392,7 +400,7 @@ class TestTracingMetadataFlow:
                 )
             )
 
-        assert result == {"analysis_validity": {"ok": True}}
+        assert result["analysis_validity"] == {"ok": True}
         assert (
             fake_graph.ainvoke.await_args.kwargs["config"]["metadata"]
             == tracing_metadata
@@ -436,7 +444,7 @@ class TestTracingMetadataFlow:
                 )
             )
 
-        assert result == {"analysis_validity": {"ok": True}}
+        assert result["analysis_validity"] == {"ok": True}
         mock_builder.assert_called_once_with(
             ticker="0005.HK",
             session_id="session-1",
@@ -446,6 +454,118 @@ class TestTracingMetadataFlow:
             "ticker": "0005.HK",
             "session_id": "session-1",
         }
+
+    def test_run_analysis_forwards_tracing_callbacks_to_macro_context(self):
+        from src.main import run_analysis
+        from src.ticker_utils import CompanyNameResult
+
+        fake_tracker = MagicMock()
+        fake_graph = MagicMock()
+        fake_graph.ainvoke = AsyncMock(return_value={})
+        tracing_callback = MagicMock()
+        macro_result = MagicMock(
+            report="brief",
+            region="GLOBAL",
+            status="generated",
+            generated_at="2026-04-18T00:00:00+00:00",
+            llm_invoked=True,
+            prompt_used={"agent_name": "Macro Context Analyst", "version": "1.0"},
+        )
+
+        with (
+            patch(
+                "src.ticker_utils.resolve_company_name",
+                new=AsyncMock(
+                    return_value=CompanyNameResult(
+                        name="HSBC Holdings",
+                        source="lookup",
+                        is_resolved=True,
+                    )
+                ),
+            ),
+            patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
+            patch(
+                "src.macro_context.get_macro_context",
+                new=AsyncMock(return_value=macro_result),
+            ) as get_macro_context,
+            patch("src.graph.create_trading_graph", return_value=fake_graph),
+            patch("src.token_tracker.get_tracker", return_value=fake_tracker),
+            patch("src.main.build_analysis_validity", return_value={"ok": True}),
+        ):
+            result = asyncio.run(
+                run_analysis(
+                    ticker="0005.HK",
+                    quick_mode=True,
+                    strict_mode=False,
+                    skip_charts=True,
+                    tracing_callbacks=[tracing_callback],
+                )
+            )
+
+        assert result["analysis_validity"] == {"ok": True}
+        assert get_macro_context.await_count == 1
+        assert get_macro_context.await_args.args[0] == "0005.HK"
+        assert get_macro_context.await_args.kwargs["callbacks"] == [tracing_callback]
+        assert result["prompts_used"]["macro_context_analyst"]["agent_name"] == (
+            "Macro Context Analyst"
+        )
+
+    def test_run_analysis_logs_macro_context_prefetch_complete(self):
+        from src.main import run_analysis
+        from src.ticker_utils import CompanyNameResult
+
+        fake_tracker = MagicMock()
+        fake_graph = MagicMock()
+        fake_graph.ainvoke = AsyncMock(return_value={})
+        macro_result = MagicMock(
+            report="brief",
+            region="AUSTRALIA",
+            status="generated",
+            generated_at="2026-04-19T13:49:10.364729+00:00",
+            llm_invoked=True,
+            prompt_used={"agent_name": "Macro Context Analyst", "version": "1.0"},
+        )
+
+        with (
+            patch("src.main.logger") as mock_logger,
+            patch(
+                "src.ticker_utils.resolve_company_name",
+                new=AsyncMock(
+                    return_value=CompanyNameResult(
+                        name="Ridley",
+                        source="lookup",
+                        is_resolved=True,
+                    )
+                ),
+            ),
+            patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
+            patch(
+                "src.macro_context.get_macro_context",
+                new=AsyncMock(return_value=macro_result),
+            ),
+            patch("src.graph.create_trading_graph", return_value=fake_graph),
+            patch("src.token_tracker.get_tracker", return_value=fake_tracker),
+            patch("src.main.build_analysis_validity", return_value={"ok": True}),
+        ):
+            asyncio.run(
+                run_analysis(
+                    ticker="RIC.AX",
+                    quick_mode=True,
+                    strict_mode=False,
+                    skip_charts=True,
+                )
+            )
+
+        mock_logger.info.assert_any_call(
+            "macro_context_prefetch_complete",
+            ticker="RIC.AX",
+            trade_date=ANY,
+            region="AUSTRALIA",
+            status="generated",
+            llm_invoked=True,
+            generated_at="2026-04-19T13:49:10.364729+00:00",
+            prompt_recorded=True,
+        )
 
 
 class TestToolAuditLogging:
@@ -1176,6 +1296,36 @@ class TestSavedDiagnostics:
         assert summary["quick_model"] == "gemini-3-flash-preview"
         assert summary["deep_model"] == "gemini-3-pro-preview"
 
+    def test_build_run_summary_includes_macro_context_metadata(self, monkeypatch):
+        from src.main import build_run_summary
+
+        class StubTracker:
+            def get_total_stats(self):
+                return {
+                    "failed_attempts": 0,
+                    "total_calls": 1,
+                }
+
+        monkeypatch.setattr("src.token_tracker.get_tracker", lambda: StubTracker())
+        monkeypatch.setattr("src.main.config.llm_provider", "google")
+
+        summary = build_run_summary(
+            {
+                "analysis_validity": {"publishable": True},
+                "macro_context_status": "generated_fallback",
+                "macro_context_region": "SEA",
+                "macro_context_report": "brief",
+                "macro_context_injected_into_news": True,
+            },
+            quick_mode=True,
+            article_requested=False,
+        )
+
+        assert summary["macro_context_status"] == "generated_fallback"
+        assert summary["macro_context_region"] == "SEA"
+        assert summary["macro_context_report_present"] is True
+        assert summary["macro_context_injected_into_news"] is True
+
     def test_save_results_includes_pre_screening_and_run_summary(
         self, tmp_path, monkeypatch
     ):
@@ -1231,6 +1381,219 @@ class TestSavedDiagnostics:
 
         assert payload["pre_screening_result"] == "PASS"
         assert payload["metadata"]["llm_provider"] == "google"
+
+    def test_save_results_includes_macro_context_metadata(self, tmp_path, monkeypatch):
+        from src.main import save_results_to_file
+
+        monkeypatch.setattr("src.main.config.results_dir", str(tmp_path))
+        monkeypatch.setattr("src.main.config.enable_memory", False)
+        monkeypatch.setattr("src.prompts.get_all_prompts", lambda: {})
+
+        class StubTracker:
+            def get_total_stats(self):
+                return {
+                    "failed_attempts": 0,
+                    "total_calls": 1,
+                    "total_agents": 1,
+                    "total_prompt_tokens": 10,
+                    "total_completion_tokens": 5,
+                    "total_tokens": 15,
+                    "total_cost_usd": 0.1,
+                    "session_start": "2026-03-14T00:00:00",
+                    "agents": {"Macro Context Analyst": {"calls": 1}},
+                    "failed_by_provider": {},
+                    "failed_by_kind": {},
+                }
+
+        monkeypatch.setattr("src.token_tracker.get_tracker", lambda: StubTracker())
+
+        result = {
+            "market_report": "ok",
+            "sentiment_report": "ok",
+            "news_report": "ok",
+            "fundamentals_report": "DATA_BLOCK",
+            "final_trade_decision": "BUY",
+            "pre_screening_result": "PASS",
+            "investment_debate_state": {"count": 1},
+            "analysis_validity": {"publishable": True},
+            "artifact_statuses": {},
+            "prompts_used": {
+                "macro_context_analyst": {
+                    "agent_name": "Macro Context Analyst",
+                    "version": "1.0",
+                    "execution_path": "pre_graph",
+                }
+            },
+            "run_summary": {
+                "quick_mode": True,
+                "tool_calls": 0,
+                "publishable": True,
+                "macro_context_status": "generated",
+                "macro_context_region": "JAPAN",
+                "macro_context_report_present": True,
+                "macro_context_injected_into_news": True,
+            },
+            "macro_context_llm_invoked": True,
+            "macro_context_generated_at": "2026-04-18T00:00:00+00:00",
+            "macro_context_injected_into_news": True,
+        }
+
+        with patch("src.main.logger") as mock_logger:
+            output_path = save_results_to_file(result, "7203.T", quick_mode=True)
+        payload = json.loads(output_path.read_text())
+
+        assert payload["macro_context"]["status"] == "generated"
+        assert payload["macro_context"]["region"] == "JAPAN"
+        assert payload["macro_context"]["report_present"] is True
+        assert payload["macro_context"]["injected_into_news"] is True
+        assert payload["macro_context"]["llm_invoked"] is True
+        assert payload["macro_context"]["cache_dir"] == str(
+            tmp_path / ".macro_context_cache"
+        )
+        assert (
+            payload["prompts_metadata"]["prompts_used"]["macro_context_analyst"][
+                "agent_name"
+            ]
+            == "Macro Context Analyst"
+        )
+        snapshot_calls = [
+            call
+            for call in mock_logger.info.call_args_list
+            if call.args and call.args[0] == "analysis_artifact_macro_snapshot"
+        ]
+        assert len(snapshot_calls) == 1
+        assert snapshot_calls[0].kwargs["ticker"] == "7203.T"
+        assert snapshot_calls[0].kwargs["has_macro_context_block"] is True
+        assert snapshot_calls[0].kwargs["has_run_summary_macro_fields"] is True
+        assert snapshot_calls[0].kwargs["has_macro_prompt_metadata"] is True
+        assert snapshot_calls[0].kwargs["has_macro_token_row"] is True
+
+    def test_save_results_prefers_direct_macro_context_fields(
+        self, tmp_path, monkeypatch
+    ):
+        from src.main import save_results_to_file
+
+        monkeypatch.setattr("src.main.config.results_dir", str(tmp_path))
+        monkeypatch.setattr("src.main.config.enable_memory", False)
+        monkeypatch.setattr("src.prompts.get_all_prompts", lambda: {})
+
+        class StubTracker:
+            def get_total_stats(self):
+                return {
+                    "failed_attempts": 0,
+                    "total_calls": 0,
+                    "total_agents": 0,
+                    "total_prompt_tokens": 0,
+                    "total_completion_tokens": 0,
+                    "total_tokens": 0,
+                    "total_cost_usd": 0.0,
+                    "session_start": "2026-03-14T00:00:00",
+                    "agents": {},
+                    "failed_by_provider": {},
+                    "failed_by_kind": {},
+                }
+
+        monkeypatch.setattr("src.token_tracker.get_tracker", lambda: StubTracker())
+
+        result = {
+            "market_report": "ok",
+            "sentiment_report": "ok",
+            "news_report": "ok",
+            "fundamentals_report": "DATA_BLOCK",
+            "final_trade_decision": "BUY",
+            "analysis_validity": {"publishable": True},
+            "artifact_statuses": {},
+            "run_summary": {
+                "quick_mode": True,
+                "tool_calls": 0,
+                "publishable": True,
+                "macro_context_status": "failed",
+                "macro_context_region": "GLOBAL",
+                "macro_context_report_present": False,
+                "macro_context_injected_into_news": False,
+            },
+            "macro_context_status": "generated",
+            "macro_context_region": "JAPAN",
+            "macro_context_report": "brief",
+            "macro_context_llm_invoked": True,
+            "macro_context_generated_at": "2026-04-18T00:00:00+00:00",
+            "macro_context_injected_into_news": True,
+        }
+
+        output_path = save_results_to_file(result, "7203.T", quick_mode=True)
+        payload = json.loads(output_path.read_text())
+
+        assert payload["macro_context"]["status"] == "generated"
+        assert payload["macro_context"]["region"] == "JAPAN"
+        assert payload["macro_context"]["report_present"] is True
+        assert payload["macro_context"]["injected_into_news"] is True
+        assert payload["macro_context"]["llm_invoked"] is True
+
+    def test_save_results_warns_on_macro_artifact_mismatch(self, tmp_path, monkeypatch):
+        from src.main import save_results_to_file
+
+        monkeypatch.setattr("src.main.config.results_dir", str(tmp_path))
+        monkeypatch.setattr("src.main.config.enable_memory", False)
+        monkeypatch.setattr("src.prompts.get_all_prompts", lambda: {})
+
+        class StubTracker:
+            def get_total_stats(self):
+                return {
+                    "failed_attempts": 0,
+                    "total_calls": 1,
+                    "total_agents": 0,
+                    "total_prompt_tokens": 10,
+                    "total_completion_tokens": 5,
+                    "total_tokens": 15,
+                    "total_cost_usd": 0.1,
+                    "session_start": "2026-03-14T00:00:00",
+                    "agents": {},
+                    "failed_by_provider": {},
+                    "failed_by_kind": {},
+                }
+
+        monkeypatch.setattr("src.token_tracker.get_tracker", lambda: StubTracker())
+
+        result = {
+            "market_report": "ok",
+            "sentiment_report": "ok",
+            "news_report": "ok",
+            "fundamentals_report": "DATA_BLOCK",
+            "final_trade_decision": "BUY",
+            "analysis_validity": {"publishable": True},
+            "artifact_statuses": {},
+            "run_summary": {
+                "quick_mode": True,
+                "tool_calls": 0,
+                "publishable": True,
+                "macro_context_status": "generated",
+                "macro_context_region": "JAPAN",
+                "macro_context_report_present": True,
+                "macro_context_injected_into_news": True,
+            },
+            "macro_context_status": "generated",
+            "macro_context_region": "JAPAN",
+            "macro_context_report": "brief",
+            "macro_context_llm_invoked": True,
+            "macro_context_generated_at": "2026-04-18T00:00:00+00:00",
+            "macro_context_injected_into_news": True,
+            "prompts_used": {},
+        }
+
+        with patch("src.main.logger") as mock_logger:
+            save_results_to_file(result, "7203.T", quick_mode=True)
+
+        mock_logger.warning.assert_any_call(
+            "analysis_artifact_macro_mismatch",
+            ticker="7203.T",
+            macro_expected=True,
+            macro_llm_invoked=True,
+            macro_context_injected_into_news=True,
+            has_macro_context_block=True,
+            has_run_summary_macro_fields=True,
+            has_macro_prompt_metadata=False,
+            has_macro_token_row=False,
+        )
 
     def test_save_results_uses_read_only_memory_stats_helper(
         self, tmp_path, monkeypatch
