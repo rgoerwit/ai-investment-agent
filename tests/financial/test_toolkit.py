@@ -595,6 +595,21 @@ class TestFundamentalAnalysis:
             assert "UNKN.XX" in result
             assert "Limited Data" in result or "Fundamental Search Results" in result
 
+    async def test_unresolved_identity_does_not_trigger_name_fallback(
+        self, mock_tavily
+    ):
+        with patch(
+            "src.tools.shared.extract_company_name_async", new_callable=AsyncMock
+        ) as mock_name:
+            mock_name.return_value = "UNKN.XX"
+
+            mock_tavily.return_value = "Weak result."
+
+            result = await toolkit.get_fundamental_analysis.ainvoke("UNKN.XX")
+
+            assert "Fallback Name Search" not in result
+            assert mock_tavily.await_count == 1
+
     async def test_adr_detection_nyse(self, mock_tavily):
         """Test detection of NYSE-listed ADRs (most common type)."""
         with patch(

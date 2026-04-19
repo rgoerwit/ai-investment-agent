@@ -174,6 +174,7 @@ Practical notes:
 
 - `--quick` is usually the right first-pass setting for screening or broad review.
 - `--output` is the cleanest way to get markdown plus chart assets in a stable location.
+- Analysis can prefetch a cached regional macro brief before the graph runs; it lives under `results/.macro_context_cache/` with a 12-hour TTL and is injected only into News Analyst as regime background.
 - Free-tier Gemini works, but it is slow for larger batches. Paid tiers mostly improve throughput and reduce retry friction.
 
 ## Screening Pipeline

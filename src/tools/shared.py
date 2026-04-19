@@ -7,7 +7,6 @@ from typing import Any
 import structlog
 
 from src.config import config
-from src.ticker_utils import normalize_company_name
 
 logger = structlog.get_logger(__name__)
 
@@ -119,20 +118,27 @@ async def fetch_with_timeout(coroutine, timeout_seconds=10, error_msg="Timeout")
         return None
 
 
-async def extract_company_name_async(ticker_obj) -> str:
-    """Lightweight company name extraction for tool calls."""
-    ticker_str = ticker_obj.ticker
+async def extract_company_name_async(ticker_or_obj) -> str:
+    """Resolve company name through the shared multi-source resolver."""
+    if not isinstance(ticker_or_obj, str):
+        info = getattr(ticker_or_obj, "info", None)
+        if isinstance(info, dict):
+            from src.ticker_utils import normalize_company_name
+
+            candidate = info.get("longName") or info.get("shortName")
+            if isinstance(candidate, str) and candidate.strip():
+                return normalize_company_name(candidate.strip())
+
+    ticker_str = (
+        ticker_or_obj
+        if isinstance(ticker_or_obj, str)
+        else getattr(ticker_or_obj, "ticker", str(ticker_or_obj))
+    )
     try:
-        info = await fetch_with_timeout(
-            asyncio.to_thread(lambda: ticker_obj.info),
-            timeout_seconds=5,
-            error_msg="Name Extraction",
-        )
-        if info:
-            long_name = info.get("longName") or info.get("shortName")
-            if long_name:
-                return normalize_company_name(long_name)
-        return ticker_str
+        from src.ticker_utils import resolve_company_name
+
+        result = await resolve_company_name(ticker_str)
+        return result.name if result.is_resolved else ticker_str
     except Exception:
         return ticker_str
 

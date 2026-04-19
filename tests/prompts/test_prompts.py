@@ -594,8 +594,14 @@ class TestNewsAnalystPromptV5:
     def test_macro_detection_in_critical_outputs(self, prompt):
         assert "macro_detection" in prompt["metadata"]["critical_outputs"]
 
-    def test_macro_event_context_section_present(self, prompt):
-        assert "MACRO EVENT CONTEXT" in prompt["system_message"]
+    def test_macro_context_handling_section_present(self, prompt):
+        msg = prompt["system_message"]
+        assert "MACRO CONTEXT HANDLING" in msg
+        assert "### PORTFOLIO MACRO EVENT" in msg
+        assert "### REGIONAL MACRO CONTEXT" in msg
+
+    def test_macro_tool_signature_is_current(self, prompt):
+        assert "get_macroeconomic_news(trade_date, region)" in prompt["system_message"]
 
     def test_all_11_event_types_documented(self, prompt):
         """Ensure all event types from taxonomy appear in prompt."""
@@ -630,3 +636,20 @@ class TestNewsAnalystPromptV5:
         assert "block trade" in msg
         assert "PDMR" in msg
         assert "股權披露" in msg
+
+
+class TestMacroContextPrompt:
+    def test_macro_context_prompt_exists(self):
+        path = Path("prompts/macro_context_analyst.json")
+        prompt = json.loads(path.read_text())
+        assert prompt["agent_key"] == "macro_context_analyst"
+        assert prompt["agent_name"] == "Macro Context Analyst"
+        assert prompt["requires_tools"] is False
+
+    def test_macro_context_prompt_has_required_sections(self):
+        prompt = json.loads(Path("prompts/macro_context_analyst.json").read_text())
+        msg = prompt["system_message"]
+        assert "RATES & LIQUIDITY" in msg
+        assert "FX & FLOWS" in msg
+        assert "REGIME SUMMARY" in msg
+        assert 'published="YYYY-MM-DD"' in msg

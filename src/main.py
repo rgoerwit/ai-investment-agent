@@ -1342,6 +1342,22 @@ async def run_analysis(
         # Fetch benchmark context once (non-blocking) before graph starts.
         # Prepended to the HumanMessage so every agent receives it as session context.
         market_context = await _fetch_market_context(ticker, real_date)
+        macro_context_report = ""
+        macro_context_region = "GLOBAL"
+        macro_context_status = "failed"
+        try:
+            from src.macro_context import get_macro_context
+
+            macro_context = await get_macro_context(ticker, real_date)
+            macro_context_report = macro_context.report
+            macro_context_region = macro_context.region
+            macro_context_status = macro_context.status
+        except Exception as exc:
+            logger.warning(
+                "macro_context_prefetch_failed",
+                ticker=ticker,
+                error=str(exc),
+            )
 
         session_id = _resolve_langfuse_session_id(
             session_id or f"{ticker}-{real_date}-{uuid.uuid4().hex[:8]}"
@@ -1441,6 +1457,9 @@ async def run_analysis(
             enable_memory=config.enable_memory,
             max_debate_rounds=1 if quick_mode else 2,
             max_risk_rounds=1,
+            macro_context_report=macro_context_report,
+            macro_context_region=macro_context_region,
+            macro_context_status=macro_context_status,
         )
 
         logger.info(

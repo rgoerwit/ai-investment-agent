@@ -13,6 +13,7 @@ from src.tooling.runtime import TOOL_SERVICE, ToolInvocation
 logger = structlog.get_logger(__name__)
 
 _TOOL_OUTPUT_MAX_CHARS = 20_000
+_TOOL_CALL_TIMEOUT_SECONDS = 120
 
 
 def _cap_tool_output(content: str, tool_name: str) -> str:
@@ -108,6 +109,13 @@ def create_agent_tool_node(tools: list, agent_key: str):
                 f"Error: Unknown tool '{tool_name}'",
             )
 
+        logger.info(
+            "tool_call_start",
+            agent=agent_key,
+            tool=tool_name,
+            ticker=tool_args.get("ticker", tool_args.get("symbol", "")),
+        )
+
         try:
             invocation = ToolInvocation(
                 name=tool_name,
@@ -115,9 +123,17 @@ def create_agent_tool_node(tools: list, agent_key: str):
                 source="toolnode",
                 agent_key=agent_key,
             )
-            tool_result = await TOOL_SERVICE.execute(
-                invocation,
-                runner=lambda args, tool=tool_fn: tool.ainvoke(args),
+            tool_result = await asyncio.wait_for(
+                TOOL_SERVICE.execute(
+                    invocation,
+                    runner=lambda args, tool=tool_fn: tool.ainvoke(args),
+                ),
+                timeout=_TOOL_CALL_TIMEOUT_SECONDS,
+            )
+            logger.info(
+                "tool_call_complete",
+                agent=agent_key,
+                tool=tool_name,
             )
             return _success_message(
                 tool_name,
@@ -126,7 +142,26 @@ def create_agent_tool_node(tools: list, agent_key: str):
                 blocked=tool_result.blocked,
                 findings=tool_result.findings,
             )
+        except asyncio.TimeoutError:
+            logger.error(
+                "tool_call_timeout",
+                agent=agent_key,
+                tool=tool_name,
+                timeout_seconds=_TOOL_CALL_TIMEOUT_SECONDS,
+            )
+            return _error_message(
+                tool_name,
+                tool_id,
+                f"Error: Tool '{tool_name}' timed out after"
+                f" {_TOOL_CALL_TIMEOUT_SECONDS}s",
+            )
         except Exception as exc:
+            logger.error(
+                "tool_call_error",
+                agent=agent_key,
+                tool=tool_name,
+                error=str(exc),
+            )
             return _error_message(tool_name, tool_id, f"Error: {exc}")
 
     async def agent_tool_node(state: AgentState, config) -> dict:

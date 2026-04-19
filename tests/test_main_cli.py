@@ -176,6 +176,60 @@ class TestOutputCompanyNameLookup:
             "TRUE.ST",
         ]
 
+    def test_run_analysis_prefetches_macro_context_into_trading_context(self):
+        from src.main import run_analysis
+        from src.ticker_utils import CompanyNameResult
+
+        fake_tracker = MagicMock()
+        captured_context = {}
+
+        async def _capture_ainvoke(_state, *, config):
+            captured_context["context"] = config["configurable"]["context"]
+            return {}
+
+        fake_graph = MagicMock()
+        fake_graph.ainvoke = AsyncMock(side_effect=_capture_ainvoke)
+
+        macro_result = MagicMock()
+        macro_result.report = "### EQUITY REGIME\n- Summary: Risk appetite is mixed."
+        macro_result.region = "JAPAN"
+        macro_result.status = "cached"
+
+        with (
+            patch(
+                "src.ticker_utils.resolve_company_name",
+                new=AsyncMock(
+                    return_value=CompanyNameResult(
+                        name="Toyota Motor",
+                        source="test",
+                        is_resolved=True,
+                    )
+                ),
+            ),
+            patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
+            patch(
+                "src.macro_context.get_macro_context",
+                new=AsyncMock(return_value=macro_result),
+            ),
+            patch("src.graph.create_trading_graph", return_value=fake_graph),
+            patch("src.token_tracker.get_tracker", return_value=fake_tracker),
+            patch("src.main.build_analysis_validity", return_value={"ok": True}),
+        ):
+            result = asyncio.run(
+                run_analysis(
+                    ticker="7203.T",
+                    quick_mode=True,
+                    strict_mode=False,
+                    skip_charts=True,
+                )
+            )
+
+        assert result == {"analysis_validity": {"ok": True}}
+        context = captured_context["context"]
+        assert context.macro_context_report == macro_result.report
+        assert context.macro_context_region == "JAPAN"
+        assert context.macro_context_status == "cached"
+
     def test_strict_and_quick_composable(self):
         """--strict --quick can be combined without conflict."""
         from src.main import build_arg_parser

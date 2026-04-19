@@ -320,6 +320,90 @@ class IbkrClient:
             )
             return False
 
+    def _call_iserver_accounts(self) -> bool:
+        """Best-effort /iserver/accounts priming for market-data endpoints."""
+        self._ensure_connected()
+        for attr_name in (
+            "receive_brokerage_accounts",
+            "accounts",
+            "iserver_accounts",
+        ):
+            method = getattr(self._ibind_client, attr_name, None)
+            if callable(method):
+                try:
+                    self._throttle.call(method)
+                    return True
+                except Exception as exc:
+                    logger.debug(
+                        "iserver_accounts_prime_failed",
+                        method=attr_name,
+                        error=str(exc),
+                    )
+                    return False
+        logger.debug("iserver_accounts_prime_unavailable")
+        return False
+
+    def _get_marketdata_snapshot_method(self):
+        for attr_name in (
+            "live_marketdata_snapshot",
+            "marketdata_snapshot",
+            "market_data_snapshot",
+        ):
+            method = getattr(self._ibind_client, attr_name, None)
+            if callable(method):
+                return method
+        return None
+
+    def get_marketdata_snapshot(
+        self,
+        conid: int,
+        *,
+        fields: str = "31,55,84,86,87,6004,6008,6509,7051",
+        compete: bool = False,
+    ) -> dict:
+        """
+        Fetch a single-contract market data snapshot.
+
+        Uses the documented /iserver/accounts preflight plus the snapshot
+        pre-flight pattern required by the IBKR Client Portal API.
+        """
+        self._ensure_connected()
+
+        if not self.initialize_brokerage_session(compete=compete):
+            logger.debug(
+                "marketdata_snapshot_skipped_no_session",
+                conid=conid,
+                compete=compete,
+            )
+            return {}
+
+        self._call_iserver_accounts()
+
+        snapshot_method = self._get_marketdata_snapshot_method()
+        if snapshot_method is None:
+            logger.debug("marketdata_snapshot_method_unavailable", conid=conid)
+            return {}
+
+        field_ids = [field.strip() for field in fields.split(",") if field.strip()]
+
+        def _request():
+            return snapshot_method(conids=[str(conid)], fields=field_ids)
+
+        try:
+            result = self._throttle.call_with_warmup(
+                preflight=_request,
+                request=_request,
+                warm_up_secs=0.5,
+                label="marketdata_snapshot",
+            )
+            data = result.data if hasattr(result, "data") else result
+            if isinstance(data, list) and data and isinstance(data[0], dict):
+                return data[0]
+            return {}
+        except Exception as exc:
+            logger.debug("marketdata_snapshot_failed", conid=conid, error=str(exc))
+            return {}
+
     def get_watchlist(self, name_hint: str = "default watchlist") -> list[dict] | None:
         """
         Fetch watchlist rows from IBKR.
@@ -476,16 +560,20 @@ class IbkrClient:
             logger.warning("live_orders_fetch_failed", error=str(e))
             return []
 
-    def get_contract_info(self, conid: int) -> dict:
+    def get_contract_info(self, conid: int, *, compete: bool = True) -> dict:
         """
         Get contract details (symbol, exchange, currency) for a given conid.
 
         Used to resolve watchlist conids to yfinance tickers.
 
+        Args:
+            conid: IBKR contract identifier.
+            compete: Whether this call may displace another brokerage session.
+
         Returns raw contract info dict, or {} on failure.
         """
         self._ensure_connected()
-        self.initialize_brokerage_session()
+        self.initialize_brokerage_session(compete=compete)
         try:
             result = self._throttle.call(
                 lambda: self._ibind_client.contract_information_by_conid(str(conid))

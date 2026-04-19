@@ -188,6 +188,81 @@ def _build_retry_invocation_messages(
     ]
 
 
+def _build_portfolio_macro_event_context(ticker: str) -> str:
+    """Return the existing portfolio-detected macro-event block for News Analyst."""
+    try:
+        from src.memory import create_macro_events_store
+        from src.ticker_policy import get_ticker_suffix
+
+        macro_store = create_macro_events_store()
+        if not macro_store.available:
+            return ""
+
+        region = get_ticker_suffix(ticker)
+        events = macro_store.get_active_events(region_filter=region or None)
+        if not events:
+            return ""
+
+        lines = ["### PORTFOLIO MACRO EVENT"]
+        for event in events[:2]:
+            lines.append(
+                f"- {event.event_date} | {event.impact} | "
+                f"{event.scope}: {event.news_headline}"
+            )
+            if event.news_detail:
+                lines.append(f"  {event.news_detail}")
+        lines.append(
+            "Instruction: Determine if this equity is an "
+            "'Innocent Bystander' (dropped due to the macro event, "
+            "fundamentals intact -> OPPORTUNITY) or "
+            "'Structurally Impaired' (business model affected -> EXIT). "
+            "Ignore if event is inapplicable to this region/sector."
+        )
+        logger.info("macro_events_injected", ticker=ticker, count=len(events[:2]))
+        return "\n".join(lines)
+    except Exception as exc:
+        logger.debug("macro_events_injection_failed", ticker=ticker, error=str(exc))
+        return ""
+
+
+def _build_regional_macro_context_block(context: Any | None, ticker: str) -> str:
+    """Return the cached regional macro brief block for News Analyst."""
+    macro_report = getattr(context, "macro_context_report", "") if context else ""
+    if not macro_report:
+        return ""
+
+    macro_region = getattr(context, "macro_context_region", "GLOBAL") or "GLOBAL"
+    macro_status = getattr(context, "macro_context_status", "disabled") or "disabled"
+    logger.info(
+        "macro_context_injected",
+        ticker=ticker,
+        region=macro_region,
+        status=macro_status,
+    )
+    return "### REGIONAL MACRO CONTEXT\n" f"Region: {macro_region}\n" f"{macro_report}"
+
+
+def _build_news_macro_extra_context(ticker: str, context: Any | None) -> str:
+    """Build deterministic macro context for News Analyst.
+
+    Keep discrete portfolio shocks first and broader regional regime context
+    second so the prompt can de-duplicate them rather than treating them as two
+    unrelated signals.
+    """
+    blocks = []
+    portfolio_block = _build_portfolio_macro_event_context(ticker)
+    if portfolio_block:
+        blocks.append(portfolio_block)
+
+    regional_block = _build_regional_macro_context_block(context, ticker)
+    if regional_block:
+        blocks.append(regional_block)
+
+    if not blocks:
+        return ""
+    return "\n\n" + "\n\n".join(blocks) + "\n"
+
+
 def create_analyst_node(
     llm,
     agent_key: str,
@@ -348,40 +423,7 @@ def create_analyst_node(
                     )
 
             if agent_key == "news_analyst":
-                try:
-                    from src.memory import create_macro_events_store
-                    from src.ticker_policy import get_ticker_suffix
-
-                    macro_store = create_macro_events_store()
-                    if macro_store.available:
-                        region = get_ticker_suffix(ticker)
-                        events = macro_store.get_active_events(
-                            region_filter=region or None
-                        )
-                        if events:
-                            lines = ["### MACRO EVENT CONTEXT (portfolio-detected)"]
-                            for event in events[:2]:
-                                lines.append(
-                                    f"- {event.event_date} | {event.impact} | "
-                                    f"{event.scope}: {event.news_headline}"
-                                )
-                                if event.news_detail:
-                                    lines.append(f"  {event.news_detail}")
-                            lines.append(
-                                "Instruction: Determine if this equity is an "
-                                "'Innocent Bystander' (dropped due to the macro event, "
-                                "fundamentals intact -> OPPORTUNITY) or "
-                                "'Structurally Impaired' (business model affected -> EXIT). "
-                                "Ignore if event is inapplicable to this region/sector."
-                            )
-                            extra_context += "\n\n" + "\n".join(lines) + "\n"
-                            logger.info(
-                                "macro_events_injected",
-                                ticker=ticker,
-                                count=len(events[:2]),
-                            )
-                except Exception as exc:
-                    logger.debug("macro_events_injection_failed", error=str(exc))
+                extra_context += _build_news_macro_extra_context(ticker, context)
 
             full_system_instruction = (
                 f"{agent_prompt.system_message}\n\n"

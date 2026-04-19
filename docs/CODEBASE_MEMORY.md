@@ -1,6 +1,6 @@
 # Codebase Memory
 
-Last updated: 2026-03-15
+Last updated: 2026-04-18
 
 This file is a durable orientation note, not the source of truth.
 Use it to get context quickly, then verify against the live tree.
@@ -120,6 +120,11 @@ It parses the fundamentals `DATA_BLOCK` and drives auto-reject or risk-penalty o
 
 `src/memory.py` provides ticker-isolated ChromaDB memory plus macro/lesson retrieval.
 Memory outages should degrade analysis, not abort it.
+
+Macro surfaces are intentionally split:
+
+- `MacroEventsStore` holds sparse portfolio-detected discrete shocks
+- `src/macro_context.py` holds a short cached regional regime brief under `results/.macro_context_cache/`
 
 ### Reporting
 

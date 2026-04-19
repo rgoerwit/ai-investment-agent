@@ -1,6 +1,6 @@
 # Runtime Model
 
-Last updated: 2026-04-08
+Last updated: 2026-04-18
 
 This document defines the canonical runtime/control-plane model for the operator workbench roadmap.
 It is a design contract for future storage and orchestration work, not an implementation description.
@@ -26,6 +26,7 @@ Freeze the runtime state model before storage, scheduling, and observability wor
 | Cache/lock compatibility artifact | `.{results_dir}.latest_analyses_index.lock` | `src.ibkr.reconciler._analysis_index_lock()` | Reconciler incremental/full index writers | This is a concurrency artifact, not a migration data source. |
 | Dashboard refresh jobs | `runtime/ibkr_dashboard/jobs.sqlite` | `src.web.ibkr_dashboard.job_store.RefreshJobStore` | Dashboard API/UI, dashboard worker | Separate SQLite store today. |
 | Pipeline freshness marker | `results/.pipeline_last_run.json` | `scripts/run_pipeline.sh` | `src.ibkr.screening_freshness.load_screening_freshness()` | Marker-only programmatic API today. |
+| Regional macro context cache | `results/.macro_context_cache/*.json` | `src.macro_context.get_macro_context()` | `src.main.run_analysis()` prefetch path, News Analyst via `TradingContext` | Pre-graph cached regime brief; distinct from `MacroEventsStore`. |
 | Token/cost data | In-memory singleton in `src.token_tracker.py` | `src.token_tracker.TokenTracker` | `src.main`, report/logging paths | No durable persistence today. |
 | Observability traces | SDK-managed Langfuse root trace context via `src.observability.py` | Workflow entrypoints such as `src.main.run_with_args()` plus nested LangChain callbacks and explicit tool observations | External Langfuse UI, logs, article/retrospective flows, and operator diagnostics | Langfuse is opt-in per run; when disabled the app uses a no-op observability runtime and skips tracing overhead. |
 | Eval run identity | Capture manifests under `evals/captures/...` | `src.eval.baseline_capture` | Eval/capture tooling | Current eval `run_id` is a separate concept from future pipeline run identity. |
@@ -63,7 +64,19 @@ Current trace contract:
   - `deep_model`
   - `quick_model`
   - `prompt_source`
-  - `release`
+- `release`
+
+## Trading Context Notes
+
+`TradingContext` remains the graph-config seam for non-artifact runtime context.
+It now also carries optional pre-graph macro fields:
+
+- `macro_context_report`
+- `macro_context_region`
+- `macro_context_status`
+
+These fields are advisory context only. They do not change graph topology,
+barrier semantics, or artifact validity rules.
 
 Batch/session note:
 

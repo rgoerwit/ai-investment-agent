@@ -757,18 +757,10 @@ def _characterize_macro_event(
     # News search
     headline, detail = "unknown", ""
     try:
-        _region_map = {
-            "T": "Japan",
-            "HK": "Hong Kong",
-            "KS": "Korea",
-            "TW": "Taiwan",
-            "L": "UK",
-            "DE": "Germany",
-            "AS": "Netherlands",
-            "PA": "France",
-        }
+        from src.macro_regions import display_region_for_suffix
+
         region_hint = (
-            _region_map.get(top_region.lstrip("."), "") if scope == "REGIONAL" else ""
+            display_region_for_suffix(top_region) if scope == "REGIONAL" else ""
         )
         query = f"stock market shock {event_date} {region_hint} cause reason".strip()
         result = search_tavily_sync_inspected(query, profile="news_basic")

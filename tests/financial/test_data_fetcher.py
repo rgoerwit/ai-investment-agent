@@ -10,6 +10,7 @@ Verifies:
 
 import asyncio
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -468,6 +469,148 @@ class TestPanicMode:
         # The mock returns these fields, and they should appear in the final data
         assert data.get("returnOnEquity") == 0.18
         assert data.get("returnOnAssets") == 0.12
+
+    @pytest.mark.asyncio
+    async def test_ibkr_rescue_skipped_for_healthy_fetch(self, fetcher):
+        fetcher._fetch_all_sources_parallel = AsyncMock(
+            return_value={
+                "yfinance": {
+                    "symbol": "3600.HK",
+                    "currentPrice": 4.56,
+                    "currency": "HKD",
+                    "longName": "Modern Dental Group",
+                    "sector": "Health Care",
+                    "industry": "Medical Devices",
+                    "marketCap": 1_000_000_000,
+                }
+            }
+        )
+        fetcher._fetch_tavily_gaps = AsyncMock(return_value={})
+        fetcher._probe_ibkr_security = AsyncMock()
+
+        result = await fetcher.get_financial_metrics("3600.HK")
+
+        assert result["currentPrice"] == 4.56
+        fetcher._probe_ibkr_security.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_ibkr_rescue_can_retry_with_corrected_ticker_before_tavily(
+        self, fetcher
+    ):
+        probe = SimpleNamespace(
+            identity_confidence="VERIFIED",
+            resolved_yf_ticker="BEC.SI",
+            company_name="BRC Asia",
+            currency="SGD",
+            market_data_availability="R",
+            last_price=2.34,
+            error_kind=None,
+        )
+
+        fetcher._fetch_all_sources_parallel = AsyncMock(
+            side_effect=[
+                {"yfinance": None, "yahooquery": None, "fmp": None},
+                {
+                    "yfinance": {
+                        "symbol": "BEC.SI",
+                        "currentPrice": 2.34,
+                        "currency": "SGD",
+                        "longName": "BRC Asia",
+                        "sector": "Industrials",
+                    }
+                },
+            ]
+        )
+        fetcher._fetch_tavily_gaps = AsyncMock(return_value={})
+        fetcher._probe_ibkr_security = AsyncMock(return_value=probe)
+
+        result = await fetcher.get_financial_metrics("BEC.SG")
+
+        assert result["symbol"] == "BEC.SI"
+        assert result["currency"] == "SGD"
+        assert result["currentPrice"] == 2.34
+        assert result["longName"] == "BRC Asia"
+        assert result["_ibkr_identity_confidence"] == "VERIFIED"
+        fetcher._probe_ibkr_security.assert_awaited_once_with("BEC.SG")
+        assert fetcher._fetch_all_sources_parallel.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_ibkr_rescue_does_not_override_existing_statement_fields(
+        self, fetcher
+    ):
+        probe = SimpleNamespace(
+            identity_confidence="VERIFIED",
+            resolved_yf_ticker="3600.HK",
+            company_name="Modern Dental Group",
+            currency="HKD",
+            market_data_availability="R",
+            last_price=4.56,
+            error_kind=None,
+        )
+        fetcher._fetch_all_sources_parallel = AsyncMock(
+            return_value={
+                "yfinance": {
+                    "symbol": "3600.HK",
+                    "currency": "HKD",
+                    "operatingCashflow": 123456789,
+                }
+            }
+        )
+        fetcher._fetch_tavily_gaps = AsyncMock(return_value={})
+        fetcher._probe_ibkr_security = AsyncMock(return_value=probe)
+
+        result = await fetcher.get_financial_metrics("3600.HK")
+
+        assert result["operatingCashflow"] == 123456789
+        assert result["currentPrice"] == 4.56
+
+    @pytest.mark.asyncio
+    async def test_ibkr_rescue_triggered_on_identity_weak(self, fetcher):
+        probe = SimpleNamespace(
+            identity_confidence="UNVERIFIED",
+            resolved_yf_ticker=None,
+            company_name=None,
+            currency=None,
+            market_data_availability=None,
+            last_price=None,
+            error_kind="NOT_CONFIGURED",
+        )
+        fetcher._fetch_all_sources_parallel = AsyncMock(
+            return_value={
+                "yfinance": {"symbol": "BEC.SG", "operatingCashflow": 99_000_000}
+            }
+        )
+        fetcher._fetch_tavily_gaps = AsyncMock(return_value={})
+        fetcher._probe_ibkr_security = AsyncMock(return_value=probe)
+
+        await fetcher.get_financial_metrics("BEC.SG")
+
+        fetcher._probe_ibkr_security.assert_awaited_once_with("BEC.SG")
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_ibkr_probe_sets_metadata_without_retry(self, fetcher):
+        probe = SimpleNamespace(
+            identity_confidence="AMBIGUOUS",
+            resolved_yf_ticker=None,
+            company_name=None,
+            currency=None,
+            market_data_availability=None,
+            last_price=None,
+            error_kind="AMBIGUOUS",
+        )
+        fetcher._fetch_all_sources_parallel = AsyncMock(
+            return_value={
+                "yfinance": {"symbol": "BEC.SG", "operatingCashflow": 99_000_000}
+            }
+        )
+        fetcher._fetch_tavily_gaps = AsyncMock(return_value={})
+        fetcher._probe_ibkr_security = AsyncMock(return_value=probe)
+
+        result = await fetcher.get_financial_metrics("BEC.SG")
+
+        assert result["_ibkr_identity_confidence"] == "AMBIGUOUS"
+        assert result["_ibkr_probe_error_kind"] == "AMBIGUOUS"
+        assert fetcher._fetch_all_sources_parallel.await_count == 1
 
     @pytest.mark.asyncio
     async def test_dangerous_fields_filtering(self, fetcher):

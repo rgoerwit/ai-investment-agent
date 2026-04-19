@@ -1,5 +1,5 @@
 """
-Tests for agent tool node filtering to prevent cross-agent tool execution.
+Tests for agent tool node filtering, timeout safety, and cross-agent isolation.
 
 Critical Bug Context (Jan 2026):
 When multiple agents call the same tool (e.g., get_news), the create_agent_tool_node
@@ -498,3 +498,170 @@ class TestAllAgentToolCombinations:
             assert result == {
                 "messages": []
             }, f"{agent_key} tool node accepted wrong agent's message"
+
+
+class TestToolCallTimeout:
+    """Failsafe timeout in _execute_one prevents indefinite hangs.
+
+    Context (Apr 2026): Foreign Language Analyst's 5 concurrent
+    search_foreign_sources calls hung indefinitely on RIC.AX because
+    asyncio.gather in tool_nodes.py had no timeout. Individual tool
+    timeouts (Tavily 30s, DDG 8s) failed to fire when the event loop
+    was blocked. The fix wraps each tool invocation in asyncio.wait_for
+    with a failsafe timeout.
+    """
+
+    def _build_state(self, agent_key, tool_calls):
+        return {
+            "messages": [
+                HumanMessage(content="Analyze"),
+                AIMessage(name=agent_key, content="", tool_calls=tool_calls),
+            ]
+        }
+
+    @pytest.mark.asyncio
+    async def test_tool_timeout_returns_error_message(self, monkeypatch):
+        """Tool exceeding timeout returns error ToolMessage instead of hanging."""
+        import src.graph.tool_nodes as tn_mod
+
+        monkeypatch.setattr(tn_mod, "_TOOL_CALL_TIMEOUT_SECONDS", 0.2)
+
+        tool = MagicMock()
+        tool.name = "slow_tool"
+
+        async def _hang(_args):
+            await asyncio.sleep(10)
+            return "unreachable"
+
+        tool.ainvoke = AsyncMock(side_effect=_hang)
+
+        node = create_agent_tool_node([tool], "test_agent")
+        state = self._build_state(
+            "test_agent",
+            [{"name": "slow_tool", "args": {}, "id": "t1", "type": "tool_call"}],
+        )
+
+        result = await node(state, {"configurable": {}})
+
+        assert len(result["messages"]) == 1
+        msg = result["messages"][0]
+        assert isinstance(msg, ToolMessage)
+        assert msg.status == "error"
+        assert "timed out" in msg.content
+
+    @pytest.mark.asyncio
+    async def test_normal_tool_unaffected_by_timeout(self):
+        """Tools completing within timeout work normally."""
+        tool = MagicMock()
+        tool.name = "fast_tool"
+        tool.ainvoke = AsyncMock(return_value="fast result")
+
+        node = create_agent_tool_node([tool], "test_agent")
+        state = self._build_state(
+            "test_agent",
+            [{"name": "fast_tool", "args": {}, "id": "t1", "type": "tool_call"}],
+        )
+
+        result = await node(state, {"configurable": {}})
+
+        assert len(result["messages"]) == 1
+        assert result["messages"][0].content == "fast result"
+        assert result["messages"][0].status != "error"
+
+    @pytest.mark.asyncio
+    async def test_timeout_does_not_block_other_tools(self, monkeypatch):
+        """One slow tool timing out doesn't block fast parallel tools."""
+        import src.graph.tool_nodes as tn_mod
+
+        monkeypatch.setattr(tn_mod, "_TOOL_CALL_TIMEOUT_SECONDS", 0.2)
+
+        fast_tool = MagicMock()
+        fast_tool.name = "fast_tool"
+        fast_tool.ainvoke = AsyncMock(return_value="fast result")
+
+        slow_tool = MagicMock()
+        slow_tool.name = "slow_tool"
+
+        async def _hang(_args):
+            await asyncio.sleep(10)
+
+        slow_tool.ainvoke = AsyncMock(side_effect=_hang)
+
+        node = create_agent_tool_node([fast_tool, slow_tool], "test_agent")
+        state = self._build_state(
+            "test_agent",
+            [
+                {"name": "fast_tool", "args": {}, "id": "t1", "type": "tool_call"},
+                {"name": "slow_tool", "args": {}, "id": "t2", "type": "tool_call"},
+            ],
+        )
+
+        start = time.perf_counter()
+        result = await node(state, {"configurable": {}})
+        elapsed = time.perf_counter() - start
+
+        assert len(result["messages"]) == 2
+        # Fast tool succeeds
+        fast_msg = next(m for m in result["messages"] if m.tool_call_id == "t1")
+        assert fast_msg.content == "fast result"
+        # Slow tool times out
+        slow_msg = next(m for m in result["messages"] if m.tool_call_id == "t2")
+        assert slow_msg.status == "error"
+        assert "timed out" in slow_msg.content
+        # Total time bounded by timeout, not by sleep(10)
+        assert elapsed < 1.0
+
+    @pytest.mark.asyncio
+    async def test_tool_exception_still_caught(self):
+        """Regular exceptions (not timeout) still produce error ToolMessage."""
+        tool = MagicMock()
+        tool.name = "broken_tool"
+        tool.ainvoke = AsyncMock(side_effect=ValueError("bad input"))
+
+        node = create_agent_tool_node([tool], "test_agent")
+        state = self._build_state(
+            "test_agent",
+            [{"name": "broken_tool", "args": {}, "id": "t1", "type": "tool_call"}],
+        )
+
+        result = await node(state, {"configurable": {}})
+
+        assert len(result["messages"]) == 1
+        msg = result["messages"][0]
+        assert msg.status == "error"
+        assert "bad input" in msg.content
+
+    @pytest.mark.asyncio
+    async def test_timeout_logging(self, monkeypatch, caplog):
+        """Timeout produces tool_call_timeout log entry with tool name."""
+        import src.graph.tool_nodes as tn_mod
+
+        monkeypatch.setattr(tn_mod, "_TOOL_CALL_TIMEOUT_SECONDS", 0.1)
+
+        tool = MagicMock()
+        tool.name = "hanging_tool"
+
+        async def _hang(_args):
+            await asyncio.sleep(10)
+
+        tool.ainvoke = AsyncMock(side_effect=_hang)
+
+        node = create_agent_tool_node([tool], "test_agent")
+        state = self._build_state(
+            "test_agent",
+            [
+                {
+                    "name": "hanging_tool",
+                    "args": {"ticker": "RIC.AX"},
+                    "id": "t1",
+                    "type": "tool_call",
+                }
+            ],
+        )
+
+        with caplog.at_level("ERROR"):
+            await node(state, {"configurable": {}})
+
+        log_text = caplog.text
+        assert "tool_call_timeout" in log_text
+        assert "hanging_tool" in log_text

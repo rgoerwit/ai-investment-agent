@@ -4,7 +4,6 @@ import asyncio
 from typing import Annotated
 
 import structlog
-import yfinance as yf
 from langchain_core.tools import tool
 
 from src.stocktwits_api import StockTwitsAPI
@@ -36,8 +35,10 @@ async def get_news(
 
     try:
         normalized_symbol = normalize_ticker(ticker)
-        ticker_obj = yf.Ticker(normalized_symbol)
-        company_name = await shared.extract_company_name_async(ticker_obj)
+        company_name = await shared.extract_company_name_async(normalized_symbol)
+        company_resolved = company_name != normalized_symbol
+        query_anchor = f'"{company_name}"' if company_resolved else ticker
+        display_name = company_name if company_resolved else ticker
 
         local_source_hints = {
             ".KS": "site:pulsenews.co.kr OR site:koreatimes.co.kr OR site:koreaherald.com OR site:mk.co.kr",
@@ -56,9 +57,9 @@ async def get_news(
         results = []
 
         general_query = (
-            f'"{company_name}" {search_query}'
+            f"{query_anchor} {search_query}"
             if search_query
-            else f'"{company_name}" (earnings OR merger OR acquisition OR regulatory)'
+            else f"{query_anchor} (earnings OR merger OR acquisition OR regulatory)"
         )
         general_result = await shared._tavily_search_with_timeout(
             {"query": general_query}
@@ -70,7 +71,7 @@ async def get_news(
 
         if local_hint and not search_query:
             local_query = (
-                f'"{company_name}" {local_hint} (earnings OR guidance OR strategy)'
+                f"{query_anchor} {local_hint} (earnings OR guidance OR strategy)"
             )
             local_result = await shared._tavily_search_with_timeout(
                 {"query": local_query}
@@ -85,9 +86,9 @@ async def get_news(
                     )
 
         if not results:
-            return f"No news found for {company_name}."
+            return f"No news found for {display_name}."
 
-        return f"News Results for {company_name}:\n\n" + "\n".join(results)
+        return f"News Results for {display_name}:\n\n" + "\n".join(results)
     except Exception as exc:
         logger.error(f"News fetch failed for {ticker}: {exc}")
         return f"Error fetching news: {str(exc)}"
@@ -139,13 +140,27 @@ async def get_social_media_sentiment(ticker: str) -> str:
 
 
 @tool
-async def get_macroeconomic_news(trade_date: str) -> str:
-    """Get macroeconomic news context for a specific date."""
+async def get_macroeconomic_news(trade_date: str, region: str = "") -> str:
+    """Get raw macroeconomic news context for a date and optional region bucket."""
     if not shared.tavily_tool:
         return "Tool unavailable"
-    result = await shared._tavily_search_with_timeout(
-        {"query": f"macroeconomic news {trade_date}"}
+
+    query = (
+        f"global macro market conditions {trade_date} "
+        "central bank rates inflation CPI PMI GDP FX currency "
+        "bond yields liquidity credit spreads risk appetite equity market"
     )
+    if region:
+        from src.macro_regions import query_hint_for_macro_region
+
+        hint = query_hint_for_macro_region(region)
+        query = (
+            f"{hint} market conditions {trade_date} "
+            "central bank rates inflation CPI PMI GDP FX currency "
+            "bond yields liquidity credit spreads risk appetite equity market"
+        )
+
+    result = await shared._tavily_search_with_timeout({"query": query})
     if not result:
         return "Macroeconomic news search timed out or failed."
     return shared._format_and_truncate_tavily_result(result)

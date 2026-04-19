@@ -122,6 +122,75 @@ class TestGetLiveOrders:
 
         assert result == []
 
+
+class TestGetMarketdataSnapshot:
+    """Tests for IbkrClient.get_marketdata_snapshot()."""
+
+    _PATCH_ENSURE = "src.ibkr.client.IbkrClient._ensure_connected"
+    _PATCH_SESSION = "src.ibkr.client.IbkrClient.initialize_brokerage_session"
+
+    def test_snapshot_uses_accounts_prime_and_two_call_warmup(self):
+        client = _make_client()
+        client._ibind_client.receive_brokerage_accounts.return_value = _response(
+            [{"id": "U1234567"}]
+        )
+        client._ibind_client.live_marketdata_snapshot.side_effect = [
+            _response([{}]),
+            _response(
+                [
+                    {
+                        "31": "123.45",
+                        "55": "7203",
+                        "7051": "Toyota Motor",
+                    }
+                ]
+            ),
+        ]
+
+        with (
+            patch(self._PATCH_ENSURE),
+            patch(self._PATCH_SESSION, return_value=True) as mock_session,
+        ):
+            result = client.get_marketdata_snapshot(12345)
+
+        mock_session.assert_called_once_with(compete=False)
+        client._ibind_client.receive_brokerage_accounts.assert_called_once()
+        assert client._ibind_client.live_marketdata_snapshot.call_count == 2
+        assert result["31"] == "123.45"
+        assert result["7051"] == "Toyota Motor"
+
+    def test_snapshot_falls_back_to_alternate_method_name(self):
+        client = _make_client()
+        client._ibind_client.live_marketdata_snapshot = None
+        client._ibind_client.marketdata_snapshot.side_effect = [
+            _response([{}]),
+            _response([{"31": "9.87"}]),
+        ]
+
+        with patch(self._PATCH_ENSURE), patch(self._PATCH_SESSION, return_value=True):
+            result = client.get_marketdata_snapshot(999)
+
+        assert result["31"] == "9.87"
+
+    def test_snapshot_returns_empty_when_session_init_fails(self):
+        client = _make_client()
+
+        with patch(self._PATCH_ENSURE), patch(self._PATCH_SESSION, return_value=False):
+            result = client.get_marketdata_snapshot(12345)
+
+        assert result == {}
+
+    def test_snapshot_returns_empty_on_exception(self):
+        client = _make_client()
+        client._ibind_client.receive_brokerage_accounts.side_effect = RuntimeError(
+            "boom"
+        )
+
+        with patch(self._PATCH_ENSURE), patch(self._PATCH_SESSION, return_value=True):
+            result = client.get_marketdata_snapshot(12345)
+
+        assert result == {}
+
     # ------------------------------------------------------------------ #
     # Two-call protocol (pre-flight + real)
     # ------------------------------------------------------------------ #

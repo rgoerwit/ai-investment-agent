@@ -4,7 +4,6 @@ import asyncio
 from typing import Annotated
 
 import structlog
-import yfinance as yf
 from langchain_core.tools import tool
 
 from src.ticker_utils import normalize_ticker
@@ -28,9 +27,13 @@ async def search_foreign_sources(
     """
     try:
         normalized_symbol = normalize_ticker(ticker)
-        ticker_obj = yf.Ticker(normalized_symbol)
-        company_name = await shared.extract_company_name_async(ticker_obj)
-        full_query = f"{search_query} {company_name} {ticker}"
+        company_name = await shared.extract_company_name_async(normalized_symbol)
+        company_resolved = company_name != normalized_symbol
+        full_query = (
+            f"{search_query} {company_name} {ticker}"
+            if company_resolved
+            else f"{search_query} {ticker}"
+        )
 
         logger.info("foreign_source_search", ticker=ticker, query=full_query[:100])
 
@@ -70,7 +73,7 @@ async def search_foreign_sources(
 
         return f"""### Foreign Source Search Results
 Query: {search_query}
-Ticker: {ticker} ({company_name})
+Ticker: {ticker} ({company_name if company_resolved else 'UNVERIFIED COMPANY'})
 {source_note}
 
 {results_str}
