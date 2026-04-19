@@ -274,13 +274,13 @@ class Settings(BaseSettings):
         description="LLM provider (google, openai, anthropic)",
     )
     deep_think_llm: str = Field(
-        default="gemini-3-pro-preview",
+        default="gemini-3.1-pro-preview",
         validation_alias="DEEP_MODEL",
         description="Model for deep thinking/synthesis agents",
     )
     # Flash models work with langchain-google-genai 4.0.0+
     quick_think_llm: str = Field(
-        default="gemini-2.0-flash",
+        default="gemini-3-flash-preview",
         validation_alias="QUICK_MODEL",
         description="Model for quick thinking/data gathering agents",
     )
@@ -318,12 +318,12 @@ class Settings(BaseSettings):
 
     # --- Consultant Configuration ---
     consultant_model: str = Field(
-        default="gpt-4o",
+        default="gpt-5.4",
         validation_alias="CONSULTANT_MODEL",
         description="OpenAI model for consultant in normal mode",
     )
     consultant_quick_model: str = Field(
-        default="gpt-4o-mini",
+        default="gpt-5.4-mini",
         validation_alias="CONSULTANT_QUICK_MODEL",
         description="OpenAI model for consultant in quick mode",
     )
