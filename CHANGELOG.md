@@ -5,15 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.9.11] - 2026-04-19
 
 ### Added
 
-- **Macro Context Observability / Reporting Alignment** — Pre-graph `Macro Context Analyst` runs now participate in the standard callback path for token/cost tracking and active trace callbacks. Saved analysis artifacts now record macro-context execution metadata alongside the normal run summary.
+- **Cached Regional Macro Context** — New pre-graph `Macro Context Analyst` (`src/macro_context.py`, `src/macro_regions.py`) generates a regional macro brief (rates, sentiment, headwinds) before the analysis graph runs. Brief is injected into the News Analyst's system message only. Results cached per-region with configurable TTL. Full token/cost tracking and Langfuse trace propagation.
+- **IBKR Security Data Service** — `src/ibkr/security_data_service.py`: low-volume probe for identity verification, conid resolution, and quote rescue via brokerage session. Used by reconciler for ticker disambiguation.
+- **Per-Tool-Call Timeout** — `src/graph/tool_nodes.py` wraps each tool invocation with a configurable `asyncio.timeout` (default 90s) to prevent indefinite hangs from concurrent web searches.
+- **Secondary Correlated-Sell Detection** — `compute_portfolio_health()` now fires `CORRELATED_SELL_EVENT` when ≥8 verdict sells AND ≥40% of held positions are sells, even without a tight date cluster. Catches gradual accumulation during extended macro events.
+- **Ownership-Change & Capital Efficiency Validators** — `RedFlagDetector` expanded with ROIC trend analysis, capital allocation scoring, ownership-change detection, and idle-cash penalties. New prompt rules in `portfolio_manager.json` and `fundamentals_analyst.json` for ownership concentration and cash drag.
 
 ### Changed
 
-- **Documentation / Architecture Refresh** — README and supporting docs now describe cached regional macro context explicitly, including the pre-graph execution step, News Analyst-only injection path, and the distinction from `MacroEventsStore`.
+- **Correlated-Sell Window** — Default sliding window widened from 7 to 14 days to capture batch re-analysis patterns spread across multiple nightly runs.
+- **Cash Summary: Confirmed vs Conditional** — `build_cash_timeline()` now excludes SOFT_REJECT sells from pending inflows. Soft-sell proceeds shown separately as "conditional" in both cash summary and action plan settlement projections.
+- **Dashboard Launcher** — `run_ibkr_dashboard.sh` fixed empty-array crash under `set -u`; now prints dashboard URL before starting Flask.
+- **Prompt Updates** — `news_analyst` v5.3 (macro brief injection), `foreign_language_analyst` v1.7, `fundamentals_analyst` v9.11, `portfolio_manager` v8.6, `consultant` v2.6.
+
+### Fixed
+
+- **Macro Analyst Token Tracking** — Macro Context Analyst was not appearing in saved analysis `token_usage` or `prompts_used`; now participates in standard callback path.
 
 ## [3.9.10] - 2026-04-12
 
