@@ -976,7 +976,7 @@ from dataclasses import dataclass  # noqa: E402 — after existing imports
 
 @dataclass
 class MacroEvent:
-    """Represents a portfolio-detected macro event stored in ChromaDB."""
+    """Represents a portfolio-detected discrete macro event stored in ChromaDB."""
 
     event_date: str  # YYYY-MM-DD (peak_anchor from CORRELATED_SELL_EVENT)
     detected_date: str  # YYYY-MM-DD
@@ -1035,6 +1035,7 @@ class MacroEventsStore:
     Global ChromaDB collection for portfolio-detected macro events.
     Uses dummy embeddings ([0.0]*768) — queries are metadata-only.
     Non-ticker-isolated (like lessons_learned in retrospective.py).
+    This stores sparse event shocks, not rolling regional regime briefs.
     """
 
     def __init__(self) -> None:

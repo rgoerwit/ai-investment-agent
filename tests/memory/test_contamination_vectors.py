@@ -64,6 +64,7 @@ class TestCompanyNameExtraction:
         }
         company_name = await extract_company_name_async(ticker_obj)
 
+        assert company_name == "Cathay Pacific Airways"
         assert (
             "CATHAY" in company_name.upper()
         ), f"Expected Cathay Pacific, got: {company_name}"

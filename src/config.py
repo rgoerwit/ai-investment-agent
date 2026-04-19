@@ -404,6 +404,46 @@ class Settings(BaseSettings):
         validation_alias="LEVERAGE_ENGINEERED_RATIO",
         description="ROE/ROIC ratio above which returns are likely engineered. Default 3.0.",
     )
+    idle_cash_net_cash_to_mc_threshold: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=5.0,
+        validation_alias="IDLE_CASH_NET_CASH_TO_MC_THRESHOLD",
+        description="Net cash / market cap threshold for idle-cash risk. Default 25%.",
+    )
+    idle_cash_severe_net_cash_to_mc_threshold: float = Field(
+        default=0.40,
+        ge=0.0,
+        le=5.0,
+        validation_alias="IDLE_CASH_SEVERE_NET_CASH_TO_MC_THRESHOLD",
+        description="Severe idle-cash threshold for net cash / market cap. Default 40%.",
+    )
+    idle_cash_cash_to_assets_threshold: float = Field(
+        default=0.20,
+        ge=0.0,
+        le=1.0,
+        validation_alias="IDLE_CASH_CASH_TO_ASSETS_THRESHOLD",
+        description="Cash / total assets threshold for idle-cash risk. Default 20%.",
+    )
+    idle_cash_min_payout_ratio: float = Field(
+        default=20.0,
+        ge=0.0,
+        le=1000.0,
+        validation_alias="IDLE_CASH_MIN_PAYOUT_RATIO",
+        description="Minimum payout ratio before retained cash is treated as weak shareholder return. Default 20%.",
+    )
+    capex_to_da_underinvesting_threshold: float = Field(
+        default=0.75,
+        ge=0.0,
+        validation_alias="CAPEX_TO_DA_UNDERINVESTING_THRESHOLD",
+        description="Capex / D&A ratio below which reinvestment is treated as underinvesting. Default 0.75.",
+    )
+    capex_to_da_growth_threshold: float = Field(
+        default=1.25,
+        ge=0.0,
+        validation_alias="CAPEX_TO_DA_GROWTH_THRESHOLD",
+        description="Capex / D&A ratio above which reinvestment is treated as growth investing. Default 1.25.",
+    )
 
     # --- Logging ---
     log_level: str = Field(

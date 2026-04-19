@@ -247,6 +247,29 @@ Net Income: -£100M
         assert metrics_gbp["fcf"] == 500_000_000
         assert metrics_gbp["net_income"] == -100_000_000
 
+    def test_extract_idle_cash_datablock_fields(self):
+        """Test extraction of idle-cash supporting fields from DATA_BLOCK."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 62%
+NET_CASH_TO_MARKET_CAP: 27%
+CASH_TO_ASSETS: 21%
+CAPEX_TO_DA: 0.70
+CAPEX_TO_DA_STATUS: UNDERINVESTING
+CAPITAL_PLAN_STATUS: NONE
+REVENUE_BACKLOG_COVERAGE: 0.8 yrs
+### --- END DATA_BLOCK ---
+"""
+
+        metrics = RedFlagDetector.extract_metrics(report)
+
+        assert metrics["net_cash_to_market_cap"] == pytest.approx(0.27, rel=0.01)
+        assert metrics["cash_to_assets"] == pytest.approx(0.21, rel=0.01)
+        assert metrics["capex_to_da"] == pytest.approx(0.70, rel=0.01)
+        assert metrics["capex_to_da_status"] == "UNDERINVESTING"
+        assert metrics["capital_plan_status"] == "NONE"
+        assert metrics["revenue_backlog_coverage"] == pytest.approx(0.8, rel=0.01)
+
 
 class TestRedFlagValidatorNode:
     """Test the financial health validator node logic."""

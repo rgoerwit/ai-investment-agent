@@ -1,5 +1,10 @@
 """Public toolkit surface smoke tests."""
 
+import inspect
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
 from src.toolkit import (
     Toolkit,
     get_financial_metrics,
@@ -50,3 +55,24 @@ def test_toolkit_group_accessors_return_expected_tools():
 
     legal_tool_names = {tool.name for tool in toolkit.get_legal_tools()}
     assert legal_tool_names == {"search_legal_tax_disclosures"}
+
+
+def test_get_macroeconomic_news_accepts_optional_region_param():
+    signature = inspect.signature(get_macroeconomic_news.coroutine)
+    assert "region" in signature.parameters
+    assert signature.parameters["region"].default == ""
+
+
+@pytest.mark.asyncio
+async def test_get_macroeconomic_news_region_hint_reaches_tavily_query():
+    with patch(
+        "src.tools.shared._tavily_search_with_timeout",
+        new=AsyncMock(return_value=None),
+    ) as tavily_search:
+        result = await get_macroeconomic_news.ainvoke(
+            {"trade_date": "2026-04-18", "region": "JAPAN"}
+        )
+
+    assert "timed out or failed" in result
+    called_query = tavily_search.await_args.args[0]["query"]
+    assert "Japan" in called_query

@@ -1,9 +1,10 @@
-"""Tests for macro event injection into the News Analyst extra_context."""
+"""Tests for News Analyst macro-context injection helpers."""
+
+from __future__ import annotations
 
 from datetime import date, timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 
 def _active_event(
@@ -36,140 +37,166 @@ def _active_event(
     )
 
 
-def _run_injection_block(ticker: str, events: list) -> str:
-    """
-    Simulate the `if agent_key == 'news_analyst':` injection block from analyst_node.
-    Returns the resulting extra_context string.
-    """
-    extra_context = ""
-    with patch("src.memory.create_macro_events_store") as mock_create:
-        mock_store = MagicMock()
-        mock_store.available = True
-        mock_store.get_active_events.return_value = events
-        mock_create.return_value = mock_store
-
-        try:
-            from src.memory import create_macro_events_store
-            from src.ticker_policy import get_ticker_suffix
-
-            _mstore = create_macro_events_store()
-            if _mstore.available:
-                _region = get_ticker_suffix(ticker)
-                _events = _mstore.get_active_events(region_filter=_region or None)
-                if _events:
-                    _lines = ["### MACRO EVENT CONTEXT (portfolio-detected)"]
-                    for _ev in _events[:2]:
-                        _lines.append(
-                            f"- {_ev.event_date} | {_ev.impact} | "
-                            f"{_ev.scope}: {_ev.news_headline}"
-                        )
-                        if _ev.news_detail:
-                            _lines.append(f"  {_ev.news_detail}")
-                    _lines.append(
-                        "Instruction: Determine if this equity is an "
-                        "'Innocent Bystander' (dropped due to the macro event, "
-                        "fundamentals intact \u2192 OPPORTUNITY) or "
-                        "'Structurally Impaired' (business model affected \u2192 EXIT). "
-                        "Ignore if event is inapplicable to this region/sector."
-                    )
-                    extra_context += "\n\n" + "\n".join(_lines) + "\n"
-        except Exception:
-            pass
-    return extra_context
-
-
 class TestNewsAnalystMacroInjection:
-    def test_active_event_produces_extra_context(self):
-        """Active macro event → MACRO EVENT CONTEXT block appears in extra_context."""
-        ctx = _run_injection_block("7203.T", [_active_event()])
-        assert "MACRO EVENT CONTEXT" in ctx
-        assert "Markets fall on tariff fears" in ctx
+    def test_event_only_block_present(self):
+        from src.agents.analyst_nodes import _build_news_macro_extra_context
 
-    def test_no_events_produces_no_extra_context(self):
-        """No active events → extra_context remains empty."""
-        ctx = _run_injection_block("7203.T", [])
-        assert ctx == ""
-
-    def test_capped_at_2_events(self):
-        """3 active events → only 2 injected (cap enforced)."""
-        events = [_active_event(event_date=f"2026-03-0{i}") for i in range(1, 4)]
-        ctx = _run_injection_block("7203.T", events)
-        # Only 2 headlines should appear (cap at 2)
-        assert ctx.count("Markets fall on tariff fears") <= 2
-
-    def test_innocent_bystander_framing_present(self):
-        """'Innocent Bystander' framing appears in injection text."""
-        ctx = _run_injection_block("7203.T", [_active_event()])
-        assert "Innocent Bystander" in ctx
-
-    def test_structurally_impaired_framing_present(self):
-        """'Structurally Impaired' framing appears in injection text."""
-        ctx = _run_injection_block("7203.T", [_active_event()])
-        assert "Structurally Impaired" in ctx
-
-    def test_news_detail_included_when_present(self):
-        """Event with news_detail → detail line appears in context."""
-        ctx = _run_injection_block("7203.T", [_active_event(news_detail="Key detail.")])
-        assert "Key detail." in ctx
-
-    def test_news_detail_skipped_when_empty(self):
-        """Event with empty news_detail → no empty line in context."""
-        ctx = _run_injection_block("7203.T", [_active_event(news_detail="")])
-        # Context still produced (event headline present), no extra blank lines
-        assert "MACRO EVENT CONTEXT" in ctx
-        lines = ctx.strip().split("\n")
-        # No line should be only whitespace within the block
-        assert not any(line.strip() == "" for line in lines)
-
-    def test_event_date_and_impact_in_context(self):
-        """Event date and impact appear in the injected line."""
-        ctx = _run_injection_block("7203.T", [_active_event()])
-        assert "2026-03-05" in ctx
-        assert "TRANSIENT" in ctx
-
-    def test_store_unavailable_produces_no_extra_context(self):
-        """MacroEventsStore.available=False → no injection."""
-        extra_context = ""
         with patch("src.memory.create_macro_events_store") as mock_create:
             mock_store = MagicMock()
-            mock_store.available = False
+            mock_store.available = True
+            mock_store.get_active_events.return_value = [_active_event()]
             mock_create.return_value = mock_store
-            try:
-                from src.memory import create_macro_events_store
 
-                _mstore = create_macro_events_store()
-                if _mstore.available:
-                    extra_context = "SHOULD NOT APPEAR"
-            except Exception:
-                pass
-        assert extra_context == ""
+            extra_context = _build_news_macro_extra_context("7203.T", None)
 
-    def test_exception_in_injection_does_not_propagate(self):
-        """Exception in injection block is caught; extra_context stays empty."""
-        extra_context = ""
-        with patch(
-            "src.memory.create_macro_events_store", side_effect=Exception("boom")
-        ):
-            try:
-                from src.memory import create_macro_events_store
+        assert "### PORTFOLIO MACRO EVENT" in extra_context
+        assert "Markets fall on tariff fears" in extra_context
+        assert "### REGIONAL MACRO CONTEXT" not in extra_context
 
-                _mstore = create_macro_events_store()  # raises
-            except Exception:
-                pass  # caught by outer try/except in analyst_node
-        assert extra_context == ""
+    def test_brief_only_block_present(self):
+        from src.agents.analyst_nodes import _build_news_macro_extra_context
 
-    def test_region_suffix_passed_to_get_active_events(self):
-        """get_active_events() is called with the ticker's region suffix."""
         with patch("src.memory.create_macro_events_store") as mock_create:
             mock_store = MagicMock()
             mock_store.available = True
             mock_store.get_active_events.return_value = []
             mock_create.return_value = mock_store
-            _run_injection_block("7203.T", [])
-            # Called with region_filter=".T"
-            call_kwargs = mock_store.get_active_events.call_args
-            if call_kwargs:
-                region = call_kwargs[1].get("region_filter") or (
-                    call_kwargs[0][0] if call_kwargs[0] else None
-                )
-                assert region == ".T"
+
+            context = SimpleNamespace(
+                macro_context_report="### RATES & LIQUIDITY\n- Summary: BOJ still supportive.",
+                macro_context_region="JAPAN",
+                macro_context_status="generated",
+            )
+            extra_context = _build_news_macro_extra_context("7203.T", context)
+
+        assert "### PORTFOLIO MACRO EVENT" not in extra_context
+        assert "### REGIONAL MACRO CONTEXT" in extra_context
+        assert "Region: JAPAN" in extra_context
+
+    def test_event_and_brief_appear_in_deterministic_order(self):
+        from src.agents.analyst_nodes import _build_news_macro_extra_context
+
+        with patch("src.memory.create_macro_events_store") as mock_create:
+            mock_store = MagicMock()
+            mock_store.available = True
+            mock_store.get_active_events.return_value = [_active_event()]
+            mock_create.return_value = mock_store
+
+            context = SimpleNamespace(
+                macro_context_report="### EQUITY REGIME\n- Summary: Risk appetite improving.",
+                macro_context_region="JAPAN",
+                macro_context_status="cached",
+            )
+            extra_context = _build_news_macro_extra_context("7203.T", context)
+
+        portfolio_idx = extra_context.index("### PORTFOLIO MACRO EVENT")
+        regional_idx = extra_context.index("### REGIONAL MACRO CONTEXT")
+        assert portfolio_idx < regional_idx
+
+    def test_regional_macro_injection_log_includes_audit_fields(self):
+        from src.agents.analyst_nodes import _build_news_macro_extra_context
+
+        with (
+            patch("src.memory.create_macro_events_store") as mock_create,
+            patch("src.agents.analyst_nodes.logger") as mock_logger,
+        ):
+            mock_store = MagicMock()
+            mock_store.available = True
+            mock_store.get_active_events.return_value = [_active_event()]
+            mock_create.return_value = mock_store
+
+            context = SimpleNamespace(
+                macro_context_report="### EQUITY REGIME\n- Summary: Risk appetite improving.",
+                macro_context_region="JAPAN",
+                macro_context_status="generated",
+            )
+            _build_news_macro_extra_context("7203.T", context)
+
+        mock_logger.info.assert_any_call(
+            "macro_context_injected",
+            ticker="7203.T",
+            region="JAPAN",
+            status="generated",
+            report_len=len(context.macro_context_report),
+            agent="news_analyst",
+            portfolio_macro_event_present=True,
+            regional_macro_context_present=True,
+        )
+
+    def test_no_context_produces_empty_string(self):
+        from src.agents.analyst_nodes import _build_news_macro_extra_context
+
+        with patch("src.memory.create_macro_events_store") as mock_create:
+            mock_store = MagicMock()
+            mock_store.available = True
+            mock_store.get_active_events.return_value = []
+            mock_create.return_value = mock_store
+
+            extra_context = _build_news_macro_extra_context("7203.T", None)
+
+        assert extra_context == ""
+
+    def test_empty_report_skips_regional_block(self):
+        from src.agents.analyst_nodes import _build_news_macro_extra_context
+
+        with patch("src.memory.create_macro_events_store") as mock_create:
+            mock_store = MagicMock()
+            mock_store.available = True
+            mock_store.get_active_events.return_value = []
+            mock_create.return_value = mock_store
+
+            context = SimpleNamespace(
+                macro_context_report="",
+                macro_context_region="JAPAN",
+                macro_context_status="generated",
+            )
+            extra_context = _build_news_macro_extra_context("7203.T", context)
+
+        assert "### REGIONAL MACRO CONTEXT" not in extra_context
+
+    def test_store_unavailable_does_not_block_regional_brief(self):
+        from src.agents.analyst_nodes import _build_news_macro_extra_context
+
+        with patch("src.memory.create_macro_events_store") as mock_create:
+            mock_store = MagicMock()
+            mock_store.available = False
+            mock_create.return_value = mock_store
+
+            context = SimpleNamespace(
+                macro_context_report="### FX & FLOWS\n- Summary: Yen remains weak.",
+                macro_context_region="JAPAN",
+                macro_context_status="generated_fallback",
+            )
+            extra_context = _build_news_macro_extra_context("7203.T", context)
+
+        assert "### PORTFOLIO MACRO EVENT" not in extra_context
+        assert "### REGIONAL MACRO CONTEXT" in extra_context
+
+    def test_region_suffix_passed_to_macro_event_lookup(self):
+        from src.agents.analyst_nodes import _build_news_macro_extra_context
+
+        with patch("src.memory.create_macro_events_store") as mock_create:
+            mock_store = MagicMock()
+            mock_store.available = True
+            mock_store.get_active_events.return_value = []
+            mock_create.return_value = mock_store
+
+            _build_news_macro_extra_context("7203.T", None)
+
+        call_kwargs = mock_store.get_active_events.call_args
+        region = call_kwargs.kwargs.get("region_filter") if call_kwargs else None
+        assert region == ".T"
+
+    def test_event_block_keeps_innocent_bystander_framing(self):
+        from src.agents.analyst_nodes import _build_news_macro_extra_context
+
+        with patch("src.memory.create_macro_events_store") as mock_create:
+            mock_store = MagicMock()
+            mock_store.available = True
+            mock_store.get_active_events.return_value = [_active_event()]
+            mock_create.return_value = mock_store
+
+            extra_context = _build_news_macro_extra_context("7203.T", None)
+
+        assert "Innocent Bystander" in extra_context
+        assert "Structurally Impaired" in extra_context

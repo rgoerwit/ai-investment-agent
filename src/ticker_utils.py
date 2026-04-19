@@ -17,6 +17,7 @@ from src.exchange_metadata import (
 )
 
 logger = structlog.get_logger(__name__)
+_ibkr_name_service = None
 
 _COMPANY_NAME_BASE_FALLBACK_SUFFIXES = frozenset({".ST"})
 _NORMALIZED_SHARE_CLASS_TICKER_PATTERN = re.compile(
@@ -544,6 +545,26 @@ async def _try_eodhd(ticker: str) -> str | None:
     return None
 
 
+async def _try_ibkr(ticker: str) -> str | None:
+    """Attempt company name resolution via the sparse IBKR security probe."""
+    try:
+        probe = await _get_ibkr_name_service().probe_security(ticker)
+        if probe.identity_confidence == "VERIFIED":
+            return probe.company_name
+    except Exception as e:
+        logger.debug("company_name_ibkr_failed", ticker=ticker, error=str(e))
+    return None
+
+
+def _get_ibkr_name_service():
+    global _ibkr_name_service
+    if _ibkr_name_service is None:
+        from src.ibkr.security_data_service import IbkrSecurityDataService
+
+        _ibkr_name_service = IbkrSecurityDataService()
+    return _ibkr_name_service
+
+
 async def resolve_company_name(ticker: str) -> CompanyNameResult:
     """
     Resolve company name from multiple sources with fallback chain.
@@ -607,6 +628,42 @@ async def resolve_company_name(ticker: str) -> CompanyNameResult:
                     source=source_name,
                     error=str(e),
                 )
+
+    try:
+        raw_name = await _try_ibkr(ticker)
+        if _is_valid_company_name(raw_name, ticker):
+            normalized = normalize_company_name(raw_name)
+            logger.info(
+                "company_name_resolved",
+                ticker=ticker,
+                requested_ticker=ticker,
+                lookup_ticker=ticker,
+                lookup_strategy="ibkr_probe",
+                name=normalized,
+                source="ibkr",
+            )
+            return CompanyNameResult(name=normalized, source="ibkr", is_resolved=True)
+        if raw_name:
+            logger.debug(
+                "company_name_rejected",
+                ticker=ticker,
+                requested_ticker=ticker,
+                lookup_ticker=ticker,
+                lookup_strategy="ibkr_probe",
+                raw_name=raw_name,
+                source="ibkr",
+                reason="name matches lookup ticker string",
+            )
+    except Exception as e:
+        logger.debug(
+            "company_name_source_error",
+            ticker=ticker,
+            requested_ticker=ticker,
+            lookup_ticker=ticker,
+            lookup_strategy="ibkr_probe",
+            source="ibkr",
+            error=str(e),
+        )
 
     logger.debug(
         "company_name_unresolved",

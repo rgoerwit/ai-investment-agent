@@ -5,6 +5,7 @@ Validates the 4-source fallback chain (yfinance → yahooquery → FMP → EODHD
 ticker echo rejection, normalization, fetcher methods, and agent prompt warning.
 """
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,6 +14,7 @@ from src.ticker_utils import (
     CompanyNameResult,
     _company_name_lookup_candidates,
     _is_valid_company_name,
+    _try_ibkr,
     resolve_company_name,
 )
 
@@ -170,6 +172,53 @@ class TestResolveCompanyName:
         assert result.source == "unresolved"
         assert result.name == "2154.HK"
         mock_logger.warning.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ibkr_resolves_after_non_ibkr_sources_fail(self):
+        with (
+            patch("src.ticker_utils._try_yfinance", new_callable=AsyncMock) as mock_yf,
+            patch(
+                "src.ticker_utils._try_yahooquery", new_callable=AsyncMock
+            ) as mock_yq,
+            patch("src.ticker_utils._try_fmp", new_callable=AsyncMock) as mock_fmp,
+            patch("src.ticker_utils._try_eodhd", new_callable=AsyncMock) as mock_eodhd,
+            patch("src.ticker_utils._try_ibkr", new_callable=AsyncMock) as mock_ibkr,
+        ):
+            mock_yf.return_value = None
+            mock_yq.return_value = None
+            mock_fmp.return_value = None
+            mock_eodhd.return_value = None
+            mock_ibkr.return_value = "Modern Dental Group"
+
+            result = await resolve_company_name("3600.HK")
+
+        assert result.is_resolved is True
+        assert result.source == "ibkr"
+        assert result.name == "Modern Dental"
+
+    @pytest.mark.asyncio
+    async def test_try_ibkr_reuses_singleton_service(self):
+        service = MagicMock()
+        service.probe_security = AsyncMock(
+            side_effect=[
+                SimpleNamespace(
+                    identity_confidence="VERIFIED",
+                    company_name="Modern Dental Group",
+                ),
+                SimpleNamespace(
+                    identity_confidence="VERIFIED",
+                    company_name="Modern Dental Group",
+                ),
+            ]
+        )
+
+        with patch("src.ticker_utils._get_ibkr_name_service", return_value=service):
+            first = await _try_ibkr("3600.HK")
+            second = await _try_ibkr("3600.HK")
+
+        assert first == "Modern Dental Group"
+        assert second == "Modern Dental Group"
+        assert service.probe_security.await_count == 2
 
     @pytest.mark.asyncio
     async def test_ticker_echo_rejected_tries_next(self):

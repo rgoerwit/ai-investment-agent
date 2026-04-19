@@ -4,7 +4,6 @@ import json
 from typing import Annotated
 
 import pandas as pd
-import yfinance as yf
 from langchain_core.tools import tool
 from stockstats import wrap as stockstats_wrap
 
@@ -160,8 +159,8 @@ async def get_fundamental_analysis(
 
     try:
         normalized_symbol = normalize_ticker(ticker)
-        ticker_obj = yf.Ticker(normalized_symbol)
-        company_name = await shared.extract_company_name_async(ticker_obj)
+        company_name = await shared.extract_company_name_async(normalized_symbol)
+        company_resolved = company_name != normalized_symbol
 
         ticker_query = f"{ticker} stock analyst coverage count consensus rating American Depositary Receipt exchange listing ADR status"
         ticker_results = await shared._tavily_search_with_timeout(
@@ -176,7 +175,7 @@ async def get_fundamental_analysis(
         ticker_search_failed = not ticker_results or len(ticker_results_str) < 200
 
         if ticker_search_failed:
-            if company_name and company_name != ticker:
+            if company_resolved:
                 name_query = f'"{company_name}" stock analyst coverage count consensus rating American Depositary Receipt ADR status'
                 name_results = await shared._tavily_search_with_timeout(
                     {"query": name_query}
@@ -201,7 +200,7 @@ async def get_fundamental_analysis(
             keyword.lower() in ticker_results_str.lower() for keyword in adr_keywords
         )
 
-        if not found_adr_info and company_name and company_name != ticker:
+        if not found_adr_info and company_resolved:
             adr_query = (
                 f'"{company_name}" American Depositary Receipt ADR ticker status'
             )

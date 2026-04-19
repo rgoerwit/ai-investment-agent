@@ -2878,9 +2878,10 @@ class TestCorrelatedSellDetectionWindow:
 
     def test_sells_beyond_window_not_grouped(self):
         """
-        3 sells on 2026-03-05 + 3 sells on 2026-03-13 (8 days apart, beyond
-        7-day window) + 2 holds = 8 total held.
-        Neither window contains ≥5 sells → does NOT fire.
+        3 sells on 2026-03-05 + 3 sells on 2026-03-20 (15 days apart, beyond
+        14-day window) + 2 holds = 8 total held.
+        Neither window contains ≥5 sells → primary does NOT fire.
+        6/8 total ratio = 75% would trigger secondary, but count < 8 → no fire.
         """
         items = (
             [
@@ -2888,7 +2889,7 @@ class TestCorrelatedSellDetectionWindow:
                 for i in range(3)
             ]
             + [
-                _make_sell_item_on_date(f"T{i}.T", "2026-03-13", conid=200 + i)
+                _make_sell_item_on_date(f"T{i}.T", "2026-03-20", conid=200 + i)
                 for i in range(3)
             ]
             + [_make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(2)]
@@ -2978,6 +2979,102 @@ class TestCorrelatedSellDetectionWindow:
             correlated_window_days=3,
         )
         assert not any("CORRELATED_SELL_EVENT" in f for f in flags_far)
+
+
+class TestSecondaryRatioCorrelatedSell:
+    """Test that gradual accumulation of sells (spread over weeks) triggers
+    CORRELATED_SELL_EVENT via the secondary absolute-ratio check."""
+
+    def test_gradual_accumulation_triggers_secondary(self):
+        """10 verdict sells across 4+ weeks out of 20 held (50%) → secondary fires."""
+        items = (
+            # Sells spread across multiple weeks — no 14-day window catches ≥5
+            [
+                _make_sell_item_on_date(f"A{i}.T", "2026-02-16", conid=100 + i)
+                for i in range(2)
+            ]
+            + [
+                _make_sell_item_on_date(f"B{i}.T", "2026-03-05", conid=200 + i)
+                for i in range(2)
+            ]
+            + [
+                _make_sell_item_on_date(f"C{i}.T", "2026-03-20", conid=300 + i)
+                for i in range(3)
+            ]
+            + [
+                _make_sell_item_on_date(f"D{i}.T", "2026-04-10", conid=400 + i)
+                for i in range(3)
+            ]
+            + [_make_hold_item_for_health(f"H{i}.T", conid=500 + i) for i in range(10)]
+        )
+        positions = [i.ibkr_position for i in items if i.ibkr_position]
+        portfolio = _make_portfolio(value=len(positions) * 1000, cash=0)
+        portfolio.exchange_weights = {}
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        # 10 sells / 20 total = 50% ≥ 40% and count=10 ≥ 8 → secondary fires
+        assert any("CORRELATED_SELL_EVENT" in f for f in flags)
+
+    def test_secondary_does_not_fire_below_threshold(self):
+        """7 verdict sells out of 50 held (14%) → too low for secondary."""
+        items = [
+            _make_sell_item_on_date(f"S{i}.T", f"2026-0{i + 1}-05", conid=100 + i)
+            for i in range(7)
+        ] + [_make_hold_item_for_health(f"H{i}.T", conid=200 + i) for i in range(43)]
+        positions = [i.ibkr_position for i in items if i.ibkr_position]
+        portfolio = _make_portfolio(value=len(positions) * 1000, cash=0)
+        portfolio.exchange_weights = {}
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        # 7/50 = 14% < 40% → secondary does NOT fire; also count < 8
+        assert not any("CORRELATED_SELL_EVENT" in f for f in flags)
+
+    def test_secondary_requires_minimum_count(self):
+        """6 verdict sells out of 10 held (60%) → ratio passes but count < 8 → no fire."""
+        items = [
+            _make_sell_item_on_date(f"S{i}.T", f"2026-0{i + 1}-15", conid=100 + i)
+            for i in range(6)
+        ] + [_make_hold_item_for_health(f"H{i}.T", conid=200 + i) for i in range(4)]
+        positions = [i.ibkr_position for i in items if i.ibkr_position]
+        portfolio = _make_portfolio(value=len(positions) * 1000, cash=0)
+        portfolio.exchange_weights = {}
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        # 6/10 = 60% ≥ 40% but count=6 < 8 → secondary does NOT fire
+        assert not any("CORRELATED_SELL_EVENT" in f for f in flags)
+
+    def test_secondary_demotes_soft_rejects_to_review(self):
+        """When secondary fires, SOFT_REJECT sells are demoted to REVIEW."""
+        items = [
+            _make_sell_item_on_date(
+                f"S{i}.T", f"2026-0{(i % 4) + 1}-{10 + i}", conid=100 + i
+            )
+            for i in range(10)
+        ] + [_make_hold_item_for_health(f"H{i}.T", conid=200 + i) for i in range(10)]
+        positions = [i.ibkr_position for i in items if i.ibkr_position]
+        portfolio = _make_portfolio(value=len(positions) * 1000, cash=0)
+        portfolio.exchange_weights = {}
+
+        # Verify sells exist before
+        soft_before = [
+            i for i in items if i.sell_type == "SOFT_REJECT" and i.action == "SELL"
+        ]
+        assert len(soft_before) == 10
+
+        compute_portfolio_health(positions, {}, portfolio, reconciliation_items=items)
+
+        # After: demoted to REVIEW
+        soft_after = [
+            i for i in items if i.sell_type == "SOFT_REJECT" and i.action == "SELL"
+        ]
+        reviews = [
+            i for i in items if i.sell_type == "SOFT_REJECT" and i.action == "REVIEW"
+        ]
+        assert len(soft_after) == 0
+        assert len(reviews) == 10
 
 
 class TestCurrencyAccuracy:

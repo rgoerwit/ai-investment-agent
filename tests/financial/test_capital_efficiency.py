@@ -12,7 +12,7 @@ Run with: pytest tests/test_capital_efficiency.py -v
 import pandas as pd
 import pytest
 
-from src.validators.red_flag_detector import RedFlagDetector
+from src.validators.red_flag_detector import RedFlagDetector, Sector
 
 
 class TestCapitalEfficiencyCalculation:
@@ -200,6 +200,42 @@ class TestCapitalEfficiencyCalculation:
 
         assert signals == {}
 
+    def test_idle_cash_signals_are_computed_when_inputs_exist(self):
+        """Test additive idle-cash signals from existing balance-sheet and cash-flow inputs."""
+        from src.data.fetcher import SmartMarketDataFetcher
+
+        fetcher = SmartMarketDataFetcher()
+
+        income_stmt = pd.DataFrame(
+            {"2024": [75_000_000, 0.20]},
+            index=["EBIT", "Tax Rate For Calcs"],
+        )
+        balance_sheet = pd.DataFrame(
+            {"2024": [500_000_000]},
+            index=["Invested Capital"],
+        )
+        cashflow = pd.DataFrame(
+            {"2024": [-60_000_000, 40_000_000]},
+            index=["Capital Expenditure", "Depreciation And Amortization"],
+        )
+        info = {
+            "returnOnAssets": 0.08,
+            "returnOnEquity": 0.12,
+            "cashAndShortTermInvestments": 300_000_000,
+            "totalDebt": 50_000_000,
+            "marketCap": 1_000_000_000,
+            "totalAssets": 1_000_000_000,
+        }
+
+        signals = fetcher._calculate_capital_efficiency_signals(
+            income_stmt, balance_sheet, info, "TEST", cashflow=cashflow
+        )
+
+        assert signals["capital_netCashToMarketCap"] == pytest.approx(0.25, rel=0.01)
+        assert signals["capital_cashToAssets"] == pytest.approx(0.30, rel=0.01)
+        assert signals["capital_capexToDaRatio"] == pytest.approx(1.5, rel=0.01)
+        assert signals["capital_capexToDaStatus"] == "GROWTH_INVESTING"
+
 
 class TestCapitalEfficiencyExtraction:
     """Test DATA_BLOCK extraction for capital efficiency."""
@@ -311,6 +347,28 @@ class TestCapitalEfficiencyExtraction:
         metrics = RedFlagDetector.extract_capital_efficiency_signals(report)
 
         assert metrics["roic_quality"] == "STRONG"
+
+    def test_extract_idle_cash_fields(self):
+        """Test extraction of idle-cash-specific fields from DATA_BLOCK."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        NET_CASH_TO_MARKET_CAP: 35%
+        CASH_TO_ASSETS: 0.22
+        CAPEX_TO_DA: 0.80
+        CAPEX_TO_DA_STATUS: MAINTENANCE
+        CAPITAL_PLAN_STATUS: NONE
+        REVENUE_BACKLOG_COVERAGE: 1.3 yrs
+        ### --- END DATA_BLOCK ---
+        """
+
+        metrics = RedFlagDetector.extract_capital_efficiency_signals(report)
+
+        assert metrics["net_cash_to_market_cap"] == pytest.approx(0.35, rel=0.01)
+        assert metrics["cash_to_assets"] == pytest.approx(0.22, rel=0.01)
+        assert metrics["capex_to_da"] == pytest.approx(0.80, rel=0.01)
+        assert metrics["capex_to_da_status"] == "MAINTENANCE"
+        assert metrics["capital_plan_status"] == "NONE"
+        assert metrics["revenue_backlog_coverage"] == pytest.approx(1.3, rel=0.01)
 
 
 class TestCapitalEfficiencyFlagDetection:
@@ -456,6 +514,164 @@ class TestCapitalEfficiencyFlagDetection:
         """Test empty report returns no flags."""
         assert RedFlagDetector.detect_capital_efficiency_flags("", "TEST") == []
         assert RedFlagDetector.detect_capital_efficiency_flags(None, "TEST") == []
+
+    def test_idle_cash_risk_flag(self):
+        """High cash with weak deployment and no plan should trigger idle-cash risk."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        ROIC_PERCENT: 5.00
+        ROIC_QUALITY: WEAK
+        LEVERAGE_QUALITY: GENUINE
+        NET_CASH_TO_MARKET_CAP: 30%
+        CASH_TO_ASSETS: 22%
+        CAPEX_TO_DA_STATUS: MAINTENANCE
+        PAYOUT_RATIO: 5.0%
+        CAPITAL_PLAN_STATUS: NONE
+        ### --- END DATA_BLOCK ---
+        """
+
+        flags = RedFlagDetector.detect_capital_efficiency_flags(report, "TEST")
+
+        flag_types = [flag["type"] for flag in flags]
+        assert "CAPITAL_IDLE_CASH_RISK" in flag_types
+
+    def test_idle_cash_severe_flag(self):
+        """Extreme net cash with destructive deployment and no plan should trigger severe flag."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        ROIC_PERCENT: -2.00%
+        ROIC_QUALITY: DESTRUCTIVE
+        LEVERAGE_QUALITY: GENUINE
+        NET_CASH_TO_MARKET_CAP: 45%
+        CASH_TO_ASSETS: 28%
+        CAPEX_TO_DA_STATUS: UNDERINVESTING
+        PAYOUT_RATIO: 0%
+        CAPITAL_PLAN_STATUS: NONE
+        ### --- END DATA_BLOCK ---
+        """
+
+        flags = RedFlagDetector.detect_capital_efficiency_flags(report, "TEST")
+
+        severe_flag = next(
+            flag for flag in flags if flag["type"] == "CAPITAL_IDLE_CASH_SEVERE"
+        )
+        assert severe_flag["risk_penalty"] == 1.0
+        assert all(flag["type"] != "CAPITAL_IDLE_CASH_RISK" for flag in flags)
+
+    def test_idle_cash_not_flagged_when_explicit_plan_or_reinvestment_exists(self):
+        """High cash alone should not be penalized when deployment is clearly justified."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        ROIC_PERCENT: 9.00%
+        ROIC_QUALITY: ADEQUATE
+        LEVERAGE_QUALITY: CONSERVATIVE
+        NET_CASH_TO_MARKET_CAP: 42%
+        CASH_TO_ASSETS: 25%
+        CAPEX_TO_DA_STATUS: GROWTH_INVESTING
+        PAYOUT_RATIO: 5.0%
+        CAPITAL_PLAN_STATUS: EXPLICIT
+        REVENUE_BACKLOG_COVERAGE: 1.4 yrs
+        ### --- END DATA_BLOCK ---
+        """
+
+        flags = RedFlagDetector.detect_capital_efficiency_flags(report, "TEST")
+
+        flag_types = [flag["type"] for flag in flags]
+        assert "CAPITAL_IDLE_CASH_RISK" not in flag_types
+        assert "CAPITAL_IDLE_CASH_SEVERE" not in flag_types
+
+    def test_idle_cash_unknown_evidence_stays_neutral(self):
+        """Unknown plan evidence should not trigger deterministic idle-cash penalties."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        ROIC_PERCENT: 5.00
+        ROIC_QUALITY: WEAK
+        LEVERAGE_QUALITY: GENUINE
+        NET_CASH_TO_MARKET_CAP: 35%
+        CASH_TO_ASSETS: 24%
+        CAPEX_TO_DA_STATUS: MAINTENANCE
+        PAYOUT_RATIO: 5.0%
+        CAPITAL_PLAN_STATUS: UNKNOWN
+        ### --- END DATA_BLOCK ---
+        """
+
+        flags = RedFlagDetector.detect_capital_efficiency_flags(report, "TEST")
+
+        flag_types = [flag["type"] for flag in flags]
+        assert "CAPITAL_IDLE_CASH_RISK" not in flag_types
+        assert "CAPITAL_IDLE_CASH_SEVERE" not in flag_types
+
+    def test_idle_cash_japanese_overcapitalization_pattern(self):
+        """ADEQUATE ROIC + CONSERVATIVE leverage + excess cash + no plan should flag."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        ROIC_PERCENT: 10.50
+        ROIC_QUALITY: ADEQUATE
+        LEVERAGE_QUALITY: CONSERVATIVE
+        ROE_ROIC_RATIO: 0.72
+        NET_CASH_TO_MARKET_CAP: 31%
+        CASH_TO_ASSETS: 26%
+        CAPEX_TO_DA_STATUS: MAINTENANCE
+        PAYOUT_RATIO: 8.0%
+        CAPITAL_PLAN_STATUS: NONE
+        ### --- END DATA_BLOCK ---
+        """
+
+        flags = RedFlagDetector.detect_capital_efficiency_flags(report, "2173.T")
+
+        flag_types = [flag["type"] for flag in flags]
+        assert "CAPITAL_IDLE_CASH_RISK" in flag_types
+
+    def test_bank_cash_not_flagged_as_idle(self):
+        """Financial-sector cash should not be treated as idle-cash hoarding."""
+        report = """
+        ### --- START DATA_BLOCK ---
+        SECTOR: Financials
+        ROIC_PERCENT: 9.00
+        ROIC_QUALITY: ADEQUATE
+        LEVERAGE_QUALITY: GENUINE
+        NET_CASH_TO_MARKET_CAP: 60%
+        CASH_TO_ASSETS: 35%
+        CAPITAL_PLAN_STATUS: NONE
+        ### --- END DATA_BLOCK ---
+        """
+
+        flags = RedFlagDetector.detect_capital_efficiency_flags(
+            report,
+            "1288.HK",
+            sector=Sector.FINANCIALS,
+        )
+
+        flag_types = [flag["type"] for flag in flags]
+        assert "CAPITAL_IDLE_CASH_RISK" not in flag_types
+        assert "CAPITAL_IDLE_CASH_SEVERE" not in flag_types
+
+    def test_value_trap_mid_term_plan_suppresses_idle_cash_flag(self):
+        """Value-trap mid-term plan fallback should suppress idle-cash penalty."""
+        fundamentals = """
+        ### --- START DATA_BLOCK ---
+        ROIC_PERCENT: 5.00
+        ROIC_QUALITY: WEAK
+        LEVERAGE_QUALITY: GENUINE
+        NET_CASH_TO_MARKET_CAP: 35%
+        CASH_TO_ASSETS: 24%
+        CAPEX_TO_DA_STATUS: MAINTENANCE
+        PAYOUT_RATIO: 5.0%
+        ### --- END DATA_BLOCK ---
+        """
+        value_trap = """
+        CATALYSTS:
+          MID_TERM_PLAN: 3-year ROE target confirmed
+        """
+
+        flags = RedFlagDetector.detect_capital_efficiency_flags(
+            fundamentals,
+            "TEST",
+            value_trap_report=value_trap,
+        )
+
+        flag_types = [flag["type"] for flag in flags]
+        assert "CAPITAL_IDLE_CASH_RISK" not in flag_types
 
 
 class TestRealWorldScenarios:

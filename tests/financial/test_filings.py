@@ -588,39 +588,35 @@ class TestForeignSourceSearch:
     async def test_search_foreign_sources_returns_tavily_when_ddg_stalls(self):
         from src.tools.research import search_foreign_sources
 
-        mock_ticker = MagicMock()
-        mock_ticker.ticker = "SNTIA.OL"
-
-        with patch("src.tools.research.yf.Ticker", return_value=mock_ticker):
-            with patch(
-                "src.tools.research.shared.extract_company_name_async",
-                new=AsyncMock(return_value="Sentia ASA"),
-            ):
-                with patch("src.tools.research.shared.tavily_tool", object()):
-                    with patch(
-                        "src.tools.research.shared._tavily_search_with_timeout",
-                        new=AsyncMock(
-                            return_value={
-                                "results": [
-                                    {
-                                        "title": "IR page",
-                                        "url": "https://example.com/ir",
-                                        "content": "Official annual report link",
-                                    }
-                                ]
-                            }
-                        ),
-                    ):
-                        with patch(
-                            "src.tools.research.shared._ddg_search",
-                            new=AsyncMock(return_value=[]),
-                        ):
-                            result = await search_foreign_sources.ainvoke(
+        with patch(
+            "src.tools.research.shared.extract_company_name_async",
+            new=AsyncMock(return_value="Sentia ASA"),
+        ):
+            with patch("src.tools.research.shared.tavily_tool", object()):
+                with patch(
+                    "src.tools.research.shared._tavily_search_with_timeout",
+                    new=AsyncMock(
+                        return_value={
+                            "results": [
                                 {
-                                    "ticker": "SNTIA.OL",
-                                    "search_query": "annual report investor relations",
+                                    "title": "IR page",
+                                    "url": "https://example.com/ir",
+                                    "content": "Official annual report link",
                                 }
-                            )
+                            ]
+                        }
+                    ),
+                ):
+                    with patch(
+                        "src.tools.research.shared._ddg_search",
+                        new=AsyncMock(return_value=[]),
+                    ):
+                        result = await search_foreign_sources.ainvoke(
+                            {
+                                "ticker": "SNTIA.OL",
+                                "search_query": "annual report investor relations",
+                            }
+                        )
 
         assert "Foreign Source Search Results" in result
         assert "IR page" in result

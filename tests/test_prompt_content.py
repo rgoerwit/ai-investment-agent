@@ -71,6 +71,12 @@ class TestFundamentalsPromptContent:
             "from generic cyclical decline."
         )
 
+    def test_fundamentals_prompt_has_idle_cash_fields(self):
+        prompt = get_prompt("fundamentals_analyst")
+        msg = prompt.system_message
+        assert "NET_CASH_TO_MARKET_CAP" in msg
+        assert "CAPITAL_PLAN_STATUS" in msg
+
 
 class TestPortfolioManagerPromptContent:
     """Guard PM handling of consultant no-coverage cases."""
@@ -80,6 +86,12 @@ class TestPortfolioManagerPromptContent:
         assert (
             "should be noted without adding +0.25" in prompt.system_message
         ), "PM prompt must keep plain ex-US no-coverage consultant cases neutral."
+
+    def test_portfolio_manager_prompt_mentions_idle_cash_leniency(self):
+        prompt = get_prompt("portfolio_manager")
+        assert (
+            "CAPITAL_PLAN_STATUS" in prompt.system_message
+        ), "PM prompt must distinguish idle cash with no plan from justified cash buffers."
 
 
 class TestFundamentalsEbitdaAnnualization:
@@ -174,3 +186,24 @@ class TestForeignLanguageOrderBook:
         assert (
             "REVENUE BACKLOG" in prompt.system_message
         ), "FLA output format must include REVENUE BACKLOG section to pass data downstream."
+
+    def test_capital_policy_output_block_present(self):
+        prompt = get_prompt("foreign_language_analyst")
+        assert (
+            "CAPITAL POLICY" in prompt.system_message
+        ), "FLA output format must include CAPITAL POLICY so capital-allocation evidence reaches Fundamentals."
+
+    def test_ownership_change_search_present(self):
+        prompt = get_prompt("foreign_language_analyst")
+        msg = prompt.system_message
+        assert "Search G: Ownership Changes / Insider Dealings" in msg
+        assert "director dealings" in msg
+        assert "股權披露" in msg
+        assert "大量保有報告書" in msg
+        assert "PDMR" in msg
+
+    def test_ownership_change_output_block_present(self):
+        prompt = get_prompt("foreign_language_analyst")
+        msg = prompt.system_message
+        assert "Recent Ownership Changes" in msg
+        assert "Insider/Director Dealings" in msg

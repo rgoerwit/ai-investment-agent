@@ -137,3 +137,4 @@ class AgentState(MessagesState):
     red_flags: Annotated[list[dict[str, Any]], take_last]
     pre_screening_result: Annotated[str, take_last]
     chart_paths: Annotated[dict[str, str], take_last]
+    macro_context_injected_into_news: Annotated[bool, take_last]

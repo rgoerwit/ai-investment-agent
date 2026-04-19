@@ -355,6 +355,28 @@ KEY_RISKS:
         assert metrics_with["has_catalyst"] is True
         assert metrics_without["has_catalyst"] is False
 
+    def test_extract_capital_allocation_detail_fields(self):
+        """Test richer capital-allocation fields are preserved from VALUE_TRAP_BLOCK."""
+        from src.validators.red_flag_detector import RedFlagDetector
+
+        report = """
+CAPITAL_ALLOCATION:
+  RATING: POOR
+  BUYBACK_CONTEXT: No buyback despite large cash balance
+  PAYOUT_TREND: Flat for 5 years
+  CASH_POSITION: Net cash > 30% of market cap
+CATALYSTS:
+  MID_TERM_PLAN: FY2028 ROE target 10%
+"""
+
+        metrics = RedFlagDetector.extract_value_trap_score(report)
+
+        assert metrics["capital_allocation_rating"] == "POOR"
+        assert metrics["buyback_context"] == "No buyback despite large cash balance"
+        assert metrics["payout_trend"] == "Flat for 5 years"
+        assert metrics["cash_position"] == "Net cash > 30% of market cap"
+        assert metrics["mid_term_plan"] == "FY2028 ROE target 10%"
+
 
 class TestDetectValueTrapFlags:
     """Test value trap flag detection."""

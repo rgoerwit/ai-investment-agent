@@ -19,6 +19,8 @@ cd "${REPO_ROOT}"
 
 RUN_WORKER=true
 APP_ARGS=()
+DASH_HOST="127.0.0.1"
+DASH_PORT="5050"
 
 resolve_python_cmd() {
     if [[ -n "${INVESTMENT_AGENT_CONTAINER:-}" ]] || [[ -f "/.dockerenv" ]] || [[ -f "/run/.containerenv" ]]; then
@@ -68,9 +70,27 @@ while [[ $# -gt 0 ]]; do
             usage
             exit 0
             ;;
+        --host)
+            DASH_HOST="$2"
+            APP_ARGS+=("$1" "$2")
+            shift 2
+            ;;
+        --port)
+            DASH_PORT="$2"
+            APP_ARGS+=("$1" "$2")
+            shift 2
+            ;;
         --)
             shift
             APP_ARGS=("$@")
+            # Scan remaining args for --host/--port.
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --host) DASH_HOST="${2:-}"; shift 2 ;;
+                    --port) DASH_PORT="${2:-}"; shift 2 ;;
+                    *) shift ;;
+                esac
+            done
             break
             ;;
         *)
@@ -101,5 +121,5 @@ if ${RUN_WORKER}; then
     echo "[INFO] Started dashboard worker (PID ${WORKER_PID})"
 fi
 
-echo "[INFO] Starting dashboard app"
-exec "${PYTHON_CMD[@]}" -m src.web.ibkr_dashboard.app "${APP_ARGS[@]}"
+echo "[INFO] Starting dashboard app at http://${DASH_HOST}:${DASH_PORT}/"
+exec "${PYTHON_CMD[@]}" -m src.web.ibkr_dashboard.app ${APP_ARGS[@]+"${APP_ARGS[@]}"}

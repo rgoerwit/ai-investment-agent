@@ -16,13 +16,6 @@ import structlog
 from langchain_core.tools import tool
 
 from src.tavily_utils import tavily_search_with_timeout as _tavily_search_with_timeout
-from src.ticker_policy import (
-    CHINA_SUFFIXES,
-    INDIA_SUFFIXES,
-    KOREA_SUFFIXES,
-    TAIWAN_SUFFIXES,
-    ticker_in_group,
-)
 
 logger = structlog.get_logger(__name__)
 
@@ -78,11 +71,13 @@ REGION_PLATFORMS = {
     "taiwan": ["taipeitimes.com", "focustaiwan.tw"],
     "china": ["chinadaily.com.cn", "globaltimes.cn", "caixinglobal.com"],
     "india": ["economictimes.indiatimes.com", "moneycontrol.com", "livemint.com"],
+    "singapore": ["businesstimes.com.sg", "straitstimes.com", "channelnewsasia.com"],
     "thailand": ["bangkokpost.com", "nationthailand.com"],
     "malaysia": ["thestar.com.my", "nst.com.my", "theedgemalaysia.com"],
     "vietnam": ["vnexpress.net", "vietnamnews.vn", "vir.com.vn"],
     "indonesia": ["jakartaglobe.id", "thejakartapost.com", "antaranews.com"],
     # Europe
+    "uk": ["ft.com", "bbc.com/news/business", "thisismoney.co.uk"],
     "germany": ["dw.com", "handelsblatt.com/english", "thelocal.de"],
     "france": ["france24.com", "rfi.fr", "connexionfrance.com", "lemonde.fr/en"],
     "spain": ["elpais.com/english", "theolivepress.es", "surinenglish.com"],
@@ -91,6 +86,7 @@ REGION_PLATFORMS = {
     "denmark": ["cphpost.dk", "dr.dk/nyheder"],
     "switzerland": ["swissinfo.ch", "lenews.ch"],
     # Americas
+    "canada": ["theglobeandmail.com/business", "financialpost.com", "bnnbloomberg.ca"],
     "brazil": ["riotimesonline.com", "braziljournal.com", "folha.uol.com.br"],
     "mexico": ["mexiconewsdaily.com", "eluniversal.com.mx/english"],
     # Middle East
@@ -99,6 +95,12 @@ REGION_PLATFORMS = {
         "thenationalnews.com",
         "aljazeera.com",
         "gulfnews.com",
+    ],
+    # Oceania
+    "australia": [
+        "afr.com",
+        "abc.net.au/news/business",
+        "theaustralian.com.au/business",
     ],
 }
 
@@ -121,62 +123,10 @@ def get_company_translations(ticker: str, company_name: str) -> dict[str, str]:
 
 
 def detect_market_region(ticker: str) -> str:
-    """Detect the market region from ticker suffix."""
-    ticker = ticker.upper()
+    """Detect the market region from ticker suffix for REGION_PLATFORMS lookups."""
+    from src.macro_regions import infer_sentiment_region
 
-    # Asia
-    if ticker.endswith(".HK"):
-        return "hong_kong"
-    if ticker_in_group(ticker, KOREA_SUFFIXES):
-        return "south_korea"
-    if ticker.endswith(".T"):
-        return "japan"
-    if ticker_in_group(ticker, TAIWAN_SUFFIXES):
-        return "taiwan"
-    if ticker_in_group(ticker, CHINA_SUFFIXES - {".HK"}):
-        return "china"
-    if ticker_in_group(ticker, INDIA_SUFFIXES):
-        return "india"
-    if ticker.endswith(".BK"):
-        return "thailand"
-    if ticker.endswith(".KL"):
-        return "malaysia"
-    if ticker.endswith(".VN"):
-        return "vietnam"
-    if ticker.endswith(".JK"):
-        return "indonesia"
-
-    # Europe
-    if ticker.endswith(".DE") or ticker.endswith(".F") or ticker.endswith(".XETRA"):
-        return "germany"
-    if ticker.endswith(".VI"):
-        return "germany"  # Austria (German language)
-    if ticker.endswith(".PA"):
-        return "france"
-    if ticker.endswith(".BR"):
-        return "france"  # Brussels (often French/English overlap in fin media)
-    if ticker.endswith(".MC") or ticker.endswith(".MA"):
-        return "spain"
-    if ticker.endswith(".LS"):
-        return "portugal"
-    if ticker.endswith(".WA"):
-        return "poland"
-    if ticker.endswith(".CO"):
-        return "denmark"
-    if ticker.endswith(".SW") or ticker.endswith(".S"):
-        return "switzerland"
-
-    # Americas
-    if ticker.endswith(".SA"):
-        return "brazil"
-    if ticker.endswith(".MX"):
-        return "mexico"
-
-    # Middle East
-    if ticker.endswith(".SR") or ticker.endswith(".QA") or ticker.endswith(".AE"):
-        return "middle_east"
-
-    return "unknown"
+    return infer_sentiment_region(ticker)
 
 
 @tool

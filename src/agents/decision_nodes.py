@@ -379,6 +379,8 @@ NEUTRAL ANALYST (Balanced):
                 )
 
         if fundamentals:
+            sector = RedFlagDetector.detect_sector(fundamentals)
+
             moat_bonuses = RedFlagDetector.detect_moat_flags(fundamentals, ticker)
             if moat_bonuses:
                 red_flags.extend(moat_bonuses)
@@ -392,7 +394,10 @@ NEUTRAL ANALYST (Balanced):
                 )
 
             capital_flags = RedFlagDetector.detect_capital_efficiency_flags(
-                fundamentals, ticker
+                fundamentals,
+                ticker,
+                value_trap_report=value_trap,
+                sector=sector,
             )
             if capital_flags:
                 red_flags.extend(capital_flags)

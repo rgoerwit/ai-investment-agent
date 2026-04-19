@@ -75,6 +75,22 @@ class TestCharacterizeMacroEventScope:
         scope, *_ = _characterize_macro_event("2026-03-05", items, 0.30)
         assert scope == "REGIONAL"
 
+    def test_regional_news_query_uses_shared_display_region_mapping(self):
+        captured = {}
+
+        def _capture(query: str, profile: str = "news_basic"):
+            captured["query"] = query
+            return None
+
+        items = [_make_sell_item("D05.SI") for _ in range(5)]
+        with patch(
+            "scripts.portfolio_manager.search_tavily_sync_inspected",
+            side_effect=_capture,
+        ):
+            _characterize_macro_event("2026-03-05", items, 0.30)
+
+        assert "Singapore" in captured["query"]
+
 
 class TestCharacterizeMacroEventLLM:
     def test_llm_classification_used_when_available(self):

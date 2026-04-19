@@ -542,6 +542,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         self._history_inflight: dict[
             tuple[str, str, str | None, str | None], asyncio.Task[pd.DataFrame]
         ] = {}
+        self._ibkr_security_service = None
 
         self.fmp_fetcher = get_fmp_fetcher() if FMP_AVAILABLE else None
         self.eodhd_fetcher = get_eodhd_fetcher() if EODHD_AVAILABLE else None
@@ -589,6 +590,26 @@ class SmartMarketDataFetcher(FinancialFetcher):
             time.monotonic() + FETCH_RESULT_CACHE_TTL_SECONDS,
             copy.deepcopy(payload),
         )
+
+    def _get_ibkr_security_service(self):
+        if self._ibkr_security_service is None:
+            from src.ibkr.security_data_service import IbkrSecurityDataService
+
+            self._ibkr_security_service = IbkrSecurityDataService()
+        return self._ibkr_security_service
+
+    async def _probe_ibkr_security(self, ticker: str):
+        try:
+            return await self._get_ibkr_security_service().probe_security(ticker)
+        except Exception as exc:
+            logger.debug("ibkr_security_probe_failed", ticker=ticker, error=str(exc))
+            return None
+
+    @staticmethod
+    def _has_safe_identity_anchor(data: dict[str, Any]) -> bool:
+        if not data:
+            return False
+        return any(data.get(field) for field in ("longName", "shortName", "industry"))
 
     def _history_cache_key(
         self,
@@ -876,7 +897,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         # --- CAPITAL EFFICIENCY SIGNALS ---
         # Calculate ROIC and leverage quality from statements
         capital_signals = self._calculate_capital_efficiency_signals(
-            financials, balance_sheet, extracted, symbol
+            financials, balance_sheet, extracted, symbol, cashflow=cashflow
         )
         for key, value in capital_signals.items():
             extracted[key] = value
@@ -1236,9 +1257,10 @@ class SmartMarketDataFetcher(FinancialFetcher):
         balance_sheet: "pd.DataFrame",
         info: dict[str, Any],
         symbol: str,
+        cashflow: "pd.DataFrame | None" = None,
     ) -> dict[str, Any]:
         """
-        Calculate capital efficiency metrics: ROIC and leverage quality.
+        Calculate capital efficiency metrics: ROIC, leverage quality, and idle-cash context.
 
         Detects value destruction (ROIC < 0 with positive ROE) and financial
         engineering (ROE >> ROIC). Uses hurdle rate as WACC proxy to avoid
@@ -1262,6 +1284,14 @@ class SmartMarketDataFetcher(FinancialFetcher):
             ebit: float | None = None
             tax_rate: float | None = None
             invested_capital: float | None = None
+            total_debt = _safe_float(info.get("totalDebt"))
+            cash = _safe_float(
+                info.get("cashAndShortTermInvestments") or info.get("totalCash")
+            )
+            total_assets = _safe_float(info.get("totalAssets"))
+            market_cap = _safe_float(info.get("marketCap"))
+            capex: float | None = None
+            d_and_a: float | None = None
 
             if not income_stmt.empty and len(income_stmt.columns) > 0:
                 if "EBIT" in income_stmt.index:
@@ -1279,6 +1309,73 @@ class SmartMarketDataFetcher(FinancialFetcher):
                     val = balance_sheet.loc["Invested Capital"].iloc[0]
                     if pd.notna(val) and val > 0:
                         invested_capital = float(val)
+
+                if total_debt is None:
+                    if "Total Debt" in balance_sheet.index:
+                        val = balance_sheet.loc["Total Debt"].iloc[0]
+                        if pd.notna(val):
+                            total_debt = float(val)
+                    elif "Long Term Debt" in balance_sheet.index:
+                        long_term = balance_sheet.loc["Long Term Debt"].iloc[0]
+                        short_term = (
+                            balance_sheet.loc["Current Debt"].iloc[0]
+                            if "Current Debt" in balance_sheet.index
+                            else 0
+                        )
+                        if pd.notna(long_term) and pd.notna(short_term):
+                            total_debt = float(long_term) + float(short_term)
+
+                if total_assets is None and "Total Assets" in balance_sheet.index:
+                    val = balance_sheet.loc["Total Assets"].iloc[0]
+                    if pd.notna(val):
+                        total_assets = float(val)
+
+                if cash is None:
+                    used_combined_cash_row = False
+                    cash_rows = [
+                        "Cash And Short Term Investments",
+                        "Cash And Cash Equivalents",
+                        "Cash",
+                    ]
+                    for cash_row in cash_rows:
+                        if cash_row in balance_sheet.index:
+                            val = balance_sheet.loc[cash_row].iloc[0]
+                            if pd.notna(val):
+                                cash = float(val)
+                                used_combined_cash_row = (
+                                    cash_row == "Cash And Short Term Investments"
+                                )
+                                break
+                    if (
+                        cash is not None
+                        and not used_combined_cash_row
+                        and "Short Term Investments" in balance_sheet.index
+                    ):
+                        sti = balance_sheet.loc["Short Term Investments"].iloc[0]
+                        if pd.notna(sti):
+                            cash += float(sti)
+
+            if (
+                cashflow is not None
+                and not cashflow.empty
+                and len(cashflow.columns) > 0
+            ):
+                if "Capital Expenditure" in cashflow.index:
+                    val = cashflow.loc["Capital Expenditure"].iloc[0]
+                    if pd.notna(val):
+                        capex = float(val)
+
+                for da_row in (
+                    "Depreciation And Amortization",
+                    "Depreciation Amortization Depletion",
+                    "Depreciation & Amortization",
+                    "Depreciation",
+                ):
+                    if da_row in cashflow.index:
+                        val = cashflow.loc[da_row].iloc[0]
+                        if pd.notna(val):
+                            d_and_a = float(val)
+                            break
 
             # ROA and ROE from info dict
             # roa = info.get("returnOnAssets")
@@ -1339,6 +1436,29 @@ class SmartMarketDataFetcher(FinancialFetcher):
                         signals["capital_leverageQuality"] = "CONSERVATIVE"
                     else:
                         signals["capital_leverageQuality"] = "GENUINE"
+
+            if (
+                cash is not None
+                and total_debt is not None
+                and market_cap
+                and market_cap > 0
+            ):
+                signals["capital_netCashToMarketCap"] = round(
+                    (cash - total_debt) / market_cap, 4
+                )
+
+            if cash is not None and total_assets and total_assets > 0:
+                signals["capital_cashToAssets"] = round(cash / total_assets, 4)
+
+            if capex is not None and d_and_a not in (None, 0):
+                capex_to_da_ratio = abs(capex) / abs(d_and_a)
+                signals["capital_capexToDaRatio"] = round(capex_to_da_ratio, 2)
+                if capex_to_da_ratio < config.capex_to_da_underinvesting_threshold:
+                    signals["capital_capexToDaStatus"] = "UNDERINVESTING"
+                elif capex_to_da_ratio > config.capex_to_da_growth_threshold:
+                    signals["capital_capexToDaStatus"] = "GROWTH_INVESTING"
+                else:
+                    signals["capital_capexToDaStatus"] = "MAINTENANCE"
 
             if signals:
                 logger.debug(
@@ -2900,16 +3020,90 @@ class SmartMarketDataFetcher(FinancialFetcher):
 
             # Panic Mode: full vacuum (any market) OR basics missing for fragile exchanges
             basics_failed = not all(k in merged for k in self.REQUIRED_BASICS)
-            is_fragile_exchange = get_ticker_suffix(ticker) in FRAGILE_EXCHANGE_SUFFIXES
+            suffix = get_ticker_suffix(ticker)
+            is_fragile_exchange = suffix in FRAGILE_EXCHANGE_SUFFIXES
+            identity_weak = (
+                bool(suffix)
+                and not self._has_safe_identity_anchor(merged)
+                and not merged.get("currentPrice")
+            )
 
-            if not merged or (is_fragile_exchange and basics_failed):
-                panic_reason = "total data vacuum" if not merged else "basics missing"
+            if not merged or (is_fragile_exchange and basics_failed) or identity_weak:
+                if not merged:
+                    panic_reason = "total data vacuum"
+                elif identity_weak:
+                    panic_reason = "identity weak"
+                else:
+                    panic_reason = "basics missing"
                 logger.warning(
                     "data_vacuum_detected",
                     symbol=ticker,
                     msg=f"Triggering Panic Mode ({panic_reason})",
                 )
                 all_critical = self.IMPORTANT_FIELDS + self.REQUIRED_BASICS
+                probe = await self._probe_ibkr_security(ticker)
+                if probe is not None:
+                    merged.setdefault("_ibkr_probe_used", True)
+                    merged["_ibkr_identity_confidence"] = probe.identity_confidence
+                    if probe.company_name:
+                        merged["_ibkr_company_name"] = probe.company_name
+                    if probe.market_data_availability:
+                        merged["_ibkr_market_data_availability"] = (
+                            probe.market_data_availability
+                        )
+                    if probe.error_kind:
+                        merged["_ibkr_probe_error_kind"] = probe.error_kind
+
+                    if probe.identity_confidence == "VERIFIED":
+                        resolved_ticker = probe.resolved_yf_ticker or ticker
+                        if not merged.get("symbol"):
+                            merged["symbol"] = resolved_ticker
+                        if probe.company_name and not merged.get("longName"):
+                            merged["longName"] = probe.company_name
+                        if probe.currency and not merged.get("currency"):
+                            merged["currency"] = probe.currency
+                        if probe.last_price is not None and not merged.get(
+                            "currentPrice"
+                        ):
+                            merged["currentPrice"] = probe.last_price
+
+                        if resolved_ticker and resolved_ticker != ticker:
+                            logger.info(
+                                "ibkr_ticker_retry",
+                                original=ticker,
+                                resolved=resolved_ticker,
+                            )
+                            retry_results = await self._fetch_all_sources_parallel(
+                                resolved_ticker
+                            )
+                            retry_merged, retry_metadata = (
+                                self._smart_merge_with_quality(
+                                    retry_results, resolved_ticker
+                                )
+                            )
+                            if retry_merged:
+                                retry_merge = (
+                                    self._merge_data(merged, retry_merged)
+                                    if merged
+                                    else MergeResult(retry_merged, len(retry_merged))
+                                )
+                                merged = retry_merge.data
+                                merge_metadata["gaps_filled"] += retry_merge.gaps_filled
+                                merge_metadata["sources_used"] = sorted(
+                                    set(merge_metadata["sources_used"])
+                                    | set(retry_metadata.get("sources_used", []))
+                                )
+                                merge_metadata["field_sources"].update(
+                                    {
+                                        key: value
+                                        for key, value in retry_metadata.get(
+                                            "field_sources", {}
+                                        ).items()
+                                        if key not in merge_metadata["field_sources"]
+                                    }
+                                )
+                                ticker = resolved_ticker
+
                 tavily_rescue = await self._fetch_tavily_gaps(ticker, all_critical)
                 if tavily_rescue:
                     merged = self._merge_gap_fill_data(

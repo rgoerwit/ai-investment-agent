@@ -51,6 +51,7 @@ This is gatekeeping. Sophisticated financial analysis has been a **luxury good**
 
 What if you could simulate an institutional research team using AI?
 
+- **Macro Context Analyst** - Pre-graph regional regime context for News Analyst
 - **Market Analyst** - Technical analysis, price trends, volume
 - **Fundamentals Analyst** - Financial metrics, balance sheet health
 - **News Analyst** - Recent events, catalysts, risks
@@ -143,6 +144,10 @@ Here's how a single stock analysis flows through the system:
 ```
 User: "Analyze 0005.HK"
     ↓
+[Pre-Graph Macro Context]
+  └─ Macro Context Analyst summarizes cached regional regime background
+     and feeds it only to News Analyst
+    ↓
 [Parallel Data Gathering]
   ├─ Market Analyst (technical analysis)
   ├─ Fundamentals Analyst (financial metrics)
@@ -175,6 +180,11 @@ User: "Analyze 0005.HK"
     └─ Apply thesis criteria (GARP strategy)
     └─ FINAL DECISION: BUY / HOLD / SELL + position size
 ```
+
+This pre-graph macro brief is intentionally separate from portfolio-detected
+macro events. `MacroEventsStore` holds sparse discrete shocks discovered by the
+portfolio path, while `src.macro_context.py` holds a short cached regional
+regime brief used as News Analyst background.
 
 **Why this works better than a single prompt:**
 
