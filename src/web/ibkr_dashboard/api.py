@@ -266,7 +266,12 @@ def create_refresh_job():
 @api_bp.get("/settings")
 def get_settings():
     preferences = _preferences()
-    return jsonify(preferences.model_dump())
+    return jsonify(
+        {
+            **preferences.model_dump(),
+            "results_dir": str(_settings().results_dir),
+        }
+    )
 
 
 @api_bp.post("/settings")
@@ -290,6 +295,7 @@ def save_settings():
     snapshot_reload_required = bool(_snapshot_service().apply_preferences(preferences))
     return jsonify(
         {
+            "results_dir": str(_settings().results_dir),
             **preferences.model_dump(),
             "saved": True,
             "snapshot_reload_required": snapshot_reload_required,

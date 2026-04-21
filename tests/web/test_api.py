@@ -248,6 +248,7 @@ def test_settings_round_trip(client):
     assert payload["watchlist_name"] == "alpha"
     assert payload["read_only"] is True
     assert payload["max_age_days"] == 21
+    assert payload["results_dir"] == "results"
 
 
 def test_settings_save_reports_snapshot_reload_requirement(client):
@@ -295,3 +296,4 @@ def test_settings_save_preserves_startup_overrides_on_partial_update(
     assert payload["watchlist_name"] == "default watchlist"
     assert payload["notes"] == "operator note"
     assert payload["snapshot_reload_required"] is False
+    assert payload["results_dir"] == "results"

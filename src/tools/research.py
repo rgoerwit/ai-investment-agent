@@ -7,6 +7,8 @@ import structlog
 from langchain_core.tools import tool
 
 from src.ticker_utils import normalize_ticker
+from src.tooling.inspection_service import INSPECTION_SERVICE
+from src.tooling.inspector import InspectionEnvelope, SourceKind
 from src.tools import shared
 
 logger = structlog.get_logger(__name__)
@@ -64,6 +66,17 @@ async def search_foreign_sources(
 
         results_str = shared._format_and_truncate_tavily_result(merged)
 
+        # Inspect merged foreign-search output after DDG+Tavily merge.
+        results_str = await INSPECTION_SERVICE.check(
+            InspectionEnvelope(
+                content_text=results_str,
+                raw_content=results_str,
+                source_kind=SourceKind.web_search,
+                source_name="foreign_search_merged",
+                metadata={"ticker": ticker, "query": search_query[:100]},
+            )
+        )
+
         sources_used = []
         if tavily_results and not isinstance(tavily_results, Exception):
             sources_used.append("Tavily")
@@ -117,4 +130,14 @@ async def get_official_filings(
             f"No official filing API available for {normalized}. "
             "Use search_foreign_sources instead."
         )
-    return result.to_report_string()
+    report = result.to_report_string()
+    # Inspect official filing text (lighter treatment via SourceKind).
+    return await INSPECTION_SERVICE.check(
+        InspectionEnvelope(
+            content_text=report,
+            raw_content=report,
+            source_kind=SourceKind.official_filing,
+            source_name="official_filings",
+            metadata={"ticker": normalized},
+        )
+    )

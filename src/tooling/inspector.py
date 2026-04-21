@@ -26,6 +26,8 @@ class SourceKind(str, Enum):
     official_filing = "official_filing"
     social_feed = "social_feed"
     financial_api = "financial_api"
+    memory_retrieval = "memory_retrieval"
+    cached_context = "cached_context"
     mcp_tool_output = "mcp_tool_output"  # reserved for future MCP integration
 
 

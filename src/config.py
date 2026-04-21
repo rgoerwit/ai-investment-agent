@@ -536,24 +536,33 @@ class Settings(BaseSettings):
     untrusted_content_inspection_enabled: bool = Field(
         default=False,
         validation_alias="UNTRUSTED_CONTENT_INSPECTION_ENABLED",
-        description="Enable content inspection for external ingress paths",
+        description=("Enable untrusted-content inspection for external ingress paths"),
     )
     untrusted_content_inspection_mode: Literal["warn", "sanitize", "block"] = Field(
         default="warn",
         validation_alias="UNTRUSTED_CONTENT_INSPECTION_MODE",
-        description="Inspection action mode: warn | sanitize | block",
+        description=(
+            "Inspection action mode: warn for observation-first rollout, "
+            "sanitize for safe rewrites, block for placeholder substitution"
+        ),
     )
     untrusted_content_fail_policy: Literal["fail_open", "fail_closed"] = Field(
         default="fail_open",
         validation_alias="UNTRUSTED_CONTENT_FAIL_POLICY",
-        description="Policy when backend errors: fail_open | fail_closed",
+        description=(
+            "Policy when the backend errors: fail_open preserves availability, "
+            "fail_closed blocks on inspector failures"
+        ),
     )
     untrusted_content_backend: Literal[
         "null", "http", "python", "subprocess", "composite"
     ] = Field(
         default="null",
         validation_alias="UNTRUSTED_CONTENT_BACKEND",
-        description="Inspection backend: null | http | python | subprocess | composite",
+        description=(
+            "Inspection backend. Current in-process options are null, python "
+            "(heuristic), and composite (heuristic plus selective judge)."
+        ),
     )
 
     # --- Telemetry & System Overrides ---

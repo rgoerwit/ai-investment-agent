@@ -8,6 +8,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.types import RunnableConfig
 
 from src.runtime_diagnostics import failure_artifact, success_artifact
+from src.tooling.text_boundary import format_untrusted_block
 
 from . import message_utils, support
 from . import runtime as agent_runtime
@@ -169,9 +170,22 @@ Only use data explicitly related to {ticker} ({company_name}).
             else "Provide your rebuttal to the opponent's Round 1 argument."
         )
 
-        context_block = past_insights
+        context_block = ""
+        if past_insights:
+            context_block = format_untrusted_block(
+                past_insights,
+                "MEMORY RETRIEVAL",
+                provenance=f"ChromaDB collection for {ticker}",
+            )
         if lessons_text:
-            context_block += f"\n\n{lessons_text}"
+            wrapped_lessons = format_untrusted_block(
+                lessons_text,
+                "RETROSPECTIVE LESSONS",
+                provenance="global lessons_learned collection",
+            )
+            context_block += (
+                f"\n\n{wrapped_lessons}" if context_block else wrapped_lessons
+            )
 
         prompt = (
             f"{agent_prompt.system_message}\n{negative_constraint}\n\nREPORTS:\n"

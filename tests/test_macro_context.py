@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -130,6 +131,37 @@ class TestCacheReadWrite:
                 ttl_hours=12,
             )
         assert cached is None
+
+    def test_cache_dir_tracks_live_results_dir(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("src.macro_context._CACHE_DIR", None)
+        monkeypatch.setattr("src.config.config.results_dir", tmp_path)
+
+        from src.macro_context import get_macro_context_cache_dir
+
+        assert get_macro_context_cache_dir() == tmp_path / ".macro_context_cache"
+
+    def test_cache_dir_uses_live_config_after_reload_under_patch(
+        self, monkeypatch, tmp_path
+    ):
+        import src.config
+        import src.macro_context as macro_context
+
+        original_results_dir = src.config.config.results_dir
+
+        try:
+            with patch("src.config.config") as mock_config:
+                mock_config.results_dir = tmp_path / "patched"
+                importlib.reload(macro_context)
+
+            monkeypatch.setattr("src.macro_context._CACHE_DIR", None)
+            monkeypatch.setattr(src.config.config, "results_dir", tmp_path / "live")
+
+            assert macro_context.get_macro_context_cache_dir() == (
+                tmp_path / "live" / ".macro_context_cache"
+            )
+        finally:
+            src.config.config.results_dir = original_results_dir
+            importlib.reload(macro_context)
 
 
 class TestGetMacroContext:

@@ -134,9 +134,59 @@ class TestAnalystNode:
 
         mock_highlights.assert_called_once_with("N" * 30_000, max_chars=5000)
         invocation_messages = captured_inputs[0]["messages"]
-        system_message = invocation_messages[0].content
-        assert "### NEWS HIGHLIGHTS" in system_message
-        assert "HIGHLIGHTS" in system_message
+        # extra_context is in HumanMessage (index 1), not SystemMessage (index 0)
+        from langchain_core.messages import HumanMessage
+
+        context_message = invocation_messages[1]
+        assert isinstance(context_message, HumanMessage)
+        assert "HIGHLIGHTS" in context_message.content
+
+    @pytest.mark.asyncio
+    async def test_fundamentals_analyst_keeps_pfic_guidance_in_system_prompt(self):
+        """Trusted coordinator guidance should stay in SystemMessage."""
+        from src.agents import create_analyst_node
+
+        mock_llm = MagicMock()
+        mock_response = SimpleNamespace(content="Test analysis report", tool_calls=None)
+        captured_inputs = []
+
+        async def _capture_invoke(_runnable, payload, **_kwargs):
+            captured_inputs.append(payload)
+            return mock_response
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling",
+            new=AsyncMock(side_effect=_capture_invoke),
+        ):
+            node = create_analyst_node(
+                mock_llm,
+                "fundamentals_analyst",
+                [],
+                "fundamentals_report",
+            )
+            state = {
+                "messages": [],
+                "company_of_interest": "6782.TW",
+                "trade_date": "2026-04-13",
+                "raw_fundamentals_data": '{"operatingCashflow": 123}',
+                "legal_report": "Legal counsel summary",
+            }
+            config = {
+                "configurable": {
+                    "context": MagicMock(ticker="6782.TW", trade_date="2026-04-13")
+                }
+            }
+
+            await node(state, config)
+
+        invocation_messages = captured_inputs[0]["messages"]
+        system_message = invocation_messages[0]
+        context_message = invocation_messages[1]
+
+        assert "Use Legal Counsel output to inform PFIC_RISK in DATA_BLOCK." in (
+            system_message.content
+        )
+        assert "Legal counsel summary" in context_message.content
 
 
 class TestResearcherNode:

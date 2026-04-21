@@ -31,6 +31,8 @@ from src.data_block_utils import extract_last_data_block
 from src.exchange_metadata import SUFFIX_TO_CURRENCY_CODE
 from src.runtime_diagnostics import classify_failure
 from src.ticker_policy import get_ticker_suffix
+from src.tooling.inspection_service import INSPECTION_SERVICE
+from src.tooling.inspector import InspectionEnvelope, SourceKind
 
 logger = structlog.get_logger(__name__)
 
@@ -1433,6 +1435,18 @@ async def format_lessons_for_injection(
         )
 
     formatted = "\n".join(lines)
+
+    # Inspect lessons text for injection before returning.
+    formatted = await INSPECTION_SERVICE.check(
+        InspectionEnvelope(
+            content_text=formatted,
+            raw_content=formatted,
+            source_kind=SourceKind.memory_retrieval,
+            source_name="lessons_learned",
+            metadata={"ticker": ticker, "sector": sector},
+        )
+    )
+
     _record_capture_memory_event(
         {
             "event": "lessons_injected",

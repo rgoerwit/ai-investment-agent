@@ -3,6 +3,7 @@
 import json
 import logging
 from argparse import Namespace
+from pathlib import Path
 from types import ModuleType
 from unittest.mock import AsyncMock, patch
 
@@ -465,6 +466,43 @@ def test_main_report_mode_uses_service_bundle_in_formatter():
     assert mock_report.call_args.kwargs["refresh_activity"].skipped_due_to_limit == [
         "6758.T"
     ]
+
+
+def test_refresh_save_callback_uses_requested_results_dir(tmp_path):
+    """Queued refresh saves should land in the same results root the request loaded."""
+    args = _make_args(
+        recommend=True,
+        report_only=False,
+        results_dir=str(tmp_path),
+    )
+    bundle = _make_bundle(refresh_activity=RefreshActivity(policy="off", limit=10))
+    captured_results_dir: dict[str, Path] = {}
+
+    class FakeService:
+        def __init__(self, **kwargs):
+            save_results_fn = kwargs["save_results_fn"]
+            save_results_fn({"ticker": "7203.T"}, "7203.T", quick_mode=False)
+            self.build_bundle = AsyncMock(return_value=bundle)
+
+    def fake_save_results_to_file(result, ticker, quick_mode=False, **kwargs):
+        captured_results_dir["path"] = Path(kwargs["results_dir"])
+        return tmp_path / f"{ticker}.json"
+
+    with (
+        patch("scripts.portfolio_manager.parse_args", return_value=args),
+        patch("scripts.portfolio_manager._configure_logging"),
+        patch("scripts.portfolio_manager._preflight_ibkr_requirements"),
+        patch("scripts.portfolio_manager.PortfolioRecommendationService", FakeService),
+        patch(
+            "src.main.save_results_to_file",
+            side_effect=fake_save_results_to_file,
+        ),
+        patch("scripts.portfolio_manager._store_macro_event_if_detected"),
+        patch("scripts.portfolio_manager.format_report", return_value="report"),
+    ):
+        main()
+
+    assert captured_results_dir["path"] == tmp_path
 
 
 def test_main_json_mode_uses_service_bundle_in_json_formatter(capsys):

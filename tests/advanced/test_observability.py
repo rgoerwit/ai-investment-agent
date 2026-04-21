@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+import threading
 from contextlib import nullcontext
 from types import ModuleType
 from unittest.mock import MagicMock, patch
@@ -78,6 +79,13 @@ def _reload_observability():
     import src.observability as observability
 
     return importlib.reload(observability)
+
+
+@pytest.fixture(autouse=True)
+def restore_observability_module():
+    """Keep module-level state aligned with the real config singleton between tests."""
+    yield
+    _reload_observability()
 
 
 class TestObservabilityRuntime:
@@ -451,10 +459,20 @@ class TestFlushTraces:
             observability = _reload_observability()
             observability.flush_traces()
 
+    def test_flush_traces_is_noop_when_keys_missing(self):
+        with patch("src.config.config") as mock_config:
+            mock_config.langfuse_enabled = True
+            mock_config.get_langfuse_public_key.return_value = ""
+            mock_config.get_langfuse_secret_key.return_value = ""
+            observability = _reload_observability()
+            observability.flush_traces()
+
     def test_flush_traces_prefers_shutdown(self):
         mock_client = MagicMock()
         with patch("src.config.config") as mock_config:
             mock_config.langfuse_enabled = True
+            mock_config.get_langfuse_public_key.return_value = "pk-test"
+            mock_config.get_langfuse_secret_key.return_value = "sk-test"
             with patch.dict(
                 sys.modules,
                 _fake_langfuse_modules(client=mock_client),
@@ -463,6 +481,70 @@ class TestFlushTraces:
                 observability.flush_traces()
 
         mock_client.shutdown.assert_called_once()
+
+    def test_flush_traces_uses_live_config_after_reload_under_patch(self):
+        mock_client = MagicMock()
+
+        with patch("src.config.config") as mock_config:
+            mock_config.langfuse_enabled = True
+            mock_config.get_langfuse_public_key.return_value = "pk-test"
+            mock_config.get_langfuse_secret_key.return_value = "sk-test"
+            _reload_observability()
+
+        with patch.dict(sys.modules, _fake_langfuse_modules(client=mock_client)):
+            observability = _reload_observability()
+            observability.flush_traces()
+
+        mock_client.shutdown.assert_not_called()
+        mock_client.flush.assert_not_called()
+
+    def test_flush_traces_times_out_without_hanging(self):
+        blocked = threading.Event()
+
+        def _slow_shutdown():
+            blocked.wait(timeout=1.0)
+
+        mock_client = MagicMock()
+        mock_client.shutdown.side_effect = _slow_shutdown
+
+        with patch("src.config.config") as mock_config:
+            mock_config.langfuse_enabled = True
+            mock_config.get_langfuse_public_key.return_value = "pk-test"
+            mock_config.get_langfuse_secret_key.return_value = "sk-test"
+            with patch.dict(
+                sys.modules,
+                _fake_langfuse_modules(client=mock_client),
+            ):
+                observability = _reload_observability()
+                with patch.object(observability, "logger") as mock_logger:
+                    observability.flush_traces(timeout_seconds=0.01)
+
+        mock_logger.warning.assert_any_call(
+            "langfuse_flush_timeout",
+            operation="shutdown",
+            timeout_seconds=0.01,
+        )
+
+    def test_flush_traces_logs_worker_exception(self):
+        mock_client = MagicMock()
+        mock_client.shutdown.side_effect = RuntimeError("flush boom")
+
+        with patch("src.config.config") as mock_config:
+            mock_config.langfuse_enabled = True
+            mock_config.get_langfuse_public_key.return_value = "pk-test"
+            mock_config.get_langfuse_secret_key.return_value = "sk-test"
+            with patch.dict(
+                sys.modules,
+                _fake_langfuse_modules(client=mock_client),
+            ):
+                observability = _reload_observability()
+                with patch.object(observability, "logger") as mock_logger:
+                    observability.flush_traces(timeout_seconds=0)
+
+        mock_logger.warning.assert_any_call(
+            "langfuse_flush_failed",
+            error="flush boom",
+        )
 
 
 class TestConfigIntegration:

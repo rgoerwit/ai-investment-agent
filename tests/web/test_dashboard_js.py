@@ -59,7 +59,7 @@ const context = {{
 
 vm.createContext(context);
 vm.runInContext(
-  source + "\\nglobalThis.__dashboardTest = {{ escapeHtmlText, escapeHtmlAttr, renderTickerLink, renderSettings, renderConcentrationHeader, updateMacroAlert, state, elements }};",
+  source + "\\nglobalThis.__dashboardTest = {{ escapeHtmlText, escapeHtmlAttr, renderTickerLink, renderSettings, renderConcentrationHeader, updateMacroAlert, updateModeAlert, state, elements }};",
   context,
 );
 const __dashboardTest = context.__dashboardTest;
@@ -174,3 +174,27 @@ return alert.innerHTML;
 
     assert "<img" not in result
     assert "&lt;img src=x onerror=alert(1)&gt;" in result
+
+
+def test_update_mode_alert_uses_configured_results_dir():
+    result = _run_dashboard_js(
+        """
+const { updateModeAlert, state, elements } = __dashboardTest;
+const alert = {
+  classList: { add() {}, remove() {} },
+  textContent: "",
+  innerHTML: "",
+};
+elements.modeAlert = () => alert;
+state.snapshot = { read_only: true };
+state.settings = {
+  results_dir: 'scratch/results-custom',
+  account_id: null,
+};
+updateModeAlert();
+return alert.innerHTML;
+"""
+    )
+
+    assert "scratch/results-custom" in result
+    assert "<code>results/</code>" not in result

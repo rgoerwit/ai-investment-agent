@@ -47,6 +47,18 @@ def restore_cli_logger_levels():
         logging.getLogger(name).setLevel(level)
 
 
+@pytest.fixture
+def stub_observability(monkeypatch):
+    """Keep CLI orchestration unit tests independent of real tracing shutdown."""
+    from src.observability import NoopObservabilityRuntime
+
+    monkeypatch.setattr(
+        "src.observability.get_observability_runtime",
+        lambda *args, **kwargs: NoopObservabilityRuntime(),
+    )
+    monkeypatch.setattr("src.observability.flush_traces", lambda: None)
+
+
 class TestStrictModeCLI:
     """Test --strict CLI flag is wired correctly."""
 
@@ -673,7 +685,7 @@ class TestToolAuditLogging:
 
         TOOL_SERVICE.clear_hooks()
         try:
-            with pytest.raises(ValueError, match="only 'null' is implemented"):
+            with pytest.raises(ValueError, match="is not implemented"):
                 configure_content_inspection_from_config()
         finally:
             TOOL_SERVICE.clear_hooks()
@@ -885,6 +897,11 @@ class TestResolveOutputTargets:
 
 
 class TestMainOrchestration:
+    @pytest.fixture(autouse=True)
+    def _stub_tracing_runtime(self, stub_observability):
+        """These orchestration tests exercise CLI control flow, not Langfuse internals."""
+        return None
+
     def test_run_retrospective_only_returns_one_on_failure(self, monkeypatch):
         from src.main import _run_retrospective_only
 
@@ -1097,6 +1114,223 @@ class TestMainOrchestration:
         )
 
         assert asyncio.run(main()) == 1
+
+    def test_main_keeps_results_dir_persistent_when_output_is_set(self, monkeypatch):
+        from src.main import OutputTargets, config, main
+
+        output_file = Path("scratch/report.md")
+        observed_results_dirs: list[Path] = []
+        original_results_dir = Path("results")
+        args = SimpleNamespace(
+            retrospective_only=False,
+            ticker="6083.T",
+            quick=False,
+            strict=False,
+            article=False,
+            quiet=True,
+            brief=False,
+            svg=False,
+            transparent=False,
+            imagedir=None,
+        )
+
+        async def fake_execute(*_args, **_kwargs):
+            observed_results_dirs.append(Path(config.results_dir))
+            return {"analysis_validity": {"publishable": True}}
+
+        async def fake_article(*_args, **_kwargs):
+            observed_results_dirs.append(Path(config.results_dir))
+            return False
+
+        def fake_persist(*_args, **_kwargs):
+            observed_results_dirs.append(Path(config.results_dir))
+
+        monkeypatch.setattr("src.main.parse_arguments", lambda: args)
+        monkeypatch.setattr("src.main.config.results_dir", original_results_dir)
+        monkeypatch.setattr(
+            "src.main._apply_runtime_overrides", lambda passed_args: None
+        )
+        monkeypatch.setattr("src.main._validate_cli_args", lambda passed_args: None)
+        monkeypatch.setattr(
+            "src.main._resolve_output_targets",
+            lambda passed_args: OutputTargets(
+                output_file, Path("scratch/images"), False
+            ),
+        )
+        monkeypatch.setattr(
+            "src.main._setup_runtime",
+            lambda passed_args, targets: (
+                observed_results_dirs.append(Path(config.results_dir))
+                or {"google": {"dns": "ok"}}
+            ),
+        )
+        monkeypatch.setattr(
+            "src.main._maybe_run_ticker_retrospective",
+            lambda passed_args: (
+                observed_results_dirs.append(Path(config.results_dir)) or _async_none()
+            ),
+        )
+        monkeypatch.setattr(
+            "src.main._emit_start_banner", lambda passed_args, targets: "banner"
+        )
+        monkeypatch.setattr("src.main._execute_analysis", fake_execute)
+        monkeypatch.setattr(
+            "src.main._attach_run_summary",
+            lambda result, passed_args, preflight: None,
+        )
+        monkeypatch.setattr(
+            "src.main._render_primary_output",
+            lambda result, passed_args, targets, banner: (None, None, None),
+        )
+        monkeypatch.setattr("src.main._persist_analysis_outputs", fake_persist)
+        monkeypatch.setattr(
+            "src.main._maybe_save_rejection_record",
+            lambda result, passed_args, **kwargs: _async_none(),
+        )
+        monkeypatch.setattr("src.main._maybe_generate_article", fake_article)
+        monkeypatch.setattr(
+            "src.main._log_final_summary",
+            lambda result, passed_args, article_generated: None,
+        )
+        monkeypatch.setattr(
+            "src.cleanup.cleanup_async_resources", lambda: _async_none()
+        )
+
+        assert asyncio.run(main()) == 0
+        assert observed_results_dirs
+        assert all(path == original_results_dir for path in observed_results_dirs)
+        assert Path(config.results_dir) == original_results_dir
+
+    def test_main_restores_results_dir_after_failed_run_with_output(self, monkeypatch):
+        from src.main import OutputTargets, config, main
+
+        original_results_dir = Path("results")
+        args = SimpleNamespace(
+            retrospective_only=False,
+            ticker="6083.T",
+            quick=False,
+            strict=False,
+            article=False,
+            quiet=True,
+            brief=False,
+            svg=False,
+            transparent=False,
+            imagedir=None,
+        )
+
+        monkeypatch.setattr("src.main.parse_arguments", lambda: args)
+        monkeypatch.setattr("src.main.config.results_dir", original_results_dir)
+        monkeypatch.setattr(
+            "src.main._apply_runtime_overrides", lambda passed_args: None
+        )
+        monkeypatch.setattr("src.main._validate_cli_args", lambda passed_args: None)
+        monkeypatch.setattr(
+            "src.main._resolve_output_targets",
+            lambda passed_args: OutputTargets(
+                Path("scratch/report.md"), Path("scratch/images"), False
+            ),
+        )
+        monkeypatch.setattr("src.main._setup_runtime", lambda passed_args, targets: {})
+        monkeypatch.setattr(
+            "src.main._maybe_run_ticker_retrospective",
+            lambda passed_args: _async_none(),
+        )
+        monkeypatch.setattr(
+            "src.main._emit_start_banner", lambda passed_args, targets: "banner"
+        )
+        monkeypatch.setattr(
+            "src.main._execute_analysis",
+            lambda passed_args, targets, **kwargs: _async_result(None),
+        )
+        monkeypatch.setattr(
+            "src.cleanup.cleanup_async_resources", lambda: _async_none()
+        )
+
+        assert asyncio.run(main()) == 1
+        assert Path(config.results_dir) == original_results_dir
+
+    def test_main_preserves_explicit_imagedir_without_retargeting_results_dir(
+        self, monkeypatch
+    ):
+        from src.main import OutputTargets, config, main
+
+        output_file = Path("scratch/report.md")
+        explicit_image_dir = Path("custom-images/charts")
+        observed: dict[str, Path] = {}
+        args = SimpleNamespace(
+            retrospective_only=False,
+            ticker="6083.T",
+            quick=False,
+            strict=False,
+            article=False,
+            quiet=True,
+            brief=False,
+            svg=False,
+            transparent=False,
+            imagedir=str(explicit_image_dir),
+        )
+
+        async def fake_execute(_args, targets, **_kwargs):
+            observed["results_dir"] = Path(config.results_dir)
+            observed["image_dir"] = targets.image_dir
+            return {"analysis_validity": {"publishable": True}}
+
+        monkeypatch.setattr("src.main.parse_arguments", lambda: args)
+        monkeypatch.setattr("src.main.config.results_dir", Path("results"))
+        monkeypatch.setattr(
+            "src.main._apply_runtime_overrides", lambda passed_args: None
+        )
+        monkeypatch.setattr("src.main._validate_cli_args", lambda passed_args: None)
+        monkeypatch.setattr(
+            "src.main._resolve_output_targets",
+            lambda passed_args: OutputTargets(output_file, explicit_image_dir, False),
+        )
+        monkeypatch.setattr("src.main._setup_runtime", lambda passed_args, targets: {})
+        monkeypatch.setattr(
+            "src.main._maybe_run_ticker_retrospective",
+            lambda passed_args: _async_none(),
+        )
+        monkeypatch.setattr(
+            "src.main._emit_start_banner", lambda passed_args, targets: "banner"
+        )
+        monkeypatch.setattr("src.main._execute_analysis", fake_execute)
+        monkeypatch.setattr(
+            "src.main._attach_run_summary",
+            lambda result, passed_args, preflight: None,
+        )
+        monkeypatch.setattr(
+            "src.main._render_primary_output",
+            lambda result, passed_args, targets, banner: (None, None, None),
+        )
+        monkeypatch.setattr(
+            "src.main._persist_analysis_outputs",
+            lambda result, passed_args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            "src.main._maybe_save_rejection_record",
+            lambda result, passed_args, **kwargs: _async_none(),
+        )
+        monkeypatch.setattr(
+            "src.main._maybe_generate_article",
+            lambda result,
+            passed_args,
+            targets,
+            company_name,
+            report,
+            reporter,
+            **kwargs: _async_result(False),
+        )
+        monkeypatch.setattr(
+            "src.main._log_final_summary",
+            lambda result, passed_args, article_generated: None,
+        )
+        monkeypatch.setattr(
+            "src.cleanup.cleanup_async_resources", lambda: _async_none()
+        )
+
+        assert asyncio.run(main()) == 0
+        assert observed["results_dir"] == Path("results")
+        assert observed["image_dir"] == explicit_image_dir
 
 
 class TestSavedDiagnostics:

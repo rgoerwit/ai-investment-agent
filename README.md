@@ -122,6 +122,26 @@ cp .env.example .env
 
 At minimum, set `GOOGLE_API_KEY` in `.env`. Optional keys such as Tavily, FMP, EODHD, and OpenAI improve coverage, search quality, or optional consultant paths.
 
+### Optional Untrusted-Content Inspection
+
+The runtime can inspect untrusted search results, social content, retrieved memory, filing text, and cached context before that material is reused in prompts. This is off by default so existing workflows do not change unexpectedly.
+
+Recommended initial posture:
+
+```bash
+UNTRUSTED_CONTENT_INSPECTION_ENABLED=true
+UNTRUSTED_CONTENT_BACKEND=python
+UNTRUSTED_CONTENT_INSPECTION_MODE=warn
+UNTRUSTED_CONTENT_FAIL_POLICY=fail_open
+```
+
+Practical notes:
+
+- `python` enables the in-process heuristic inspector with no extra service dependency.
+- `composite` adds a selective LLM judge on top of heuristics and is higher-latency and higher-cost.
+- Start with `warn` to inspect logs and false positives before moving to `sanitize` or `block`.
+- `fail_open` is the safer rollout default for a local operator workflow; `fail_closed` is stricter but can suppress content when the inspector itself errors.
+
 ### Confirm the Core Path Works
 
 ```bash

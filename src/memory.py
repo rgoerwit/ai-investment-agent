@@ -27,6 +27,8 @@ from tenacity import (
 
 from src.config import config
 from src.runtime_diagnostics import classify_failure
+from src.tooling.inspection_service import INSPECTION_SERVICE
+from src.tooling.inspector import InspectionEnvelope, SourceKind
 
 logger = structlog.get_logger(__name__)
 
@@ -436,9 +438,20 @@ class FinancialSituationMemory:
             formatted_results = []
             if results and "documents" in results:
                 for i in range(len(results["documents"][0])):
+                    doc = results["documents"][0][i]
+                    # Inspect retrieved memory content for injection.
+                    approved = await INSPECTION_SERVICE.check(
+                        InspectionEnvelope(
+                            content_text=doc,
+                            raw_content=doc,
+                            source_kind=SourceKind.memory_retrieval,
+                            source_name=self.name,
+                            metadata={"collection": self.name},
+                        )
+                    )
                     formatted_results.append(
                         {
-                            "document": results["documents"][0][i],
+                            "document": approved,
                             "metadata": results["metadatas"][0][i]
                             if "metadatas" in results
                             else {},

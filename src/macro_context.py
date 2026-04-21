@@ -24,12 +24,16 @@ from typing import Any
 import structlog
 from langchain_core.callbacks import BaseCallbackHandler
 
-from src.config import config
+import src.config as config_module
 from src.macro_regions import infer_macro_region
+from src.tooling.inspection_service import INSPECTION_SERVICE
+from src.tooling.inspector import InspectionEnvelope, SourceKind
 
 logger = structlog.get_logger(__name__)
 
-_CACHE_DIR = config.results_dir / ".macro_context_cache"
+# Optional override seam for tests. Production code should use the live
+# results_dir-derived path via get_macro_context_cache_dir().
+_CACHE_DIR: Path | None = None
 _DEFAULT_TTL_HOURS = 12
 _THIN_MIN_CHARS = 500
 _FINGERPRINT_SCHEMA = "MACRO_QUERY_V1\nMACRO_OUTPUT_V1"
@@ -53,12 +57,14 @@ class MacroContextResult:
 
 
 def _cache_path(region: str) -> Path:
-    return _CACHE_DIR / f"{region}.json"
+    return get_macro_context_cache_dir() / f"{region}.json"
 
 
 def get_macro_context_cache_dir() -> Path:
     """Return the on-disk cache directory for regional macro briefs."""
-    return Path(config.results_dir) / ".macro_context_cache"
+    if _CACHE_DIR is not None:
+        return Path(_CACHE_DIR)
+    return Path(config_module.config.results_dir) / ".macro_context_cache"
 
 
 def _prompt_metadata() -> dict[str, Any] | None:
@@ -158,7 +164,8 @@ def _write_cache(
     report: str,
     status: str,
 ) -> str:
-    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_dir = get_macro_context_cache_dir()
+    cache_dir.mkdir(parents=True, exist_ok=True)
     generated_at = _utc_now_iso()
     payload = {
         "version": 1,
@@ -305,8 +312,19 @@ async def get_macro_context(
             region=region,
             cache_path=str(_cache_path(region)),
         )
+        report = str(cached.get("report", ""))
+        # Inspect cached brief on re-entry as untrusted cached_context.
+        report = await INSPECTION_SERVICE.check(
+            InspectionEnvelope(
+                content_text=report,
+                raw_content=report,
+                source_kind=SourceKind.cached_context,
+                source_name="macro_context_cache",
+                metadata={"region": region, "ticker": ticker},
+            )
+        )
         return MacroContextResult(
-            report=str(cached.get("report", "")),
+            report=report,
             region=region,
             status="cached",
             generated_at=cached.get("generated_at"),

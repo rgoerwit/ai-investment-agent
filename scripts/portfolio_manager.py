@@ -2777,7 +2777,12 @@ def main() -> None:
     def _save_refresh_result(result, ticker: str, *, quick_mode: bool) -> Path:
         from src.main import save_results_to_file
 
-        return save_results_to_file(result, ticker, quick_mode=quick_mode)
+        return save_results_to_file(
+            result,
+            ticker,
+            quick_mode=quick_mode,
+            results_dir=results_dir,
+        )
 
     service = PortfolioRecommendationService(
         portfolio_data_service=portfolio_service,
@@ -2802,7 +2807,9 @@ def main() -> None:
         if str(e).startswith("No analysis JSONs found in "):
             print(f"No analysis JSONs found in {results_dir}/", file=sys.stderr)
             print(
-                f"Run some analyses first: {_analysis_command('7203.T')} --output results/7203.T.md",
+                "Run some analyses first: "
+                f"{_analysis_command('7203.T')} --output "
+                f"{Path(results_dir) / '7203.T.md'}",
                 file=sys.stderr,
             )
             sys.exit(1)

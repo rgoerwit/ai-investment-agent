@@ -22,6 +22,7 @@ from langchain_google_genai import (
     HarmCategory,
 )
 
+import src.config as config_module
 from src.config import config
 from src.llm_budgets import GenerationBudget, get_generation_budget
 
@@ -173,7 +174,7 @@ class _LazyRateLimiterProxy(BaseRateLimiter):
 
 
 GLOBAL_RATE_LIMITER = _LazyRateLimiterProxy(
-    lambda: _create_rate_limiter_from_rpm(config.gemini_rpm_limit)
+    lambda: _create_rate_limiter_from_rpm(config_module.config.gemini_rpm_limit)
 )
 
 # Track LLM instances for cleanup

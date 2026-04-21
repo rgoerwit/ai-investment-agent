@@ -544,8 +544,13 @@ def configure_content_inspection_from_config() -> None:
     from src.tooling.inspection_service import configure_content_inspection
     from src.tooling.inspector import NullInspector
     from src.tooling.runtime import TOOL_SERVICE
+    from src.tooling.tool_argument_policy import ToolArgumentPolicyHook
 
-    hooks = [h for h in TOOL_SERVICE.hooks if not isinstance(h, ContentInspectionHook)]
+    hooks = [
+        h
+        for h in TOOL_SERVICE.hooks
+        if not isinstance(h, ContentInspectionHook | ToolArgumentPolicyHook)
+    ]
 
     if not config.untrusted_content_inspection_enabled:
         TOOL_SERVICE.set_hooks(hooks)
@@ -560,13 +565,32 @@ def configure_content_inspection_from_config() -> None:
 
     if backend_name == "null" or not backend_name:
         inspector = NullInspector()
+    elif backend_name == "python":
+        from src.tooling.heuristic_inspector import HeuristicInspector
+
+        inspector = HeuristicInspector()
+    elif backend_name == "composite":
+        from src.tooling.escalating_inspector import EscalatingInspector
+        from src.tooling.heuristic_inspector import HeuristicInspector
+        from src.tooling.llm_judge_inspector import LLMJudgeInspector
+
+        # Composite stays threshold-driven by default; hot-path "always judge"
+        # sources must be opted in explicitly so rollout cost is predictable.
+        inspector = EscalatingInspector(
+            heuristic=HeuristicInspector(),
+            judge=LLMJudgeInspector(),
+        )
     else:
         raise ValueError(
-            "UNTRUSTED_CONTENT_BACKEND is set to "
-            f"{backend_name!r}, but only 'null' is implemented in this branch."
+            f"UNTRUSTED_CONTENT_BACKEND={backend_name!r} is not implemented. "
+            "Supported: null, python, composite."
         )
 
     configure_content_inspection(inspector, mode=mode, fail_policy=fail_policy)
+    # Argument policy is a separate pre-call guard; content inspection remains
+    # the post-call ingress filter for retrieved content.
+    arg_policy_mode = "block" if mode == "block" else "warn"
+    hooks.append(ToolArgumentPolicyHook(mode=arg_policy_mode))
     hooks.append(ContentInspectionHook())
     TOOL_SERVICE.set_hooks(hooks)
     logger.info(
@@ -713,10 +737,16 @@ def build_run_summary(
     }
 
 
-def _normalize_macro_context_metadata(result: dict[str, Any]) -> dict[str, Any]:
-    """Return one normalized macro-context metadata view for persistence."""
-    from src.macro_context import get_macro_context_cache_dir
+def _normalize_macro_context_metadata(
+    result: dict[str, Any],
+    *,
+    cache_dir: Path | str | None = None,
+) -> dict[str, Any]:
+    """Return one normalized macro-context metadata view for persistence.
 
+    ``cache_dir`` lets the saved artifact reflect the actual results destination
+    used for this run rather than ambient global config.
+    """
     run_summary = result.get("run_summary", {}) or {}
     status = result.get("macro_context_status")
     region = result.get("macro_context_region")
@@ -738,7 +768,11 @@ def _normalize_macro_context_metadata(result: dict[str, Any]) -> dict[str, Any]:
         ),
         "llm_invoked": bool(result.get("macro_context_llm_invoked", False)),
         "generated_at": result.get("macro_context_generated_at"),
-        "cache_dir": str(get_macro_context_cache_dir()),
+        "cache_dir": str(
+            Path(cache_dir)
+            if cache_dir is not None
+            else Path(config.results_dir) / ".macro_context_cache"
+        ),
     }
 
 
@@ -1136,7 +1170,10 @@ def save_results_to_file(
             ),
         },
         "token_usage": token_stats,
-        "macro_context": _normalize_macro_context_metadata(result),
+        "macro_context": _normalize_macro_context_metadata(
+            result,
+            cache_dir=results_dir / ".macro_context_cache",
+        ),
         "prompts_metadata": {
             "prompts_used": prompts_used,
             "available_prompts": available_prompts,
@@ -2241,6 +2278,7 @@ def _persist_analysis_outputs(
             result,
             args.ticker,
             quick_mode=args.quick,
+            results_dir=Path(config.results_dir),
             trace_id=trace_id,
         )
         if not args.quiet and not args.brief:
@@ -2443,7 +2481,11 @@ async def run_with_args(
             session_id=session_id,
             tags=trace_tags,
             metadata=trace_metadata,
-            input_payload={"ticker": args.ticker, "quick_mode": args.quick},
+            input_payload={
+                "ticker": args.ticker,
+                "quick_mode": args.quick,
+                "results_dir": str(Path(config.results_dir)),
+            },
         )
 
         try:
