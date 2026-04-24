@@ -48,7 +48,7 @@ def test_safe_metadata_filters_sensitive_keys_and_truncates_values():
     payload = safe_metadata(
         {
             "ticker": "6005.T",
-            "password": "supersecret",
+            "password": "short",
             "notes": "x" * 100,
         },
         max_chars=16,
