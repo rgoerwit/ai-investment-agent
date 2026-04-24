@@ -26,6 +26,7 @@ from tenacity import (
 )
 
 from src.config import config
+from src.error_safety import safe_error_payload, summarize_exception
 from src.runtime_diagnostics import classify_failure
 from src.runtime_services import get_current_inspection_service
 from src.tooling.inspector import InspectionEnvelope, SourceKind
@@ -159,7 +160,11 @@ class FinancialSituationMemory:
                 )
 
         except Exception as e:
-            logger.warning("chromadb_init_failed", error=str(e), collection=name)
+            logger.warning(
+                "chromadb_init_failed",
+                collection=name,
+                **summarize_exception(e, operation="memory chromadb init"),
+            )
             self.available = False
 
     @classmethod
@@ -228,7 +233,9 @@ class FinancialSituationMemory:
             return cls._shared_embeddings
         except Exception as e:
             logger.warning(
-                "embeddings_init_failed", error=str(e), collection=collection_name
+                "embeddings_init_failed",
+                collection=collection_name,
+                **summarize_exception(e, operation="memory embeddings init"),
             )
             return None
 
@@ -259,7 +266,9 @@ class FinancialSituationMemory:
             return cls._shared_chroma_client
         except Exception as e:
             logger.warning(
-                "chromadb_init_failed", error=str(e), collection=collection_name
+                "chromadb_init_failed",
+                collection=collection_name,
+                **summarize_exception(e, operation="shared chromadb init"),
             )
             return None
 
@@ -433,7 +442,11 @@ class FinancialSituationMemory:
             return True
 
         except Exception as e:
-            logger.error("add_situations_failed", collection=self.name, error=str(e))
+            logger.error(
+                "add_situations_failed",
+                collection=self.name,
+                **summarize_exception(e, operation="memory add situations"),
+            )
             return False
 
     async def query_similar_situations(
@@ -542,8 +555,12 @@ class FinancialSituationMemory:
                 logger.error(
                     "query_similar_situations_failed",
                     collection=self.name,
-                    error=str(e),
+                    **summarize_exception(e, operation="memory query"),
                 )
+            error_payload = safe_error_payload(
+                e,
+                operation="memory query",
+            )
             _record_capture_memory_event(
                 {
                     "event": "query_similar_situations_failed",
@@ -551,7 +568,9 @@ class FinancialSituationMemory:
                     "query_text": query_text,
                     "n_results": n_results,
                     "metadata_filter": metadata_filter,
-                    "error": str(e),
+                    "error": error_payload["error"],
+                    "error_type": error_payload["error_type"],
+                    "failure_kind": error_payload["failure_kind"],
                     "error_kind": error_kind,
                     "available": True,
                 }
@@ -694,12 +713,17 @@ class FinancialSituationMemory:
                     # Try to get name for logging
                     name = getattr(collection_item, "name", str(collection_item))
                     logger.error(
-                        "collection_cleanup_failed", collection=name, error=str(e)
+                        "collection_cleanup_failed",
+                        collection=name,
+                        **summarize_exception(e, operation="memory collection cleanup"),
                     )
                     results[name] = 0
 
         except Exception as e:
-            logger.error("cleanup_all_memories_failed", error=str(e))
+            logger.error(
+                "cleanup_all_memories_failed",
+                **summarize_exception(e, operation="memory cleanup"),
+            )
 
         return results
 
@@ -727,8 +751,17 @@ class FinancialSituationMemory:
                     "status": "deleted",
                 }
 
-            logger.error("get_stats_failed", collection=self.name, error=str(e))
-            return {"available": False, "name": self.name, "count": 0, "error": str(e)}
+            error_payload = safe_error_payload(
+                e,
+                operation="memory stats",
+                extra={"available": False, "name": self.name, "count": 0},
+            )
+            logger.error(
+                "get_stats_failed",
+                collection=self.name,
+                **summarize_exception(e, operation="memory stats"),
+            )
+            return error_payload
 
 
 def sanitize_ticker_for_collection(ticker: str) -> str:
@@ -811,7 +844,7 @@ def create_memory_instances(ticker: str) -> dict[str, FinancialSituationMemory]:
                 "ticker_memory_creation_failed",
                 ticker=ticker,
                 collection_name=name,
-                error=str(e),
+                **summarize_exception(e, operation="ticker memory creation"),
             )
             # Create a disabled instance
             instances[name] = FinancialSituationMemory(name)
@@ -849,7 +882,11 @@ def get_ticker_memory_stats(ticker: str) -> dict[str, dict[str, Any]]:
             for collection in existing_collections
         }
     except Exception as exc:
-        logger.warning("ticker_memory_stats_list_failed", ticker=ticker, error=str(exc))
+        logger.warning(
+            "ticker_memory_stats_list_failed",
+            ticker=ticker,
+            **summarize_exception(exc, operation="ticker memory stats list"),
+        )
         return {role: {"name": name, **unavailable} for role, name in role_map.items()}
 
     stats: dict[str, dict[str, Any]] = {}
@@ -865,18 +902,22 @@ def get_ticker_memory_stats(ticker: str) -> dict[str, dict[str, Any]]:
                 "count": collection.count(),
             }
         except Exception as exc:
+            error_payload = safe_error_payload(
+                exc,
+                operation="ticker memory stats",
+                extra={
+                    "available": False,
+                    "name": collection_name,
+                    "count": 0,
+                },
+            )
             logger.warning(
                 "ticker_memory_stats_failed",
                 ticker=ticker,
                 collection=collection_name,
-                error=str(exc),
+                **summarize_exception(exc, operation="ticker memory stats"),
             )
-            stats[role] = {
-                "available": False,
-                "name": collection_name,
-                "count": 0,
-                "error": str(exc),
-            }
+            stats[role] = error_payload
     return stats
 
 
@@ -971,11 +1012,18 @@ def cleanup_all_memories(days: int = 0, ticker: str | None = None) -> dict[str, 
             except Exception as e:
                 # Try to get name for logging
                 name = getattr(collection_item, "name", str(collection_item))
-                logger.error("collection_cleanup_failed", collection=name, error=str(e))
+                logger.error(
+                    "collection_cleanup_failed",
+                    collection=name,
+                    **summarize_exception(e, operation="memory collection cleanup all"),
+                )
                 results[name] = 0
 
     except Exception as e:
-        logger.error("cleanup_all_memories_failed", error=str(e))
+        logger.error(
+            "cleanup_all_memories_failed",
+            **summarize_exception(e, operation="memory cleanup all"),
+        )
 
     return results
 
@@ -1018,12 +1066,21 @@ def get_all_memory_stats() -> dict[str, dict[str, Any]]:
                 if _is_missing_collection_error(e):
                     continue
                 logger.error(
-                    "get_collection_stats_failed", collection=name, error=str(e)
+                    "get_collection_stats_failed",
+                    collection=name,
+                    **summarize_exception(e, operation="memory collection stats"),
                 )
-                stats[name] = {"count": 0, "error": str(e)}
+                stats[name] = safe_error_payload(
+                    e,
+                    operation="memory collection stats",
+                    extra={"count": 0},
+                )
 
     except Exception as e:
-        logger.error("get_all_stats_failed", error=str(e))
+        logger.error(
+            "get_all_stats_failed",
+            **summarize_exception(e, operation="memory stats aggregate"),
+        )
 
     return stats
 
@@ -1123,7 +1180,10 @@ class MacroEventsStore:
             )
             self.available = True
         except Exception as e:
-            logger.warning("macro_events_store_init_failed", error=str(e))
+            logger.warning(
+                "macro_events_store_init_failed",
+                **summarize_exception(e, operation="macro events store init"),
+            )
 
     def store_event(self, event: "MacroEvent") -> bool:
         """Store with 7-day dedup on event_date. Returns True if stored."""
@@ -1184,7 +1244,10 @@ class MacroEventsStore:
             )
             return True
         except Exception as e:
-            logger.warning("macro_event_store_failed", error=str(e))
+            logger.warning(
+                "macro_event_store_failed",
+                **summarize_exception(e, operation="macro event store"),
+            )
             return False
 
     def get_active_events(
@@ -1228,13 +1291,22 @@ class MacroEventsStore:
             )
             return events
         except Exception as e:
-            logger.warning("macro_events_get_failed", error=str(e))
+            logger.warning(
+                "macro_events_get_failed",
+                **summarize_exception(e, operation="macro events get"),
+            )
+            error_payload = safe_error_payload(
+                e,
+                operation="macro events get",
+            )
             _record_capture_memory_event(
                 {
                     "event": "macro_get_active_events_failed",
                     "region_filter": region_filter,
                     "available": True,
-                    "error": str(e),
+                    "error": error_payload["error"],
+                    "error_type": error_payload["error_type"],
+                    "failure_kind": error_payload["failure_kind"],
                 }
             )
             return []
@@ -1270,13 +1342,22 @@ class MacroEventsStore:
             )
             return events
         except Exception as e:
-            logger.warning("macro_structural_events_get_failed", error=str(e))
+            logger.warning(
+                "macro_structural_events_get_failed",
+                **summarize_exception(e, operation="macro structural events get"),
+            )
+            error_payload = safe_error_payload(
+                e,
+                operation="macro structural events get",
+            )
             _record_capture_memory_event(
                 {
                     "event": "macro_get_structural_events_failed",
                     "since_date": since_date,
                     "available": True,
-                    "error": str(e),
+                    "error": error_payload["error"],
+                    "error_type": error_payload["error_type"],
+                    "failure_kind": error_payload["failure_kind"],
                 }
             )
             return []

@@ -13,6 +13,7 @@ from typing import Any, Literal, Protocol, TypeAlias
 
 import structlog
 
+from src.error_safety import redact_sensitive_text
 from src.observability import start_tool_observation
 from src.runtime_diagnostics import classify_failure
 
@@ -100,18 +101,21 @@ class ToolExecutionService:
                 tool=call.name,
                 source=call.source,
                 agent_key=call.agent_key,
-                reason=str(exc),
+                reason=redact_sensitive_text(str(exc)),
             )
             return ToolResult(
                 value=f"TOOL_BLOCKED: {exc}",
                 blocked=True,
-                findings=[str(exc)],
+                findings=[redact_sensitive_text(str(exc))],
             )
 
         try:
             with start_tool_observation(
                 tool_name=call.name,
-                input_payload=call.args,
+                input_payload={
+                    "arg_keys": sorted(call.args.keys()),
+                    "ticker": call.args.get("ticker"),
+                },
                 metadata={
                     "tool_name": call.name,
                     "tool_source": call.source,

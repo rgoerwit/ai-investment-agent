@@ -275,7 +275,9 @@ class TestMacroEventsStoreFiltering:
         payload = mock_capture_event.call_args.args[0]
         assert payload["event"] == "macro_get_active_events_failed"
         assert payload["available"] is True
-        assert payload["error"] == "query error"
+        assert payload["error"].startswith("Error in macro events get: Exception")
+        assert payload["error_type"] == "Exception"
+        assert payload["failure_kind"] == "unknown_provider_error"
 
     def test_forced_reanalysis_preserved_in_deserialization(self):
         """forced_reanalysis=True stored in metadata survives round-trip deserialization."""
@@ -335,7 +337,11 @@ class TestMacroEventsStoreFiltering:
         assert payload["event"] == "macro_get_structural_events_failed"
         assert payload["since_date"] == "2026-01-01"
         assert payload["available"] is True
-        assert payload["error"] == "query error"
+        assert payload["error"].startswith(
+            "Error in macro structural events get: Exception"
+        )
+        assert payload["error_type"] == "Exception"
+        assert payload["failure_kind"] == "unknown_provider_error"
 
 
 class TestDateToInt:

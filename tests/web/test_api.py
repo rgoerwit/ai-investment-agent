@@ -217,6 +217,36 @@ def test_create_refresh_job_requires_snapshot_for_scope(tmp_path: Path):
     assert response.status_code == 409
 
 
+def test_create_refresh_job_sanitizes_validation_errors(
+    tmp_path: Path, sample_bundle, monkeypatch
+):
+    client, _snapshot_service = _make_client(
+        tmp_path,
+        bundle=sample_bundle,
+        metadata=SnapshotMetadata(
+            status="ready",
+            fetched_at="2026-03-28T12:00:00Z",
+            cache_hit=True,
+            refreshing=False,
+            last_error=None,
+        ),
+    )
+    monkeypatch.setattr(
+        "src.web.ibkr_dashboard.api._resolve_refresh_tickers",
+        lambda scope, payload: (_ for _ in ()).throw(
+            ValueError("api_key=supersecretvalue1234567890")
+        ),
+    )
+
+    response = client.post("/api/refresh/jobs", json={"scope": "stale_positions"})
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert payload["error"] == "invalid_request"
+    assert payload["message"].startswith("Error in refresh job validation: ValueError")
+    assert "supersecretvalue1234567890" not in payload["message"]
+
+
 def test_create_refresh_job_rejects_empty_scope_result(client, sample_bundle):
     sample_bundle.freshness_summary = AnalysisFreshnessSummary()
     response = client.post("/api/refresh/jobs", json={"scope": "stale_positions"})

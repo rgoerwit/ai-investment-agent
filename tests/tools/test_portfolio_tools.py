@@ -138,7 +138,14 @@ async def test_snapshot_tool_returns_error_cleanly(monkeypatch):
         "src.tools.portfolio._portfolio_service", lambda: FailingPortfolioService()
     )
     payload = await get_ibkr_portfolio_snapshot.ainvoke({})
-    assert payload == {"ok": False, "error": "boom"}
+    assert payload["ok"] is False
+    assert payload["error_type"] == "RuntimeError"
+    assert payload["failure_kind"] == "unknown_provider_error"
+    assert payload["retryable"] is False
+    assert payload["message_preview"] == "boom"
+    assert payload["error"].startswith(
+        "Error in get_ibkr_portfolio_snapshot: RuntimeError"
+    )
 
 
 def test_registry_exposes_portfolio_tools():

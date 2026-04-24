@@ -60,3 +60,31 @@ async def test_audit_logs_prefix_style_tool_failures(
     kwargs = mock_logger.warning.call_args.kwargs
     assert kwargs["failure_kind"] == expected_kind
     assert kwargs["message"] == expected_message
+
+
+@pytest.mark.asyncio
+async def test_audit_before_logs_argument_shape_without_sensitive_values():
+    hook = LoggingToolAuditHook()
+    call = ToolInvocation(
+        name="fetch_reference_content",
+        args={
+            "url": "https://example.com?api_key=supersecretvalue1234567890",
+            "authorization": "Bearer sk-topsecretabcdefghijklmnopqrstuvwxyz",
+            "query": "normal text",
+        },
+        source="editor",
+        agent_key="editor",
+    )
+
+    with patch("src.tooling.audit.logger") as mock_logger:
+        returned = await hook.before(call)
+
+    assert returned == call
+    mock_logger.info.assert_called_once()
+    kwargs = mock_logger.info.call_args.kwargs
+    assert kwargs["arg_keys"] == ["authorization", "query", "url"]
+    assert kwargs["args_len"] == 3
+    assert "supersecretvalue1234567890" not in str(mock_logger.info.call_args)
+    assert "sk-topsecretabcdefghijklmnopqrstuvwxyz" not in str(
+        mock_logger.info.call_args
+    )

@@ -12,6 +12,7 @@ import structlog
 from langchain_core.callbacks import BaseCallbackHandler
 
 import src.config as config_module
+from src.error_safety import safe_metadata, safe_trace_input, summarize_exception
 
 if TYPE_CHECKING:
     from src.config import Settings
@@ -55,6 +56,7 @@ def _langfuse_keys_present(settings: Settings) -> bool:
 
 def _sanitize_trace_metadata(metadata: dict[str, Any]) -> dict[str, str]:
     """Return Langfuse-compatible propagated metadata."""
+    metadata = safe_metadata(metadata)
     sanitized: dict[str, str] = {}
     for key, value in metadata.items():
         if value is None:
@@ -150,7 +152,7 @@ def build_langchain_config(
     if active and active.graph_metadata:
         merged_metadata.update(active.graph_metadata)
     if metadata:
-        merged_metadata.update(metadata)
+        merged_metadata.update(safe_metadata(metadata))
 
     invoke_config: dict[str, Any] = {}
     if merged_callbacks:
@@ -260,7 +262,7 @@ class LangfuseTraceContext(TraceContext):
                     value=value,
                     data_type=data_type,
                     comment=comment,
-                    metadata=metadata,
+                    metadata=safe_metadata(metadata),
                 )
                 return
 
@@ -274,10 +276,18 @@ class LangfuseTraceContext(TraceContext):
                     value=value,
                     data_type=data_type,
                     comment=comment,
-                    metadata=metadata,
+                    metadata=safe_metadata(metadata),
                 )
         except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("langfuse_score_failed", error=str(exc), score_name=name)
+            logger.warning(
+                "langfuse_score_failed",
+                score_name=name,
+                **summarize_exception(
+                    exc,
+                    operation="recording Langfuse score",
+                    provider="unknown",
+                ),
+            )
 
     def create_deferred_score(
         self,
@@ -296,14 +306,18 @@ class LangfuseTraceContext(TraceContext):
                 value=value,
                 data_type=data_type,
                 comment=comment,
-                metadata=metadata,
+                metadata=safe_metadata(metadata),
             )
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(
                 "langfuse_deferred_score_failed",
-                error=str(exc),
                 score_name=name,
                 trace_id=trace_id,
+                **summarize_exception(
+                    exc,
+                    operation="creating deferred Langfuse score",
+                    provider="unknown",
+                ),
             )
 
     def close(self) -> None:
@@ -317,17 +331,38 @@ class LangfuseTraceContext(TraceContext):
                     trace_id=self.trace_id
                 )
         except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("langfuse_trace_finalize_failed", error=str(exc))
+            logger.warning(
+                "langfuse_trace_finalize_failed",
+                **summarize_exception(
+                    exc,
+                    operation="finalizing Langfuse trace",
+                    provider="unknown",
+                ),
+            )
         finally:
             _ACTIVE_TRACE_CONTEXT.reset(self._context_token)
             try:
                 self._propagation_ctx.__exit__(None, None, None)
             except Exception as exc:
-                logger.warning("langfuse_propagation_ctx_exit_failed", error=str(exc))
+                logger.warning(
+                    "langfuse_propagation_ctx_exit_failed",
+                    **summarize_exception(
+                        exc,
+                        operation="exiting Langfuse propagation context",
+                        provider="unknown",
+                    ),
+                )
             try:
                 self._root_ctx.__exit__(None, None, None)
             except Exception as exc:
-                logger.warning("langfuse_root_ctx_exit_failed", error=str(exc))
+                logger.warning(
+                    "langfuse_root_ctx_exit_failed",
+                    **summarize_exception(
+                        exc,
+                        operation="exiting Langfuse root context",
+                        provider="unknown",
+                    ),
+                )
 
 
 class ObservabilityRuntime(Protocol):
@@ -417,8 +452,11 @@ class LangfuseObservabilityRuntime:
             root_ctx = client.start_as_current_observation(
                 name=observation_name,
                 as_type="chain",
-                input=input_payload,
-                metadata={"ticker": metadata.get("ticker")},
+                input=safe_trace_input(
+                    input_payload,
+                    allowlist={"ticker", "quick_mode", "workflow"},
+                ),
+                metadata=safe_metadata({"ticker": metadata.get("ticker")}),
             )
             root_ctx.__enter__()
             root_entered = True
@@ -441,19 +479,30 @@ class LangfuseObservabilityRuntime:
                 root_ctx=root_ctx,
                 propagation_ctx=propagation_ctx,
                 callbacks=callbacks,
-                graph_metadata=metadata,
+                graph_metadata=safe_metadata(metadata),
                 trace_id=trace_id,
                 trace_url=trace_url,
             )
         except Exception as exc:
-            logger.warning("langfuse_trace_start_failed", error=str(exc))
+            logger.warning(
+                "langfuse_trace_start_failed",
+                **summarize_exception(
+                    exc,
+                    operation="starting Langfuse trace",
+                    provider="unknown",
+                ),
+            )
             if propagation_entered and propagation_ctx is not None:
                 try:
                     propagation_ctx.__exit__(None, None, None)
                 except Exception as cleanup_exc:
                     logger.warning(
                         "langfuse_propagation_cleanup_failed",
-                        error=str(cleanup_exc),
+                        **summarize_exception(
+                            cleanup_exc,
+                            operation="cleaning up Langfuse propagation context",
+                            provider="unknown",
+                        ),
                     )
             if root_entered and root_ctx is not None:
                 try:
@@ -461,7 +510,11 @@ class LangfuseObservabilityRuntime:
                 except Exception as cleanup_exc:
                     logger.warning(
                         "langfuse_root_cleanup_failed",
-                        error=str(cleanup_exc),
+                        **summarize_exception(
+                            cleanup_exc,
+                            operation="cleaning up Langfuse root context",
+                            provider="unknown",
+                        ),
                     )
             return NoopTraceContext()
 
@@ -540,7 +593,14 @@ def get_observability_runtime(settings: Settings | None = None) -> Observability
         )
         return NoopObservabilityRuntime()
     except Exception as exc:
-        logger.warning("langfuse_runtime_unavailable", error=str(exc))
+        logger.warning(
+            "langfuse_runtime_unavailable",
+            **summarize_exception(
+                exc,
+                operation="initializing Langfuse runtime",
+                provider="unknown",
+            ),
+        )
         return NoopObservabilityRuntime()
 
 
@@ -570,11 +630,18 @@ def start_tool_observation(
         return client.start_as_current_observation(
             name=f"tool:{tool_name}",
             as_type="tool",
-            input=input_payload,
-            metadata=metadata or {"tool_name": tool_name},
+            input=safe_trace_input(input_payload),
+            metadata=safe_metadata(metadata or {"tool_name": tool_name}),
         )
     except Exception as exc:  # pragma: no cover - defensive
-        logger.debug("langfuse_tool_observation_unavailable", error=str(exc))
+        logger.debug(
+            "langfuse_tool_observation_unavailable",
+            **summarize_exception(
+                exc,
+                operation="starting Langfuse tool observation",
+                provider="unknown",
+            ),
+        )
         return nullcontext()
 
 
@@ -603,14 +670,18 @@ def create_deferred_score(
             value=value,
             data_type=data_type,
             comment=comment,
-            metadata=metadata,
+            metadata=safe_metadata(metadata),
         )
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning(
             "langfuse_create_deferred_score_failed",
-            error=str(exc),
             trace_id=trace_id,
             score_name=name,
+            **summarize_exception(
+                exc,
+                operation="creating deferred Langfuse score",
+                provider="unknown",
+            ),
         )
 
 
@@ -638,4 +709,11 @@ def flush_traces(timeout_seconds: float = _DEFAULT_FLUSH_TIMEOUT_SECONDS) -> Non
             operation_name=operation_name,
         )
     except Exception as exc:  # pragma: no cover - defensive
-        logger.warning("langfuse_flush_failed", error=str(exc))
+        logger.warning(
+            "langfuse_flush_failed",
+            **summarize_exception(
+                exc,
+                operation="flushing Langfuse traces",
+                provider="unknown",
+            ),
+        )

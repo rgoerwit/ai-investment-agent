@@ -28,6 +28,7 @@ from rich.table import Table
 
 # Import config FIRST to set telemetry/system env vars before any library imports
 from src.config import config, validate_environment_variables
+from src.error_safety import format_error_message, summarize_exception
 from src.eval import (
     CURRENT_CAPTURE_SCHEMA_VERSION,
     BaselineCaptureConfig,
@@ -82,6 +83,15 @@ def _cost_suffix() -> str:
     if stats["total_calls"] == 0:
         return ""
     return f" [dim](Est. cost: ${stats['total_cost_usd']:.4f})[/dim]"
+
+
+def _safe_cli_error_message(operation: str, exc: BaseException) -> str:
+    summary = summarize_exception(exc, operation=operation, provider="unknown")
+    return format_error_message(
+        operation=operation,
+        error_type=summary["error_type"],
+        message_preview=summary["message_preview"],
+    )
 
 
 def suppress_all_logging():
@@ -468,15 +478,20 @@ def run_provider_preflight() -> dict[str, dict[str, str]]:
                 "host": host,
                 "dns": "failed",
                 "error_type": type(exc).__name__,
-                "error": str(exc),
+                "error": _safe_cli_error_message(
+                    f"provider preflight for {provider}",
+                    exc,
+                ),
             }
             logger.warning(
                 "provider_preflight",
                 provider=provider,
-                host=host,
                 dns="failed",
-                error_type=type(exc).__name__,
-                error=str(exc),
+                **summarize_exception(
+                    exc,
+                    operation=f"provider preflight for {provider}",
+                    provider="unknown",
+                ),
             )
     return results
 
@@ -841,9 +856,19 @@ async def handle_article_generation(
             console.print(f"[dim]Word count: {word_count} words[/dim]")
 
     except Exception as e:
-        logger.error("article_generation_failed", error=str(e), exc_info=True)
+        logger.error(
+            "article_generation_failed",
+            **summarize_exception(
+                e,
+                operation="generating article",
+                provider="unknown",
+            ),
+            exc_info=True,
+        )
         if not args.quiet and not args.brief:
-            console.print(f"[yellow]Warning: Article generation failed: {e}[/yellow]")
+            console.print(
+                f"[yellow]Warning: {_safe_cli_error_message('generating article', e)}[/yellow]"
+            )
 
 
 def get_welcome_banner(ticker: str, quick_mode: bool) -> str:
@@ -919,7 +944,10 @@ def display_memory_statistics(ticker: str):
         console.print()
 
     except Exception as e:
-        logger.warning("memory_statistics_unavailable", error=str(e))
+        logger.warning(
+            "memory_statistics_unavailable",
+            **summarize_exception(e, operation="display memory statistics"),
+        )
 
 
 def display_token_summary():
@@ -1084,7 +1112,10 @@ def save_results_to_file(
         try:
             memory_stats = get_ticker_memory_stats(ticker)
         except Exception as e:
-            logger.warning("memory_stats_unavailable", error=str(e))
+            logger.warning(
+                "memory_stats_unavailable",
+                **summarize_exception(e, operation="save memory stats"),
+            )
 
     # Get token usage stats
     from src.token_tracker import get_tracker
@@ -1252,7 +1283,10 @@ def save_results_to_file(
             trace_id=trace_id,
         )
     except Exception as e:
-        logger.warning("snapshot_extraction_failed", error=str(e))
+        logger.warning(
+            "snapshot_extraction_failed",
+            **summarize_exception(e, operation="prediction snapshot extraction"),
+        )
 
     with open(filepath, "w") as f:
         json.dump(save_data, f, indent=2)
@@ -1281,7 +1315,10 @@ def save_results_to_file(
                     refreshed_count=len(refreshed),
                 )
     except Exception as exc:
-        logger.debug("analysis_index_update_skipped", error=str(exc))
+        logger.debug(
+            "analysis_index_update_skipped",
+            **summarize_exception(exc, operation="analysis index update"),
+        )
 
     logger.info(
         f"Results saved to {filepath} ({len(prompts_used)} prompts tracked, {len(custom_prompts_loaded)} custom)"
@@ -1354,7 +1391,14 @@ async def _fetch_market_context(ticker: str, trade_date: str) -> str:
             )
             return f"MARKET NOTE: {name} {direction} {abs(pct):.1f}% on {actual_date}."
     except Exception as e:
-        logger.debug("market_context_fetch_failed", error=str(e))
+        logger.debug(
+            "market_context_fetch_failed",
+            **summarize_exception(
+                e,
+                operation="fetching market context",
+                provider="unknown",
+            ),
+        )
     return ""
 
 
@@ -1405,7 +1449,11 @@ async def _prefetch_macro_context(
         logger.warning(
             "macro_context_prefetch_failed",
             ticker=ticker,
-            error=str(exc),
+            **summarize_exception(
+                exc,
+                operation="prefetching macro context",
+                provider="unknown",
+            ),
         )
         return default_result
 
@@ -1670,8 +1718,19 @@ async def run_analysis(
                 [f"analysis_exception:{type(e).__name__}"],
                 stage="run_analysis",
             )
-        logger.error("analysis_failed", ticker=ticker, error=str(e), exc_info=True)
-        console.print(f"\n[bold red]Error during analysis:[/bold red] {str(e)}\n")
+        logger.error(
+            "analysis_failed",
+            ticker=ticker,
+            **summarize_exception(
+                e,
+                operation="running analysis",
+                provider="unknown",
+            ),
+            exc_info=True,
+        )
+        console.print(
+            f"\n[bold red]{_safe_cli_error_message('running analysis', e)}[/bold red]\n"
+        )
         return None
 
 
@@ -1776,10 +1835,11 @@ def _setup_runtime(
     try:
         validate_environment_variables()
     except ValueError as exc:
+        message = _safe_cli_error_message("validating environment configuration", exc)
         if args.quiet or args.brief:
-            print(f"# Configuration Error\n\n{str(exc)}")
+            print(f"# Configuration Error\n\n{message}")
         else:
-            console.print(f"\n[bold red]Configuration Error:[/bold red] {str(exc)}\n")
+            console.print(f"\n[bold red]Configuration Error:[/bold red] {message}\n")
             console.print(
                 "Please check your .env file and ensure all required API keys are set.\n"
             )
@@ -1791,10 +1851,11 @@ def _setup_runtime(
             enable_tool_audit=enable_tool_audit,
         )
     except ValueError as exc:
+        message = _safe_cli_error_message("building runtime services", exc)
         if args.quiet or args.brief:
-            print(f"# Configuration Error\n\n{str(exc)}")
+            print(f"# Configuration Error\n\n{message}")
         else:
-            console.print(f"\n[bold red]Configuration Error:[/bold red] {str(exc)}\n")
+            console.print(f"\n[bold red]Configuration Error:[/bold red] {message}\n")
         raise SystemExit(1) from exc
 
     return provider_preflight, runtime_services
@@ -1850,7 +1911,7 @@ async def _run_retrospective_only(args: argparse.Namespace) -> int:
                 "run_mode": "retrospective_only",
                 "release": config.app_release,
             },
-            input_payload={"ticker": None, "results_dir": str(results_dir)},
+            input_payload={"workflow": "retrospective_batch"},
         )
         try:
             lessons = await run_retrospective(
@@ -1882,10 +1943,18 @@ async def _run_retrospective_only(args: argparse.Namespace) -> int:
             else:
                 print(f"# Retrospective Complete\n\n{msg}")
     except Exception as exc:
-        logger.error("retrospective_failed", error=str(exc), exc_info=True)
+        logger.error(
+            "retrospective_failed",
+            **summarize_exception(
+                exc,
+                operation="running retrospective batch",
+                provider="unknown",
+            ),
+            exc_info=True,
+        )
         if not args.quiet and not args.brief:
             console.print(
-                f"[yellow]Warning: Retrospective evaluation failed: {exc}[/yellow]"
+                f"[yellow]Warning: {_safe_cli_error_message('running retrospective batch', exc)}[/yellow]"
             )
         return 1
     return 0
@@ -1927,7 +1996,7 @@ async def _maybe_run_ticker_retrospective(args: argparse.Namespace) -> None:
                 "run_mode": "retrospective_single_ticker",
                 "release": config.app_release,
             },
-            input_payload={"ticker": args.ticker, "results_dir": str(results_dir)},
+            input_payload={"ticker": args.ticker, "workflow": "retrospective_single"},
         )
         try:
             lessons = await run_retrospective(
@@ -1943,7 +2012,15 @@ async def _maybe_run_ticker_retrospective(args: argparse.Namespace) -> None:
                 f"\n[green]Generated {len(lessons)} new lesson(s) from past analyses[/green]"
             )
     except Exception as exc:
-        logger.warning("retrospective_failed", ticker=args.ticker, error=str(exc))
+        logger.warning(
+            "retrospective_failed",
+            ticker=args.ticker,
+            **summarize_exception(
+                exc,
+                operation="running single-ticker retrospective",
+                provider="unknown",
+            ),
+        )
 
 
 def _emit_start_banner(args: argparse.Namespace, output_targets: OutputTargets) -> str:
@@ -2089,7 +2166,15 @@ def _finalize_baseline_capture(
     try:
         return baseline_capture.finalize_run(result)
     except Exception as exc:
-        logger.error("baseline_capture_finalize_failed", error=str(exc), exc_info=True)
+        logger.error(
+            "baseline_capture_finalize_failed",
+            **summarize_exception(
+                exc,
+                operation="finalizing baseline capture",
+                provider="unknown",
+            ),
+            exc_info=True,
+        )
         return None
 
 
@@ -2227,7 +2312,11 @@ def _render_primary_output(
             logger.error(
                 "report_write_failed",
                 path=str(output_targets.output_file),
-                error=str(exc),
+                **summarize_exception(
+                    exc,
+                    operation="writing markdown report",
+                    provider="unknown",
+                ),
                 exc_info=True,
             )
             raise SystemExit(1) from exc
@@ -2257,10 +2346,18 @@ def _persist_analysis_outputs(
                 f"[green]Results saved to:[/green] [cyan]{filepath}[/cyan]{_cost_suffix()}"
             )
     except Exception as exc:
-        logger.error("results_save_failed", error=str(exc), exc_info=True)
+        logger.error(
+            "results_save_failed",
+            **summarize_exception(
+                exc,
+                operation="saving analysis results",
+                provider="unknown",
+            ),
+            exc_info=True,
+        )
         if not args.quiet and not args.brief:
             console.print(
-                f"\n[yellow]Warning: Could not save results to file: {exc}[/yellow]\n"
+                f"\n[yellow]Warning: {_safe_cli_error_message('saving analysis results', exc)}[/yellow]\n"
             )
 
 
@@ -2289,7 +2386,14 @@ async def _maybe_save_rejection_record(
             rejection_memory = create_lessons_memory()
             await save_rejection_record(snapshot, rejection_memory)
     except Exception as exc:
-        logger.debug("rejection_record_save_skipped", error=str(exc))
+        logger.debug(
+            "rejection_record_save_skipped",
+            **summarize_exception(
+                exc,
+                operation="saving rejection record",
+                provider="unknown",
+            ),
+        )
 
 
 async def _maybe_generate_article(
@@ -2459,7 +2563,7 @@ async def run_with_args(
             input_payload={
                 "ticker": args.ticker,
                 "quick_mode": args.quick,
-                "results_dir": str(Path(config.results_dir)),
+                "workflow": "analysis",
             },
         )
 
@@ -2549,11 +2653,20 @@ async def run_with_args(
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else 1
     except Exception as exc:
-        logger.error("unexpected_error", error=str(exc), exc_info=True)
+        logger.error(
+            "unexpected_error",
+            **summarize_exception(
+                exc,
+                operation="running CLI entrypoint",
+                provider="unknown",
+            ),
+            exc_info=True,
+        )
+        message = _safe_cli_error_message("running CLI entrypoint", exc)
         if args and (getattr(args, "quiet", False) or getattr(args, "brief", False)):
-            print(f"# Unexpected Error\n\n{str(exc)}")
+            print(f"# Unexpected Error\n\n{message}")
         else:
-            console.print(f"\n[bold red]Unexpected error:[/bold red] {str(exc)}\n")
+            console.print(f"\n[bold red]Unexpected error:[/bold red] {message}\n")
         return 1
     finally:
         try:

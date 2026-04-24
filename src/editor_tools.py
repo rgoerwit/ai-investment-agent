@@ -12,6 +12,11 @@ import structlog
 from bs4 import BeautifulSoup
 from langchain_core.tools import tool
 
+from src.error_safety import (
+    format_error_message,
+    redact_sensitive_text,
+    summarize_exception,
+)
 from src.runtime_diagnostics import classify_failure
 from src.runtime_services import get_current_inspection_service
 from src.tooling.inspector import InspectionEnvelope, SourceKind
@@ -30,6 +35,14 @@ MAX_REFERENCE_REDIRECTS = 3
 USER_AGENT = "Mozilla/5.0 (compatible; InvestorAgent/1.0; +https://github.com/rgoerwit/ai-investment-agent)"
 
 _REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
+
+
+def _safe_url_preview(url: str) -> str:
+    return redact_sensitive_text(url, max_chars=80)
+
+
+def _safe_query_preview(query: str) -> str:
+    return redact_sensitive_text(query, max_chars=80)
 
 
 def _resolve_redirect_target(current_url: str, location: str) -> str:
@@ -107,7 +120,7 @@ async def fetch_reference_content(url: str) -> str:
         if len(text) < 100:
             logger.warning(
                 "Reference content too short",
-                url=url[:80],
+                url=_safe_url_preview(url),
                 chars=len(text),
             )
             return f"INSUFFICIENT_CONTENT: URL returned only {len(text)} chars of text"
@@ -118,7 +131,7 @@ async def fetch_reference_content(url: str) -> str:
 
         logger.info(
             "Fetched reference content",
-            url=url[:80],
+            url=_safe_url_preview(url),
             chars=len(text),
         )
 
@@ -132,25 +145,41 @@ async def fetch_reference_content(url: str) -> str:
         return await get_current_inspection_service().check(envelope)
 
     except httpx.TimeoutException:
-        logger.warning("reference_fetch_timeout", url=url[:80], failure_kind="timeout")
+        logger.warning(
+            "reference_fetch_timeout",
+            url=_safe_url_preview(url),
+            failure_kind="timeout",
+        )
         return "FETCH_FAILED: Request timed out after 10 seconds"
 
     except ValueError as exc:
+        summary = summarize_exception(
+            exc,
+            operation="fetch_reference_content",
+            provider="unknown",
+        )
         logger.warning(
             "reference_fetch_rejected",
-            url=url[:80],
-            error=str(exc),
+            url=_safe_url_preview(url),
+            **summary,
         )
         if "redirect" in str(exc).lower():
-            return f"FETCH_FAILED: {exc}"
-        return f"INVALID_URL: {exc}"
+            return f"FETCH_FAILED: redirect blocked ({summary['error_type']})"
+        return format_error_message(
+            operation="validating fetch_reference_content URL",
+            error_type=summary["error_type"],
+            message_preview=summary["message_preview"],
+        ).replace("Error in validating fetch_reference_content URL", "INVALID_URL")
 
     except httpx.HTTPStatusError as e:
         logger.warning(
             "reference_fetch_http_error",
-            url=url[:80],
+            url=_safe_url_preview(url),
             status=e.response.status_code,
-            response_preview=e.response.text[:200] if e.response.text else "",
+            response_preview=redact_sensitive_text(
+                e.response.text or "",
+                max_chars=64,
+            ),
         )
         return f"FETCH_FAILED: HTTP {e.response.status_code}"
 
@@ -158,25 +187,30 @@ async def fetch_reference_content(url: str) -> str:
         details = classify_failure(e, provider="unknown")
         logger.warning(
             "reference_fetch_request_error",
-            url=url[:80],
+            url=_safe_url_preview(url),
             failure_kind=details.kind,
             retryable=details.retryable,
             error_type=details.error_type,
-            error=str(e),
+            error_message=details.message,
         )
         return f"FETCH_FAILED: {type(e).__name__}"
 
     except Exception as e:
-        details = classify_failure(e, provider="unknown")
+        summary = summarize_exception(
+            e,
+            operation="fetch_reference_content",
+            provider="unknown",
+        )
         logger.error(
             "reference_fetch_unexpected_error",
-            url=url[:80],
-            failure_kind=details.kind,
-            retryable=details.retryable,
-            error_type=details.error_type,
-            error=str(e),
+            url=_safe_url_preview(url),
+            **summary,
         )
-        return f"FETCH_FAILED: {str(e)}"
+        return "FETCH_FAILED: " + format_error_message(
+            operation="fetch_reference_content",
+            error_type=summary["error_type"],
+            message_preview=summary["message_preview"],
+        )
 
 
 MAX_CLAIM_SEARCH_CHARS = 3000
@@ -214,20 +248,29 @@ async def search_claim(query: str) -> str:
         text = str(result)
         if len(text) > MAX_CLAIM_SEARCH_CHARS:
             text = text[:MAX_CLAIM_SEARCH_CHARS] + "...[truncated]"
-        logger.info("claim_search_complete", query=query[:80], result_chars=len(text))
+        logger.info(
+            "claim_search_complete",
+            query=_safe_query_preview(query),
+            result_chars=len(text),
+        )
         return text
 
     except Exception as e:
-        details = classify_failure(e, provider="unknown")
+        summary = summarize_exception(
+            e,
+            operation="search_claim",
+            provider="unknown",
+        )
         logger.warning(
             "claim_search_failed",
-            query=query[:80],
-            failure_kind=details.kind,
-            retryable=details.retryable,
-            error_type=details.error_type,
-            error=str(e),
+            query=_safe_query_preview(query),
+            **summary,
         )
-        return f"SEARCH_FAILED: {str(e)}"
+        return "SEARCH_FAILED: " + format_error_message(
+            operation="search_claim",
+            error_type=summary["error_type"],
+            message_preview=summary["message_preview"],
+        )
 
 
 def get_editor_tools() -> list:

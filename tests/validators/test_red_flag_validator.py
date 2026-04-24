@@ -2134,6 +2134,99 @@ class TestCyclicalPeakDetection:
         cyclical_flags = [f for f in flags if f["type"] == "CYCLICAL_PEAK_WARNING"]
         assert len(cyclical_flags) == 0
 
+    def test_growth_quality_unproven_strong_growth_with_declining_returns(self):
+        """Strong growth plus weaker returns should trigger unproven-growth warning."""
+        metrics = {
+            "roa_current": 4.2,
+            "roa_5y_avg": 6.8,
+            "roe_5y_avg": 10.3,
+            "peg_ratio": None,
+            "profitability_trend": "DECLINING",
+            "revenue_growth_ttm": 57.4,
+            "roic_quality": "ADEQUATE",
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": 14.0,
+            "pb_ratio": None,
+            "adjusted_health_score": 79.2,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "ocf": None,
+            "_raw_report": "",
+        }
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "6005.T")
+        growth_flags = [f for f in flags if f["type"] == "GROWTH_QUALITY_UNPROVEN"]
+        cyclical_flags = [f for f in flags if f["type"] == "CYCLICAL_PEAK_WARNING"]
+        assert len(growth_flags) == 1
+        assert growth_flags[0]["risk_penalty"] == 0.75
+        assert "57.4%" in growth_flags[0]["detail"]
+        assert len(cyclical_flags) == 0
+        assert result == "PASS"
+
+    def test_growth_quality_unproven_does_not_fire_for_stable_organic_strength(self):
+        """Strong growth with stable or improving returns should not overfire."""
+        metrics = {
+            "roa_current": 9.5,
+            "roa_5y_avg": 9.0,
+            "roe_5y_avg": 15.0,
+            "peg_ratio": None,
+            "profitability_trend": "IMPROVING",
+            "revenue_growth_ttm": 31.0,
+            "roic_quality": "STRONG",
+            "debt_to_equity": None,
+            "net_income": None,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": 14.0,
+            "pb_ratio": None,
+            "adjusted_health_score": 79.2,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "ocf": None,
+            "_raw_report": "",
+        }
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        growth_flags = [f for f in flags if f["type"] == "GROWTH_QUALITY_UNPROVEN"]
+        assert len(growth_flags) == 0
+
+    def test_transient_strength_distortion_detects_named_one_time_driver(self):
+        """Named non-recurring drivers in fundamentals text should trigger warning."""
+        metrics = {
+            "roa_current": 8.0,
+            "roa_5y_avg": 7.5,
+            "roe_5y_avg": 12.0,
+            "peg_ratio": None,
+            "profitability_trend": "STABLE",
+            "revenue_growth_ttm": 18.0,
+            "roic_quality": "ADEQUATE",
+            "debt_to_equity": None,
+            "net_income": 1_000,
+            "fcf": None,
+            "interest_coverage": None,
+            "pe_ratio": 12.0,
+            "pb_ratio": None,
+            "adjusted_health_score": 72.0,
+            "payout_ratio": None,
+            "dividend_coverage": None,
+            "net_margin": None,
+            "ocf": 1_200,
+            "_raw_report": (
+                "The quarter benefited from a legal settlement gain and a gain on sale "
+                "of a division, boosting reported strength."
+            ),
+        }
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
+        transient_flags = [
+            f for f in flags if f["type"] == "TRANSIENT_STRENGTH_DISTORTION"
+        ]
+        assert len(transient_flags) == 1
+        assert transient_flags[0]["risk_penalty"] == 0.75
+        assert "legal settlement" in transient_flags[0]["detail"]
+
 
 class TestOCFNIRatioCheck:
     """Tests for RED FLAG 7: Suspicious OCF/NI Ratio."""
@@ -2457,6 +2550,39 @@ HARD STOP: RESTRICTED — NS-CMIC listed entity.
         assert conditions["verdict"] == "UNKNOWN"
         flags = RedFlagDetector.detect_consultant_flags(conditions, "TEST.T")
         assert len(flags) == 0
+
+    def test_consultant_growth_quality_theme_flag(self):
+        """Growth-quality evidence gaps should add one targeted consultant flag."""
+        review = """
+### CONSULTANT REVIEW: CONDITIONAL APPROVAL
+
+- Growth quality is being inferred, not proven: organic vs acquired mix unknown.
+- Incremental ROIC and synergy evidence remain unproven.
+
+**Overall Assessment**: CONDITIONAL APPROVAL
+"""
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["growth_quality_unproven"] is True
+        flags = RedFlagDetector.detect_consultant_flags(conditions, "6005.T")
+        themed = [f for f in flags if f["type"] == "CONSULTANT_GROWTH_QUALITY_UNPROVEN"]
+        assert len(themed) == 1
+        assert themed[0]["risk_penalty"] == 0.5
+
+    def test_consultant_transient_strength_theme_flag(self):
+        """Named one-time distortion concerns should add one targeted consultant flag."""
+        review = """
+### CONSULTANT REVIEW: CONDITIONAL APPROVAL
+
+- Current strength may reflect a non-operating legal settlement and one-time gain on sale.
+
+**Overall Assessment**: CONDITIONAL APPROVAL
+"""
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["transient_strength_unproven"] is True
+        flags = RedFlagDetector.detect_consultant_flags(conditions, "TEST.T")
+        themed = [f for f in flags if f["type"] == "CONSULTANT_TRANSIENT_STRENGTH"]
+        assert len(themed) == 1
+        assert themed[0]["risk_penalty"] == 0.5
 
     def test_verdict_not_found_no_flags(self):
         """Unrecognized text → UNKNOWN verdict → no flags."""

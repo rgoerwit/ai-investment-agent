@@ -327,6 +327,31 @@ class TestGetNews:
                 # Verify normalization was called
                 mock_normalize.assert_called_once()
 
+    async def test_news_tool_redacts_sensitive_error_content(self, mock_tavily):
+        with patch(
+            "src.tools.shared.extract_company_name_async", new_callable=AsyncMock
+        ) as mock_name:
+            with patch("src.tools.news.logger") as mock_logger:
+                mock_name.return_value = "FailCorp"
+                mock_tavily.side_effect = RuntimeError(
+                    "api_key=supersecretvalue1234567890 "
+                    "Authorization=Bearer sk-secretabcdefghijklmnopqrstuvwxyz "
+                    "results_dir=/tmp/private/results"
+                )
+
+                result = await toolkit.get_news.ainvoke({"ticker": "FAIL"})
+
+        assert result.startswith("Error in get_news: RuntimeError")
+        assert "supersecretvalue1234567890" not in result
+        assert "sk-secretabcdefghijklmnopqrstuvwxyz" not in result
+        assert "/tmp/private/results" not in result
+        mock_logger.error.assert_called_once()
+        kwargs = mock_logger.error.call_args.kwargs
+        assert kwargs["error_type"] == "RuntimeError"
+        assert "supersecretvalue1234567890" not in str(kwargs)
+        assert "sk-secretabcdefghijklmnopqrstuvwxyz" not in str(kwargs)
+        assert "/tmp/private/results" not in str(kwargs)
+
 
 @pytest.mark.asyncio
 class TestGetYfinanceData:

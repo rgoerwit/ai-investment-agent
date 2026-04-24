@@ -77,6 +77,12 @@ class TestFundamentalsPromptContent:
         assert "NET_CASH_TO_MARKET_CAP" in msg
         assert "CAPITAL_PLAN_STATUS" in msg
 
+    def test_fundamentals_prompt_mentions_growth_quality_unproven_cap(self):
+        prompt = get_prompt("fundamentals_analyst")
+        msg = prompt.system_message
+        assert "GROWTH_QUALITY_UNPROVEN" in msg
+        assert "Cap Revenue Growth scoring component at 0.5 pts" in msg
+
 
 class TestPortfolioManagerPromptContent:
     """Guard PM handling of consultant no-coverage cases."""
@@ -92,6 +98,17 @@ class TestPortfolioManagerPromptContent:
         assert (
             "CAPITAL_PLAN_STATUS" in prompt.system_message
         ), "PM prompt must distinguish idle cash with no plan from justified cash buffers."
+
+    def test_portfolio_manager_prompt_blocks_override_on_unproven_strength(self):
+        prompt = get_prompt("portfolio_manager")
+        msg = prompt.system_message
+        assert "GROWTH_QUALITY_UNPROVEN" in msg
+        assert "TRANSIENT_STRENGTH_DISTORTION" in msg
+        assert "BUY override is not allowed" in msg
+
+    def test_portfolio_manager_prompt_forbids_unverifiable_override_support(self):
+        prompt = get_prompt("portfolio_manager")
+        assert "UNVERIFIABLE consultant-resolution claims" in prompt.system_message
 
 
 class TestFundamentalsEbitdaAnnualization:

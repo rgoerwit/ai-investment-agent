@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 from src.config import config
+from src.error_safety import format_error_message, summarize_exception
 from src.runtime_services import (
     RuntimeServices,
     build_provider_runtime,
@@ -113,7 +114,20 @@ def _run_job(
             succeeded += 1
         except Exception as exc:
             failed += 1
-            store.update_ticker_status(job.job_id, ticker, "failed", error=str(exc))
+            summary = summarize_exception(
+                exc,
+                operation="dashboard refresh job",
+            )
+            store.update_ticker_status(
+                job.job_id,
+                ticker,
+                "failed",
+                error=format_error_message(
+                    operation="dashboard refresh job",
+                    error_type=summary["error_type"],
+                    message_preview=summary["message_preview"],
+                ),
+            )
 
     if failed == 0:
         status = "completed"

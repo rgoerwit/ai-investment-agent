@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from src.error_safety import redact_sensitive_text
+
 if TYPE_CHECKING:
     from src.tooling.runtime import ToolInvocation, ToolResult
 
@@ -24,14 +26,6 @@ def _safe_len(value: Any) -> int:
         return len(value)
     except TypeError:
         return len(str(value))
-
-
-def _serialize_preview(value: Any, limit: int = 200) -> str:
-    try:
-        rendered = json.dumps(value, default=str)
-    except Exception:
-        rendered = str(value)
-    return rendered[:limit]
 
 
 def _extract_error_like_details(value: Any) -> dict[str, Any] | None:
@@ -57,7 +51,7 @@ def _extract_error_like_details(value: Any) -> dict[str, Any] | None:
         prefix, _, detail = text.partition(":")
         return {
             "failure_kind": prefix.lower(),
-            "message": detail.strip()[:200],
+            "message": redact_sensitive_text(detail.strip(), max_chars=64),
         }
 
     try:
@@ -71,7 +65,7 @@ def _extract_error_like_details(value: Any) -> dict[str, Any] | None:
             "retryable": payload.get("retryable"),
             "provider": payload.get("provider"),
             "endpoint": payload.get("fmp_endpoint") or payload.get("endpoint"),
-            "message": str(payload.get("error"))[:200],
+            "message": redact_sensitive_text(str(payload.get("error")), max_chars=64),
         }
     return None
 
@@ -85,7 +79,7 @@ class LoggingToolAuditHook:
             tool=call.name,
             source=call.source,
             agent_key=call.agent_key,
-            args_preview=_serialize_preview(call.args),
+            arg_keys=sorted(call.args.keys()),
             args_len=_safe_len(call.args),
         )
         return call

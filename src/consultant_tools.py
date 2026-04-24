@@ -21,6 +21,7 @@ import structlog
 import yfinance as yf
 from langchain_core.tools import tool
 
+from src.error_safety import safe_error_payload, summarize_exception
 from src.runtime_diagnostics import classify_failure
 
 logger = structlog.get_logger(__name__)
@@ -145,8 +146,20 @@ async def spot_check_metric(
             }
         )
     except Exception as e:
-        logger.warning("spot_check_failed", ticker=ticker, metric=metric, error=str(e))
-        return json.dumps({"error": str(e), "ticker": ticker, "metric": metric})
+        summary = summarize_exception(
+            e,
+            operation="spot_check_metric",
+            provider="unknown",
+        )
+        logger.warning("spot_check_failed", ticker=ticker, metric=metric, **summary)
+        return json.dumps(
+            safe_error_payload(
+                e,
+                operation="spot_check_metric",
+                provider="unknown",
+                extra={"ticker": ticker, "metric": metric},
+            )
+        )
 
 
 @tool("spot_check_metric_alt")
@@ -240,36 +253,57 @@ async def spot_check_metric_alt(
         )
 
     except FMPSubscriptionUnavailableError as e:
+        summary = summarize_exception(
+            e,
+            operation="spot_check_metric_alt",
+            provider="unknown",
+        )
         logger.debug(
             "spot_check_alt_subscription_unavailable",
             ticker=ticker,
             metric=metric,
-            error=str(e),
+            **summary,
         )
         return _build_fmp_access_failure(
             ticker=ticker,
             metric=metric,
-            error=f"FMP alt-source unavailable: {e}",
+            error="FMP alt-source unavailable for this ticker or endpoint",
             suggestion="The current FMP plan does not cover this ticker or endpoint. Use official filings or another primary source instead.",
             retryable=False,
         )
     except ValueError as e:
         # FMP API key validation error
+        summary = summarize_exception(
+            e,
+            operation="spot_check_metric_alt",
+            provider="unknown",
+        )
         logger.warning(
             "spot_check_alt_key_error",
             ticker=ticker,
             metric=metric,
-            error=str(e),
+            **summary,
         )
         return _build_fmp_access_failure(
             ticker=ticker,
             metric=metric,
-            error=f"FMP API key issue: {e}",
+            error="FMP API key issue",
             suggestion="Check FMP API credentials or use official filings if independent cross-validation is still needed.",
             retryable=False,
         )
     except Exception as e:
         details = classify_failure(e, provider="unknown", model_name="fmp_alt_source")
+        safe_payload = safe_error_payload(
+            e,
+            operation="spot_check_metric_alt",
+            provider="unknown",
+            extra={
+                "ticker": ticker,
+                "metric": metric,
+                "provider": "fmp",
+                "fmp_endpoint": FMP_FIELD_MAP[metric][0],
+            },
+        )
         logger.warning(
             "spot_check_alt_failed",
             ticker=ticker,
@@ -277,21 +311,9 @@ async def spot_check_metric_alt(
             failure_kind=details.kind,
             retryable=details.retryable,
             error_type=details.error_type,
-            error=str(e),
+            message_preview=safe_payload.get("message_preview"),
         )
-        endpoint, _ = FMP_FIELD_MAP[metric]
-        return json.dumps(
-            {
-                "error": str(e),
-                "ticker": ticker,
-                "metric": metric,
-                "provider": "fmp",
-                "failure_kind": details.kind,
-                "retryable": details.retryable,
-                "error_type": details.error_type,
-                "fmp_endpoint": endpoint,
-            }
-        )
+        return json.dumps(safe_payload)
 
 
 def get_consultant_tools() -> list:
