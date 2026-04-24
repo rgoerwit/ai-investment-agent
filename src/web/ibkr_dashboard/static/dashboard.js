@@ -1113,9 +1113,10 @@ function updateModeAlert() {
   const accountHint = settings.account_id
     ? ` Current account override: <code>${escapeHtml(settings.account_id)}</code>.`
     : "";
+  const resultsDir = escapeHtml(String(settings.results_dir || "results/"));
   alert.classList.remove("hidden");
   alert.innerHTML =
-    "<strong>Read-only data view:</strong> this dashboard is showing saved analysis results from <code>results/</code>, not your live IBKR portfolio. Switch Data source to live in Settings, or restart with <code>--live</code> / <code>IBKR_DASHBOARD_READ_ONLY=false</code> and working broker credentials."
+    `<strong>Read-only data view:</strong> this dashboard is showing saved analysis results from <code>${resultsDir}</code>, not your live IBKR portfolio. Switch Data source to live in Settings, or restart with <code>--live</code> / <code>IBKR_DASHBOARD_READ_ONLY=false</code> and working broker credentials.`
     + accountHint;
 }
 

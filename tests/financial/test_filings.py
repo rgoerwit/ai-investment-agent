@@ -634,7 +634,7 @@ class TestGetOfficialFilingsTool:
     @pytest.mark.asyncio
     async def test_no_fetcher_available(self):
         """Should return informative message for unsupported markets."""
-        from src.toolkit import get_official_filings
+        from src.tools.research import get_official_filings
 
         with patch("src.data.filings.registry") as mock_registry:
             mock_registry.fetch = AsyncMock(return_value=None)
@@ -644,7 +644,7 @@ class TestGetOfficialFilingsTool:
     @pytest.mark.asyncio
     async def test_returns_formatted_result(self):
         """Should return formatted filing data when available."""
-        from src.toolkit import get_official_filings
+        from src.tools.research import get_official_filings
 
         mock_result = FilingResult(
             source="EDINET",
@@ -668,7 +668,7 @@ class TestGetOfficialFilingsTool:
     @pytest.mark.asyncio
     async def test_timeout_returns_degraded_message(self):
         """Timeout should degrade instead of hanging."""
-        from src.toolkit import get_official_filings
+        from src.tools.research import get_official_filings
 
         async def slow_fetch(_ticker):
             await asyncio.sleep(1)

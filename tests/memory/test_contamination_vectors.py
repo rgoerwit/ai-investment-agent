@@ -5,6 +5,7 @@ This module tests the various contamination scenarios identified in
 MEMORY_CONTAMINATION_ANALYSIS.md to ensure proper isolation.
 """
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -256,7 +257,7 @@ class TestLLMHallucinationPrevention:
     @pytest.mark.asyncio
     async def test_company_name_should_be_in_tool_output(self):
         """Verify that tools return company names in their output."""
-        from src.toolkit import get_financial_metrics
+        from src.tools.market import get_financial_metrics
 
         mocked_data = {
             "symbol": "0293.HK",
@@ -266,10 +267,11 @@ class TestLLMHallucinationPrevention:
         }
 
         with patch(
-            "src.tools.market.market_data_fetcher.get_financial_metrics",
-            new=AsyncMock(),
-        ) as fetch_mock:
-            fetch_mock.return_value = mocked_data
+            "src.tools.market._market_data_fetcher",
+            return_value=SimpleNamespace(
+                get_financial_metrics=AsyncMock(return_value=mocked_data)
+            ),
+        ):
             # Tools are LangChain StructuredTool objects, use ainvoke method
             result = await get_financial_metrics.ainvoke({"ticker": "0293.HK"})
 

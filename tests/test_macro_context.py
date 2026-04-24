@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -130,6 +131,37 @@ class TestCacheReadWrite:
                 ttl_hours=12,
             )
         assert cached is None
+
+    def test_cache_dir_tracks_live_results_dir(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("src.macro_context._CACHE_DIR", None)
+        monkeypatch.setattr("src.config.config.results_dir", tmp_path)
+
+        from src.macro_context import get_macro_context_cache_dir
+
+        assert get_macro_context_cache_dir() == tmp_path / ".macro_context_cache"
+
+    def test_cache_dir_uses_live_config_after_reload_under_patch(
+        self, monkeypatch, tmp_path
+    ):
+        import src.config
+        import src.macro_context as macro_context
+
+        original_results_dir = src.config.config.results_dir
+
+        try:
+            with patch("src.config.config") as mock_config:
+                mock_config.results_dir = tmp_path / "patched"
+                importlib.reload(macro_context)
+
+            monkeypatch.setattr("src.macro_context._CACHE_DIR", None)
+            monkeypatch.setattr(src.config.config, "results_dir", tmp_path / "live")
+
+            assert macro_context.get_macro_context_cache_dir() == (
+                tmp_path / "live" / ".macro_context_cache"
+            )
+        finally:
+            src.config.config.results_dir = original_results_dir
+            importlib.reload(macro_context)
 
 
 class TestGetMacroContext:
@@ -267,6 +299,47 @@ class TestGetMacroContext:
             ticker="7203.T",
             region="JAPAN",
             cache_path=str(tmp_path / "JAPAN.json"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_blocked_by_inspection_returns_failed(self, tmp_path):
+        inspection_service = SimpleNamespace(
+            check=AsyncMock(return_value="TOOL_BLOCKED: suspicious cached context")
+        )
+
+        with (
+            patch("src.macro_context._CACHE_DIR", tmp_path),
+            patch("src.macro_context._compute_fingerprint", return_value="fp123"),
+            patch(
+                "src.macro_context.get_current_inspection_service",
+                return_value=inspection_service,
+            ),
+            patch(
+                "src.macro_context._fetch_macro_raw", new_callable=AsyncMock
+            ) as fetch,
+            patch("src.macro_context._summarize", new_callable=AsyncMock) as summarize,
+            patch("src.macro_context.logger") as mock_logger,
+        ):
+            generated_at = _write_cache(
+                "JAPAN",
+                trade_date="2026-04-18",
+                fingerprint="fp123",
+                report="cached brief",
+                status="generated",
+            )
+            result = await get_macro_context("7203.T", "2026-04-18")
+
+        assert result.status == "failed"
+        assert result.report == ""
+        assert result.generated_at == generated_at
+        fetch.assert_not_awaited()
+        summarize.assert_not_awaited()
+        mock_logger.warning.assert_any_call(
+            "macro_context_cache_blocked",
+            ticker="7203.T",
+            region="JAPAN",
+            cache_path=str(tmp_path / "JAPAN.json"),
+            blocked_reason="suspicious cached context",
         )
 
     @pytest.mark.asyncio

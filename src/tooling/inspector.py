@@ -18,7 +18,11 @@ logger = structlog.get_logger(__name__)
 
 
 class SourceKind(str, Enum):
-    """Classification of the content's origin — used for policy decisions."""
+    """Classification of the content's origin — used for policy decisions.
+
+    Future MCP adapters should normalize remote tool/resource output into the
+    same inspection plane rather than inventing a parallel trust model.
+    """
 
     tool_output = "tool_output"
     web_search = "web_search"
@@ -26,6 +30,9 @@ class SourceKind(str, Enum):
     official_filing = "official_filing"
     social_feed = "social_feed"
     financial_api = "financial_api"
+    memory_retrieval = "memory_retrieval"
+    memory_write = "memory_write"
+    cached_context = "cached_context"
     mcp_tool_output = "mcp_tool_output"  # reserved for future MCP integration
 
 

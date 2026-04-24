@@ -11,9 +11,10 @@ Every external-content callsite should call::
 
     approved = await INSPECTION_SERVICE.check(InspectionEnvelope(...))
 
-and use the returned approved value in place of the raw content. When the
-inspector allows the content, the original ``raw_content`` value is preserved
-when available so structured payload shapes are not lost.
+and use the returned approved value in place of the raw content. This is the
+single trust boundary for untrusted prompt-bound content. When the inspector
+allows the content, the original ``raw_content`` value is preserved when
+available so structured payload shapes are not lost.
 """
 
 from __future__ import annotations

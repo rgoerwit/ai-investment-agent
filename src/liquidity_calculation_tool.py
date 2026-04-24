@@ -3,8 +3,8 @@ from typing import Annotated
 import structlog
 from langchain_core.tools import tool
 
-from src.data.fetcher import fetcher as market_data_fetcher
 from src.fx_normalization import get_fx_rate
+from src.runtime_services import get_current_market_data_fetcher
 from src.ticker_utils import normalize_ticker
 
 logger = structlog.get_logger(__name__)
@@ -78,6 +78,11 @@ EXCHANGE_CURRENCY_MAP = {
 }
 
 
+def _market_data_fetcher():
+    """Resolve the active market-data fetcher at call time."""
+    return get_current_market_data_fetcher()
+
+
 @tool
 async def calculate_liquidity_metrics(
     ticker: Annotated[str | None, "Stock ticker symbol"] = None,
@@ -96,13 +101,15 @@ async def calculate_liquidity_metrics(
         # Step 1: Fetch ROBUST anchor price (multi-source validated)
         # This prevents "cent-scaling" bugs where history data is 1/100th of reality
         # Anchoring to the validated spot price ensures turnover reflects actual market value.
-        anchor_data = await market_data_fetcher.get_financial_metrics(normalized_symbol)
+        anchor_data = await _market_data_fetcher().get_financial_metrics(
+            normalized_symbol
+        )
         anchor_price = (
             anchor_data.get("currentPrice") if isinstance(anchor_data, dict) else None
         )
 
         # Step 2: Fetch volume history
-        hist = await market_data_fetcher.get_historical_prices(
+        hist = await _market_data_fetcher().get_historical_prices(
             normalized_symbol, period="3mo"
         )
 

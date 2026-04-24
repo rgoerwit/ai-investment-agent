@@ -5,14 +5,17 @@ Design: "Dumb Tool" pattern - tools do pure I/O only.
 The Agent (Editor) handles all reasoning/verification logic.
 """
 
+from urllib.parse import urljoin
+
 import httpx
 import structlog
 from bs4 import BeautifulSoup
 from langchain_core.tools import tool
 
 from src.runtime_diagnostics import classify_failure
-from src.tooling.inspection_service import INSPECTION_SERVICE
+from src.runtime_services import get_current_inspection_service
 from src.tooling.inspector import InspectionEnvelope, SourceKind
+from src.tooling.tool_argument_policy import _is_reasonable_reference_url
 
 logger = structlog.get_logger(__name__)
 
@@ -21,9 +24,45 @@ MAX_REFERENCE_CHARS = 5000
 
 # Request timeout in seconds
 REQUEST_TIMEOUT = 10.0
+MAX_REFERENCE_REDIRECTS = 3
 
 # User agent for requests
 USER_AGENT = "Mozilla/5.0 (compatible; InvestorAgent/1.0; +https://github.com/rgoerwit/ai-investment-agent)"
+
+_REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
+
+
+def _resolve_redirect_target(current_url: str, location: str) -> str:
+    return urljoin(current_url, location)
+
+
+async def _fetch_reference_response(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+) -> httpx.Response:
+    current_url = url
+
+    for _ in range(MAX_REFERENCE_REDIRECTS + 1):
+        if not _is_reasonable_reference_url(current_url):
+            raise ValueError(f"redirect target rejected by policy: {current_url}")
+
+        response = await client.get(
+            current_url,
+            headers=headers,
+            follow_redirects=False,
+        )
+
+        if response.status_code not in _REDIRECT_STATUS_CODES:
+            return response
+
+        location = response.headers.get("location", "").strip()
+        if not location:
+            return response
+
+        current_url = _resolve_redirect_target(current_url, location)
+
+    raise ValueError("too many redirects")
 
 
 @tool("fetch_reference_content")
@@ -41,13 +80,13 @@ async def fetch_reference_content(url: str) -> str:
     Returns:
         Text content from the URL (truncated to 5000 chars), or error message
     """
-    if not url or not url.startswith(("http://", "https://")):
+    if not _is_reasonable_reference_url(url):
         return f"INVALID_URL: '{url}' is not a valid HTTP/HTTPS URL"
 
     try:
         headers = {"User-Agent": USER_AGENT}
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            resp = await client.get(url, headers=headers, follow_redirects=True)
+            resp = await _fetch_reference_response(client, url, headers)
             resp.raise_for_status()
 
         # Parse HTML and extract text
@@ -90,11 +129,21 @@ async def fetch_reference_content(url: str) -> str:
             source_uri=url,
             metadata={"url": url[:200]},
         )
-        return await INSPECTION_SERVICE.check(envelope)
+        return await get_current_inspection_service().check(envelope)
 
     except httpx.TimeoutException:
         logger.warning("reference_fetch_timeout", url=url[:80], failure_kind="timeout")
         return "FETCH_FAILED: Request timed out after 10 seconds"
+
+    except ValueError as exc:
+        logger.warning(
+            "reference_fetch_rejected",
+            url=url[:80],
+            error=str(exc),
+        )
+        if "redirect" in str(exc).lower():
+            return f"FETCH_FAILED: {exc}"
+        return f"INVALID_URL: {exc}"
 
     except httpx.HTTPStatusError as e:
         logger.warning(

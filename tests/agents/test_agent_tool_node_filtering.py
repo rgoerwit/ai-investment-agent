@@ -346,7 +346,7 @@ class TestCrossAgentToolUsage:
         When agents share tools, the tool node must correctly identify which
         agent's AIMessage to process based on msg.name, not just tool names.
         """
-        from src.toolkit import toolkit
+        from src.tools.registry import toolkit
 
         # Verify get_news is in multiple tool lists
         news_tools = toolkit.get_news_tools()
@@ -368,7 +368,7 @@ class TestCrossAgentToolUsage:
 
     def test_each_agent_has_unique_tool_node(self):
         """Verify each agent gets its own tool node instance."""
-        from src.toolkit import toolkit
+        from src.tools.registry import toolkit
 
         # Create tool nodes for agents that share tools
         news_node = create_agent_tool_node(toolkit.get_news_tools(), "news_analyst")
@@ -451,7 +451,7 @@ class TestAllAgentToolCombinations:
     @pytest.fixture
     def agent_tool_configs(self):
         """Get all agent/tool configurations from the actual graph."""
-        from src.toolkit import toolkit
+        from src.tools.registry import toolkit
 
         return [
             ("market_analyst", toolkit.get_market_tools()),

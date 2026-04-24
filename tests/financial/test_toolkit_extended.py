@@ -1,19 +1,32 @@
 """Extended toolkit tests focusing on AI/API failure modes and edge cases."""
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pandas as pd
 import pytest
 
-from src import toolkit
+from src.tools.market import (
+    get_financial_metrics,
+    get_technical_indicators,
+)
+from src.tools.news import get_news, get_social_media_sentiment
+
+toolkit = SimpleNamespace(
+    get_financial_metrics=get_financial_metrics,
+    get_news=get_news,
+    get_social_media_sentiment=get_social_media_sentiment,
+    get_technical_indicators=get_technical_indicators,
+)
 
 
 @pytest.fixture
 def mock_fetcher():
-    """Mock the singleton market_data_fetcher."""
-    with patch("src.tools.market.market_data_fetcher") as mock:
-        yield mock
+    """Mock the active market-data fetcher seam."""
+    fetcher = SimpleNamespace()
+    with patch("src.tools.market._market_data_fetcher", return_value=fetcher):
+        yield fetcher
 
 
 @pytest.fixture

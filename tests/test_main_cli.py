@@ -47,6 +47,18 @@ def restore_cli_logger_levels():
         logging.getLogger(name).setLevel(level)
 
 
+@pytest.fixture
+def stub_observability(monkeypatch):
+    """Keep CLI orchestration unit tests independent of real tracing shutdown."""
+    from src.observability import NoopObservabilityRuntime
+
+    monkeypatch.setattr(
+        "src.observability.get_observability_runtime",
+        lambda *args, **kwargs: NoopObservabilityRuntime(),
+    )
+    monkeypatch.setattr("src.observability.flush_traces", lambda: None)
+
+
 class TestStrictModeCLI:
     """Test --strict CLI flag is wired correctly."""
 
@@ -135,6 +147,14 @@ class TestOutputCompanyNameLookup:
         fake_tracker = MagicMock()
         fake_graph = MagicMock()
         fake_graph.ainvoke = AsyncMock(return_value={})
+        fake_macro_context = {
+            "report": "",
+            "region": "EUROPE",
+            "status": "failed",
+            "generated_at": None,
+            "llm_invoked": False,
+            "prompt_used": None,
+        }
 
         with (
             patch("src.main.logger") as mock_logger,
@@ -149,6 +169,10 @@ class TestOutputCompanyNameLookup:
                 ),
             ),
             patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
+            patch(
+                "src.main._prefetch_macro_context",
+                new=AsyncMock(return_value=fake_macro_context),
+            ),
             patch("src.graph.create_trading_graph", return_value=fake_graph),
             patch("src.token_tracker.get_tracker", return_value=fake_tracker),
             patch("src.main.build_analysis_validity", return_value={"ok": True}),
@@ -192,13 +216,14 @@ class TestOutputCompanyNameLookup:
         fake_graph = MagicMock()
         fake_graph.ainvoke = AsyncMock(side_effect=_capture_ainvoke)
 
-        macro_result = MagicMock()
-        macro_result.report = "### EQUITY REGIME\n- Summary: Risk appetite is mixed."
-        macro_result.region = "JAPAN"
-        macro_result.status = "cached"
-        macro_result.generated_at = None
-        macro_result.llm_invoked = False
-        macro_result.prompt_used = None
+        macro_result = {
+            "report": "### EQUITY REGIME\n- Summary: Risk appetite is mixed.",
+            "region": "JAPAN",
+            "status": "cached",
+            "generated_at": None,
+            "llm_invoked": False,
+            "prompt_used": None,
+        }
 
         with (
             patch(
@@ -213,7 +238,7 @@ class TestOutputCompanyNameLookup:
             ),
             patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
             patch(
-                "src.macro_context.get_macro_context",
+                "src.main._prefetch_macro_context",
                 new=AsyncMock(return_value=macro_result),
             ),
             patch("src.graph.create_trading_graph", return_value=fake_graph),
@@ -234,7 +259,7 @@ class TestOutputCompanyNameLookup:
         assert result["macro_context_region"] == "JAPAN"
         assert result["macro_context_injected_into_news"] is False
         context = captured_context["context"]
-        assert context.macro_context_report == macro_result.report
+        assert context.macro_context_report == macro_result["report"]
         assert context.macro_context_region == "JAPAN"
         assert context.macro_context_status == "cached"
 
@@ -463,14 +488,14 @@ class TestTracingMetadataFlow:
         fake_graph = MagicMock()
         fake_graph.ainvoke = AsyncMock(return_value={})
         tracing_callback = MagicMock()
-        macro_result = MagicMock(
-            report="brief",
-            region="GLOBAL",
-            status="generated",
-            generated_at="2026-04-18T00:00:00+00:00",
-            llm_invoked=True,
-            prompt_used={"agent_name": "Macro Context Analyst", "version": "1.0"},
-        )
+        macro_result = {
+            "report": "brief",
+            "region": "GLOBAL",
+            "status": "generated",
+            "generated_at": "2026-04-18T00:00:00+00:00",
+            "llm_invoked": True,
+            "prompt_used": {"agent_name": "Macro Context Analyst", "version": "1.0"},
+        }
 
         with (
             patch(
@@ -485,9 +510,9 @@ class TestTracingMetadataFlow:
             ),
             patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
             patch(
-                "src.macro_context.get_macro_context",
+                "src.main._prefetch_macro_context",
                 new=AsyncMock(return_value=macro_result),
-            ) as get_macro_context,
+            ) as prefetch_macro_context,
             patch("src.graph.create_trading_graph", return_value=fake_graph),
             patch("src.token_tracker.get_tracker", return_value=fake_tracker),
             patch("src.main.build_analysis_validity", return_value={"ok": True}),
@@ -503,21 +528,20 @@ class TestTracingMetadataFlow:
             )
 
         assert result["analysis_validity"] == {"ok": True}
-        assert get_macro_context.await_count == 1
-        assert get_macro_context.await_args.args[0] == "0005.HK"
-        assert get_macro_context.await_args.kwargs["callbacks"] == [tracing_callback]
+        assert prefetch_macro_context.await_count == 1
+        assert prefetch_macro_context.await_args.args[0] == "0005.HK"
+        assert prefetch_macro_context.await_args.kwargs["callbacks"] == [
+            tracing_callback
+        ]
         assert result["prompts_used"]["macro_context_analyst"]["agent_name"] == (
             "Macro Context Analyst"
         )
 
-    def test_run_analysis_logs_macro_context_prefetch_complete(self):
-        from src.main import run_analysis
-        from src.ticker_utils import CompanyNameResult
+    @pytest.mark.asyncio
+    async def test_prefetch_macro_context_logs_completion(self):
+        from src.main import _prefetch_macro_context
 
-        fake_tracker = MagicMock()
-        fake_graph = MagicMock()
-        fake_graph.ainvoke = AsyncMock(return_value={})
-        macro_result = MagicMock(
+        macro_result = SimpleNamespace(
             report="brief",
             region="AUSTRALIA",
             status="generated",
@@ -529,33 +553,20 @@ class TestTracingMetadataFlow:
         with (
             patch("src.main.logger") as mock_logger,
             patch(
-                "src.ticker_utils.resolve_company_name",
-                new=AsyncMock(
-                    return_value=CompanyNameResult(
-                        name="Ridley",
-                        source="lookup",
-                        is_resolved=True,
-                    )
-                ),
-            ),
-            patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
-            patch(
                 "src.macro_context.get_macro_context",
                 new=AsyncMock(return_value=macro_result),
             ),
-            patch("src.graph.create_trading_graph", return_value=fake_graph),
-            patch("src.token_tracker.get_tracker", return_value=fake_tracker),
-            patch("src.main.build_analysis_validity", return_value={"ok": True}),
         ):
-            asyncio.run(
-                run_analysis(
-                    ticker="RIC.AX",
-                    quick_mode=True,
-                    strict_mode=False,
-                    skip_charts=True,
-                )
-            )
+            result = await _prefetch_macro_context("RIC.AX", "2026-04-19")
 
+        assert result == {
+            "report": "brief",
+            "region": "AUSTRALIA",
+            "status": "generated",
+            "generated_at": "2026-04-19T13:49:10.364729+00:00",
+            "llm_invoked": True,
+            "prompt_used": {"agent_name": "Macro Context Analyst", "version": "1.0"},
+        }
         mock_logger.info.assert_any_call(
             "macro_context_prefetch_complete",
             ticker="RIC.AX",
@@ -568,7 +579,7 @@ class TestTracingMetadataFlow:
         )
 
 
-class TestToolAuditLogging:
+class TestRuntimeServiceHookConfig:
     def test_debug_flag_implies_verbose(self, monkeypatch):
         from src.main import build_arg_parser, parse_arguments
 
@@ -582,43 +593,24 @@ class TestToolAuditLogging:
         assert args.debug is True
         assert args.verbose is True
 
-    def test_configure_tool_audit_logging_is_opt_in(self):
-        from src.main import configure_tool_audit_logging
-        from src.tooling.runtime import TOOL_SERVICE
+    def test_build_runtime_services_from_config_audit_hook_is_opt_in(self, monkeypatch):
+        from src.main import build_runtime_services_from_config
 
-        configure_tool_audit_logging(False)
-        assert TOOL_SERVICE.hooks == []
+        monkeypatch.setattr(
+            "src.main.config.untrusted_content_inspection_enabled", False
+        )
 
-        configure_tool_audit_logging(True)
-        try:
-            assert len(TOOL_SERVICE.hooks) == 1
-        finally:
-            configure_tool_audit_logging(False)
+        services = build_runtime_services_from_config(enable_tool_audit=False)
+        assert services.tool_service.hooks == []
 
-    def test_configure_tool_audit_logging_preserves_content_inspection_hook(self):
-        from src.main import configure_tool_audit_logging
-        from src.tooling.inspection_hook import ContentInspectionHook
-        from src.tooling.runtime import TOOL_SERVICE
+        services = build_runtime_services_from_config(enable_tool_audit=True)
+        hook_types = [type(h).__name__ for h in services.tool_service.hooks]
+        assert hook_types == ["LoggingToolAuditHook"]
 
-        TOOL_SERVICE.set_hooks([ContentInspectionHook()])
-        try:
-            configure_tool_audit_logging(True)
-            hook_types = [type(h).__name__ for h in TOOL_SERVICE.hooks]
-            assert "LoggingToolAuditHook" in hook_types
-            assert "ContentInspectionHook" in hook_types
-
-            configure_tool_audit_logging(False)
-            hook_types = [type(h).__name__ for h in TOOL_SERVICE.hooks]
-            assert "LoggingToolAuditHook" not in hook_types
-            assert "ContentInspectionHook" in hook_types
-        finally:
-            TOOL_SERVICE.clear_hooks()
-
-    def test_configure_content_inspection_from_config_installs_tool_hook(
+    def test_build_runtime_services_from_config_audit_hook_coexists_with_inspection(
         self, monkeypatch
     ):
-        from src.main import configure_content_inspection_from_config
-        from src.tooling.runtime import TOOL_SERVICE
+        from src.main import build_runtime_services_from_config
 
         monkeypatch.setattr(
             "src.main.config.untrusted_content_inspection_enabled", True
@@ -629,38 +621,46 @@ class TestToolAuditLogging:
             "src.main.config.untrusted_content_fail_policy", "fail_open"
         )
 
-        TOOL_SERVICE.clear_hooks()
-        try:
-            configure_content_inspection_from_config()
-            hook_types = [type(h).__name__ for h in TOOL_SERVICE.hooks]
-            assert "ContentInspectionHook" in hook_types
-        finally:
-            TOOL_SERVICE.clear_hooks()
+        services = build_runtime_services_from_config(enable_tool_audit=True)
+        hook_types = [type(h).__name__ for h in services.tool_service.hooks]
+        assert "LoggingToolAuditHook" in hook_types
+        assert "ContentInspectionHook" in hook_types
+
+    def test_configure_content_inspection_from_config_installs_tool_hook(
+        self, monkeypatch
+    ):
+        from src.main import configure_content_inspection_from_config
+
+        monkeypatch.setattr(
+            "src.main.config.untrusted_content_inspection_enabled", True
+        )
+        monkeypatch.setattr("src.main.config.untrusted_content_backend", "null")
+        monkeypatch.setattr("src.main.config.untrusted_content_inspection_mode", "warn")
+        monkeypatch.setattr(
+            "src.main.config.untrusted_content_fail_policy", "fail_open"
+        )
+
+        services = configure_content_inspection_from_config()
+        hook_types = [type(h).__name__ for h in services.tool_service.hooks]
+        assert "ContentInspectionHook" in hook_types
 
     def test_configure_content_inspection_from_config_removes_tool_hook_when_disabled(
         self, monkeypatch
     ):
         from src.main import configure_content_inspection_from_config
-        from src.tooling.inspection_hook import ContentInspectionHook
-        from src.tooling.runtime import TOOL_SERVICE
 
         monkeypatch.setattr(
             "src.main.config.untrusted_content_inspection_enabled", False
         )
 
-        TOOL_SERVICE.set_hooks([ContentInspectionHook()])
-        try:
-            configure_content_inspection_from_config()
-            hook_types = [type(h).__name__ for h in TOOL_SERVICE.hooks]
-            assert "ContentInspectionHook" not in hook_types
-        finally:
-            TOOL_SERVICE.clear_hooks()
+        services = configure_content_inspection_from_config()
+        hook_types = [type(h).__name__ for h in services.tool_service.hooks]
+        assert "ContentInspectionHook" not in hook_types
 
     def test_configure_content_inspection_from_config_rejects_unimplemented_backend(
         self, monkeypatch
     ):
         from src.main import configure_content_inspection_from_config
-        from src.tooling.runtime import TOOL_SERVICE
 
         monkeypatch.setattr(
             "src.main.config.untrusted_content_inspection_enabled", True
@@ -671,12 +671,8 @@ class TestToolAuditLogging:
             "src.main.config.untrusted_content_fail_policy", "fail_open"
         )
 
-        TOOL_SERVICE.clear_hooks()
-        try:
-            with pytest.raises(ValueError, match="only 'null' is implemented"):
-                configure_content_inspection_from_config()
-        finally:
-            TOOL_SERVICE.clear_hooks()
+        with pytest.raises(ValueError, match="is not implemented"):
+            configure_content_inspection_from_config()
 
 
 class TestBaselineCaptureCliHelpers:
@@ -729,6 +725,93 @@ class TestBaselineCaptureCliHelpers:
         assert ok is True
         assert "Cleaned 1 stale inflight capture(s)" in messages[0]
 
+    @pytest.mark.asyncio
+    async def test_execute_analysis_adds_capture_hook_without_mutating_global_service(
+        self,
+    ):
+        from src.main import _execute_analysis
+        from src.runtime_services import RuntimeServices, build_provider_runtime
+        from src.tooling.inspection_service import InspectionService
+        from src.tooling.runtime import TOOL_SERVICE, ToolExecutionService
+
+        base_hook = object()
+        global_hooks_before = TOOL_SERVICE.hooks
+        runtime_services = RuntimeServices(
+            tool_service=ToolExecutionService([base_hook]),
+            inspection_service=InspectionService(),
+            providers=build_provider_runtime(),
+        )
+
+        class Capture:
+            def make_tool_hook(self):
+                return "capture_hook"
+
+        args = SimpleNamespace(
+            ticker="7203.T",
+            quick=True,
+            strict=False,
+            svg=False,
+            transparent=False,
+        )
+        output_targets = SimpleNamespace(image_dir=Path("."), skip_charts=True)
+
+        with patch(
+            "src.main.run_analysis", new=AsyncMock(return_value={"ok": True})
+        ) as mock_run:
+            result = await _execute_analysis(
+                args,
+                output_targets,
+                baseline_capture=Capture(),
+                runtime_services=runtime_services,
+            )
+
+        assert result == {"ok": True}
+        passed_services = mock_run.await_args.kwargs["runtime_services"]
+        assert runtime_services.tool_service.hooks == [base_hook]
+        assert passed_services.tool_service.hooks == [base_hook, "capture_hook"]
+        assert TOOL_SERVICE.hooks == global_hooks_before
+
+    @pytest.mark.asyncio
+    async def test_execute_analysis_does_not_leak_capture_hook_on_error(self):
+        from src.main import _execute_analysis
+        from src.runtime_services import RuntimeServices, build_provider_runtime
+        from src.tooling.inspection_service import InspectionService
+        from src.tooling.runtime import TOOL_SERVICE, ToolExecutionService
+
+        global_hooks_before = TOOL_SERVICE.hooks
+        runtime_services = RuntimeServices(
+            tool_service=ToolExecutionService(["base_hook"]),
+            inspection_service=InspectionService(),
+            providers=build_provider_runtime(),
+        )
+
+        class Capture:
+            def make_tool_hook(self):
+                return "capture_hook"
+
+        args = SimpleNamespace(
+            ticker="7203.T",
+            quick=True,
+            strict=False,
+            svg=False,
+            transparent=False,
+        )
+        output_targets = SimpleNamespace(image_dir=Path("."), skip_charts=True)
+
+        with patch(
+            "src.main.run_analysis", new=AsyncMock(side_effect=RuntimeError("boom"))
+        ):
+            with pytest.raises(RuntimeError, match="boom"):
+                await _execute_analysis(
+                    args,
+                    output_targets,
+                    baseline_capture=Capture(),
+                    runtime_services=runtime_services,
+                )
+
+        assert runtime_services.tool_service.hooks == ["base_hook"]
+        assert TOOL_SERVICE.hooks == global_hooks_before
+
     @patch("src.main.socket.getaddrinfo", side_effect=OSError("dns down"))
     def test_provider_preflight_logs_failures(self, _mock_dns):
         from src.main import run_provider_preflight
@@ -747,9 +830,6 @@ class TestBaselineCaptureCliHelpers:
             {"quiet": False, "brief": False, "verbose": True, "debug": False},
         )()
 
-        monkeypatch.setattr(
-            "src.main.configure_tool_audit_logging", lambda enabled: None
-        )
         monkeypatch.setattr("src.main.run_provider_preflight", lambda: {"ok": True})
 
         result = configure_cli_logging(args)
@@ -770,9 +850,6 @@ class TestBaselineCaptureCliHelpers:
         )()
 
         monkeypatch.setenv("INVESTMENT_AGENT_TRACE_HTTP", "1")
-        monkeypatch.setattr(
-            "src.main.configure_tool_audit_logging", lambda enabled: None
-        )
         monkeypatch.setattr("src.main.run_provider_preflight", lambda: {"ok": True})
 
         configure_cli_logging(args)
@@ -885,6 +962,11 @@ class TestResolveOutputTargets:
 
 
 class TestMainOrchestration:
+    @pytest.fixture(autouse=True)
+    def _stub_tracing_runtime(self, stub_observability):
+        """These orchestration tests exercise CLI control flow, not Langfuse internals."""
+        return None
+
     def test_run_retrospective_only_returns_one_on_failure(self, monkeypatch):
         from src.main import _run_retrospective_only
 
@@ -919,7 +1001,10 @@ class TestMainOrchestration:
             "src.main._resolve_output_targets",
             lambda passed_args: OutputTargets(None, Path("images"), True),
         )
-        monkeypatch.setattr("src.main._setup_runtime", lambda passed_args, targets: {})
+        monkeypatch.setattr(
+            "src.main._setup_runtime",
+            lambda passed_args, targets: ({}, object()),
+        )
         monkeypatch.setattr("src.main._run_retrospective_only", fake_retrospective_only)
         monkeypatch.setattr(
             "src.cleanup.cleanup_async_resources", lambda: _async_none()
@@ -967,7 +1052,8 @@ class TestMainOrchestration:
         monkeypatch.setattr(
             "src.main._setup_runtime",
             lambda passed_args, targets: (
-                call_order.append("setup") or {"google": {"dns": "ok"}}
+                call_order.append("setup") or {"google": {"dns": "ok"}},
+                object(),
             ),
         )
         monkeypatch.setattr(
@@ -1080,7 +1166,10 @@ class TestMainOrchestration:
             "src.main._resolve_output_targets",
             lambda passed_args: OutputTargets(None, Path("images"), True),
         )
-        monkeypatch.setattr("src.main._setup_runtime", lambda passed_args, targets: {})
+        monkeypatch.setattr(
+            "src.main._setup_runtime",
+            lambda passed_args, targets: ({}, object()),
+        )
         monkeypatch.setattr(
             "src.main._maybe_run_ticker_retrospective",
             lambda passed_args: _async_none(),
@@ -1097,6 +1186,230 @@ class TestMainOrchestration:
         )
 
         assert asyncio.run(main()) == 1
+
+    def test_main_keeps_results_dir_persistent_when_output_is_set(self, monkeypatch):
+        from src.main import OutputTargets, config, main
+
+        output_file = Path("scratch/report.md")
+        observed_results_dirs: list[Path] = []
+        original_results_dir = Path("results")
+        args = SimpleNamespace(
+            retrospective_only=False,
+            ticker="6083.T",
+            quick=False,
+            strict=False,
+            article=False,
+            quiet=True,
+            brief=False,
+            svg=False,
+            transparent=False,
+            imagedir=None,
+        )
+
+        async def fake_execute(*_args, **_kwargs):
+            observed_results_dirs.append(Path(config.results_dir))
+            return {"analysis_validity": {"publishable": True}}
+
+        async def fake_article(*_args, **_kwargs):
+            observed_results_dirs.append(Path(config.results_dir))
+            return False
+
+        def fake_persist(*_args, **_kwargs):
+            observed_results_dirs.append(Path(config.results_dir))
+
+        monkeypatch.setattr("src.main.parse_arguments", lambda: args)
+        monkeypatch.setattr("src.main.config.results_dir", original_results_dir)
+        monkeypatch.setattr(
+            "src.main._apply_runtime_overrides", lambda passed_args: None
+        )
+        monkeypatch.setattr("src.main._validate_cli_args", lambda passed_args: None)
+        monkeypatch.setattr(
+            "src.main._resolve_output_targets",
+            lambda passed_args: OutputTargets(
+                output_file, Path("scratch/images"), False
+            ),
+        )
+        monkeypatch.setattr(
+            "src.main._setup_runtime",
+            lambda passed_args, targets: (
+                observed_results_dirs.append(Path(config.results_dir))
+                or {"google": {"dns": "ok"}},
+                object(),
+            ),
+        )
+        monkeypatch.setattr(
+            "src.main._maybe_run_ticker_retrospective",
+            lambda passed_args: (
+                observed_results_dirs.append(Path(config.results_dir)) or _async_none()
+            ),
+        )
+        monkeypatch.setattr(
+            "src.main._emit_start_banner", lambda passed_args, targets: "banner"
+        )
+        monkeypatch.setattr("src.main._execute_analysis", fake_execute)
+        monkeypatch.setattr(
+            "src.main._attach_run_summary",
+            lambda result, passed_args, preflight: None,
+        )
+        monkeypatch.setattr(
+            "src.main._render_primary_output",
+            lambda result, passed_args, targets, banner: (None, None, None),
+        )
+        monkeypatch.setattr("src.main._persist_analysis_outputs", fake_persist)
+        monkeypatch.setattr(
+            "src.main._maybe_save_rejection_record",
+            lambda result, passed_args, **kwargs: _async_none(),
+        )
+        monkeypatch.setattr("src.main._maybe_generate_article", fake_article)
+        monkeypatch.setattr(
+            "src.main._log_final_summary",
+            lambda result, passed_args, article_generated: None,
+        )
+        monkeypatch.setattr(
+            "src.cleanup.cleanup_async_resources", lambda: _async_none()
+        )
+
+        assert asyncio.run(main()) == 0
+        assert observed_results_dirs
+        assert all(path == original_results_dir for path in observed_results_dirs)
+        assert Path(config.results_dir) == original_results_dir
+
+    def test_main_restores_results_dir_after_failed_run_with_output(self, monkeypatch):
+        from src.main import OutputTargets, config, main
+
+        original_results_dir = Path("results")
+        args = SimpleNamespace(
+            retrospective_only=False,
+            ticker="6083.T",
+            quick=False,
+            strict=False,
+            article=False,
+            quiet=True,
+            brief=False,
+            svg=False,
+            transparent=False,
+            imagedir=None,
+        )
+
+        monkeypatch.setattr("src.main.parse_arguments", lambda: args)
+        monkeypatch.setattr("src.main.config.results_dir", original_results_dir)
+        monkeypatch.setattr(
+            "src.main._apply_runtime_overrides", lambda passed_args: None
+        )
+        monkeypatch.setattr("src.main._validate_cli_args", lambda passed_args: None)
+        monkeypatch.setattr(
+            "src.main._resolve_output_targets",
+            lambda passed_args: OutputTargets(
+                Path("scratch/report.md"), Path("scratch/images"), False
+            ),
+        )
+        monkeypatch.setattr(
+            "src.main._setup_runtime",
+            lambda passed_args, targets: ({}, object()),
+        )
+        monkeypatch.setattr(
+            "src.main._maybe_run_ticker_retrospective",
+            lambda passed_args: _async_none(),
+        )
+        monkeypatch.setattr(
+            "src.main._emit_start_banner", lambda passed_args, targets: "banner"
+        )
+        monkeypatch.setattr(
+            "src.main._execute_analysis",
+            lambda passed_args, targets, **kwargs: _async_result(None),
+        )
+        monkeypatch.setattr(
+            "src.cleanup.cleanup_async_resources", lambda: _async_none()
+        )
+
+        assert asyncio.run(main()) == 1
+        assert Path(config.results_dir) == original_results_dir
+
+    def test_main_preserves_explicit_imagedir_without_retargeting_results_dir(
+        self, monkeypatch
+    ):
+        from src.main import OutputTargets, config, main
+
+        output_file = Path("scratch/report.md")
+        explicit_image_dir = Path("custom-images/charts")
+        observed: dict[str, Path] = {}
+        args = SimpleNamespace(
+            retrospective_only=False,
+            ticker="6083.T",
+            quick=False,
+            strict=False,
+            article=False,
+            quiet=True,
+            brief=False,
+            svg=False,
+            transparent=False,
+            imagedir=str(explicit_image_dir),
+        )
+
+        async def fake_execute(_args, targets, **_kwargs):
+            observed["results_dir"] = Path(config.results_dir)
+            observed["image_dir"] = targets.image_dir
+            return {"analysis_validity": {"publishable": True}}
+
+        monkeypatch.setattr("src.main.parse_arguments", lambda: args)
+        monkeypatch.setattr("src.main.config.results_dir", Path("results"))
+        monkeypatch.setattr(
+            "src.main._apply_runtime_overrides", lambda passed_args: None
+        )
+        monkeypatch.setattr("src.main._validate_cli_args", lambda passed_args: None)
+        monkeypatch.setattr(
+            "src.main._resolve_output_targets",
+            lambda passed_args: OutputTargets(output_file, explicit_image_dir, False),
+        )
+        monkeypatch.setattr(
+            "src.main._setup_runtime",
+            lambda passed_args, targets: ({}, object()),
+        )
+        monkeypatch.setattr(
+            "src.main._maybe_run_ticker_retrospective",
+            lambda passed_args: _async_none(),
+        )
+        monkeypatch.setattr(
+            "src.main._emit_start_banner", lambda passed_args, targets: "banner"
+        )
+        monkeypatch.setattr("src.main._execute_analysis", fake_execute)
+        monkeypatch.setattr(
+            "src.main._attach_run_summary",
+            lambda result, passed_args, preflight: None,
+        )
+        monkeypatch.setattr(
+            "src.main._render_primary_output",
+            lambda result, passed_args, targets, banner: (None, None, None),
+        )
+        monkeypatch.setattr(
+            "src.main._persist_analysis_outputs",
+            lambda result, passed_args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            "src.main._maybe_save_rejection_record",
+            lambda result, passed_args, **kwargs: _async_none(),
+        )
+        monkeypatch.setattr(
+            "src.main._maybe_generate_article",
+            lambda result,
+            passed_args,
+            targets,
+            company_name,
+            report,
+            reporter,
+            **kwargs: _async_result(False),
+        )
+        monkeypatch.setattr(
+            "src.main._log_final_summary",
+            lambda result, passed_args, article_generated: None,
+        )
+        monkeypatch.setattr(
+            "src.cleanup.cleanup_async_resources", lambda: _async_none()
+        )
+
+        assert asyncio.run(main()) == 0
+        assert observed["results_dir"] == Path("results")
+        assert observed["image_dir"] == explicit_image_dir
 
 
 class TestSavedDiagnostics:

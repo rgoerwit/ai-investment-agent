@@ -274,13 +274,13 @@ class Settings(BaseSettings):
         description="LLM provider (google, openai, anthropic)",
     )
     deep_think_llm: str = Field(
-        default="gemini-3-pro-preview",
+        default="gemini-3.1-pro-preview",
         validation_alias="DEEP_MODEL",
         description="Model for deep thinking/synthesis agents",
     )
     # Flash models work with langchain-google-genai 4.0.0+
     quick_think_llm: str = Field(
-        default="gemini-2.0-flash",
+        default="gemini-3-flash-preview",
         validation_alias="QUICK_MODEL",
         description="Model for quick thinking/data gathering agents",
     )
@@ -318,12 +318,12 @@ class Settings(BaseSettings):
 
     # --- Consultant Configuration ---
     consultant_model: str = Field(
-        default="gpt-4o",
+        default="gpt-5.4",
         validation_alias="CONSULTANT_MODEL",
         description="OpenAI model for consultant in normal mode",
     )
     consultant_quick_model: str = Field(
-        default="gpt-4o-mini",
+        default="gpt-5.4-mini",
         validation_alias="CONSULTANT_QUICK_MODEL",
         description="OpenAI model for consultant in quick mode",
     )
@@ -536,24 +536,33 @@ class Settings(BaseSettings):
     untrusted_content_inspection_enabled: bool = Field(
         default=False,
         validation_alias="UNTRUSTED_CONTENT_INSPECTION_ENABLED",
-        description="Enable content inspection for external ingress paths",
+        description=("Enable untrusted-content inspection for external ingress paths"),
     )
     untrusted_content_inspection_mode: Literal["warn", "sanitize", "block"] = Field(
         default="warn",
         validation_alias="UNTRUSTED_CONTENT_INSPECTION_MODE",
-        description="Inspection action mode: warn | sanitize | block",
+        description=(
+            "Inspection action mode: warn for observation-first rollout, "
+            "sanitize for safe rewrites, block for placeholder substitution"
+        ),
     )
     untrusted_content_fail_policy: Literal["fail_open", "fail_closed"] = Field(
         default="fail_open",
         validation_alias="UNTRUSTED_CONTENT_FAIL_POLICY",
-        description="Policy when backend errors: fail_open | fail_closed",
+        description=(
+            "Policy when the backend errors: fail_open preserves availability, "
+            "fail_closed blocks on inspector failures"
+        ),
     )
     untrusted_content_backend: Literal[
         "null", "http", "python", "subprocess", "composite"
     ] = Field(
         default="null",
         validation_alias="UNTRUSTED_CONTENT_BACKEND",
-        description="Inspection backend: null | http | python | subprocess | composite",
+        description=(
+            "Inspection backend. Current in-process options are null, python "
+            "(heuristic), and composite (heuristic plus selective judge)."
+        ),
     )
 
     # --- Telemetry & System Overrides ---

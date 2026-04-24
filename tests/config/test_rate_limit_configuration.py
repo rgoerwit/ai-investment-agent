@@ -7,6 +7,7 @@ the rate limiter for different API tiers (free, paid tier 1, tier 2).
 
 import importlib
 import os
+from unittest.mock import patch
 
 import pytest
 
@@ -186,6 +187,32 @@ class TestGlobalRateLimiterInitialization:
         del os.environ["GEMINI_RPM_LIMIT"]
         importlib.reload(src.config)
         importlib.reload(src.llms)
+
+    def test_global_rate_limiter_uses_live_config_after_reload_under_patch(
+        self, monkeypatch
+    ):
+        """Reloading llms under a patched config must not freeze a stale mock."""
+        import src.config
+        import src.llms
+
+        original_rpm = src.config.config.gemini_rpm_limit
+
+        try:
+            with patch("src.config.config") as mock_config:
+                mock_config.gemini_rpm_limit = 999
+                importlib.reload(src.llms)
+
+            src.llms.GLOBAL_RATE_LIMITER._instance = None
+            monkeypatch.setattr(src.config.config, "gemini_rpm_limit", 120)
+
+            expected_rps = (120 / 60.0) * 0.8
+            assert src.llms.GLOBAL_RATE_LIMITER.requests_per_second == pytest.approx(
+                expected_rps, abs=0.01
+            )
+        finally:
+            src.llms.GLOBAL_RATE_LIMITER._instance = None
+            src.config.config.gemini_rpm_limit = original_rpm
+            importlib.reload(src.llms)
 
 
 class TestTierComparison:

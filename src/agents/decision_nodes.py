@@ -18,6 +18,7 @@ from src.runtime_diagnostics import (
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .output_limits import cap_state_value
 from .output_validation import (
     log_output_diagnostics,
     log_truncation_diagnostic,
@@ -252,7 +253,7 @@ RESEARCH MANAGER PLAN:
             )
             return success_artifact(
                 "trader_investment_plan",
-                content_str,
+                cap_state_value(content_str, "trader_investment_plan"),
                 provider=support.infer_provider_name(llm),
             )
         except Exception as exc:
@@ -576,7 +577,7 @@ RISK TEAM DEBATE:
 
             return success_artifact(
                 "final_trade_decision",
-                content_str,
+                cap_state_value(content_str, "final_trade_decision"),
                 provider=support.infer_provider_name(llm),
             )
         except Exception as exc:

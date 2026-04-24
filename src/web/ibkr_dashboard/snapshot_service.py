@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
@@ -12,6 +13,7 @@ from src.ibkr.recommendation_service import (
     PortfolioRecommendationRequest,
     PortfolioRecommendationService,
 )
+from src.runtime_services import RuntimeServices, use_runtime_services
 from src.web.ibkr_dashboard.settings import DashboardPreferences, DashboardSettings
 
 SnapshotStatus = Literal["idle", "loading", "ready", "error"]
@@ -32,8 +34,10 @@ class DashboardSnapshotService:
         settings: DashboardSettings,
         *,
         preferences: DashboardPreferences | None = None,
+        runtime_services: RuntimeServices | None = None,
     ) -> None:
         self._settings = settings
+        self._runtime_services = runtime_services
         self._preferences = preferences or DashboardPreferences(
             account_id=settings.account_id,
             read_only=settings.read_only,
@@ -171,7 +175,12 @@ class DashboardSnapshotService:
         error_message: str | None = None
         results_mtime_ns: int | None = None
         try:
-            bundle = asyncio.run(self._load_snapshot())
+            with (
+                use_runtime_services(self._runtime_services)
+                if self._runtime_services is not None
+                else nullcontext()
+            ):
+                bundle = asyncio.run(self._load_snapshot())
             results_mtime_ns = self._results_dir_mtime_ns()
         except Exception as exc:
             error_message = str(exc)

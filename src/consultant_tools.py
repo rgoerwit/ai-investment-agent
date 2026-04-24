@@ -303,6 +303,6 @@ def get_consultant_tools() -> list:
     - spot_check_metric_alt: FMP (independent of pipeline)
     - get_official_filings: Official filing APIs (EDINET/DART) for ground-truth
     """
-    from src.toolkit import get_official_filings
+    from src.tools.research import get_official_filings
 
     return [spot_check_metric_alt, get_official_filings]

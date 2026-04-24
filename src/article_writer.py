@@ -21,9 +21,10 @@ from pydantic import BaseModel, Field
 from src.config import config
 from src.llms import create_deep_thinking_llm, create_writer_llm
 from src.runtime_diagnostics import classify_failure, get_model_name, infer_provider
+from src.runtime_services import get_current_tool_service
 from src.tavily_utils import search_tavily_sync_inspected
 from src.token_tracker import TokenTrackingCallback, get_tracker
-from src.tooling.runtime import TOOL_SERVICE, ToolInvocation
+from src.tooling.runtime import ToolInvocation
 
 # Maximum characters for fact-check context (controls token usage)
 MAX_FACT_CHECK_CHARS = 1500
@@ -1250,7 +1251,7 @@ class ArticleEditor:
                     tool=tool_name,
                     args_preview=str(tool_args)[:100],
                 )
-                tool_result = await TOOL_SERVICE.execute(
+                tool_result = await get_current_tool_service().execute(
                     ToolInvocation(
                         name=tool_name,
                         args=tool_args,

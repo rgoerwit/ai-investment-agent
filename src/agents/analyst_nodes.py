@@ -20,9 +20,11 @@ from src.data_block_utils import (
     normalize_structured_block_boundaries,
 )
 from src.runtime_diagnostics import failure_artifact, success_artifact
+from src.tooling.text_boundary import format_untrusted_block
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .output_limits import cap_state_value
 from .output_validation import (
     log_output_diagnostics,
     log_truncation_diagnostic,
@@ -341,6 +343,7 @@ def create_analyst_node(
             company_resolved = state.get("company_name_resolved", True)
 
             extra_context = ""
+            trusted_context_instructions = ""
             macro_context_injected_into_news = False
 
             if agent_key == "junior_fundamentals_analyst":
@@ -369,10 +372,13 @@ def create_analyst_node(
                     )
 
                 if foreign_data:
+                    trusted_context_instructions += (
+                        "\nCross-reference foreign or alternative-source data against "
+                        "Junior Analyst data. Prioritize Junior data when both sources "
+                        "report the same metric.\n"
+                    )
                     extra_context += (
                         "\n\n### FOREIGN/ALTERNATIVE SOURCE DATA (Cross-Reference)"
-                        "\nNote: Use this data to fill gaps in Junior Analyst data. "
-                        "Prioritize Junior's data when both sources have the same metric.\n"
                         f"{foreign_data}\n"
                     )
                     logger.info(
@@ -405,6 +411,10 @@ def create_analyst_node(
 
                 conflict_report = support.compute_data_conflicts(raw_data, foreign_data)
                 if conflict_report:
+                    trusted_context_instructions += (
+                        "\nReview the computed data-conflict report below and resolve "
+                        "discrepancies conservatively.\n"
+                    )
                     extra_context += conflict_report
                     logger.info(
                         "senior_fundamentals_conflicts_detected",
@@ -414,11 +424,15 @@ def create_analyst_node(
 
                 legal_report = state.get("legal_report", "")
                 if legal_report:
+                    trusted_context_instructions += (
+                        "\nUse Legal Counsel output to inform PFIC_RISK in DATA_BLOCK. "
+                        "If Legal Counsel found PFIC disclosure (pfic_status: PROBABLE), "
+                        "set PFIC_RISK to MEDIUM or HIGH. If no disclosure was found in "
+                        "a high-risk sector (pfic_status: UNCERTAIN), set PFIC_RISK to "
+                        "at least MEDIUM.\n"
+                    )
                     extra_context += (
                         "\n\n### LEGAL/TAX RISK ASSESSMENT (From Legal Counsel)"
-                        "\nUse this to inform your PFIC_RISK assessment in DATA_BLOCK. "
-                        "If Legal Counsel found PFIC disclosure (pfic_status: PROBABLE), set PFIC_RISK: MEDIUM or HIGH. "
-                        "If no disclosure found in high-risk sector (pfic_status: UNCERTAIN), set PFIC_RISK: MEDIUM.\n"
                         f"{legal_report}\n"
                     )
                     logger.info(
@@ -440,18 +454,28 @@ def create_analyst_node(
                     "### REGIONAL MACRO CONTEXT" in news_macro_context
                 )
 
-            full_system_instruction = (
+            core_system_instruction = (
                 f"{agent_prompt.system_message}\n\n"
                 f"Date: {support._format_date_with_fy_hint(current_date)}\n"
                 f"Ticker: {ticker}\n"
                 f"{support._company_line(company_name, company_resolved)}\n"
                 f"{support.get_analysis_context(ticker)}"
-                f"{extra_context}"
+                f"{trusted_context_instructions}"
             )
             invocation_messages = [
-                SystemMessage(content=full_system_instruction),
-                *filtered_messages,
+                SystemMessage(content=core_system_instruction),
             ]
+            if extra_context:
+                invocation_messages.append(
+                    HumanMessage(
+                        content=format_untrusted_block(
+                            extra_context,
+                            "SUPPLEMENTARY CONTEXT",
+                            provenance="prior analysis stages and external data sources",
+                        )
+                    )
+                )
+            invocation_messages.extend(filtered_messages)
 
             response = await agent_runtime.invoke_with_rate_limit_handling(
                 runnable,
@@ -617,7 +641,7 @@ def create_analyst_node(
             new_state.update(
                 success_artifact(
                     output_field,
-                    content_str,
+                    cap_state_value(content_str, output_field),
                     provider=support.infer_provider_name(llm),
                 )
             )
@@ -716,7 +740,7 @@ Extract valuation parameters and output in the required format."""
             )
             return success_artifact(
                 "valuation_params",
-                content_str,
+                cap_state_value(content_str, "valuation_params"),
                 provider=support.infer_provider_name(llm),
             )
         except Exception as exc:

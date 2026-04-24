@@ -7,6 +7,8 @@ prices to USD using dynamic FX rates before checking liquidity threshold.
 This is the ONLY integration of fx_normalization.py into the main codebase.
 """
 
+from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pandas as pd
@@ -20,18 +22,26 @@ from src.liquidity_calculation_tool import (
 # ==================== TEST FIXTURES ====================
 
 
-@pytest.fixture(autouse=True)
-def mock_get_financial_metrics():
-    """
-    Ensure all tests in this module use a mock for get_financial_metrics.
-    This forces the liquidity tool to use the historical mean price from
-    the mock data provided by the tests, ensuring isolation.
-    """
+@contextmanager
+def _patch_liquidity_fetcher(
+    *,
+    historical_prices=None,
+    history_side_effect=None,
+    financial_metrics=None,
+):
+    """Patch the liquidity tool's call-time fetcher seam."""
+    fetcher = SimpleNamespace(
+        get_historical_prices=AsyncMock(
+            return_value=historical_prices,
+            side_effect=history_side_effect,
+        ),
+        get_financial_metrics=AsyncMock(return_value=financial_metrics),
+    )
     with patch(
-        "src.data.fetcher.SmartMarketDataFetcher.get_financial_metrics",
-        new=AsyncMock(return_value=None),
+        "src.liquidity_calculation_tool._market_data_fetcher",
+        return_value=fetcher,
     ):
-        yield
+        yield fetcher
 
 
 # Helper to call the LangChain tool
@@ -53,10 +63,7 @@ class TestLiquidityFXConversion:
             }
         )
 
-        with patch(
-            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
-            return_value=mock_hist,
-        ):
+        with _patch_liquidity_fetcher(historical_prices=mock_hist):
             with patch(
                 "src.liquidity_calculation_tool.get_fx_rate",
                 new=AsyncMock(return_value=(1.0, "identity")),
@@ -74,10 +81,7 @@ class TestLiquidityFXConversion:
             {"Close": [60.0, 61.0, 59.0], "Volume": [10_000_000, 11_000_000, 9_000_000]}
         )
 
-        with patch(
-            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
-            return_value=mock_hist,
-        ):
+        with _patch_liquidity_fetcher(historical_prices=mock_hist):
             with patch(
                 "src.liquidity_calculation_tool.get_fx_rate",
                 new=AsyncMock(return_value=(0.128, "yfinance")),
@@ -98,10 +102,7 @@ class TestLiquidityFXConversion:
             }
         )
 
-        with patch(
-            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
-            return_value=mock_hist,
-        ):
+        with _patch_liquidity_fetcher(historical_prices=mock_hist):
             with patch(
                 "src.liquidity_calculation_tool.get_fx_rate",
                 new=AsyncMock(return_value=(0.0067, "yfinance")),
@@ -118,10 +119,7 @@ class TestLiquidityFXConversion:
             {"Close": [10.0, 10.5, 9.5], "Volume": [10_000, 11_000, 9_000]}
         )
 
-        with patch(
-            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
-            return_value=mock_hist,
-        ):
+        with _patch_liquidity_fetcher(historical_prices=mock_hist):
             with patch(
                 "src.liquidity_calculation_tool.get_fx_rate",
                 new=AsyncMock(return_value=(0.128, "yfinance")),
@@ -135,10 +133,7 @@ class TestLiquidityFXConversion:
         """Test fallback to static rates when yfinance fails."""
         mock_hist = pd.DataFrame({"Close": [2500.0], "Volume": [5_000_000]})
 
-        with patch(
-            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
-            return_value=mock_hist,
-        ):
+        with _patch_liquidity_fetcher(historical_prices=mock_hist):
             with patch(
                 "src.liquidity_calculation_tool.get_fx_rate",
                 new=AsyncMock(return_value=(0.0067, "fallback")),
@@ -172,10 +167,7 @@ class TestBackwardsCompatibility:
         """Test empty history returns FAIL status."""
         empty_hist = pd.DataFrame()
 
-        with patch(
-            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
-            return_value=empty_hist,
-        ):
+        with _patch_liquidity_fetcher(historical_prices=empty_hist):
             result = await call_tool("XXXX.XX")
 
         assert "Status: FAIL" in result
@@ -184,10 +176,7 @@ class TestBackwardsCompatibility:
     @pytest.mark.asyncio
     async def test_exception_returns_error(self):
         """Test exception handling returns ERROR status."""
-        with patch(
-            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
-            side_effect=Exception("Network error"),
-        ):
+        with _patch_liquidity_fetcher(history_side_effect=Exception("Network error")):
             result = await call_tool("TEST.US")
 
         assert "Status: ERROR" in result

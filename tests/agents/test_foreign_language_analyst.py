@@ -85,7 +85,7 @@ class TestSearchForeignSourcesTool:
 
     def test_tool_exists_in_toolkit(self):
         """Verify tool is available in toolkit."""
-        from src.toolkit import toolkit
+        from src.tools.registry import toolkit
 
         foreign_tools = toolkit.get_foreign_language_tools()
         assert len(foreign_tools) == 2
@@ -96,7 +96,7 @@ class TestSearchForeignSourcesTool:
 
     def test_tool_in_all_tools(self):
         """Verify tool is included in get_all_tools."""
-        from src.toolkit import toolkit
+        from src.tools.registry import toolkit
 
         all_tools = toolkit.get_all_tools()
         tool_names = [t.name for t in all_tools]
@@ -104,7 +104,7 @@ class TestSearchForeignSourcesTool:
 
     def test_tool_has_correct_description(self):
         """Verify tool has informative description."""
-        from src.toolkit import toolkit
+        from src.tools.registry import toolkit
 
         foreign_tools = toolkit.get_foreign_language_tools()
         tool = foreign_tools[0]
@@ -115,7 +115,7 @@ class TestSearchForeignSourcesTool:
     @pytest.mark.asyncio
     async def test_tool_handles_no_tavily(self):
         """Test graceful handling when Tavily is not configured and DDG also empty."""
-        from src.toolkit import search_foreign_sources
+        from src.tools.research import search_foreign_sources
 
         # Mock tavily_tool as None AND DDG returning empty
         with patch("src.tools.shared.tavily_tool", None):

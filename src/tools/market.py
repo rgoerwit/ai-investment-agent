@@ -7,9 +7,34 @@ import pandas as pd
 from langchain_core.tools import tool
 from stockstats import wrap as stockstats_wrap
 
-from src.data.fetcher import fetcher as market_data_fetcher
+from src.runtime_services import (
+    get_current_inspection_service,
+    get_current_market_data_fetcher,
+)
 from src.ticker_utils import normalize_ticker
+from src.tooling.inspector import InspectionEnvelope, SourceKind
 from src.tools import shared
+
+_FINANCIAL_TEXT_FIELDS = frozenset(
+    {
+        "longBusinessSummary",
+        "businessSummary",
+        "longName",
+        "shortName",
+        "sector",
+        "industry",
+        "quoteType",
+        "exchange",
+        "fullExchangeName",
+        "country",
+        "website",
+    }
+)
+
+
+def _market_data_fetcher():
+    """Resolve the active market-data fetcher at call time."""
+    return get_current_market_data_fetcher()
 
 
 def extract_from_dataframe(
@@ -24,6 +49,55 @@ def extract_from_dataframe(
         return None
     except Exception:
         return None
+
+
+async def _inspect_financial_text(value: str, source_name: str, *, ticker: str) -> str:
+    """Inspect free text from financial APIs before it becomes prompt-visible."""
+    return await get_current_inspection_service().check(
+        InspectionEnvelope(
+            content_text=value,
+            raw_content=value,
+            source_kind=SourceKind.financial_api,
+            source_name=source_name,
+            metadata={"ticker": ticker},
+        )
+    )
+
+
+async def _inspect_financial_payload_text(
+    payload: object,
+    source_name: str,
+    *,
+    ticker: str,
+) -> object:
+    if isinstance(payload, dict):
+        inspected: dict[str, object] = {}
+        for key, value in payload.items():
+            if isinstance(value, str) and key in _FINANCIAL_TEXT_FIELDS:
+                inspected[key] = await _inspect_financial_text(
+                    value,
+                    source_name,
+                    ticker=ticker,
+                )
+            elif isinstance(value, dict | list):
+                inspected[key] = await _inspect_financial_payload_text(
+                    value,
+                    source_name,
+                    ticker=ticker,
+                )
+            else:
+                inspected[key] = value
+        return inspected
+
+    if isinstance(payload, list):
+        return [
+            await _inspect_financial_payload_text(item, source_name, ticker=ticker)
+            if isinstance(item, dict | list)
+            else item
+            for item in payload
+        ]
+
+    return payload
 
 
 @tool
@@ -44,12 +118,17 @@ async def get_financial_metrics(
     """
     try:
         normalized_symbol = normalize_ticker(ticker)
-        data = await market_data_fetcher.get_financial_metrics(normalized_symbol)
+        data = await _market_data_fetcher().get_financial_metrics(normalized_symbol)
 
         if "error" in data:
             return json.dumps({"error": data.get("error")})
 
         sanitized_data = shared._sanitize_for_json(data)
+        sanitized_data = await _inspect_financial_payload_text(
+            sanitized_data,
+            "yfinance_financial_metrics",
+            ticker=normalized_symbol,
+        )
         return json.dumps(sanitized_data, indent=2)
     except Exception as exc:
         return json.dumps({"error": str(exc)})
@@ -68,14 +147,19 @@ async def get_yfinance_data(
     """Get historical stock price data in LOCAL TRADING CURRENCY (not USD)."""
     try:
         normalized = normalize_ticker(symbol)
-        hist = await market_data_fetcher.get_historical_prices(
+        hist = await _market_data_fetcher().get_historical_prices(
             normalized,
             start=start_date,
             end=end_date,
         )
         if hist.empty:
             return "No data"
-        return hist.reset_index().to_csv(index=False)
+        csv_text = hist.reset_index().to_csv(index=False)
+        return await _inspect_financial_text(
+            csv_text,
+            "yfinance_historical_prices",
+            ticker=normalized,
+        )
     except Exception as exc:
         return f"Error: {exc}"
 
@@ -91,7 +175,9 @@ async def get_technical_indicators(
     """Get RSI, MACD, Bollinger Bands, and Moving Averages."""
     try:
         normalized = normalize_ticker(symbol)
-        hist = await market_data_fetcher.get_historical_prices(normalized, period="2y")
+        hist = await _market_data_fetcher().get_historical_prices(
+            normalized, period="2y"
+        )
 
         if hist.empty:
             return "No data"

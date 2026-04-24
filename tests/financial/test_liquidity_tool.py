@@ -1,10 +1,12 @@
 """Tests for liquidity calculation tool with comprehensive edge case coverage."""
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 import pytest
+import yfinance as yf
 
 from src.liquidity_calculation_tool import calculate_liquidity_metrics
 
@@ -14,15 +16,25 @@ from src.liquidity_calculation_tool import calculate_liquidity_metrics
 @pytest.fixture(autouse=True)
 def mock_get_financial_metrics():
     """
-    Ensure all tests in this module use a mock for get_financial_metrics.
-    This forces the liquidity tool to use the historical mean price from
-    the mock data provided by the tests, ensuring isolation.
+    Bridge legacy yfinance-based test setup onto the call-time fetcher seam.
+
+    Tests in this module already mock `yfinance.Ticker(...).history(...)`.
+    Patch `_market_data_fetcher()` so the liquidity tool still consumes that
+    mocked history path while keeping `get_financial_metrics()` disabled.
     """
     from unittest.mock import AsyncMock, patch
 
+    async def _get_historical_prices(symbol: str, period: str = "3mo"):
+        return yf.Ticker(symbol).history(period=period)
+
+    fetcher = SimpleNamespace(
+        get_financial_metrics=AsyncMock(return_value=None),
+        get_historical_prices=AsyncMock(side_effect=_get_historical_prices),
+    )
+
     with patch(
-        "src.data.fetcher.SmartMarketDataFetcher.get_financial_metrics",
-        new=AsyncMock(return_value=None),
+        "src.liquidity_calculation_tool._market_data_fetcher",
+        return_value=fetcher,
     ):
         yield
 

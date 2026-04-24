@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from contextlib import AbstractContextManager, nullcontext
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
@@ -10,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 import structlog
 from langchain_core.callbacks import BaseCallbackHandler
 
-from src.config import config
+import src.config as config_module
 
 if TYPE_CHECKING:
     from src.config import Settings
@@ -22,10 +23,16 @@ _REQUIRED_TRACE_METHODS = (
     "get_current_trace_id",
     "get_trace_url",
 )
+_DEFAULT_FLUSH_TIMEOUT_SECONDS = 2.0
 
 _ACTIVE_TRACE_CONTEXT: ContextVar[TraceContext | None] = ContextVar(
     "active_trace_context", default=None
 )
+
+
+def _current_settings() -> Settings:
+    """Read the live config singleton instead of capturing patched test state."""
+    return config_module.config
 
 
 def _validate_client_methods(client: object, required: tuple[str, ...]) -> None:
@@ -57,6 +64,53 @@ def _sanitize_trace_metadata(metadata: dict[str, Any]) -> dict[str, str]:
         elif isinstance(value, str | int | float):
             sanitized[key] = str(value)
     return sanitized
+
+
+def _resolve_flush_action(client: object) -> tuple[str, Any] | None:
+    """Return the preferred client flush/shutdown callable when available."""
+    for name in ("shutdown", "flush"):
+        action = getattr(client, name, None)
+        if callable(action):
+            return name, action
+    return None
+
+
+def _run_with_timeout(
+    action: Any,
+    *,
+    timeout_seconds: float,
+    operation_name: str,
+) -> bool:
+    """Run a potentially blocking best-effort action without hanging the CLI."""
+    errors: list[Exception] = []
+
+    def _target() -> None:
+        try:
+            action()
+        except Exception as exc:  # pragma: no cover - defensive
+            errors.append(exc)
+
+    if timeout_seconds <= 0:
+        _target()
+    else:
+        worker = threading.Thread(
+            target=_target,
+            name=f"observability-{operation_name}",
+            daemon=True,
+        )
+        worker.start()
+        worker.join(timeout_seconds)
+        if worker.is_alive():
+            logger.warning(
+                "langfuse_flush_timeout",
+                operation=operation_name,
+                timeout_seconds=timeout_seconds,
+            )
+            return False
+
+    if errors:
+        raise errors[0]
+    return True
 
 
 def _merge_callbacks(
@@ -468,7 +522,7 @@ class LangfuseObservabilityRuntime:
 
 def get_observability_runtime(settings: Settings | None = None) -> ObservabilityRuntime:
     """Return the enabled observability runtime or a no-op runtime."""
-    settings = settings or config
+    settings = settings or _current_settings()
     if not settings.langfuse_enabled:
         return NoopObservabilityRuntime()
     if not _langfuse_keys_present(settings):
@@ -503,7 +557,8 @@ def start_tool_observation(
     active trace context.
     """
     active = get_current_trace_context()
-    if not active or not active.enabled or not config.langfuse_enabled:
+    settings = _current_settings()
+    if not active or not active.enabled or not settings.langfuse_enabled:
         return nullcontext()
 
     try:
@@ -533,7 +588,8 @@ def create_deferred_score(
     metadata: dict[str, Any] | None = None,
 ) -> None:
     """Create a score against a previously recorded trace."""
-    if not config.langfuse_enabled or not _langfuse_keys_present(config):
+    settings = _current_settings()
+    if not settings.langfuse_enabled or not _langfuse_keys_present(settings):
         return
     try:
         from langfuse import get_client
@@ -558,18 +614,28 @@ def create_deferred_score(
         )
 
 
-def flush_traces() -> None:
-    """Best-effort flush/shutdown of the active Langfuse client."""
-    if not config.langfuse_enabled:
+def flush_traces(timeout_seconds: float = _DEFAULT_FLUSH_TIMEOUT_SECONDS) -> None:
+    """Best-effort flush/shutdown of the active Langfuse client.
+
+    The Langfuse SDK can block while draining worker queues during shutdown.
+    Bound that wait so CLI failure/exit paths are not hostage to exporter state.
+    """
+    settings = _current_settings()
+    if not settings.langfuse_enabled or not _langfuse_keys_present(settings):
         return
 
     try:
         from langfuse import get_client
 
         client = get_client()
-        if hasattr(client, "shutdown"):
-            client.shutdown()
-        elif hasattr(client, "flush"):
-            client.flush()
+        action_info = _resolve_flush_action(client)
+        if action_info is None:
+            return
+        operation_name, action = action_info
+        _run_with_timeout(
+            action,
+            timeout_seconds=timeout_seconds,
+            operation_name=operation_name,
+        )
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("langfuse_flush_failed", error=str(exc))

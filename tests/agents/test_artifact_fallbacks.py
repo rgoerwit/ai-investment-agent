@@ -142,11 +142,11 @@ class TestArtifactFallbacks:
             "src.agents.runtime.invoke_with_rate_limit_handling",
             new=AsyncMock(side_effect=[initial_response, repaired_response]),
         ) as invoke_mock:
-            with patch.object(
-                create_auditor_node.__globals__["TOOL_SERVICE"],
-                "execute",
-                new=AsyncMock(),
-            ) as mock_execute:
+            tool_service = SimpleNamespace(execute=AsyncMock())
+            with patch(
+                "src.agents.consultant_nodes.get_current_tool_service",
+                return_value=tool_service,
+            ):
                 node = create_auditor_node(initial_llm, [])
                 result = await node(
                     {
@@ -163,7 +163,7 @@ class TestArtifactFallbacks:
         assert status["ok"] is True
         assert "VERDICT:" in result["auditor_report"]
         assert invoke_mock.await_count == 2
-        mock_execute.assert_not_awaited()
+        tool_service.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
     @patch("src.prompts.get_prompt")
