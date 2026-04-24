@@ -168,6 +168,9 @@ class TestObservabilityRuntime:
         assert mock_propagation_ctx.entered is True
         assert mock_propagation_ctx.exited is True
         mock_client.start_as_current_observation.assert_called_once()
+        root_kwargs = mock_client.start_as_current_observation.call_args.kwargs
+        assert root_kwargs["input"] == {"ticker": "0005.HK"}
+        assert root_kwargs["metadata"] == {"ticker": "0005.HK"}
         mock_callback_cls.assert_called_once_with()
 
     def test_start_analysis_trace_sanitizes_propagated_metadata(self):
@@ -213,6 +216,62 @@ class TestObservabilityRuntime:
             "quick_mode": "true",
             "release": "3.1.0",
         }
+        root_kwargs = mock_client.start_as_current_observation.call_args.kwargs
+        assert root_kwargs["input"] == {"ticker": "0005.HK"}
+        assert root_kwargs["metadata"] == {"ticker": "0005.HK"}
+
+    def test_start_analysis_trace_excludes_sensitive_input_and_metadata(self):
+        mock_client = MagicMock()
+        mock_root_ctx = _FakeContextManager("root")
+        mock_propagation_ctx = _FakeContextManager("propagation")
+        mock_client.start_as_current_observation.return_value = mock_root_ctx
+        mock_client.get_current_trace_id.return_value = "trace-123"
+        mock_client.get_trace_url.return_value = "https://langfuse/trace-123"
+
+        with patch("src.config.config") as mock_config:
+            mock_config.langfuse_enabled = True
+            mock_config.get_langfuse_public_key.return_value = "pk-test"
+            mock_config.get_langfuse_secret_key.return_value = "sk-test"
+            mock_config.app_release = "3.1.0"
+            with patch.dict(
+                sys.modules,
+                _fake_langfuse_modules(
+                    client=mock_client,
+                    callback_handler=MagicMock(return_value=MagicMock()),
+                    propagate_attributes=MagicMock(return_value=mock_propagation_ctx),
+                ),
+            ):
+                observability = _reload_observability()
+                trace = observability.get_observability_runtime().start_analysis_trace(
+                    ticker="0005.HK",
+                    session_id="batch-1",
+                    tags=["analysis"],
+                    metadata={
+                        "ticker": "0005.HK",
+                        "api_token": "secret-token-1234567890",
+                        "results_dir": "/tmp/private/results",
+                        "authorization": "Bearer sk-secretabcdefghijklmnopqrstuvwxyz",
+                    },
+                    input_payload={
+                        "ticker": "0005.HK",
+                        "quick_mode": True,
+                        "workflow": "analysis",
+                        "results_dir": "/tmp/private/results",
+                        "api_token": "secret-token-1234567890",
+                    },
+                )
+                trace.close()
+
+        root_kwargs = mock_client.start_as_current_observation.call_args.kwargs
+        assert root_kwargs["input"] == {
+            "ticker": "0005.HK",
+            "quick_mode": True,
+            "workflow": "analysis",
+        }
+        assert root_kwargs["metadata"] == {"ticker": "0005.HK"}
+        assert "secret-token-1234567890" not in str(root_kwargs)
+        assert "/tmp/private/results" not in str(root_kwargs)
+        assert "sk-secretabcdefghijklmnopqrstuvwxyz" not in str(root_kwargs)
 
     def test_start_analysis_trace_fails_soft_on_capability_gap(self):
         mock_client = object()
@@ -312,9 +371,14 @@ class TestObservabilityRuntime:
         assert mock_root_ctx.exited is True
         assert mock_propagation_ctx.entered is True
         assert mock_propagation_ctx.exited is False
-        mock_logger.warning.assert_any_call(
-            "langfuse_trace_start_failed", error="propagation boom"
-        )
+        matching = [
+            call
+            for call in mock_logger.warning.call_args_list
+            if call.args and call.args[0] == "langfuse_trace_start_failed"
+        ]
+        assert matching
+        assert matching[0].kwargs["error_type"] == "RuntimeError"
+        assert matching[0].kwargs["message_preview"] == "propagation boom"
 
     def test_score_trace_prefers_score_current_trace(self):
         mock_client = MagicMock()
@@ -434,12 +498,21 @@ class TestObservabilityRuntime:
 
         assert mock_root_ctx.exited is True
         assert mock_propagation_ctx.exited is True
-        mock_logger.warning.assert_any_call(
-            "langfuse_propagation_ctx_exit_failed", error="prop exit"
-        )
-        mock_logger.warning.assert_any_call(
-            "langfuse_root_ctx_exit_failed", error="root exit"
-        )
+        propagation = [
+            call
+            for call in mock_logger.warning.call_args_list
+            if call.args and call.args[0] == "langfuse_propagation_ctx_exit_failed"
+        ]
+        root = [
+            call
+            for call in mock_logger.warning.call_args_list
+            if call.args and call.args[0] == "langfuse_root_ctx_exit_failed"
+        ]
+        assert propagation and root
+        assert propagation[0].kwargs["error_type"] == "RuntimeError"
+        assert propagation[0].kwargs["message_preview"] == "prop exit"
+        assert root[0].kwargs["error_type"] == "RuntimeError"
+        assert root[0].kwargs["message_preview"] == "root exit"
 
 
 class TestToolObservation:
@@ -541,10 +614,14 @@ class TestFlushTraces:
                 with patch.object(observability, "logger") as mock_logger:
                     observability.flush_traces(timeout_seconds=0)
 
-        mock_logger.warning.assert_any_call(
-            "langfuse_flush_failed",
-            error="flush boom",
-        )
+        matching = [
+            call
+            for call in mock_logger.warning.call_args_list
+            if call.args and call.args[0] == "langfuse_flush_failed"
+        ]
+        assert matching
+        assert matching[0].kwargs["error_type"] == "RuntimeError"
+        assert matching[0].kwargs["message_preview"] == "flush boom"
 
 
 class TestConfigIntegration:

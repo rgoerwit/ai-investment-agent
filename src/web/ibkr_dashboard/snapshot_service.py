@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
+from src.error_safety import format_error_message, summarize_exception
 from src.ibkr.portfolio_data_service import IbkrPortfolioDataService
 from src.ibkr.recommendation_service import (
     PortfolioRecommendationBundle,
@@ -183,7 +184,15 @@ class DashboardSnapshotService:
                 bundle = asyncio.run(self._load_snapshot())
             results_mtime_ns = self._results_dir_mtime_ns()
         except Exception as exc:
-            error_message = str(exc)
+            summary = summarize_exception(
+                exc,
+                operation="dashboard snapshot load",
+            )
+            error_message = format_error_message(
+                operation="dashboard snapshot load",
+                error_type=summary["error_type"],
+                message_preview=summary["message_preview"],
+            )
         finally:
             with self._lock:
                 stale_load = load_version != self._preferences_version

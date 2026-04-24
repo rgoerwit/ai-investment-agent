@@ -56,6 +56,73 @@ CAPITAL_INTENSIVE_SECTORS = {
     Sector.REAL_ESTATE,
 }
 
+_TRANSIENT_STRENGTH_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "acquisition-led consolidation",
+        re.compile(
+            r"\b(?:acquisition[- ]driven|acquisition-led|m&a(?:[- ]driven)?|merger[- ]driven|inorganic growth|organic vs acquired|m&a illusion)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "asset or division sale",
+        re.compile(
+            r"\b(?:asset sale|division sale|sale of (?:a )?division|gain on sale)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "legal settlement",
+        re.compile(r"\b(?:legal settlement|settlement gain)\b", re.IGNORECASE),
+    ),
+    (
+        "restructuring gain",
+        re.compile(r"\b(?:restructuring gain|one-time gain)\b", re.IGNORECASE),
+    ),
+    (
+        "regulatory windfall or subsidy",
+        re.compile(
+            r"\b(?:regulatory windfall|government subsidy|subsidy windfall)\b",
+            re.IGNORECASE,
+        ),
+    ),
+)
+
+_CONSULTANT_GROWTH_QUALITY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\borganic\s+vs\.?\s+acquired\b", re.IGNORECASE),
+    re.compile(
+        r"\bgrowth quality\b.*\b(?:inferred|not proven|unknown|unproven)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bacquisition-led growth\b", re.IGNORECASE),
+    re.compile(r"\bm&a illusion\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:incremental roic|incremental return(?:s)?|synerg(?:y|ies))\b.*\b(?:unknown|unproven|not proven|not demonstrated|missing)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:accretive|value-creating)\b.*\b(?:not proven|unproven|unknown)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:recurring revenue|service mix|maintenance-as-a-service)\b.*\b(?:not evidenced|unsupported|unverified|unverifiable|not proven)\b",
+        re.IGNORECASE,
+    ),
+)
+
+_CONSULTANT_TRANSIENT_STRENGTH_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\b(?:one-time|non-recurring|nonoperating|non-operating)\b", re.IGNORECASE
+    ),
+    re.compile(r"\b(?:asset sale|division sale|gain on sale)\b", re.IGNORECASE),
+    re.compile(r"\b(?:legal settlement|settlement gain)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:regulatory windfall|government subsidy|subsidy windfall)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:restructuring gain|restructuring charge)\b", re.IGNORECASE),
+)
+
 
 class RedFlagDetector:
     """
@@ -1069,6 +1136,116 @@ class RedFlagDetector:
                 ticker=ticker,
                 signals=peak_signals,
                 profitability_trend=profitability_trend,
+            )
+
+        # --- RED FLAG 6B: Growth Quality Unproven ---
+        # Strong top-line growth with weakening returns can reflect a larger but not
+        # yet value-creating base (acquisition-led growth, inorganic expansion, etc.).
+        revenue_growth_ttm = metrics.get("revenue_growth_ttm")
+        roic_quality = metrics.get("roic_quality")
+        growth_quality_signals = []
+        if revenue_growth_ttm is not None and revenue_growth_ttm >= 25.0:
+            if profitability_trend == "DECLINING":
+                growth_quality_signals.append(
+                    "profitability trend declining despite strong revenue growth"
+                )
+            if (
+                roa_current is not None
+                and roa_5y_avg is not None
+                and roa_5y_avg > 0
+                and roa_current < 0.85 * roa_5y_avg
+            ):
+                growth_quality_signals.append(
+                    f"ROA {roa_current:.1f}% vs 5Y avg {roa_5y_avg:.1f}%"
+                )
+
+        if growth_quality_signals:
+            roic_note = (
+                f"; ROIC quality {roic_quality.lower()}"
+                if isinstance(roic_quality, str)
+                and roic_quality in {"WEAK", "ADEQUATE"}
+                else ""
+            )
+            red_flags.append(
+                {
+                    "type": "GROWTH_QUALITY_UNPROVEN",
+                    "severity": "WARNING",
+                    "detail": (
+                        f"Revenue growth {revenue_growth_ttm:.1f}% with "
+                        f"{'; '.join(growth_quality_signals)}{roic_note}"
+                    ),
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 0.75,
+                    "rationale": (
+                        "Strong reported growth is not yet supported by improving "
+                        "capital efficiency. Treat the new baseline as unproven until "
+                        "returns stabilize or improve."
+                    ),
+                }
+            )
+            logger.info(
+                "red_flag_growth_quality_unproven",
+                ticker=ticker,
+                revenue_growth_ttm=revenue_growth_ttm,
+                profitability_trend=profitability_trend,
+                roa_current=roa_current,
+                roa_5y_avg=roa_5y_avg,
+                roic_quality=roic_quality,
+            )
+
+        # --- RED FLAG 6C: Transient Strength Distortion ---
+        # Named one-time drivers in the fundamentals narrative should not be allowed
+        # to masquerade as durable operating strength.
+        raw_report = metrics.get("_raw_report", "") or ""
+        transient_strength_labels = [
+            label
+            for label, pattern in _TRANSIENT_STRENGTH_PATTERNS
+            if isinstance(raw_report, str) and pattern.search(raw_report)
+        ]
+        ocf_current = metrics.get("ocf")
+        has_current_strength = (
+            revenue_growth_ttm is not None and revenue_growth_ttm >= 15.0
+        ) or (
+            net_income is not None
+            and net_income > 0
+            and ocf_current is not None
+            and ocf_current > 0
+            and metrics.get("adjusted_health_score") is not None
+            and metrics.get("adjusted_health_score", 0) >= 60.0
+        )
+        if transient_strength_labels and has_current_strength:
+            detail_parts = []
+            if revenue_growth_ttm is not None and revenue_growth_ttm >= 15.0:
+                detail_parts.append(f"revenue growth {revenue_growth_ttm:.1f}%")
+            if (
+                net_income is not None
+                and net_income > 0
+                and ocf_current is not None
+                and ocf_current > 0
+            ):
+                detail_parts.append("positive net income and OCF")
+            red_flags.append(
+                {
+                    "type": "TRANSIENT_STRENGTH_DISTORTION",
+                    "severity": "WARNING",
+                    "detail": (
+                        f"Named transient driver detected ({', '.join(transient_strength_labels[:2])}) "
+                        f"alongside {'; '.join(detail_parts)}"
+                    ),
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 0.75,
+                    "rationale": (
+                        "Current-period strength may reflect a non-recurring driver "
+                        "rather than durable operating improvement. Do not treat this "
+                        "as proven baseline earning power."
+                    ),
+                }
+            )
+            logger.info(
+                "red_flag_transient_strength_distortion",
+                ticker=ticker,
+                drivers=transient_strength_labels,
+                revenue_growth_ttm=revenue_growth_ttm,
             )
 
         # --- RED FLAG 7: Suspicious OCF/NI Ratio (Data Quality Check) ---
@@ -2568,6 +2745,8 @@ class RedFlagDetector:
             "has_hard_stop": False,
             "concern_count": 0,
             "spot_check_discrepancies": [],
+            "growth_quality_unproven": False,
+            "transient_strength_unproven": False,
         }
 
         if not consultant_review:
@@ -2605,6 +2784,15 @@ class RedFlagDetector:
         )
         result["spot_check_discrepancies"] = discrepancy_matches
 
+        result["growth_quality_unproven"] = any(
+            pattern.search(consultant_review)
+            for pattern in _CONSULTANT_GROWTH_QUALITY_PATTERNS
+        )
+        result["transient_strength_unproven"] = any(
+            pattern.search(consultant_review)
+            for pattern in _CONSULTANT_TRANSIENT_STRENGTH_PATTERNS
+        )
+
         # Count material concerns (bullet points or numbered items in conditions section)
         # Look for patterns like "- Material error..." or "1. Issue..."
         concern_patterns = re.findall(
@@ -2620,6 +2808,8 @@ class RedFlagDetector:
             has_mandate_breach=result["has_mandate_breach"],
             has_hard_stop=result["has_hard_stop"],
             discrepancy_count=len(result["spot_check_discrepancies"]),
+            growth_quality_unproven=result["growth_quality_unproven"],
+            transient_strength_unproven=result["transient_strength_unproven"],
         )
 
         return result
@@ -2716,6 +2906,46 @@ class RedFlagDetector:
                 }
             )
             logger.info("consultant_flag_conditional", ticker=ticker)
+
+        if conditions.get("growth_quality_unproven"):
+            flags.append(
+                {
+                    "type": "CONSULTANT_GROWTH_QUALITY_UNPROVEN",
+                    "severity": "WARNING",
+                    "detail": (
+                        "Consultant says growth durability is unproven "
+                        "(organic vs acquired / synergy evidence unresolved)"
+                    ),
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 0.5,
+                    "rationale": (
+                        "External consultant could not verify that recent growth is "
+                        "organic, accretive, or supported by recurring-revenue evidence. "
+                        "Treat current strength as provisional."
+                    ),
+                }
+            )
+            logger.info("consultant_flag_growth_quality_unproven", ticker=ticker)
+
+        if conditions.get("transient_strength_unproven"):
+            flags.append(
+                {
+                    "type": "CONSULTANT_TRANSIENT_STRENGTH",
+                    "severity": "WARNING",
+                    "detail": (
+                        "Consultant flagged possible one-time or non-operating "
+                        "strength distortion"
+                    ),
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 0.5,
+                    "rationale": (
+                        "External consultant identified a named non-recurring driver "
+                        "that may be inflating current strength. Do not treat this as "
+                        "durable baseline performance without further proof."
+                    ),
+                }
+            )
+            logger.info("consultant_flag_transient_strength", ticker=ticker)
 
         # --- SPOT-CHECK DISCREPANCIES: Additional penalty per discrepancy ---
         if discrepancies:

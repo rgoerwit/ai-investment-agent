@@ -6,6 +6,7 @@ from typing import Annotated
 import structlog
 from langchain_core.tools import tool
 
+from src.error_safety import format_error_message, summarize_exception
 from src.runtime_services import get_current_inspection_service
 from src.stocktwits_api import StockTwitsAPI
 from src.ticker_utils import normalize_ticker
@@ -90,8 +91,21 @@ async def get_news(
 
         return f"News Results for {display_name}:\n\n" + "\n".join(results)
     except Exception as exc:
-        logger.error(f"News fetch failed for {ticker}: {exc}")
-        return f"Error fetching news: {str(exc)}"
+        summary = summarize_exception(
+            exc,
+            operation="get_news",
+            provider="unknown",
+        )
+        logger.error(
+            "news_fetch_failed",
+            ticker=ticker,
+            **summary,
+        )
+        return format_error_message(
+            operation="get_news",
+            error_type=summary["error_type"],
+            message_preview=summary["message_preview"],
+        )
 
 
 @tool
@@ -136,7 +150,21 @@ async def get_social_media_sentiment(ticker: str) -> str:
 
         return summary
     except Exception as exc:
-        return f"Error getting sentiment: {str(exc)}"
+        summary = summarize_exception(
+            exc,
+            operation="get_social_media_sentiment",
+            provider="unknown",
+        )
+        logger.warning(
+            "social_media_sentiment_failed",
+            ticker=ticker,
+            **summary,
+        )
+        return format_error_message(
+            operation="get_social_media_sentiment",
+            error_type=summary["error_type"],
+            message_preview=summary["message_preview"],
+        )
 
 
 @tool

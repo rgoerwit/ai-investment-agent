@@ -47,6 +47,7 @@ import yfinance as yf
 
 from src.config import config
 from src.data.interfaces import FinancialFetcher
+from src.error_safety import safe_error_payload, summarize_exception
 from src.fx_normalization import (
     is_near_minor_unit_ratio,
     normalize_minor_unit_amount,
@@ -603,7 +604,15 @@ class SmartMarketDataFetcher(FinancialFetcher):
         try:
             return await self._get_ibkr_security_service().probe_security(ticker)
         except Exception as exc:
-            logger.debug("ibkr_security_probe_failed", ticker=ticker, error=str(exc))
+            logger.debug(
+                "ibkr_security_probe_failed",
+                ticker=ticker,
+                **summarize_exception(
+                    exc,
+                    operation="probing IBKR security data",
+                    provider="unknown",
+                ),
+            )
             return None
 
     @staticmethod
@@ -694,7 +703,13 @@ class SmartMarketDataFetcher(FinancialFetcher):
                 return rate
         except Exception as e:
             logger.debug(
-                "fx_rate_fetch_failed", pair=f"{from_curr}/{to_curr}", error=str(e)
+                "fx_rate_fetch_failed",
+                pair=f"{from_curr}/{to_curr}",
+                **summarize_exception(
+                    e,
+                    operation="fetching FX rate",
+                    provider="unknown",
+                ),
             )
 
         return 1.0
@@ -886,7 +901,15 @@ class SmartMarketDataFetcher(FinancialFetcher):
                     pass
 
         except Exception as e:
-            logger.debug("statement_extraction_failed", symbol=symbol, error=str(e))
+            logger.debug(
+                "statement_extraction_failed",
+                symbol=symbol,
+                **summarize_exception(
+                    e,
+                    operation="extracting financial statements",
+                    provider="unknown",
+                ),
+            )
 
         # --- MOAT SIGNALS ---
         # Calculate multi-year moat indicators from statements
@@ -946,7 +969,15 @@ class SmartMarketDataFetcher(FinancialFetcher):
             qt_inc = ticker.quarterly_financials
             qt_cf = ticker.quarterly_cashflow
         except Exception as e:
-            logger.debug("quarterly_data_unavailable", symbol=symbol, error=str(e))
+            logger.debug(
+                "quarterly_data_unavailable",
+                symbol=symbol,
+                **summarize_exception(
+                    e,
+                    operation="extracting quarterly data",
+                    provider="unknown",
+                ),
+            )
             return extracted
 
         # --- DATE METADATA ---
@@ -1199,7 +1230,15 @@ class SmartMarketDataFetcher(FinancialFetcher):
                             signal=signals.get("moat_marginStability"),
                         )
         except Exception as e:
-            logger.debug("moat_margin_calc_failed", symbol=symbol, error=str(e))
+            logger.debug(
+                "moat_margin_calc_failed",
+                symbol=symbol,
+                **summarize_exception(
+                    e,
+                    operation="calculating moat margin stability",
+                    provider="unknown",
+                ),
+            )
 
         # --- 2. CASH CONVERSION QUALITY (3-year CFO/NI ratio) ---
         try:
@@ -1248,7 +1287,15 @@ class SmartMarketDataFetcher(FinancialFetcher):
                         signal=signals.get("moat_cashConversion"),
                     )
         except Exception as e:
-            logger.debug("moat_cash_conversion_failed", symbol=symbol, error=str(e))
+            logger.debug(
+                "moat_cash_conversion_failed",
+                symbol=symbol,
+                **summarize_exception(
+                    e,
+                    operation="calculating moat cash conversion",
+                    provider="unknown",
+                ),
+            )
 
         return signals
 
@@ -1474,7 +1521,11 @@ class SmartMarketDataFetcher(FinancialFetcher):
             logger.debug(
                 "capital_efficiency_calculation_failed",
                 symbol=symbol,
-                error=str(e),
+                **summarize_exception(
+                    e,
+                    operation="calculating capital efficiency signals",
+                    provider="unknown",
+                ),
             )
 
         return signals
@@ -1601,7 +1652,15 @@ class SmartMarketDataFetcher(FinancialFetcher):
                         years=len(roas),
                     )
         except Exception as e:
-            logger.debug("roa_trend_calc_failed", symbol=symbol, error=str(e))
+            logger.debug(
+                "roa_trend_calc_failed",
+                symbol=symbol,
+                **summarize_exception(
+                    e,
+                    operation="calculating ROA trend",
+                    provider="unknown",
+                ),
+            )
 
         # --- ROE: Net Income / Stockholders Equity ---
         try:
@@ -1638,7 +1697,15 @@ class SmartMarketDataFetcher(FinancialFetcher):
                         years=len(roes),
                     )
         except Exception as e:
-            logger.debug("roe_trend_calc_failed", symbol=symbol, error=str(e))
+            logger.debug(
+                "roe_trend_calc_failed",
+                symbol=symbol,
+                **summarize_exception(
+                    e,
+                    operation="calculating ROE trend",
+                    provider="unknown",
+                ),
+            )
 
         return signals
 
@@ -1709,7 +1776,11 @@ class SmartMarketDataFetcher(FinancialFetcher):
             logger.warning(
                 "graham_test_error",
                 symbol=symbol,
-                error=str(e),
+                **summarize_exception(
+                    e,
+                    operation="calculating Graham earnings test",
+                    provider="unknown",
+                ),
             )
             signals["graham_consecutive_positive_years"] = None
             signals["graham_test"] = "ERROR"
@@ -1724,7 +1795,15 @@ class SmartMarketDataFetcher(FinancialFetcher):
             try:
                 info = await asyncio.to_thread(lambda: ticker.info)
             except YFRateLimitError as exc:
-                logger.warning("yfinance_rate_limited", symbol=symbol, error=str(exc))
+                logger.warning(
+                    "yfinance_rate_limited",
+                    symbol=symbol,
+                    **summarize_exception(
+                        exc,
+                        operation="fetching yfinance enhanced data",
+                        provider="unknown",
+                    ),
+                )
                 return None
             except Exception:
                 info = {}
@@ -1801,10 +1880,26 @@ class SmartMarketDataFetcher(FinancialFetcher):
             return info
 
         except YFRateLimitError as e:
-            logger.warning("yfinance_rate_limited", symbol=symbol, error=str(e))
+            logger.warning(
+                "yfinance_rate_limited",
+                symbol=symbol,
+                **summarize_exception(
+                    e,
+                    operation="fetching yfinance enhanced data",
+                    provider="unknown",
+                ),
+            )
             return None
         except Exception as e:
-            logger.error("yfinance_enhanced_failed", symbol=symbol, error=str(e))
+            logger.error(
+                "yfinance_enhanced_failed",
+                symbol=symbol,
+                **summarize_exception(
+                    e,
+                    operation="fetching yfinance enhanced data",
+                    provider="unknown",
+                ),
+            )
             return None
 
     def _fetch_yahooquery_fallback(self, symbol: str) -> dict | None:
@@ -1889,7 +1984,15 @@ class SmartMarketDataFetcher(FinancialFetcher):
             return None
 
         except Exception as e:
-            logger.warning("eodhd_fetch_error", symbol=symbol, error=str(e))
+            logger.warning(
+                "eodhd_fetch_error",
+                symbol=symbol,
+                **summarize_exception(
+                    e,
+                    operation="fetching EODHD data",
+                    provider="unknown",
+                ),
+            )
             return None
 
     async def _fetch_av_fallback(self, symbol: str) -> dict | None:
@@ -1919,7 +2022,15 @@ class SmartMarketDataFetcher(FinancialFetcher):
             return None
 
         except Exception as e:
-            logger.warning("alpha_vantage_fetch_error", symbol=symbol, error=str(e))
+            logger.warning(
+                "alpha_vantage_fetch_error",
+                symbol=symbol,
+                **summarize_exception(
+                    e,
+                    operation="fetching Alpha Vantage data",
+                    provider="unknown",
+                ),
+            )
             return None
 
     async def _fetch_all_sources_parallel(self, symbol: str) -> dict[str, dict | None]:
@@ -1959,7 +2070,15 @@ class SmartMarketDataFetcher(FinancialFetcher):
                 results[source_name] = None
                 source_outcomes[source_name] = "timeout"
             except Exception as e:
-                logger.warning(f"{source_name}_error", symbol=symbol, error=str(e))
+                logger.warning(
+                    f"{source_name}_error",
+                    symbol=symbol,
+                    **summarize_exception(
+                        e,
+                        operation=f"fetching {source_name} data",
+                        provider="unknown",
+                    ),
+                )
                 results[source_name] = None
                 source_outcomes[source_name] = f"error:{type(e).__name__}"
 
@@ -2867,7 +2986,14 @@ class SmartMarketDataFetcher(FinancialFetcher):
             with open(self._MNEMONIC_CACHE_FILE, "w") as f:
                 json.dump(raw, f, indent=2)
         except OSError as e:
-            logger.warning("mnemonic_cache_save_failed", error=str(e))
+            logger.warning(
+                "mnemonic_cache_save_failed",
+                **summarize_exception(
+                    e,
+                    operation="saving mnemonic cache",
+                    provider="unknown",
+                ),
+            )
 
     async def _pre_resolve_ticker(self, ticker: str) -> str:
         """
@@ -2909,7 +3035,15 @@ class SmartMarketDataFetcher(FinancialFetcher):
                     self._save_mnemonic_cache(ticker, sym)
                     return sym
         except Exception as e:
-            logger.warning("mnemonic_pre_resolve_failed", ticker=ticker, error=str(e))
+            logger.warning(
+                "mnemonic_pre_resolve_failed",
+                ticker=ticker,
+                **summarize_exception(
+                    e,
+                    operation="pre-resolving ticker mnemonic",
+                    provider="unknown",
+                ),
+            )
 
         return ticker  # original ticker; Tavily fallback still active
 
@@ -2965,7 +3099,15 @@ class SmartMarketDataFetcher(FinancialFetcher):
             return None
 
         except Exception as e:
-            logger.warning("ticker_resolution_failed", symbol=symbol, error=str(e))
+            logger.warning(
+                "ticker_resolution_failed",
+                symbol=symbol,
+                **summarize_exception(
+                    e,
+                    operation="resolving ticker via search",
+                    provider="unknown",
+                ),
+            )
             return None
 
     async def _get_financial_metrics_uncached(
@@ -3205,8 +3347,21 @@ class SmartMarketDataFetcher(FinancialFetcher):
             return merged
 
         except Exception as e:
-            logger.error("unexpected_fetch_error", ticker=ticker, error=str(e))
-            return {"error": str(e), "symbol": ticker}
+            logger.error(
+                "unexpected_fetch_error",
+                ticker=ticker,
+                **summarize_exception(
+                    e,
+                    operation="get_financial_metrics",
+                    provider="unknown",
+                ),
+            )
+            return safe_error_payload(
+                e,
+                operation="get_financial_metrics",
+                provider="unknown",
+                extra={"symbol": ticker},
+            )
 
     async def get_financial_metrics(
         self, ticker: str, timeout: int = 30
@@ -3264,7 +3419,15 @@ class SmartMarketDataFetcher(FinancialFetcher):
                     hist = await asyncio.to_thread(stock.history, **history_kwargs)
             return hist
         except Exception as e:
-            logger.error("history_fetch_failed", ticker=ticker, error=str(e))
+            logger.error(
+                "history_fetch_failed",
+                ticker=ticker,
+                **summarize_exception(
+                    e,
+                    operation="get_historical_prices",
+                    provider="unknown",
+                ),
+            )
             return pd.DataFrame()
 
     async def get_price_history(

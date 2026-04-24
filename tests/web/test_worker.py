@@ -70,6 +70,12 @@ def test_worker_marks_partial_when_one_ticker_fails(tmp_path: Path, monkeypatch)
     run_once(store, settings)
     job = store.list_jobs()[0]
     assert job["status"] == "partial"
+    failure = store.get_job(job["job_id"])["tickers"][1]
+    assert failure["status"] == "failed"
+    assert (
+        failure["error"]
+        == "Error in dashboard refresh job: RuntimeError (preview: boom)"
+    )
 
 
 def test_worker_passes_explicit_runtime_services(tmp_path: Path, monkeypatch):

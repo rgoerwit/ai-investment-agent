@@ -211,7 +211,7 @@ async def test_execute_wraps_runner_in_tool_observation():
 
     mock_observation.assert_called_once_with(
         tool_name="get_news",
-        input_payload={"ticker": "AAPL"},
+        input_payload={"arg_keys": ["ticker"], "ticker": "AAPL"},
         metadata={
             "tool_name": "get_news",
             "tool_source": "editor",

@@ -5,6 +5,7 @@ from typing import Any
 
 from langchain_core.tools import tool
 
+from src.error_safety import safe_error_payload
 from src.ibkr.account_service import AccountStatus, IbkrAccountService
 from src.ibkr.portfolio_data_service import (
     CashSnapshot,
@@ -41,8 +42,10 @@ def _ok_payload(data: Any) -> dict[str, Any]:
     return {"ok": True, "data": _serialize_value(data)}
 
 
-def _error_payload(exc: Exception) -> dict[str, Any]:
-    return {"ok": False, "error": str(exc)}
+def _error_payload(exc: Exception, *, operation: str) -> dict[str, Any]:
+    payload = safe_error_payload(exc, operation=operation, provider="unknown")
+    payload["ok"] = False
+    return payload
 
 
 @tool
@@ -54,7 +57,7 @@ async def get_ibkr_holdings(account_id: str = "") -> dict[str, Any]:
         )
         return _ok_payload(positions)
     except Exception as exc:
-        return _error_payload(exc)
+        return _error_payload(exc, operation="get_ibkr_holdings")
 
 
 @tool
@@ -70,7 +73,7 @@ async def get_ibkr_watchlist(
         )
         return _ok_payload(snapshot)
     except Exception as exc:
-        return _error_payload(exc)
+        return _error_payload(exc, operation="get_ibkr_watchlist")
 
 
 @tool
@@ -82,7 +85,7 @@ async def get_ibkr_live_orders(account_id: str = "") -> dict[str, Any]:
         )
         return _ok_payload(orders)
     except Exception as exc:
-        return _error_payload(exc)
+        return _error_payload(exc, operation="get_ibkr_live_orders")
 
 
 @tool
@@ -94,7 +97,7 @@ async def get_ibkr_cash_summary(account_id: str = "") -> dict[str, Any]:
         )
         return _ok_payload(snapshot)
     except Exception as exc:
-        return _error_payload(exc)
+        return _error_payload(exc, operation="get_ibkr_cash_summary")
 
 
 @tool
@@ -107,7 +110,7 @@ async def get_ibkr_account_status(account_id: str = "") -> dict[str, Any]:
         )
         return _ok_payload(status)
     except Exception as exc:
-        return _error_payload(exc)
+        return _error_payload(exc, operation="get_ibkr_account_status")
 
 
 @tool
@@ -128,4 +131,4 @@ async def get_ibkr_portfolio_snapshot(
         )
         return _ok_payload(snapshot)
     except Exception as exc:
-        return _error_payload(exc)
+        return _error_payload(exc, operation="get_ibkr_portfolio_snapshot")

@@ -6,6 +6,7 @@ from typing import Any
 
 from flask import Blueprint, current_app, jsonify, request
 
+from src.error_safety import format_error_message, summarize_exception
 from src.web.ibkr_dashboard.drilldown_service import (
     DrilldownLoadError,
     find_markdown_artifacts,
@@ -68,6 +69,29 @@ def _load_snapshot_or_response(*, force: bool = False):
         )
 
     return bundle, metadata, None
+
+
+def _error_response(
+    error_code: str,
+    exc: BaseException,
+    *,
+    operation: str,
+    status_code: int,
+):
+    summary = summarize_exception(exc, operation=operation)
+    return (
+        jsonify(
+            {
+                "error": error_code,
+                "message": format_error_message(
+                    operation=operation,
+                    error_type=summary["error_type"],
+                    message_preview=summary["message_preview"],
+                ),
+            }
+        ),
+        status_code,
+    )
 
 
 @api_bp.get("/portfolio")
@@ -163,14 +187,11 @@ def get_equity_drilldown(ticker: str):
                     Path(article_markdown_path)
                 )
         except DrilldownLoadError as exc:
-            return (
-                jsonify(
-                    {
-                        "error": "drilldown_load_failed",
-                        "message": str(exc),
-                    }
-                ),
-                500,
+            return _error_response(
+                "drilldown_load_failed",
+                exc,
+                operation="equity drilldown load",
+                status_code=500,
             )
 
     payload = serialize_equity_drilldown(
@@ -224,9 +245,19 @@ def create_refresh_job():
     try:
         tickers = _resolve_refresh_tickers(scope, payload)
     except ValueError as exc:
-        return jsonify({"error": "invalid_request", "message": str(exc)}), 400
+        return _error_response(
+            "invalid_request",
+            exc,
+            operation="refresh job validation",
+            status_code=400,
+        )
     except RuntimeError as exc:
-        return jsonify({"error": "snapshot_required", "message": str(exc)}), 409
+        return _error_response(
+            "snapshot_required",
+            exc,
+            operation="refresh job validation",
+            status_code=409,
+        )
     if scope == "ticker_list" and not tickers:
         return (
             jsonify(

@@ -117,7 +117,10 @@ def test_failed_refresh_preserves_cached_bundle(
     bundle, meta = service.load_snapshot_sync()
     assert bundle is sample_bundle
     assert meta.status == "ready"
-    assert meta.last_error == "boom"
+    assert (
+        meta.last_error
+        == "Error in dashboard snapshot load: RuntimeError (preview: boom)"
+    )
 
 
 def test_results_dir_mtime_invalidates_cache(
@@ -248,7 +251,10 @@ def test_failed_initial_load_returns_error_after_background_completion(
     bundle, meta = service.load_snapshot_sync()
     assert bundle is None
     assert meta.status == "error"
-    assert meta.last_error == "boom"
+    assert (
+        meta.last_error
+        == "Error in dashboard snapshot load: RuntimeError (preview: boom)"
+    )
 
 
 def test_inflight_invalidating_preference_change_discards_stale_loaded_bundle(

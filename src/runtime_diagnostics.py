@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 from src.data_block_utils import has_parseable_data_block
+from src.error_safety import redact_sensitive_text
 
 ProviderName = Literal["google", "openai", "anthropic", "unknown"]
 FailureKind = Literal[
@@ -247,7 +248,7 @@ def classify_failure(
         error_type=type(exc).__name__,
         root_cause_type=type(root).__name__,
         retryable=retryable,
-        message=message[:200],
+        message=redact_sensitive_text(message, max_chars=200),
     )
 
 
