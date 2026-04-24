@@ -7793,4 +7793,4 @@ writer = ["langchain-anthropic"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.13"
-content-hash = "061f3350dafefee1522fc66fbb58abd65dbe6ea623f08983d32c416b731aa00f"
+content-hash = "4cf53b61ea2e1a26b04f643391863206e7f3b52b811a2830f6ea5149f3d1edd6"
