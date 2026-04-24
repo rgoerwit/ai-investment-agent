@@ -24,6 +24,7 @@ from src.tooling.text_boundary import format_untrusted_block
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .output_limits import cap_state_value
 from .output_validation import (
     log_output_diagnostics,
     log_truncation_diagnostic,
@@ -640,7 +641,7 @@ def create_analyst_node(
             new_state.update(
                 success_artifact(
                     output_field,
-                    content_str,
+                    cap_state_value(content_str, output_field),
                     provider=support.infer_provider_name(llm),
                 )
             )
@@ -739,7 +740,7 @@ Extract valuation parameters and output in the required format."""
             )
             return success_artifact(
                 "valuation_params",
-                content_str,
+                cap_state_value(content_str, "valuation_params"),
                 provider=support.infer_provider_name(llm),
             )
         except Exception as exc:

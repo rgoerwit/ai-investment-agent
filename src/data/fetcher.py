@@ -51,6 +51,7 @@ from src.fx_normalization import (
     is_near_minor_unit_ratio,
     normalize_minor_unit_amount,
 )
+from src.runtime_services import get_current_market_data_fetcher
 from src.tavily_utils import search_tavily_inspected
 from src.ticker_policy import (
     FRAGILE_EXCHANGE_SUFFIXES,
@@ -2376,7 +2377,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         # Reinspect the aggregated text before extraction so this call site keeps
         # an explicit prompt-ingress boundary even though each query result is
         # already inspected centrally in tavily_utils.
-        from src.tooling.inspection_service import INSPECTION_SERVICE
+        from src.runtime_services import get_current_inspection_service
         from src.tooling.inspector import InspectionEnvelope, SourceKind
 
         envelope = InspectionEnvelope(
@@ -2385,7 +2386,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
             source_name="tavily",
             metadata={"symbol": symbol, "fields": list(search_results.keys())},
         )
-        all_text = await INSPECTION_SERVICE.check(envelope)
+        all_text = await get_current_inspection_service().check(envelope)
 
         return self.pattern_extractor.extract_from_text(all_text, skip_fields=set())
 
@@ -3365,25 +3366,31 @@ class _LazyFetcherProxy:
     """Proxy that defers SmartMarketDataFetcher construction until first use."""
 
     async def get_financial_metrics(self, *args, **kwargs):
-        return await get_fetcher().get_financial_metrics(*args, **kwargs)
+        return await get_current_market_data_fetcher().get_financial_metrics(
+            *args, **kwargs
+        )
 
     async def get_historical_prices(self, *args, **kwargs):
-        return await get_fetcher().get_historical_prices(*args, **kwargs)
+        return await get_current_market_data_fetcher().get_historical_prices(
+            *args, **kwargs
+        )
 
     async def get_price_history(self, *args, **kwargs):
-        return await get_fetcher().get_price_history(*args, **kwargs)
+        return await get_current_market_data_fetcher().get_price_history(
+            *args, **kwargs
+        )
 
     def get_stats(self, *args, **kwargs):
-        return get_fetcher().get_stats(*args, **kwargs)
+        return get_current_market_data_fetcher().get_stats(*args, **kwargs)
 
     def clear_fx_cache(self, *args, **kwargs):
-        return get_fetcher().clear_fx_cache(*args, **kwargs)
+        return get_current_market_data_fetcher().clear_fx_cache(*args, **kwargs)
 
     def is_available(self, *args, **kwargs):
-        return get_fetcher().is_available(*args, **kwargs)
+        return get_current_market_data_fetcher().is_available(*args, **kwargs)
 
     def __getattr__(self, name):
-        return getattr(get_fetcher(), name)
+        return getattr(get_current_market_data_fetcher(), name)
 
     def __repr__(self) -> str:
         status = "initialized" if _fetcher_instance is not None else "lazy"

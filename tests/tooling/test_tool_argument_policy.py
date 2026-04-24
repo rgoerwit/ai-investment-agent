@@ -103,6 +103,52 @@ async def test_no_hostname_blocked():
         await hook.before(call)
 
 
+@pytest.mark.asyncio
+async def test_localhost_blocked():
+    hook = ToolArgumentPolicyHook(mode="block")
+    call = _call(args={"url": "http://localhost:8000/internal"})
+    with pytest.raises(ToolCallBlocked):
+        await hook.before(call)
+
+
+@pytest.mark.asyncio
+async def test_private_ipv4_blocked():
+    hook = ToolArgumentPolicyHook(mode="block")
+    for url in (
+        "http://10.0.0.5/secret",
+        "http://172.16.9.1/secret",
+        "http://192.168.1.20/secret",
+        "http://169.254.169.254/latest/meta-data",
+        "http://127.0.0.1:8080/debug",
+    ):
+        with pytest.raises(ToolCallBlocked):
+            await hook.before(_call(args={"url": url}))
+
+
+@pytest.mark.asyncio
+async def test_private_ipv6_blocked():
+    hook = ToolArgumentPolicyHook(mode="block")
+    for url in (
+        "http://[::1]/admin",
+        "http://[fc00::1]/admin",
+        "http://[fe80::1]/admin",
+    ):
+        with pytest.raises(ToolCallBlocked):
+            await hook.before(_call(args={"url": url}))
+
+
+@pytest.mark.asyncio
+async def test_cloud_metadata_hostname_blocked():
+    hook = ToolArgumentPolicyHook(mode="block")
+    for url in (
+        "http://metadata.google.internal/computeMetadata/v1",
+        "http://metadata.google/computeMetadata/v1",
+        "http://instance-data/latest/meta-data",
+    ):
+        with pytest.raises(ToolCallBlocked):
+            await hook.before(_call(args={"url": url}))
+
+
 # ---------------------------------------------------------------------------
 # search_claim — query validation
 # ---------------------------------------------------------------------------

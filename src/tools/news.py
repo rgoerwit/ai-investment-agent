@@ -6,9 +6,9 @@ from typing import Annotated
 import structlog
 from langchain_core.tools import tool
 
+from src.runtime_services import get_current_inspection_service
 from src.stocktwits_api import StockTwitsAPI
 from src.ticker_utils import normalize_ticker
-from src.tooling.inspection_service import INSPECTION_SERVICE
 from src.tooling.inspector import InspectionEnvelope, SourceKind
 from src.tools import shared
 
@@ -114,7 +114,7 @@ async def get_social_media_sentiment(ticker: str) -> str:
                 source_name="stocktwits",
                 metadata={"ticker": ticker},
             )
-            inspection_tasks.append(INSPECTION_SERVICE.check(envelope))
+            inspection_tasks.append(get_current_inspection_service().check(envelope))
 
         inspected_messages = (
             await asyncio.gather(*inspection_tasks) if inspection_tasks else []

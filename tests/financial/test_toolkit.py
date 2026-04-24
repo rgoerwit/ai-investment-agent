@@ -1,5 +1,5 @@
 """
-Comprehensive tests for src/toolkit.py - All agent tools.
+Comprehensive tests for concrete agent tools.
 
 Tests cover:
 - get_financial_metrics: Primary data fetching, FMP fallback, formatting
@@ -12,20 +12,36 @@ Each test uses proper async mocking and validates both success and error paths.
 """
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pandas as pd
 import pytest
 
-# Import the module under test
-from src import toolkit
+from src.tools.market import (
+    get_financial_metrics,
+    get_fundamental_analysis,
+    get_technical_indicators,
+    get_yfinance_data,
+)
+from src.tools.news import get_news, get_social_media_sentiment
+
+toolkit = SimpleNamespace(
+    get_financial_metrics=get_financial_metrics,
+    get_fundamental_analysis=get_fundamental_analysis,
+    get_news=get_news,
+    get_social_media_sentiment=get_social_media_sentiment,
+    get_technical_indicators=get_technical_indicators,
+    get_yfinance_data=get_yfinance_data,
+)
 
 
 @pytest.fixture
 def mock_fetcher():
-    """Mock the singleton market_data_fetcher used in toolkit."""
-    with patch("src.tools.market.market_data_fetcher") as mock:
-        yield mock
+    """Mock the active market-data fetcher seam used by market tools."""
+    fetcher = SimpleNamespace()
+    with patch("src.tools.market._market_data_fetcher", return_value=fetcher):
+        yield fetcher
 
 
 @pytest.fixture

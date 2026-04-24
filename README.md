@@ -124,7 +124,13 @@ At minimum, set `GOOGLE_API_KEY` in `.env`. Optional keys such as Tavily, FMP, E
 
 ### Optional Untrusted-Content Inspection
 
-The runtime can inspect untrusted search results, social content, retrieved memory, filing text, and cached context before that material is reused in prompts. This is off by default so existing workflows do not change unexpectedly.
+The runtime can inspect untrusted tool/data context before that material is reused in prompts. In practice this covers web/search results, social content, selected financial-API free text, retrieved memory, filing text, and cached context. This is off by default so existing workflows do not change unexpectedly.
+
+Repo-wide trust-boundary rule:
+
+- inspect raw external content at ingress where practical
+- route agentic tool loops through the runtime-bound tool execution plane so tool-output inspection always runs
+- wrap replayed untrusted text from memory/cache/prior stages before it re-enters prompts
 
 Recommended initial posture:
 
@@ -355,25 +361,34 @@ Deterministic red-flag logic can reject a name before the debate path continues.
 prompts/                     Versioned prompt JSON files
 scripts/                     Screening, portfolio, and operator scripts
 src/main.py                  Main CLI/runtime entrypoint
+src/runtime_services.py      Runtime-scoped tool, inspection, and provider ownership
+src/macro_context.py         Pre-graph macro brief generation and cache
 src/graph/                   Graph assembly, routing, barriers
 src/agents/                  Node logic and shared agent state
 src/tools/                   Tool implementations by domain
-src/toolkit.py               Tool facade used by agent roles
+src/tooling/                 Tool execution, inspection, and audit hooks
 src/data/                    Market and fundamental data fetching
 src/validators/              Deterministic validation and red-flag screening
+src/report_generator.py      Markdown report assembly
+src/article_writer.py        Optional article-writing flow
 src/charts/                  Chart extraction and rendering
 src/memory.py                Chroma-backed memory and macro-event support
 src/ibkr/                    Portfolio, reconciliation, and broker integration
 src/web/ibkr_dashboard/      Local Flask dashboard
+src/eval/                    Baseline capture and evaluation helpers
 tests/                       Unit and integration coverage
 ```
 
 How the pieces connect:
 
-- `src/main.py` is the staged runtime entrypoint.
-- `src/graph/` wires the workflow, `src/agents/` owns the node logic, and `src/tools/` plus `src/toolkit.py` provide the tool surface.
+- `src/main.py` is the staged runtime entrypoint: CLI parsing, runtime setup, macro-context prefetch, graph execution, persistence, and output handling.
+- `src/runtime_services.py` owns runtime-scoped tool execution, content inspection, and long-lived provider dependencies for the CLI, worker, and dashboard processes.
+- `src/macro_context.py` builds and caches the pre-graph regional regime brief that is injected into News Analyst context.
+- `src/graph/` wires the workflow, `src/agents/` owns node logic and state handling, and `src/tools/` plus `src/tools/registry.py` provide the tool surface used by agent tool nodes.
+- `src/tooling/` owns the execution plane around those tools: inspection, audit hooks, and argument-policy enforcement.
 - `src/data/`, `src/validators/`, `src/memory.py`, and `src/charts/` are shared subsystems used by the main analysis path.
-- `src/ibkr/` and `src/web/ibkr_dashboard/` are adjacent operator workflows built on top of saved analysis outputs and, optionally, live broker context.
+- `src/report_generator.py` turns the final graph state into the structured markdown report; `src/article_writer.py` is the optional long-form writing pass on top of that report.
+- `scripts/portfolio_manager.py`, `src/ibkr/`, and `src/web/ibkr_dashboard/` are the operator-facing portfolio workflows built on top of saved analysis outputs and, optionally, live broker context.
 
 ## Testing
 

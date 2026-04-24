@@ -25,6 +25,13 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _has_inspection_call(src: str) -> bool:
+    return (
+        "INSPECTION_SERVICE.check" in src
+        or "get_current_inspection_service().check" in src
+    )
+
+
 def _src(rel: str) -> Path:
     return SRC_ROOT / rel
 
@@ -63,18 +70,18 @@ def test_create_react_agent_not_imported_in_consultant_nodes():
 def test_tavily_utils_has_inspection():
     """tavily_search_with_timeout must call INSPECTION_SERVICE.check before returning."""
     src = _read(_src("tavily_utils.py"))
-    assert "INSPECTION_SERVICE.check" in src, (
+    assert _has_inspection_call(src), (
         "tavily_utils.py: tavily_search_with_timeout must call "
-        "INSPECTION_SERVICE.check() before returning results."
+        "an inspection service before returning results."
     )
 
 
 def test_editor_tools_fetch_reference_has_inspection():
     """fetch_reference_content must call INSPECTION_SERVICE.check on fetched content."""
     src = _read(_src("editor_tools.py"))
-    assert "INSPECTION_SERVICE.check" in src, (
+    assert _has_inspection_call(src), (
         "editor_tools.py: fetch_reference_content must call "
-        "INSPECTION_SERVICE.check() before returning fetched content."
+        "an inspection service before returning fetched content."
     )
 
 
@@ -90,18 +97,18 @@ def test_editor_tools_search_claim_uses_inspected_tavily_helper():
 def test_news_stocktwits_has_inspection():
     """StockTwits message content must be inspected before inclusion in output."""
     src = _read(_src("tools/news.py"))
-    assert "INSPECTION_SERVICE.check" in src, (
+    assert _has_inspection_call(src), (
         "tools/news.py: get_social_media_sentiment must call "
-        "INSPECTION_SERVICE.check() on StockTwits message content."
+        "an inspection service on StockTwits message content."
     )
 
 
 def test_fetcher_tavily_gaps_has_inspection():
     """_fetch_tavily_gaps must call INSPECTION_SERVICE.check before extracting metrics."""
     src = _read(_src("data/fetcher.py"))
-    assert "INSPECTION_SERVICE.check" in src, (
+    assert _has_inspection_call(src), (
         "data/fetcher.py: _fetch_tavily_gaps must call "
-        "INSPECTION_SERVICE.check() before passing web text to pattern_extractor."
+        "an inspection service before passing web text to pattern_extractor."
     )
 
 
@@ -202,22 +209,24 @@ def test_inspection_service_singleton_exists():
 
 
 # ---------------------------------------------------------------------------
-# 8. InspectionEnvelope and SourceKind are importable from src.tooling
+# 8. Inspection primitives are importable from owning modules
 # ---------------------------------------------------------------------------
 
 
-def test_inspection_types_exported_from_tooling():
-    from src.tooling import (  # noqa: F401
+def test_inspection_types_importable_from_owning_modules():
+    from src.tooling.inspection_hook import ContentInspectionHook  # noqa: F401
+    from src.tooling.inspection_service import (  # noqa: F401
         INSPECTION_SERVICE,
+        InspectionService,
+        configure_content_inspection,
+    )
+    from src.tooling.inspector import (  # noqa: F401
         CompositeInspector,
-        ContentInspectionHook,
         ContentInspector,
         InspectionDecision,
         InspectionEnvelope,
-        InspectionService,
         NullInspector,
         SourceKind,
-        configure_content_inspection,
     )
 
 
@@ -229,9 +238,9 @@ def test_inspection_types_exported_from_tooling():
 def test_memory_retrieval_has_inspection():
     """query_similar_situations must call INSPECTION_SERVICE.check on ChromaDB results."""
     src = _read(_src("memory.py"))
-    assert "INSPECTION_SERVICE.check" in src, (
+    assert _has_inspection_call(src), (
         "memory.py: query_similar_situations must call "
-        "INSPECTION_SERVICE.check() on ChromaDB retrieved documents."
+        "an inspection service on ChromaDB retrieved documents."
     )
 
 
@@ -244,21 +253,30 @@ def test_memory_uses_memory_retrieval_source_kind():
     )
 
 
+def test_memory_write_has_inspection():
+    """add_situations must inspect content before persistence."""
+    src = _read(_src("memory.py"))
+    assert "SourceKind.memory_write" in src, (
+        "memory.py: add_situations must use SourceKind.memory_write for "
+        "persisted content inspection."
+    )
+
+
 def test_retrospective_has_inspection():
     """format_lessons_for_injection must inspect lessons text."""
     src = _read(_src("retrospective.py"))
-    assert "INSPECTION_SERVICE.check" in src, (
+    assert _has_inspection_call(src), (
         "retrospective.py: format_lessons_for_injection must call "
-        "INSPECTION_SERVICE.check() on formatted lessons text."
+        "an inspection service on formatted lessons text."
     )
 
 
 def test_research_foreign_search_has_inspection():
     """search_foreign_sources must inspect merged DDG+Tavily output."""
     src = _read(_src("tools/research.py"))
-    assert "INSPECTION_SERVICE.check" in src, (
+    assert _has_inspection_call(src), (
         "tools/research.py: search_foreign_sources must call "
-        "INSPECTION_SERVICE.check() on merged output."
+        "an inspection service on merged output."
     )
 
 
@@ -282,9 +300,9 @@ def test_research_uses_official_filing_source_kind():
 def test_macro_context_has_inspection():
     """get_macro_context must inspect cached brief on re-entry."""
     src = _read(_src("macro_context.py"))
-    assert "INSPECTION_SERVICE.check" in src, (
+    assert _has_inspection_call(src), (
         "macro_context.py: get_macro_context must call "
-        "INSPECTION_SERVICE.check() on cached macro brief."
+        "an inspection service on cached macro brief."
     )
 
 
@@ -294,6 +312,15 @@ def test_macro_context_uses_cached_context_source_kind():
     assert "SourceKind.cached_context" in src, (
         "macro_context.py: cached brief inspection must use "
         "SourceKind.cached_context."
+    )
+
+
+def test_market_tools_use_financial_api_source_kind():
+    """Financial API free-text must be classified explicitly."""
+    src = _read(_src("tools/market.py"))
+    assert "SourceKind.financial_api" in src, (
+        "tools/market.py: free-text financial API fields must use "
+        "SourceKind.financial_api."
     )
 
 
@@ -377,6 +404,19 @@ def test_analyst_nodes_extra_context_in_human_message():
     )
 
 
+def test_state_artifact_writers_use_cap_state_value():
+    """Persisted large artifacts must be capped at the write point."""
+    for rel in (
+        "agents/analyst_nodes.py",
+        "agents/research_nodes.py",
+        "agents/decision_nodes.py",
+    ):
+        src = _read(_src(rel))
+        assert (
+            "cap_state_value" in src
+        ), f"{rel}: success_artifact writes must use cap_state_value()."
+
+
 # ---------------------------------------------------------------------------
 # 12. SourceKind includes new values
 # ---------------------------------------------------------------------------
@@ -396,19 +436,24 @@ def test_source_kind_has_cached_context():
     assert SourceKind.cached_context.value == "cached_context"
 
 
+def test_source_kind_has_memory_write():
+    from src.tooling.inspector import SourceKind
+
+    assert hasattr(SourceKind, "memory_write")
+    assert SourceKind.memory_write.value == "memory_write"
+
+
 # ---------------------------------------------------------------------------
-# 13. New tooling exports
+# 13. New tooling primitives
 # ---------------------------------------------------------------------------
 
 
-def test_new_inspectors_exported_from_tooling():
-    from src.tooling import (  # noqa: F401
-        EscalatingInspector,
-        HeuristicInspector,
-        LLMJudgeInspector,
-        ToolArgumentPolicyHook,
-        format_untrusted_block,
-    )
+def test_new_inspectors_importable_from_owning_modules():
+    from src.tooling.escalating_inspector import EscalatingInspector  # noqa: F401
+    from src.tooling.heuristic_inspector import HeuristicInspector  # noqa: F401
+    from src.tooling.llm_judge_inspector import LLMJudgeInspector  # noqa: F401
+    from src.tooling.text_boundary import format_untrusted_block  # noqa: F401
+    from src.tooling.tool_argument_policy import ToolArgumentPolicyHook  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -417,29 +462,29 @@ def test_new_inspectors_exported_from_tooling():
 
 
 def test_main_supports_python_backend():
-    """main.py must support the 'python' backend (HeuristicInspector)."""
-    src = _read(_src("main.py"))
+    """runtime_services.py must support the 'python' backend (HeuristicInspector)."""
+    src = _read(_src("runtime_services.py"))
     assert "HeuristicInspector" in src, (
-        "main.py: configure_content_inspection_from_config must support "
+        "runtime_services.py: build_runtime_services_from_config must support "
         "'python' backend with HeuristicInspector."
     )
 
 
 def test_main_supports_composite_backend():
-    """main.py must support the 'composite' backend (EscalatingInspector)."""
-    src = _read(_src("main.py"))
+    """runtime_services.py must support the 'composite' backend (EscalatingInspector)."""
+    src = _read(_src("runtime_services.py"))
     assert "EscalatingInspector" in src, (
-        "main.py: configure_content_inspection_from_config must support "
+        "runtime_services.py: build_runtime_services_from_config must support "
         "'composite' backend with EscalatingInspector."
     )
 
 
 def test_main_registers_argument_policy_hook():
-    """main.py must register ToolArgumentPolicyHook."""
-    src = _read(_src("main.py"))
+    """runtime_services.py must register ToolArgumentPolicyHook."""
+    src = _read(_src("runtime_services.py"))
     assert "ToolArgumentPolicyHook" in src, (
-        "main.py: configure_content_inspection_from_config must register "
-        "ToolArgumentPolicyHook on TOOL_SERVICE."
+        "runtime_services.py: build_runtime_services_from_config must register "
+        "ToolArgumentPolicyHook on the tool service."
     )
 
 

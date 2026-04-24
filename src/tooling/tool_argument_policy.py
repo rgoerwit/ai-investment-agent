@@ -11,6 +11,7 @@ or crafting exfiltration queries.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from typing import Literal
 from urllib.parse import urlparse
@@ -39,6 +40,39 @@ _SUSPICIOUS_URL_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"burpcollaborator\.net", re.I),
 ]
 
+_PRIVATE_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+)
+
+_BLOCKED_HOSTNAMES = frozenset(
+    {
+        "localhost",
+        "metadata.google.internal",
+        "metadata.google",
+        "instance-data",
+    }
+)
+
+
+def _hostname_is_blocked(hostname: str) -> bool:
+    normalized = hostname.strip().lower().rstrip(".")
+    if normalized in _BLOCKED_HOSTNAMES:
+        return True
+
+    try:
+        addr = ipaddress.ip_address(normalized)
+    except ValueError:
+        return False
+
+    return any(addr in network for network in _PRIVATE_NETWORKS)
+
 
 def _is_reasonable_reference_url(url: str) -> bool:
     """Return True if the URL looks like a legitimate reference."""
@@ -51,6 +85,9 @@ def _is_reasonable_reference_url(url: str) -> bool:
         return False
 
     if not parsed.hostname:
+        return False
+
+    if _hostname_is_blocked(parsed.hostname):
         return False
 
     # Flag excessively long query strings (exfiltration signal).

@@ -8,7 +8,8 @@ import structlog
 from langchain_core.messages import AIMessage, ToolMessage
 
 from src.agents import AgentState
-from src.tooling.runtime import TOOL_SERVICE, ToolInvocation
+from src.runtime_services import get_current_tool_service
+from src.tooling.runtime import ToolInvocation
 
 logger = structlog.get_logger(__name__)
 
@@ -124,7 +125,7 @@ def create_agent_tool_node(tools: list, agent_key: str):
                 agent_key=agent_key,
             )
             tool_result = await asyncio.wait_for(
-                TOOL_SERVICE.execute(
+                get_current_tool_service().execute(
                     invocation,
                     runner=lambda args, tool=tool_fn: tool.ainvoke(args),
                 ),

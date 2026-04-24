@@ -10,7 +10,7 @@ Tests cover:
 
 import json
 import warnings
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import httpx
 import pytest
@@ -194,6 +194,48 @@ class TestFetchReferenceContent:
                 len(result) <= max_reference_chars + 20
             )  # Allow for truncation marker
             assert "truncated" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_redirect_to_private_target_rejected(self):
+        """A public URL must not be allowed to redirect into a private target."""
+        tool = _fetch_reference_content_tool()
+
+        redirect = MagicMock()
+        redirect.status_code = 302
+        redirect.headers = {"location": "http://127.0.0.1:8080/admin"}
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.get = AsyncMock(return_value=redirect)
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=None)
+            mock_client.return_value = mock_instance
+
+            result = await tool.ainvoke({"url": "https://example.com/redirect"})
+
+            assert "FETCH_FAILED" in result or "INVALID_URL" in result
+            assert "redirect" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_too_many_redirects_rejected(self):
+        """Redirect loops should stop after the configured hop budget."""
+        tool = _fetch_reference_content_tool()
+
+        redirect = MagicMock()
+        redirect.status_code = 302
+        redirect.headers = {"location": "https://example.com/next"}
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.get = AsyncMock(return_value=redirect)
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=None)
+            mock_client.return_value = mock_instance
+
+            result = await tool.ainvoke({"url": "https://example.com/loop"})
+
+            assert "FETCH_FAILED" in result
+            assert "redirect" in result.lower()
 
 
 class TestGetEditorTools:
@@ -1664,10 +1706,13 @@ class TestEditorToolCalling:
         mock_tool.name = "fetch_reference_content"
         editor._tools_by_name = {"fetch_reference_content": mock_tool}
 
+        tool_service = Mock()
+        tool_service.execute = AsyncMock()
         with patch(
-            "src.article_writer.TOOL_SERVICE.execute", new=AsyncMock()
-        ) as exec_mock:
-            exec_mock.return_value = ToolResult(value="hooked-result")
+            "src.article_writer.get_current_tool_service",
+            return_value=tool_service,
+        ):
+            tool_service.execute.return_value = ToolResult(value="hooked-result")
 
             results = await editor._execute_tool_calls(
                 [
@@ -1679,7 +1724,7 @@ class TestEditorToolCalling:
                 ]
             )
 
-        exec_mock.assert_awaited_once()
+        tool_service.execute.assert_awaited_once()
         mock_tool.ainvoke.assert_not_called()
         assert len(results) == 1
         assert results[0].content == "hooked-result"

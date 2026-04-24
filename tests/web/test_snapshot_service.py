@@ -4,6 +4,13 @@ import threading
 import time
 from pathlib import Path
 
+from src.runtime_services import (
+    RuntimeServices,
+    build_provider_runtime,
+    get_current_runtime_services,
+)
+from src.tooling.inspection_service import InspectionService
+from src.tooling.runtime import ToolExecutionService
 from src.web.ibkr_dashboard.settings import DashboardPreferences, DashboardSettings
 from src.web.ibkr_dashboard.snapshot_service import DashboardSnapshotService
 
@@ -298,3 +305,30 @@ def test_inflight_invalidating_preference_change_discards_stale_loaded_bundle(
     assert bundle == "fresh-bundle"
     assert meta.status == "ready"
     assert calls == [None, "U20958465"]
+
+
+def test_background_load_binds_runtime_services(tmp_path: Path, monkeypatch):
+    runtime_services = RuntimeServices(
+        tool_service=ToolExecutionService(),
+        inspection_service=InspectionService(),
+        providers=build_provider_runtime(),
+    )
+    service = DashboardSnapshotService(
+        DashboardSettings(
+            results_dir=tmp_path / "results", runtime_dir=tmp_path / "runtime"
+        ),
+        runtime_services=runtime_services,
+    )
+    seen = {}
+
+    async def fake_load():
+        seen["runtime_services"] = get_current_runtime_services()
+        return "bundle"
+
+    monkeypatch.setattr(service, "_load_snapshot", fake_load)
+
+    bundle, meta = service.load_snapshot_sync()
+    assert bundle is None
+    assert meta.status == "loading"
+    assert service.wait_until_idle(1.0)
+    assert seen["runtime_services"] is runtime_services

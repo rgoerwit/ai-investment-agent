@@ -12,7 +12,7 @@ from typing import Any, Literal
 import structlog
 
 from src.config import config
-from src.tooling.inspection_service import INSPECTION_SERVICE
+from src.runtime_services import get_current_inspection_service
 from src.tooling.inspector import InspectionEnvelope, SourceKind
 
 logger = structlog.get_logger(__name__)
@@ -82,7 +82,7 @@ async def _inspect_tavily_result(raw: Any, query_text: str) -> Any:
         source_name="tavily",
         metadata={"query": query_text[:200]},
     )
-    return await INSPECTION_SERVICE.check(envelope)
+    return await get_current_inspection_service().check(envelope)
 
 
 async def tavily_search_with_timeout(

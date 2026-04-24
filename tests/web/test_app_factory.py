@@ -7,6 +7,8 @@ from src.web.ibkr_dashboard.settings import DashboardSettings
 def test_create_app_registers_dashboard_services(tmp_path):
     settings = DashboardSettings(runtime_dir=tmp_path / "runtime")
     app = create_app(settings)
+    assert "RUNTIME_SERVICES" in app.config
+    assert "PROVIDER_RUNTIME" in app.config
     assert "SNAPSHOT_SERVICE" in app.config
     assert "JOB_STORE" in app.config
     assert "MACRO_ALERT_SERVICE" in app.config

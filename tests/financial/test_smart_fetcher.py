@@ -9,6 +9,7 @@ Verifies that:
 """
 
 import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -20,14 +21,119 @@ def _fmt_pct(value) -> str:
     return f"{value:.1f}%" if isinstance(value, int | float) else "N/A"
 
 
+def _mock_source_fetch(
+    fetcher: SmartMarketDataFetcher,
+    *,
+    ticker: str,
+    yfinance: dict,
+    yahooquery: dict | None = None,
+) -> None:
+    fetcher._pre_resolve_ticker = AsyncMock(return_value=ticker)
+    fetcher._fetch_all_sources_parallel = AsyncMock(
+        return_value={"yfinance": yfinance, "yahooquery": yahooquery}
+    )
+    fetcher._fetch_tavily_gaps = AsyncMock(return_value={})
+    fetcher._probe_ibkr_security = AsyncMock(return_value=None)
+
+
+@pytest.fixture
+def sample_metrics():
+    return {
+        "AAPL": {
+            "symbol": "AAPL",
+            "shortName": "Apple Inc.",
+            "currency": "USD",
+            "currentPrice": 212.34,
+            "marketCap": 3_280_000_000_000,
+            "trailingPE": 31.2,
+            "priceToBook": 45.3,
+            "revenueGrowth": 0.061,
+            "grossMargins": 0.462,
+            "freeCashflow": 101_000_000_000,
+            "debtToEquity": 1.45,
+            "currentRatio": 0.98,
+            "profitMargins": 0.247,
+            "operatingMargins": 0.311,
+            "returnOnEquity": 1.52,
+            "operatingCashflow": 118_000_000_000,
+            "numberOfAnalystOpinions": 38,
+            "sector": "Technology",
+            "industry": "Consumer Electronics",
+        },
+        "0005.HK": {
+            "symbol": "0005.HK",
+            "shortName": "HSBC Holdings plc",
+            "currency": "HKD",
+            "currentPrice": 69.8,
+            "priceToBook": 0.94,
+            "bookValue": 74.2,
+            "marketCap": 1_250_000_000_000,
+            "trailingPE": 8.5,
+            "returnOnEquity": 0.121,
+            "revenueGrowth": 0.043,
+            "profitMargins": 0.287,
+            "debtToEquity": 0.22,
+            "currentRatio": 1.1,
+            "freeCashflow": 18_400_000_000,
+            "operatingCashflow": 24_100_000_000,
+            "sector": "Financial Services",
+            "industry": "Banks - Diversified",
+            "numberOfAnalystOpinions": 19,
+        },
+        "MSFT": {
+            "symbol": "MSFT",
+            "shortName": "Microsoft Corporation",
+            "currency": "USD",
+            "currentPrice": 468.11,
+            "marketCap": 3_480_000_000_000,
+            "trailingPE": 35.1,
+            "priceToBook": 12.7,
+            "returnOnEquity": 0.341,
+            "revenueGrowth": 0.152,
+            "profitMargins": 0.359,
+            "operatingMargins": 0.431,
+            "grossMargins": 0.689,
+            "debtToEquity": 0.37,
+            "currentRatio": 1.32,
+            "freeCashflow": 69_200_000_000,
+            "operatingCashflow": 87_600_000_000,
+            "sector": "Technology",
+            "industry": "Software - Infrastructure",
+            "numberOfAnalystOpinions": 44,
+        },
+        "BRK-B": {
+            "symbol": "BRK-B",
+            "shortName": "Berkshire Hathaway Inc.",
+            "currency": "USD",
+            "currentPrice": 453.87,
+            "marketCap": 978_000_000_000,
+            "profitMargins": 0.188,
+            "operatingMargins": 0.214,
+            "debtToEquity": 0.26,
+            "currentRatio": 1.71,
+            "freeCashflow": 32_500_000_000,
+            "operatingCashflow": 46_800_000_000,
+            "sector": "Financial Services",
+            "industry": "Insurance - Diversified",
+            "numberOfAnalystOpinions": 9,
+        },
+    }
+
+
 @pytest.mark.asyncio
-async def test_basic_fetch():
+async def test_basic_fetch(sample_metrics):
     """Test that basics are always present."""
     print("=" * 80)
     print("TEST 1: Basic Fetch (AAPL)")
     print("=" * 80)
 
     fetcher = SmartMarketDataFetcher()
+    _mock_source_fetch(
+        fetcher,
+        ticker="AAPL",
+        yfinance=sample_metrics["AAPL"],
+        yahooquery={"regularMarketSource": "DELAYED"},
+    )
     data = await fetcher.get_financial_metrics("AAPL")
 
     print(f"\nSymbol: {data.get('symbol')}")
@@ -88,13 +194,14 @@ async def test_basic_fetch():
 
 
 @pytest.mark.asyncio
-async def test_hsbc_currency_bug():
+async def test_hsbc_currency_bug(sample_metrics):
     """Test HSBC currency bug is fixed."""
     print("\n" + "=" * 80)
     print("TEST 2: HSBC Currency Bug Fix")
     print("=" * 80)
 
     fetcher = SmartMarketDataFetcher()
+    _mock_source_fetch(fetcher, ticker="0005.HK", yfinance=sample_metrics["0005.HK"])
     data = await fetcher.get_financial_metrics("0005.HK")
 
     print(f"\nSymbol: {data.get('symbol')}")
@@ -119,7 +226,7 @@ async def test_hsbc_currency_bug():
 
 
 @pytest.mark.asyncio
-async def test_fine_grained_validation():
+async def test_fine_grained_validation(sample_metrics):
     """Test fine-grained validation."""
     print("\n" + "=" * 80)
     print("TEST 3: Fine-Grained Validation")
@@ -127,6 +234,7 @@ async def test_fine_grained_validation():
 
     fetcher = SmartMarketDataFetcher()
     validator = FineGrainedValidator()
+    _mock_source_fetch(fetcher, ticker="MSFT", yfinance=sample_metrics["MSFT"])
 
     data = await fetcher.get_financial_metrics("MSFT")
     validation = validator.validate_comprehensive(data, "MSFT")
@@ -136,13 +244,14 @@ async def test_fine_grained_validation():
 
 
 @pytest.mark.asyncio
-async def test_gap_filling():
+async def test_gap_filling(sample_metrics):
     """Test that gaps get filled from multiple sources."""
     print("\n" + "=" * 80)
     print("TEST 4: Multi-Source Gap Filling")
     print("=" * 80)
 
     fetcher = SmartMarketDataFetcher()
+    _mock_source_fetch(fetcher, ticker="BRK-B", yfinance=sample_metrics["BRK-B"])
 
     # Test with a ticker that might have sparse data
     data = await fetcher.get_financial_metrics("BRK-B")

@@ -572,7 +572,7 @@ class TestWithholdingTaxRates:
 
     def test_withholding_rates_exist(self):
         """Test that WITHHOLDING_TAX_RATES is populated."""
-        from src.toolkit import WITHHOLDING_TAX_RATES
+        from src.tools.legal import WITHHOLDING_TAX_RATES
 
         # Check key countries exist
         assert "japan" in WITHHOLDING_TAX_RATES
@@ -582,7 +582,7 @@ class TestWithholdingTaxRates:
 
     def test_known_withholding_rates(self):
         """Test known withholding rates are correct."""
-        from src.toolkit import WITHHOLDING_TAX_RATES
+        from src.tools.legal import WITHHOLDING_TAX_RATES
 
         # Japan has treaty rate of 15%
         assert WITHHOLDING_TAX_RATES["japan"] == "15%"

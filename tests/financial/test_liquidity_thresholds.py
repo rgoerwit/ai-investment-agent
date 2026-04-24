@@ -10,6 +10,8 @@ at $250k–$500k (e.g. SCL.NZ at $358k) to be labelled MARGINAL by the tool
 while the PM treated them as PASS, producing contradictory report text.
 """
 
+from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import numpy as np
@@ -17,6 +19,20 @@ import pandas as pd
 import pytest
 
 from src.liquidity_calculation_tool import calculate_liquidity_metrics
+
+
+@contextmanager
+def _patch_liquidity_fetcher(mock_hist: pd.DataFrame):
+    """Patch the liquidity tool's call-time fetcher seam."""
+    fetcher = SimpleNamespace(
+        get_historical_prices=AsyncMock(return_value=mock_hist),
+        get_financial_metrics=AsyncMock(return_value=None),
+    )
+    with patch(
+        "src.liquidity_calculation_tool._market_data_fetcher",
+        return_value=fetcher,
+    ):
+        yield fetcher
 
 
 def _mock_hist(mean_price: float, volume: int, n: int = 60) -> pd.DataFrame:
@@ -32,14 +48,7 @@ def _mock_hist(mean_price: float, volume: int, n: int = 60) -> pd.DataFrame:
 async def _run(ticker: str, mean_price: float, volume: int) -> str:
     """Invoke calculate_liquidity_metrics with mocked data sources at FX=1.0 (USD)."""
     with (
-        patch(
-            "src.liquidity_calculation_tool.market_data_fetcher.get_historical_prices",
-            return_value=_mock_hist(mean_price, volume),
-        ),
-        patch(
-            "src.liquidity_calculation_tool.market_data_fetcher.get_financial_metrics",
-            new=AsyncMock(return_value=None),
-        ),
+        _patch_liquidity_fetcher(_mock_hist(mean_price, volume)),
         patch(
             "src.liquidity_calculation_tool.get_fx_rate",
             new=AsyncMock(return_value=(1.0, "test")),

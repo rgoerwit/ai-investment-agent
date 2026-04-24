@@ -36,7 +36,7 @@ from src.memory import (
     sanitize_ticker_for_collection,
 )
 from src.token_tracker import TokenTrackingCallback, get_tracker
-from src.toolkit import toolkit
+from src.tools.registry import toolkit
 
 from .routing import _is_auditor_enabled
 from .tool_nodes import create_agent_tool_node

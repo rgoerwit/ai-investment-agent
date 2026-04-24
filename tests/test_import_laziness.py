@@ -1,7 +1,9 @@
-"""Regression tests for import-time initialization safety."""
+"""Regression tests for import-time initialization and runtime seam hygiene."""
 
 import importlib
+import importlib.util
 import sys
+from pathlib import Path
 
 
 def test_src_llms_import_does_not_construct_default_models(monkeypatch):
@@ -92,18 +94,41 @@ def test_src_data_fetcher_import_does_not_construct_singleton(monkeypatch):
     assert "lazy" in repr(fetcher_module.fetcher)
 
 
-def test_toolkit_facade_defers_market_tool_import():
-    sys.modules.pop("src.toolkit", None)
-    sys.modules.pop("src.tools.registry", None)
-    sys.modules.pop("src.tools.market", None)
+def test_runtime_code_uses_tool_registry_instead_of_removed_toolkit_facade():
+    graph_components = Path("src/graph/components.py").read_text(encoding="utf-8")
+    consultant_tools = Path("src/consultant_tools.py").read_text(encoding="utf-8")
 
-    import src.toolkit as toolkit_module
+    assert "from src.toolkit import toolkit" not in graph_components
+    assert "from src.tools.registry import toolkit" in graph_components
+    assert "from src.toolkit import get_official_filings" not in consultant_tools
 
-    assert "src.tools.market" not in sys.modules
 
-    toolkit = toolkit_module.toolkit
-    assert "src.tools.market" not in sys.modules
+def test_legacy_toolkit_facade_file_is_removed():
+    assert not Path("src/toolkit.py").exists()
 
-    market_tools = toolkit.get_market_tools()
-    assert market_tools
-    assert "src.tools.market" in sys.modules
+
+def test_tools_package_no_longer_reexports_legacy_tool_surface():
+    src = Path("src/tools/__init__.py").read_text(encoding="utf-8")
+    assert "__getattr__" not in src
+    assert "get_financial_metrics" not in src
+
+
+def test_src_package_root_is_inert():
+    src = Path("src/__init__.py").read_text(encoding="utf-8")
+    assert "toolkit" not in src
+    assert "from src." not in src
+
+
+def test_tooling_package_init_is_inert():
+    src = Path("src/tooling/__init__.py").read_text(encoding="utf-8")
+    assert "from src.tooling." not in src
+
+
+def test_portfolio_manager_cold_start_import_has_no_runtime_services_cycle():
+    spec = importlib.util.spec_from_file_location(
+        "portfolio_manager_import_test",
+        Path("scripts/portfolio_manager.py"),
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)

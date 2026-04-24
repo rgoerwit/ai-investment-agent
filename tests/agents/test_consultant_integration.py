@@ -237,14 +237,19 @@ class TestConsultantNodeExecution:
             "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
         ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
+                tool_service = Mock()
+                tool_service.execute = AsyncMock()
                 with patch(
-                    "src.agents.consultant_nodes.TOOL_SERVICE.execute", new=AsyncMock()
-                ) as exec_mock:
+                    "src.agents.consultant_nodes.get_current_tool_service",
+                    return_value=tool_service,
+                ):
                     mock_prompt = Mock()
                     mock_prompt.system_message = "You are a consultant."
                     mock_prompt.agent_name = "External Consultant"
                     mock_get_prompt.return_value = mock_prompt
-                    exec_mock.return_value = ToolResult(value="hooked-tool-result")
+                    tool_service.execute.return_value = ToolResult(
+                        value="hooked-tool-result"
+                    )
 
                     consultant_node = create_consultant_node(
                         mock_llm, "consultant", tools=[mock_tool]
@@ -266,7 +271,7 @@ class TestConsultantNodeExecution:
 
                     result = await consultant_node(state, config)
 
-        exec_mock.assert_awaited_once()
+        tool_service.execute.assert_awaited_once()
         mock_tool.ainvoke.assert_not_called()
         assert result["consultant_review"] == "CONSULTANT REVIEW: VERIFIED"
 
@@ -301,13 +306,15 @@ class TestConsultantNodeExecution:
             "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
         ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
+                tool_service = Mock()
+                tool_service.execute = AsyncMock(
+                    return_value=ToolResult(
+                        value='{"error":"invalid key","provider":"fmp","failure_kind":"auth_error"}'
+                    )
+                )
                 with patch(
-                    "src.agents.consultant_nodes.TOOL_SERVICE.execute",
-                    new=AsyncMock(
-                        return_value=ToolResult(
-                            value='{"error":"invalid key","provider":"fmp","failure_kind":"auth_error"}'
-                        )
-                    ),
+                    "src.agents.consultant_nodes.get_current_tool_service",
+                    return_value=tool_service,
                 ):
                     mock_prompt = Mock()
                     mock_prompt.system_message = "You are a consultant."
@@ -403,8 +410,11 @@ class TestConsultantNodeExecution:
             "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
         ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
+                tool_service = Mock()
+                tool_service.execute = exec_mock
                 with patch(
-                    "src.agents.consultant_nodes.TOOL_SERVICE.execute", new=exec_mock
+                    "src.agents.consultant_nodes.get_current_tool_service",
+                    return_value=tool_service,
                 ):
                     mock_prompt = Mock()
                     mock_prompt.system_message = "You are a consultant."
@@ -506,8 +516,11 @@ class TestConsultantNodeExecution:
             "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
         ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
+                tool_service = Mock()
+                tool_service.execute = exec_mock
                 with patch(
-                    "src.agents.consultant_nodes.TOOL_SERVICE.execute", new=exec_mock
+                    "src.agents.consultant_nodes.get_current_tool_service",
+                    return_value=tool_service,
                 ):
                     mock_prompt = Mock()
                     mock_prompt.system_message = "You are a consultant."
@@ -590,8 +603,11 @@ class TestConsultantNodeExecution:
             "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
         ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
+                tool_service = Mock()
+                tool_service.execute = exec_mock
                 with patch(
-                    "src.agents.consultant_nodes.TOOL_SERVICE.execute", new=exec_mock
+                    "src.agents.consultant_nodes.get_current_tool_service",
+                    return_value=tool_service,
                 ):
                     mock_prompt = Mock()
                     mock_prompt.system_message = "You are a consultant."

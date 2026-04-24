@@ -1,4 +1,8 @@
-"""Shared tool execution service for all tool-calling surfaces."""
+"""Shared tool execution service for all tool-calling surfaces.
+
+All agentic tool loops must go through ``TOOL_SERVICE`` so pre-call argument
+policy and post-call untrusted-content inspection run consistently.
+"""
 
 from __future__ import annotations
 
@@ -53,10 +57,21 @@ class ToolHook(Protocol):
 
 
 class ToolExecutionService:
-    """Execute tools through an ordered hook chain."""
+    """Execute tools through an ordered hook chain.
+
+    This is the mandatory execution plane for prompt-bound tool outputs.
+    """
 
     def __init__(self, hooks: list[ToolHook] | None = None) -> None:
         self._hooks: list[ToolHook] = list(hooks or [])
+
+    def with_hooks(self, hooks: list[ToolHook]) -> ToolExecutionService:
+        """Return a new service with the provided hook chain."""
+        return ToolExecutionService(hooks)
+
+    def with_extra_hooks(self, hooks: list[ToolHook]) -> ToolExecutionService:
+        """Return a new service with additional hooks appended."""
+        return ToolExecutionService([*self._hooks, *hooks])
 
     def set_hooks(self, hooks: list[ToolHook]) -> None:
         self._hooks = list(hooks)

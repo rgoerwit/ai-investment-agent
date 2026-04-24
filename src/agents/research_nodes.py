@@ -12,6 +12,7 @@ from src.tooling.text_boundary import format_untrusted_block
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .output_limits import cap_state_value
 from .output_validation import (
     log_output_diagnostics,
     log_truncation_diagnostic,
@@ -344,7 +345,7 @@ def create_research_manager_node(
 
             return success_artifact(
                 "investment_plan",
-                content_str,
+                cap_state_value(content_str, "investment_plan"),
                 provider=support.infer_provider_name(llm),
             )
         except Exception as exc:

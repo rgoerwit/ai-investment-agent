@@ -201,118 +201,59 @@ class TestBackendWiring:
 
     def test_python_backend_creates_heuristic_inspector(self, monkeypatch):
         from src.tooling.heuristic_inspector import HeuristicInspector
-        from src.tooling.inspection_service import INSPECTION_SERVICE
-        from src.tooling.runtime import TOOL_SERVICE
 
         self._setup_config(monkeypatch, backend="python")
-        TOOL_SERVICE.clear_hooks()
-        try:
-            from src.main import configure_content_inspection_from_config
+        from src.main import configure_content_inspection_from_config
 
-            configure_content_inspection_from_config()
-            assert isinstance(INSPECTION_SERVICE._inspector, HeuristicInspector)
-        finally:
-            TOOL_SERVICE.clear_hooks()
-            INSPECTION_SERVICE.configure(NullInspector())
+        services = configure_content_inspection_from_config()
+        assert isinstance(services.inspection_service._inspector, HeuristicInspector)
 
     def test_composite_backend_creates_escalating_inspector(self, monkeypatch):
         from src.tooling.escalating_inspector import EscalatingInspector
-        from src.tooling.inspection_service import INSPECTION_SERVICE
-        from src.tooling.runtime import TOOL_SERVICE
 
         self._setup_config(monkeypatch, backend="composite")
-        TOOL_SERVICE.clear_hooks()
-        try:
-            from src.main import configure_content_inspection_from_config
+        from src.main import configure_content_inspection_from_config
 
-            configure_content_inspection_from_config()
-            assert isinstance(INSPECTION_SERVICE._inspector, EscalatingInspector)
-        finally:
-            TOOL_SERVICE.clear_hooks()
-            INSPECTION_SERVICE.configure(NullInspector())
+        services = configure_content_inspection_from_config()
+        assert isinstance(services.inspection_service._inspector, EscalatingInspector)
 
     def test_null_backend_creates_null_inspector(self, monkeypatch):
-        from src.tooling.inspection_service import INSPECTION_SERVICE
-        from src.tooling.runtime import TOOL_SERVICE
-
         self._setup_config(monkeypatch, backend="null")
-        TOOL_SERVICE.clear_hooks()
-        try:
-            from src.main import configure_content_inspection_from_config
+        from src.main import configure_content_inspection_from_config
 
-            configure_content_inspection_from_config()
-            assert isinstance(INSPECTION_SERVICE._inspector, NullInspector)
-        finally:
-            TOOL_SERVICE.clear_hooks()
-            INSPECTION_SERVICE.configure(NullInspector())
+        services = configure_content_inspection_from_config()
+        assert isinstance(services.inspection_service._inspector, NullInspector)
 
     def test_unimplemented_backend_raises(self, monkeypatch):
-        from src.tooling.inspection_service import INSPECTION_SERVICE
-        from src.tooling.runtime import TOOL_SERVICE
-
         self._setup_config(monkeypatch, backend="http")
-        TOOL_SERVICE.clear_hooks()
-        try:
-            from src.main import configure_content_inspection_from_config
+        from src.main import configure_content_inspection_from_config
 
-            with pytest.raises(ValueError, match="is not implemented"):
-                configure_content_inspection_from_config()
-        finally:
-            TOOL_SERVICE.clear_hooks()
-            INSPECTION_SERVICE.configure(NullInspector())
+        with pytest.raises(ValueError, match="is not implemented"):
+            configure_content_inspection_from_config()
 
     def test_disabled_inspection_uses_null(self, monkeypatch):
-        from src.tooling.inspection_service import INSPECTION_SERVICE
-        from src.tooling.runtime import TOOL_SERVICE
-
         self._setup_config(monkeypatch, enabled=False)
-        TOOL_SERVICE.clear_hooks()
-        try:
-            from src.main import configure_content_inspection_from_config
+        from src.main import configure_content_inspection_from_config
 
-            configure_content_inspection_from_config()
-            assert isinstance(INSPECTION_SERVICE._inspector, NullInspector)
-        finally:
-            TOOL_SERVICE.clear_hooks()
-            INSPECTION_SERVICE.configure(NullInspector())
+        services = configure_content_inspection_from_config()
+        assert isinstance(services.inspection_service._inspector, NullInspector)
 
     def test_enabled_inspection_installs_argument_policy_hook(self, monkeypatch):
-        from src.tooling.inspection_service import INSPECTION_SERVICE
-        from src.tooling.runtime import TOOL_SERVICE
-        from src.tooling.tool_argument_policy import ToolArgumentPolicyHook
-
         self._setup_config(monkeypatch, backend="python")
-        TOOL_SERVICE.clear_hooks()
-        try:
-            from src.main import configure_content_inspection_from_config
+        from src.main import configure_content_inspection_from_config
 
-            configure_content_inspection_from_config()
-            hook_types = [type(h).__name__ for h in TOOL_SERVICE.hooks]
-            assert "ToolArgumentPolicyHook" in hook_types
-            # Argument policy hook should come BEFORE ContentInspectionHook
-            arg_idx = hook_types.index("ToolArgumentPolicyHook")
-            insp_idx = hook_types.index("ContentInspectionHook")
-            assert arg_idx < insp_idx
-        finally:
-            TOOL_SERVICE.clear_hooks()
-            INSPECTION_SERVICE.configure(NullInspector())
+        services = configure_content_inspection_from_config()
+        hook_types = [type(h).__name__ for h in services.tool_service.hooks]
+        assert "ToolArgumentPolicyHook" in hook_types
+        arg_idx = hook_types.index("ToolArgumentPolicyHook")
+        insp_idx = hook_types.index("ContentInspectionHook")
+        assert arg_idx < insp_idx
 
     def test_disabled_inspection_removes_hooks(self, monkeypatch):
-        from src.tooling.inspection_hook import ContentInspectionHook
-        from src.tooling.inspection_service import INSPECTION_SERVICE
-        from src.tooling.runtime import TOOL_SERVICE
-        from src.tooling.tool_argument_policy import ToolArgumentPolicyHook
-
-        # Pre-install hooks
-        TOOL_SERVICE.set_hooks([ToolArgumentPolicyHook(), ContentInspectionHook()])
         self._setup_config(monkeypatch, enabled=False)
-        try:
-            from src.main import configure_content_inspection_from_config
+        from src.main import configure_content_inspection_from_config
 
-            configure_content_inspection_from_config()
-            hook_types = [type(h).__name__ for h in TOOL_SERVICE.hooks]
-            assert "ContentInspectionHook" not in hook_types
-            assert "ToolArgumentPolicyHook" not in hook_types
-        finally:
-            TOOL_SERVICE.clear_hooks()
-            INSPECTION_SERVICE.configure(NullInspector())
+        services = configure_content_inspection_from_config()
+        hook_types = [type(h).__name__ for h in services.tool_service.hooks]
+        assert "ContentInspectionHook" not in hook_types
+        assert "ToolArgumentPolicyHook" not in hook_types

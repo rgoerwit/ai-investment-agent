@@ -13,7 +13,8 @@ from langchain_core.messages import ToolMessage as TM
 from langgraph.types import RunnableConfig
 
 from src.runtime_diagnostics import ArtifactStatus, failure_artifact, success_artifact
-from src.tooling.runtime import TOOL_SERVICE, ToolInvocation
+from src.runtime_services import get_current_tool_service
+from src.tooling.runtime import ToolInvocation
 
 from . import message_utils, support
 from . import runtime as agent_runtime
@@ -438,7 +439,7 @@ Provide your independent consultant review."""
                                     f"Consultant node exceeded total wall-clock timeout of {CONSULTANT_TOTAL_TIMEOUT_SECONDS:.0f}s for {ticker}"
                                 )
                             try:
-                                tool_result = await TOOL_SERVICE.execute(
+                                tool_result = await get_current_tool_service().execute(
                                     ToolInvocation(
                                         name=tool_call["name"],
                                         args=tool_call["args"],
@@ -722,7 +723,7 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
                     tool_call_id = tool_call.get("id", tool_call["name"])
                     if tool_fn:
                         try:
-                            tool_result = await TOOL_SERVICE.execute(
+                            tool_result = await get_current_tool_service().execute(
                                 ToolInvocation(
                                     name=tool_call["name"],
                                     args=tool_call["args"],
@@ -940,7 +941,7 @@ Perform a forensic audit using your tools."""
                     tool_call_id = tool_call.get("id", tool_call["name"])
                     if tool_fn:
                         try:
-                            tool_result = await TOOL_SERVICE.execute(
+                            tool_result = await get_current_tool_service().execute(
                                 ToolInvocation(
                                     name=tool_call["name"],
                                     args=tool_call["args"],

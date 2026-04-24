@@ -25,6 +25,7 @@ from langchain_google_genai import (
 import src.config as config_module
 from src.config import config
 from src.llm_budgets import GenerationBudget, get_generation_budget
+from src.runtime_services import get_current_provider_runtime
 
 logger = structlog.get_logger(__name__)
 _logged_model_init_configs: set[tuple[str, str, int, int, str | None]] = set()
@@ -114,6 +115,12 @@ def _create_rate_limiter_from_rpm(rpm: int) -> InMemoryRateLimiter:
     )
 
 
+def create_process_rate_limiter(rpm: int | None = None) -> InMemoryRateLimiter:
+    """Create an owned rate limiter for a long-lived process/runtime."""
+    effective_rpm = rpm if rpm is not None else config_module.config.gemini_rpm_limit
+    return _create_rate_limiter_from_rpm(effective_rpm)
+
+
 def _reset_init_log_cache_for_tests() -> None:
     """Reset one-time init logging state for tests."""
     _logged_model_init_configs.clear()
@@ -143,11 +150,18 @@ def _log_model_init_once(
 class _LazyRateLimiterProxy(BaseRateLimiter):
     """Lazily construct the shared Gemini rate limiter on first use."""
 
-    def __init__(self, factory: Callable[[], InMemoryRateLimiter]):
+    def __init__(self, factory: Callable[[], BaseRateLimiter]):
         self._factory = factory
-        self._instance: InMemoryRateLimiter | None = None
+        self._instance: BaseRateLimiter | None = None
 
-    def _get_instance(self) -> InMemoryRateLimiter:
+    def _get_instance(self) -> BaseRateLimiter:
+        provider_runtime = get_current_provider_runtime()
+        if (
+            provider_runtime is not None
+            and provider_runtime.rate_limiter is not None
+            and provider_runtime.rate_limiter is not self
+        ):
+            return provider_runtime.rate_limiter
         if self._instance is None:
             self._instance = self._factory()
         return self._instance

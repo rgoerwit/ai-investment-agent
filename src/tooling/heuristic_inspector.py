@@ -1,4 +1,4 @@
-"""Pattern-based prompt-injection detector.
+"""Pattern-based context-pollution detector.
 
 Implements ``ContentInspector`` for the ``"python"`` backend config slot.
 Detects common injection signals — override phrases, role-play coercion,
@@ -7,7 +7,9 @@ scored pattern families.
 
 Heuristics are a fast, zero-cost first pass.  For semantic coverage
 (paraphrasing, multilingual attacks, context-dependent injection) use
-``EscalatingInspector`` which chains this with an LLM judge.
+``EscalatingInspector`` which chains this with an LLM judge. Structured
+sources such as filings and financial APIs are treated more lightly, but
+their free-text fields are still not trusted.
 """
 
 from __future__ import annotations
@@ -37,7 +39,9 @@ _ThreatType = Literal[
     "delimiter_breakout",
     "hidden_markup",
     "encoded_payload",
+    "exfiltration",
     "control_chars",
+    "context_bomb",
 ]
 
 
@@ -92,6 +96,16 @@ _SIGNALS: list[_Signal] = [
     ),
     _Signal(re.compile(r"you\s+are\s+now\s+(a|an|the)\b", re.I), 2.0, "override"),
     _Signal(re.compile(r"^system\s*:", re.I | re.M), 2.0, "override"),
+    _Signal(
+        re.compile(r"(?:system|admin)\s+(?:notification|alert|message)\s*:", re.I),
+        2.0,
+        "override",
+    ),
+    _Signal(
+        re.compile(r"user\s+has\s+(?:authorized|approved|confirmed)\b", re.I),
+        2.0,
+        "override",
+    ),
     # --- Role-play coercion ---
     _Signal(re.compile(r"pretend\s+(that\s+)?you\s+are\b", re.I), 2.0, "role_play"),
     _Signal(
@@ -147,6 +161,52 @@ _SIGNALS: list[_Signal] = [
         re.compile(r"(?:base64|eval|decode)\s*[\(:]", re.I), 1.5, "encoded_payload"
     ),
     _Signal(re.compile(r"(?:atob|btoa)\s*\(", re.I), 1.5, "encoded_payload"),
+    # --- Exfiltration / persistence / looping instructions ---
+    _Signal(
+        re.compile(
+            r"(?:send|post|upload|transmit)\s+(?:the\s+)?(?:data|results|output|report)\s+to\b",
+            re.I,
+        ),
+        2.0,
+        "exfiltration",
+    ),
+    _Signal(
+        re.compile(
+            r"(?:include|append|add)\s+(?:the\s+)?(?:system\s+prompt|api\s+key|credentials?|token)\b",
+            re.I,
+        ),
+        3.0,
+        "exfiltration",
+    ),
+    _Signal(
+        re.compile(
+            r"(?:reveal|output|print|expose)\s+(?:the\s+)?(?:system\s+prompt|api\s+key|credentials?|token)\b",
+            re.I,
+        ),
+        3.0,
+        "exfiltration",
+    ),
+    _Signal(
+        re.compile(
+            r"(?:save|store|remember|memorize)\s+(?:this|the\s+following)\s+(?:for\s+)?(?:future|later|next)\b",
+            re.I,
+        ),
+        2.0,
+        "override",
+    ),
+    _Signal(
+        re.compile(
+            r"(?:keep|continue)\s+(?:calling|searching|fetching|querying)\s+(?:until|for)\b",
+            re.I,
+        ),
+        1.5,
+        "override",
+    ),
+    _Signal(
+        re.compile(r"[\u200b-\u200f\u2028-\u202f\u2060-\u206f\ufeff]"),
+        1.5,
+        "hidden_markup",
+    ),
 ]
 
 # Delimiter tags that can be safely stripped.
@@ -160,6 +220,7 @@ _STRIPPABLE_DELIMITERS: list[re.Pattern[str]] = [
 # Threshold for invisible / control character density (fraction of total).
 _CONTROL_CHAR_DENSITY_THRESHOLD = 0.03
 _CONTROL_CHAR_MIN_LENGTH = 50  # skip short strings
+_CONTEXT_BOMB_THRESHOLD = 15_000
 
 # Source kinds that receive lighter treatment (lower risk, structured data).
 _LIGHT_TREATMENT_SOURCES: frozenset[SourceKind] = frozenset(
@@ -189,6 +250,44 @@ def _detect_signals(text: str) -> list[_Hit]:
         if m:
             hits.append(_Hit(signal=sig, match_text=m.group()[:120]))
     return hits
+
+
+def _detect_context_bomb(
+    text: str,
+    source_kind: SourceKind,
+    metadata: dict[str, object] | None,
+) -> _Hit | None:
+    """Flag oversized low-value payloads before they dominate prompt budget."""
+    if source_kind in _LIGHT_TREATMENT_SOURCES:
+        return None
+
+    original_length = 0
+    if metadata:
+        raw_original_length = metadata.get("original_length")
+        if isinstance(raw_original_length, int):
+            original_length = raw_original_length
+
+    observed_length = max(len(text), original_length)
+    if observed_length <= _CONTEXT_BOMB_THRESHOLD:
+        return None
+
+    unique_chars = len(set(text))
+    if unique_chars >= 20:
+        return None
+
+    tokens = re.findall(r"\S+", text[:4000])
+    unique_tokens = len(set(tokens))
+    if unique_tokens > 3:
+        return None
+
+    return _Hit(
+        signal=_Signal(re.compile(r"$^"), 2.0, "context_bomb"),
+        match_text=(
+            "low-entropy oversized payload "
+            f"({observed_length} chars, {unique_chars} unique chars, "
+            f"{unique_tokens} unique tokens)"
+        ),
+    )
 
 
 def _control_char_density(text: str) -> float:
@@ -251,6 +350,13 @@ class HeuristicInspector:
 
         # --- Pattern matching ---
         hits = _detect_signals(text)
+        context_bomb_hit = _detect_context_bomb(
+            text,
+            envelope.source_kind,
+            envelope.metadata,
+        )
+        if context_bomb_hit is not None:
+            hits.append(context_bomb_hit)
 
         if not hits and not cc_hit:
             return InspectionDecision(action="allow", threat_level="safe")

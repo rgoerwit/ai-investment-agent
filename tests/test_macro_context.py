@@ -302,6 +302,47 @@ class TestGetMacroContext:
         )
 
     @pytest.mark.asyncio
+    async def test_cache_hit_blocked_by_inspection_returns_failed(self, tmp_path):
+        inspection_service = SimpleNamespace(
+            check=AsyncMock(return_value="TOOL_BLOCKED: suspicious cached context")
+        )
+
+        with (
+            patch("src.macro_context._CACHE_DIR", tmp_path),
+            patch("src.macro_context._compute_fingerprint", return_value="fp123"),
+            patch(
+                "src.macro_context.get_current_inspection_service",
+                return_value=inspection_service,
+            ),
+            patch(
+                "src.macro_context._fetch_macro_raw", new_callable=AsyncMock
+            ) as fetch,
+            patch("src.macro_context._summarize", new_callable=AsyncMock) as summarize,
+            patch("src.macro_context.logger") as mock_logger,
+        ):
+            generated_at = _write_cache(
+                "JAPAN",
+                trade_date="2026-04-18",
+                fingerprint="fp123",
+                report="cached brief",
+                status="generated",
+            )
+            result = await get_macro_context("7203.T", "2026-04-18")
+
+        assert result.status == "failed"
+        assert result.report == ""
+        assert result.generated_at == generated_at
+        fetch.assert_not_awaited()
+        summarize.assert_not_awaited()
+        mock_logger.warning.assert_any_call(
+            "macro_context_cache_blocked",
+            ticker="7203.T",
+            region="JAPAN",
+            cache_path=str(tmp_path / "JAPAN.json"),
+            blocked_reason="suspicious cached context",
+        )
+
+    @pytest.mark.asyncio
     async def test_generated_logs_fallback_and_cache_path(self, tmp_path):
         with (
             patch("src.macro_context._CACHE_DIR", tmp_path),

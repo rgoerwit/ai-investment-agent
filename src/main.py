@@ -14,6 +14,7 @@ import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -480,18 +481,28 @@ def run_provider_preflight() -> dict[str, dict[str, str]]:
     return results
 
 
-def configure_tool_audit_logging(enabled: bool) -> None:
-    """Install or remove verbose tool audit hooks for this CLI run."""
-    from src.tooling.audit import LoggingToolAuditHook
-    from src.tooling.runtime import TOOL_SERVICE
+def build_runtime_services_from_config(
+    *,
+    enable_tool_audit: bool,
+    provider_runtime=None,
+):
+    """Build runtime-scoped services for a CLI/worker/app process."""
+    from src.runtime_services import build_runtime_services_from_config as _build
 
-    hooks = [h for h in TOOL_SERVICE.hooks if not isinstance(h, LoggingToolAuditHook)]
-    if enabled:
-        hooks.insert(0, LoggingToolAuditHook())
-        TOOL_SERVICE.set_hooks(hooks)
-        logger.info("tool_audit_logging_enabled")
-    else:
-        TOOL_SERVICE.set_hooks(hooks)
+    return _build(
+        config,
+        enable_tool_audit=enable_tool_audit,
+        provider_runtime=provider_runtime,
+        logger=logger,
+    )
+
+
+def configure_content_inspection_from_config(*, provider_runtime=None):
+    """Build runtime services with content inspection wired from config."""
+    return build_runtime_services_from_config(
+        enable_tool_audit=False,
+        provider_runtime=provider_runtime,
+    )
 
 
 def _resolve_langfuse_session_id(default_session_id: str) -> str:
@@ -534,78 +545,10 @@ def _build_analysis_trace_metadata(
     }
 
 
-def configure_content_inspection_from_config() -> None:
-    """Wire up content inspection from config settings.
-
-    Called independently of logging configuration — security inspection must
-    not be gated on CLI verbosity flags.
-    """
-    from src.tooling.inspection_hook import ContentInspectionHook
-    from src.tooling.inspection_service import configure_content_inspection
-    from src.tooling.inspector import NullInspector
-    from src.tooling.runtime import TOOL_SERVICE
-    from src.tooling.tool_argument_policy import ToolArgumentPolicyHook
-
-    hooks = [
-        h
-        for h in TOOL_SERVICE.hooks
-        if not isinstance(h, ContentInspectionHook | ToolArgumentPolicyHook)
-    ]
-
-    if not config.untrusted_content_inspection_enabled:
-        TOOL_SERVICE.set_hooks(hooks)
-        configure_content_inspection(
-            NullInspector(), mode="warn", fail_policy="fail_open"
-        )
-        return
-
-    mode = config.untrusted_content_inspection_mode
-    fail_policy = config.untrusted_content_fail_policy
-    backend_name = config.untrusted_content_backend
-
-    if backend_name == "null" or not backend_name:
-        inspector = NullInspector()
-    elif backend_name == "python":
-        from src.tooling.heuristic_inspector import HeuristicInspector
-
-        inspector = HeuristicInspector()
-    elif backend_name == "composite":
-        from src.tooling.escalating_inspector import EscalatingInspector
-        from src.tooling.heuristic_inspector import HeuristicInspector
-        from src.tooling.llm_judge_inspector import LLMJudgeInspector
-
-        # Composite stays threshold-driven by default; hot-path "always judge"
-        # sources must be opted in explicitly so rollout cost is predictable.
-        inspector = EscalatingInspector(
-            heuristic=HeuristicInspector(),
-            judge=LLMJudgeInspector(),
-        )
-    else:
-        raise ValueError(
-            f"UNTRUSTED_CONTENT_BACKEND={backend_name!r} is not implemented. "
-            "Supported: null, python, composite."
-        )
-
-    configure_content_inspection(inspector, mode=mode, fail_policy=fail_policy)
-    # Argument policy is a separate pre-call guard; content inspection remains
-    # the post-call ingress filter for retrieved content.
-    arg_policy_mode = "block" if mode == "block" else "warn"
-    hooks.append(ToolArgumentPolicyHook(mode=arg_policy_mode))
-    hooks.append(ContentInspectionHook())
-    TOOL_SERVICE.set_hooks(hooks)
-    logger.info(
-        "content_inspection_enabled",
-        mode=mode,
-        fail_policy=fail_policy,
-        backend=backend_name,
-    )
-
-
 def configure_cli_logging(args) -> dict[str, dict[str, str]]:
     """Configure CLI logging without globally enabling dependency debug output."""
     mode = _cli_logging_mode(args)
     if mode in {"quiet", "brief"}:
-        configure_tool_audit_logging(False)
         suppress_all_logging()
         return {}
 
@@ -623,7 +566,6 @@ def configure_cli_logging(args) -> dict[str, dict[str, str]]:
             logging.getLogger(name).setLevel(logging.DEBUG)
 
     enable_diagnostics = mode in {"verbose", "debug"}
-    configure_tool_audit_logging(enable_diagnostics)
     return run_provider_preflight() if enable_diagnostics else {}
 
 
@@ -1416,6 +1358,58 @@ async def _fetch_market_context(ticker: str, trade_date: str) -> str:
     return ""
 
 
+async def _prefetch_macro_context(
+    ticker: str,
+    trade_date: str,
+    *,
+    callbacks: list[Any] | None = None,
+) -> dict[str, Any]:
+    """Load macro context with a deterministic failed fallback."""
+    default_result = {
+        "report": "",
+        "region": "GLOBAL",
+        "status": "failed",
+        "generated_at": None,
+        "llm_invoked": False,
+        "prompt_used": None,
+    }
+
+    try:
+        from src.macro_context import get_macro_context
+
+        macro_context = await get_macro_context(
+            ticker,
+            trade_date,
+            callbacks=callbacks,
+        )
+        result = {
+            "report": macro_context.report,
+            "region": macro_context.region,
+            "status": macro_context.status,
+            "generated_at": macro_context.generated_at,
+            "llm_invoked": macro_context.llm_invoked,
+            "prompt_used": macro_context.prompt_used,
+        }
+        logger.info(
+            "macro_context_prefetch_complete",
+            ticker=ticker,
+            trade_date=trade_date,
+            region=result["region"],
+            status=result["status"],
+            llm_invoked=result["llm_invoked"],
+            generated_at=result["generated_at"],
+            prompt_recorded=bool(result["prompt_used"]),
+        )
+        return result
+    except Exception as exc:
+        logger.warning(
+            "macro_context_prefetch_failed",
+            ticker=ticker,
+            error=str(exc),
+        )
+        return default_result
+
+
 async def run_analysis(
     ticker: str,
     quick_mode: bool,
@@ -1430,6 +1424,7 @@ async def run_analysis(
     session_id: str | None = None,
     tracing_callbacks: list[Any] | None = None,
     tracing_metadata: dict[str, Any] | None = None,
+    runtime_services: Any | None = None,
 ) -> dict | None:
     """Run the multi-agent analysis workflow.
 
@@ -1447,246 +1442,227 @@ async def run_analysis(
 
         from src.agents import AgentState, InvestDebateState, RiskDebateState
         from src.graph import TradingContext, create_trading_graph
+        from src.runtime_services import use_runtime_services
         from src.token_tracker import get_tracker
 
-        # Reset token tracker for fresh analysis
-        tracker = get_tracker()
-        tracker.reset()
+        with (
+            use_runtime_services(runtime_services)
+            if runtime_services
+            else nullcontext()
+        ):
+            # Reset token tracker for fresh analysis
+            tracker = get_tracker()
+            tracker.reset()
 
-        logger.info("analysis_starting", ticker=ticker, quick_mode=quick_mode)
+            logger.info("analysis_starting", ticker=ticker, quick_mode=quick_mode)
 
-        # CRITICAL FIX: Enforce real-world date to prevent "Time Travel" hallucinations
-        # This overrides potentially stale system prompts or environment defaults
-        real_date = datetime.now().strftime("%Y-%m-%d")
+            # CRITICAL FIX: Enforce real-world date to prevent "Time Travel" hallucinations
+            # This overrides potentially stale system prompts or environment defaults
+            real_date = datetime.now().strftime("%Y-%m-%d")
 
-        # CRITICAL FIX: Fetch and verify company name BEFORE graph execution
-        # Multi-source resolution prevents identity hallucination when yfinance fails
-        # (e.g., delisted tickers like 2154.HK where agents guess different companies)
-        from src.ticker_utils import (
-            _company_name_lookup_candidates,
-            get_ticker_info,
-            resolve_company_name,
-        )
-
-        name_result = await resolve_company_name(ticker)
-        company_name = name_result.name
-
-        if not name_result.is_resolved:
-            logger.warning(
-                "company_name_unresolved_at_startup",
-                ticker=ticker,
-                requested_ticker=ticker,
-                lookup_candidates=[
-                    symbol
-                    for symbol, _strategy in _company_name_lookup_candidates(ticker)
-                ],
-                message="No source could resolve company name — LLM hallucination risk",
+            # CRITICAL FIX: Fetch and verify company name BEFORE graph execution
+            # Multi-source resolution prevents identity hallucination when yfinance fails
+            # (e.g., delisted tickers like 2154.HK where agents guess different companies)
+            from src.ticker_utils import (
+                _company_name_lookup_candidates,
+                get_ticker_info,
+                resolve_company_name,
             )
 
-        # Fetch benchmark context once (non-blocking) before graph starts.
-        # Prepended to the HumanMessage so every agent receives it as session context.
-        market_context = await _fetch_market_context(ticker, real_date)
-        # The macro brief remains advisory News Analyst context, but its LLM call
-        # should still flow through the same callback-based cost/tracing surface.
-        macro_context_report = ""
-        macro_context_region = "GLOBAL"
-        macro_context_status = "failed"
-        macro_context_generated_at = None
-        macro_context_llm_invoked = False
-        macro_context_prompt_used = None
-        try:
-            from src.macro_context import get_macro_context
+            name_result = await resolve_company_name(ticker)
+            company_name = name_result.name
 
-            macro_context = await get_macro_context(
+            if not name_result.is_resolved:
+                logger.warning(
+                    "company_name_unresolved_at_startup",
+                    ticker=ticker,
+                    requested_ticker=ticker,
+                    lookup_candidates=[
+                        symbol
+                        for symbol, _strategy in _company_name_lookup_candidates(ticker)
+                    ],
+                    message="No source could resolve company name — LLM hallucination risk",
+                )
+
+            # Fetch benchmark context once (non-blocking) before graph starts.
+            # Prepended to the HumanMessage so every agent receives it as session context.
+            market_context = await _fetch_market_context(ticker, real_date)
+            # The macro brief remains advisory News Analyst context, but its LLM call
+            # should still flow through the same callback-based cost/tracing surface.
+            macro_context = await _prefetch_macro_context(
                 ticker,
                 real_date,
                 callbacks=tracing_callbacks,
             )
-            macro_context_report = macro_context.report
-            macro_context_region = macro_context.region
-            macro_context_status = macro_context.status
-            macro_context_generated_at = macro_context.generated_at
-            macro_context_llm_invoked = macro_context.llm_invoked
-            macro_context_prompt_used = macro_context.prompt_used
-            logger.info(
-                "macro_context_prefetch_complete",
-                ticker=ticker,
-                trade_date=real_date,
-                region=macro_context_region,
-                status=macro_context_status,
-                llm_invoked=macro_context_llm_invoked,
-                generated_at=macro_context_generated_at,
-                prompt_recorded=bool(macro_context_prompt_used),
-            )
-        except Exception as exc:
-            logger.warning(
-                "macro_context_prefetch_failed",
-                ticker=ticker,
-                error=str(exc),
-            )
+            macro_context_report = macro_context["report"]
+            macro_context_region = macro_context["region"]
+            macro_context_status = macro_context["status"]
+            macro_context_generated_at = macro_context["generated_at"]
+            macro_context_llm_invoked = macro_context["llm_invoked"]
+            macro_context_prompt_used = macro_context["prompt_used"]
 
-        session_id = _resolve_langfuse_session_id(
-            session_id or f"{ticker}-{real_date}-{uuid.uuid4().hex[:8]}"
-        )
-        if baseline_capture:
-            baseline_capture.start_run(
-                ticker=ticker,
-                trade_date=real_date,
-                args=capture_args
-                or argparse.Namespace(
+            session_id = _resolve_langfuse_session_id(
+                session_id or f"{ticker}-{real_date}-{uuid.uuid4().hex[:8]}"
+            )
+            if baseline_capture:
+                baseline_capture.start_run(
                     ticker=ticker,
-                    quick=quick_mode,
-                    strict=strict_mode,
-                    no_memory=not config.enable_memory,
-                    capture_baseline=True,
+                    trade_date=real_date,
+                    args=capture_args
+                    or argparse.Namespace(
+                        ticker=ticker,
+                        quick=quick_mode,
+                        strict=strict_mode,
+                        no_memory=not config.enable_memory,
+                        capture_baseline=True,
+                    ),
+                    session_id=session_id,
+                )
+
+            graph = create_trading_graph(
+                ticker=ticker,  # BUG FIX #1: Pass ticker for isolation
+                cleanup_previous=True,  # BUG FIX #1: Cleanup to prevent contamination
+                max_debate_rounds=1 if quick_mode else 2,
+                max_risk_discuss_rounds=1,
+                enable_memory=config.enable_memory,
+                recursion_limit=100,
+                quick_mode=quick_mode,  # Pass quick_mode for consultant LLM selection
+                strict_mode=strict_mode,  # Pass strict_mode for quality gates
+                # Chart generation (post-PM)
+                chart_format=chart_format,
+                transparent_charts=transparent_charts,
+                image_dir=image_dir,
+                skip_charts=skip_charts,
+                baseline_capture=baseline_capture,
+                node_observer=node_observer,
+            )
+
+            _tinfo = get_ticker_info(ticker)
+            _exch = _tinfo.get("exchange_name", "")
+            _exch_note = (
+                f" [{_exch}]"
+                if _exch and _exch not in ("Unknown", "US Exchange (assumed)")
+                else ""
+            )
+            _base_msg = f"Analyze {ticker}{_exch_note} ({company_name}) for investment decision. Current Date: {real_date}."
+            if market_context:
+                _base_msg += f" {market_context}"
+            initial_state = AgentState(
+                messages=[HumanMessage(content=_base_msg)],
+                company_of_interest=ticker,
+                company_name=company_name,  # ADDED: Anchor verified company name in state
+                company_name_resolved=name_result.is_resolved,
+                trade_date=real_date,
+                sender="user",
+                market_report="",
+                sentiment_report="",
+                news_report="",
+                raw_fundamentals_data="",
+                foreign_language_report="",
+                fundamentals_report="",
+                investment_debate_state=InvestDebateState(
+                    bull_round1="",
+                    bear_round1="",
+                    bull_round2="",
+                    bear_round2="",
+                    current_round=1,
+                    bull_history="",
+                    bear_history="",
+                    history="",
+                    current_response="",
+                    judge_decision="",
+                    count=0,
                 ),
-                session_id=session_id,
+                investment_plan="",
+                trader_investment_plan="",
+                risk_debate_state=RiskDebateState(
+                    latest_speaker="",
+                    current_risky_response="",
+                    current_safe_response="",
+                    current_neutral_response="",
+                ),
+                final_trade_decision="",
+                tools_called={},
+                prompts_used={},
+                artifact_statuses={},
+                red_flags=[],
+                pre_screening_result="",
+                legal_report="",
+                auditor_report="",
+                value_trap_report="",
+                macro_context_injected_into_news=False,
             )
 
-        graph = create_trading_graph(
-            ticker=ticker,  # BUG FIX #1: Pass ticker for isolation
-            cleanup_previous=True,  # BUG FIX #1: Cleanup to prevent contamination
-            max_debate_rounds=1 if quick_mode else 2,
-            max_risk_discuss_rounds=1,
-            enable_memory=config.enable_memory,
-            recursion_limit=100,
-            quick_mode=quick_mode,  # Pass quick_mode for consultant LLM selection
-            strict_mode=strict_mode,  # Pass strict_mode for quality gates
-            # Chart generation (post-PM)
-            chart_format=chart_format,
-            transparent_charts=transparent_charts,
-            image_dir=image_dir,
-            skip_charts=skip_charts,
-            baseline_capture=baseline_capture,
-            node_observer=node_observer,
-        )
-
-        _tinfo = get_ticker_info(ticker)
-        _exch = _tinfo.get("exchange_name", "")
-        _exch_note = (
-            f" [{_exch}]"
-            if _exch and _exch not in ("Unknown", "US Exchange (assumed)")
-            else ""
-        )
-        _base_msg = f"Analyze {ticker}{_exch_note} ({company_name}) for investment decision. Current Date: {real_date}."
-        if market_context:
-            _base_msg += f" {market_context}"
-        initial_state = AgentState(
-            messages=[HumanMessage(content=_base_msg)],
-            company_of_interest=ticker,
-            company_name=company_name,  # ADDED: Anchor verified company name in state
-            company_name_resolved=name_result.is_resolved,
-            trade_date=real_date,
-            sender="user",
-            market_report="",
-            sentiment_report="",
-            news_report="",
-            raw_fundamentals_data="",
-            foreign_language_report="",
-            fundamentals_report="",
-            investment_debate_state=InvestDebateState(
-                bull_round1="",
-                bear_round1="",
-                bull_round2="",
-                bear_round2="",
-                current_round=1,
-                bull_history="",
-                bear_history="",
-                history="",
-                current_response="",
-                judge_decision="",
-                count=0,
-            ),
-            investment_plan="",
-            trader_investment_plan="",
-            risk_debate_state=RiskDebateState(
-                latest_speaker="",
-                current_risky_response="",
-                current_safe_response="",
-                current_neutral_response="",
-            ),
-            final_trade_decision="",
-            tools_called={},
-            prompts_used={},
-            artifact_statuses={},
-            red_flags=[],
-            pre_screening_result="",
-            legal_report="",
-            auditor_report="",
-            value_trap_report="",
-            macro_context_injected_into_news=False,
-        )
-
-        context = TradingContext(
-            ticker=ticker,
-            trade_date=real_date,
-            quick_mode=quick_mode,
-            enable_memory=config.enable_memory,
-            max_debate_rounds=1 if quick_mode else 2,
-            max_risk_rounds=1,
-            macro_context_report=macro_context_report,
-            macro_context_region=macro_context_region,
-            macro_context_status=macro_context_status,
-        )
-
-        logger.info(
-            "multi_agent_analysis_starting", ticker=ticker, trade_date=real_date
-        )
-
-        tags = _build_analysis_trace_tags(quick_mode)
-        graph_metadata = (
-            dict(tracing_metadata)
-            if tracing_metadata is not None
-            else _build_analysis_trace_metadata(
+            context = TradingContext(
                 ticker=ticker,
-                session_id=session_id,
+                trade_date=real_date,
                 quick_mode=quick_mode,
+                enable_memory=config.enable_memory,
+                max_debate_rounds=1 if quick_mode else 2,
+                max_risk_rounds=1,
+                macro_context_report=macro_context_report,
+                macro_context_region=macro_context_region,
+                macro_context_status=macro_context_status,
             )
-        )
 
-        capture_token = None
-        if baseline_capture:
-            capture_token = set_active_capture_manager(baseline_capture)
-
-        try:
-            result = await graph.ainvoke(
-                initial_state,
-                config={
-                    "recursion_limit": 100,
-                    "configurable": {"context": context},
-                    "callbacks": tracing_callbacks or [],
-                    "tags": tags,
-                    "metadata": graph_metadata,
-                },
+            logger.info(
+                "multi_agent_analysis_starting", ticker=ticker, trade_date=real_date
             )
-        finally:
-            if capture_token is not None:
-                reset_active_capture_manager(capture_token)
 
-        logger.info("analysis_completed", ticker=ticker)
-
-        # Log token usage summary
-        from src.token_tracker import get_tracker
-
-        tracker = get_tracker()
-        tracker.print_summary()
-
-        if isinstance(result, dict):
-            result["macro_context_report"] = macro_context_report
-            result["macro_context_region"] = macro_context_region
-            result["macro_context_status"] = macro_context_status
-            result["macro_context_generated_at"] = macro_context_generated_at
-            result["macro_context_llm_invoked"] = macro_context_llm_invoked
-            result["macro_context_injected_into_news"] = bool(
-                result.get("macro_context_injected_into_news", False)
+            tags = _build_analysis_trace_tags(quick_mode)
+            graph_metadata = (
+                dict(tracing_metadata)
+                if tracing_metadata is not None
+                else _build_analysis_trace_metadata(
+                    ticker=ticker,
+                    session_id=session_id,
+                    quick_mode=quick_mode,
+                )
             )
-            if macro_context_llm_invoked and macro_context_prompt_used:
-                prompts_used = dict(result.get("prompts_used", {}) or {})
-                prompts_used["macro_context_analyst"] = macro_context_prompt_used
-                result["prompts_used"] = prompts_used
-            result["analysis_validity"] = build_analysis_validity(result)
 
-        return result
+            capture_token = None
+            if baseline_capture:
+                capture_token = set_active_capture_manager(baseline_capture)
+
+            try:
+                result = await graph.ainvoke(
+                    initial_state,
+                    config={
+                        "recursion_limit": 100,
+                        "configurable": {"context": context},
+                        "callbacks": tracing_callbacks or [],
+                        "tags": tags,
+                        "metadata": graph_metadata,
+                    },
+                )
+            finally:
+                if capture_token is not None:
+                    reset_active_capture_manager(capture_token)
+
+            logger.info("analysis_completed", ticker=ticker)
+
+            # Log token usage summary
+            from src.token_tracker import get_tracker
+
+            tracker = get_tracker()
+            tracker.print_summary()
+
+            if isinstance(result, dict):
+                result["macro_context_report"] = macro_context_report
+                result["macro_context_region"] = macro_context_region
+                result["macro_context_status"] = macro_context_status
+                result["macro_context_generated_at"] = macro_context_generated_at
+                result["macro_context_llm_invoked"] = macro_context_llm_invoked
+                result["macro_context_injected_into_news"] = bool(
+                    result.get("macro_context_injected_into_news", False)
+                )
+                if macro_context_llm_invoked and macro_context_prompt_used:
+                    prompts_used = dict(result.get("prompts_used", {}) or {})
+                    prompts_used["macro_context_analyst"] = macro_context_prompt_used
+                    result["prompts_used"] = prompts_used
+                result["analysis_validity"] = build_analysis_validity(result)
+
+            return result
 
     except Exception as e:
         if baseline_capture:
@@ -1766,12 +1742,13 @@ def _resolve_output_targets(args: argparse.Namespace) -> OutputTargets:
 
 def _setup_runtime(
     args: argparse.Namespace, output_targets: OutputTargets
-) -> dict[str, dict[str, str]]:
+) -> tuple[dict[str, dict[str, str]], Any]:
     """Configure logging, runtime paths, and environment validation."""
     _enable_quiet_runtime_if_needed(args)
     config.images_dir = output_targets.image_dir
 
     provider_preflight = configure_cli_logging(args)
+    enable_tool_audit = _cli_logging_mode(args) in {"verbose", "debug"}
 
     if (
         output_targets.skip_charts
@@ -1810,7 +1787,9 @@ def _setup_runtime(
 
     # Content inspection is configured independently of logging verbosity.
     try:
-        configure_content_inspection_from_config()
+        runtime_services = build_runtime_services_from_config(
+            enable_tool_audit=enable_tool_audit,
+        )
     except ValueError as exc:
         if args.quiet or args.brief:
             print(f"# Configuration Error\n\n{str(exc)}")
@@ -1818,7 +1797,7 @@ def _setup_runtime(
             console.print(f"\n[bold red]Configuration Error:[/bold red] {str(exc)}\n")
         raise SystemExit(1) from exc
 
-    return provider_preflight
+    return provider_preflight, runtime_services
 
 
 async def _run_retrospective_only(args: argparse.Namespace) -> int:
@@ -1986,40 +1965,32 @@ async def _execute_analysis(
     output_targets: OutputTargets,
     baseline_capture: BaselineCaptureManager | None = None,
     *,
+    runtime_services: Any,
     session_id: str | None = None,
     tracing_callbacks: list[Any] | None = None,
     tracing_metadata: dict[str, Any] | None = None,
 ) -> dict | None:
     """Run the analysis graph for the current CLI request."""
-    capture_hook = None
-    original_hooks = None
+    scoped_runtime_services = runtime_services
     if baseline_capture:
-        from src.tooling.runtime import TOOL_SERVICE
-
-        original_hooks = TOOL_SERVICE.hooks
         capture_hook = baseline_capture.make_tool_hook()
-        TOOL_SERVICE.set_hooks([*original_hooks, capture_hook])
+        scoped_runtime_services = runtime_services.with_extra_tool_hooks([capture_hook])
 
-    try:
-        return await run_analysis(
-            args.ticker,
-            args.quick,
-            strict_mode=args.strict,
-            chart_format="svg" if args.svg else "png",
-            transparent_charts=args.transparent,
-            image_dir=output_targets.image_dir,
-            skip_charts=output_targets.skip_charts,
-            baseline_capture=baseline_capture,
-            capture_args=args,
-            session_id=session_id,
-            tracing_callbacks=tracing_callbacks,
-            tracing_metadata=tracing_metadata,
-        )
-    finally:
-        if baseline_capture and original_hooks is not None:
-            from src.tooling.runtime import TOOL_SERVICE
-
-            TOOL_SERVICE.set_hooks(original_hooks)
+    return await run_analysis(
+        args.ticker,
+        args.quick,
+        strict_mode=args.strict,
+        chart_format="svg" if args.svg else "png",
+        transparent_charts=args.transparent,
+        image_dir=output_targets.image_dir,
+        skip_charts=output_targets.skip_charts,
+        baseline_capture=baseline_capture,
+        capture_args=args,
+        session_id=session_id,
+        tracing_callbacks=tracing_callbacks,
+        tracing_metadata=tracing_metadata,
+        runtime_services=scoped_runtime_services,
+    )
 
 
 def _create_baseline_capture_manager(
@@ -2430,7 +2401,7 @@ async def run_with_args(
         _apply_runtime_overrides(args)
         _validate_cli_args(args)
         output_targets = _resolve_output_targets(args)
-        provider_preflight = _setup_runtime(args, output_targets)
+        provider_preflight, runtime_services = _setup_runtime(args, output_targets)
         baseline_capture = _create_baseline_capture_manager(args)
 
         if baseline_capture is not None and capture_preflight_override is not None:
@@ -2460,10 +2431,14 @@ async def run_with_args(
         if not preflight_ok:
             return 1
 
-        if args.retrospective_only:
-            return await _run_retrospective_only(args)
+        from src.runtime_services import use_runtime_services
 
-        await _maybe_run_ticker_retrospective(args)
+        if args.retrospective_only:
+            with use_runtime_services(runtime_services):
+                return await _run_retrospective_only(args)
+
+        with use_runtime_services(runtime_services):
+            await _maybe_run_ticker_retrospective(args)
         welcome_banner = _emit_start_banner(args, output_targets)
         from src.observability import flush_traces, get_observability_runtime
 
@@ -2489,66 +2464,69 @@ async def run_with_args(
         )
 
         try:
-            if baseline_capture is None:
-                result = await _execute_analysis(
+            with use_runtime_services(runtime_services):
+                if baseline_capture is None:
+                    result = await _execute_analysis(
+                        args,
+                        output_targets,
+                        runtime_services=runtime_services,
+                        session_id=session_id,
+                        tracing_callbacks=trace_context.callbacks,
+                        tracing_metadata=trace_context.graph_metadata,
+                    )
+                else:
+                    result = await _execute_analysis(
+                        args,
+                        output_targets,
+                        baseline_capture=baseline_capture,
+                        runtime_services=runtime_services,
+                        session_id=session_id,
+                        tracing_callbacks=trace_context.callbacks,
+                        tracing_metadata=trace_context.graph_metadata,
+                    )
+
+                if not result:
+                    if baseline_capture:
+                        baseline_capture.reject_run(
+                            ["analysis_returned_no_result"], stage="main"
+                        )
+                        _finalize_baseline_capture(
+                            baseline_capture,
+                            {
+                                "analysis_validity": {"publishable": False},
+                                "artifact_statuses": {},
+                            },
+                        )
+                    _report_analysis_failure(args)
+                    return 1
+
+                _attach_run_summary(result, args, provider_preflight)
+                _score_analysis_trace(result, trace_context)
+                capture_path = _finalize_baseline_capture(baseline_capture, result)
+                _print_capture_result(args, baseline_capture, capture_path)
+                company_name, report, reporter = _render_primary_output(
+                    result, args, output_targets, welcome_banner
+                )
+                _persist_analysis_outputs(result, args, trace_id=trace_context.trace_id)
+                await _maybe_save_rejection_record(
+                    result,
+                    args,
+                    trace_id=trace_context.trace_id,
+                )
+                article_generated = await _maybe_generate_article(
+                    result,
                     args,
                     output_targets,
-                    session_id=session_id,
+                    company_name,
+                    report,
+                    reporter,
                     tracing_callbacks=trace_context.callbacks,
-                    tracing_metadata=trace_context.graph_metadata,
+                    tracing_metadata={
+                        **trace_context.graph_metadata,
+                        "workflow": "article",
+                        "source_trace_id": trace_context.trace_id,
+                    },
                 )
-            else:
-                result = await _execute_analysis(
-                    args,
-                    output_targets,
-                    baseline_capture=baseline_capture,
-                    session_id=session_id,
-                    tracing_callbacks=trace_context.callbacks,
-                    tracing_metadata=trace_context.graph_metadata,
-                )
-
-            if not result:
-                if baseline_capture:
-                    baseline_capture.reject_run(
-                        ["analysis_returned_no_result"], stage="main"
-                    )
-                    _finalize_baseline_capture(
-                        baseline_capture,
-                        {
-                            "analysis_validity": {"publishable": False},
-                            "artifact_statuses": {},
-                        },
-                    )
-                _report_analysis_failure(args)
-                return 1
-
-            _attach_run_summary(result, args, provider_preflight)
-            _score_analysis_trace(result, trace_context)
-            capture_path = _finalize_baseline_capture(baseline_capture, result)
-            _print_capture_result(args, baseline_capture, capture_path)
-            company_name, report, reporter = _render_primary_output(
-                result, args, output_targets, welcome_banner
-            )
-            _persist_analysis_outputs(result, args, trace_id=trace_context.trace_id)
-            await _maybe_save_rejection_record(
-                result,
-                args,
-                trace_id=trace_context.trace_id,
-            )
-            article_generated = await _maybe_generate_article(
-                result,
-                args,
-                output_targets,
-                company_name,
-                report,
-                reporter,
-                tracing_callbacks=trace_context.callbacks,
-                tracing_metadata={
-                    **trace_context.graph_metadata,
-                    "workflow": "article",
-                    "source_trace_id": trace_context.trace_id,
-                },
-            )
         finally:
             trace_context.close()
             if trace_context.trace_url:

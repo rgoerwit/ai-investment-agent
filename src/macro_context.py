@@ -26,7 +26,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 
 import src.config as config_module
 from src.macro_regions import infer_macro_region
-from src.tooling.inspection_service import INSPECTION_SERVICE
+from src.runtime_services import get_current_inspection_service
 from src.tooling.inspector import InspectionEnvelope, SourceKind
 
 logger = structlog.get_logger(__name__)
@@ -314,7 +314,7 @@ async def get_macro_context(
         )
         report = str(cached.get("report", ""))
         # Inspect cached brief on re-entry as untrusted cached_context.
-        report = await INSPECTION_SERVICE.check(
+        report = await get_current_inspection_service().check(
             InspectionEnvelope(
                 content_text=report,
                 raw_content=report,
@@ -323,6 +323,20 @@ async def get_macro_context(
                 metadata={"region": region, "ticker": ticker},
             )
         )
+        if isinstance(report, str) and report.startswith("TOOL_BLOCKED:"):
+            logger.warning(
+                "macro_context_cache_blocked",
+                ticker=ticker,
+                region=region,
+                cache_path=str(_cache_path(region)),
+                blocked_reason=report.removeprefix("TOOL_BLOCKED:").strip(),
+            )
+            return MacroContextResult(
+                report="",
+                region=region,
+                status="failed",
+                generated_at=cached.get("generated_at"),
+            )
         return MacroContextResult(
             report=report,
             region=region,

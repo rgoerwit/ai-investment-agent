@@ -5,11 +5,16 @@ from typing import Any
 
 from flask import Flask
 
+from src.config import config
 from src.ibkr.cli_options import (
     add_common_portfolio_request_args,
     dashboard_preferences_overrides_from_args,
     dashboard_settings_overrides_from_args,
     validate_common_portfolio_request_args,
+)
+from src.runtime_services import (
+    build_provider_runtime,
+    build_runtime_services_from_config,
 )
 from src.web.ibkr_dashboard.api import api_bp
 from src.web.ibkr_dashboard.job_store import RefreshJobStore
@@ -36,6 +41,12 @@ def create_app(
     app.config["TEMPLATES_AUTO_RELOAD"] = True
     resolved_settings = settings or DashboardSettings()
     resolved_settings.runtime_dir.mkdir(parents=True, exist_ok=True)
+    provider_runtime = build_provider_runtime(explicit=True)
+    runtime_services = build_runtime_services_from_config(
+        config,
+        enable_tool_audit=False,
+        provider_runtime=provider_runtime,
+    )
     preferences_store = DashboardPreferencesStore(
         resolved_settings.runtime_dir / "settings.json"
     )
@@ -44,9 +55,12 @@ def create_app(
         preferences = preferences.model_copy(update=preferences_override)
 
     app.config["DASHBOARD_SETTINGS"] = resolved_settings
+    app.config["PROVIDER_RUNTIME"] = provider_runtime
+    app.config["RUNTIME_SERVICES"] = runtime_services
     app.config["SNAPSHOT_SERVICE"] = DashboardSnapshotService(
         resolved_settings,
         preferences=preferences,
+        runtime_services=runtime_services,
     )
     app.config["JOB_STORE"] = RefreshJobStore(
         resolved_settings.runtime_dir / "jobs.sqlite"

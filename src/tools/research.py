@@ -6,8 +6,8 @@ from typing import Annotated
 import structlog
 from langchain_core.tools import tool
 
+from src.runtime_services import get_current_inspection_service
 from src.ticker_utils import normalize_ticker
-from src.tooling.inspection_service import INSPECTION_SERVICE
 from src.tooling.inspector import InspectionEnvelope, SourceKind
 from src.tools import shared
 
@@ -67,7 +67,7 @@ async def search_foreign_sources(
         results_str = shared._format_and_truncate_tavily_result(merged)
 
         # Inspect merged foreign-search output after DDG+Tavily merge.
-        results_str = await INSPECTION_SERVICE.check(
+        results_str = await get_current_inspection_service().check(
             InspectionEnvelope(
                 content_text=results_str,
                 raw_content=results_str,
@@ -132,7 +132,7 @@ async def get_official_filings(
         )
     report = result.to_report_string()
     # Inspect official filing text (lighter treatment via SourceKind).
-    return await INSPECTION_SERVICE.check(
+    return await get_current_inspection_service().check(
         InspectionEnvelope(
             content_text=report,
             raw_content=report,

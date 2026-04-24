@@ -206,3 +206,59 @@ async def test_envelope_populated_from_invocation():
         assert env.content_text == "content"
     finally:
         INSPECTION_SERVICE.configure(original_inspector, mode=original_mode)
+
+
+@pytest.mark.asyncio
+async def test_after_serializes_dict_without_calling_str():
+    captured: list[InspectionEnvelope] = []
+
+    class Explosive:
+        def __str__(self) -> str:
+            raise AssertionError("unsafe __str__ should not be called")
+
+    class CapturingInspector:
+        async def inspect(self, envelope: InspectionEnvelope) -> InspectionDecision:
+            captured.append(envelope)
+            return InspectionDecision(action="allow", threat_level="safe")
+
+    original_inspector = INSPECTION_SERVICE._inspector
+    original_mode = INSPECTION_SERVICE._mode
+    try:
+        INSPECTION_SERVICE.configure(CapturingInspector(), mode="warn")
+        hook = ContentInspectionHook()
+        result = await hook.after(
+            _invocation(),
+            ToolResult(value={"payload": ["ok", {"nested": Explosive()}]}),
+        )
+        assert result.blocked is False
+        assert captured
+        assert "<Explosive>" in captured[0].content_text
+    finally:
+        INSPECTION_SERVICE.configure(original_inspector, mode=original_mode)
+
+
+@pytest.mark.asyncio
+async def test_after_truncates_large_content_before_inspection():
+    captured: list[InspectionEnvelope] = []
+
+    class CapturingInspector:
+        async def inspect(self, envelope: InspectionEnvelope) -> InspectionDecision:
+            captured.append(envelope)
+            return InspectionDecision(action="allow", threat_level="safe")
+
+    original_inspector = INSPECTION_SERVICE._inspector
+    original_mode = INSPECTION_SERVICE._mode
+    try:
+        INSPECTION_SERVICE.configure(CapturingInspector(), mode="warn")
+        hook = ContentInspectionHook()
+        huge = "x" * 60_000
+        result = await hook.after(_invocation(), _result(huge))
+        assert result.value == huge
+        assert captured
+        env = captured[0]
+        assert env.metadata["original_length"] == 60_000
+        assert env.metadata["truncated_for_inspection"] is True
+        assert env.content_text.endswith("...[truncated for inspection]")
+        assert len(env.content_text) < 60_000
+    finally:
+        INSPECTION_SERVICE.configure(original_inspector, mode=original_mode)

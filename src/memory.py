@@ -27,7 +27,7 @@ from tenacity import (
 
 from src.config import config
 from src.runtime_diagnostics import classify_failure
-from src.tooling.inspection_service import INSPECTION_SERVICE
+from src.runtime_services import get_current_inspection_service
 from src.tooling.inspector import InspectionEnvelope, SourceKind
 
 logger = structlog.get_logger(__name__)
@@ -349,16 +349,17 @@ class FinancialSituationMemory:
             logger.debug("empty_situations_list", collection=self.name)
             return False
 
-        try:
-            # Generate embeddings for all situations
-            embeddings = []
-            for situation in situations:
-                emb = await self._get_embedding(situation)
-                embeddings.append(emb)
+        if metadata is not None and len(metadata) != len(situations):
+            logger.error(
+                "memory_add_metadata_length_mismatch",
+                collection=self.name,
+                situations=len(situations),
+                metadata=len(metadata),
+            )
+            return False
 
-            # Prepare IDs (use timestamp + index)
+        try:
             timestamp = datetime.now().isoformat()
-            ids = [f"{timestamp}_{i}" for i in range(len(situations))]
 
             # Prepare metadata
             if metadata is None:
@@ -369,16 +370,64 @@ class FinancialSituationMemory:
                     if "timestamp" not in meta:
                         meta["timestamp"] = timestamp
 
+            approved_situations: list[str] = []
+            approved_metadata: list[dict[str, Any]] = []
+
+            for situation, meta in zip(situations, metadata, strict=True):
+                approved = await get_current_inspection_service().check(
+                    InspectionEnvelope(
+                        content_text=situation,
+                        raw_content=situation,
+                        source_kind=SourceKind.memory_write,
+                        source_name=self.name,
+                        metadata={"collection": self.name},
+                    )
+                )
+                if isinstance(approved, str) and approved.startswith("TOOL_BLOCKED:"):
+                    logger.warning(
+                        "memory_write_blocked",
+                        collection=self.name,
+                        reason=approved,
+                    )
+                    continue
+
+                approved_situations.append(
+                    approved if isinstance(approved, str) else situation
+                )
+                approved_metadata.append(meta)
+
+            if not approved_situations:
+                logger.warning(
+                    "memory_add_no_approved_situations",
+                    collection=self.name,
+                    attempted=len(situations),
+                )
+                return False
+
+            # Generate embeddings only for approved situations.
+            embeddings = []
+            for situation in approved_situations:
+                emb = await self._get_embedding(situation)
+                embeddings.append(emb)
+
+            # Prepare IDs (use timestamp + index)
+            ids = [f"{timestamp}_{i}" for i in range(len(approved_situations))]
+
             # Add to collection
             self.situation_collection.add(
-                ids=ids, embeddings=embeddings, documents=situations, metadatas=metadata
+                ids=ids,
+                embeddings=embeddings,
+                documents=approved_situations,
+                metadatas=approved_metadata,
             )
 
             logger.info(
                 "situations_added",
                 collection=self.name,
-                count=len(situations),
-                has_metadata=metadata is not None,
+                count=len(approved_situations),
+                attempted=len(situations),
+                blocked=len(situations) - len(approved_situations),
+                has_metadata=approved_metadata is not None,
             )
 
             return True
@@ -440,7 +489,7 @@ class FinancialSituationMemory:
                 for i in range(len(results["documents"][0])):
                     doc = results["documents"][0][i]
                     # Inspect retrieved memory content for injection.
-                    approved = await INSPECTION_SERVICE.check(
+                    approved = await get_current_inspection_service().check(
                         InspectionEnvelope(
                             content_text=doc,
                             raw_content=doc,

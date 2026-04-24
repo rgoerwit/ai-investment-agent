@@ -1,6 +1,6 @@
 # Codebase Memory
 
-Last updated: 2026-04-18
+Last updated: 2026-04-23
 
 This file is a durable orientation note, not the source of truth.
 Use it to get context quickly, then verify against the live tree.
@@ -33,20 +33,25 @@ Read in this order:
 2. `README.md`
 3. top of `CHANGELOG.md`
 4. `src/main.py`
-5. `src/graph/`
-6. `src/agents/`
-7. `src/toolkit.py` and `src/tools/`
-8. `src/data/fetcher.py`
-9. `src/runtime_diagnostics.py`
-10. `src/validators/red_flag_detector.py`
-11. `src/memory.py`
-12. `src/ibkr/`
+5. `src/runtime_services.py`
+6. `src/tooling/`
+7. `src/graph/`
+8. `src/agents/`
+9. `src/tools/`
+10. `src/data/fetcher.py`
+11. `src/runtime_diagnostics.py`
+12. `src/validators/red_flag_detector.py`
+13. `src/memory.py`
+14. `src/ibkr/`
 
 ## Runtime Spine
 
 `src/main.py` owns CLI parsing, logging setup, runtime overrides, execution, and output saving.
 
 For runtime/control-plane state design, use `docs/RUNTIME_MODEL.md` as the canonical Stage 0 model before changing storage or orchestration seams.
+
+`src/runtime_services.py` owns runtime-scoped service binding.
+`RuntimeServices` uses `ContextVar` scoping so CLI runs, graph execution, dashboard snapshot loads, and worker jobs can bind their own tool execution, inspection, provider runtimes, and hooks without sharing mutable globals by accident.
 
 `src/graph/` owns:
 
@@ -63,10 +68,11 @@ For runtime/control-plane state design, use `docs/RUNTIME_MODEL.md` as the canon
 - PM/trader/risk nodes
 - consultant/legal/auditor nodes
 
-`src/toolkit.py` is the tool facade.
 `src/tools/` holds the domain tool implementations.
+`src/toolkit.py` is deleted.
+Package roots such as `src/__init__.py`, `src/tooling/__init__.py`, and `src/tools/__init__.py` are intentionally inert; do not assume convenience re-exports.
 
-`src/tooling/` owns cross-cutting tool execution and audit hooks.
+`src/tooling/` owns cross-cutting tool execution, audit hooks, argument policy, and untrusted-content inspection.
 
 `src/runtime_diagnostics.py` owns artifact completion/validity and publishability checks.
 
@@ -120,6 +126,7 @@ It parses the fundamentals `DATA_BLOCK` and drives auto-reject or risk-penalty o
 
 `src/memory.py` provides ticker-isolated ChromaDB memory plus macro/lesson retrieval.
 Memory outages should degrade analysis, not abort it.
+Memory writes are inspected per document with `SourceKind.memory_write`; blocked writes are skipped and fully blocked batches return `False`.
 
 Macro surfaces are intentionally split:
 
@@ -134,6 +141,17 @@ Main files:
 - `src/report_generator.py`
 - `src/charts/`
 - `src/article_writer.py`
+
+Large graph-state artifacts are bounded with `src/agents/output_limits.py::cap_state_value()` at the write points so oversized LLM output does not silently bloat state.
+
+### Content-ingress hardening
+
+The current trust-boundary model is:
+
+- inspect tool output in the tool execution plane
+- inspect cached or replayed untrusted context before it re-enters prompts
+- inspect financial-API free-text fields before they become prompt-visible
+- keep blocked content out of primary prompt paths rather than storing sentinel text as valid analysis
 
 ### IBKR path
 
@@ -163,6 +181,7 @@ Strong coverage areas include:
 
 Patch owning modules in tests, not facades.
 Use facade tests only for real public APIs.
+Prefer patching `src.runtime_services`, `src.tools.*`, or the owning helper used at call time.
 
 ## Practical Notes
 
@@ -176,8 +195,16 @@ Use facade tests only for real public APIs.
 Already split:
 
 - `src/agents.py` -> `src/agents/`
-- `src/toolkit.py` -> `src/tools/` with facade preserved
+- `src/toolkit.py` -> `src/tools/` with facade removed
 - `src/graph.py` -> `src/graph/`
+
+Recent completed control-plane/security work:
+
+- runtime-scoped service container via `RuntimeServices`
+- memory-write inspection
+- financial-API text-field inspection
+- artifact bounding via `cap_state_value()`
+- broader heuristic prompt-injection coverage
 
 Next likely large seams:
 

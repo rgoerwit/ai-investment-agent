@@ -78,7 +78,7 @@ class TestGetOwnershipStructureTool:
     @pytest.mark.asyncio
     async def test_tool_returns_valid_json(self):
         """Test tool returns valid JSON structure."""
-        from src.toolkit import get_ownership_structure
+        from src.tools.ownership import get_ownership_structure
 
         # Use a well-known ticker - tools must be invoked with .ainvoke()
         result = await get_ownership_structure.ainvoke({"ticker": "AAPL"})
@@ -93,7 +93,7 @@ class TestGetOwnershipStructureTool:
     @pytest.mark.asyncio
     async def test_tool_handles_invalid_ticker(self):
         """Test tool gracefully handles invalid ticker."""
-        from src.toolkit import get_ownership_structure
+        from src.tools.ownership import get_ownership_structure
 
         result = await get_ownership_structure.ainvoke({"ticker": "INVALIDTICKER12345"})
         data = json.loads(result)
@@ -106,7 +106,7 @@ class TestGetOwnershipStructureTool:
     @pytest.mark.asyncio
     async def test_tool_handles_empty_ticker(self):
         """Test tool handles empty ticker string."""
-        from src.toolkit import get_ownership_structure
+        from src.tools.ownership import get_ownership_structure
 
         result = await get_ownership_structure.ainvoke({"ticker": ""})
         data = json.loads(result)
@@ -117,7 +117,7 @@ class TestGetOwnershipStructureTool:
     @pytest.mark.asyncio
     async def test_tool_normalizes_international_ticker(self):
         """Test tool normalizes international ticker formats."""
-        from src.toolkit import get_ownership_structure
+        from src.tools.ownership import get_ownership_structure
 
         # Test Japanese ticker
         result = await get_ownership_structure.ainvoke({"ticker": "7203.T"})
@@ -129,7 +129,7 @@ class TestGetOwnershipStructureTool:
     @pytest.mark.asyncio
     async def test_tool_calculates_insider_trend(self):
         """Test insider trend calculation logic."""
-        from src.toolkit import get_ownership_structure
+        from src.tools.ownership import get_ownership_structure
 
         result = await get_ownership_structure.ainvoke({"ticker": "MSFT"})
         data = json.loads(result)
@@ -141,7 +141,7 @@ class TestGetOwnershipStructureTool:
     @patch("src.tools.ownership.yf.Ticker")
     async def test_tool_handles_yfinance_exception(self, mock_ticker):
         """Test tool handles yfinance exceptions gracefully."""
-        from src.toolkit import get_ownership_structure
+        from src.tools.ownership import get_ownership_structure
 
         mock_ticker.side_effect = Exception("API Error")
 
@@ -154,7 +154,7 @@ class TestGetOwnershipStructureTool:
     @patch("src.tools.ownership.yf.Ticker")
     async def test_tool_handles_partial_data(self, mock_ticker):
         """Test tool handles partial data availability."""
-        from src.toolkit import get_ownership_structure
+        from src.tools.ownership import get_ownership_structure
 
         mock_yf = MagicMock()
         mock_yf.institutional_holders = None  # Missing institutional data
@@ -175,7 +175,7 @@ class TestGetOwnershipStructureTool:
         self, mock_load_property, mock_ticker
     ):
         """One timed-out ownership section should degrade cleanly to PARTIAL."""
-        from src.toolkit import get_ownership_structure
+        from src.tools.ownership import get_ownership_structure
 
         mock_ticker.return_value = MagicMock()
         mock_load_property.side_effect = [
@@ -199,7 +199,7 @@ class TestGetOwnershipStructureTool:
         self, mock_load_property, mock_ticker
     ):
         """Multiple timed-out sections should still return valid JSON."""
-        from src.toolkit import get_ownership_structure
+        from src.tools.ownership import get_ownership_structure
 
         mock_ticker.return_value = MagicMock()
         mock_load_property.side_effect = [
@@ -579,7 +579,7 @@ class TestGraphIntegration:
 
     def test_toolkit_has_value_trap_tools(self):
         """Test Toolkit provides value trap tools."""
-        from src.toolkit import Toolkit
+        from src.tools.registry import Toolkit
 
         toolkit = Toolkit()
         tools = toolkit.get_value_trap_tools()
@@ -696,7 +696,7 @@ KEY_RISKS:
         # This tests the tool doesn't hang indefinitely
         import asyncio
 
-        from src.toolkit import get_ownership_structure
+        from src.tools.ownership import get_ownership_structure
 
         try:
             result = await asyncio.wait_for(
