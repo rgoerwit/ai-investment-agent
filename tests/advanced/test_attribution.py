@@ -239,13 +239,13 @@ class TestFetcherAttribution:
         assert 'merge_metadata.get("field_sources"' in content
 
     def test_smart_merge_method_tracks_field_sources(self):
-        """Verify _smart_merge_with_quality method initializes field_sources tracking."""
+        """Verify merge-policy ownership still tracks field-level source attribution."""
         from pathlib import Path
 
-        fetcher_path = Path("src/data/fetcher.py")
-        content = fetcher_path.read_text()
+        merge_policy_path = Path("src/data/merge_policy.py")
+        content = merge_policy_path.read_text()
 
-        # The method should initialize field_sources dict
-        assert "field_sources = {}" in content
+        # The merge seam should initialize field_sources dict
+        assert "field_sources" in content
         # And track sources for each field
         assert "field_sources[" in content

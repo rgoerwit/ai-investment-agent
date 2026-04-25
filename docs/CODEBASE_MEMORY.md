@@ -1,6 +1,6 @@
 # Codebase Memory
 
-Last updated: 2026-04-23
+Last updated: 2026-04-24
 
 This file is a durable orientation note, not the source of truth.
 Use it to get context quickly, then verify against the live tree.
@@ -41,8 +41,13 @@ Read in this order:
 10. `src/data/fetcher.py`
 11. `src/runtime_diagnostics.py`
 12. `src/validators/red_flag_detector.py`
-13. `src/memory.py`
-14. `src/ibkr/`
+13. `src/validators/sector_classifier.py`
+14. `src/validators/metric_extractor.py`
+15. `src/validators/financial_rules.py`
+16. `src/validators/supplemental_extractors.py`
+17. `src/validators/supplemental_flags.py`
+18. `src/memory.py`
+19. `src/ibkr/`
 
 ## Runtime Spine
 
@@ -119,8 +124,16 @@ It merges multiple sources and is a common regression surface.
 
 ### Validator
 
-`src/validators/red_flag_detector.py` is a key deterministic safety layer.
-It parses the fundamentals `DATA_BLOCK` and drives auto-reject or risk-penalty outcomes.
+`src/validators/red_flag_detector.py` is the thin public validator facade.
+Ownership now lives in:
+
+- `src/validators/sector_classifier.py`
+- `src/validators/metric_extractor.py`
+- `src/validators/financial_rules.py`
+- `src/validators/supplemental_extractors.py`
+- `src/validators/supplemental_flags.py`
+
+Together they parse the fundamentals `DATA_BLOCK` and drive auto-reject or risk-penalty outcomes.
 
 ### Memory
 
@@ -197,6 +210,7 @@ Already split:
 - `src/agents.py` -> `src/agents/`
 - `src/toolkit.py` -> `src/tools/` with facade removed
 - `src/graph.py` -> `src/graph/`
+- `src/validators/red_flag_detector.py` -> facade plus validator ownership submodules
 
 Recent completed control-plane/security work:
 
@@ -209,7 +223,6 @@ Recent completed control-plane/security work:
 Next likely large seams:
 
 - `src/main.py`
-- `src/validators/red_flag_detector.py`
 - `src/ibkr/reconciler.py`
 - `src/report_generator.py`
 

@@ -33,7 +33,6 @@ import copy
 import json
 import math
 import re
-import statistics
 import time
 from collections import namedtuple
 from dataclasses import dataclass
@@ -46,7 +45,70 @@ import structlog
 import yfinance as yf
 
 from src.config import config
+from src.data.gap_fill import (
+    calculate_coverage as calculate_coverage_impl,
+)
+from src.data.gap_fill import (
+    fetch_tavily_gaps as fetch_tavily_gaps_impl,
+)
+from src.data.gap_fill import (
+    identify_critical_gaps as identify_critical_gaps_impl,
+)
+from src.data.gap_fill import (
+    merge_gap_fill_data as merge_gap_fill_data_impl,
+)
 from src.data.interfaces import FinancialFetcher
+from src.data.merge_policy import (
+    quarantine_forward_pe_outlier as quarantine_forward_pe_outlier_impl,
+)
+from src.data.merge_policy import (
+    smart_merge_with_quality as smart_merge_with_quality_impl,
+)
+from src.data.metric_extraction import (
+    calculate_capital_efficiency_signals as calculate_capital_efficiency_signals_impl,
+)
+from src.data.metric_extraction import (
+    calculate_derived_metrics as calculate_derived_metrics_impl,
+)
+from src.data.metric_extraction import (
+    calculate_graham_earnings_test as calculate_graham_earnings_test_impl,
+)
+from src.data.metric_extraction import (
+    calculate_moat_signals as calculate_moat_signals_impl,
+)
+from src.data.metric_extraction import (
+    calculate_return_trends as calculate_return_trends_impl,
+)
+from src.data.metric_extraction import (
+    compute_trend_regression as compute_trend_regression_impl,
+)
+from src.data.metric_extraction import (
+    extract_from_financial_statements as extract_from_financial_statements_impl,
+)
+from src.data.metric_extraction import (
+    extract_quarterly_horizons as extract_quarterly_horizons_impl,
+)
+from src.data.source_fetchers import (
+    classify_aggregate_source_failure as classify_aggregate_source_failure_impl,
+)
+from src.data.source_fetchers import (
+    fetch_all_sources_parallel as fetch_all_sources_parallel_impl,
+)
+from src.data.source_fetchers import (
+    fetch_av_fallback as fetch_av_fallback_impl,
+)
+from src.data.source_fetchers import (
+    fetch_eodhd_fallback as fetch_eodhd_fallback_impl,
+)
+from src.data.source_fetchers import (
+    fetch_fmp_fallback as fetch_fmp_fallback_impl,
+)
+from src.data.source_fetchers import (
+    fetch_yahooquery_fallback as fetch_yahooquery_fallback_impl,
+)
+from src.data.source_fetchers import (
+    fetch_yfinance_enhanced as fetch_yfinance_enhanced_impl,
+)
 from src.error_safety import safe_error_payload, summarize_exception
 from src.fx_normalization import (
     is_near_minor_unit_ratio,
@@ -61,20 +123,12 @@ from src.ticker_policy import (
     normalize_exchange_specific_base,
 )
 from src.ticker_utils import generate_strict_search_query
-from src.yfinance_runtime import YFRateLimitError, configure_yfinance_defaults
+from src.yfinance_runtime import configure_yfinance_defaults
 
 logger = structlog.get_logger(__name__)
 configure_yfinance_defaults()
 
 # --- Optional Dependencies ---
-try:
-    from yahooquery import Ticker as YQTicker
-
-    YAHOOQUERY_AVAILABLE = True
-except ImportError:
-    YAHOOQUERY_AVAILABLE = False
-    logger.warning("yahooquery_not_available")
-
 try:
     from src.data.fmp_fetcher import get_fmp_fetcher
 
@@ -109,7 +163,6 @@ except ImportError:
 
 
 # Constants
-MIN_INFO_FIELDS = 3
 ROE_PERCENTAGE_THRESHOLD = 1.0
 # D/E > 10 (1000%) is extremely rare; values like 14.77 are percentages (14.77%)
 DEBT_EQUITY_PERCENTAGE_THRESHOLD = 10.0
@@ -718,586 +771,19 @@ class SmartMarketDataFetcher(FinancialFetcher):
         self, ticker: yf.Ticker, symbol: str
     ) -> dict[str, Any]:
         """Extract metrics from yfinance financial statements."""
-        extracted = {}
-
-        try:
-            financials = ticker.financials
-            cashflow = ticker.cashflow
-            balance_sheet = ticker.balance_sheet
-
-            if financials.empty and cashflow.empty and balance_sheet.empty:
-                return extracted
-
-            self.stats["sources"]["statements"] += 1
-
-            # INCOME STATEMENT
-            if not financials.empty:
-                # Revenue Growth
-                if "Total Revenue" in financials.index and len(financials.columns) >= 2:
-                    try:
-                        revenue_series = financials.loc["Total Revenue"]
-                        current = float(revenue_series.iloc[0])
-                        previous = float(revenue_series.iloc[1])
-
-                        if previous and previous != 0:
-                            growth = (current - previous) / previous
-                            if -0.5 < growth < 5.0:
-                                extracted["revenueGrowth"] = growth
-                                extracted["_revenueGrowth_source"] = (
-                                    "calculated_from_statements"
-                                )
-                    except Exception:
-                        pass
-
-                # Margins
-                try:
-                    if (
-                        "Gross Profit" in financials.index
-                        and "Total Revenue" in financials.index
-                    ):
-                        gross_profit = float(financials.loc["Gross Profit"].iloc[0])
-                        revenue = float(financials.loc["Total Revenue"].iloc[0])
-                        if revenue:
-                            extracted["grossMargins"] = gross_profit / revenue
-                            extracted["_grossMargins_source"] = (
-                                "calculated_from_statements"
-                            )
-
-                    if (
-                        "Operating Income" in financials.index
-                        and "Total Revenue" in financials.index
-                    ):
-                        op_income = float(financials.loc["Operating Income"].iloc[0])
-                        revenue = float(financials.loc["Total Revenue"].iloc[0])
-                        if revenue:
-                            extracted["operatingMargins"] = op_income / revenue
-                            extracted["_operatingMargins_source"] = (
-                                "calculated_from_statements"
-                            )
-
-                    if (
-                        "Net Income" in financials.index
-                        and "Total Revenue" in financials.index
-                    ):
-                        net_income = float(financials.loc["Net Income"].iloc[0])
-                        revenue = float(financials.loc["Total Revenue"].iloc[0])
-                        if revenue:
-                            extracted["profitMargins"] = net_income / revenue
-                            extracted["_profitMargins_source"] = (
-                                "calculated_from_statements"
-                            )
-                except Exception:
-                    pass
-
-            # CASH FLOW STATEMENT
-            if not cashflow.empty:
-                if "Operating Cash Flow" in cashflow.index:
-                    try:
-                        ocf = float(cashflow.loc["Operating Cash Flow"].iloc[0])
-                        extracted["operatingCashflow"] = ocf
-                        extracted["_operatingCashflow_source"] = (
-                            "extracted_from_statements"
-                        )
-                    except Exception:
-                        pass
-
-                try:
-                    if (
-                        "Operating Cash Flow" in cashflow.index
-                        and "Capital Expenditure" in cashflow.index
-                    ):
-                        ocf = float(cashflow.loc["Operating Cash Flow"].iloc[0])
-                        capex = float(cashflow.loc["Capital Expenditure"].iloc[0])
-                        fcf = ocf + capex  # Capex is usually negative
-                        extracted["freeCashflow"] = fcf
-                        extracted["_freeCashflow_source"] = "calculated_from_statements"
-                except Exception:
-                    pass
-
-            # BALANCE SHEET
-            if not balance_sheet.empty:
-                extracted["_statements_date"] = balance_sheet.columns[0].strftime(
-                    "%Y-%m-%d"
-                )
-                try:
-                    if (
-                        "Current Assets" in balance_sheet.index
-                        and "Current Liabilities" in balance_sheet.index
-                    ):
-                        current_assets = float(
-                            balance_sheet.loc["Current Assets"].iloc[0]
-                        )
-                        current_liabilities = float(
-                            balance_sheet.loc["Current Liabilities"].iloc[0]
-                        )
-                        if current_liabilities:
-                            extracted["currentRatio"] = (
-                                current_assets / current_liabilities
-                            )
-                            extracted["_currentRatio_source"] = (
-                                "calculated_from_statements"
-                            )
-                except Exception:
-                    pass
-
-                try:
-                    debt = None
-                    equity = None
-
-                    if "Total Debt" in balance_sheet.index:
-                        debt = float(balance_sheet.loc["Total Debt"].iloc[0])
-                    elif "Long Term Debt" in balance_sheet.index:
-                        long_term = float(balance_sheet.loc["Long Term Debt"].iloc[0])
-                        short_term = 0
-                        if "Current Debt" in balance_sheet.index:
-                            short_term = float(
-                                balance_sheet.loc["Current Debt"].iloc[0]
-                            )
-                        debt = long_term + short_term
-
-                    if "Stockholders Equity" in balance_sheet.index:
-                        equity = float(balance_sheet.loc["Stockholders Equity"].iloc[0])
-                    elif "Total Stockholder Equity" in balance_sheet.index:
-                        equity = float(
-                            balance_sheet.loc["Total Stockholder Equity"].iloc[0]
-                        )
-
-                    if debt is not None and equity is not None and equity != 0:
-                        extracted["debtToEquity"] = debt / equity
-                        extracted["_debtToEquity_source"] = "calculated_from_statements"
-                except Exception:
-                    pass
-
-                # PFIC passive asset data: total assets and liquid assets for IRS cash-to-assets test
-                # (IRS Form 8621 counts cash + short-term investments + marketable securities)
-                try:
-                    if "Total Assets" in balance_sheet.index:
-                        extracted["totalAssets"] = float(
-                            balance_sheet.loc["Total Assets"].iloc[0]
-                        )
-                        extracted["_totalAssets_source"] = "calculated_from_statements"
-
-                    # Sum cash equivalents + short-term investments for broad passive-asset base
-                    liquid = None
-                    for cash_row in [
-                        "Cash And Cash Equivalents",
-                        "Cash",
-                        "Cash And Short Term Investments",
-                    ]:
-                        if cash_row in balance_sheet.index:
-                            liquid = float(balance_sheet.loc[cash_row].iloc[0])
-                            break
-                    if liquid is not None:
-                        sti = 0.0
-                        if "Short Term Investments" in balance_sheet.index:
-                            sti = float(
-                                balance_sheet.loc["Short Term Investments"].iloc[0]
-                            )
-                        extracted["cashAndShortTermInvestments"] = liquid + sti
-                        extracted["_cashAndShortTermInvestments_source"] = (
-                            "calculated_from_statements"
-                        )
-                except Exception:
-                    pass
-
-        except Exception as e:
-            logger.debug(
-                "statement_extraction_failed",
-                symbol=symbol,
-                **summarize_exception(
-                    e,
-                    operation="extracting financial statements",
-                    provider="unknown",
-                ),
-            )
-
-        # --- MOAT SIGNALS ---
-        # Calculate multi-year moat indicators from statements
-        moat_signals = self._calculate_moat_signals(financials, cashflow, symbol)
-        for key, value in moat_signals.items():
-            extracted[key] = value
-            extracted[f"_{key}_source"] = "calculated_from_statements"
-
-        # --- CAPITAL EFFICIENCY SIGNALS ---
-        # Calculate ROIC and leverage quality from statements
-        capital_signals = self._calculate_capital_efficiency_signals(
-            financials, balance_sheet, extracted, symbol, cashflow=cashflow
-        )
-        for key, value in capital_signals.items():
-            extracted[key] = value
-
-        # --- HISTORICAL RETURN TRENDS ---
-        # Calculate 5Y average ROA/ROE for sustainability assessment
-        return_trends = self._calculate_return_trends(financials, balance_sheet, symbol)
-        for key, value in return_trends.items():
-            extracted[key] = value
-
-        # --- GRAHAM CONSECUTIVE EARNINGS TEST ---
-        # Benjamin Graham's quality filter: consecutive years of positive earnings
-        graham_signals = self._calculate_graham_earnings_test(financials, symbol)
-        for key, value in graham_signals.items():
-            extracted[key] = value
-
-        # --- QUARTERLY HORIZON METRICS (TTM / MRQ) ---
-        # Extract multi-horizon growth from quarterly financial statements
-        quarterly_horizons = self._extract_quarterly_horizons(ticker, symbol)
-        for key, value in quarterly_horizons.items():
-            extracted[key] = value
-
-        return extracted
+        return extract_from_financial_statements_impl(self, ticker, symbol)
 
     def _extract_quarterly_horizons(
         self, ticker: yf.Ticker, symbol: str
     ) -> dict[str, Any]:
-        """
-        Extract TTM and MRQ metrics from quarterly financial statements.
-
-        Provides three distinct growth horizons to mitigate rearview-mirror bias:
-        - FY: Already calculated by _extract_from_financial_statements (revenueGrowth)
-        - TTM: Sum of last 4 quarters vs sum of prior 4 quarters
-        - MRQ: Most recent quarter vs same quarter last year (YoY)
-
-        Also calculates TTM aggregates for Net Income, OCF, and FCF to enable
-        temporally-aligned ratio checks (e.g., TTM P/E consistency, PEG).
-
-        Note: yfinance .quarterly_financials is an alias for .quarterly_income_stmt.
-        We use .quarterly_financials for consistency with existing .financials usage.
-        """
-        extracted: dict[str, Any] = {}
-
-        try:
-            qt_inc = ticker.quarterly_financials
-            qt_cf = ticker.quarterly_cashflow
-        except Exception as e:
-            logger.debug(
-                "quarterly_data_unavailable",
-                symbol=symbol,
-                **summarize_exception(
-                    e,
-                    operation="extracting quarterly data",
-                    provider="unknown",
-                ),
-            )
-            return extracted
-
-        # --- DATE METADATA ---
-        if qt_inc is not None and not qt_inc.empty:
-            latest_q_date = qt_inc.columns[0]
-            extracted["latest_quarter_date"] = str(latest_q_date.date())
-            extracted["_latest_quarter_date_source"] = "yfinance_quarterly"
-
-        # --- Helper: find the quarter closest to 12 months ago ---
-        def _find_yoy_match_idx(
-            series_index: pd.DatetimeIndex, latest_date: pd.Timestamp
-        ) -> int | None:
-            """Find the index of the quarter closest to 12 months before latest_date."""
-            target = latest_date - pd.DateOffset(months=12)
-            best_idx = None
-            best_delta = timedelta(days=999)
-            for i, dt in enumerate(series_index):
-                if i == 0:
-                    continue  # Skip the latest quarter itself
-                delta = abs(dt - target)
-                if delta < best_delta and delta < timedelta(days=45):
-                    best_delta = delta
-                    best_idx = i
-            return best_idx
-
-        # --- REVENUE HORIZONS ---
-        if qt_inc is not None and not qt_inc.empty and "Total Revenue" in qt_inc.index:
-            rev_series = qt_inc.loc["Total Revenue"].dropna()
-
-            if len(rev_series) >= 5:
-                # MRQ YoY: latest quarter vs same quarter last year
-                match_idx = _find_yoy_match_idx(rev_series.index, rev_series.index[0])
-                if match_idx is not None:
-                    mrq_current = float(rev_series.iloc[0])
-                    mrq_prior = float(rev_series.iloc[match_idx])
-                    if mrq_prior > 0:
-                        mrq_growth = (mrq_current - mrq_prior) / mrq_prior
-                        if -1.0 < mrq_growth < 10.0:
-                            extracted["revenueGrowth_MRQ"] = mrq_growth
-                            extracted["_revenueGrowth_MRQ_source"] = (
-                                "calculated_from_quarterly"
-                            )
-
-            if len(rev_series) >= 8:
-                # TTM: sum of last 4 quarters vs sum of prior 4 quarters
-                # min_count=4 ensures NaN if any quarter is missing
-                ttm_current = rev_series.iloc[0:4].sum(min_count=4)
-                ttm_prior = rev_series.iloc[4:8].sum(min_count=4)
-                if pd.notna(ttm_current) and pd.notna(ttm_prior) and ttm_prior > 0:
-                    ttm_growth = (ttm_current - ttm_prior) / ttm_prior
-                    if -1.0 < ttm_growth < 10.0:
-                        extracted["revenueGrowth_TTM"] = float(ttm_growth)
-                        extracted["_revenueGrowth_TTM_source"] = (
-                            "calculated_from_quarterly"
-                        )
-
-                # TTM Revenue absolute (for cross-checks)
-                if pd.notna(ttm_current):
-                    extracted["revenue_TTM"] = float(ttm_current)
-                    extracted["_revenue_TTM_source"] = "calculated_from_quarterly"
-
-        # --- NET INCOME HORIZONS ---
-        if qt_inc is not None and not qt_inc.empty and "Net Income" in qt_inc.index:
-            ni_series = qt_inc.loc["Net Income"].dropna()
-
-            if len(ni_series) >= 5:
-                match_idx = _find_yoy_match_idx(ni_series.index, ni_series.index[0])
-                if match_idx is not None:
-                    mrq_ni = float(ni_series.iloc[0])
-                    mrq_ni_prior = float(ni_series.iloc[match_idx])
-                    if mrq_ni_prior > 0:
-                        mrq_ni_growth = (mrq_ni - mrq_ni_prior) / mrq_ni_prior
-                        if -5.0 < mrq_ni_growth < 50.0:
-                            extracted["earningsGrowth_MRQ"] = mrq_ni_growth
-                            extracted["_earningsGrowth_MRQ_source"] = (
-                                "calculated_from_quarterly"
-                            )
-
-            if len(ni_series) >= 4:
-                ttm_ni = ni_series.iloc[0:4].sum(min_count=4)
-                if pd.notna(ttm_ni):
-                    extracted["netIncome_TTM"] = float(ttm_ni)
-                    extracted["_netIncome_TTM_source"] = "calculated_from_quarterly"
-
-                if len(ni_series) >= 8:
-                    ttm_ni_prior = ni_series.iloc[4:8].sum(min_count=4)
-                    if pd.notna(ttm_ni) and pd.notna(ttm_ni_prior) and ttm_ni_prior > 0:
-                        ttm_ni_growth = (ttm_ni - ttm_ni_prior) / ttm_ni_prior
-                        if -5.0 < ttm_ni_growth < 50.0:
-                            extracted["earningsGrowth_TTM"] = float(ttm_ni_growth)
-                            extracted["_earningsGrowth_TTM_source"] = (
-                                "calculated_from_quarterly"
-                            )
-
-        # --- OCF TTM ---
-        if (
-            qt_cf is not None
-            and not qt_cf.empty
-            and "Operating Cash Flow" in qt_cf.index
-        ):
-            ocf_series = qt_cf.loc["Operating Cash Flow"].dropna()
-            if len(ocf_series) >= 4:
-                ttm_ocf = ocf_series.iloc[0:4].sum(min_count=4)
-                if pd.notna(ttm_ocf):
-                    extracted["operatingCashflow_TTM"] = float(ttm_ocf)
-                    extracted["_operatingCashflow_TTM_source"] = (
-                        "calculated_from_quarterly"
-                    )
-
-        # --- FCF TTM ---
-        if qt_cf is not None and not qt_cf.empty:
-            has_ocf = "Operating Cash Flow" in qt_cf.index
-            has_capex = "Capital Expenditure" in qt_cf.index
-            if has_ocf and has_capex:
-                ocf_s = qt_cf.loc["Operating Cash Flow"].dropna()
-                capex_s = qt_cf.loc["Capital Expenditure"].dropna()
-                common_dates = ocf_s.index.intersection(capex_s.index)[:4]
-                if len(common_dates) >= 4:
-                    ttm_fcf_ocf = ocf_s[common_dates].sum(min_count=4)
-                    ttm_fcf_capex = capex_s[common_dates].sum(min_count=4)
-                    if pd.notna(ttm_fcf_ocf) and pd.notna(ttm_fcf_capex):
-                        extracted["freeCashflow_TTM"] = float(
-                            ttm_fcf_ocf + ttm_fcf_capex
-                        )
-                        extracted["_freeCashflow_TTM_source"] = (
-                            "calculated_from_quarterly"
-                        )
-
-        # --- GROWTH TRAJECTORY (deterministic) ---
-        mrq_growth = extracted.get("revenueGrowth_MRQ")
-        ttm_growth = extracted.get("revenueGrowth_TTM")
-
-        if mrq_growth is not None and ttm_growth is not None:
-            delta = mrq_growth - ttm_growth
-            if delta > 0.10:
-                extracted["growth_trajectory"] = "ACCELERATING"
-            elif delta < -0.10:
-                extracted["growth_trajectory"] = "DECELERATING"
-            else:
-                extracted["growth_trajectory"] = "STABLE"
-            extracted["_growth_trajectory_source"] = "calculated_from_quarterly"
-
-        if (
-            extracted.get("growth_trajectory") == "ACCELERATING"
-            and extracted.get("earningsGrowth_TTM") is not None
-            and extracted["earningsGrowth_TTM"] < -0.05
-        ):
-            extracted["growth_trajectory"] = "MIXED"
-            extracted["_growth_trajectory_source"] = (
-                f"{extracted.get('_growth_trajectory_source', 'calculated_from_quarterly')}|eps_divergence"
-            )
-
-        if extracted:
-            logger.debug(
-                "quarterly_horizons_extracted",
-                symbol=symbol,
-                fields=sorted(k for k in extracted if not k.startswith("_")),
-            )
-
-        return extracted
+        """Extract TTM and MRQ metrics from quarterly financial statements."""
+        return extract_quarterly_horizons_impl(ticker, symbol)
 
     def _calculate_moat_signals(
         self, financials: "pd.DataFrame", cashflow: "pd.DataFrame", symbol: str
     ) -> dict[str, Any]:
-        """
-        Calculate economic moat signal metrics from multi-year financial statements.
-
-        Uses Coefficient of Variation (CV) for stability measurement - statistically
-        superior to raw standard deviation as it's scale-independent.
-
-        Metrics calculated:
-        1. Gross Margin CV (5-year): Low CV (<8%) indicates pricing power
-        2. CFO/Net Income Ratio (3-year avg): High ratio (>90%) indicates quality earnings
-
-        Args:
-            financials: yfinance financials DataFrame (columns are years, newest first)
-            cashflow: yfinance cashflow DataFrame (columns are years, newest first)
-            symbol: Ticker symbol for logging
-
-        Returns:
-            Dict with moat signal metrics and human-readable assessments.
-            Empty dict if insufficient data.
-
-        Note:
-            Uses sample standard deviation (N-1) via statistics.stdev() for proper
-            small-sample statistics (3-5 data points).
-        """
-        signals: dict[str, Any] = {}
-
-        # Require minimum 3 years of data for meaningful statistics
-        if financials.empty or len(financials.columns) < 3:
-            logger.debug("moat_signals_insufficient_data", symbol=symbol, years=0)
-            return signals
-
-        # --- 1. GROSS MARGIN STABILITY (5-year CV) ---
-        try:
-            if (
-                "Gross Profit" in financials.index
-                and "Total Revenue" in financials.index
-            ):
-                margins = []
-                years_available = min(5, len(financials.columns))
-
-                for i in range(years_available):
-                    try:
-                        gross_profit = financials.loc["Gross Profit"].iloc[i]
-                        revenue = financials.loc["Total Revenue"].iloc[i]
-
-                        # Skip if either is None, NaN, or zero
-                        if (
-                            pd.notna(gross_profit)
-                            and pd.notna(revenue)
-                            and revenue != 0
-                        ):
-                            margin = float(gross_profit) / float(revenue)
-                            # Sanity check: margin should be between -0.5 and 1.0
-                            if -0.5 < margin < 1.0:
-                                margins.append(margin)
-                    except (ValueError, TypeError, KeyError):
-                        continue
-
-                # Require minimum 3 valid data points for meaningful statistics
-                if len(margins) >= 3:
-                    mean_margin = statistics.mean(margins)
-
-                    # CV = StdDev / Mean (only valid if mean > 0)
-                    # Using sample stdev (N-1) for small-sample correctness
-                    if mean_margin > 0.05:  # Require minimum 5% margin
-                        std_margin = statistics.stdev(margins)  # N-1 denominator
-                        cv = std_margin / mean_margin
-
-                        signals["moat_grossMarginCV"] = round(cv, 4)
-                        signals["moat_grossMarginAvg"] = round(mean_margin, 4)
-                        signals["moat_grossMarginYears"] = len(margins)
-
-                        # Human-readable signal (used for threshold logic downstream)
-                        if cv < 0.08:
-                            signals["moat_marginStability"] = "HIGH"
-                        elif cv < 0.15:
-                            signals["moat_marginStability"] = "MEDIUM"
-                        else:
-                            signals["moat_marginStability"] = "LOW"
-
-                        logger.debug(
-                            "moat_margin_calculated",
-                            symbol=symbol,
-                            cv=cv,
-                            avg=mean_margin,
-                            years=len(margins),
-                            signal=signals.get("moat_marginStability"),
-                        )
-        except Exception as e:
-            logger.debug(
-                "moat_margin_calc_failed",
-                symbol=symbol,
-                **summarize_exception(
-                    e,
-                    operation="calculating moat margin stability",
-                    provider="unknown",
-                ),
-            )
-
-        # --- 2. CASH CONVERSION QUALITY (3-year CFO/NI ratio) ---
-        try:
-            if (
-                not cashflow.empty
-                and "Operating Cash Flow" in cashflow.index
-                and "Net Income" in financials.index
-            ):
-                ratios = []
-                years_available = min(3, len(financials.columns), len(cashflow.columns))
-
-                for i in range(years_available):
-                    try:
-                        ocf = cashflow.loc["Operating Cash Flow"].iloc[i]
-                        ni = financials.loc["Net Income"].iloc[i]
-
-                        # Only calculate for profitable years (NI > 0)
-                        if pd.notna(ocf) and pd.notna(ni) and float(ni) > 0:
-                            ratio = float(ocf) / float(ni)
-                            # Sanity check: ratio typically 0.3 to 2.5
-                            # (can exceed 1.0 when D&A high relative to capex)
-                            if 0.1 < ratio < 3.0:
-                                ratios.append(ratio)
-                    except (ValueError, TypeError, KeyError):
-                        continue
-
-                if len(ratios) >= 2:
-                    avg_ratio = statistics.mean(ratios)
-                    signals["moat_cfoToNiAvg"] = round(avg_ratio, 4)
-                    signals["moat_cfoToNiYears"] = len(ratios)
-
-                    # Human-readable signal (used for threshold logic downstream)
-                    # Note: ratio > 1.0 is valid (strong cash generation)
-                    if avg_ratio > 0.90:
-                        signals["moat_cashConversion"] = "STRONG"
-                    elif avg_ratio > 0.70:
-                        signals["moat_cashConversion"] = "ADEQUATE"
-                    else:
-                        signals["moat_cashConversion"] = "WEAK"
-
-                    logger.debug(
-                        "moat_cash_conversion_calculated",
-                        symbol=symbol,
-                        avg_ratio=avg_ratio,
-                        years=len(ratios),
-                        signal=signals.get("moat_cashConversion"),
-                    )
-        except Exception as e:
-            logger.debug(
-                "moat_cash_conversion_failed",
-                symbol=symbol,
-                **summarize_exception(
-                    e,
-                    operation="calculating moat cash conversion",
-                    provider="unknown",
-                ),
-            )
-
-        return signals
+        """Calculate economic moat signal metrics from multi-year financial statements."""
+        return calculate_moat_signals_impl(financials, cashflow, symbol)
 
     def _calculate_capital_efficiency_signals(
         self,
@@ -1307,279 +793,19 @@ class SmartMarketDataFetcher(FinancialFetcher):
         symbol: str,
         cashflow: "pd.DataFrame | None" = None,
     ) -> dict[str, Any]:
-        """
-        Calculate capital efficiency metrics: ROIC, leverage quality, and idle-cash context.
-
-        Detects value destruction (ROIC < 0 with positive ROE) and financial
-        engineering (ROE >> ROIC). Uses hurdle rate as WACC proxy to avoid
-        precision theater of CAPM calculations.
-
-        Args:
-            income_stmt: yfinance income statement DataFrame
-            balance_sheet: yfinance balance sheet DataFrame
-            info: Extracted data dict (contains ROA, ROE from info)
-            symbol: Ticker symbol for logging
-
-        Returns:
-            Dict with capital efficiency signals. Empty dict if insufficient data.
-        """
-        from src.config import config
-
-        signals: dict[str, Any] = {}
-
-        try:
-            # --- Extract components ---
-            ebit: float | None = None
-            tax_rate: float | None = None
-            invested_capital: float | None = None
-            total_debt = _safe_float(info.get("totalDebt"))
-            cash = _safe_float(
-                info.get("cashAndShortTermInvestments") or info.get("totalCash")
-            )
-            total_assets = _safe_float(info.get("totalAssets"))
-            market_cap = _safe_float(info.get("marketCap"))
-            capex: float | None = None
-            d_and_a: float | None = None
-
-            if not income_stmt.empty and len(income_stmt.columns) > 0:
-                if "EBIT" in income_stmt.index:
-                    val = income_stmt.loc["EBIT"].iloc[0]
-                    if pd.notna(val):
-                        ebit = float(val)
-
-                if "Tax Rate For Calcs" in income_stmt.index:
-                    val = income_stmt.loc["Tax Rate For Calcs"].iloc[0]
-                    if pd.notna(val):
-                        tax_rate = float(val)
-
-            if not balance_sheet.empty and len(balance_sheet.columns) > 0:
-                if "Invested Capital" in balance_sheet.index:
-                    val = balance_sheet.loc["Invested Capital"].iloc[0]
-                    if pd.notna(val) and val > 0:
-                        invested_capital = float(val)
-
-                if total_debt is None:
-                    if "Total Debt" in balance_sheet.index:
-                        val = balance_sheet.loc["Total Debt"].iloc[0]
-                        if pd.notna(val):
-                            total_debt = float(val)
-                    elif "Long Term Debt" in balance_sheet.index:
-                        long_term = balance_sheet.loc["Long Term Debt"].iloc[0]
-                        short_term = (
-                            balance_sheet.loc["Current Debt"].iloc[0]
-                            if "Current Debt" in balance_sheet.index
-                            else 0
-                        )
-                        if pd.notna(long_term) and pd.notna(short_term):
-                            total_debt = float(long_term) + float(short_term)
-
-                if total_assets is None and "Total Assets" in balance_sheet.index:
-                    val = balance_sheet.loc["Total Assets"].iloc[0]
-                    if pd.notna(val):
-                        total_assets = float(val)
-
-                if cash is None:
-                    used_combined_cash_row = False
-                    cash_rows = [
-                        "Cash And Short Term Investments",
-                        "Cash And Cash Equivalents",
-                        "Cash",
-                    ]
-                    for cash_row in cash_rows:
-                        if cash_row in balance_sheet.index:
-                            val = balance_sheet.loc[cash_row].iloc[0]
-                            if pd.notna(val):
-                                cash = float(val)
-                                used_combined_cash_row = (
-                                    cash_row == "Cash And Short Term Investments"
-                                )
-                                break
-                    if (
-                        cash is not None
-                        and not used_combined_cash_row
-                        and "Short Term Investments" in balance_sheet.index
-                    ):
-                        sti = balance_sheet.loc["Short Term Investments"].iloc[0]
-                        if pd.notna(sti):
-                            cash += float(sti)
-
-            if (
-                cashflow is not None
-                and not cashflow.empty
-                and len(cashflow.columns) > 0
-            ):
-                if "Capital Expenditure" in cashflow.index:
-                    val = cashflow.loc["Capital Expenditure"].iloc[0]
-                    if pd.notna(val):
-                        capex = float(val)
-
-                for da_row in (
-                    "Depreciation And Amortization",
-                    "Depreciation Amortization Depletion",
-                    "Depreciation & Amortization",
-                    "Depreciation",
-                ):
-                    if da_row in cashflow.index:
-                        val = cashflow.loc[da_row].iloc[0]
-                        if pd.notna(val):
-                            d_and_a = float(val)
-                            break
-
-            # ROA and ROE from info dict
-            # roa = info.get("returnOnAssets")
-            roe = info.get("returnOnEquity")
-
-            # --- Calculate ROIC ---
-            roic: float | None = None
-            if (
-                ebit is not None
-                and invested_capital is not None
-                and invested_capital > 0
-            ):
-                # Default tax rate to 21% if not available
-                effective_tax = tax_rate if tax_rate is not None else 0.21
-                # Clamp tax rate to reasonable range
-                effective_tax = max(0.0, min(0.5, effective_tax))
-                nopat = ebit * (1 - effective_tax)
-                roic = nopat / invested_capital
-
-                signals["capital_roic"] = round(roic, 4)
-                signals["capital_roic_source"] = "calculated"
-
-                # --- ROIC Quality Classification ---
-                hurdle = config.roic_hurdle_rate
-                strong = config.roic_strong_threshold
-
-                if roic < 0:
-                    signals["capital_roicQuality"] = "DESTRUCTIVE"
-                elif roic < hurdle:
-                    signals["capital_roicQuality"] = "WEAK"
-                elif roic < strong:
-                    signals["capital_roicQuality"] = "ADEQUATE"
-                else:
-                    signals["capital_roicQuality"] = "STRONG"
-
-                # Spread vs hurdle rate (proxy for ROIC - WACC)
-                signals["capital_hurdleSpread"] = round(roic - hurdle, 4)
-
-            # --- Leverage Quality (ROE/ROIC relationship) ---
-            if roic is not None and roe is not None:
-                # Handle edge cases
-                if roic <= 0 and roe > 0:
-                    # Value destruction: negative operating returns, positive equity returns
-                    signals["capital_leverageQuality"] = "VALUE_DESTRUCTION"
-                elif roic > 0:
-                    ratio = roe / roic
-                    signals["capital_roeRoicRatio"] = round(ratio, 2)
-
-                    suspect = config.leverage_suspect_ratio
-                    engineered = config.leverage_engineered_ratio
-
-                    if ratio > engineered:
-                        signals["capital_leverageQuality"] = "ENGINEERED"
-                    elif ratio > suspect:
-                        signals["capital_leverageQuality"] = "SUSPECT"
-                    elif ratio < 1.0:
-                        # ROIC > ROE: under-leveraged or conservative
-                        signals["capital_leverageQuality"] = "CONSERVATIVE"
-                    else:
-                        signals["capital_leverageQuality"] = "GENUINE"
-
-            if (
-                cash is not None
-                and total_debt is not None
-                and market_cap
-                and market_cap > 0
-            ):
-                signals["capital_netCashToMarketCap"] = round(
-                    (cash - total_debt) / market_cap, 4
-                )
-
-            if cash is not None and total_assets and total_assets > 0:
-                signals["capital_cashToAssets"] = round(cash / total_assets, 4)
-
-            if capex is not None and d_and_a not in (None, 0):
-                capex_to_da_ratio = abs(capex) / abs(d_and_a)
-                signals["capital_capexToDaRatio"] = round(capex_to_da_ratio, 2)
-                if capex_to_da_ratio < config.capex_to_da_underinvesting_threshold:
-                    signals["capital_capexToDaStatus"] = "UNDERINVESTING"
-                elif capex_to_da_ratio > config.capex_to_da_growth_threshold:
-                    signals["capital_capexToDaStatus"] = "GROWTH_INVESTING"
-                else:
-                    signals["capital_capexToDaStatus"] = "MAINTENANCE"
-
-            if signals:
-                logger.debug(
-                    "capital_efficiency_calculated",
-                    symbol=symbol,
-                    roic=signals.get("capital_roic"),
-                    roic_quality=signals.get("capital_roicQuality"),
-                    leverage_quality=signals.get("capital_leverageQuality"),
-                )
-
-        except Exception as e:
-            logger.debug(
-                "capital_efficiency_calculation_failed",
-                symbol=symbol,
-                **summarize_exception(
-                    e,
-                    operation="calculating capital efficiency signals",
-                    provider="unknown",
-                ),
-            )
-
-        return signals
+        """Calculate capital efficiency metrics: ROIC, leverage quality, and idle-cash context."""
+        return calculate_capital_efficiency_signals_impl(
+            income_stmt=income_stmt,
+            balance_sheet=balance_sheet,
+            info=info,
+            symbol=symbol,
+            cashflow=cashflow,
+        )
 
     @staticmethod
     def _compute_trend_regression(values: list[float], mean_val: float) -> str:
-        """
-        Determine trend using linear regression slope and coefficient of variation.
-
-        Args:
-            values: Time series (oldest first, newest last)
-            mean_val: Pre-computed mean for CV calculation
-
-        Returns:
-            UNSTABLE: CV > 0.40 (high variance masks any trend)
-            IMPROVING: Slope > 0.5% of mean per year
-            DECLINING: Slope < -0.5% of mean per year
-            STABLE: Slope within ±0.5% of mean per year
-        """
-        n = len(values)
-        if n < 3 or mean_val == 0:
-            return "N/A"
-
-        # Coefficient of variation (CV) - measures volatility
-        try:
-            stdev = statistics.stdev(values)
-            cv = abs(stdev / mean_val) if mean_val != 0 else 0
-        except statistics.StatisticsError:
-            cv = 0
-
-        # High variance = UNSTABLE (cyclical or erratic)
-        if cv > 0.40:
-            return "UNSTABLE"
-
-        # Linear regression: slope = Σ(x-x̄)(y-ȳ) / Σ(x-x̄)²
-        x_mean = (n - 1) / 2.0
-        numerator = sum((i - x_mean) * (v - mean_val) for i, v in enumerate(values))
-        denominator = sum((i - x_mean) ** 2 for i in range(n))
-
-        if denominator == 0:
-            return "STABLE"
-
-        slope = numerator / denominator
-
-        # Normalize slope as % of mean per year
-        slope_pct = (slope / abs(mean_val)) if mean_val != 0 else 0
-
-        # Thresholds: ±0.5% annual change relative to mean
-        if slope_pct > 0.005:
-            return "IMPROVING"
-        elif slope_pct < -0.005:
-            return "DECLINING"
-        else:
-            return "STABLE"
+        """Determine trend using linear regression slope and coefficient of variation."""
+        return compute_trend_regression_impl(values, mean_val)
 
     def _calculate_return_trends(
         self,
@@ -1587,529 +813,52 @@ class SmartMarketDataFetcher(FinancialFetcher):
         balance_sheet: "pd.DataFrame",
         symbol: str,
     ) -> dict[str, Any]:
-        """
-        Calculate 5-year historical average ROA/ROE and trend direction.
-
-        Used to detect cyclical peaks vs structural quality improvement.
-        Requires minimum 3 years of data; uses up to 5 years if available.
-
-        Args:
-            financials: yfinance financials DataFrame (columns are years, newest first)
-            balance_sheet: yfinance balance sheet DataFrame
-            symbol: Ticker symbol for logging
-
-        Returns:
-            Dict with roa_5y_avg, roe_5y_avg, and profitability_trend.
-            Empty dict if insufficient data.
-        """
-        signals: dict[str, Any] = {}
-
-        if financials.empty or balance_sheet.empty:
-            return signals
-
-        years_available = min(len(financials.columns), len(balance_sheet.columns), 5)
-        if years_available < 3:
-            logger.debug(
-                "return_trends_insufficient_data", symbol=symbol, years=years_available
-            )
-            return signals
-
-        # --- ROA: Net Income / Total Assets ---
-        try:
-            if (
-                "Net Income" in financials.index
-                and "Total Assets" in balance_sheet.index
-            ):
-                roas = []
-                for i in range(years_available):
-                    try:
-                        ni = financials.loc["Net Income"].iloc[i]
-                        assets = balance_sheet.loc["Total Assets"].iloc[i]
-                        if pd.notna(ni) and pd.notna(assets) and float(assets) > 0:
-                            roa = float(ni) / float(assets)
-                            # Sanity: exclude extreme outliers
-                            if -0.50 < roa < 0.50:
-                                roas.append(roa)
-                    except (ValueError, TypeError, IndexError):
-                        continue
-
-                if len(roas) >= 3:
-                    avg_roa = statistics.mean(roas)
-                    signals["roa_5y_avg"] = round(avg_roa * 100, 2)
-                    signals["_roa_5y_years"] = len(roas)
-
-                    # Trend via regression + variance analysis
-                    # roas[0] = newest, roas[-1] = oldest; invert for time series
-                    signals["profitability_trend"] = self._compute_trend_regression(
-                        list(reversed(roas)), avg_roa
-                    )
-
-                    logger.debug(
-                        "roa_trend_calculated",
-                        symbol=symbol,
-                        roa_5y_avg=signals.get("roa_5y_avg"),
-                        trend=signals.get("profitability_trend"),
-                        years=len(roas),
-                    )
-        except Exception as e:
-            logger.debug(
-                "roa_trend_calc_failed",
-                symbol=symbol,
-                **summarize_exception(
-                    e,
-                    operation="calculating ROA trend",
-                    provider="unknown",
-                ),
-            )
-
-        # --- ROE: Net Income / Stockholders Equity ---
-        try:
-            equity_key = (
-                "Stockholders Equity"
-                if "Stockholders Equity" in balance_sheet.index
-                else "Total Stockholder Equity"
-                if "Total Stockholder Equity" in balance_sheet.index
-                else None
-            )
-
-            if "Net Income" in financials.index and equity_key:
-                roes = []
-                for i in range(years_available):
-                    try:
-                        ni = financials.loc["Net Income"].iloc[i]
-                        equity = balance_sheet.loc[equity_key].iloc[i]
-                        # Require positive equity (negative = insolvent, skip)
-                        if pd.notna(ni) and pd.notna(equity) and float(equity) > 0:
-                            roe = float(ni) / float(equity)
-                            if -1.0 < roe < 1.0:
-                                roes.append(roe)
-                    except (ValueError, TypeError, IndexError):
-                        continue
-
-                if len(roes) >= 3:
-                    signals["roe_5y_avg"] = round(statistics.mean(roes) * 100, 2)
-                    signals["_roe_5y_years"] = len(roes)
-
-                    logger.debug(
-                        "roe_trend_calculated",
-                        symbol=symbol,
-                        roe_5y_avg=signals.get("roe_5y_avg"),
-                        years=len(roes),
-                    )
-        except Exception as e:
-            logger.debug(
-                "roe_trend_calc_failed",
-                symbol=symbol,
-                **summarize_exception(
-                    e,
-                    operation="calculating ROE trend",
-                    provider="unknown",
-                ),
-            )
-
-        return signals
+        """Calculate 5-year historical average ROA/ROE and trend direction."""
+        return calculate_return_trends_impl(financials, balance_sheet, symbol)
 
     def _calculate_graham_earnings_test(
         self,
         financials: "pd.DataFrame",
         symbol: str,
     ) -> dict[str, Any]:
-        """
-        Graham's consecutive positive earnings test.
-
-        Benjamin Graham required 10 years of uninterrupted positive earnings
-        as a quality filter. We adapt this to available data (typically 4-5 years
-        from yfinance annual statements).
-
-        Returns:
-            Dict with graham_consecutive_positive_years and graham_test fields.
-        """
-        signals: dict[str, Any] = {}
-
-        try:
-            if financials.empty or len(financials.columns) == 0:
-                signals["graham_consecutive_positive_years"] = None
-                signals["graham_test"] = "INSUFFICIENT_DATA"
-                return signals
-
-            # Extract Net Income row (yfinance uses "Net Income")
-            if "Net Income" not in financials.index:
-                signals["graham_consecutive_positive_years"] = None
-                signals["graham_test"] = "INSUFFICIENT_DATA"
-                return signals
-
-            net_incomes = financials.loc["Net Income"]
-
-            # Count consecutive positive years from most recent
-            # financials columns are newest first (index 0 = most recent)
-            consecutive_positive = 0
-            for ni in net_incomes:
-                if pd.notna(ni) and float(ni) > 0:
-                    consecutive_positive += 1
-                else:
-                    break  # Stop at first non-positive year
-
-            years_available = len(net_incomes.dropna())
-            signals["graham_consecutive_positive_years"] = consecutive_positive
-            signals["_graham_years_available"] = years_available
-
-            # Graham test: Pass if all available years positive (scaled threshold)
-            # Full Graham requires 10yr; we use what's available
-            if years_available >= 5 and consecutive_positive >= years_available:
-                signals["graham_test"] = "PASS"
-            elif consecutive_positive >= 4:
-                signals["graham_test"] = "PASS"
-            elif years_available >= 3 and consecutive_positive < years_available:
-                signals["graham_test"] = "FAIL"
-            else:
-                signals["graham_test"] = "INSUFFICIENT_DATA"
-
-            logger.debug(
-                "graham_test_calculated",
-                symbol=symbol,
-                consecutive_positive=consecutive_positive,
-                years_available=years_available,
-                result=signals["graham_test"],
-            )
-
-        except Exception as e:
-            logger.warning(
-                "graham_test_error",
-                symbol=symbol,
-                **summarize_exception(
-                    e,
-                    operation="calculating Graham earnings test",
-                    provider="unknown",
-                ),
-            )
-            signals["graham_consecutive_positive_years"] = None
-            signals["graham_test"] = "ERROR"
-
-        return signals
+        """Run Graham's consecutive positive earnings test."""
+        return calculate_graham_earnings_test_impl(financials, symbol)
 
     async def _fetch_yfinance_enhanced(self, symbol: str) -> dict | None:
         """Fetch yfinance data including statement calculation."""
-        try:
-            ticker = yf.Ticker(symbol)
-            info = {}
-            try:
-                info = await asyncio.to_thread(lambda: ticker.info)
-            except YFRateLimitError as exc:
-                logger.warning(
-                    "yfinance_rate_limited",
-                    symbol=symbol,
-                    **summarize_exception(
-                        exc,
-                        operation="fetching yfinance enhanced data",
-                        provider="unknown",
-                    ),
-                )
-                return None
-            except Exception:
-                info = {}
-
-            has_price = False
-            price_fields = ["currentPrice", "regularMarketPrice", "previousClose"]
-
-            if info:
-                for field in price_fields:
-                    if field in info and info[field] is not None:
-                        has_price = True
-                        break
-
-            if not has_price and hasattr(ticker, "fast_info"):
-                try:
-                    fast_info = await asyncio.to_thread(lambda: ticker.fast_info)
-                    fast_price = fast_info.get("lastPrice")
-                    if fast_price:
-                        info["currentPrice"] = fast_price
-                        has_price = True
-                except (AttributeError, KeyError):
-                    pass
-
-            if not has_price:
-                logger.warning("yfinance_no_price", symbol=symbol)
-                info = info or {}
-
-            # ALWAYS extract from statements (for gap-filling and divergence
-            # detection). These yfinance statement properties can trigger HTTP
-            # fetches, so keep them off the event loop.
-            statement_data = await asyncio.to_thread(
-                self._extract_from_financial_statements,
-                ticker,
-                symbol,
-            )
-
-            # Flag significant TTM vs statement divergence for data quality awareness
-            fcf_ttm = info.get("freeCashflow")
-            fcf_stmt = statement_data.get("freeCashflow")
-            if fcf_ttm and fcf_stmt and fcf_ttm != 0 and fcf_stmt != 0:
-                ratio = abs(fcf_ttm / fcf_stmt)
-                if ratio > 1.5 or ratio < 0.67:
-                    info["fcf_data_note"] = (
-                        f"FCF DATA QUALITY UNCERTAIN: TTM ({fcf_ttm/1e9:.2f}B) vs "
-                        f"statement ({fcf_stmt/1e9:.2f}B) = {ratio:.1f}x divergence"
-                    )
-
-            for key, value in statement_data.items():
-                if key.startswith("_"):
-                    # Always copy source tags
-                    info[key] = value
-                elif key not in info or info.get(key) is None:
-                    # Only use statement data to fill gaps (TTM is more current)
-                    if value is not None:
-                        info[key] = value
-
-            if not info or (not has_price and len(info) < 5):
-                return None
-
-            if "symbol" not in info:
-                info["symbol"] = symbol
-
-            trading_curr = info.get("currency", "").upper()
-            financial_curr = info.get("financialCurrency", "").upper()
-            if trading_curr and financial_curr and trading_curr != financial_curr:
-                info["cross_listing_note"] = (
-                    f"Price data is in {trading_curr} ({info.get('exchange', 'unknown exchange')}). "
-                    f"Financial statements are reported in {financial_curr}. "
-                    f"This is a cross-listing — the company's primary exchange may use {financial_curr}. "
-                    f"All price and liquidity data refers to the {trading_curr} listing only."
-                )
-
-            self.stats["sources"]["yfinance"] += 1
-            return info
-
-        except YFRateLimitError as e:
-            logger.warning(
-                "yfinance_rate_limited",
-                symbol=symbol,
-                **summarize_exception(
-                    e,
-                    operation="fetching yfinance enhanced data",
-                    provider="unknown",
-                ),
-            )
-            return None
-        except Exception as e:
-            logger.error(
-                "yfinance_enhanced_failed",
-                symbol=symbol,
-                **summarize_exception(
-                    e,
-                    operation="fetching yfinance enhanced data",
-                    provider="unknown",
-                ),
-            )
-            return None
+        return await fetch_yfinance_enhanced_impl(self, symbol)
 
     def _fetch_yahooquery_fallback(self, symbol: str) -> dict | None:
         """Fallback: yahooquery."""
-        if not YAHOOQUERY_AVAILABLE:
-            return None
-
-        try:
-            yq = YQTicker(symbol)
-            combined = {}
-            modules = [
-                yq.summary_profile,
-                yq.summary_detail,
-                yq.key_stats,
-                yq.financial_data,
-                yq.price,
-            ]
-
-            for module in modules:
-                if isinstance(module, dict) and symbol in module:
-                    data = module[symbol]
-                    if isinstance(data, dict):
-                        combined.update(data)
-
-            if not combined or len(combined) < MIN_INFO_FIELDS:
-                return None
-
-            if "currentPrice" not in combined and "regularMarketPrice" in combined:
-                combined["currentPrice"] = combined["regularMarketPrice"]
-
-            self.stats["sources"]["yahooquery"] += 1
-            return combined
-        except Exception:
-            return None
+        return fetch_yahooquery_fallback_impl(self, symbol)
 
     async def _fetch_fmp_fallback(self, symbol: str) -> dict | None:
         """Fallback: FMP."""
-        if (
-            not FMP_AVAILABLE
-            or not self.fmp_fetcher
-            or not self.fmp_fetcher.is_available()
-        ):
-            return None
-
-        try:
-            fmp_data = await self.fmp_fetcher.get_financial_metrics(symbol)
-
-            # Check if we got valid data (keys other than _source)
-            if fmp_data and any(
-                v is not None for k, v in fmp_data.items() if k != "_source"
-            ):
-                self.stats["sources"]["fmp"] += 1
-                return fmp_data
-
-        except Exception:
-            return None
-
-        return None
+        return await fetch_fmp_fallback_impl(self, symbol)
 
     async def _fetch_eodhd_fallback(self, symbol: str) -> dict | None:
-        """
-        Fallback: EOD Historical Data.
-        High quality source for fundamentals.
-        Gracefully handles API Limits/Errors by returning None.
-        """
-        if not EODHD_AVAILABLE or not self.eodhd_fetcher:
-            return None
-
-        try:
-            # Check circuit breaker before attempting
-            if not self.eodhd_fetcher.is_available():
-                return None
-
-            data = await self.eodhd_fetcher.get_financial_metrics(symbol)
-
-            # If successful and contains data
-            if data and any(v is not None for k, v in data.items() if k != "_source"):
-                self.stats["sources"]["eodhd"] += 1
-                return data
-
-            # If data is None, fetcher might have hit rate limit (logged inside fetcher)
-            return None
-
-        except Exception as e:
-            logger.warning(
-                "eodhd_fetch_error",
-                symbol=symbol,
-                **summarize_exception(
-                    e,
-                    operation="fetching EODHD data",
-                    provider="unknown",
-                ),
-            )
-            return None
+        """Fallback: EOD Historical Data."""
+        return await fetch_eodhd_fallback_impl(self, symbol)
 
     async def _fetch_av_fallback(self, symbol: str) -> dict | None:
-        """
-        Fallback: Alpha Vantage.
-        High-quality fundamentals with circuit breaker for rate limit handling.
-        Free tier: 25 requests/day, 5 requests/minute.
-        """
-        if not ALPHA_VANTAGE_AVAILABLE or not self.av_fetcher:
-            return None
-
-        try:
-            # Check circuit breaker before attempting
-            if not self.av_fetcher.is_available():
-                return None
-
-            data = await self.av_fetcher.get_financial_metrics(symbol)
-
-            # If successful and contains data
-            if data and any(
-                v is not None for k, v in data.items() if not k.startswith("_")
-            ):
-                self.stats["sources"]["alpha_vantage"] += 1
-                return data
-
-            # If data is None, fetcher might have hit rate limit (logged inside fetcher)
-            return None
-
-        except Exception as e:
-            logger.warning(
-                "alpha_vantage_fetch_error",
-                symbol=symbol,
-                **summarize_exception(
-                    e,
-                    operation="fetching Alpha Vantage data",
-                    provider="unknown",
-                ),
-            )
-            return None
+        """Fallback: Alpha Vantage."""
+        return await fetch_av_fallback_impl(self, symbol)
 
     async def _fetch_all_sources_parallel(self, symbol: str) -> dict[str, dict | None]:
         """PHASE 1: Launch all data sources in parallel."""
-        logger.info("launching_parallel_sources", symbol=symbol)
-
-        tasks = {
-            "yfinance": self._fetch_yfinance_enhanced(symbol),
-            "yahooquery": asyncio.to_thread(self._fetch_yahooquery_fallback, symbol),
-            "fmp": self._fetch_fmp_fallback(symbol),
-            "eodhd": self._fetch_eodhd_fallback(symbol),
-            "alpha_vantage": self._fetch_av_fallback(symbol),
-        }
-
-        results = {}
-        source_outcomes: dict[str, str] = {}
-        for source_name, coro in tasks.items():
-            try:
-                # Wait for each task with timeout
-                result = await asyncio.wait_for(coro, timeout=PER_SOURCE_TIMEOUT)
-                results[source_name] = result
-                if result:
-                    source_outcomes[source_name] = "success"
-                    logger.info(
-                        f"{source_name}_success", symbol=symbol, fields=len(result)
-                    )
-                else:
-                    # Expected when API key not configured - use debug, not warning
-                    source_outcomes[source_name] = "empty"
-                    logger.debug(f"{source_name}_returned_none", symbol=symbol)
-            except asyncio.TimeoutError:
-                logger.warning(
-                    f"{source_name}_timeout",
-                    symbol=symbol,
-                    timeout_seconds=PER_SOURCE_TIMEOUT,
-                )
-                results[source_name] = None
-                source_outcomes[source_name] = "timeout"
-            except Exception as e:
-                logger.warning(
-                    f"{source_name}_error",
-                    symbol=symbol,
-                    **summarize_exception(
-                        e,
-                        operation=f"fetching {source_name} data",
-                        provider="unknown",
-                    ),
-                )
-                results[source_name] = None
-                source_outcomes[source_name] = f"error:{type(e).__name__}"
-
-        live_sources = [s for s in results if results[s] is not None]
-        if not live_sources:
-            logger.warning(
-                "all_data_sources_failed",
-                symbol=symbol,
-                sources_attempted=list(tasks.keys()),
-                source_outcomes=source_outcomes,
-                suspected_cause=self._classify_aggregate_source_failure(
-                    source_outcomes
-                ),
-            )
-
-        return results
+        return await fetch_all_sources_parallel_impl(
+            self,
+            symbol,
+            PER_SOURCE_TIMEOUT,
+            logger_obj=logger,
+            asyncio_module=asyncio,
+        )
 
     def _classify_aggregate_source_failure(
         self, source_outcomes: dict[str, str]
     ) -> str:
         """Classify aggregate source failure conservatively from per-source outcomes."""
-        transient_markers = ("timeout", "connect", "proxy", "ssl", "dns", "socket")
-        non_success = [
-            outcome for outcome in source_outcomes.values() if outcome != "success"
-        ]
-        if non_success and all(
-            any(marker in outcome.lower() for marker in transient_markers)
-            for outcome in non_success
-        ):
-            return "connectivity_or_provider_transient"
-        return "no_data_or_provider_unavailable"
+        return classify_aggregate_source_failure_impl(source_outcomes)
 
     def _normalize_scaling_errors(self, val_a: float, val_b: float) -> float:
         """
@@ -2142,372 +891,44 @@ class SmartMarketDataFetcher(FinancialFetcher):
     def _smart_merge_with_quality(
         self, source_results: dict[str, dict | None], symbol: str
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """
-        PHASE 3: Intelligent merge with quality scoring.
-        Updated to include EODHD and Alpha Vantage in the priority logic and field-specific override checks.
-        """
-        source_results = self._quarantine_forward_pe_outlier(source_results, symbol)
-        merged = {}
-        field_sources = {}
-        field_quality = {}
-        source_conflicts = {}
-        sources_used = set()
-        gaps_filled = 0
-
-        # Order of processing (lowest priority to highest priority if quality scores match)
-        # Note: Actual precedence is determined by SOURCE_QUALITY dict
-        source_order = ["yahooquery", "fmp", "alpha_vantage", "eodhd", "yfinance"]
-
-        for source_name in source_order:
-            source_data = source_results.get(source_name)
-            if not source_data:
-                continue
-
-            sources_used.add(source_name)
-
-            for key, value in source_data.items():
-                if value is None:
-                    continue
-
-                if key.startswith("_") and key.endswith("_source"):
-                    continue
-
-                # 1. Determine Base Quality for this source
-                # Check for explicit keys in SOURCE_QUALITY to handle fallbacks correctly
-                if source_name in SOURCE_QUALITY:
-                    quality = SOURCE_QUALITY[source_name]
-                else:
-                    quality = SOURCE_QUALITY.get(f"{source_name}_info", 5)
-
-                # 2. Check for Field-Specific Override (e.g. calculated_from_statements)
-                source_tag_key = f"_{key}_source"
-                if source_tag_key in source_data:
-                    tag = source_data[source_tag_key]
-                    if tag in SOURCE_QUALITY:
-                        quality = SOURCE_QUALITY[tag]
-
-                should_use = False
-
-                if key not in merged:
-                    should_use = True
-                elif merged[key] is None and value is not None:
-                    should_use = True
-                    gaps_filled += 1
-                elif key in field_quality:
-                    if quality > field_quality[key]:
-                        should_use = True
-                        logger.debug(
-                            "replacing_with_higher_quality",
-                            symbol=symbol,
-                            field=key,
-                            old_source=field_sources.get(key),
-                            new_source=source_name,
-                        )
-
-                if should_use:
-                    # SCALING CORRECTION: Check for 100x errors before replacing
-                    if (
-                        key in merged
-                        and merged[key] is not None
-                        and isinstance(value, int | float)
-                    ):
-                        try:
-                            # If new value is ~100x different, pick the base currency version
-                            # But be careful not to trigger this on percentages vs decimals (handled below)
-                            # Only apply to large nominal values like Price or Market Cap
-                            if key in [
-                                "currentPrice",
-                                "regularMarketPrice",
-                                "previousClose",
-                                "marketCap",
-                            ]:
-                                corrected_val = self._normalize_scaling_errors(
-                                    float(merged[key]), float(value)
-                                )
-                                # If the function returned something other than the new value, it means
-                                # scaling logic intervened.
-                                if corrected_val != float(value):
-                                    logger.info(
-                                        "scaling_error_corrected",
-                                        field=key,
-                                        original=merged[key],
-                                        candidate=value,
-                                        corrected=corrected_val,
-                                    )
-                                    value = corrected_val
-                        except (ValueError, TypeError):
-                            pass
-
-                    if key in NON_FINANCIAL_METADATA_FIELDS:
-                        merged[key] = value
-                        field_sources[key] = source_name
-                        field_quality[key] = quality
-                        continue
-
-                # Record source conflicts when values differ by >20%.
-                # Keep analysis-relevant conflicts in metadata even when the merge
-                # winner is obvious by source quality.
-                if (
-                    key in merged
-                    and merged[key] is not None
-                    and value is not None
-                    and key not in NON_FINANCIAL_METADATA_FIELDS
-                    and key not in NON_ACTIONABLE_CONFLICT_FIELDS
-                ):
-                    try:
-                        old_val = float(merged[key])
-                        new_val = float(value)
-                        if key in PERCENT_LIKE_FIELDS:
-                            old_val, new_val = _normalize_percent_pair(old_val, new_val)
-                        if (
-                            old_val != 0
-                            and abs(new_val - old_val) / abs(old_val) > 0.20
-                        ):
-                            old_source = field_sources.get(key, "unknown")
-                            old_quality = field_quality.get(key, quality)
-                            if should_use:
-                                winner_quality = quality
-                                loser_quality = old_quality
-                            else:
-                                winner_quality = old_quality
-                                loser_quality = quality
-                            source_conflicts[key] = {
-                                "old": round(old_val, 4),
-                                "old_source": old_source,
-                                "new": round(new_val, 4),
-                                "new_source": source_name,
-                                "variance_pct": round(
-                                    abs(new_val - old_val) / abs(old_val) * 100, 1
-                                ),
-                                "field_class": _conflict_field_class(key),
-                                "resolved_by_quality": not _is_actionable_conflict(
-                                    key, old_quality, quality
-                                ),
-                                "winner_quality": winner_quality,
-                                "loser_quality": loser_quality,
-                            }
-                    except (ValueError, TypeError):
-                        pass  # Non-numeric fields — skip
-
-                if should_use:
-                    merged[key] = value
-                    field_sources[key] = source_name
-                    field_quality[key] = quality
-
-        metadata = {
-            "sources_used": list(sources_used),
-            "composite_source": f"composite_{'+'.join(sorted(sources_used))}",
-            "gaps_filled": gaps_filled,
-            "field_sources": field_sources,
-            "field_quality": field_quality,
-            "source_conflicts": source_conflicts,
-        }
-
-        if source_conflicts:
-            formatted_conflicts = {
-                k: f"{v['old_source']}={v['old']} vs {v['new_source']}={v['new']} (Δ{v['variance_pct']}%)"
-                for k, v in source_conflicts.items()
-            }
-            actionable_conflicts = {
-                key: value
-                for key, value in source_conflicts.items()
-                if not value["resolved_by_quality"]
-            }
-            resolved_conflicts = {
-                key: value
-                for key, value in source_conflicts.items()
-                if value["resolved_by_quality"]
-            }
-            if actionable_conflicts:
-                logger.warning(
-                    "source_data_conflicts",
-                    symbol=symbol,
-                    conflicts={
-                        key: formatted_conflicts[key] for key in actionable_conflicts
-                    },
-                )
-            if resolved_conflicts:
-                logger.debug(
-                    "source_data_conflicts_resolved",
-                    symbol=symbol,
-                    conflicts={
-                        key: formatted_conflicts[key] for key in resolved_conflicts
-                    },
-                )
-
-        logger.info(
-            "smart_merge_complete",
-            symbol=symbol,
-            total_fields=len(merged),
-            sources=list(sources_used),
-            gaps_filled=gaps_filled,
+        """PHASE 3: Intelligent merge with quality scoring."""
+        return smart_merge_with_quality_impl(
+            source_results,
+            symbol,
+            self._quarantine_forward_pe_outlier,
+            logger_obj=logger,
         )
-
-        return merged, metadata
 
     def _quarantine_forward_pe_outlier(
         self, source_results: dict[str, dict | None], symbol: str
     ) -> dict[str, dict | None]:
-        candidates: list[tuple[str, float]] = []
-        for source_name, source_data in source_results.items():
-            if not source_data:
-                continue
-            forward_pe = _coerce_positive_float(source_data.get("forwardPE"))
-            if forward_pe is not None:
-                candidates.append((source_name, forward_pe))
-
-        if len(candidates) < 2:
-            return source_results
-
-        reference_candidates = [
-            (source_name, value)
-            for source_name, value in candidates
-            if value <= FORWARD_PE_REFERENCE_MAX
-        ]
-        if not reference_candidates:
-            return source_results
-
-        outliers = [
-            (source_name, value)
-            for source_name, value in candidates
-            if value > FORWARD_PE_OUTLIER_THRESHOLD
-            and any(
-                value / reference_value >= FORWARD_PE_OUTLIER_RATIO
-                for _, reference_value in reference_candidates
-            )
-        ]
-        if len(outliers) != 1:
-            return source_results
-
-        outlier_source, outlier_value = outliers[0]
-        sanitized_results: dict[str, dict | None] = {}
-        for source_name, source_data in source_results.items():
-            if not source_data:
-                sanitized_results[source_name] = source_data
-                continue
-            updated = source_data.copy()
-            if source_name == outlier_source:
-                updated["forwardPE"] = None
-                updated["_forwardPE_quarantine_reason"] = (
-                    "single_source_outlier_vs_plausible_peer"
-                )
-            sanitized_results[source_name] = updated
-
-        logger.info(
-            "forward_pe_outlier_quarantined",
-            symbol=symbol,
-            source=outlier_source,
-            forward_pe=round(outlier_value, 4),
-            reference_values={
-                source_name: round(value, 4)
-                for source_name, value in reference_candidates
-            },
+        return quarantine_forward_pe_outlier_impl(
+            source_results,
+            symbol,
+            logger_obj=logger,
         )
-        return sanitized_results
 
     def _calculate_coverage(self, data: dict) -> float:
         """Calculate percentage of IMPORTANT_FIELDS present."""
-        if not data:
-            return 0.0
-        present = sum(
-            1 for field in self.IMPORTANT_FIELDS if data.get(field) is not None
-        )
-        return present / len(self.IMPORTANT_FIELDS) if self.IMPORTANT_FIELDS else 0.0
+        return calculate_coverage_impl(data, self.IMPORTANT_FIELDS)
 
     def _identify_critical_gaps(self, data: dict) -> list[str]:
         """Identify which critical fields are missing."""
-        return [
-            field
-            for field in CRITICAL_ANALYSIS_FIELDS
-            if field not in data or data[field] is None
-        ]
+        return identify_critical_gaps_impl(data)
 
     async def _fetch_tavily_gaps(
         self, symbol: str, missing_fields: list[str]
     ) -> dict[str, Any]:
         """PHASE 5: Tavily gap-filling."""
-        DANGEROUS_FIELDS = [
-            "trailingPE",
-            "forwardPE",
-            "pegRatio",
-            "currentPrice",
-            "marketCap",
-        ]
-        safe_missing_fields = [f for f in missing_fields if f not in DANGEROUS_FIELDS]
-
-        if "us_revenue_pct" in missing_fields or "geographic_revenue" in missing_fields:
-            safe_missing_fields.append("us_revenue_pct")
-
-        if not self.tavily_client or not safe_missing_fields:
-            return {}
-
-        try:
-            import yfinance as yf
-
-            ticker_obj = yf.Ticker(symbol)
-            info = await asyncio.wait_for(
-                asyncio.to_thread(lambda: ticker_obj.info),
-                timeout=5,
-            )
-            company_name = info.get("longName") or info.get("shortName") or symbol
-        except Exception:
-            company_name = symbol
-
-        fields_to_search = safe_missing_fields[:5]
-        search_results = {}
-
-        for field in fields_to_search:
-            # Map internal field names to search terms
-            field_terms = {
-                "trailingPE": "trailing P/E ratio price earnings",
-                "forwardPE": "forward P/E ratio estimate",
-                "priceToBook": "price to book ratio P/B",
-                "returnOnEquity": "ROE return on equity",
-                "debtToEquity": "debt to equity ratio leverage",
-                "numberOfAnalystOpinions": "analyst coverage count",
-                "revenueGrowth": "revenue growth year over year",
-            }
-
-            if field == "us_revenue_pct":
-                query = f'"{company_name}" annual report revenue by geography North America United States'
-            else:
-                term = field_terms.get(field, field)
-                query = generate_strict_search_query(symbol, company_name, term)
-
-            try:
-                result = await search_tavily_inspected(
-                    query,
-                    profile="finance_deep",
-                    timeout=5,
-                )
-                if isinstance(result, dict) and "results" in result:
-                    combined = "\n".join(
-                        [i.get("content", "") for i in result["results"]]
-                    )
-                    search_results[field] = combined
-            except (TimeoutError, asyncio.TimeoutError, Exception):
-                pass
-
-        if not search_results:
-            return {}
-
-        all_text = "\n\n".join(search_results.values())
-
-        # Reinspect the aggregated text before extraction so this call site keeps
-        # an explicit prompt-ingress boundary even though each query result is
-        # already inspected centrally in tavily_utils.
-        from src.runtime_services import get_current_inspection_service
-        from src.tooling.inspector import InspectionEnvelope, SourceKind
-
-        envelope = InspectionEnvelope(
-            content_text=all_text,
-            source_kind=SourceKind.web_search,
-            source_name="tavily",
-            metadata={"symbol": symbol, "fields": list(search_results.keys())},
+        return await fetch_tavily_gaps_impl(
+            self,
+            symbol,
+            missing_fields,
+            yf_module=yf,
+            asyncio_module=asyncio,
+            search_fn=search_tavily_inspected,
+            query_builder=generate_strict_search_query,
         )
-        all_text = await get_current_inspection_service().check(envelope)
-
-        return self.pattern_extractor.extract_from_text(all_text, skip_fields=set())
 
     def _merge_gap_fill_data(
         self,
@@ -2516,90 +937,11 @@ class SmartMarketDataFetcher(FinancialFetcher):
         merge_metadata: dict[str, Any],
     ) -> dict[str, Any]:
         """Merge Tavily data."""
-        tavily_quality = SOURCE_QUALITY["tavily_extraction"]
-        added = 0
-        for key, value in gap_fill_data.items():
-            if value is None:
-                continue
-            should_use = False
-
-            if key not in merged:
-                should_use = True
-            elif merged[key] is None:
-                should_use = True
-            elif (
-                key in merge_metadata["field_quality"]
-                and tavily_quality > merge_metadata["field_quality"][key]
-            ):
-                should_use = True
-
-            if should_use:
-                merged[key] = value
-                merge_metadata["field_sources"][key] = "tavily"
-                merge_metadata["field_quality"][key] = tavily_quality
-                added += 1
-
-        merge_metadata["gaps_filled"] += added
-        return merged
+        return merge_gap_fill_data_impl(merged, gap_fill_data, merge_metadata)
 
     def _calculate_derived_metrics(self, data: dict, symbol: str) -> dict:
         """Calculate metrics."""
-        calculated = {}
-        try:
-            if data.get("returnOnEquity") is None:
-                roa = data.get("returnOnAssets")
-                de = data.get("debtToEquity")
-                if roa is not None and de is not None:
-                    calculated["returnOnEquity"] = roa * (1 + de)
-                    calculated["_returnOnEquity_source"] = "calculated_from_roa_de"
-
-            # PEG fallback: RE-ENABLED with TTM-aligned earnings growth (Feb 2026)
-            # Previously disabled because earningsGrowth (quarterly YoY) mismatched
-            # TTM P/E time horizon. Now uses earningsGrowth_TTM which sums last 4
-            # quarters vs prior 4 quarters — temporally aligned with trailingPE.
-            if data.get("pegRatio") is None:
-                pe = data.get("trailingPE")
-                ttm_eg = data.get("earningsGrowth_TTM")
-                if pe and ttm_eg and ttm_eg > 0.01:
-                    calculated_peg = pe / (ttm_eg * 100)
-                    if 0 < calculated_peg < 10:
-                        calculated["pegRatio"] = calculated_peg
-                        calculated["_pegRatio_source"] = "calculated_from_ttm_aligned"
-
-            # Growth trajectory fallback: MRQ vs FY when TTM not available
-            if data.get("growth_trajectory") is None:
-                mrq = data.get("revenueGrowth_MRQ")
-                fy = data.get("revenueGrowth")
-                if mrq is not None and fy is not None:
-                    delta = mrq - fy
-                    if delta > 0.10:
-                        calculated["growth_trajectory"] = "ACCELERATING"
-                    elif delta < -0.10:
-                        calculated["growth_trajectory"] = "DECELERATING"
-                    else:
-                        calculated["growth_trajectory"] = "STABLE"
-                    calculated["_growth_trajectory_source"] = "calculated_mrq_vs_fy"
-
-            if (
-                calculated.get("growth_trajectory") == "ACCELERATING"
-                and data.get("earningsGrowth_TTM") is not None
-                and data["earningsGrowth_TTM"] < -0.05
-            ):
-                calculated["growth_trajectory"] = "MIXED"
-                calculated["_growth_trajectory_source"] = (
-                    f"{calculated.get('_growth_trajectory_source', 'calculated_mrq_vs_fy')}|eps_divergence"
-                )
-
-            # FIX: Ensure marketCap is calculated if missing
-            if data.get("marketCap") is None:
-                price = data.get("currentPrice") or data.get("regularMarketPrice")
-                shares = data.get("sharesOutstanding")
-                if price and shares:
-                    calculated["marketCap"] = price * shares
-                    calculated["_marketCap_source"] = "calculated_from_price_shares"
-        except Exception:
-            pass
-        return calculated
+        return calculate_derived_metrics_impl(data, symbol)
 
     def _merge_data(self, primary: dict, *fallbacks: dict) -> MergeResult:
         """Merge simple dictionaries."""
