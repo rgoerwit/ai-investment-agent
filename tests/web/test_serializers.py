@@ -74,6 +74,22 @@ def test_serialize_dashboard_snapshot_uses_shared_cash_summary(sample_bundle):
     )
 
 
+def test_serialize_dashboard_snapshot_canonicalizes_sector_weights(sample_bundle):
+    sample_bundle.portfolio.sector_weights = {
+        "Technology": 8.0,
+        "Information Technology": 1.5,
+        "Healthcare": 3.0,
+        "Health Care": 1.0,
+    }
+
+    payload = serialize_dashboard_snapshot(sample_bundle)
+
+    assert payload["portfolio"]["sector_weights"] == {
+        "Information Technology": 9.5,
+        "Health Care": 4.0,
+    }
+
+
 def test_serialize_dashboard_snapshot_uses_shared_live_order_annotations(sample_bundle):
     payload = serialize_dashboard_snapshot(sample_bundle)
     sell_item = next(item for item in sample_bundle.items if item.ticker.yf == "7203.T")

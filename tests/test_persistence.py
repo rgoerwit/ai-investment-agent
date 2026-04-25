@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from langchain_core.messages import ToolMessage
 
 
@@ -115,6 +116,94 @@ def test_save_results_to_file_preserves_macro_context_metadata(tmp_path, monkeyp
     assert payload["macro_context"]["cache_dir"] == str(
         tmp_path / ".macro_context_cache"
     )
+
+
+def test_save_results_to_file_canonicalizes_prediction_snapshot_sector(
+    tmp_path, monkeypatch
+):
+    from src.persistence import save_results_to_file
+
+    monkeypatch.setattr("src.persistence.config.results_dir", str(tmp_path))
+    monkeypatch.setattr("src.persistence.config.enable_memory", False)
+    monkeypatch.setattr("src.prompts.get_all_prompts", lambda: {})
+
+    class StubTracker:
+        def get_total_stats(self):
+            return {
+                "failed_attempts": 0,
+                "total_calls": 0,
+                "total_agents": 0,
+                "total_prompt_tokens": 0,
+                "total_completion_tokens": 0,
+                "total_tokens": 0,
+                "total_cost_usd": 0.0,
+                "session_start": "2026-03-14T00:00:00",
+                "agents": {},
+                "failed_by_provider": {},
+                "failed_by_kind": {},
+            }
+
+    monkeypatch.setattr("src.token_tracker.get_tracker", lambda: StubTracker())
+
+    result = {
+        "market_report": "ok",
+        "sentiment_report": "ok",
+        "news_report": "ok",
+        "fundamentals_report": "DATA_BLOCK",
+        "final_trade_decision": "BUY",
+        "analysis_validity": {"publishable": True},
+        "artifact_statuses": {},
+        "prompts_used": {},
+        "run_summary": {"quick_mode": True, "tool_calls": 0, "publishable": True},
+    }
+
+    with patch(
+        "src.retrospective.extract_snapshot",
+        return_value={
+            "ticker": "7203.T",
+            "verdict": "BUY",
+            "analysis_date": "2026-04-25",
+            "sector": "Consumer Cyclical",
+        },
+    ):
+        output_path = save_results_to_file(result, "7203.T", quick_mode=True)
+
+    payload = json.loads(output_path.read_text())
+    assert payload["prediction_snapshot"]["sector"] == "Consumer Discretionary"
+
+
+@pytest.mark.asyncio
+async def test_maybe_save_rejection_record_canonicalizes_snapshot_sector():
+    from src.persistence import _maybe_save_rejection_record
+
+    args = SimpleNamespace(ticker="7203.T", quick=False)
+    logger = MagicMock()
+
+    with (
+        patch(
+            "src.retrospective.extract_snapshot",
+            return_value={
+                "ticker": "7203.T",
+                "verdict": "HOLD",
+                "analysis_date": "2026-04-25",
+                "sector": "Technology",
+            },
+        ),
+        patch(
+            "src.retrospective.create_lessons_memory",
+            return_value=MagicMock(available=True),
+        ),
+        patch(
+            "src.retrospective.save_rejection_record",
+            new=AsyncMock(return_value=True),
+        ) as save_rejection_record,
+    ):
+        await _maybe_save_rejection_record(
+            {}, args, trace_id="trace-1", logger_obj=logger
+        )
+
+    snapshot = save_rejection_record.await_args.args[0]
+    assert snapshot["sector"] == "Information Technology"
 
 
 def test_persist_analysis_outputs_surfaces_formatted_warning():

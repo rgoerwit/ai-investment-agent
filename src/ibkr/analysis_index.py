@@ -23,6 +23,7 @@ from src.error_safety import summarize_exception
 from src.ibkr.models import AnalysisRecord, TradeBlockData
 from src.ibkr.order_builder import parse_trade_block
 from src.ibkr.reconciliation_rules import _exchange_from_ticker, _normalize_verdict
+from src.sector_normalization import normalize_sector_label
 
 logger = structlog.get_logger(__name__)
 _ANALYSIS_INDEX_VERSION = 2
@@ -88,7 +89,9 @@ def _serialize_analysis_index_entry(record: AnalysisRecord) -> dict[str, Any]:
 
 def _deserialize_analysis_record(data: dict[str, Any]) -> AnalysisRecord:
     """Deserialize an AnalysisRecord from the latest-analyses cache."""
-    return AnalysisRecord.model_validate(data)
+    record = AnalysisRecord.model_validate(data)
+    record.sector = normalize_sector_label(record.sector)
+    return record
 
 
 def _validate_analysis_index_entry(
@@ -284,7 +287,7 @@ def _build_analysis_record_from_data(
         target_1_price=snapshot.get("target_1_price") or trade_block.target_1_price,
         target_2_price=snapshot.get("target_2_price") or trade_block.target_2_price,
         conviction=snapshot.get("conviction") or trade_block.conviction,
-        sector=snapshot.get("sector") or "",
+        sector=normalize_sector_label(snapshot.get("sector")),
         exchange=snapshot.get("exchange") or _exchange_from_ticker(ticker),
         is_quick_mode=bool(snapshot.get("is_quick_mode", False)),
     )

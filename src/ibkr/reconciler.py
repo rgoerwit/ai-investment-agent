@@ -21,6 +21,7 @@ from src.ibkr.models import (
 from src.ibkr.opportunity_finder import find_opportunities
 from src.ibkr.position_evaluator import evaluate_positions
 from src.ibkr.watchlist_evaluator import evaluate_watchlist
+from src.sector_normalization import normalize_sector_label
 from src.ticker_policy import is_safe_symbol_crossmatch_base, split_ticker
 
 logger = structlog.get_logger(__name__)
@@ -95,7 +96,7 @@ def _populate_portfolio_weights(
                 if best and "." in best.ticker:
                     current_ticker = best.ticker
                     analysis = best
-            sector = (analysis.sector if analysis else "") or "Unknown"
+            sector = normalize_sector_label(analysis.sector if analysis else None)
             exchange = _exchange_from_position(pos)
             weight = pos.market_value_usd / total_position_value * 100
             sector_weights[sector] = sector_weights.get(sector, 0.0) + weight

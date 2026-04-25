@@ -90,27 +90,6 @@ class LiveOrderMatch:
     status: str
 
 
-def normalize_sector_label(sector: str) -> str:
-    """Normalize sector labels so equivalent names aggregate cleanly."""
-    normalized = " ".join((sector or "").split()).strip()
-    if not normalized:
-        return "Unknown"
-    if normalized.casefold() in {"healthcare", "health care"}:
-        return "Health Care"
-    return normalized
-
-
-def aggregate_sector_weights(
-    sector_weights: dict[str, float] | None,
-) -> dict[str, float]:
-    """Merge sector buckets that differ only by benign label variants."""
-    aggregated: dict[str, float] = {}
-    for sector, pct in (sector_weights or {}).items():
-        label = normalize_sector_label(sector)
-        aggregated[label] = aggregated.get(label, 0.0) + pct
-    return aggregated
-
-
 def group_portfolio_actions(
     items: list[ReconciliationItem],
     *,
@@ -145,6 +124,8 @@ def group_portfolio_actions(
     trims = tuple(item for item in items if item.action == "TRIM")
     removes = tuple(item for item in items if item.action == "REMOVE")
     adds = tuple(item for item in items if item.action == "ADD")
+    # BUY remains the internal recommendation type; presentation decides whether
+    # that surfaces as a live buy or as an advisory watchlist candidate.
     new_buys = tuple(
         item
         for item in items

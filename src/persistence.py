@@ -10,6 +10,7 @@ from typing import Any
 import structlog
 
 from src.config import config
+from src.sector_normalization import normalize_sector_label
 
 logger = structlog.get_logger(__name__)
 
@@ -156,6 +157,18 @@ def _normalize_macro_context_metadata(
             else Path(config.results_dir) / ".macro_context_cache"
         ),
     }
+
+
+def _normalize_prediction_snapshot(
+    snapshot: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Canonicalize snapshot fields that feed long-lived downstream workflows."""
+    if snapshot is None:
+        return None
+    normalized = dict(snapshot)
+    if "sector" in normalized:
+        normalized["sector"] = normalize_sector_label(normalized.get("sector"))
+    return normalized
 
 
 def save_results_to_file(
@@ -372,11 +385,13 @@ def save_results_to_file(
     try:
         from src.retrospective import extract_snapshot
 
-        save_data["prediction_snapshot"] = extract_snapshot(
-            result,
-            ticker,
-            quick_mode,
-            trace_id=trace_id,
+        save_data["prediction_snapshot"] = _normalize_prediction_snapshot(
+            extract_snapshot(
+                result,
+                ticker,
+                quick_mode,
+                trace_id=trace_id,
+            )
         )
     except Exception as exc:
         logger_obj.warning(
@@ -498,13 +513,15 @@ async def _maybe_save_rejection_record(
             save_rejection_record,
         )
 
-        snapshot = extract_snapshot(
-            result,
-            args.ticker,
-            is_quick_mode=args.quick,
-            trace_id=trace_id,
+        snapshot = _normalize_prediction_snapshot(
+            extract_snapshot(
+                result,
+                args.ticker,
+                is_quick_mode=args.quick,
+                trace_id=trace_id,
+            )
         )
-        verdict = snapshot.get("verdict", "")
+        verdict = (snapshot or {}).get("verdict", "")
         if verdict and verdict != "BUY":
             rejection_memory = create_lessons_memory()
             await save_rejection_record(snapshot, rejection_memory)

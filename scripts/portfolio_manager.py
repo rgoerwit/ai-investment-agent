@@ -55,9 +55,6 @@ from src.ibkr.models import (
 from src.ibkr.portfolio_data_service import IbkrPortfolioDataService
 from src.ibkr.portfolio_health import compute_portfolio_health
 from src.ibkr.portfolio_presentation import (
-    aggregate_sector_weights as shared_aggregate_sector_weights,
-)
-from src.ibkr.portfolio_presentation import (
     build_action_summary_counts,
     build_cash_summary,
     group_portfolio_actions,
@@ -67,9 +64,6 @@ from src.ibkr.portfolio_presentation import (
 )
 from src.ibkr.portfolio_presentation import (
     find_live_order as shared_find_live_order,
-)
-from src.ibkr.portfolio_presentation import (
-    normalize_sector_label as shared_normalize_sector_label,
 )
 from src.ibkr.recommendation_service import (
     PortfolioRecommendationRequest,
@@ -85,6 +79,12 @@ from src.ibkr.refresh_service import (
     run_ticker_for,
 )
 from src.ibkr.screening_freshness import ScreeningFreshnessSummary
+from src.sector_normalization import (
+    aggregate_sector_weights as shared_aggregate_sector_weights,
+)
+from src.sector_normalization import (
+    normalize_sector_label as shared_normalize_sector_label,
+)
 from src.tavily_utils import search_tavily_sync_inspected
 
 _IBKR_OAUTH_PORTAL = (
