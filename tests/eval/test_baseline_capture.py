@@ -824,7 +824,7 @@ def test_cleanup_stale_inflight_moves_capture_to_rejected(tmp_path, monkeypatch)
 
 
 def test_capture_flag_is_parsed_from_cli():
-    from src.main import build_arg_parser
+    from src.cli import build_arg_parser
 
     parser = build_arg_parser()
     args = parser.parse_args(["--ticker", "0005.HK", "--capture-baseline"])

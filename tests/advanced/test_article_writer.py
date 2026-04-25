@@ -235,7 +235,7 @@ class TestArticlePathResolution:
 
     def test_resolve_article_path_default_no_output(self):
         """Test default article path when --article is used without value and no --output."""
-        from src.main import resolve_article_path
+        from src.cli import resolve_article_path
 
         args = MagicMock()
         args.article = True  # --article without value
@@ -248,7 +248,7 @@ class TestArticlePathResolution:
 
     def test_resolve_article_path_derives_from_output(self):
         """Test article path derived from --output when --article has no value."""
-        from src.main import resolve_article_path
+        from src.cli import resolve_article_path
 
         args = MagicMock()
         args.article = True  # --article without value
@@ -261,7 +261,7 @@ class TestArticlePathResolution:
 
     def test_resolve_article_path_derives_preserves_extension(self):
         """Test that derived path preserves the output file extension."""
-        from src.main import resolve_article_path
+        from src.cli import resolve_article_path
 
         args = MagicMock()
         args.article = True
@@ -273,7 +273,7 @@ class TestArticlePathResolution:
 
     def test_resolve_article_path_absolute(self):
         """Test absolute article path is used as-is."""
-        from src.main import resolve_article_path
+        from src.cli import resolve_article_path
 
         args = MagicMock()
         args.article = "/tmp/my_article.md"
@@ -285,7 +285,7 @@ class TestArticlePathResolution:
 
     def test_resolve_article_path_relative_with_output(self):
         """Test relative article path resolves to output directory."""
-        from src.main import resolve_article_path
+        from src.cli import resolve_article_path
 
         args = MagicMock()
         args.article = "custom.md"  # Relative path
@@ -297,7 +297,7 @@ class TestArticlePathResolution:
 
     def test_resolve_article_path_relative_no_output(self):
         """Test relative article path stays relative when no --output."""
-        from src.main import resolve_article_path
+        from src.cli import resolve_article_path
 
         args = MagicMock()
         args.article = "custom.md"  # Relative path
@@ -309,7 +309,7 @@ class TestArticlePathResolution:
 
     def test_resolve_article_path_adds_extension(self):
         """Test that .md extension is added if missing."""
-        from src.main import resolve_article_path
+        from src.cli import resolve_article_path
 
         args = MagicMock()
         args.article = "/tmp/my_article"  # No extension
@@ -321,7 +321,7 @@ class TestArticlePathResolution:
 
     def test_resolve_article_path_none_when_disabled(self):
         """Test returns None when --article not specified."""
-        from src.main import resolve_article_path
+        from src.cli import resolve_article_path
 
         args = MagicMock()
         args.article = False

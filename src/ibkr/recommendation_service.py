@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from src.ibkr.analysis_index import load_latest_analyses
 from src.ibkr.models import (
     AnalysisRecord,
     NormalizedPosition,
@@ -11,12 +12,8 @@ from src.ibkr.models import (
     ReconciliationItem,
 )
 from src.ibkr.portfolio_data_service import IbkrPortfolioDataService, PortfolioSnapshot
-from src.ibkr.reconciler import (
-    ReconciliationDiagnostics,
-    compute_portfolio_health,
-    load_latest_analyses,
-    reconcile,
-)
+from src.ibkr.portfolio_health import compute_portfolio_health
+from src.ibkr.reconciler import ReconciliationDiagnostics, reconcile
 from src.ibkr.refresh_service import (
     AnalysisFreshnessSummary,
     AnalysisRefreshService,

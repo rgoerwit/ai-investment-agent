@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from src.ibkr.portfolio_presentation import (
-    aggregate_sector_weights,
     build_action_summary_counts,
     group_portfolio_actions,
 )
+from src.sector_normalization import aggregate_sector_weights
 
 
 def test_group_portfolio_actions_matches_cli_buckets(sample_bundle):

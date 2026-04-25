@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from src.main import resolve_output_paths
+from src.cli import resolve_output_paths
 
 
 class TestCliPathResolution:

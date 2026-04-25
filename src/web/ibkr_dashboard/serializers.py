@@ -10,7 +10,6 @@ from src.ibkr.models import (
     ReconciliationItem,
 )
 from src.ibkr.portfolio_presentation import (
-    aggregate_sector_weights,
     build_action_summary_counts,
     build_cash_summary,
     build_freshness_overview,
@@ -20,6 +19,7 @@ from src.ibkr.portfolio_presentation import (
 )
 from src.ibkr.recommendation_service import PortfolioRecommendationBundle
 from src.ibkr.screening_freshness import ScreeningFreshnessSummary
+from src.sector_normalization import aggregate_sector_weights
 from src.web.ibkr_dashboard.drilldown_service import build_structured_sections
 
 _DIP_WATCH_LIMIT = 7

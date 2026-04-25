@@ -12,7 +12,7 @@ class TestResolveOutputPaths:
 
     def test_no_output_no_imagedir(self):
         """When neither output nor imagedir specified, use defaults."""
-        from src.main import resolve_output_paths
+        from src.cli import resolve_output_paths
 
         args = Namespace(output=None, imagedir=None)
         output_file, image_dir = resolve_output_paths(args)
@@ -22,7 +22,7 @@ class TestResolveOutputPaths:
 
     def test_output_specified_no_imagedir(self):
         """When output specified but not imagedir, derive imagedir from output."""
-        from src.main import resolve_output_paths
+        from src.cli import resolve_output_paths
 
         args = Namespace(output="results/report.md", imagedir=None)
         output_file, image_dir = resolve_output_paths(args)
@@ -32,7 +32,7 @@ class TestResolveOutputPaths:
 
     def test_output_in_current_dir(self):
         """When output is in current directory, imagedir is ./images."""
-        from src.main import resolve_output_paths
+        from src.cli import resolve_output_paths
 
         args = Namespace(output="report.md", imagedir=None)
         output_file, image_dir = resolve_output_paths(args)
@@ -42,7 +42,7 @@ class TestResolveOutputPaths:
 
     def test_imagedir_explicit_override(self):
         """When imagedir explicitly specified, use it regardless of output."""
-        from src.main import resolve_output_paths
+        from src.cli import resolve_output_paths
 
         args = Namespace(output="results/report.md", imagedir="custom/charts")
         output_file, image_dir = resolve_output_paths(args)
@@ -52,7 +52,7 @@ class TestResolveOutputPaths:
 
     def test_imagedir_without_output(self):
         """When imagedir specified but not output, use specified imagedir."""
-        from src.main import resolve_output_paths
+        from src.cli import resolve_output_paths
 
         args = Namespace(output=None, imagedir="my/images")
         output_file, image_dir = resolve_output_paths(args)
@@ -62,7 +62,7 @@ class TestResolveOutputPaths:
 
     def test_nested_output_path(self):
         """When output is deeply nested, imagedir is sibling images folder."""
-        from src.main import resolve_output_paths
+        from src.cli import resolve_output_paths
 
         args = Namespace(output="a/b/c/report.md", imagedir=None)
         output_file, image_dir = resolve_output_paths(args)
@@ -76,28 +76,28 @@ class TestValidateImagedir:
 
     def test_valid_relative_path(self):
         """Valid relative path should work."""
-        from src.main import validate_imagedir
+        from src.cli import validate_imagedir
 
         result = validate_imagedir("images")
         assert result == Path("images")
 
     def test_valid_nested_path(self):
         """Valid nested relative path should work."""
-        from src.main import validate_imagedir
+        from src.cli import validate_imagedir
 
         result = validate_imagedir("results/charts/images")
         assert isinstance(result, Path)
 
     def test_absolute_path_allowed(self):
         """Absolute paths are allowed (user's choice)."""
-        from src.main import validate_imagedir
+        from src.cli import validate_imagedir
 
         result = validate_imagedir("/tmp/images")
         assert result == Path("/tmp/images")
 
     def test_path_with_parent_ref(self):
         """Paths with .. are allowed (user's responsibility)."""
-        from src.main import validate_imagedir
+        from src.cli import validate_imagedir
 
         result = validate_imagedir("../outside/project")
         assert result == Path("../outside/project")

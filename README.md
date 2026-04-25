@@ -241,6 +241,7 @@ Resumption is built in:
 ## IBKR Portfolio Management
 
 `scripts/portfolio_manager.py` sits on top of the saved analysis JSONs in `results/`. It bridges the evaluator output with live or offline portfolio context.
+The IBKR reconciliation path is now split by ownership: `src/ibkr/reconciler.py` orchestrates while `analysis_index.py`, `reconciliation_rules.py`, `position_evaluator.py`, `watchlist_evaluator.py`, `opportunity_finder.py`, and `portfolio_health.py` own the underlying loading, rule, and routing logic.
 
 ```bash
 # Verify credentials and IBKR connectivity first
@@ -361,6 +362,9 @@ Deterministic red-flag logic can reject a name before the debate path continues.
 prompts/                     Versioned prompt JSON files
 scripts/                     Screening, portfolio, and operator scripts
 src/main.py                  Main CLI/runtime entrypoint
+src/cli.py                   CLI parsing and output-path resolution
+src/persistence.py           Analysis artifact building and persistence helpers
+src/output.py                CLI/banner/report/article output helpers
 src/runtime_services.py      Runtime-scoped tool, inspection, and provider ownership
 src/macro_context.py         Pre-graph macro brief generation and cache
 src/graph/                   Graph assembly, routing, barriers
@@ -381,12 +385,16 @@ tests/                       Unit and integration coverage
 
 How the pieces connect:
 
-- `src/main.py` is the staged runtime entrypoint: CLI parsing, runtime setup, macro-context prefetch, graph execution, persistence, and output handling.
+- `src/main.py` is now orchestration-first: runtime setup, macro-context prefetch, graph execution, tracing, and mode dispatch.
+- `src/cli.py` owns CLI parsing, flag validation, and output/article path resolution.
+- `src/persistence.py` owns saved artifact assembly, JSON persistence, and rejection-record helpers.
+- `src/output.py` owns banners, CLI/report rendering, and optional article generation.
 - `src/runtime_services.py` owns runtime-scoped tool execution, content inspection, and long-lived provider dependencies for the CLI, worker, and dashboard processes.
 - `src/macro_context.py` builds and caches the pre-graph regional regime brief that is injected into News Analyst context.
 - `src/graph/` wires the workflow, `src/agents/` owns node logic and state handling, and `src/tools/` plus `src/tools/registry.py` provide the tool surface used by agent tool nodes.
 - `src/tooling/` owns the execution plane around those tools: inspection, audit hooks, and argument-policy enforcement.
 - `src/data/`, `src/validators/`, `src/memory.py`, and `src/charts/` are shared subsystems used by the main analysis path.
+- `src/data/fetcher.py` is now an orchestration seam over `src/data/source_fetchers.py`, `src/data/metric_extraction.py`, `src/data/merge_policy.py`, and `src/data/gap_fill.py`.
 - `src/report_generator.py` turns the final graph state into the structured markdown report; `src/article_writer.py` is the optional long-form writing pass on top of that report.
 - `scripts/portfolio_manager.py`, `src/ibkr/`, and `src/web/ibkr_dashboard/` are the operator-facing portfolio workflows built on top of saved analysis outputs and, optionally, live broker context.
 

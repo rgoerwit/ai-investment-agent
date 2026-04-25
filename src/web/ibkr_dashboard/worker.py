@@ -40,7 +40,7 @@ def _save_result_sync(
     *,
     results_dir: str,
 ) -> Path:
-    from src.main import save_results_to_file
+    from src.persistence import save_results_to_file
 
     return save_results_to_file(
         result,

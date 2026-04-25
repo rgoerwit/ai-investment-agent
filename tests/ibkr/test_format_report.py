@@ -24,7 +24,7 @@ from src.ibkr.portfolio_presentation import build_cash_summary, build_live_order
 from src.ibkr.refresh_service import RefreshActivity
 from src.ibkr.screening_freshness import ScreeningFreshnessSummary
 from src.ibkr.ticker import Ticker
-from tests.ibkr.test_reconciler import (
+from tests.ibkr.reconciler_cases import (
     _make_analysis,
     _make_portfolio,
     _make_position,
@@ -2002,6 +2002,32 @@ class TestPortfolioManagerOutputTightening:
         assert "Healthcare" not in report
         assert "Health Care" in report
         assert "11.6%" in report
+
+    def test_concentration_merges_multiple_legacy_sector_labels(self):
+        portfolio = _make_portfolio()
+        portfolio.sector_weights = {
+            "Technology": 8.0,
+            "Information Technology": 1.5,
+            "Basic Materials": 4.0,
+            "Materials": 2.0,
+            "Consumer Cyclical": 3.0,
+            "Consumer Discretionary": 1.0,
+            "Consumer Defensive": 2.5,
+            "Consumer Staples": 0.5,
+        }
+        report = format_report([], portfolio)
+        assert "  Technology              " not in report
+        assert "  Basic Materials         " not in report
+        assert "  Consumer Cyclical       " not in report
+        assert "  Consumer Defensive      " not in report
+        assert "Information Technology" in report
+        assert "Materials" in report
+        assert "Consumer Discretionary" in report
+        assert "Consumer Staples" in report
+        assert "9.5%" in report
+        assert "6.0%" in report
+        assert "4.0%" in report
+        assert "3.0%" in report
 
     def test_watchlist_moves_are_advisory_not_past_tense(self):
         high = _make_offwatch_buy("TOTL.JK", conviction="High")

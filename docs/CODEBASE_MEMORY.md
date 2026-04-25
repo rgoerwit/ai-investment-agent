@@ -1,6 +1,6 @@
 # Codebase Memory
 
-Last updated: 2026-04-23
+Last updated: 2026-04-24
 
 This file is a durable orientation note, not the source of truth.
 Use it to get context quickly, then verify against the live tree.
@@ -33,20 +33,31 @@ Read in this order:
 2. `README.md`
 3. top of `CHANGELOG.md`
 4. `src/main.py`
-5. `src/runtime_services.py`
-6. `src/tooling/`
-7. `src/graph/`
-8. `src/agents/`
-9. `src/tools/`
-10. `src/data/fetcher.py`
-11. `src/runtime_diagnostics.py`
-12. `src/validators/red_flag_detector.py`
-13. `src/memory.py`
-14. `src/ibkr/`
+5. `src/cli.py`
+6. `src/persistence.py`
+7. `src/output.py`
+8. `src/runtime_services.py`
+9. `src/tooling/`
+10. `src/graph/`
+11. `src/agents/`
+12. `src/tools/`
+13. `src/data/fetcher.py`
+14. `src/runtime_diagnostics.py`
+15. `src/validators/red_flag_detector.py`
+16. `src/validators/sector_classifier.py`
+17. `src/validators/metric_extractor.py`
+18. `src/validators/financial_rules.py`
+19. `src/validators/supplemental_extractors.py`
+20. `src/validators/supplemental_flags.py`
+21. `src/memory.py`
+22. `src/ibkr/`
 
 ## Runtime Spine
 
-`src/main.py` owns CLI parsing, logging setup, runtime overrides, execution, and output saving.
+`src/main.py` is now orchestration-first: runtime setup, macro-context prefetch, graph execution, tracing, and mode dispatch.
+`src/cli.py` owns CLI parsing, validation, and output/article path resolution.
+`src/persistence.py` owns saved-artifact assembly, JSON persistence, and rejection-record helpers.
+`src/output.py` owns banners, CLI/report rendering, and article generation helpers.
 
 For runtime/control-plane state design, use `docs/RUNTIME_MODEL.md` as the canonical Stage 0 model before changing storage or orchestration seams.
 
@@ -116,11 +127,25 @@ If something breaks, check these first:
 
 `src/data/fetcher.py` is the core market/fundamental data pipeline.
 It merges multiple sources and is a common regression surface.
+Ownership now lives across:
+
+- `src/data/source_fetchers.py`
+- `src/data/metric_extraction.py`
+- `src/data/merge_policy.py`
+- `src/data/gap_fill.py`
 
 ### Validator
 
-`src/validators/red_flag_detector.py` is a key deterministic safety layer.
-It parses the fundamentals `DATA_BLOCK` and drives auto-reject or risk-penalty outcomes.
+`src/validators/red_flag_detector.py` is the thin public validator facade.
+Ownership now lives in:
+
+- `src/validators/sector_classifier.py`
+- `src/validators/metric_extractor.py`
+- `src/validators/financial_rules.py`
+- `src/validators/supplemental_extractors.py`
+- `src/validators/supplemental_flags.py`
+
+Together they parse the fundamentals `DATA_BLOCK` and drive auto-reject or risk-penalty outcomes.
 
 ### Memory
 
@@ -167,6 +192,16 @@ This path now includes:
 - recommendation/reconciliation logic
 - portfolio-health and macro-event handling
 
+Ownership is now split across:
+
+- `src/ibkr/reconciler.py` for orchestration
+- `src/ibkr/analysis_index.py` for latest-analysis cache/load/update
+- `src/ibkr/reconciliation_rules.py` for FX, staleness, verdict, and sell helper rules
+- `src/ibkr/position_evaluator.py` for held-position routing
+- `src/ibkr/watchlist_evaluator.py` for watchlist routing
+- `src/ibkr/opportunity_finder.py` for off-watchlist BUY discovery
+- `src/ibkr/portfolio_health.py` for portfolio-health and correlated-sell handling
+
 ## Testing Guidance
 
 The test suite is broad and behavior-heavy.
@@ -197,6 +232,7 @@ Already split:
 - `src/agents.py` -> `src/agents/`
 - `src/toolkit.py` -> `src/tools/` with facade removed
 - `src/graph.py` -> `src/graph/`
+- `src/validators/red_flag_detector.py` -> facade plus validator ownership submodules
 
 Recent completed control-plane/security work:
 
@@ -205,12 +241,11 @@ Recent completed control-plane/security work:
 - financial-API text-field inspection
 - artifact bounding via `cap_state_value()`
 - broader heuristic prompt-injection coverage
+- `src/main.py` -> orchestration plus `src/cli.py`, `src/persistence.py`, and `src/output.py`
+- `src/ibkr/reconciler.py` -> orchestration plus IBKR ownership submodules
 
 Next likely large seams:
 
-- `src/main.py`
-- `src/validators/red_flag_detector.py`
-- `src/ibkr/reconciler.py`
 - `src/report_generator.py`
 
 ## Provenance

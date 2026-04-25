@@ -49,8 +49,8 @@ records which local currency that is.
 
 The single source of truth for the FX conversion rate is
 `AnalysisRecord.fx_rate_to_usd` (saved at analysis time).  When it is
-missing, `reconciler._resolve_fx()` applies a hardcoded fallback from
-`src.fx_normalization.FALLBACK_RATES_TO_USD`, logging a warning.
+missing, `src.ibkr.reconciliation_rules._resolve_fx()` applies a hardcoded
+fallback from `src.fx_normalization.FALLBACK_RATES_TO_USD`, logging a warning.
 
 ## GBX (British pence) note
 ----------------------------------------------------------------------
@@ -149,7 +149,7 @@ class AnalysisRecord(BaseModel):
 
     `fx_rate_to_usd` converts LOCAL → USD.  It is saved at analysis time from
     a yfinance FX fetch.  When it is None (e.g. older snapshots, offline
-    analyses), `reconciler._resolve_fx()` supplies a hardcoded fallback.
+    analyses), `src.ibkr.reconciliation_rules._resolve_fx()` supplies a hardcoded fallback.
 
     Do NOT compare price fields from two different AnalysisRecords without
     first checking that their currencies match.

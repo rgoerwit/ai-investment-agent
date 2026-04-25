@@ -717,7 +717,6 @@ class TestMainPyIntegration:
         )
 
         with (
-            patch("src.main.resolve_article_path", return_value="/tmp/test_article.md"),
             patch(
                 "src.article_writer.ArticleWriter", return_value=mock_writer_instance
             ),
@@ -726,7 +725,7 @@ class TestMainPyIntegration:
             ),
             patch("builtins.open", MagicMock()),
         ):
-            from src.main import handle_article_generation
+            from src.output import handle_article_generation
 
             await handle_article_generation(
                 args=args,
@@ -739,6 +738,8 @@ class TestMainPyIntegration:
                     "final_trade_decision": "PM_BLOCK",
                     "valuation_params": "VAL_PARAMS",
                 },
+                resolve_article_path_fn=lambda *_args,
+                **_kwargs: "/tmp/test_article.md",
             )
 
             # Verify editor.edit() was called
@@ -769,7 +770,6 @@ class TestMainPyIntegration:
         mock_editor_instance.edit = AsyncMock()
 
         with (
-            patch("src.main.resolve_article_path", return_value="/tmp/test_article.md"),
             patch(
                 "src.article_writer.ArticleWriter", return_value=mock_writer_instance
             ),
@@ -778,7 +778,7 @@ class TestMainPyIntegration:
             ),
             patch("builtins.open", MagicMock()),
         ):
-            from src.main import handle_article_generation
+            from src.output import handle_article_generation
 
             await handle_article_generation(
                 args=args,
@@ -786,6 +786,8 @@ class TestMainPyIntegration:
                 company_name="Test Corp",
                 report_text="Full report...",
                 trade_date="2026-01-01",
+                resolve_article_path_fn=lambda *_args,
+                **_kwargs: "/tmp/test_article.md",
             )
 
             # Verify editor.edit() was NOT called
@@ -795,7 +797,7 @@ class TestMainPyIntegration:
         """Verify handle_article_generation accepts analysis_result parameter."""
         import inspect
 
-        from src.main import handle_article_generation
+        from src.output import handle_article_generation
 
         sig = inspect.signature(handle_article_generation)
         param_names = list(sig.parameters.keys())
@@ -829,7 +831,6 @@ class TestMainPyIntegration:
         m_open = mock_open()
 
         with (
-            patch("src.main.resolve_article_path", return_value="/tmp/test_article.md"),
             patch(
                 "src.article_writer.ArticleWriter", return_value=mock_writer_instance
             ),
@@ -839,7 +840,7 @@ class TestMainPyIntegration:
             patch("builtins.open", m_open),
             patch("src.main.console"),
         ):
-            from src.main import handle_article_generation
+            from src.output import handle_article_generation
 
             # Should NOT raise - exception is caught internally
             await handle_article_generation(
@@ -852,6 +853,8 @@ class TestMainPyIntegration:
                     "fundamentals_report": "DATA",
                     "final_trade_decision": "PM",
                 },
+                resolve_article_path_fn=lambda *_args,
+                **_kwargs: "/tmp/test_article.md",
             )
 
             # The function should complete without raising

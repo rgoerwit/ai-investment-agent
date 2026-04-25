@@ -105,9 +105,9 @@ def test_news_stocktwits_has_inspection():
 
 def test_fetcher_tavily_gaps_has_inspection():
     """_fetch_tavily_gaps must call INSPECTION_SERVICE.check before extracting metrics."""
-    src = _read(_src("data/fetcher.py"))
+    src = _read(_src("data/gap_fill.py"))
     assert _has_inspection_call(src), (
-        "data/fetcher.py: _fetch_tavily_gaps must call "
+        "data/gap_fill.py: fetch_tavily_gaps must call "
         "an inspection service before passing web text to pattern_extractor."
     )
 

@@ -64,7 +64,7 @@ class TestStrictModeCLI:
 
     def test_strict_flag_parsed_from_cli(self):
         """--strict sets args.strict = True."""
-        from src.main import build_arg_parser
+        from src.cli import build_arg_parser
 
         parser = build_arg_parser()
         args = parser.parse_args(["--ticker", "0005.HK", "--strict"])
@@ -72,7 +72,7 @@ class TestStrictModeCLI:
 
     def test_no_strict_flag_defaults_false(self):
         """Without --strict, args.strict = False."""
-        from src.main import build_arg_parser
+        from src.cli import build_arg_parser
 
         parser = build_arg_parser()
         args = parser.parse_args(["--ticker", "0005.HK"])
@@ -81,7 +81,7 @@ class TestStrictModeCLI:
 
 class TestOutputCompanyNameLookup:
     def test_load_company_name_for_output_retries_normalized_alias(self):
-        from src.main import _load_company_name_for_output
+        from src.output import _load_company_name_for_output
 
         requested_symbols = []
 
@@ -117,13 +117,18 @@ class TestOutputCompanyNameLookup:
         fake_yfinance.Ticker.side_effect = _ticker_factory
 
         with patch.dict(sys.modules, {"yfinance": fake_yfinance}):
-            with patch("src.main.ThreadPoolExecutor", return_value=_Executor()):
-                assert _load_company_name_for_output("TRUE.B.ST") == "Truecaller AB"
+            assert (
+                _load_company_name_for_output(
+                    "TRUE.B.ST",
+                    thread_pool_executor_cls=lambda **_kwargs: _Executor(),
+                )
+                == "Truecaller AB"
+            )
 
         assert requested_symbols == ["TRUE.B.ST", "TRUE-B.ST"]
 
     def test_load_company_name_for_output_returns_none_on_timeout(self):
-        from src.main import _load_company_name_for_output
+        from src.output import _load_company_name_for_output
 
         fake_yfinance = MagicMock()
         fake_yfinance.Ticker.return_value.info = {"longName": "Should Not Return"}
@@ -135,8 +140,13 @@ class TestOutputCompanyNameLookup:
         mock_executor.__enter__.return_value.submit.return_value = mock_future
 
         with patch.dict(sys.modules, {"yfinance": fake_yfinance}):
-            with patch("src.main.ThreadPoolExecutor", return_value=mock_executor):
-                assert _load_company_name_for_output("SNTIA.OL") is None
+            assert (
+                _load_company_name_for_output(
+                    "SNTIA.OL",
+                    thread_pool_executor_cls=lambda **_kwargs: mock_executor,
+                )
+                is None
+            )
 
     def test_run_analysis_warns_with_lookup_candidates_after_company_name_exhaustion(
         self,
@@ -265,7 +275,7 @@ class TestOutputCompanyNameLookup:
 
     def test_strict_and_quick_composable(self):
         """--strict --quick can be combined without conflict."""
-        from src.main import build_arg_parser
+        from src.cli import build_arg_parser
 
         parser = build_arg_parser()
         args = parser.parse_args(["--ticker", "0005.HK", "--strict", "--quick"])
@@ -274,7 +284,7 @@ class TestOutputCompanyNameLookup:
 
     def test_strict_with_quiet_composable(self):
         """--strict --quiet can be combined (batch use case)."""
-        from src.main import build_arg_parser
+        from src.cli import build_arg_parser
 
         parser = build_arg_parser()
         args = parser.parse_args(["--ticker", "0005.HK", "--strict", "--quiet"])
@@ -283,7 +293,7 @@ class TestOutputCompanyNameLookup:
 
     def test_strict_with_output_composable(self):
         """--strict with --output is valid."""
-        from src.main import build_arg_parser
+        from src.cli import build_arg_parser
 
         parser = build_arg_parser()
         args = parser.parse_args(
@@ -294,7 +304,7 @@ class TestOutputCompanyNameLookup:
 
     def test_strict_quick_quiet_all_composable(self):
         """--strict --quick --quiet can all be combined (pipeline batch mode)."""
-        from src.main import build_arg_parser
+        from src.cli import build_arg_parser
 
         parser = build_arg_parser()
         args = parser.parse_args(
@@ -306,21 +316,21 @@ class TestOutputCompanyNameLookup:
 
     def test_capture_baseline_flag_parsed_from_cli(self):
         """--capture-baseline enables baseline capture mode."""
-        from src.main import build_arg_parser
+        from src.cli import build_arg_parser
 
         parser = build_arg_parser()
         args = parser.parse_args(["--ticker", "0005.HK", "--capture-baseline"])
         assert args.capture_baseline is True
 
     def test_capture_baseline_cleanup_flag_parsed_from_cli(self):
-        from src.main import build_arg_parser
+        from src.cli import build_arg_parser
 
         parser = build_arg_parser()
         args = parser.parse_args(["--ticker", "0005.HK", "--capture-baseline-cleanup"])
         assert args.capture_baseline_cleanup is True
 
     def test_enable_langfuse_flag_parsed_from_cli(self):
-        from src.main import build_arg_parser
+        from src.cli import build_arg_parser
 
         parser = build_arg_parser()
         args = parser.parse_args(["--ticker", "0005.HK", "--enable-langfuse"])
@@ -343,7 +353,7 @@ class TestOutputCompanyNameLookup:
         assert _resolve_langfuse_session_id("default-session") == "default-session"
 
     def test_parse_arguments_allows_cleanup_without_ticker(self, monkeypatch):
-        from src.main import parse_arguments
+        from src.cli import parse_arguments
 
         monkeypatch.setattr(sys, "argv", ["prog", "--capture-baseline-cleanup"])
         args = parse_arguments()
@@ -581,7 +591,7 @@ class TestTracingMetadataFlow:
 
 class TestRuntimeServiceHookConfig:
     def test_debug_flag_implies_verbose(self, monkeypatch):
-        from src.main import build_arg_parser, parse_arguments
+        from src.cli import build_arg_parser, parse_arguments
 
         parser = build_arg_parser()
         parsed = parser.parse_args(["--ticker", "6083.T", "--debug"])
@@ -902,7 +912,7 @@ class TestRuntimeOverrides:
 
 class TestValidateCliArgs:
     def test_quick_with_svg_exits_2(self, capsys):
-        from src.main import _validate_cli_args
+        from src.cli import _validate_cli_args
 
         args = SimpleNamespace(quick=True, transparent=False, svg=True)
 
@@ -913,7 +923,7 @@ class TestValidateCliArgs:
         assert "--svg" in capsys.readouterr().err
 
     def test_quick_with_transparent_exits_2(self, capsys):
-        from src.main import _validate_cli_args
+        from src.cli import _validate_cli_args
 
         args = SimpleNamespace(quick=True, transparent=True, svg=False)
 
@@ -926,7 +936,7 @@ class TestValidateCliArgs:
 
 class TestResolveOutputTargets:
     def test_stdout_without_imagedir_disables_charts(self):
-        from src.main import _resolve_output_targets
+        from src.cli import _resolve_output_targets
 
         args = SimpleNamespace(output=None, imagedir=None, no_charts=False)
 
@@ -937,7 +947,7 @@ class TestResolveOutputTargets:
         assert targets.skip_charts is True
 
     def test_stdout_with_imagedir_preserves_chart_generation(self):
-        from src.main import _resolve_output_targets
+        from src.cli import _resolve_output_targets
 
         args = SimpleNamespace(output=None, imagedir="assets/charts", no_charts=False)
 
@@ -948,7 +958,7 @@ class TestResolveOutputTargets:
         assert targets.skip_charts is False
 
     def test_file_output_keeps_charts_enabled_by_default(self):
-        from src.main import _resolve_output_targets
+        from src.cli import _resolve_output_targets
 
         args = SimpleNamespace(
             output="results/report.md", imagedir=None, no_charts=False
@@ -983,7 +993,8 @@ class TestMainOrchestration:
         assert asyncio.run(_run_retrospective_only(args)) == 1
 
     def test_retrospective_only_returns_early(self, monkeypatch):
-        from src.main import OutputTargets, main
+        from src.cli import OutputTargets
+        from src.main import main
 
         calls = []
         args = SimpleNamespace(retrospective_only=True)
@@ -992,13 +1003,13 @@ class TestMainOrchestration:
             calls.append(("retrospective_only", passed_args))
             return 0
 
-        monkeypatch.setattr("src.main.parse_arguments", lambda: args)
+        monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
         monkeypatch.setattr(
             "src.main._apply_runtime_overrides", lambda passed_args: None
         )
-        monkeypatch.setattr("src.main._validate_cli_args", lambda passed_args: None)
+        monkeypatch.setattr("src.main.cli._validate_cli_args", lambda passed_args: None)
         monkeypatch.setattr(
-            "src.main._resolve_output_targets",
+            "src.main.cli._resolve_output_targets",
             lambda passed_args: OutputTargets(None, Path("images"), True),
         )
         monkeypatch.setattr(
@@ -1014,7 +1025,8 @@ class TestMainOrchestration:
         assert calls == [("retrospective_only", args)]
 
     def test_main_success_path_returns_zero(self, monkeypatch):
-        from src.main import OutputTargets, main
+        from src.cli import OutputTargets
+        from src.main import main
 
         call_order = []
         args = SimpleNamespace(
@@ -1034,17 +1046,17 @@ class TestMainOrchestration:
             call_order.append(label)
             return value
 
-        monkeypatch.setattr("src.main.parse_arguments", lambda: args)
+        monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
         monkeypatch.setattr(
             "src.main._apply_runtime_overrides",
             lambda passed_args: call_order.append("apply"),
         )
         monkeypatch.setattr(
-            "src.main._validate_cli_args",
+            "src.main.cli._validate_cli_args",
             lambda passed_args: call_order.append("validate"),
         )
         monkeypatch.setattr(
-            "src.main._resolve_output_targets",
+            "src.main.cli._resolve_output_targets",
             lambda passed_args: OutputTargets(
                 Path("results/report.md"), Path("results/images"), False
             ),
@@ -1061,8 +1073,9 @@ class TestMainOrchestration:
             lambda passed_args: fake_async("retrospective"),
         )
         monkeypatch.setattr(
-            "src.main._emit_start_banner",
-            lambda passed_args, targets: call_order.append("banner") or "banner",
+            "src.main.output._emit_start_banner",
+            lambda passed_args, targets, **kwargs: call_order.append("banner")
+            or "banner",
         )
         monkeypatch.setattr(
             "src.main._execute_analysis",
@@ -1075,21 +1088,21 @@ class TestMainOrchestration:
             lambda result, passed_args, preflight: call_order.append("summary"),
         )
         monkeypatch.setattr(
-            "src.main._render_primary_output",
-            lambda result, passed_args, targets, banner: (
+            "src.main.output._render_primary_output",
+            lambda result, passed_args, targets, banner, **kwargs: (
                 call_order.append("render") or (None, None, None)
             ),
         )
         monkeypatch.setattr(
-            "src.main._persist_analysis_outputs",
+            "src.main.persistence._persist_analysis_outputs",
             lambda result, passed_args, **kwargs: call_order.append("persist"),
         )
         monkeypatch.setattr(
-            "src.main._maybe_save_rejection_record",
+            "src.main.persistence._maybe_save_rejection_record",
             lambda result, passed_args, **kwargs: fake_async("rejection"),
         )
         monkeypatch.setattr(
-            "src.main._maybe_generate_article",
+            "src.main.output._maybe_generate_article",
             lambda result,
             passed_args,
             targets,
@@ -1127,12 +1140,12 @@ class TestMainOrchestration:
 
         args = SimpleNamespace(retrospective_only=False)
 
-        monkeypatch.setattr("src.main.parse_arguments", lambda: args)
+        monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
         monkeypatch.setattr(
             "src.main._apply_runtime_overrides", lambda passed_args: None
         )
         monkeypatch.setattr(
-            "src.main._validate_cli_args",
+            "src.main.cli._validate_cli_args",
             lambda passed_args: (_ for _ in ()).throw(SystemExit(2)),
         )
         monkeypatch.setattr(
@@ -1142,7 +1155,8 @@ class TestMainOrchestration:
         assert asyncio.run(main()) == 2
 
     def test_main_returns_one_when_analysis_fails(self, monkeypatch):
-        from src.main import OutputTargets, main
+        from src.cli import OutputTargets
+        from src.main import main
 
         args = SimpleNamespace(
             retrospective_only=False,
@@ -1157,13 +1171,13 @@ class TestMainOrchestration:
             imagedir=None,
         )
 
-        monkeypatch.setattr("src.main.parse_arguments", lambda: args)
+        monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
         monkeypatch.setattr(
             "src.main._apply_runtime_overrides", lambda passed_args: None
         )
-        monkeypatch.setattr("src.main._validate_cli_args", lambda passed_args: None)
+        monkeypatch.setattr("src.main.cli._validate_cli_args", lambda passed_args: None)
         monkeypatch.setattr(
-            "src.main._resolve_output_targets",
+            "src.main.cli._resolve_output_targets",
             lambda passed_args: OutputTargets(None, Path("images"), True),
         )
         monkeypatch.setattr(
@@ -1175,7 +1189,8 @@ class TestMainOrchestration:
             lambda passed_args: _async_none(),
         )
         monkeypatch.setattr(
-            "src.main._emit_start_banner", lambda passed_args, targets: "banner"
+            "src.main.output._emit_start_banner",
+            lambda passed_args, targets, **kwargs: "banner",
         )
         monkeypatch.setattr(
             "src.main._execute_analysis",
@@ -1188,7 +1203,8 @@ class TestMainOrchestration:
         assert asyncio.run(main()) == 1
 
     def test_main_keeps_results_dir_persistent_when_output_is_set(self, monkeypatch):
-        from src.main import OutputTargets, config, main
+        from src.cli import OutputTargets
+        from src.main import config, main
 
         output_file = Path("scratch/report.md")
         observed_results_dirs: list[Path] = []
@@ -1217,14 +1233,14 @@ class TestMainOrchestration:
         def fake_persist(*_args, **_kwargs):
             observed_results_dirs.append(Path(config.results_dir))
 
-        monkeypatch.setattr("src.main.parse_arguments", lambda: args)
+        monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
         monkeypatch.setattr("src.main.config.results_dir", original_results_dir)
         monkeypatch.setattr(
             "src.main._apply_runtime_overrides", lambda passed_args: None
         )
-        monkeypatch.setattr("src.main._validate_cli_args", lambda passed_args: None)
+        monkeypatch.setattr("src.main.cli._validate_cli_args", lambda passed_args: None)
         monkeypatch.setattr(
-            "src.main._resolve_output_targets",
+            "src.main.cli._resolve_output_targets",
             lambda passed_args: OutputTargets(
                 output_file, Path("scratch/images"), False
             ),
@@ -1244,7 +1260,8 @@ class TestMainOrchestration:
             ),
         )
         monkeypatch.setattr(
-            "src.main._emit_start_banner", lambda passed_args, targets: "banner"
+            "src.main.output._emit_start_banner",
+            lambda passed_args, targets, **kwargs: "banner",
         )
         monkeypatch.setattr("src.main._execute_analysis", fake_execute)
         monkeypatch.setattr(
@@ -1252,15 +1269,17 @@ class TestMainOrchestration:
             lambda result, passed_args, preflight: None,
         )
         monkeypatch.setattr(
-            "src.main._render_primary_output",
-            lambda result, passed_args, targets, banner: (None, None, None),
+            "src.main.output._render_primary_output",
+            lambda result, passed_args, targets, banner, **kwargs: (None, None, None),
         )
-        monkeypatch.setattr("src.main._persist_analysis_outputs", fake_persist)
         monkeypatch.setattr(
-            "src.main._maybe_save_rejection_record",
+            "src.main.persistence._persist_analysis_outputs", fake_persist
+        )
+        monkeypatch.setattr(
+            "src.main.persistence._maybe_save_rejection_record",
             lambda result, passed_args, **kwargs: _async_none(),
         )
-        monkeypatch.setattr("src.main._maybe_generate_article", fake_article)
+        monkeypatch.setattr("src.main.output._maybe_generate_article", fake_article)
         monkeypatch.setattr(
             "src.main._log_final_summary",
             lambda result, passed_args, article_generated: None,
@@ -1275,7 +1294,8 @@ class TestMainOrchestration:
         assert Path(config.results_dir) == original_results_dir
 
     def test_main_restores_results_dir_after_failed_run_with_output(self, monkeypatch):
-        from src.main import OutputTargets, config, main
+        from src.cli import OutputTargets
+        from src.main import config, main
 
         original_results_dir = Path("results")
         args = SimpleNamespace(
@@ -1291,14 +1311,14 @@ class TestMainOrchestration:
             imagedir=None,
         )
 
-        monkeypatch.setattr("src.main.parse_arguments", lambda: args)
+        monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
         monkeypatch.setattr("src.main.config.results_dir", original_results_dir)
         monkeypatch.setattr(
             "src.main._apply_runtime_overrides", lambda passed_args: None
         )
-        monkeypatch.setattr("src.main._validate_cli_args", lambda passed_args: None)
+        monkeypatch.setattr("src.main.cli._validate_cli_args", lambda passed_args: None)
         monkeypatch.setattr(
-            "src.main._resolve_output_targets",
+            "src.main.cli._resolve_output_targets",
             lambda passed_args: OutputTargets(
                 Path("scratch/report.md"), Path("scratch/images"), False
             ),
@@ -1312,7 +1332,8 @@ class TestMainOrchestration:
             lambda passed_args: _async_none(),
         )
         monkeypatch.setattr(
-            "src.main._emit_start_banner", lambda passed_args, targets: "banner"
+            "src.main.output._emit_start_banner",
+            lambda passed_args, targets, **kwargs: "banner",
         )
         monkeypatch.setattr(
             "src.main._execute_analysis",
@@ -1328,7 +1349,8 @@ class TestMainOrchestration:
     def test_main_preserves_explicit_imagedir_without_retargeting_results_dir(
         self, monkeypatch
     ):
-        from src.main import OutputTargets, config, main
+        from src.cli import OutputTargets
+        from src.main import config, main
 
         output_file = Path("scratch/report.md")
         explicit_image_dir = Path("custom-images/charts")
@@ -1351,14 +1373,14 @@ class TestMainOrchestration:
             observed["image_dir"] = targets.image_dir
             return {"analysis_validity": {"publishable": True}}
 
-        monkeypatch.setattr("src.main.parse_arguments", lambda: args)
+        monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
         monkeypatch.setattr("src.main.config.results_dir", Path("results"))
         monkeypatch.setattr(
             "src.main._apply_runtime_overrides", lambda passed_args: None
         )
-        monkeypatch.setattr("src.main._validate_cli_args", lambda passed_args: None)
+        monkeypatch.setattr("src.main.cli._validate_cli_args", lambda passed_args: None)
         monkeypatch.setattr(
-            "src.main._resolve_output_targets",
+            "src.main.cli._resolve_output_targets",
             lambda passed_args: OutputTargets(output_file, explicit_image_dir, False),
         )
         monkeypatch.setattr(
@@ -1370,7 +1392,8 @@ class TestMainOrchestration:
             lambda passed_args: _async_none(),
         )
         monkeypatch.setattr(
-            "src.main._emit_start_banner", lambda passed_args, targets: "banner"
+            "src.main.output._emit_start_banner",
+            lambda passed_args, targets, **kwargs: "banner",
         )
         monkeypatch.setattr("src.main._execute_analysis", fake_execute)
         monkeypatch.setattr(
@@ -1378,19 +1401,19 @@ class TestMainOrchestration:
             lambda result, passed_args, preflight: None,
         )
         monkeypatch.setattr(
-            "src.main._render_primary_output",
-            lambda result, passed_args, targets, banner: (None, None, None),
+            "src.main.output._render_primary_output",
+            lambda result, passed_args, targets, banner, **kwargs: (None, None, None),
         )
         monkeypatch.setattr(
-            "src.main._persist_analysis_outputs",
+            "src.main.persistence._persist_analysis_outputs",
             lambda result, passed_args, **kwargs: None,
         )
         monkeypatch.setattr(
-            "src.main._maybe_save_rejection_record",
+            "src.main.persistence._maybe_save_rejection_record",
             lambda result, passed_args, **kwargs: _async_none(),
         )
         monkeypatch.setattr(
-            "src.main._maybe_generate_article",
+            "src.main.output._maybe_generate_article",
             lambda result,
             passed_args,
             targets,
@@ -1492,7 +1515,7 @@ class TestSavedDiagnostics:
     def test_build_run_summary_tracks_finished_vs_successful_artifacts(
         self, monkeypatch
     ):
-        from src.main import build_run_summary
+        from src.persistence import build_run_summary
 
         class StubTracker:
             def get_total_stats(self):
@@ -1540,7 +1563,7 @@ class TestSavedDiagnostics:
     ):
         from langchain_core.messages import ToolMessage
 
-        from src.main import build_run_summary
+        from src.persistence import build_run_summary
 
         class StubTracker:
             def get_total_stats(self):
@@ -1587,7 +1610,7 @@ class TestSavedDiagnostics:
         assert summary["llm_providers_used"] == ["google", "openai"]
 
     def test_build_run_summary_includes_quick_and_deep_models(self, monkeypatch):
-        from src.main import build_run_summary
+        from src.persistence import build_run_summary
 
         class StubTracker:
             def get_total_stats(self):
@@ -1610,7 +1633,7 @@ class TestSavedDiagnostics:
         assert summary["deep_model"] == "gemini-3-pro-preview"
 
     def test_build_run_summary_includes_macro_context_metadata(self, monkeypatch):
-        from src.main import build_run_summary
+        from src.persistence import build_run_summary
 
         class StubTracker:
             def get_total_stats(self):
@@ -1644,7 +1667,7 @@ class TestSavedDiagnostics:
     ):
         from langchain_core.messages import ToolMessage
 
-        from src.main import save_results_to_file
+        from src.persistence import save_results_to_file
 
         monkeypatch.setattr("src.main.config.results_dir", str(tmp_path))
         monkeypatch.setattr("src.main.config.enable_memory", False)
@@ -1696,7 +1719,7 @@ class TestSavedDiagnostics:
         assert payload["metadata"]["llm_provider"] == "google"
 
     def test_save_results_includes_macro_context_metadata(self, tmp_path, monkeypatch):
-        from src.main import save_results_to_file
+        from src.persistence import save_results_to_file
 
         monkeypatch.setattr("src.main.config.results_dir", str(tmp_path))
         monkeypatch.setattr("src.main.config.enable_memory", False)
@@ -1751,8 +1774,10 @@ class TestSavedDiagnostics:
             "macro_context_injected_into_news": True,
         }
 
-        with patch("src.main.logger") as mock_logger:
-            output_path = save_results_to_file(result, "7203.T", quick_mode=True)
+        mock_logger = MagicMock()
+        output_path = save_results_to_file(
+            result, "7203.T", quick_mode=True, logger_obj=mock_logger
+        )
         payload = json.loads(output_path.read_text())
 
         assert payload["macro_context"]["status"] == "generated"
@@ -1784,7 +1809,7 @@ class TestSavedDiagnostics:
     def test_save_results_prefers_direct_macro_context_fields(
         self, tmp_path, monkeypatch
     ):
-        from src.main import save_results_to_file
+        from src.persistence import save_results_to_file
 
         monkeypatch.setattr("src.main.config.results_dir", str(tmp_path))
         monkeypatch.setattr("src.main.config.enable_memory", False)
@@ -1843,7 +1868,7 @@ class TestSavedDiagnostics:
         assert payload["macro_context"]["llm_invoked"] is True
 
     def test_save_results_warns_on_macro_artifact_mismatch(self, tmp_path, monkeypatch):
-        from src.main import save_results_to_file
+        from src.persistence import save_results_to_file
 
         monkeypatch.setattr("src.main.config.results_dir", str(tmp_path))
         monkeypatch.setattr("src.main.config.enable_memory", False)
@@ -1893,8 +1918,8 @@ class TestSavedDiagnostics:
             "prompts_used": {},
         }
 
-        with patch("src.main.logger") as mock_logger:
-            save_results_to_file(result, "7203.T", quick_mode=True)
+        mock_logger = MagicMock()
+        save_results_to_file(result, "7203.T", quick_mode=True, logger_obj=mock_logger)
 
         mock_logger.warning.assert_any_call(
             "analysis_artifact_macro_mismatch",
@@ -1911,7 +1936,7 @@ class TestSavedDiagnostics:
     def test_save_results_uses_read_only_memory_stats_helper(
         self, tmp_path, monkeypatch
     ):
-        from src.main import save_results_to_file
+        from src.persistence import save_results_to_file
 
         monkeypatch.setattr("src.main.config.results_dir", str(tmp_path))
         monkeypatch.setattr("src.main.config.enable_memory", True)
@@ -1970,8 +1995,8 @@ class TestSavedDiagnostics:
     def test_save_results_updates_index_for_next_indexed_load(
         self, tmp_path, monkeypatch
     ):
-        from src.ibkr.reconciler import load_latest_analyses
-        from src.main import save_results_to_file
+        from src.ibkr.analysis_index import load_latest_analyses
+        from src.persistence import save_results_to_file
 
         monkeypatch.setattr("src.main.config.results_dir", str(tmp_path))
         monkeypatch.setattr("src.main.config.enable_memory", False)
@@ -2037,8 +2062,8 @@ class TestSavedDiagnostics:
     def test_save_results_uses_incremental_update_when_mtime_is_stale_but_count_matches(
         self, tmp_path, monkeypatch
     ):
-        from src.ibkr.reconciler import _analysis_index_path, load_latest_analyses
-        from src.main import save_results_to_file
+        from src.ibkr.analysis_index import _analysis_index_path, load_latest_analyses
+        from src.persistence import save_results_to_file
 
         monkeypatch.setattr("src.main.config.results_dir", str(tmp_path))
         monkeypatch.setattr("src.main.config.enable_memory", False)
@@ -2097,8 +2122,10 @@ class TestSavedDiagnostics:
             "run_summary": {"quick_mode": True, "tool_calls": 0, "publishable": True},
         }
 
-        with patch("src.main.logger") as mock_logger:
-            output_path = save_results_to_file(second_result, "6083.T", quick_mode=True)
+        mock_logger = MagicMock()
+        output_path = save_results_to_file(
+            second_result, "6083.T", quick_mode=True, logger_obj=mock_logger
+        )
 
         analyses = load_latest_analyses(tmp_path)
         assert "6083.T" in analyses
@@ -2114,8 +2141,8 @@ class TestSavedDiagnostics:
     def test_save_results_rebuilds_index_when_incremental_update_skips(
         self, tmp_path, monkeypatch
     ):
-        from src.ibkr.reconciler import _analysis_index_path, load_latest_analyses
-        from src.main import save_results_to_file
+        from src.ibkr.analysis_index import _analysis_index_path, load_latest_analyses
+        from src.persistence import save_results_to_file
 
         monkeypatch.setattr("src.main.config.results_dir", str(tmp_path))
         monkeypatch.setattr("src.main.config.enable_memory", False)
@@ -2175,8 +2202,10 @@ class TestSavedDiagnostics:
             "run_summary": {"quick_mode": True, "tool_calls": 0, "publishable": True},
         }
 
-        with patch("src.main.logger") as mock_logger:
-            output_path = save_results_to_file(second_result, "6083.T", quick_mode=True)
+        mock_logger = MagicMock()
+        output_path = save_results_to_file(
+            second_result, "6083.T", quick_mode=True, logger_obj=mock_logger
+        )
 
         analyses = load_latest_analyses(tmp_path)
         assert "6083.T" in analyses
@@ -2207,7 +2236,7 @@ class TestSavedFileBannerRemoval:
         }
 
     def _make_output_targets(self, output_file):
-        from src.main import OutputTargets
+        from src.cli import OutputTargets
 
         return OutputTargets(
             output_file=output_file,
@@ -2219,7 +2248,7 @@ class TestSavedFileBannerRemoval:
         """Written file must not begin with the startup banner block."""
         from types import SimpleNamespace
 
-        from src.main import _render_primary_output, get_welcome_banner
+        from src.output import _render_primary_output, get_welcome_banner
 
         output_file = tmp_path / "report.md"
         args = SimpleNamespace(
@@ -2246,7 +2275,7 @@ class TestSavedFileBannerRemoval:
         """First non-blank line of the saved file must be the report title (# TICKER ...)."""
         from types import SimpleNamespace
 
-        from src.main import _render_primary_output, get_welcome_banner
+        from src.output import _render_primary_output, get_welcome_banner
 
         output_file = tmp_path / "report.md"
         args = SimpleNamespace(
@@ -2276,7 +2305,7 @@ class TestSavedFileBannerRemoval:
         """Brief mode with --output also writes report-only (no banner)."""
         from types import SimpleNamespace
 
-        from src.main import _render_primary_output, get_welcome_banner
+        from src.output import _render_primary_output, get_welcome_banner
 
         output_file = tmp_path / "brief.md"
         args = SimpleNamespace(

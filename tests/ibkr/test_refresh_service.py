@@ -11,7 +11,7 @@ from src.ibkr.refresh_service import (
     RefreshExecutionOptions,
     RefreshPlanOptions,
 )
-from tests.ibkr.test_reconciler import _make_analysis, _make_position
+from tests.ibkr.reconciler_cases import _make_analysis, _make_position
 
 
 def _make_review_item(
