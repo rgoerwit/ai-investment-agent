@@ -33,25 +33,31 @@ Read in this order:
 2. `README.md`
 3. top of `CHANGELOG.md`
 4. `src/main.py`
-5. `src/runtime_services.py`
-6. `src/tooling/`
-7. `src/graph/`
-8. `src/agents/`
-9. `src/tools/`
-10. `src/data/fetcher.py`
-11. `src/runtime_diagnostics.py`
-12. `src/validators/red_flag_detector.py`
-13. `src/validators/sector_classifier.py`
-14. `src/validators/metric_extractor.py`
-15. `src/validators/financial_rules.py`
-16. `src/validators/supplemental_extractors.py`
-17. `src/validators/supplemental_flags.py`
-18. `src/memory.py`
-19. `src/ibkr/`
+5. `src/cli.py`
+6. `src/persistence.py`
+7. `src/output.py`
+8. `src/runtime_services.py`
+9. `src/tooling/`
+10. `src/graph/`
+11. `src/agents/`
+12. `src/tools/`
+13. `src/data/fetcher.py`
+14. `src/runtime_diagnostics.py`
+15. `src/validators/red_flag_detector.py`
+16. `src/validators/sector_classifier.py`
+17. `src/validators/metric_extractor.py`
+18. `src/validators/financial_rules.py`
+19. `src/validators/supplemental_extractors.py`
+20. `src/validators/supplemental_flags.py`
+21. `src/memory.py`
+22. `src/ibkr/`
 
 ## Runtime Spine
 
-`src/main.py` owns CLI parsing, logging setup, runtime overrides, execution, and output saving.
+`src/main.py` is now orchestration-first: runtime setup, macro-context prefetch, graph execution, tracing, and mode dispatch.
+`src/cli.py` owns CLI parsing, validation, and output/article path resolution.
+`src/persistence.py` owns saved-artifact assembly, JSON persistence, and rejection-record helpers.
+`src/output.py` owns banners, CLI/report rendering, and article generation helpers.
 
 For runtime/control-plane state design, use `docs/RUNTIME_MODEL.md` as the canonical Stage 0 model before changing storage or orchestration seams.
 
@@ -121,6 +127,12 @@ If something breaks, check these first:
 
 `src/data/fetcher.py` is the core market/fundamental data pipeline.
 It merges multiple sources and is a common regression surface.
+Ownership now lives across:
+
+- `src/data/source_fetchers.py`
+- `src/data/metric_extraction.py`
+- `src/data/merge_policy.py`
+- `src/data/gap_fill.py`
 
 ### Validator
 
@@ -219,10 +231,10 @@ Recent completed control-plane/security work:
 - financial-API text-field inspection
 - artifact bounding via `cap_state_value()`
 - broader heuristic prompt-injection coverage
+- `src/main.py` -> orchestration plus `src/cli.py`, `src/persistence.py`, and `src/output.py`
 
 Next likely large seams:
 
-- `src/main.py`
 - `src/ibkr/reconciler.py`
 - `src/report_generator.py`
 
