@@ -6,6 +6,7 @@ import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from src.cli import build_arg_parser
 from src.eval.baseline_capture import (
     BaselineCaptureConfig,
     BaselineCaptureManager,
@@ -13,7 +14,7 @@ from src.eval.baseline_capture import (
 )
 from src.eval.constants import CURRENT_CAPTURE_SCHEMA_VERSION
 from src.eval.scenario_catalog import DEFAULT_SUITE_NAME, load_prompt_check_suite
-from src.main import build_arg_parser, run_with_args
+from src.main import run_with_args
 
 
 @dataclass(frozen=True)

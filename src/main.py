@@ -14,41 +14,18 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from datetime import datetime
+from functools import partial
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import structlog
 from rich.console import Console
 
-from src.cli import (
-    OutputTargets,
-)
-from src.cli import (
-    _cli_logging_mode as _cli_logging_mode_impl,
-)
-from src.cli import (
-    _resolve_output_targets as _resolve_output_targets_impl,
-)
-from src.cli import (
-    _validate_cli_args as _validate_cli_args_impl,
-)
-from src.cli import (
-    build_arg_parser as build_arg_parser_impl,
-)
-from src.cli import (
-    parse_arguments as parse_arguments_impl,
-)
-from src.cli import (
-    resolve_article_path as resolve_article_path_impl,
-)
-from src.cli import (
-    resolve_output_paths as resolve_output_paths_impl,
-)
-from src.cli import (
-    validate_imagedir as validate_imagedir_impl,
-)
+import src.cli as cli
 
 # Import config FIRST to set telemetry/system env vars before any library imports
+import src.output as output
+import src.persistence as persistence
 from src.config import config, validate_environment_variables
 from src.error_safety import format_error_message, summarize_exception
 from src.eval import (
@@ -58,54 +35,6 @@ from src.eval import (
     BaselinePreflightResult,
     reset_active_capture_manager,
     set_active_capture_manager,
-)
-from src.output import (
-    _emit_start_banner as _emit_start_banner_impl,
-)
-from src.output import (
-    _load_company_name_for_output as _load_company_name_for_output_impl,
-)
-from src.output import (
-    _maybe_generate_article as _maybe_generate_article_impl,
-)
-from src.output import (
-    _render_primary_output as _render_primary_output_impl,
-)
-from src.output import (
-    _report_analysis_failure as _report_analysis_failure_impl,
-)
-from src.output import (
-    display_memory_statistics as display_memory_statistics_impl,
-)
-from src.output import (
-    display_results as display_results_impl,
-)
-from src.output import (
-    display_token_summary as display_token_summary_impl,
-)
-from src.output import (
-    display_welcome_banner as display_welcome_banner_impl,
-)
-from src.output import (
-    get_welcome_banner as get_welcome_banner_impl,
-)
-from src.output import (
-    handle_article_generation as handle_article_generation_impl,
-)
-from src.persistence import (
-    _maybe_save_rejection_record as _maybe_save_rejection_record_impl,
-)
-from src.persistence import (
-    _normalize_macro_context_metadata as _normalize_macro_context_metadata_impl,
-)
-from src.persistence import (
-    _persist_analysis_outputs as _persist_analysis_outputs_impl,
-)
-from src.persistence import (
-    build_run_summary as build_run_summary_impl,
-)
-from src.persistence import (
-    save_results_to_file as save_results_to_file_impl,
 )
 from src.runtime_diagnostics import build_analysis_validity
 
@@ -188,32 +117,6 @@ def suppress_all_logging():
     import warnings
 
     warnings.filterwarnings("ignore")
-
-
-def _cli_logging_mode(
-    args,
-) -> Literal["quiet", "brief", "normal", "verbose", "debug"]:
-    return _cli_logging_mode_impl(args)
-
-
-def build_arg_parser() -> argparse.ArgumentParser:
-    return build_arg_parser_impl()
-
-
-def parse_arguments() -> argparse.Namespace:
-    return parse_arguments_impl()
-
-
-def resolve_output_paths(args) -> tuple[Path | None, Path]:
-    return resolve_output_paths_impl(args)
-
-
-def validate_imagedir(imagedir: str) -> Path:
-    return validate_imagedir_impl(imagedir)
-
-
-def resolve_article_path(args, ticker: str) -> Path | None:
-    return resolve_article_path_impl(args, ticker)
 
 
 def run_provider_preflight() -> dict[str, dict[str, str]]:
@@ -319,7 +222,7 @@ def _build_analysis_trace_metadata(
 
 def configure_cli_logging(args) -> dict[str, dict[str, str]]:
     """Configure CLI logging without globally enabling dependency debug output."""
-    mode = _cli_logging_mode(args)
+    mode = cli._cli_logging_mode(args)
     if mode in {"quiet", "brief"}:
         suppress_all_logging()
         return {}
@@ -339,95 +242,6 @@ def configure_cli_logging(args) -> dict[str, dict[str, str]]:
 
     enable_diagnostics = mode in {"verbose", "debug"}
     return run_provider_preflight() if enable_diagnostics else {}
-
-
-def build_run_summary(
-    result: dict,
-    *,
-    quick_mode: bool,
-    article_requested: bool,
-    provider_preflight: dict[str, dict[str, str]] | None = None,
-) -> dict[str, object]:
-    return build_run_summary_impl(
-        result,
-        quick_mode=quick_mode,
-        article_requested=article_requested,
-        provider_preflight=provider_preflight,
-    )
-
-
-def _normalize_macro_context_metadata(
-    result: dict[str, Any],
-    *,
-    cache_dir: Path | str | None = None,
-) -> dict[str, Any]:
-    return _normalize_macro_context_metadata_impl(result, cache_dir=cache_dir)
-
-
-async def handle_article_generation(
-    args,
-    ticker: str,
-    company_name: str,
-    report_text: str,
-    trade_date: str,
-    valuation_context: str | None = None,
-    analysis_result: dict | None = None,
-    tracing_callbacks: list[Any] | None = None,
-    tracing_metadata: dict[str, Any] | None = None,
-) -> None:
-    await handle_article_generation_impl(
-        args=args,
-        ticker=ticker,
-        company_name=company_name,
-        report_text=report_text,
-        trade_date=trade_date,
-        valuation_context=valuation_context,
-        analysis_result=analysis_result,
-        tracing_callbacks=tracing_callbacks,
-        tracing_metadata=tracing_metadata,
-        logger_obj=logger,
-        console_obj=console,
-        resolve_article_path_fn=resolve_article_path,
-        error_message_formatter=_safe_cli_error_message,
-    )
-
-
-def get_welcome_banner(ticker: str, quick_mode: bool) -> str:
-    return get_welcome_banner_impl(ticker, quick_mode)
-
-
-def display_welcome_banner(ticker: str, quick_mode: bool):
-    display_welcome_banner_impl(ticker, quick_mode)
-
-
-def display_memory_statistics(ticker: str):
-    display_memory_statistics_impl(ticker, console_obj=console, logger_obj=logger)
-
-
-def display_token_summary():
-    display_token_summary_impl(console_obj=console)
-
-
-def display_results(result: dict, ticker: str):
-    display_results_impl(result, ticker, console_obj=console)
-
-
-def save_results_to_file(
-    result: dict,
-    ticker: str,
-    quick_mode: bool = False,
-    *,
-    results_dir: Path | str | None = None,
-    trace_id: str | None = None,
-) -> Path:
-    return save_results_to_file_impl(
-        result,
-        ticker,
-        quick_mode=quick_mode,
-        results_dir=results_dir,
-        trace_id=trace_id,
-        logger_obj=logger,
-    )
 
 
 _BENCH_NAMES: dict[str, str] = {
@@ -857,23 +671,15 @@ def _apply_runtime_overrides(args: argparse.Namespace) -> None:
         config.langfuse_enabled = True
 
 
-def _validate_cli_args(args: argparse.Namespace) -> None:
-    _validate_cli_args_impl(args)
-
-
-def _resolve_output_targets(args: argparse.Namespace) -> OutputTargets:
-    return _resolve_output_targets_impl(args)
-
-
 def _setup_runtime(
-    args: argparse.Namespace, output_targets: OutputTargets
+    args: argparse.Namespace, output_targets: cli.OutputTargets
 ) -> tuple[dict[str, dict[str, str]], Any]:
     """Configure logging, runtime paths, and environment validation."""
     _enable_quiet_runtime_if_needed(args)
     config.images_dir = output_targets.image_dir
 
     provider_preflight = configure_cli_logging(args)
-    enable_tool_audit = _cli_logging_mode(args) in {"verbose", "debug"}
+    enable_tool_audit = cli._cli_logging_mode(args) in {"verbose", "debug"}
 
     if (
         output_targets.skip_charts
@@ -1089,19 +895,9 @@ async def _maybe_run_ticker_retrospective(args: argparse.Namespace) -> None:
         )
 
 
-def _emit_start_banner(args: argparse.Namespace, output_targets: OutputTargets) -> str:
-    return _emit_start_banner_impl(
-        args,
-        output_targets,
-        logger_obj=logger,
-        print_fn=print,
-        welcome_banner_fn=get_welcome_banner,
-    )
-
-
 async def _execute_analysis(
     args: argparse.Namespace,
-    output_targets: OutputTargets,
+    output_targets: cli.OutputTargets,
     baseline_capture: BaselineCaptureManager | None = None,
     *,
     runtime_services: Any,
@@ -1249,7 +1045,7 @@ def _attach_run_summary(
     result.setdefault("run_summary", {})
     result["run_summary"]["quick_mode"] = bool(args.quick)
     result["analysis_validity"] = build_analysis_validity(result)
-    result["run_summary"] = build_run_summary(
+    result["run_summary"] = persistence.build_run_summary(
         result,
         quick_mode=args.quick,
         article_requested=bool(args.article),
@@ -1291,89 +1087,6 @@ def _score_analysis_trace(result: dict, trace_context: Any) -> None:
     )
 
 
-def _load_company_name_for_output(ticker: str) -> str | None:
-    return _load_company_name_for_output_impl(
-        ticker,
-        thread_pool_executor_cls=ThreadPoolExecutor,
-    )
-
-
-def _render_primary_output(
-    result: dict,
-    args: argparse.Namespace,
-    output_targets: OutputTargets,
-    welcome_banner: str,
-) -> tuple[str | None, str | None, Any | None]:
-    return _render_primary_output_impl(
-        result,
-        args,
-        output_targets,
-        welcome_banner,
-        console_obj=console,
-        logger_obj=logger,
-        company_name_loader=_load_company_name_for_output,
-        display_results_fn=display_results,
-        cost_suffix_fn=_cost_suffix,
-    )
-
-
-def _persist_analysis_outputs(
-    result: dict,
-    args: argparse.Namespace,
-    *,
-    trace_id: str | None = None,
-) -> None:
-    _persist_analysis_outputs_impl(
-        result,
-        args,
-        trace_id=trace_id,
-        logger_obj=logger,
-        console_obj=console,
-        cost_suffix_fn=_cost_suffix,
-        error_message_formatter=_safe_cli_error_message,
-    )
-
-
-async def _maybe_save_rejection_record(
-    result: dict,
-    args: argparse.Namespace,
-    *,
-    trace_id: str | None = None,
-) -> None:
-    await _maybe_save_rejection_record_impl(
-        result,
-        args,
-        trace_id=trace_id,
-        logger_obj=logger,
-    )
-
-
-async def _maybe_generate_article(
-    result: dict,
-    args: argparse.Namespace,
-    output_targets: OutputTargets,
-    company_name: str | None,
-    report: str | None,
-    reporter: Any | None,
-    tracing_callbacks: list[Any] | None = None,
-    tracing_metadata: dict[str, Any] | None = None,
-) -> bool:
-    return await _maybe_generate_article_impl(
-        result,
-        args,
-        output_targets,
-        company_name,
-        report,
-        reporter,
-        tracing_callbacks=tracing_callbacks,
-        tracing_metadata=tracing_metadata,
-        logger_obj=logger,
-        console_obj=console,
-        company_name_loader=_load_company_name_for_output,
-        handle_article_generation_fn=handle_article_generation,
-    )
-
-
 def _log_final_summary(
     result: dict, args: argparse.Namespace, article_generated: bool
 ) -> None:
@@ -1385,13 +1098,9 @@ def _log_final_summary(
     )
 
 
-def _report_analysis_failure(args: argparse.Namespace) -> None:
-    _report_analysis_failure_impl(args, console_obj=console)
-
-
 async def main() -> int:
     """Main entry point for the application."""
-    return await run_with_args(parse_arguments())
+    return await run_with_args(cli.parse_arguments())
 
 
 async def run_with_args(
@@ -1403,8 +1112,8 @@ async def run_with_args(
     """Run the analysis CLI flow for already-parsed arguments."""
     try:
         _apply_runtime_overrides(args)
-        _validate_cli_args(args)
-        output_targets = _resolve_output_targets(args)
+        cli._validate_cli_args(args)
+        output_targets = cli._resolve_output_targets(args)
         provider_preflight, runtime_services = _setup_runtime(args, output_targets)
         baseline_capture = _create_baseline_capture_manager(args)
 
@@ -1443,7 +1152,13 @@ async def run_with_args(
 
         with use_runtime_services(runtime_services):
             await _maybe_run_ticker_retrospective(args)
-        welcome_banner = _emit_start_banner(args, output_targets)
+        welcome_banner = output._emit_start_banner(
+            args,
+            output_targets,
+            logger_obj=logger,
+            print_fn=print,
+            welcome_banner_fn=output.get_welcome_banner,
+        )
         from src.observability import flush_traces, get_observability_runtime
 
         default_session_id = f"{args.ticker}-{datetime.now().strftime('%Y-%m-%d')}-{uuid.uuid4().hex[:8]}"
@@ -1501,23 +1216,44 @@ async def run_with_args(
                                 "artifact_statuses": {},
                             },
                         )
-                    _report_analysis_failure(args)
+                    output._report_analysis_failure(args, console_obj=console)
                     return 1
 
                 _attach_run_summary(result, args, provider_preflight)
                 _score_analysis_trace(result, trace_context)
                 capture_path = _finalize_baseline_capture(baseline_capture, result)
                 _print_capture_result(args, baseline_capture, capture_path)
-                company_name, report, reporter = _render_primary_output(
-                    result, args, output_targets, welcome_banner
+                company_name_loader = partial(
+                    output._load_company_name_for_output,
+                    thread_pool_executor_cls=ThreadPoolExecutor,
                 )
-                _persist_analysis_outputs(result, args, trace_id=trace_context.trace_id)
-                await _maybe_save_rejection_record(
+                company_name, report, reporter = output._render_primary_output(
+                    result,
+                    args,
+                    output_targets,
+                    welcome_banner,
+                    console_obj=console,
+                    logger_obj=logger,
+                    company_name_loader=company_name_loader,
+                    display_results_fn=output.display_results,
+                    cost_suffix_fn=_cost_suffix,
+                )
+                persistence._persist_analysis_outputs(
                     result,
                     args,
                     trace_id=trace_context.trace_id,
+                    logger_obj=logger,
+                    console_obj=console,
+                    cost_suffix_fn=_cost_suffix,
+                    error_message_formatter=_safe_cli_error_message,
                 )
-                article_generated = await _maybe_generate_article(
+                await persistence._maybe_save_rejection_record(
+                    result,
+                    args,
+                    trace_id=trace_context.trace_id,
+                    logger_obj=logger,
+                )
+                article_generated = await output._maybe_generate_article(
                     result,
                     args,
                     output_targets,
@@ -1530,6 +1266,15 @@ async def run_with_args(
                         "workflow": "article",
                         "source_trace_id": trace_context.trace_id,
                     },
+                    logger_obj=logger,
+                    console_obj=console,
+                    company_name_loader=company_name_loader,
+                    handle_article_generation_fn=partial(
+                        output.handle_article_generation,
+                        logger_obj=logger,
+                        console_obj=console,
+                        error_message_formatter=_safe_cli_error_message,
+                    ),
                 )
         finally:
             trace_context.close()

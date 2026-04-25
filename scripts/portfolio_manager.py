@@ -2771,7 +2771,7 @@ def main() -> None:
         )
 
     def _save_refresh_result(result, ticker: str, *, quick_mode: bool) -> Path:
-        from src.main import save_results_to_file
+        from src.persistence import save_results_to_file
 
         return save_results_to_file(
             result,

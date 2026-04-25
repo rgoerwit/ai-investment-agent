@@ -494,7 +494,7 @@ def test_refresh_save_callback_uses_requested_results_dir(tmp_path):
         patch("scripts.portfolio_manager._preflight_ibkr_requirements"),
         patch("scripts.portfolio_manager.PortfolioRecommendationService", FakeService),
         patch(
-            "src.main.save_results_to_file",
+            "src.persistence.save_results_to_file",
             side_effect=fake_save_results_to_file,
         ),
         patch("scripts.portfolio_manager._store_macro_event_if_detected"),
