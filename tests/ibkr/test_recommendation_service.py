@@ -10,7 +10,7 @@ from src.ibkr.recommendation_service import (
     PortfolioRecommendationRequest,
     PortfolioRecommendationService,
 )
-from tests.ibkr.test_reconciler import _make_analysis, _make_position
+from tests.ibkr.reconciler_cases import _make_analysis, _make_position
 
 
 class FakePortfolioDataService:

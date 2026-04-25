@@ -1,4 +1,4 @@
-"""Tests for the reconciler — position-aware action generation."""
+"""Shared reconciler test cases and helpers for IBKR split test modules."""
 
 import json
 import multiprocessing
@@ -9,6 +9,16 @@ from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
+from src.ibkr.analysis_index import (
+    AnalysisLoadProgress,
+    _analysis_index_lock,
+    _analysis_index_lock_path,
+    _analysis_index_path,
+    _build_analysis_record_from_data,
+    _parse_scores_from_final_decision,
+    load_latest_analyses,
+    update_latest_analyses_index,
+)
 from src.ibkr.models import (
     AnalysisRecord,
     NormalizedPosition,
@@ -16,23 +26,14 @@ from src.ibkr.models import (
     ReconciliationItem,
     TradeBlockData,
 )
-from src.ibkr.reconciler import (
-    AnalysisLoadProgress,
-    ReconciliationDiagnostics,
-    _analysis_index_lock,
-    _analysis_index_lock_path,
-    _analysis_index_path,
-    _build_analysis_record_from_data,
+from src.ibkr.portfolio_health import compute_portfolio_health
+from src.ibkr.reconciler import ReconciliationDiagnostics, reconcile
+from src.ibkr.reconciliation_rules import (
     _exchange_from_position,
-    _parse_scores_from_final_decision,
     _resolve_fx,
     check_staleness,
     check_stop_breach,
     check_target_hit,
-    compute_portfolio_health,
-    load_latest_analyses,
-    reconcile,
-    update_latest_analyses_index,
 )
 from src.ibkr.ticker import Ticker
 from tests.ibkr.lock_helpers import hold_analysis_index_lock
@@ -1052,7 +1053,7 @@ class TestLoadLatestAnalyses:
                 json.dumps(data)
             )
 
-        with patch("src.ibkr.reconciler.logger", new=MagicMock()) as mock_logger:
+        with patch("src.ibkr.analysis_index.logger", new=MagicMock()) as mock_logger:
             load_latest_analyses(tmp_path)
 
         debug_events = [call.args[0] for call in mock_logger.debug.call_args_list]
@@ -1095,7 +1096,7 @@ class TestLoadLatestAnalyses:
         assert "7203.T" in first
 
         monkeypatch.setattr(
-            "src.ibkr.reconciler._build_analysis_record_from_file",
+            "src.ibkr.analysis_index._build_analysis_record_from_file",
             lambda filepath: (_ for _ in ()).throw(AssertionError("should use index")),
         )
 
@@ -1120,11 +1121,11 @@ class TestLoadLatestAnalyses:
         (tmp_path / "notes.txt").write_text("benign churn")
 
         monkeypatch.setattr(
-            "src.ibkr.reconciler._build_analysis_record_from_file",
+            "src.ibkr.analysis_index._build_analysis_record_from_file",
             lambda filepath: (_ for _ in ()).throw(AssertionError("should use index")),
         )
 
-        with patch("src.ibkr.reconciler.logger", new=MagicMock()) as mock_logger:
+        with patch("src.ibkr.analysis_index.logger", new=MagicMock()) as mock_logger:
             second = load_latest_analyses(tmp_path)
 
         assert second["7203.T"].ticker == "7203.T"
@@ -1492,7 +1493,7 @@ class TestLoadLatestAnalyses:
         record = _build_analysis_record_from_data(second_path, second)
         assert record is not None
 
-        with patch("src.ibkr.reconciler.logger") as mock_logger:
+        with patch("src.ibkr.analysis_index.logger") as mock_logger:
             updated = update_latest_analyses_index(
                 tmp_path,
                 record,
@@ -1582,7 +1583,7 @@ class TestLoadLatestAnalyses:
         else:
             effective_previous_dir_mtime_ns = previous_dir_mtime_ns
 
-        with patch("src.ibkr.reconciler.logger") as mock_logger:
+        with patch("src.ibkr.analysis_index.logger") as mock_logger:
             updated = update_latest_analyses_index(
                 tmp_path,
                 record,
@@ -1675,7 +1676,7 @@ class TestLoadLatestAnalyses:
         assert ready.wait(2.0)
 
         start = time.perf_counter()
-        with patch("src.ibkr.reconciler.logger") as mock_logger:
+        with patch("src.ibkr.analysis_index.logger") as mock_logger:
             updated = update_latest_analyses_index(
                 tmp_path,
                 record,
@@ -1737,7 +1738,7 @@ class TestLoadLatestAnalyses:
         record = _build_analysis_record_from_data(second_path, second)
         assert record is not None
 
-        with patch("src.ibkr.reconciler.logger") as mock_logger:
+        with patch("src.ibkr.analysis_index.logger") as mock_logger:
             updated = update_latest_analyses_index(
                 tmp_path,
                 record,
@@ -1762,18 +1763,50 @@ class TestLoadLatestAnalyses:
         index_path = _analysis_index_path(tmp_path)
         index_path.write_text("{not-json")
 
-        with patch("src.ibkr.reconciler.logger") as mock_logger:
+        with patch("src.ibkr.analysis_index.logger") as mock_logger:
             analyses = load_latest_analyses(tmp_path)
 
         assert analyses == {}
         mock_logger.warning.assert_any_call(
             "analysis_index_load_failed",
             path=str(index_path),
-            error=ANY,
+            operation="loading latest analyses index",
             error_type="JSONDecodeError",
             root_cause_type="JSONDecodeError",
-            exc_info=True,
+            failure_kind=ANY,
+            retryable=ANY,
+            host=ANY,
+            message_preview=ANY,
         )
+
+    def test_unparseable_analysis_log_redacts_sensitive_exception_text(self, tmp_path):
+        """Snapshot parse failures must not log raw provider keys or bearer tokens."""
+        secret_text = (
+            "api_key=sk-testsecret1234567890 Bearer ya29.fakeSensitiveToken123456"
+        )
+        analysis_path = tmp_path / "7203.T_2026-03-01_analysis.json"
+        analysis_path.write_text("{}")
+
+        with (
+            patch(
+                "src.ibkr.analysis_index._build_analysis_record_from_file",
+                side_effect=OSError(secret_text),
+            ),
+            patch("src.ibkr.analysis_index.logger") as mock_logger,
+        ):
+            analyses = load_latest_analyses(tmp_path)
+
+        assert analyses == {}
+        warning_calls = [
+            call
+            for call in mock_logger.warning.call_args_list
+            if call.args and call.args[0] == "analysis_file_unparseable"
+        ]
+        assert warning_calls
+        logged_text = repr(warning_calls[0])
+        assert "sk-testsecret" not in logged_text
+        assert "fakeSensitiveToken" not in logged_text
+        assert "[REDACTED]" in logged_text
 
     def test_filename_duplicate_history_is_skipped_before_json_load(self, tmp_path):
         """Older files with the same filename-level ticker key are skipped early."""
@@ -1798,7 +1831,7 @@ class TestLoadLatestAnalyses:
 
         original_json_load = json.load
 
-        with patch("src.ibkr.reconciler.json.load") as mock_json_load:
+        with patch("src.ibkr.analysis_index.json.load") as mock_json_load:
             mock_json_load.side_effect = original_json_load
             analyses = load_latest_analyses(tmp_path)
 
@@ -2794,7 +2827,7 @@ VERDICT: BUY
         """Snapshot with 'DO NOT INITIATE' verdict → loaded as 'DO_NOT_INITIATE'."""
         import json as _json
 
-        from src.ibkr.reconciler import load_latest_analyses
+        from src.ibkr.analysis_index import load_latest_analyses
 
         analysis_json = {
             "prediction_snapshot": {

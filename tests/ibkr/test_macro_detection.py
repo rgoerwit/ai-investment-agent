@@ -12,7 +12,7 @@ from scripts.portfolio_manager import (
     _store_macro_event_if_detected,
 )
 from src.ibkr.models import AnalysisRecord, ReconciliationItem, TradeBlockData
-from tests.ibkr.test_reconciler import _make_analysis, _make_position
+from tests.ibkr.reconciler_cases import _make_analysis, _make_position
 
 
 def _make_sell_item(ticker: str, sell_type: str = "SOFT_REJECT") -> ReconciliationItem:

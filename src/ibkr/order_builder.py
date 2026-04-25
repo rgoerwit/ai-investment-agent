@@ -165,7 +165,7 @@ def calculate_quantity(
         entry_price_local: Entry price in LOCAL currency (JPY, HKD, SEK, …)
         fx_rate_to_usd: FX conversion rate (1 LOCAL → N USD).
             Must NOT be None for non-USD stocks — callers should resolve
-            the rate via reconciler._resolve_fx() before calling this
+            the rate via src.ibkr.reconciliation_rules._resolve_fx() before calling this
             function.  If None is received here, returns 0 to avoid
             silently using 1.0 and producing a quantity that is orders of
             magnitude too large (e.g. 150× for a JPY stock).

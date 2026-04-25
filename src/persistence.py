@@ -388,7 +388,7 @@ def save_results_to_file(
         json.dump(save_data, f, indent=2)
 
     try:
-        from src.ibkr.reconciler import (
+        from src.ibkr.analysis_index import (
             _build_analysis_record_from_data,
             load_latest_analyses,
             update_latest_analyses_index,

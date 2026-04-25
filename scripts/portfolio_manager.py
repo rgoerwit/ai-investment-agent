@@ -38,6 +38,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.ibkr.account_service import IbkrAccountService
+from src.ibkr.analysis_index import AnalysisLoadProgress, load_latest_analyses
 from src.ibkr.cli_options import (
     add_common_portfolio_request_args,
     portfolio_request_kwargs_from_args,
@@ -52,6 +53,7 @@ from src.ibkr.models import (
     ReconciliationItem,
 )
 from src.ibkr.portfolio_data_service import IbkrPortfolioDataService
+from src.ibkr.portfolio_health import compute_portfolio_health
 from src.ibkr.portfolio_presentation import (
     aggregate_sector_weights as shared_aggregate_sector_weights,
 )
@@ -73,12 +75,8 @@ from src.ibkr.recommendation_service import (
     PortfolioRecommendationRequest,
     PortfolioRecommendationService,
 )
-from src.ibkr.reconciler import (
-    AnalysisLoadProgress,
-    compute_portfolio_health,
-    load_latest_analyses,
-    reconcile,
-)
+from src.ibkr.reconciler import reconcile
+from src.ibkr.reconciliation_rules import _EXCHANGE_LONG_NAMES
 from src.ibkr.refresh_service import (
     AnalysisFreshnessSummary,
     AnalysisRefreshService,
@@ -2048,8 +2046,6 @@ def format_report(
             lines.append("")
 
         if exchange_weights:
-            from src.ibkr.reconciler import _EXCHANGE_LONG_NAMES
-
             lines.append("  Exchange:")
             for exch, pct in sorted(exchange_weights.items(), key=lambda x: -x[1]):
                 long_name = _EXCHANGE_LONG_NAMES.get(exch, exch)

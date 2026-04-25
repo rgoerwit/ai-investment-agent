@@ -105,7 +105,7 @@ def test_load_analyses_with_progress_reports_index_reconstruction(tmp_path, caps
     (tmp_path / "7203_T_2026-03-01_analysis.json").write_text(json.dumps(analysis_json))
 
     _load_analyses_with_progress(tmp_path)
-    from src.ibkr.reconciler import _analysis_index_path
+    from src.ibkr.analysis_index import _analysis_index_path
 
     _analysis_index_path(tmp_path).write_text("{broken json")
     capsys.readouterr()

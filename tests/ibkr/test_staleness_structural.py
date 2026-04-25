@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.ibkr.models import AnalysisRecord, TradeBlockData
-from src.ibkr.reconciler import check_staleness
+from src.ibkr.reconciliation_rules import check_staleness
 from src.memory import MacroEvent
 
 

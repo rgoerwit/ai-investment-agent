@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from src.ibkr.reconciler import _analysis_index_lock
+from src.ibkr.analysis_index import _analysis_index_lock
 
 
 def hold_analysis_index_lock(results_dir: str, hold_seconds: float, ready) -> None:

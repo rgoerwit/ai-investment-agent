@@ -241,6 +241,7 @@ Resumption is built in:
 ## IBKR Portfolio Management
 
 `scripts/portfolio_manager.py` sits on top of the saved analysis JSONs in `results/`. It bridges the evaluator output with live or offline portfolio context.
+The IBKR reconciliation path is now split by ownership: `src/ibkr/reconciler.py` orchestrates while `analysis_index.py`, `reconciliation_rules.py`, `position_evaluator.py`, `watchlist_evaluator.py`, `opportunity_finder.py`, and `portfolio_health.py` own the underlying loading, rule, and routing logic.
 
 ```bash
 # Verify credentials and IBKR connectivity first

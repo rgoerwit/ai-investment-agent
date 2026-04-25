@@ -24,7 +24,7 @@ from src.ibkr.portfolio_presentation import build_cash_summary, build_live_order
 from src.ibkr.refresh_service import RefreshActivity
 from src.ibkr.screening_freshness import ScreeningFreshnessSummary
 from src.ibkr.ticker import Ticker
-from tests.ibkr.test_reconciler import (
+from tests.ibkr.reconciler_cases import (
     _make_analysis,
     _make_portfolio,
     _make_position,

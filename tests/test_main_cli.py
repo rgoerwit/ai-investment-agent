@@ -1970,7 +1970,7 @@ class TestSavedDiagnostics:
     def test_save_results_updates_index_for_next_indexed_load(
         self, tmp_path, monkeypatch
     ):
-        from src.ibkr.reconciler import load_latest_analyses
+        from src.ibkr.analysis_index import load_latest_analyses
         from src.main import save_results_to_file
 
         monkeypatch.setattr("src.main.config.results_dir", str(tmp_path))
@@ -2037,7 +2037,7 @@ class TestSavedDiagnostics:
     def test_save_results_uses_incremental_update_when_mtime_is_stale_but_count_matches(
         self, tmp_path, monkeypatch
     ):
-        from src.ibkr.reconciler import _analysis_index_path, load_latest_analyses
+        from src.ibkr.analysis_index import _analysis_index_path, load_latest_analyses
         from src.main import save_results_to_file
 
         monkeypatch.setattr("src.main.config.results_dir", str(tmp_path))
@@ -2114,7 +2114,7 @@ class TestSavedDiagnostics:
     def test_save_results_rebuilds_index_when_incremental_update_skips(
         self, tmp_path, monkeypatch
     ):
-        from src.ibkr.reconciler import _analysis_index_path, load_latest_analyses
+        from src.ibkr.analysis_index import _analysis_index_path, load_latest_analyses
         from src.main import save_results_to_file
 
         monkeypatch.setattr("src.main.config.results_dir", str(tmp_path))

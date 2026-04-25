@@ -192,6 +192,16 @@ This path now includes:
 - recommendation/reconciliation logic
 - portfolio-health and macro-event handling
 
+Ownership is now split across:
+
+- `src/ibkr/reconciler.py` for orchestration
+- `src/ibkr/analysis_index.py` for latest-analysis cache/load/update
+- `src/ibkr/reconciliation_rules.py` for FX, staleness, verdict, and sell helper rules
+- `src/ibkr/position_evaluator.py` for held-position routing
+- `src/ibkr/watchlist_evaluator.py` for watchlist routing
+- `src/ibkr/opportunity_finder.py` for off-watchlist BUY discovery
+- `src/ibkr/portfolio_health.py` for portfolio-health and correlated-sell handling
+
 ## Testing Guidance
 
 The test suite is broad and behavior-heavy.
@@ -232,10 +242,10 @@ Recent completed control-plane/security work:
 - artifact bounding via `cap_state_value()`
 - broader heuristic prompt-injection coverage
 - `src/main.py` -> orchestration plus `src/cli.py`, `src/persistence.py`, and `src/output.py`
+- `src/ibkr/reconciler.py` -> orchestration plus IBKR ownership submodules
 
 Next likely large seams:
 
-- `src/ibkr/reconciler.py`
 - `src/report_generator.py`
 
 ## Provenance

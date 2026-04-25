@@ -13,8 +13,9 @@ import pytest
 
 from scripts.portfolio_manager import format_report
 from src.ibkr.models import AnalysisRecord, ReconciliationItem, TradeBlockData
-from src.ibkr.reconciler import compute_portfolio_health, reconcile
-from tests.ibkr.test_reconciler import (
+from src.ibkr.portfolio_health import compute_portfolio_health
+from src.ibkr.reconciler import reconcile
+from tests.ibkr.reconciler_cases import (
     _make_analysis,
     _make_multi_sell_scenario,
     _make_portfolio,
