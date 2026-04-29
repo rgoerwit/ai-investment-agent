@@ -20,6 +20,7 @@ from src.tooling.runtime import TOOL_SERVICE, ToolExecutionService, ToolHook
 
 if TYPE_CHECKING:
     from src.data.fetcher import SmartMarketDataFetcher
+    from src.mcp.client import MCPRuntime
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,7 @@ class RuntimeServices:
     tool_service: ToolExecutionService
     inspection_service: InspectionService
     providers: ProviderRuntime | None = None
+    mcp_runtime: MCPRuntime | None = None
 
     def with_tool_service(self, tool_service: ToolExecutionService) -> RuntimeServices:
         return replace(self, tool_service=tool_service)
@@ -203,8 +205,32 @@ def build_runtime_services_from_config(
             fail_policy=fail_policy,
             backend=backend_name,
         )
+    # Build MCP runtime if enabled
+    mcp_runtime = None
+    if getattr(config, "mcp_enabled", False):
+        try:
+            from src.mcp.config import load_registry
+            from src.mcp.client import MCPRuntime
+
+            servers_path = config.mcp_servers_path
+            servers = load_registry(servers_path)
+            mcp_runtime = MCPRuntime(
+                servers=servers,
+                budget_db_path=str(config.mcp_usage_db_path),
+            )
+            if logger is not None:
+                logger.info(
+                    "mcp_runtime_initialized",
+                    server_count=len([s for s in servers if s.enabled]),
+                )
+        except Exception as exc:
+            if logger is not None:
+                logger.warning("mcp_runtime_init_failed", error=str(exc))
+            mcp_runtime = None
+
     return RuntimeServices(
         tool_service=ToolExecutionService(hooks),
         inspection_service=inspection_service,
         providers=provider_runtime or build_provider_runtime(),
+        mcp_runtime=mcp_runtime,
     )

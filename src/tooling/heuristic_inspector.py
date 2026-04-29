@@ -365,6 +365,13 @@ class HeuristicInspector:
         if cc_hit:
             total_weight += 2.0
 
+        # Adjust weight for structured MCP output
+        if envelope.source_kind == SourceKind.mcp_tool_output:
+            payload_profile = (envelope.metadata or {}).get("payload_profile", "free_text")
+            trust_tier = (envelope.metadata or {}).get("trust_tier", "unknown")
+            if payload_profile == "structured_financial" and trust_tier == "official_vendor":
+                total_weight *= 0.5
+
         threat_types: list[str] = sorted(
             {h.signal.threat_type for h in hits}
             | ({"control_chars"} if cc_hit else set())

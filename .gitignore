@@ -180,3 +180,4 @@ runtime/ibkr_dashboard/
 # Local configuration overrides
 local_config.py
 config.local.py
+.aider*

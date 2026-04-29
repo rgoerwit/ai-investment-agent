@@ -22,7 +22,9 @@ import yfinance as yf
 from langchain_core.tools import tool
 
 from src.error_safety import safe_error_payload, summarize_exception
+from src.config import config
 from src.runtime_diagnostics import classify_failure
+from src.runtime_services import get_current_runtime_services
 
 logger = structlog.get_logger(__name__)
 
@@ -316,15 +318,125 @@ async def spot_check_metric_alt(
         return json.dumps(safe_payload)
 
 
+@tool("spot_check_metric_mcp_fmp")
+async def spot_check_metric_mcp_fmp(
+    ticker: Annotated[str, "Stock ticker (e.g., 7203.T, 0005.HK)"],
+    metric: Annotated[str, "Metric name (e.g., trailingPE, debtToEquity)"],
+) -> str:
+    """Fetch a single financial metric from the **official FMP MCP** server.
+
+    This is an independent, MCP‑based cross‑check that does not rely on
+    the main pipeline's yfinance‑driven DATA_BLOCK.  Returns compact JSON.
+
+    Use when you suspect a specific number in the analyst reports is wrong
+    or when DATA_BLOCK and narrative claims diverge.
+    """
+    _METRIC_TO_MCP_TOOL = {
+        "trailingPE": "ratios",
+        "forwardPE": "ratios",
+        "priceToBook": "ratios",
+        "debtToEquity": "ratios",
+        "returnOnEquity": "ratios",
+        "returnOnAssets": "ratios",
+        "operatingMargins": "ratios",
+        "dividendYield": "ratios",
+        "payoutRatio": "ratios",
+        "currentRatio": "ratios",
+        "freeCashflow": "cash-flow-statement",
+        "operatingCashflow": "cash-flow-statement",
+        "totalRevenue": "income-statement",
+        "netIncomeToCommon": "income-statement",
+        "currentPrice": "quote",
+        "marketCap": "quote",
+    }
+
+    tool_name = _METRIC_TO_MCP_TOOL.get(metric, "ratios")
+    services = get_current_runtime_services()
+    if services is None or services.mcp_runtime is None:
+        return json.dumps({"error": "mcp_not_available", "ticker": ticker, "metric": metric})
+
+    try:
+        result_raw = await services.mcp_runtime.call_tool(
+            "fmp_remote", tool_name, {"symbol": ticker}, agent_key="consultant"
+        )
+    except Exception as exc:
+        return json.dumps({"error": str(exc), "ticker": ticker, "metric": metric, "source": "fmp_mcp"})
+
+    try:
+        data = json.loads(result_raw)
+        payload = data.get("result") if isinstance(data, dict) else data
+        if isinstance(payload, dict):
+            value = payload.get(metric)
+            return json.dumps(
+                {"ticker": ticker, "metric": metric, "value": value, "source": "fmp_mcp"}
+            )
+    except Exception:
+        pass
+    return result_raw
+
+
+@tool("spot_check_price_or_indicator_mcp_twelvedata")
+async def spot_check_price_or_indicator_mcp_twelvedata(
+    ticker: Annotated[str, "Stock ticker (e.g., 7203.T, 0005.HK)"],
+    query: Annotated[
+        str, "One of 'price', 'volume', 'rsi', 'macd', or 'quote'"
+    ],
+) -> str:
+    """Fetch price / volume / technical indicator from **Twelve Data MCP**.
+
+    Use only to verify a specific quote or indicator when the main pipeline
+    and FMP disagree.  Never enable the “u‑tool” for consultant checks.
+
+    Returns compact JSON.
+    """
+    services = get_current_runtime_services()
+    if services is None or services.mcp_runtime is None:
+        return json.dumps(
+            {"error": "mcp_not_available", "ticker": ticker, "query": query}
+        )
+
+    allowed_tools = {"price", "quote"}
+    tool_name = query if query in allowed_tools else "quote"
+    try:
+        result_raw = await services.mcp_runtime.call_tool(
+            "twelvedata_remote", tool_name, {"symbol": ticker}, agent_key="consultant"
+        )
+    except Exception as exc:
+        return json.dumps(
+            {"error": str(exc), "ticker": ticker, "query": query, "source": "twelvedata_mcp"}
+        )
+    return result_raw
+
+
 def get_consultant_tools() -> list:
     """Get the list of tools available to the External Consultant.
 
     DELIBERATELY excludes spot_check_metric (yfinance) because the main
     pipeline already uses yfinance — verifying yfinance against yfinance is
     circular validation. The consultant gets only independent sources:
-    - spot_check_metric_alt: FMP (independent of pipeline)
+    - spot_check_metric_alt: FMP REST (independent of pipeline)
     - get_official_filings: Official filing APIs (EDINET/DART) for ground-truth
+    - spot_check_metric_mcp_fmp: FMP via MCP (broader tool surface, same vendor)
+    - spot_check_price_or_indicator_mcp_twelvedata: Twelve Data via MCP (pinned endpoints)
     """
     from src.tools.research import get_official_filings
 
-    return [spot_check_metric_alt, get_official_filings]
+    tools: list = [
+        spot_check_metric_alt,
+        get_official_filings,
+    ]
+
+    try:
+        services = get_current_runtime_services()
+    except Exception:
+        services = None
+
+    if (
+        services is not None
+        and services.mcp_runtime is not None
+        and config.consultant_mcp_enabled
+    ):
+        tools.append(spot_check_metric_mcp_fmp)
+        tools.append(spot_check_price_or_indicator_mcp_twelvedata)
+
+    return tools

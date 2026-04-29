@@ -565,6 +565,28 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- MCP Client Configuration ---
+    mcp_enabled: bool = Field(
+        default=False,
+        validation_alias="MCP_ENABLED",
+        description="Enable MCP client integration for cross-checks",
+    )
+    consultant_mcp_enabled: bool = Field(
+        default=False,
+        validation_alias="CONSULTANT_MCP_ENABLED",
+        description="Enable MCP tools for the Consultant agent (requires mcp_enabled)",
+    )
+    mcp_servers_path: Path = Field(
+        default=Path("./config/mcp_servers.json"),
+        validation_alias="MCP_SERVERS_PATH",
+        description="Path to the MCP server registry JSON file",
+    )
+    mcp_usage_db_path: Path = Field(
+        default=Path("./mcp_usage.db"),
+        validation_alias="MCP_USAGE_DB_PATH",
+        description="Path to the SQLite database for MCP usage tracking",
+    )
+
     # --- Telemetry & System Overrides ---
     # These settings are exported to os.environ for third-party libraries
     # that read directly from environment variables (ChromaDB, gRPC).
@@ -743,6 +765,8 @@ class Settings(BaseSettings):
         )
         self.images_dir = Path(os.path.expanduser(str(self.images_dir)))
         self.prompts_dir = Path(os.path.expanduser(str(self.prompts_dir)))
+        self.mcp_servers_path = Path(os.path.expanduser(str(self.mcp_servers_path)))
+        self.mcp_usage_db_path = Path(os.path.expanduser(str(self.mcp_usage_db_path)))
 
         # Create required directories
         for directory in [
