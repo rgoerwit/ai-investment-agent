@@ -73,11 +73,14 @@ class InspectionService:
     def mode(self) -> str:
         return self._mode
 
-    async def check(self, envelope: InspectionEnvelope) -> Any:
-        """Inspect *envelope* and return the approved content string.
+    async def evaluate(
+        self,
+        envelope: InspectionEnvelope,
+    ) -> tuple[InspectionDecision, Any]:
+        """Inspect *envelope* and return both decision and approved content.
 
-        Returns the original value, a sanitized replacement string, or a
-        blocked-placeholder string depending on the decision and configured mode.
+        This is the richer variant used by callsites that need the underlying
+        inspection decision for control-flow, not just the approved content.
         """
         original_value = (
             envelope.raw_content
@@ -96,7 +99,16 @@ class InspectionService:
                     error=str(exc),
                     fail_policy=self._fail_policy,
                 )
-                return _BLOCKED_PLACEHOLDER.format(reason=reason)
+                blocked = _BLOCKED_PLACEHOLDER.format(reason=reason)
+                return (
+                    InspectionDecision(
+                        action="block",
+                        threat_level="high",
+                        findings=["inspection backend error"],
+                        reason=reason,
+                    ),
+                    blocked,
+                )
             logger.warning(
                 "content_inspection_backend_error",
                 source_kind=envelope.source_kind.value,
@@ -104,10 +116,13 @@ class InspectionService:
                 error=str(exc),
                 fail_policy=self._fail_policy,
             )
-            return original_value
+            return (
+                InspectionDecision(action="allow", threat_level="safe"),
+                original_value,
+            )
 
         if decision.action == "allow" and decision.threat_level == "safe":
-            return original_value
+            return decision, original_value
 
         # Log findings for non-trivial decisions regardless of mode.
         if decision.findings or decision.threat_types:
@@ -128,19 +143,26 @@ class InspectionService:
         if decision.action in ("block", "degrade"):
             if self._mode == "block":
                 reason = decision.reason or "; ".join(decision.findings) or "policy"
-                return _BLOCKED_PLACEHOLDER.format(reason=reason)
+                return decision, _BLOCKED_PLACEHOLDER.format(reason=reason)
             if self._mode == "sanitize" and decision.sanitized_content is not None:
-                return decision.sanitized_content
-            # warn (or sanitize-without-replacement): log and pass through
-            return original_value
+                return decision, decision.sanitized_content
+            return decision, original_value
 
         if decision.action == "sanitize":
             if self._mode in ("sanitize", "block") and decision.sanitized_content:
-                return decision.sanitized_content
-            return original_value
+                return decision, decision.sanitized_content
+            return decision, original_value
 
-        # action == "allow" with non-safe threat level → warn and pass through
-        return original_value
+        return decision, original_value
+
+    async def check(self, envelope: InspectionEnvelope) -> Any:
+        """Inspect *envelope* and return the approved content string.
+
+        Returns the original value, a sanitized replacement string, or a
+        blocked-placeholder string depending on the decision and configured mode.
+        """
+        _, approved = await self.evaluate(envelope)
+        return approved
 
 
 # ---------------------------------------------------------------------------

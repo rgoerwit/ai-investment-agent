@@ -12,6 +12,7 @@ Migration Notes (Dec 2025):
 - Config class alias maintained for backwards compatibility
 """
 
+import functools
 import logging
 import os
 import sys
@@ -130,6 +131,27 @@ def _parse_env_file() -> dict:
         logger.warning(f"Could not parse .env file: {e}")
 
     return env_values
+
+
+@functools.lru_cache(maxsize=1)
+def _cached_env_file_values() -> dict[str, str]:
+    """Memoized accessor for `.env` values; cleared by tests via cache_clear()."""
+    return _parse_env_file()
+
+
+def get_env_value(name: str) -> str | None:
+    """Resolve an environment variable by name with `.env` fallback.
+
+    The repo loads `.env` via pydantic-settings into the ``Settings`` model;
+    raw ``os.getenv`` does not see those values. Code paths that look up env
+    vars by *name* (e.g., MCP server auth, where the variable name is data-
+    driven from the registry) should use this helper so the `.env` file is
+    honored consistently with shell-exported values winning when both are set.
+    """
+    value = os.getenv(name)
+    if value:
+        return value
+    return _cached_env_file_values().get(name)
 
 
 def _check_env_overrides() -> None:
@@ -565,6 +587,28 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- MCP Client Configuration ---
+    mcp_enabled: bool = Field(
+        default=False,
+        validation_alias="MCP_ENABLED",
+        description="Enable MCP client integration for cross-checks",
+    )
+    consultant_mcp_enabled: bool = Field(
+        default=False,
+        validation_alias="CONSULTANT_MCP_ENABLED",
+        description="Enable MCP tools for the Consultant agent (requires mcp_enabled)",
+    )
+    mcp_servers_path: Path = Field(
+        default=Path("./config/mcp_servers.json"),
+        validation_alias="MCP_SERVERS_PATH",
+        description="Path to the MCP server registry JSON file",
+    )
+    mcp_usage_db_path: Path = Field(
+        default=Path("./runtime/mcp_usage.db"),
+        validation_alias="MCP_USAGE_DB_PATH",
+        description="Path to the SQLite database for MCP usage tracking",
+    )
+
     # --- Telemetry & System Overrides ---
     # These settings are exported to os.environ for third-party libraries
     # that read directly from environment variables (ChromaDB, gRPC).
@@ -743,6 +787,8 @@ class Settings(BaseSettings):
         )
         self.images_dir = Path(os.path.expanduser(str(self.images_dir)))
         self.prompts_dir = Path(os.path.expanduser(str(self.prompts_dir)))
+        self.mcp_servers_path = Path(os.path.expanduser(str(self.mcp_servers_path)))
+        self.mcp_usage_db_path = Path(os.path.expanduser(str(self.mcp_usage_db_path)))
 
         # Create required directories
         for directory in [
@@ -750,6 +796,7 @@ class Settings(BaseSettings):
             self.data_cache_dir,
             Path(self.chroma_persist_directory),
             self.images_dir,
+            self.mcp_usage_db_path.parent,
         ]:
             directory.mkdir(parents=True, exist_ok=True)
 

@@ -108,8 +108,14 @@ def _format_and_truncate_tavily_result(
 
 
 async def fetch_with_timeout(coroutine, timeout_seconds=10, error_msg="Timeout"):
+    from src.async_utils import run_with_hard_timeout
+
     try:
-        return await asyncio.wait_for(coroutine, timeout=timeout_seconds)
+        return await run_with_hard_timeout(
+            coroutine,
+            timeout=timeout_seconds,
+            label=f"shared.fetch_with_timeout:{error_msg}",
+        )
     except asyncio.TimeoutError:
         logger.warning(f"YFINANCE TIMEOUT: {error_msg}")
         return None
@@ -200,15 +206,18 @@ def _sanitize_for_json(data: dict) -> dict:
 
 async def _ddg_search(query: str, max_results: int = 5) -> list[dict]:
     """DuckDuckGo fallback search. Returns list of {title, href, body}."""
+    from src.async_utils import run_with_hard_timeout
+
     try:
         from ddgs import DDGS
 
         def _sync_search():
             return DDGS(timeout=5).text(query, max_results=max_results)
 
-        results = await asyncio.wait_for(
+        results = await run_with_hard_timeout(
             asyncio.to_thread(_sync_search),
             timeout=DDG_SEARCH_TIMEOUT_SECONDS,
+            label=f"ddg:{query[:60]}",
         )
         return results if results else []
     except ImportError:

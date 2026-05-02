@@ -29,6 +29,8 @@ def _has_inspection_call(src: str) -> bool:
     return (
         "INSPECTION_SERVICE.check" in src
         or "get_current_inspection_service().check" in src
+        or "INSPECTION_SERVICE.evaluate" in src
+        or "self._inspection_service.evaluate" in src
     )
 
 
@@ -443,6 +445,13 @@ def test_source_kind_has_memory_write():
     assert SourceKind.memory_write.value == "memory_write"
 
 
+def test_source_kind_has_mcp_tool_output():
+    from src.tooling.inspector import SourceKind
+
+    assert hasattr(SourceKind, "mcp_tool_output")
+    assert SourceKind.mcp_tool_output.value == "mcp_tool_output"
+
+
 # ---------------------------------------------------------------------------
 # 13. New tooling primitives
 # ---------------------------------------------------------------------------
@@ -454,6 +463,16 @@ def test_new_inspectors_importable_from_owning_modules():
     from src.tooling.llm_judge_inspector import LLMJudgeInspector  # noqa: F401
     from src.tooling.text_boundary import format_untrusted_block  # noqa: F401
     from src.tooling.tool_argument_policy import ToolArgumentPolicyHook  # noqa: F401
+
+
+def test_mcp_runtime_uses_mcp_tool_output_inspection():
+    src = _read(_src("mcp/client.py"))
+    assert (
+        "SourceKind.mcp_tool_output" in src
+    ), "mcp/client.py: MCP ingress must use SourceKind.mcp_tool_output."
+    assert _has_inspection_call(
+        src
+    ), "mcp/client.py: MCP tool output must be inspected before prompt reuse."
 
 
 # ---------------------------------------------------------------------------

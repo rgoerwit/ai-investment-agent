@@ -1110,6 +1110,11 @@ async def run_with_args(
     capture_preflight_override: BaselinePreflightResult | None = None,
 ) -> int:
     """Run the analysis CLI flow for already-parsed arguments."""
+    from src.async_utils import install_pending_task_dump_handler
+
+    # `kill -USR1 <pid>` will dump every pending asyncio task with stack so
+    # operators can diagnose hangs without restarting the process.
+    _uninstall_dump_handler = install_pending_task_dump_handler()
     try:
         _apply_runtime_overrides(args)
         cli._validate_cli_args(args)
@@ -1318,6 +1323,10 @@ async def run_with_args(
             from src.cleanup import cleanup_async_resources
 
             await cleanup_async_resources()
+        except Exception:
+            pass
+        try:
+            _uninstall_dump_handler()
         except Exception:
             pass
 

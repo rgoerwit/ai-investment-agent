@@ -187,6 +187,22 @@ async def test_fail_closed_blocks_on_backend_error():
     assert result.startswith("TOOL_BLOCKED:")
 
 
+@pytest.mark.asyncio
+async def test_evaluate_returns_decision_and_original_content():
+    svc = InspectionService(NullInspector(), mode="warn")
+    decision, approved = await svc.evaluate(_envelope("content"))
+    assert decision.action == "allow"
+    assert approved == "content"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_returns_decision_and_blocked_placeholder():
+    svc = InspectionService(_BlockingInspector(), mode="block")
+    decision, approved = await svc.evaluate(_envelope("content"))
+    assert decision.action == "block"
+    assert approved.startswith("TOOL_BLOCKED:")
+
+
 # ---------------------------------------------------------------------------
 # CompositeInspector strategies
 # ---------------------------------------------------------------------------

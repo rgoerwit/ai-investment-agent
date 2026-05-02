@@ -11,15 +11,18 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from langchain_core.rate_limiters import BaseRateLimiter
 
+from src.error_safety import redact_sensitive_text
 from src.tooling.inspection_service import INSPECTION_SERVICE, InspectionService
+from src.tooling.inspector import ContentInspector
 from src.tooling.runtime import TOOL_SERVICE, ToolExecutionService, ToolHook
 
 if TYPE_CHECKING:
     from src.data.fetcher import SmartMarketDataFetcher
+    from src.mcp.client import MCPRuntime
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,7 @@ class RuntimeServices:
     tool_service: ToolExecutionService
     inspection_service: InspectionService
     providers: ProviderRuntime | None = None
+    mcp_runtime: MCPRuntime | None = None
 
     def with_tool_service(self, tool_service: ToolExecutionService) -> RuntimeServices:
         return replace(self, tool_service=tool_service)
@@ -143,7 +147,8 @@ def build_runtime_services_from_config(
     from src.tooling.tool_argument_policy import ToolArgumentPolicyHook
 
     inspection_service = InspectionService()
-    hooks = []
+    hooks: list[ToolHook] = []
+    providers = provider_runtime or build_provider_runtime()
 
     if enable_tool_audit:
         hooks.append(LoggingToolAuditHook())
@@ -154,57 +159,87 @@ def build_runtime_services_from_config(
             mode="warn",
             fail_policy="fail_open",
         )
-        return RuntimeServices(
-            tool_service=ToolExecutionService(hooks),
-            inspection_service=inspection_service,
-            providers=provider_runtime or build_provider_runtime(),
-        )
-
-    mode = config.untrusted_content_inspection_mode
-    fail_policy = config.untrusted_content_fail_policy
-    backend_name = config.untrusted_content_backend
-
-    if backend_name == "null" or not backend_name:
-        inspector = NullInspector()
-    elif backend_name == "python":
-        from src.tooling.heuristic_inspector import HeuristicInspector
-
-        inspector = HeuristicInspector()
-    elif backend_name == "composite":
-        from src.tooling.escalating_inspector import EscalatingInspector
-        from src.tooling.heuristic_inspector import HeuristicInspector
-        from src.tooling.llm_judge_inspector import LLMJudgeInspector
-
-        inspector = EscalatingInspector(
-            heuristic=HeuristicInspector(),
-            judge=LLMJudgeInspector(),
-        )
     else:
-        raise ValueError(
-            f"UNTRUSTED_CONTENT_BACKEND={backend_name!r} is not implemented. "
-            "Supported: null, python, composite."
-        )
+        mode = config.untrusted_content_inspection_mode
+        fail_policy = config.untrusted_content_fail_policy
+        backend_name = config.untrusted_content_backend
 
-    inspection_service.configure(inspector, mode=mode, fail_policy=fail_policy)
-    if logger is not None:
-        logger.info(
-            "content_inspection_configured",
-            inspector=type(inspector).__name__,
-            mode=mode,
-            fail_policy=fail_policy,
+        inspector: ContentInspector
+        if backend_name == "null" or not backend_name:
+            inspector = NullInspector()
+        elif backend_name == "python":
+            from src.tooling.heuristic_inspector import HeuristicInspector
+
+            inspector = HeuristicInspector()
+        elif backend_name == "composite":
+            from src.tooling.escalating_inspector import EscalatingInspector
+            from src.tooling.heuristic_inspector import HeuristicInspector
+            from src.tooling.llm_judge_inspector import LLMJudgeInspector
+
+            inspector = EscalatingInspector(
+                heuristic=HeuristicInspector(),
+                judge=LLMJudgeInspector(),
+            )
+        else:
+            raise ValueError(
+                f"UNTRUSTED_CONTENT_BACKEND={backend_name!r} is not implemented. "
+                "Supported: null, python, composite."
+            )
+
+        inspection_service.configure(inspector, mode=mode, fail_policy=fail_policy)
+        if logger is not None:
+            logger.info(
+                "content_inspection_configured",
+                inspector=type(inspector).__name__,
+                mode=mode,
+                fail_policy=fail_policy,
+            )
+        arg_policy_mode: Literal["warn", "block"] = (
+            "block" if mode == "block" else "warn"
         )
-    arg_policy_mode = "block" if mode == "block" else "warn"
-    hooks.append(ToolArgumentPolicyHook(mode=arg_policy_mode))
-    hooks.append(ContentInspectionHook(inspection_service))
-    if logger is not None:
-        logger.info(
-            "content_inspection_enabled",
-            mode=mode,
-            fail_policy=fail_policy,
-            backend=backend_name,
-        )
+        hooks.append(ToolArgumentPolicyHook(mode=arg_policy_mode))
+        hooks.append(ContentInspectionHook(inspection_service))
+        if logger is not None:
+            logger.info(
+                "content_inspection_enabled",
+                mode=mode,
+                fail_policy=fail_policy,
+                backend=backend_name,
+            )
+
+    # Build MCP runtime if enabled
+    mcp_runtime = None
+    if getattr(config, "mcp_enabled", False):
+        try:
+            from src.mcp.budget import MCPBudgetHook
+            from src.mcp.client import MCPRuntime
+            from src.mcp.config import load_registry
+
+            servers_path = config.mcp_servers_path
+            # MCP is optional: invalid registry config disables MCP for this run
+            # with a warning instead of breaking the rest of the analysis.
+            servers = load_registry(servers_path, required=True)
+            mcp_runtime = MCPRuntime(
+                servers=servers,
+                budget_db_path=str(config.mcp_usage_db_path),
+            )
+            hooks.append(MCPBudgetHook(mcp_runtime))
+            if logger is not None:
+                logger.info(
+                    "mcp_runtime_initialized",
+                    server_count=len([s for s in servers if s.enabled]),
+                )
+        except Exception as exc:
+            if logger is not None:
+                logger.warning(
+                    "mcp_runtime_init_failed",
+                    error=redact_sensitive_text(str(exc), max_chars=120),
+                )
+            mcp_runtime = None
+
     return RuntimeServices(
         tool_service=ToolExecutionService(hooks),
         inspection_service=inspection_service,
-        providers=provider_runtime or build_provider_runtime(),
+        providers=providers,
+        mcp_runtime=mcp_runtime,
     )

@@ -609,6 +609,9 @@ class TestRuntimeServiceHookConfig:
         monkeypatch.setattr(
             "src.main.config.untrusted_content_inspection_enabled", False
         )
+        # Pin MCP off so the assertion only inspects the audit/inspection wiring;
+        # MCP_ENABLED in the operator's .env would otherwise add MCPBudgetHook.
+        monkeypatch.setattr("src.main.config.mcp_enabled", False)
 
         services = build_runtime_services_from_config(enable_tool_audit=False)
         assert services.tool_service.hooks == []
@@ -635,6 +638,70 @@ class TestRuntimeServiceHookConfig:
         hook_types = [type(h).__name__ for h in services.tool_service.hooks]
         assert "LoggingToolAuditHook" in hook_types
         assert "ContentInspectionHook" in hook_types
+
+    def test_build_runtime_services_from_config_builds_mcp_when_inspection_disabled(
+        self, monkeypatch, tmp_path: Path
+    ):
+        from src.main import build_runtime_services_from_config
+
+        registry_path = tmp_path / "mcp_servers.json"
+        registry_path.write_text(
+            json.dumps(
+                {
+                    "servers": [
+                        {
+                            "id": "fmp_remote",
+                            "description": "FMP",
+                            "transport": "streamable_http",
+                            "base_url": "https://example.test/mcp",
+                            "enabled": True,
+                            "scopes": ["consultant"],
+                            "tool_allowlist": ["quote"],
+                            "trust_tier": "official_vendor",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(
+            "src.main.config.untrusted_content_inspection_enabled", False
+        )
+        monkeypatch.setattr("src.main.config.mcp_enabled", True)
+        monkeypatch.setattr("src.main.config.mcp_servers_path", registry_path)
+        monkeypatch.setattr(
+            "src.main.config.mcp_usage_db_path",
+            tmp_path / "runtime" / "mcp_usage.db",
+        )
+
+        services = build_runtime_services_from_config(enable_tool_audit=False)
+
+        assert services.mcp_runtime is not None
+        hook_types = [type(h).__name__ for h in services.tool_service.hooks]
+        assert "ContentInspectionHook" not in hook_types
+        assert "MCPBudgetHook" in hook_types
+
+    def test_build_runtime_services_from_config_degrades_when_mcp_registry_missing(
+        self, monkeypatch, tmp_path: Path
+    ):
+        from src.main import build_runtime_services_from_config
+
+        monkeypatch.setattr("src.main.config.mcp_enabled", True)
+        monkeypatch.setattr(
+            "src.main.config.mcp_servers_path",
+            tmp_path / "missing_mcp_servers.json",
+        )
+        monkeypatch.setattr(
+            "src.main.config.mcp_usage_db_path",
+            tmp_path / "runtime" / "mcp_usage.db",
+        )
+
+        services = build_runtime_services_from_config(enable_tool_audit=False)
+
+        assert services.mcp_runtime is None
+        hook_types = [type(h).__name__ for h in services.tool_service.hooks]
+        assert "MCPBudgetHook" not in hook_types
 
     def test_configure_content_inspection_from_config_installs_tool_hook(
         self, monkeypatch

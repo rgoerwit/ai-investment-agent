@@ -1722,10 +1722,17 @@ class SmartMarketDataFetcher(FinancialFetcher):
             self._get_financial_metrics_uncached(ticker, timeout)
         )
         self._metrics_inflight[ticker] = task
-        try:
-            result = await task
-        finally:
-            self._metrics_inflight.pop(ticker, None)
+
+        # Clear the dedup slot the moment the task ends (success, exception, or
+        # cancellation) — independent of whether anyone is still awaiting it.
+        # A try/finally around ``await task`` would only run if the awaiter
+        # itself returns; if a hung blocking thread keeps the task pending,
+        # try/finally would leak the slot indefinitely.
+        def _clear_metrics_slot(_t: asyncio.Task[Any], key: str = ticker) -> None:
+            self._metrics_inflight.pop(key, None)
+
+        task.add_done_callback(_clear_metrics_slot)
+        result = await task
 
         self._set_cached_metrics(ticker, result)
         return copy.deepcopy(result)
@@ -1817,10 +1824,15 @@ class SmartMarketDataFetcher(FinancialFetcher):
             )
         )
         self._history_inflight[key] = task
-        try:
-            hist = await task
-        finally:
-            self._history_inflight.pop(key, None)
+        history_key = key  # bind for the closure below
+
+        # See _metrics_inflight cleanup note: clear via done-callback so a
+        # hung underlying fetch cannot leak the dedup slot.
+        def _clear_history_slot(_t: asyncio.Task[Any]) -> None:
+            self._history_inflight.pop(history_key, None)
+
+        task.add_done_callback(_clear_history_slot)
+        hist = await task
 
         self._set_cached_history(
             ticker,

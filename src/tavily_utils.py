@@ -102,8 +102,14 @@ async def tavily_search_with_timeout(
     """
     if not _tavily_tool:
         return None
+    from src.async_utils import run_with_hard_timeout
+
     try:
-        raw = await asyncio.wait_for(_tavily_tool.ainvoke(query), timeout=timeout)
+        raw = await run_with_hard_timeout(
+            _tavily_tool.ainvoke(query),
+            timeout=timeout,
+            label=f"tavily:{query.get('query', '')[:60]}",
+        )
     except asyncio.TimeoutError:
         logger.warning(
             "tavily_search_timeout",
@@ -136,8 +142,14 @@ async def search_tavily_inspected(
     if tool is None:
         return None
 
+    from src.async_utils import run_with_hard_timeout
+
     try:
-        raw = await asyncio.wait_for(tool.ainvoke({"query": query}), timeout=timeout)
+        raw = await run_with_hard_timeout(
+            tool.ainvoke({"query": query}),
+            timeout=timeout,
+            label=f"tavily:{profile}:{query[:60]}",
+        )
     except asyncio.TimeoutError:
         logger.warning(
             "tavily_search_timeout",
