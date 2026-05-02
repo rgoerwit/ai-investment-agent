@@ -1,0 +1,41 @@
+{
+  "servers": [
+    {
+      "id": "fmp_remote",
+      "description": "Official FMP MCP endpoint. Uses dispatcher tools (statements/quote take an 'endpoint' arg).",
+      "transport": "streamable_http",
+      "base_url": "https://financialmodelingprep.com/mcp",
+      "auth": {
+        "type": "query_api_key",
+        "param": "apikey",
+        "env_var": "FMP_API_KEY"
+      },
+      "enabled": false,
+      "scopes": ["consultant"],
+      "tool_allowlist": [
+        "statements",
+        "quote"
+      ],
+      "daily_call_limit": 250,
+      "per_run_limit": 3,
+      "trust_tier": "official_vendor"
+    },
+    {
+      "id": "twelvedata_remote",
+      "description": "Twelve Data public MCP only exposes 'u-tool' (free-form AI router) and 'doc-tool'. Neither fits the consultant's narrow-allowlist contract; leave disabled.",
+      "transport": "streamable_http",
+      "base_url": "https://mcp.twelvedata.com/mcp",
+      "auth": {
+        "type": "query_api_key",
+        "param": "apikey",
+        "env_var": "TWELVE_DATA_API_KEY"
+      },
+      "enabled": false,
+      "scopes": ["consultant"],
+      "tool_allowlist": [],
+      "daily_call_limit": 250,
+      "per_run_limit": 2,
+      "trust_tier": "official_vendor"
+    }
+  ]
+}

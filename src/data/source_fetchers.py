@@ -238,58 +238,74 @@ async def fetch_all_sources_parallel(
     logger_obj: Any = logger,
     asyncio_module: Any = asyncio,
 ) -> dict[str, dict | None]:
-    """Launch all configured sources in parallel and collect outcomes."""
+    """Launch all configured sources concurrently and collect outcomes.
+
+    Each source has a hard per-source timeout that orphans the underlying
+    task if it exceeds the deadline (see ``run_with_hard_timeout``); slow or
+    hung providers cannot block sibling providers or the caller's wall clock
+    beyond ``per_source_timeout``.
+    """
+    from src.async_utils import run_with_hard_timeout
+
     logger_obj.info("launching_parallel_sources", symbol=symbol)
-    tasks = {
-        "yfinance": fetcher._fetch_yfinance_enhanced(symbol),
-        "yahooquery": asyncio_module.to_thread(
+    builders = {
+        "yfinance": lambda: fetcher._fetch_yfinance_enhanced(symbol),
+        "yahooquery": lambda: asyncio_module.to_thread(
             fetcher._fetch_yahooquery_fallback, symbol
         ),
-        "fmp": fetcher._fetch_fmp_fallback(symbol),
-        "eodhd": fetcher._fetch_eodhd_fallback(symbol),
-        "alpha_vantage": fetcher._fetch_av_fallback(symbol),
+        "fmp": lambda: fetcher._fetch_fmp_fallback(symbol),
+        "eodhd": lambda: fetcher._fetch_eodhd_fallback(symbol),
+        "alpha_vantage": lambda: fetcher._fetch_av_fallback(symbol),
     }
 
-    results: dict[str, dict | None] = {}
-    source_outcomes: dict[str, str] = {}
-    for source_name, coro in tasks.items():
+    async def _run_one(name: str) -> tuple[str, dict | None, str]:
         try:
-            result = await asyncio_module.wait_for(coro, timeout=per_source_timeout)
-            results[source_name] = result
-            if result:
-                source_outcomes[source_name] = "success"
-                logger_obj.info(
-                    f"{source_name}_success", symbol=symbol, fields=len(result)
-                )
-            else:
-                source_outcomes[source_name] = "empty"
-                logger_obj.debug(f"{source_name}_returned_none", symbol=symbol)
+            result = await run_with_hard_timeout(
+                builders[name](),
+                timeout=per_source_timeout,
+                label=f"data_source:{name}:{symbol}",
+            )
         except asyncio_module.TimeoutError:
             logger_obj.warning(
-                f"{source_name}_timeout",
+                f"{name}_timeout",
                 symbol=symbol,
                 timeout_seconds=per_source_timeout,
             )
-            results[source_name] = None
-            source_outcomes[source_name] = "timeout"
+            return name, None, "timeout"
         except Exception as exc:
             logger_obj.warning(
-                f"{source_name}_error",
+                f"{name}_error",
                 symbol=symbol,
                 **summarize_exception(
                     exc,
-                    operation=f"fetching {source_name} data",
+                    operation=f"fetching {name} data",
                     provider="unknown",
                 ),
             )
-            results[source_name] = None
-            source_outcomes[source_name] = f"error:{type(exc).__name__}"
+            return name, None, f"error:{type(exc).__name__}"
+
+        if result:
+            logger_obj.info(f"{name}_success", symbol=symbol, fields=len(result))
+            return name, result, "success"
+        logger_obj.debug(f"{name}_returned_none", symbol=symbol)
+        return name, None, "empty"
+
+    completed = await asyncio_module.gather(
+        *(_run_one(name) for name in builders),
+        return_exceptions=False,
+    )
+
+    results: dict[str, dict | None] = {}
+    source_outcomes: dict[str, str] = {}
+    for name, result, outcome in completed:
+        results[name] = result
+        source_outcomes[name] = outcome
 
     if not [source for source, result in results.items() if result is not None]:
         logger_obj.warning(
             "all_data_sources_failed",
             symbol=symbol,
-            sources_attempted=list(tasks.keys()),
+            sources_attempted=list(builders.keys()),
             source_outcomes=source_outcomes,
             suspected_cause=classify_aggregate_source_failure(source_outcomes),
         )

@@ -13,6 +13,7 @@ from typing import Any, Literal, Protocol, TypeAlias
 
 import structlog
 
+from src.async_utils import run_with_hard_timeout
 from src.error_safety import redact_sensitive_text
 from src.observability import start_tool_observation
 from src.runtime_diagnostics import classify_failure
@@ -123,8 +124,10 @@ class ToolExecutionService:
                 },
             ):
                 result = ToolResult(
-                    value=await asyncio.wait_for(
-                        runner(call.args), timeout=TOOL_CALL_TIMEOUT_SECONDS
+                    value=await run_with_hard_timeout(
+                        runner(call.args),
+                        timeout=TOOL_CALL_TIMEOUT_SECONDS,
+                        label=f"tool:{call.name}",
                     )
                 )
         except asyncio.TimeoutError as exc:
@@ -143,6 +146,14 @@ class ToolExecutionService:
             # Failed executions propagate immediately so callers keep the original
             # stack and error semantics.
             details = classify_failure(exc, provider="unknown")
+            is_mcp_error = False
+            try:  # Avoid import-time coupling for the non-MCP path.
+                from src.mcp.errors import MCPCallError
+
+                is_mcp_error = isinstance(exc, MCPCallError)
+            except Exception:  # pragma: no cover - defensive import fallback
+                is_mcp_error = False
+
             logger.error(
                 "tool_call_runner_failed",
                 tool=call.name,
@@ -154,7 +165,7 @@ class ToolExecutionService:
                 error_type=details.error_type,
                 root_cause_type=details.root_cause_type,
                 error_message=details.message,
-                exc_info=True,
+                exc_info=not is_mcp_error,
             )
             raise
 

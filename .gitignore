@@ -180,4 +180,7 @@ runtime/ibkr_dashboard/
 # Local configuration overrides
 local_config.py
 config.local.py
+config/mcp_servers.json
+runtime/mcp_usage.db
+runtime/mcp_usage.db-*
 .aider*

@@ -12,6 +12,7 @@ Migration Notes (Dec 2025):
 - Config class alias maintained for backwards compatibility
 """
 
+import functools
 import logging
 import os
 import sys
@@ -130,6 +131,27 @@ def _parse_env_file() -> dict:
         logger.warning(f"Could not parse .env file: {e}")
 
     return env_values
+
+
+@functools.lru_cache(maxsize=1)
+def _cached_env_file_values() -> dict[str, str]:
+    """Memoized accessor for `.env` values; cleared by tests via cache_clear()."""
+    return _parse_env_file()
+
+
+def get_env_value(name: str) -> str | None:
+    """Resolve an environment variable by name with `.env` fallback.
+
+    The repo loads `.env` via pydantic-settings into the ``Settings`` model;
+    raw ``os.getenv`` does not see those values. Code paths that look up env
+    vars by *name* (e.g., MCP server auth, where the variable name is data-
+    driven from the registry) should use this helper so the `.env` file is
+    honored consistently with shell-exported values winning when both are set.
+    """
+    value = os.getenv(name)
+    if value:
+        return value
+    return _cached_env_file_values().get(name)
 
 
 def _check_env_overrides() -> None:
@@ -582,7 +604,7 @@ class Settings(BaseSettings):
         description="Path to the MCP server registry JSON file",
     )
     mcp_usage_db_path: Path = Field(
-        default=Path("./mcp_usage.db"),
+        default=Path("./runtime/mcp_usage.db"),
         validation_alias="MCP_USAGE_DB_PATH",
         description="Path to the SQLite database for MCP usage tracking",
     )
@@ -774,6 +796,7 @@ class Settings(BaseSettings):
             self.data_cache_dir,
             Path(self.chroma_persist_directory),
             self.images_dir,
+            self.mcp_usage_db_path.parent,
         ]:
             directory.mkdir(parents=True, exist_ok=True)
 

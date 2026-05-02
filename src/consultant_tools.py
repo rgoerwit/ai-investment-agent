@@ -15,16 +15,21 @@ Two spot-check tools:
 
 import asyncio
 import json
-from typing import Annotated
+from typing import Annotated, Any
 
 import structlog
 import yfinance as yf
 from langchain_core.tools import tool
 
-from src.error_safety import safe_error_payload, summarize_exception
 from src.config import config
+from src.error_safety import safe_error_payload, summarize_exception
+from src.mcp.errors import MCPCallError, make_mcp_tool_name
 from src.runtime_diagnostics import classify_failure
-from src.runtime_services import get_current_runtime_services
+from src.runtime_services import (
+    get_current_runtime_services,
+    get_current_tool_service,
+)
+from src.tooling.runtime import ToolInvocation, ToolResult
 
 logger = structlog.get_logger(__name__)
 
@@ -70,6 +75,39 @@ FMP_FIELD_MAP: dict[str, tuple[str, str]] = {
     "dividendYield": ("ratios", "dividendYield"),
 }
 
+FMP_MCP_REQUIRED_TOOLS = frozenset({"statements", "quote"})
+
+# Map yfinance-named metrics → (FMP MCP tool, endpoint enum value).
+# FMP MCP uses a dispatcher pattern: each tool takes an ``endpoint`` argument
+# that selects the actual operation. Verified empirically via tools/list.
+# TTM endpoints chosen for ratios/income/cash-flow because the consultant is
+# cross-validating the *current* state, not historical snapshots.
+_FMP_METRIC_DISPATCH: dict[str, tuple[str, str]] = {
+    "trailingPE": ("statements", "metrics-ratios-ttm"),
+    "forwardPE": ("statements", "metrics-ratios-ttm"),
+    "priceToBook": ("statements", "metrics-ratios-ttm"),
+    "debtToEquity": ("statements", "metrics-ratios-ttm"),
+    "returnOnEquity": ("statements", "metrics-ratios-ttm"),
+    "returnOnAssets": ("statements", "metrics-ratios-ttm"),
+    "operatingMargins": ("statements", "metrics-ratios-ttm"),
+    "dividendYield": ("statements", "metrics-ratios-ttm"),
+    "payoutRatio": ("statements", "metrics-ratios-ttm"),
+    "currentRatio": ("statements", "metrics-ratios-ttm"),
+    "freeCashflow": ("statements", "cashflow-statements-ttm"),
+    "operatingCashflow": ("statements", "cashflow-statements-ttm"),
+    "totalRevenue": ("statements", "income-statements-ttm"),
+    "netIncomeToCommon": ("statements", "income-statements-ttm"),
+    "currentPrice": ("quote", "quote"),
+    "marketCap": ("quote", "quote"),
+}
+
+
+def _fmp_mcp_field_for(metric: str) -> str:
+    """Return the response-field name to extract from the FMP MCP payload."""
+    if metric in FMP_FIELD_MAP:
+        return FMP_FIELD_MAP[metric][1]
+    return {"currentPrice": "price", "marketCap": "marketCap"}[metric]
+
 
 def _build_fmp_access_failure(
     *,
@@ -92,6 +130,161 @@ def _build_fmp_access_failure(
     if cooldown_until is not None:
         payload["cooldown_until"] = cooldown_until
     return json.dumps(payload)
+
+
+def _build_mcp_access_failure(
+    *,
+    ticker: str,
+    key: str,
+    lookup: str,
+    provider: str,
+    error: str,
+    failure_kind: str,
+    retryable: bool,
+    source: str,
+) -> str:
+    return json.dumps(
+        {
+            "error": error,
+            "ticker": ticker,
+            key: lookup,
+            "provider": provider,
+            "failure_kind": failure_kind,
+            "retryable": retryable,
+            "source": source,
+        }
+    )
+
+
+async def _execute_mcp_via_tool_service(
+    services: Any,
+    *,
+    server_id: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+    agent_key: str,
+    scope: str,
+) -> ToolResult:
+    """Route an MCP call through the active ToolExecutionService.
+
+    Returns the full ``ToolResult`` from the shared tool plane so caller-facing
+    wrappers can distinguish hook-level blocks and preserve structured findings
+    without bypassing the normal audit/inspection/budget chokepoint.
+    """
+    invocation = ToolInvocation(
+        name=make_mcp_tool_name(server_id, tool_name),
+        args=arguments,
+        source="consultant",
+        agent_key=agent_key,
+    )
+
+    async def runner(args: dict[str, Any]) -> Any:
+        return await services.mcp_runtime.execute_raw(
+            server_id,
+            tool_name,
+            args,
+            scope=scope,
+            agent_key=agent_key,
+        )
+
+    return await get_current_tool_service().execute(invocation, runner=runner)
+
+
+def _mcp_wrapper_available(
+    runtime: Any,
+    *,
+    server_id: str,
+    required_tools: frozenset[str],
+    scope: str = "consultant",
+) -> bool:
+    """Return whether a narrow MCP wrapper can be exposed safely."""
+    checker = getattr(runtime, "is_tool_available", None)
+    if checker is None:
+        return False
+    return all(
+        checker(server_id, tool_name, scope=scope) for tool_name in required_tools
+    )
+
+
+def _classify_mcp_blocked_result(result: ToolResult) -> tuple[str, str]:
+    """Map a blocked hook result onto a stable wrapper-facing failure shape."""
+    message = result.value if isinstance(result.value, str) else "TOOL_BLOCKED"
+    normalized = message.lower()
+    if "budget exhausted" in normalized:
+        return "budget", message
+    return "inspection_blocked", message
+
+
+def _build_mcp_text_payload(
+    *,
+    ticker: str,
+    key: str,
+    lookup: str,
+    provider: str,
+    source: str,
+    text_payload: str,
+) -> str:
+    return json.dumps(
+        {
+            "ticker": ticker,
+            key: lookup,
+            "provider": provider,
+            "source": source,
+            "text_payload": text_payload,
+            "note": "mcp_payload_sanitized_or_textual",
+        }
+    )
+
+
+def _extract_candidate_payloads(result: dict[str, Any]) -> list[Any]:
+    candidates: list[Any] = []
+    for key in ("structured_content", "parsed_text_json"):
+        value = result.get(key)
+        if value is not None:
+            candidates.append(value)
+    text_value = result.get("text_content")
+    if text_value:
+        candidates.append(text_value)
+    return candidates
+
+
+def _find_nested_value(payload: Any, field_name: str) -> Any | None:
+    if isinstance(payload, dict):
+        if field_name in payload:
+            return payload[field_name]
+        data = payload.get("data")
+        if data is not None:
+            found = _find_nested_value(data, field_name)
+            if found is not None:
+                return found
+        for value in payload.values():
+            found = _find_nested_value(value, field_name)
+            if found is not None:
+                return found
+    elif isinstance(payload, list):
+        for item in payload:
+            found = _find_nested_value(item, field_name)
+            if found is not None:
+                return found
+    return None
+
+
+def _find_period(payload: Any) -> str | None:
+    if isinstance(payload, dict):
+        period = payload.get("period")
+        if isinstance(period, str):
+            return period
+        data = payload.get("data")
+        if data is not None:
+            nested = _find_period(data)
+            if nested is not None:
+                return nested
+    elif isinstance(payload, list):
+        for item in payload:
+            nested = _find_period(item)
+            if nested is not None:
+                return nested
+    return None
 
 
 @tool("spot_check_metric")
@@ -331,81 +524,145 @@ async def spot_check_metric_mcp_fmp(
     Use when you suspect a specific number in the analyst reports is wrong
     or when DATA_BLOCK and narrative claims diverge.
     """
-    _METRIC_TO_MCP_TOOL = {
-        "trailingPE": "ratios",
-        "forwardPE": "ratios",
-        "priceToBook": "ratios",
-        "debtToEquity": "ratios",
-        "returnOnEquity": "ratios",
-        "returnOnAssets": "ratios",
-        "operatingMargins": "ratios",
-        "dividendYield": "ratios",
-        "payoutRatio": "ratios",
-        "currentRatio": "ratios",
-        "freeCashflow": "cash-flow-statement",
-        "operatingCashflow": "cash-flow-statement",
-        "totalRevenue": "income-statement",
-        "netIncomeToCommon": "income-statement",
-        "currentPrice": "quote",
-        "marketCap": "quote",
-    }
+    if metric not in _FMP_METRIC_DISPATCH:
+        return json.dumps(
+            {
+                "error": f"Metric '{metric}' not available via FMP MCP spot-check",
+                "available_metrics": sorted(_FMP_METRIC_DISPATCH.keys()),
+                "provider": "fmp",
+                "source": "fmp_mcp",
+            }
+        )
 
-    tool_name = _METRIC_TO_MCP_TOOL.get(metric, "ratios")
     services = get_current_runtime_services()
     if services is None or services.mcp_runtime is None:
-        return json.dumps({"error": "mcp_not_available", "ticker": ticker, "metric": metric})
+        return _build_mcp_access_failure(
+            ticker=ticker,
+            key="metric",
+            lookup=metric,
+            provider="fmp",
+            error="FMP MCP is not available in the current runtime",
+            failure_kind="config_error",
+            retryable=False,
+            source="fmp_mcp",
+        )
+
+    tool_name, endpoint = _FMP_METRIC_DISPATCH[metric]
+    metric_field = _fmp_mcp_field_for(metric)
 
     try:
-        result_raw = await services.mcp_runtime.call_tool(
-            "fmp_remote", tool_name, {"symbol": ticker}, agent_key="consultant"
+        result = await _execute_mcp_via_tool_service(
+            services,
+            server_id="fmp_remote",
+            tool_name=tool_name,
+            arguments={"symbol": ticker, "endpoint": endpoint},
+            agent_key="consultant",
+            scope="consultant",
+        )
+    except MCPCallError as exc:
+        return _build_mcp_access_failure(
+            ticker=ticker,
+            key="metric",
+            lookup=metric,
+            provider="fmp",
+            error=exc.message,
+            failure_kind=exc.category.value,
+            retryable=exc.retryable,
+            source="fmp_mcp",
         )
     except Exception as exc:
-        return json.dumps({"error": str(exc), "ticker": ticker, "metric": metric, "source": "fmp_mcp"})
-
-    try:
-        data = json.loads(result_raw)
-        payload = data.get("result") if isinstance(data, dict) else data
-        if isinstance(payload, dict):
-            value = payload.get(metric)
-            return json.dumps(
-                {"ticker": ticker, "metric": metric, "value": value, "source": "fmp_mcp"}
+        return json.dumps(
+            safe_error_payload(
+                exc,
+                operation="spot_check_metric_mcp_fmp",
+                provider="unknown",
+                extra={
+                    "ticker": ticker,
+                    "metric": metric,
+                    "provider": "fmp",
+                    "source": "fmp_mcp",
+                },
             )
-    except Exception:
-        pass
-    return result_raw
-
-
-@tool("spot_check_price_or_indicator_mcp_twelvedata")
-async def spot_check_price_or_indicator_mcp_twelvedata(
-    ticker: Annotated[str, "Stock ticker (e.g., 7203.T, 0005.HK)"],
-    query: Annotated[
-        str, "One of 'price', 'volume', 'rsi', 'macd', or 'quote'"
-    ],
-) -> str:
-    """Fetch price / volume / technical indicator from **Twelve Data MCP**.
-
-    Use only to verify a specific quote or indicator when the main pipeline
-    and FMP disagree.  Never enable the “u‑tool” for consultant checks.
-
-    Returns compact JSON.
-    """
-    services = get_current_runtime_services()
-    if services is None or services.mcp_runtime is None:
-        return json.dumps(
-            {"error": "mcp_not_available", "ticker": ticker, "query": query}
         )
 
-    allowed_tools = {"price", "quote"}
-    tool_name = query if query in allowed_tools else "quote"
-    try:
-        result_raw = await services.mcp_runtime.call_tool(
-            "twelvedata_remote", tool_name, {"symbol": ticker}, agent_key="consultant"
+    if result.blocked:
+        failure_kind, error = _classify_mcp_blocked_result(result)
+        return _build_mcp_access_failure(
+            ticker=ticker,
+            key="metric",
+            lookup=metric,
+            provider="fmp",
+            error=error,
+            failure_kind=failure_kind,
+            retryable=False,
+            source="fmp_mcp",
         )
-    except Exception as exc:
-        return json.dumps(
-            {"error": str(exc), "ticker": ticker, "query": query, "source": "twelvedata_mcp"}
+
+    value = result.value
+    if isinstance(value, str):
+        return _build_mcp_text_payload(
+            ticker=ticker,
+            key="metric",
+            lookup=metric,
+            provider="fmp",
+            source="fmp_mcp",
+            text_payload=value,
         )
-    return result_raw
+    if not isinstance(value, dict):
+        return _build_mcp_access_failure(
+            ticker=ticker,
+            key="metric",
+            lookup=metric,
+            provider="fmp",
+            error="unexpected_mcp_payload_shape",
+            failure_kind="protocol",
+            retryable=False,
+            source="fmp_mcp",
+        )
+
+    # Vendor-side error (isError=true on CallToolResult): surface text_content
+    # as the error rather than falling through to opaque shape-extraction failure.
+    if value.get("is_error"):
+        return _build_mcp_access_failure(
+            ticker=ticker,
+            key="metric",
+            lookup=metric,
+            provider="fmp",
+            error=str(value.get("text_content") or "MCP tool returned isError=true"),
+            failure_kind="tool_error",
+            retryable=False,
+            source="fmp_mcp",
+        )
+
+    normalized_payload = value
+    for payload in _extract_candidate_payloads(normalized_payload):
+        extracted = _find_nested_value(payload, metric_field)
+        if extracted is not None:
+            response = {
+                "ticker": ticker,
+                "metric": metric,
+                "value": extracted,
+                "provider": "fmp",
+                "source": "fmp_mcp",
+                "mcp_tool": tool_name,
+                "mcp_endpoint": endpoint,
+            }
+            period = _find_period(payload)
+            if period is not None:
+                response["period"] = period
+            return json.dumps(response)
+
+    return json.dumps(
+        {
+            "error": "unexpected_mcp_payload_shape",
+            "ticker": ticker,
+            "metric": metric,
+            "provider": "fmp",
+            "source": "fmp_mcp",
+            "mcp_tool": tool_name,
+            "mcp_endpoint": endpoint,
+        }
+    )
 
 
 def get_consultant_tools() -> list:
@@ -417,7 +674,10 @@ def get_consultant_tools() -> list:
     - spot_check_metric_alt: FMP REST (independent of pipeline)
     - get_official_filings: Official filing APIs (EDINET/DART) for ground-truth
     - spot_check_metric_mcp_fmp: FMP via MCP (broader tool surface, same vendor)
-    - spot_check_price_or_indicator_mcp_twelvedata: Twelve Data via MCP (pinned endpoints)
+
+    Twelve Data MCP is intentionally not exposed: their public MCP server only
+    publishes ``u-tool`` (a free-form AI router) and ``doc-tool`` — neither
+    fits the consultant's narrow-allowlist + structured-payload contract.
     """
     from src.tools.research import get_official_filings
 
@@ -436,7 +696,12 @@ def get_consultant_tools() -> list:
         and services.mcp_runtime is not None
         and config.consultant_mcp_enabled
     ):
-        tools.append(spot_check_metric_mcp_fmp)
-        tools.append(spot_check_price_or_indicator_mcp_twelvedata)
+        runtime = services.mcp_runtime
+        if _mcp_wrapper_available(
+            runtime,
+            server_id="fmp_remote",
+            required_tools=FMP_MCP_REQUIRED_TOOLS,
+        ):
+            tools.append(spot_check_metric_mcp_fmp)
 
     return tools

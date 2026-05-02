@@ -13,10 +13,15 @@ import pytest
 
 from src.consultant_tools import (
     FMP_FIELD_MAP,
+    get_consultant_tools,
     spot_check_metric,
     spot_check_metric_alt,
+    spot_check_metric_mcp_fmp,
 )
 from src.data.fmp_fetcher import FMPSubscriptionUnavailableError
+from src.runtime_services import RuntimeServices, use_runtime_services
+from src.tooling.inspection_service import InspectionService
+from src.tooling.runtime import ToolExecutionService, ToolResult
 
 
 class TestSpotCheckMetric:
@@ -271,3 +276,180 @@ class TestSpotCheckMetricAlt:
             endpoint, field = mapping
             assert isinstance(endpoint, str), f"{metric} endpoint should be str"
             assert isinstance(field, str), f"{metric} field should be str"
+
+
+class TestMCPConsultantTools:
+    @pytest.mark.asyncio
+    async def test_fmp_mcp_wrapper_returns_value_from_nested_payload(self):
+        mock_runtime = MagicMock()
+        mock_runtime.execute_raw = AsyncMock(
+            return_value={
+                "structured_content": {"data": [{"priceEarningsRatio": 14.2}]},
+                "payload_profile": "structured_financial",
+            }
+        )
+        services = RuntimeServices(
+            tool_service=ToolExecutionService(),
+            inspection_service=InspectionService(),
+            mcp_runtime=mock_runtime,
+        )
+
+        with use_runtime_services(services):
+            result = json.loads(
+                await spot_check_metric_mcp_fmp.ainvoke(
+                    {"ticker": "7203.T", "metric": "trailingPE"}
+                )
+            )
+
+        assert result["value"] == 14.2
+        assert result["provider"] == "fmp"
+        assert result["source"] == "fmp_mcp"
+        assert result["mcp_tool"] == "statements"
+        assert result["mcp_endpoint"] == "metrics-ratios-ttm"
+        # MCP call must flow through the canonical mcp__server__tool name with
+        # the dispatcher endpoint argument bundled into the args dict.
+        mock_runtime.execute_raw.assert_called_once_with(
+            "fmp_remote",
+            "statements",
+            {"symbol": "7203.T", "endpoint": "metrics-ratios-ttm"},
+            scope="consultant",
+            agent_key="consultant",
+        )
+
+    @pytest.mark.asyncio
+    async def test_fmp_mcp_wrapper_surfaces_vendor_tool_error(self):
+        """When the vendor returns is_error=true (e.g. unknown endpoint), the
+        wrapper must surface the text_content as a structured tool_error rather
+        than fall through to opaque 'unexpected_mcp_payload_shape'."""
+        mock_runtime = MagicMock()
+        mock_runtime.execute_raw = AsyncMock(
+            return_value={
+                "server": "fmp_remote",
+                "tool": "statements",
+                "is_error": True,
+                "payload_profile": "free_text",
+                "text_content": "MCP error -32602: endpoint not allowed on free tier",
+            }
+        )
+        services = RuntimeServices(
+            tool_service=ToolExecutionService(),
+            inspection_service=InspectionService(),
+            mcp_runtime=mock_runtime,
+        )
+
+        with use_runtime_services(services):
+            result = json.loads(
+                await spot_check_metric_mcp_fmp.ainvoke(
+                    {"ticker": "7203.T", "metric": "trailingPE"}
+                )
+            )
+
+        assert result["failure_kind"] == "tool_error"
+        assert "free tier" in result["error"]
+        assert result["source"] == "fmp_mcp"
+
+    @pytest.mark.asyncio
+    async def test_fmp_mcp_wrapper_degrades_when_runtime_missing(self):
+        with patch(
+            "src.consultant_tools.get_current_runtime_services", return_value=None
+        ):
+            result = json.loads(
+                await spot_check_metric_mcp_fmp.ainvoke(
+                    {"ticker": "7203.T", "metric": "trailingPE"}
+                )
+            )
+
+        assert result["failure_kind"] == "config_error"
+        assert result["source"] == "fmp_mcp"
+
+    @pytest.mark.asyncio
+    async def test_fmp_mcp_wrapper_labels_budget_block_correctly(self):
+        with patch(
+            "src.consultant_tools._execute_mcp_via_tool_service",
+            AsyncMock(
+                return_value=ToolResult(
+                    value="TOOL_BLOCKED: MCP budget exhausted for fmp_remote",
+                    blocked=True,
+                    findings=["MCP budget exhausted for fmp_remote"],
+                )
+            ),
+        ):
+            services = RuntimeServices(
+                tool_service=ToolExecutionService(),
+                inspection_service=InspectionService(),
+                mcp_runtime=MagicMock(),
+            )
+            with use_runtime_services(services):
+                result = json.loads(
+                    await spot_check_metric_mcp_fmp.ainvoke(
+                        {"ticker": "7203.T", "metric": "trailingPE"}
+                    )
+                )
+
+        assert result["failure_kind"] == "budget"
+        assert "budget exhausted" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_fmp_mcp_wrapper_preserves_sanitized_text_payload(self):
+        with patch(
+            "src.consultant_tools._execute_mcp_via_tool_service",
+            AsyncMock(
+                return_value=ToolResult(value="sanitized payload", blocked=False)
+            ),
+        ):
+            services = RuntimeServices(
+                tool_service=ToolExecutionService(),
+                inspection_service=InspectionService(),
+                mcp_runtime=MagicMock(),
+            )
+            with use_runtime_services(services):
+                result = json.loads(
+                    await spot_check_metric_mcp_fmp.ainvoke(
+                        {"ticker": "7203.T", "metric": "trailingPE"}
+                    )
+                )
+
+        assert result["text_payload"] == "sanitized payload"
+        assert result["note"] == "mcp_payload_sanitized_or_textual"
+
+    def test_get_consultant_tools_hides_mcp_tools_when_disabled(self):
+        mock_services = MagicMock(mcp_runtime=object())
+        with patch(
+            "src.consultant_tools.get_current_runtime_services",
+            return_value=mock_services,
+        ):
+            with patch("src.consultant_tools.config.consultant_mcp_enabled", False):
+                tools = get_consultant_tools()
+
+        tool_names = {tool.name for tool in tools}
+        assert "spot_check_metric_mcp_fmp" not in tool_names
+
+    def test_get_consultant_tools_hides_mcp_tools_when_servers_are_unavailable(self):
+        mock_runtime = MagicMock()
+        mock_runtime.is_tool_available.return_value = False
+        mock_services = MagicMock(mcp_runtime=mock_runtime)
+
+        with patch(
+            "src.consultant_tools.get_current_runtime_services",
+            return_value=mock_services,
+        ):
+            with patch("src.consultant_tools.config.consultant_mcp_enabled", True):
+                tools = get_consultant_tools()
+
+        tool_names = {tool.name for tool in tools}
+        assert "spot_check_metric_mcp_fmp" not in tool_names
+
+    def test_get_consultant_tools_hides_mcp_tools_without_runtime_capability_check(
+        self,
+    ):
+        mock_services = MagicMock(mcp_runtime=object())
+
+        with patch(
+            "src.consultant_tools.get_current_runtime_services",
+            return_value=mock_services,
+        ):
+            with patch("src.consultant_tools.config.consultant_mcp_enabled", True):
+                tools = get_consultant_tools()
+
+        tool_names = {tool.name for tool in tools}
+        assert "spot_check_metric_mcp_fmp" not in tool_names

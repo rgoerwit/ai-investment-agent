@@ -18,7 +18,11 @@ from typing import Any
 
 import structlog
 
-from src.runtime_services import get_current_inspection_service
+from src.mcp.errors import parse_mcp_tool_name
+from src.runtime_services import (
+    get_current_inspection_service,
+    get_current_runtime_services,
+)
 from src.tooling.inspection_service import InspectionService
 from src.tooling.inspector import InspectionEnvelope, SourceKind
 from src.tooling.runtime import ToolInvocation, ToolResult
@@ -69,6 +73,39 @@ def _serialize_for_inspection(
     }
 
 
+def _build_mcp_metadata(
+    *,
+    server_id: str,
+    tool_name: str,
+    result_value: Any,
+    serialization_meta: dict[str, Any],
+    call: ToolInvocation,
+) -> dict[str, Any]:
+    metadata = {
+        **serialization_meta,
+        "source": call.source,
+        "args_keys": list(call.args.keys()) if call.args else [],
+        "mcp_server_id": server_id,
+        "mcp_tool_name": tool_name,
+        "payload_profile": "free_text",
+        "trust_tier": "unknown",
+    }
+
+    if isinstance(result_value, dict):
+        payload_profile = result_value.get("payload_profile")
+        if isinstance(payload_profile, str) and payload_profile:
+            metadata["payload_profile"] = payload_profile
+
+    services = get_current_runtime_services()
+    runtime = services.mcp_runtime if services is not None else None
+    spec = runtime.specs.get(server_id) if runtime is not None else None
+    if spec is not None:
+        metadata["trust_tier"] = spec.trust_tier
+        metadata["transport"] = spec.transport
+
+    return metadata
+
+
 class ContentInspectionHook:
     """Inspect tool outputs through an InspectionService.
 
@@ -100,18 +137,37 @@ class ContentInspectionHook:
             )
             return result
 
-        envelope = InspectionEnvelope(
-            content_text=content_text,
-            raw_content=result.value,
-            source_kind=SourceKind.tool_output,
-            source_name=call.name,
-            tool_name=call.name,
-            agent_key=call.agent_key,
-            metadata={
+        mcp_parts = parse_mcp_tool_name(call.name)
+        if mcp_parts is not None:
+            mcp_server_id, mcp_inner_tool = mcp_parts
+            source_kind = SourceKind.mcp_tool_output
+            source_name = mcp_server_id
+            tool_name_for_envelope = mcp_inner_tool
+            metadata = _build_mcp_metadata(
+                server_id=mcp_server_id,
+                tool_name=mcp_inner_tool,
+                result_value=result.value,
+                serialization_meta=serialization_meta,
+                call=call,
+            )
+        else:
+            source_kind = SourceKind.tool_output
+            source_name = call.name
+            tool_name_for_envelope = call.name
+            metadata = {
                 "source": call.source,
                 "args_keys": list(call.args.keys()) if call.args else [],
                 **serialization_meta,
-            },
+            }
+
+        envelope = InspectionEnvelope(
+            content_text=content_text,
+            raw_content=result.value,
+            source_kind=source_kind,
+            source_name=source_name,
+            tool_name=tool_name_for_envelope,
+            agent_key=call.agent_key,
+            metadata=metadata,
         )
 
         service = self._inspection_service or get_current_inspection_service()

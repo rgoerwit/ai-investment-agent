@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import pytest
 
+from src.mcp.client import MCPRuntime
+from src.mcp.config import MCPServerSpec
+from src.runtime_services import RuntimeServices, use_runtime_services
 from src.tooling.inspection_hook import ContentInspectionHook
 from src.tooling.inspection_service import INSPECTION_SERVICE, InspectionService
 from src.tooling.inspector import (
@@ -12,7 +15,7 @@ from src.tooling.inspector import (
     NullInspector,
     SourceKind,
 )
-from src.tooling.runtime import ToolInvocation, ToolResult
+from src.tooling.runtime import ToolExecutionService, ToolInvocation, ToolResult
 
 
 def _invocation(name: str = "test_tool", source: str = "toolnode") -> ToolInvocation:
@@ -206,6 +209,56 @@ async def test_envelope_populated_from_invocation():
         assert env.content_text == "content"
     finally:
         INSPECTION_SERVICE.configure(original_inspector, mode=original_mode)
+
+
+@pytest.mark.asyncio
+async def test_mcp_envelope_includes_payload_profile_and_trust_tier(tmp_path):
+    captured: list[InspectionEnvelope] = []
+
+    class CapturingInspector:
+        async def inspect(self, envelope: InspectionEnvelope) -> InspectionDecision:
+            captured.append(envelope)
+            return InspectionDecision(action="allow", threat_level="safe")
+
+    runtime = MCPRuntime(
+        [
+            MCPServerSpec(
+                id="fmp_remote",
+                description="FMP",
+                transport="streamable_http",
+                base_url="https://example.test/mcp",
+                scopes=["consultant"],
+                tool_allowlist=["ratios"],
+                trust_tier="official_vendor",
+            )
+        ],
+        budget_db_path=str(tmp_path / "mcp_usage.db"),
+    )
+    inspection_service = InspectionService(CapturingInspector(), mode="warn")
+    services = RuntimeServices(
+        tool_service=ToolExecutionService([]),
+        inspection_service=inspection_service,
+        mcp_runtime=runtime,
+    )
+
+    with use_runtime_services(services):
+        hook = ContentInspectionHook(inspection_service)
+        result = await hook.after(
+            _invocation(name="mcp__fmp_remote__ratios", source="consultant"),
+            ToolResult(
+                value={
+                    "payload_profile": "structured_financial",
+                    "structured_content": {"data": [{"priceEarningsRatio": 14.2}]},
+                }
+            ),
+        )
+
+    assert result.blocked is False
+    assert len(captured) == 1
+    metadata = captured[0].metadata or {}
+    assert metadata["payload_profile"] == "structured_financial"
+    assert metadata["trust_tier"] == "official_vendor"
+    assert metadata["transport"] == "streamable_http"
 
 
 @pytest.mark.asyncio

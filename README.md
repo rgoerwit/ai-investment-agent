@@ -148,6 +148,49 @@ Practical notes:
 - Start with `warn` to inspect logs and false positives before moving to `sanitize` or `block`.
 - `fail_open` is the safer rollout default for a local operator workflow; `fail_closed` is stricter but can suppress content when the inspector itself errors.
 
+### Optional MCP Cross-Checks for the Consultant
+
+The Consultant can optionally use narrow MCP-backed spot checks to verify a small number of material claims without turning the whole graph into a free-form MCP client.
+
+Current v1 posture:
+
+- MCP is disabled by default.
+- Consultant access is intentionally narrow and curated.
+- FMP MCP is used for fundamentals/quote spot checks via FMP's dispatcher tools (`statements`, `quote`).
+- Twelve Data MCP is **disabled** in the shipped registry — their public surface only exposes a free-form AI router (`u-tool`) that does not fit the narrow-allowlist contract. Re-enable only if a structured per-metric surface ships.
+- Consultant MCP calls flow through the normal tool hook plane, and when
+  untrusted-content inspection is enabled their output is inspected with
+  `SourceKind.mcp_tool_output` before it becomes prompt-visible.
+- `scripts/mcp_smoke.py` is a permanent diagnostic that exercises the MCP path end-to-end without an LLM in the loop — useful for "is MCP actually moving bytes?" checks. See [docs/MCP.md](docs/MCP.md#smoke-testing-the-integration).
+
+Setup:
+
+```bash
+cp config/mcp_servers.example.json config/mcp_servers.json
+```
+
+Then set in `.env`:
+
+```bash
+MCP_ENABLED=true
+CONSULTANT_MCP_ENABLED=true
+MCP_SERVERS_PATH=./config/mcp_servers.json
+MCP_USAGE_DB_PATH=./runtime/mcp_usage.db
+FMP_API_KEY=...
+TWELVE_DATA_API_KEY=...
+```
+
+Operational notes:
+
+- Keep secrets in `.env`, not in the JSON registry.
+- `config/mcp_servers.json` is intentionally ignored so local server selections and limits do not dirty the repo.
+- If `MCP_ENABLED=true` but the registry file is missing, empty, or has no enabled
+  servers, runtime startup logs a warning and the consultant MCP wrappers stay hidden.
+- `trust_tier` must be one of `official_vendor`, `community`, or `unknown`.
+- Supported transports in v1 are `streamable_http` and `stdio`.
+- Supported auth modes in v1 are `none`, `query_api_key`, `header_bearer`, and `header_static`.
+- The usage database tracks local MCP budgets only; it does not replace vendor-side rate limits.
+
 ### Confirm the Core Path Works
 
 ```bash
