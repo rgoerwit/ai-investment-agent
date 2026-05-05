@@ -55,9 +55,11 @@ function fmtCurrency(value) {
   }).format(value);
 }
 
-function fmtLocalMoney(value, currency = "") {
+function fmtLocalMoney(value, currency) {
   if (value === null || value === undefined) return "—";
-  return `${Number(value).toFixed(2)}${currency ? ` ${currency}` : ""}`;
+  const num = Number(value).toFixed(2);
+  if (!currency) return `? ${num}`;
+  return `${currency.toUpperCase()} ${num}`;
 }
 
 function fmtNumber(value, digits = 1) {
@@ -147,6 +149,30 @@ function renderActionTable(title, items, extraColumns = []) {
       </table>
     </section>
   `;
+}
+
+function sellTypeLabel(item) {
+  const labels = {
+    STOP_BREACH: "Stop breach",
+    HARD_REJECT: "Fundamental",
+    SOFT_REJECT: "Soft reject",
+    PROFIT_TAKE: "Profit take",
+  };
+  return labels[item.sell_type] || "Sell";
+}
+
+function profitTakeDetail(item) {
+  const parts = [];
+  if (typeof item.cost_basis_return_pct === "number") {
+    parts.push(`${item.cost_basis_return_pct.toFixed(1)}% gain`);
+  }
+  if (item.position?.tax_term) {
+    parts.push(`tax: ${item.position.tax_term}`);
+  }
+  if (item.reason) {
+    parts.push(item.reason);
+  }
+  return escapeHtml(parts.join(" · ") || "—");
 }
 
 function renderCandidatePreview(title, items, limit = 5) {
@@ -413,12 +439,17 @@ function renderOverview() {
 
 function renderActions() {
   const actions = state.snapshot.actions;
+  const sellItems = [
+    ...(actions.sell_stop_breach || []),
+    ...(actions.sell_hard || []),
+    ...(actions.sell_profit_take || []),
+    ...(actions.sell_soft_review || []),
+  ];
   const actionSections = [
-    actions.sell_stop_breach,
-    actions.sell_hard,
-    actions.sell_soft_review,
+    sellItems,
     actions.review_macro,
     actions.review_stop_breach,
+    actions.review_profit_take,
     actions.add,
     actions.trim,
     actions.review,
@@ -436,29 +467,25 @@ function renderActions() {
     `;
   }
   return `
-    ${renderActionTable("Stop Breaches", actions.sell_stop_breach, [
+    ${renderActionTable("Sell Recommendations", sellItems, [
+      { label: "Type", render: (item) => escapeHtml(sellTypeLabel(item)) },
       { label: "Price", render: (item) => fmtNumber(item.suggested_price, 2) },
       {
         label: "Would Settle",
         render: (item) => escapeHtml(item.settlement_date || "—"),
       },
-    ])}
-    ${renderActionTable("Fundamental Sells", actions.sell_hard, [
-      { label: "Price", render: (item) => fmtNumber(item.suggested_price, 2) },
-      {
-        label: "Would Settle",
-        render: (item) => escapeHtml(item.settlement_date || "—"),
-      },
-    ])}
-    ${renderActionTable("Soft Rejections", actions.sell_soft_review, [
-      { label: "Health", render: (item) => escapeHtml(item.analysis?.health_adj ?? "—") },
-      { label: "Growth", render: (item) => escapeHtml(item.analysis?.growth_adj ?? "—") },
+      { label: "Profit-Take Detail", render: profitTakeDetail },
     ])}
     ${renderActionTable("Macro Reviews", actions.review_macro, [
       { label: "Health", render: (item) => escapeHtml(item.analysis?.health_adj ?? "—") },
       { label: "Growth", render: (item) => escapeHtml(item.analysis?.growth_adj ?? "—") },
     ])}
     ${renderActionTable("Stop Breaches Under Review", actions.review_stop_breach, [
+      { label: "Health", render: (item) => escapeHtml(item.analysis?.health_adj ?? "—") },
+      { label: "Growth", render: (item) => escapeHtml(item.analysis?.growth_adj ?? "—") },
+    ])}
+    ${renderActionTable("Profit-Take Reviews", actions.review_profit_take, [
+      { label: "Detail", render: profitTakeDetail },
       { label: "Health", render: (item) => escapeHtml(item.analysis?.health_adj ?? "—") },
       { label: "Growth", render: (item) => escapeHtml(item.analysis?.growth_adj ?? "—") },
     ])}

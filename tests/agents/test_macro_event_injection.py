@@ -112,7 +112,7 @@ class TestNewsAnalystMacroInjection:
             )
             _build_news_macro_extra_context("7203.T", context)
 
-        mock_logger.info.assert_any_call(
+        mock_logger.debug.assert_any_call(
             "macro_context_injected",
             ticker="7203.T",
             region="JAPAN",

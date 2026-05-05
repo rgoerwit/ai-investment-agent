@@ -312,31 +312,59 @@ def extract_snapshot(
     fundamentals = result.get("fundamentals_report", "") or ""
 
     # Exchange/currency/benchmark mapping
+    from src.currency_resolver import resolve_local_trading_currency
+    from src.fx_normalization import (
+        FALLBACK_RATES_TO_USD,
+        normalize_minor_unit_currency,
+    )
+
     suffix = get_ticker_suffix(ticker)
-    currency = EXCHANGE_CURRENCY.get(suffix, FALLBACK_CURRENCY)
+
+    resolution = resolve_local_trading_currency(ticker=ticker)
+    if resolution.code:
+        currency = resolution.code
+        currency_source = resolution.source
+    elif suffix:
+        logger.warning(
+            "snapshot_currency_unresolved",
+            ticker=ticker,
+            suffix=suffix,
+            msg=(
+                "Currency resolver could not determine a canonical local currency "
+                "for a suffixed ticker"
+            ),
+        )
+        currency = None
+        currency_source = "unresolved"
+    else:
+        currency = "USD"
+        currency_source = "fallback_bare_ticker"
+        logger.debug(
+            "snapshot_currency_fallback_bare_ticker",
+            ticker=ticker,
+            msg="Bare ticker has no canonical exchange suffix; using USD fallback",
+        )
+
     benchmark = EXCHANGE_BENCHMARK.get(suffix, FALLBACK_BENCHMARK)
 
     # FX rate at analysis time (synchronous fallback only — no async in snapshot).
     # Saved here so the reconciler has an at-analysis-time rate to use for cost
     # calculations without needing a live FX fetch.
     fx_rate = None
-    try:
-        from src.fx_normalization import FALLBACK_RATES_TO_USD
-
-        fx_rate = FALLBACK_RATES_TO_USD.get(currency)
-        if fx_rate is None:
-            logger.warning(
-                "snapshot_fx_rate_unknown",
-                ticker=ticker,
-                currency=currency,
-                msg=(
-                    "Currency not in FALLBACK_RATES_TO_USD — "
-                    "saving fx_rate_to_usd=None. "
-                    "Add to src/fx_normalization.py to fix cost calculations."
-                ),
-            )
-    except ImportError:
-        fx_rate = None
+    if currency:
+        normalized_currency, scale = normalize_minor_unit_currency(currency)
+        major_rate = FALLBACK_RATES_TO_USD.get(normalized_currency or "")
+        fx_rate = major_rate * scale if major_rate is not None else None
+    if currency and fx_rate is None:
+        logger.warning(
+            "snapshot_fx_rate_unknown",
+            ticker=ticker,
+            currency=currency,
+            msg=(
+                "Currency not in fallback FX table — saving fx_rate_to_usd=None. "
+                "Add to src/fx_normalization.py to fix cost calculations."
+            ),
+        )
 
     # TRADE_BLOCK extraction from trader plan (zero LLM cost — pure regex)
     trader_plan = result.get("investment_analysis", {}).get("trader_plan", "") or ""
@@ -352,6 +380,7 @@ def extract_snapshot(
         "position_size": pm_data.position_size,
         # DATA_BLOCK fields
         "current_price": _extract_data_block_float(fundamentals, "CURRENT_PRICE"),
+        "currency_source": currency_source,
         "sector": _extract_data_block_field(fundamentals, "SECTOR"),
         "pe_ratio": _extract_data_block_float(fundamentals, "PE_RATIO_TTM"),
         "peg_ratio": _extract_data_block_float(fundamentals, "PEG_RATIO"),

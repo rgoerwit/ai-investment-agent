@@ -71,7 +71,7 @@ async def invoke_with_rate_limit_handling(
     )
 
     if not quiet_mode:
-        logger.info(
+        logger.debug(
             "llm_call_start",
             context=context,
             provider=resolved_provider,

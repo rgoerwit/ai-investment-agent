@@ -538,12 +538,12 @@ class TestTokenTrackingCallback:
             },
         )
 
-        with patch("src.token_tracker.logger.info") as mock_info:
+        with patch("src.token_tracker.logger.debug") as mock_debug:
             callback.on_llm_end(llm_result)
 
         budget_logs = [
             call
-            for call in mock_info.call_args_list
+            for call in mock_debug.call_args_list
             if call.args and call.args[0] == "llm_output_budget_usage"
         ]
         assert len(budget_logs) == 1

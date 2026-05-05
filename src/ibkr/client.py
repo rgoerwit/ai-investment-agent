@@ -312,7 +312,7 @@ class IbkrClient:
             self._throttle.call(
                 lambda: self._ibind_client.initialize_brokerage_session(compete=compete)
             )
-            logger.info("brokerage_session_initialized", compete=compete)
+            logger.debug("brokerage_session_initialized", compete=compete)
             return True
         except Exception as e:
             logger.warning(

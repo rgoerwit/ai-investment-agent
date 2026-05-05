@@ -21,10 +21,32 @@ from src.ibkr.reconciliation_rules import (
     check_staleness,
     check_stop_breach,
     check_target_hit,
+    classify_profit_take,
 )
 from src.ibkr.ticker import Ticker
 
 logger = structlog.get_logger(__name__)
+
+
+_PROFIT_TAKE_REASON_LABELS = {
+    "capital_idle_cash_severe": "severe idle-cash risk",
+    "capital_idle_cash_risk_plus_target_hit": "idle-cash risk plus target hit",
+    "capital_idle_cash_risk_plus_large_gain": "idle-cash risk plus large gain",
+    "short_term_tax": "short-term tax status",
+    "unknown_tax_term": "holding period unknown",
+    "unknown_tax_term_severity_override": "holding period unknown; severity override",
+}
+
+
+def _profit_take_reason(reasons: tuple[str, ...], target_hit: bool) -> str:
+    labels = [_PROFIT_TAKE_REASON_LABELS.get(reason, reason) for reason in reasons]
+    prefix = (
+        "Profit take" if "unknown_tax_term" not in reasons else "Profit take review"
+    )
+    context = "; ".join(labels) if labels else "capital allocation discipline"
+    if target_hit and "capital_idle_cash_risk_plus_target_hit" not in reasons:
+        context = f"{context}; target hit"
+    return f"{prefix}: {context}"
 
 
 def evaluate_positions(
@@ -150,7 +172,47 @@ def evaluate_positions(
             )
             continue
 
-        if check_target_hit(analysis, current_price):
+        is_stale, stale_reason = check_staleness(
+            analysis,
+            current_price,
+            max_age_days,
+            drift_threshold_pct,
+            structural_macro_events=structural_macro_events,
+        )
+
+        target_hit = check_target_hit(analysis, current_price)
+        profit_take = (
+            classify_profit_take(
+                analysis=analysis,
+                position=pos,
+                target_hit=target_hit,
+            )
+            if not is_stale
+            else None
+        )
+        if profit_take and profit_take.qualifies:
+            executable = profit_take.action == "SELL"
+            items.append(
+                ReconciliationItem(
+                    ticker=item_ticker,
+                    action=profit_take.action or "REVIEW",
+                    reason=_profit_take_reason(profit_take.reasons, target_hit),
+                    urgency="LOW" if executable else "MEDIUM",
+                    ibkr_position=pos,
+                    analysis=analysis,
+                    suggested_quantity=abs(int(pos.quantity)) if executable else None,
+                    suggested_price=current_price if executable else None,
+                    suggested_order_type="LMT",
+                    cash_impact_usd=pos.market_value_usd if executable else 0.0,
+                    settlement_date=_settlement_date(2) if executable else None,
+                    sell_type="PROFIT_TAKE",
+                    cost_basis_return_pct=profit_take.cost_basis_return_pct,
+                    profit_take_reasons=profit_take.reasons,
+                )
+            )
+            continue
+
+        if target_hit:
             items.append(
                 ReconciliationItem(
                     ticker=item_ticker,
@@ -163,13 +225,6 @@ def evaluate_positions(
             )
             continue
 
-        is_stale, stale_reason = check_staleness(
-            analysis,
-            current_price,
-            max_age_days,
-            drift_threshold_pct,
-            structural_macro_events=structural_macro_events,
-        )
         if is_stale:
             items.append(
                 ReconciliationItem(

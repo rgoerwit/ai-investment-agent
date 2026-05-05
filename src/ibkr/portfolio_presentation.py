@@ -13,7 +13,9 @@ _DEFAULT_DIP_WATCH_LIMIT = 7
 class PortfolioActionGroups:
     stop_sells: tuple[ReconciliationItem, ...]
     hard_sells: tuple[ReconciliationItem, ...]
+    profit_take_sells: tuple[ReconciliationItem, ...]
     soft_sells: tuple[ReconciliationItem, ...]
+    profit_take_reviews: tuple[ReconciliationItem, ...]
     macro_reviews: tuple[ReconciliationItem, ...]
     macro_stop_reviews: tuple[ReconciliationItem, ...]
     trims: tuple[ReconciliationItem, ...]
@@ -106,10 +108,20 @@ def group_portfolio_actions(
         for item in items
         if item.action == "SELL" and item.sell_type in (None, "HARD_REJECT")
     )
+    profit_take_sells = tuple(
+        item
+        for item in items
+        if item.action == "SELL" and item.sell_type == "PROFIT_TAKE"
+    )
     soft_sells = tuple(
         item
         for item in items
         if item.action == "SELL" and item.sell_type == "SOFT_REJECT"
+    )
+    profit_take_reviews = tuple(
+        item
+        for item in items
+        if item.action == "REVIEW" and item.sell_type == "PROFIT_TAKE"
     )
     macro_reviews = tuple(
         item
@@ -146,11 +158,12 @@ def group_portfolio_actions(
         item
         for item in items
         if item.action == "REVIEW"
-        and item.sell_type not in ("SOFT_REJECT", "STOP_BREACH")
+        and item.sell_type not in ("SOFT_REJECT", "STOP_BREACH", "PROFIT_TAKE")
     )
 
     action_bases = frozenset(
-        base_ticker(item) for item in removes + stop_sells + hard_sells + soft_sells
+        base_ticker(item)
+        for item in removes + stop_sells + hard_sells + profit_take_sells + soft_sells
     )
     held_bases = frozenset(
         base_ticker(item) for item in items if item.ibkr_position is not None
@@ -173,7 +186,9 @@ def group_portfolio_actions(
     return PortfolioActionGroups(
         stop_sells=stop_sells,
         hard_sells=hard_sells,
+        profit_take_sells=profit_take_sells,
         soft_sells=soft_sells,
+        profit_take_reviews=profit_take_reviews,
         macro_reviews=macro_reviews,
         macro_stop_reviews=macro_stop_reviews,
         trims=trims,
@@ -190,9 +205,17 @@ def group_portfolio_actions(
 
 def build_action_summary_counts(groups: PortfolioActionGroups) -> dict[str, int]:
     counts: dict[str, int] = {}
-    if groups.stop_sells or groups.hard_sells or groups.soft_sells:
+    if (
+        groups.stop_sells
+        or groups.hard_sells
+        or groups.profit_take_sells
+        or groups.soft_sells
+    ):
         counts["SELL"] = (
-            len(groups.stop_sells) + len(groups.hard_sells) + len(groups.soft_sells)
+            len(groups.stop_sells)
+            + len(groups.hard_sells)
+            + len(groups.profit_take_sells)
+            + len(groups.soft_sells)
         )
     if groups.removes:
         counts["REMOVE"] = len(groups.removes)
@@ -206,8 +229,12 @@ def build_action_summary_counts(groups: PortfolioActionGroups) -> dict[str, int]
         counts["CANDIDATES"] = len(groups.watchlist_candidates)
     if groups.holds_real:
         counts["HOLD"] = len(groups.holds_real)
-    if groups.reviews or groups.macro_stop_reviews:
-        counts["REVIEW"] = len(groups.reviews) + len(groups.macro_stop_reviews)
+    if groups.reviews or groups.profit_take_reviews or groups.macro_stop_reviews:
+        counts["REVIEW"] = (
+            len(groups.reviews)
+            + len(groups.profit_take_reviews)
+            + len(groups.macro_stop_reviews)
+        )
     if groups.macro_reviews:
         counts["MACRO_WATCH"] = len(groups.macro_reviews)
     return counts

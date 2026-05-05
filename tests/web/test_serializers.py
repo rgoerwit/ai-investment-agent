@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+from src.ibkr.models import (
+    AnalysisRecord,
+    NormalizedPosition,
+    ReconciliationItem,
+    TradeBlockData,
+)
 from src.ibkr.portfolio_presentation import build_cash_summary, build_live_order_note
 from src.ibkr.screening_freshness import ScreeningFreshnessSummary
+from src.ibkr.ticker import Ticker
 from src.web.ibkr_dashboard.serializers import (
     serialize_dashboard_snapshot,
     serialize_equity_drilldown,
@@ -100,6 +107,56 @@ def test_serialize_dashboard_snapshot_uses_shared_live_order_annotations(sample_
         sell_item,
         sample_bundle.live_orders,
     )
+
+
+def test_serialize_dashboard_snapshot_includes_profit_take_fields(sample_bundle):
+    sample_bundle.items.append(
+        ReconciliationItem(
+            ticker=Ticker.from_yf("6758.T"),
+            action="SELL",
+            reason="Profit take",
+            urgency="LOW",
+            sell_type="PROFIT_TAKE",
+            cost_basis_return_pct=42.5,
+            profit_take_reasons=("capital_idle_cash_severe",),
+            ibkr_position=NormalizedPosition(
+                conid=1,
+                ticker=Ticker.from_yf("6758.T"),
+                quantity=100,
+                avg_cost_local=1000,
+                current_price_local=1425,
+                tax_term="LONG_TERM",
+            ),
+        )
+    )
+
+    payload = serialize_dashboard_snapshot(sample_bundle)
+    row = payload["actions"]["sell_profit_take"][0]
+
+    assert row["sell_type"] == "PROFIT_TAKE"
+    assert row["cost_basis_return_pct"] == 42.5
+    assert row["profit_take_reasons"] == ["capital_idle_cash_severe"]
+
+
+def test_serialize_dashboard_snapshot_includes_currency_repair_metadata(sample_bundle):
+    sample_bundle.items[0].analysis = AnalysisRecord(
+        ticker="7203.T",
+        analysis_date="2026-03-01",
+        verdict="BUY",
+        currency="JPY",
+        currency_source="repair_on_load",
+        currency_repaired=True,
+        currency_repair_reason="legacy_snapshot_usd_default",
+        trade_block=TradeBlockData(),
+    )
+
+    payload = serialize_dashboard_snapshot(sample_bundle)
+    analysis = payload["actions"]["sell_hard"][0]["analysis"]
+
+    assert analysis["currency"] == "JPY"
+    assert analysis["currency_source"] == "repair_on_load"
+    assert analysis["currency_repaired"] is True
+    assert analysis["currency_repair_reason"] == "legacy_snapshot_usd_default"
 
 
 def test_serialize_equity_drilldown_includes_structured_and_markdown(sample_bundle):

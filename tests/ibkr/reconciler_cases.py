@@ -49,6 +49,7 @@ def _make_position(
     market_value_usd: float = 1400,
     currency: str = "JPY",
     conid: int = 123456,
+    tax_term: str = "UNKNOWN",
 ) -> NormalizedPosition:
     from src.ibkr.ticker import Ticker
 
@@ -60,6 +61,7 @@ def _make_position(
         market_value_usd=market_value_usd,
         currency=currency,
         current_price_local=current_price,
+        tax_term=tax_term,
     )
 
 
@@ -74,6 +76,7 @@ def _make_analysis(
     conviction: str = "Medium",
     size_pct: float = 5.0,
     current_price: float = 2100.0,
+    capital_flag_types: tuple[str, ...] = (),
 ) -> AnalysisRecord:
     from datetime import datetime, timedelta
 
@@ -83,6 +86,8 @@ def _make_analysis(
         analysis_date=analysis_date,
         verdict=verdict,
         current_price=current_price,
+        health_adj=70.0,
+        growth_adj=65.0,
         entry_price=entry_price,
         stop_price=stop_price,
         target_1_price=target_1,
@@ -98,6 +103,7 @@ def _make_analysis(
             target_1_price=target_1,
             target_2_price=target_2,
         ),
+        capital_flag_types=capital_flag_types,
     )
 
 
@@ -852,6 +858,44 @@ class TestLoadLatestAnalyses:
         result = load_latest_analyses(tmp_path)
         assert result["7203.T"].sector == "Consumer Discretionary"
         assert result["7203.T"].exchange == "T"
+
+    def test_derives_idle_cash_capital_flags_from_fundamentals_report(self, tmp_path):
+        """Analysis loading bridges saved fundamentals into IBKR profit-take inputs."""
+        data = {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-02-20",
+                "verdict": "BUY",
+            },
+            "reports": {
+                "fundamentals_report": """
+### --- START DATA_BLOCK ---
+SECTOR: Industrials
+RAW_HEALTH_SCORE: 72%
+ADJUSTED_HEALTH_SCORE: 72%
+RAW_GROWTH_SCORE: 65%
+ADJUSTED_GROWTH_SCORE: 65%
+US_REVENUE_PERCENT: 0%
+ANALYST_COVERAGE_ENGLISH: LOW
+PE_RATIO_TTM: 12.0
+ROIC_QUALITY: WEAK
+LEVERAGE_QUALITY: CONSERVATIVE
+ROIC_PERCENT: 4%
+NET_CASH_TO_MARKET_CAP: 45%
+CASH_TO_ASSETS: 28%
+PAYOUT_RATIO: 0%
+CAPEX_TO_DA_STATUS: MAINTENANCE
+CAPITAL_PLAN_STATUS: NONE
+### --- END DATA_BLOCK ---
+""",
+            },
+            "investment_analysis": {},
+        }
+        (tmp_path / "7203_T_2026-02-20_analysis.json").write_text(json.dumps(data))
+
+        result = load_latest_analyses(tmp_path)
+
+        assert result["7203.T"].capital_flag_types == ("CAPITAL_IDLE_CASH_SEVERE",)
 
     def test_exchange_inferred_from_ticker_when_absent(self, tmp_path):
         """If exchange absent from snapshot, infer from ticker suffix."""
@@ -2303,6 +2347,158 @@ class TestSellTypeTagging:
         items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
         assert items[0].action == "HOLD"
         assert items[0].sell_type is None
+
+
+class TestProfitTakeClassification:
+    """Profit-taking is capital-allocation driven, not a fundamentals-failure sell."""
+
+    def test_severe_idle_cash_long_term_becomes_sell(self):
+        pos = _make_position(
+            avg_cost=2000,
+            current_price=2600,
+            tax_term="LONG_TERM",
+        )
+        analysis = _make_analysis(
+            target_1=2500,
+            capital_flag_types=("CAPITAL_IDLE_CASH_SEVERE",),
+        )
+
+        items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
+
+        item = items[0]
+        assert item.action == "SELL"
+        assert item.sell_type == "PROFIT_TAKE"
+        assert item.cost_basis_return_pct == pytest.approx(30.0)
+        assert "capital_idle_cash_severe" in item.profit_take_reasons
+        assert item.suggested_quantity == 100
+        assert item.cash_impact_usd == pos.market_value_usd
+
+    def test_unknown_holding_period_defaults_to_review(self):
+        pos = _make_position(avg_cost=2000, current_price=2600)
+        analysis = _make_analysis(
+            target_1=2500,
+            capital_flag_types=("CAPITAL_IDLE_CASH_SEVERE",),
+        )
+
+        items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
+
+        item = items[0]
+        assert item.action == "REVIEW"
+        assert item.sell_type == "PROFIT_TAKE"
+        assert "unknown_tax_term" in item.profit_take_reasons
+        assert item.suggested_quantity is None
+        assert item.cash_impact_usd == 0.0
+
+    def test_unknown_holding_period_severe_large_gain_becomes_sell(self):
+        pos = _make_position(avg_cost=2000, current_price=3400)
+        analysis = _make_analysis(
+            target_1=4000,
+            capital_flag_types=("CAPITAL_IDLE_CASH_SEVERE",),
+        )
+
+        items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
+
+        item = items[0]
+        assert item.action == "SELL"
+        assert item.sell_type == "PROFIT_TAKE"
+        assert item.cost_basis_return_pct == pytest.approx(70.0)
+        assert "capital_idle_cash_severe" in item.profit_take_reasons
+        assert "unknown_tax_term_severity_override" in item.profit_take_reasons
+        assert item.suggested_quantity == 100
+        assert item.cash_impact_usd == pos.market_value_usd
+
+    def test_short_term_holding_period_defaults_to_review(self):
+        pos = _make_position(
+            avg_cost=2000,
+            current_price=2600,
+            tax_term="SHORT_TERM",
+        )
+        analysis = _make_analysis(
+            target_1=2500,
+            capital_flag_types=("CAPITAL_IDLE_CASH_SEVERE",),
+        )
+
+        items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
+
+        item = items[0]
+        assert item.action == "REVIEW"
+        assert item.sell_type == "PROFIT_TAKE"
+        assert "short_term_tax" in item.profit_take_reasons
+
+    def test_target_hit_without_capital_flag_keeps_existing_review(self):
+        pos = _make_position(avg_cost=2000, current_price=2600)
+        analysis = _make_analysis(target_1=2500)
+
+        items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
+
+        item = items[0]
+        assert item.action == "REVIEW"
+        assert item.sell_type is None
+        assert item.reason.startswith("Target hit:")
+
+    def test_idle_cash_risk_needs_target_hit_or_large_gain(self):
+        pos = _make_position(avg_cost=2000, current_price=2550)
+        analysis = _make_analysis(
+            target_1=3000,
+            capital_flag_types=("CAPITAL_IDLE_CASH_RISK",),
+        )
+
+        items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
+
+        assert items[0].action == "HOLD"
+        assert items[0].sell_type is None
+
+    def test_idle_cash_risk_with_large_gain_qualifies_without_target_hit(self):
+        pos = _make_position(
+            avg_cost=2000,
+            current_price=3100,
+            tax_term="LONG_TERM",
+        )
+        analysis = _make_analysis(
+            target_1=3500,
+            capital_flag_types=("CAPITAL_IDLE_CASH_RISK",),
+        )
+
+        items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
+
+        item = items[0]
+        assert item.action == "SELL"
+        assert item.sell_type == "PROFIT_TAKE"
+        assert "capital_idle_cash_risk_plus_large_gain" in item.profit_take_reasons
+
+    def test_profit_take_requires_intact_business_quality(self):
+        pos = _make_position(
+            avg_cost=2000,
+            current_price=2600,
+            tax_term="LONG_TERM",
+        )
+        analysis = _make_analysis(
+            target_1=2500,
+            capital_flag_types=("CAPITAL_IDLE_CASH_SEVERE",),
+        )
+        analysis.growth_adj = 45.0
+
+        items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
+
+        assert items[0].action == "REVIEW"
+        assert items[0].sell_type is None
+
+    def test_stop_breach_priority_beats_profit_take(self):
+        pos = _make_position(
+            avg_cost=1000,
+            current_price=1800,
+            tax_term="LONG_TERM",
+        )
+        analysis = _make_analysis(
+            stop_price=1900,
+            target_1=1700,
+            capital_flag_types=("CAPITAL_IDLE_CASH_SEVERE",),
+        )
+
+        items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
+
+        assert items[0].action == "SELL"
+        assert items[0].sell_type == "STOP_BREACH"
 
 
 # ── Correlated Sell Event Detection Tests ──

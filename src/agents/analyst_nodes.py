@@ -220,7 +220,7 @@ def _build_portfolio_macro_event_context(ticker: str) -> str:
             "'Structurally Impaired' (business model affected -> EXIT). "
             "Ignore if event is inapplicable to this region/sector."
         )
-        logger.info("macro_events_injected", ticker=ticker, count=len(events[:2]))
+        logger.debug("macro_events_injected", ticker=ticker, count=len(events[:2]))
         return "\n".join(lines)
     except Exception as exc:
         logger.debug("macro_events_injection_failed", ticker=ticker, error=str(exc))
@@ -258,7 +258,7 @@ def _build_news_macro_extra_context(ticker: str, context: Any | None) -> str:
             getattr(context, "macro_context_status", "disabled") or "disabled"
         )
         macro_report = getattr(context, "macro_context_report", "") if context else ""
-        logger.info(
+        logger.debug(
             "macro_context_injected",
             ticker=ticker,
             region=macro_region,
@@ -381,13 +381,13 @@ def create_analyst_node(
                         "\n\n### FOREIGN/ALTERNATIVE SOURCE DATA (Cross-Reference)"
                         f"{foreign_data}\n"
                     )
-                    logger.info(
+                    logger.debug(
                         "senior_fundamentals_has_foreign_data",
                         ticker=ticker,
                         foreign_data_length=len(foreign_data),
                     )
                 else:
-                    logger.info(
+                    logger.debug(
                         "senior_fundamentals_no_foreign_data",
                         ticker=ticker,
                         message="Foreign Language Analyst data not available - proceeding with Junior data only",
@@ -403,7 +403,7 @@ def create_analyst_node(
                         f"\n{news_highlights}\n"
                     )
                 else:
-                    logger.info(
+                    logger.debug(
                         "senior_fundamentals_no_news",
                         ticker=ticker,
                         message="News report not yet available (parallel execution) - proceeding without news context",
@@ -416,7 +416,7 @@ def create_analyst_node(
                         "discrepancies conservatively.\n"
                     )
                     extra_context += conflict_report
-                    logger.info(
+                    logger.debug(
                         "senior_fundamentals_conflicts_detected",
                         ticker=ticker,
                         conflict_count=conflict_report.count("\n- "),
@@ -435,13 +435,13 @@ def create_analyst_node(
                         "\n\n### LEGAL/TAX RISK ASSESSMENT (From Legal Counsel)"
                         f"{legal_report}\n"
                     )
-                    logger.info(
+                    logger.debug(
                         "senior_fundamentals_has_legal_data",
                         ticker=ticker,
                         legal_data_length=len(legal_report),
                     )
                 else:
-                    logger.info(
+                    logger.debug(
                         "senior_fundamentals_no_legal_data",
                         ticker=ticker,
                         message="Legal Counsel data not yet available - proceeding without legal context",
@@ -498,7 +498,7 @@ def create_analyst_node(
 
             tool_calls = getattr(response, "tool_calls", None)
             has_tool_calls = isinstance(tool_calls, list) and len(tool_calls) > 0
-            logger.info(
+            logger.debug(
                 "analyst_response_details",
                 agent_key=agent_key,
                 content_type=type(response.content).__name__,
@@ -569,14 +569,14 @@ def create_analyst_node(
 
                     if retry_has_tool_calls:
                         new_state["messages"] = [retry_response]
-                        logger.info(
+                        logger.debug(
                             "analyst_retry_produced_tool_calls",
                             agent_key=agent_key,
                             ticker=ticker,
                         )
                         return new_state
 
-                    logger.info(
+                    logger.debug(
                         "analyst_retry_complete",
                         agent_key=agent_key,
                         ticker=ticker,
@@ -647,7 +647,7 @@ def create_analyst_node(
             )
 
             if agent_key == "fundamentals_analyst":
-                logger.info(
+                logger.debug(
                     "fundamentals_output",
                     has_datablock=has_parseable_data_block(content_str),
                     length=len(content_str),
@@ -730,7 +730,7 @@ Extract valuation parameters and output in the required format."""
                 model_name=support.get_model_name(llm),
             )
             content_str = message_utils.extract_string_content(response.content)
-            logger.info(
+            logger.debug(
                 "valuation_calculator_complete",
                 ticker=ticker,
                 has_params_block=has_parseable_fenced_block(

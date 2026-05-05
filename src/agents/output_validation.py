@@ -259,7 +259,7 @@ def log_output_diagnostics(
         else None
     )
 
-    logger.info(
+    logger.debug(
         "agent_output_diagnostics",
         agent=agent_key,
         ticker=ticker,

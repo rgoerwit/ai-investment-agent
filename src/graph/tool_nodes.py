@@ -110,7 +110,7 @@ def create_agent_tool_node(tools: list, agent_key: str):
                 f"Error: Unknown tool '{tool_name}'",
             )
 
-        logger.info(
+        logger.debug(
             "tool_call_start",
             agent=agent_key,
             tool=tool_name,
@@ -131,7 +131,7 @@ def create_agent_tool_node(tools: list, agent_key: str):
                 ),
                 timeout=_TOOL_CALL_TIMEOUT_SECONDS,
             )
-            logger.info(
+            logger.debug(
                 "tool_call_complete",
                 agent=agent_key,
                 tool=tool_name,

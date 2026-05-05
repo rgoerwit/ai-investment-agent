@@ -120,6 +120,8 @@ def serialize_item(
         "suggested_order_type": item.suggested_order_type,
         "cash_impact_usd": item.cash_impact_usd,
         "settlement_date": item.settlement_date,
+        "cost_basis_return_pct": item.cost_basis_return_pct,
+        "profit_take_reasons": list(item.profit_take_reasons),
         "live_order_note": build_live_order_note(item, live_orders),
         "position": _serialize_position(item.ibkr_position),
         "analysis": _serialize_analysis(item.analysis),
@@ -248,8 +250,16 @@ def _serialize_actions(
         "sell_hard": [
             serialize_item(item, live_orders=live_orders) for item in groups.hard_sells
         ],
+        "sell_profit_take": [
+            serialize_item(item, live_orders=live_orders)
+            for item in groups.profit_take_sells
+        ],
         "sell_soft_review": [
             serialize_item(item, live_orders=live_orders) for item in groups.soft_sells
+        ],
+        "review_profit_take": [
+            serialize_item(item, live_orders=live_orders)
+            for item in groups.profit_take_reviews
         ],
         "review_macro": [
             serialize_item(item, live_orders=live_orders)
@@ -319,6 +329,9 @@ def _serialize_position(position: NormalizedPosition | None) -> dict[str, Any] |
         "currency": position.currency,
         "market_value_usd": position.market_value_usd,
         "unrealized_pnl_usd": position.unrealized_pnl_usd,
+        "acquired_date": position.acquired_date,
+        "holding_period_days": position.holding_period_days,
+        "tax_term": position.tax_term,
     }
 
 
@@ -336,6 +349,9 @@ def _serialize_analysis(analysis: AnalysisRecord | None) -> dict[str, Any] | Non
         "position_size": analysis.position_size,
         "current_price": analysis.current_price,
         "currency": analysis.currency,
+        "currency_source": analysis.currency_source,
+        "currency_repaired": analysis.currency_repaired,
+        "currency_repair_reason": analysis.currency_repair_reason,
         "entry_price": analysis.entry_price,
         "stop_price": analysis.stop_price,
         "target_1_price": analysis.target_1_price,
@@ -344,6 +360,7 @@ def _serialize_analysis(analysis: AnalysisRecord | None) -> dict[str, Any] | Non
         "sector": analysis.sector,
         "exchange": analysis.exchange,
         "is_quick_mode": analysis.is_quick_mode,
+        "capital_flag_types": list(analysis.capital_flag_types),
         "trade_block": {
             "action": analysis.trade_block.action,
             "size_pct": analysis.trade_block.size_pct,

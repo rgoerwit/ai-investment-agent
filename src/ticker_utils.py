@@ -595,7 +595,7 @@ async def resolve_company_name(ticker: str) -> CompanyNameResult:
                 raw_name = await resolver(lookup_ticker)
                 if _is_valid_company_name(raw_name, lookup_ticker):
                     normalized = normalize_company_name(raw_name)
-                    logger.info(
+                    logger.debug(
                         "company_name_resolved",
                         ticker=ticker,
                         requested_ticker=ticker,
@@ -633,7 +633,7 @@ async def resolve_company_name(ticker: str) -> CompanyNameResult:
         raw_name = await _try_ibkr(ticker)
         if _is_valid_company_name(raw_name, ticker):
             normalized = normalize_company_name(raw_name)
-            logger.info(
+            logger.debug(
                 "company_name_resolved",
                 ticker=ticker,
                 requested_ticker=ticker,

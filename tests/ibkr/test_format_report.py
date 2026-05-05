@@ -156,25 +156,31 @@ class TestFormatReportPanicDay:
         assert "MACRO ALERT" not in self._report_without_flag()
 
     def test_stop_breached_section_present(self):
-        """STOP_BREACH item → SELLS — STOP BREACHED section always rendered."""
-        assert "SELLS — STOP BREACHED" in self._report_with_flag()
+        """STOP_BREACH item is labelled inside unified sell recommendations."""
+        report = self._report_with_flag()
+        assert "SELL RECOMMENDATIONS" in report
+        assert "[STOP BREACH]" in report
 
     def test_fundamental_failure_section_present(self):
-        """HARD_REJECT item → SELLS — FUNDAMENTAL FAILURE section rendered."""
-        assert "SELLS — FUNDAMENTAL FAILURE" in self._report_with_flag()
+        """HARD_REJECT item is labelled inside unified sell recommendations."""
+        report = self._report_with_flag()
+        assert "SELL RECOMMENDATIONS" in report
+        assert "[FUNDAMENTAL FAILURE]" in report
 
     def test_soft_rejection_section_present(self):
-        """Demoted macro_reviews → SELLS — SOFT REJECTION section rendered."""
-        assert "SELLS — SOFT REJECTION" in self._report_with_flag()
+        """Demoted macro_reviews render in the sell-related review section."""
+        report = self._report_with_flag()
+        assert "SELL-RELATED REVIEWS" in report
+        assert "[SOFT REJECTION]" in report
 
     def test_soft_rejection_section_shows_demoted_items(self):
-        """Demoted items (action=REVIEW, sell_type=SOFT_REJECT) listed in SOFT REJECTION."""
+        """Demoted REVIEW + SOFT_REJECT items are listed in sell-related reviews."""
         report = self._report_with_flag()
         lines = report.split("\n")
         soft_rej_idx = next(
-            (i for i, ln in enumerate(lines) if "SELLS — SOFT REJECTION" in ln), None
+            (i for i, ln in enumerate(lines) if "SELL-RELATED REVIEWS" in ln), None
         )
-        assert soft_rej_idx is not None, "SELLS — SOFT REJECTION section missing"
+        assert soft_rej_idx is not None, "SELL-RELATED REVIEWS section missing"
         section_content = "\n".join(lines[soft_rej_idx:])
         # Held positions show IBKR symbol (no exchange suffix) in human-visible sections
         assert "SOFT00" in section_content
@@ -238,12 +244,13 @@ class TestFormatReportMacroStopReview:
         )
 
     def test_demoted_stop_appears_in_stop_breaches_under_review_section(self):
-        """REVIEW + STOP_BREACH item renders in 'STOP BREACHES UNDER REVIEW', not in 'STOP BREACHED'."""
+        """REVIEW + STOP_BREACH item renders in sell-related reviews."""
         item = self._make_demoted_stop_item()
         report = format_report(
             [item], _make_portfolio(), portfolio_health_flags=[_CORR_FLAG]
         )
-        assert "STOP BREACHES UNDER REVIEW" in report
+        assert "SELL-RELATED REVIEWS" in report
+        assert "[STOP BREACH]" in report
 
     def test_demoted_stop_not_in_mechanical_stop_breached_section(self):
         """Demoted STOP_BREACH (action=REVIEW) must not appear in the mechanical 'STOP BREACHED' section."""
@@ -254,7 +261,7 @@ class TestFormatReportMacroStopReview:
         lines = report.split("\n")
         # Identify which section the ticker appears in
         stop_breach_idx = next(
-            (i for i, ln in enumerate(lines) if "SELLS — STOP BREACHED" in ln), None
+            (i for i, ln in enumerate(lines) if "SELL RECOMMENDATIONS" in ln), None
         )
         # Mechanical STOP BREACHED section must be absent (no items with action=SELL)
         assert (
@@ -302,7 +309,7 @@ class TestFormatReportMacroStopReview:
         assert "[MACRO_STOP:" not in report
 
     def test_stop_breaches_under_review_section_absent_when_no_demoted_stops(self):
-        """'STOP BREACHES UNDER REVIEW' section must not appear when macro_stop_reviews is empty."""
+        """Sell-related reviews do not render when macro_stop_reviews is empty."""
         pos = _make_position(current_price=2100)
         # Only a regular SELL + STOP_BREACH (not demoted) — no macro_stop_reviews
         items = [
@@ -318,9 +325,10 @@ class TestFormatReportMacroStopReview:
         report = format_report(
             items, _make_portfolio(), portfolio_health_flags=[_CORR_FLAG]
         )
-        assert "STOP BREACHES UNDER REVIEW" not in report
-        # But the regular mechanical section should appear
-        assert "SELLS — STOP BREACHED" in report
+        assert "SELL-RELATED REVIEWS" not in report
+        # But the unified sell section should appear
+        assert "SELL RECOMMENDATIONS" in report
+        assert "[STOP BREACH]" in report
 
     def test_summary_counts_demoted_stop_as_review_not_sell(self):
         """Demoted STOP_BREACH (action=REVIEW) contributes to REVIEW count, not SELL count."""
@@ -355,7 +363,7 @@ class TestFormatReportNormalDay:
         assert "MACRO ALERT" not in report
 
     def test_soft_sell_on_normal_day_is_sell_not_review(self):
-        """SOFT_REJECT with action=SELL (not demoted) shows [SELL] in SOFT REJECTION section."""
+        """SOFT_REJECT with action=SELL appears in the unified sell section."""
         pos = _make_position(current_price=2100)
         items = [
             ReconciliationItem(
@@ -368,10 +376,11 @@ class TestFormatReportNormalDay:
             )
         ]
         report = format_report(items, _make_portfolio(), portfolio_health_flags=[])
-        assert "SELLS — SOFT REJECTION" in report
+        assert "SELL RECOMMENDATIONS" in report
+        assert "[SOFT REJECTION]" in report
         lines = report.split("\n")
         soft_rej_idx = next(
-            (i for i, ln in enumerate(lines) if "SELLS — SOFT REJECTION" in ln), None
+            (i for i, ln in enumerate(lines) if "SELL RECOMMENDATIONS" in ln), None
         )
         assert soft_rej_idx is not None
         # Check the next ~15 lines for the SELL action label and the ticker
@@ -393,7 +402,7 @@ class TestFormatReportNormalDay:
             )
         ]
         report = format_report(items, _make_portfolio(), portfolio_health_flags=[])
-        assert "SELLS — SOFT REJECTION" not in report
+        assert "SOFT REJECTION" not in report
 
     def test_no_sell_sections_when_no_sells(self):
         """All HOLD items → no SELL section headings in output."""
@@ -807,7 +816,7 @@ class TestPnlLine:
         )
         report = self._report_for(item)
         assert "est. gain:" in report
-        assert "+¥30,000" in report
+        assert "+JPY 30,000" in report
 
     def test_loss_line_shows_negative_pnl(self):
         """Position with current < avg_cost shows 'est. loss:' in local currency."""
@@ -818,7 +827,7 @@ class TestPnlLine:
         )
         report = self._report_for(item)
         assert "est. loss:" in report
-        assert "-¥8,000" in report
+        assert "-JPY 8,000" in report
 
     def test_gain_line_has_tax_note(self):
         """Gain lines include 'verify holding period in IBKR'."""
@@ -874,7 +883,7 @@ class TestPnlLine:
             suggested_quantity=50,
         )
         report = self._report_for(item)
-        assert "+¥10,000" in report
+        assert "+JPY 10,000" in report
         assert "est. gain:" in report
 
     def test_sell_items_in_report_show_pnl(self):
@@ -887,7 +896,8 @@ class TestPnlLine:
             unrealized_pnl_usd=180.0,
         )
         report = format_report([item], _make_portfolio(), show_recommendations=False)
-        assert "SELLS — FUNDAMENTAL FAILURE" in report
+        assert "SELL RECOMMENDATIONS" in report
+        assert "[FUNDAMENTAL FAILURE]" in report
         assert "est. gain:" in report
 
 
@@ -1954,9 +1964,9 @@ class TestPortfolioManagerOutputTightening:
         report = format_report(
             [item], _make_portfolio(), portfolio_health_flags=[_CORR_FLAG]
         )
-        assert "thesis: entry ¥2,800.00 -> now ¥2,700.00" in report
+        assert "thesis: entry JPY 2,800.00 -> now JPY 2,700.00" in report
         assert "P/L vs IBKR:" in report
-        assert "vs ¥2,000.00" in report
+        assert "vs JPY 2,000.00" in report
 
     def test_soft_rejection_detail_lines_stay_readable_width(self):
         item = _make_dip_item(
@@ -1983,7 +1993,7 @@ class TestPortfolioManagerOutputTightening:
 
         in_soft_section = False
         for line in report.splitlines():
-            if "SELLS — SOFT REJECTION" in line:
+            if "SELL RECOMMENDATIONS" in line:
                 in_soft_section = True
                 continue
             if in_soft_section and line.startswith("═" * 54):

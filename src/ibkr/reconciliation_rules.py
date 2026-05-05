@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Literal
+
 import structlog
 
 from src.exchange_metadata import IBKR_TO_YFINANCE
@@ -151,6 +154,19 @@ def _normalize_verdict(raw: str) -> str:
 
 
 _REJECT_VERDICTS = frozenset({"DO_NOT_INITIATE", "SELL", "REJECT"})
+_PROFIT_TAKE_MIN_GAIN_PCT = 25.0
+_PROFIT_TAKE_RISK_LARGE_GAIN_PCT = 50.0
+_PROFIT_TAKE_UNKNOWN_TAX_SEVERE_GAIN_PCT = 60.0
+_CAPITAL_IDLE_CASH_RISK = "CAPITAL_IDLE_CASH_RISK"
+_CAPITAL_IDLE_CASH_SEVERE = "CAPITAL_IDLE_CASH_SEVERE"
+
+
+@dataclass(frozen=True)
+class ProfitTakeDecision:
+    qualifies: bool
+    action: Literal["SELL", "REVIEW"] | None = None
+    reasons: tuple[str, ...] = ()
+    cost_basis_return_pct: float | None = None
 
 
 def check_staleness(
@@ -229,6 +245,75 @@ def check_target_hit(
     if target and current_price_local > 0:
         return current_price_local >= target
     return False
+
+
+def _cost_basis_return_pct(position: NormalizedPosition) -> float | None:
+    """Return current price return vs IBKR average cost, guarding bad cost data."""
+    if position.avg_cost_local <= 0 or position.current_price_local <= 0:
+        return None
+    return (
+        (position.current_price_local - position.avg_cost_local)
+        / position.avg_cost_local
+        * 100
+    )
+
+
+def classify_profit_take(
+    *,
+    analysis: AnalysisRecord,
+    position: NormalizedPosition,
+    target_hit: bool,
+) -> ProfitTakeDecision:
+    """Classify capital-allocation-driven profit-taking candidates."""
+    health_ok = (analysis.health_adj or 0.0) >= 50.0
+    growth_ok = (analysis.growth_adj or 0.0) >= 50.0
+    if not (health_ok and growth_ok):
+        return ProfitTakeDecision(False)
+
+    gain_pct = _cost_basis_return_pct(position)
+    if gain_pct is None or gain_pct < _PROFIT_TAKE_MIN_GAIN_PCT:
+        return ProfitTakeDecision(False, cost_basis_return_pct=gain_pct)
+
+    capital_flags = set(analysis.capital_flag_types)
+    reasons: list[str] = []
+    severe_idle_cash = _CAPITAL_IDLE_CASH_SEVERE in capital_flags
+    if severe_idle_cash:
+        reasons.append("capital_idle_cash_severe")
+    elif _CAPITAL_IDLE_CASH_RISK in capital_flags and target_hit:
+        reasons.append("capital_idle_cash_risk_plus_target_hit")
+    elif (
+        _CAPITAL_IDLE_CASH_RISK in capital_flags
+        and gain_pct >= _PROFIT_TAKE_RISK_LARGE_GAIN_PCT
+    ):
+        reasons.append("capital_idle_cash_risk_plus_large_gain")
+
+    if not reasons:
+        return ProfitTakeDecision(False, cost_basis_return_pct=gain_pct)
+
+    tax_term = position.tax_term
+    action: Literal["SELL", "REVIEW"]
+    if tax_term == "LONG_TERM" or (
+        tax_term == "UNKNOWN"
+        and severe_idle_cash
+        and gain_pct >= _PROFIT_TAKE_UNKNOWN_TAX_SEVERE_GAIN_PCT
+    ):
+        action = "SELL"
+    else:
+        action = "REVIEW"
+    if tax_term == "SHORT_TERM":
+        reasons.append("short_term_tax")
+    elif tax_term == "UNKNOWN":
+        reasons.append(
+            "unknown_tax_term_severity_override"
+            if action == "SELL"
+            else "unknown_tax_term"
+        )
+    return ProfitTakeDecision(
+        True,
+        action=action,
+        reasons=tuple(reasons),
+        cost_basis_return_pct=gain_pct,
+    )
 
 
 def _settlement_date(business_days: int) -> str:

@@ -401,7 +401,7 @@ def test_log_output_diagnostics_reads_openai_object_metadata_on_final_response()
             validation={"ok": True, "missing": []},
         )
 
-    payload = mock_logger.info.call_args[1]
+    payload = mock_logger.debug.call_args[1]
     assert payload["completion_tokens_total"] == 834
     assert payload["thinking_tokens"] == 516
     assert payload["visible_output_tokens"] == 318

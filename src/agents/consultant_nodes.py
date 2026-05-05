@@ -485,7 +485,7 @@ Provide your independent consultant review."""
                                         "failure_kind"
                                     ):
                                         fmp_alt_disabled_kind = payload["failure_kind"]
-                                        logger.info(
+                                        logger.debug(
                                             "consultant_fmp_disabled",
                                             ticker=ticker,
                                             tool=tool_call["name"],
@@ -494,7 +494,7 @@ Provide your independent consultant review."""
                                 result_failed = not is_managed_unavailability
                                 count_failure = not is_managed_unavailability
                                 if is_managed_unavailability:
-                                    logger.info(
+                                    logger.debug(
                                         "consultant_tool_suppressed",
                                         ticker=ticker,
                                         tool=tool_call["name"],
@@ -518,7 +518,7 @@ Provide your independent consultant review."""
                         )
                     )
 
-                logger.info(
+                logger.debug(
                     "consultant_tool_iteration",
                     ticker=ticker,
                     iteration=iteration + 1,
@@ -745,7 +745,7 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
                         tool_output = f"Unknown tool: {tool_call['name']}"
                     messages.append(TM(content=tool_output, tool_call_id=tool_call_id))
 
-                logger.info(
+                logger.debug(
                     "legal_counsel_tool_iteration",
                     ticker=ticker,
                     iteration=iteration + 1,
@@ -754,7 +754,7 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
 
             try:
                 parsed = json.loads(response_str)
-                logger.info(
+                logger.debug(
                     "legal_counsel_complete",
                     ticker=ticker,
                     pfic_status=parsed.get("pfic_status"),
@@ -775,7 +775,7 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
                     extracted = json_match.group()
                     try:
                         json.loads(extracted)
-                        logger.info("legal_counsel_extracted_json", ticker=ticker)
+                        logger.debug("legal_counsel_extracted_json", ticker=ticker)
                         result = success_artifact(
                             "legal_report",
                             extracted,
@@ -963,7 +963,7 @@ Perform a forensic audit using your tools."""
                         tool_output = f"Unknown tool: {tool_call['name']}"
                     messages.append(TM(content=tool_output, tool_call_id=tool_call_id))
 
-                logger.info(
+                logger.debug(
                     "auditor_tool_iteration",
                     ticker=ticker,
                     iteration=iteration + 1,
@@ -971,7 +971,7 @@ Perform a forensic audit using your tools."""
                 )
             return ""
 
-        logger.info("auditor_start", ticker=ticker)
+        logger.debug("auditor_start", ticker=ticker)
 
         try:
             response_str = await _run_auditor_loop(llm, agent_prompt.system_message)
@@ -1035,7 +1035,7 @@ Perform a forensic audit using your tools."""
                 result["sender"] = "global_forensic_auditor"
                 return result
 
-            logger.info("auditor_complete", ticker=ticker, length=len(response_str))
+            logger.debug("auditor_complete", ticker=ticker, length=len(response_str))
             result = success_artifact(
                 "auditor_report",
                 response_str,
@@ -1110,7 +1110,7 @@ VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
                         fallback_llm, agent_prompt.system_message
                     )
                     response_str = _canonicalize_forensic_auditor_output(response_str)
-                    logger.info(
+                    logger.debug(
                         "auditor_complete_after_retry",
                         ticker=ticker,
                         length=len(response_str),

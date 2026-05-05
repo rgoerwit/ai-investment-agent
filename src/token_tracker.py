@@ -156,7 +156,7 @@ class TokenTracker:
         self.session_start = datetime.now().isoformat()
 
         if not self._quiet_mode:
-            logger.info("token_tracker_initialized", session_start=self.session_start)
+            logger.debug("token_tracker_initialized", session_start=self.session_start)
 
     @classmethod
     def set_quiet_mode(cls, quiet: bool = True):
@@ -188,7 +188,7 @@ class TokenTracker:
         self.all_usages.append(usage)
 
         if not self._quiet_mode:
-            logger.info(
+            logger.debug(
                 "token_usage_recorded",
                 agent=agent_name,
                 model=model_name,
@@ -269,7 +269,7 @@ class TokenTracker:
         self.failed_attempts.clear()
         self.session_start = datetime.now().isoformat()
         if not self._quiet_mode:
-            logger.info("token_tracker_reset", session_start=self.session_start)
+            logger.debug("token_tracker_reset", session_start=self.session_start)
 
     def print_summary(self):
         """Print a formatted summary of token usage to logger."""
@@ -278,7 +278,7 @@ class TokenTracker:
 
         stats = self.get_total_stats()
 
-        logger.info("=" * 80 + "\n" + "TOKEN USAGE SUMMARY\n" + "=" * 80)
+        logger.info("TOKEN USAGE SUMMARY")
         logger.info(f"Session Start: {stats['session_start']}")
         logger.info(f"Total LLM Calls: {stats['total_calls']}")
         logger.info(f"Failed LLM Attempts: {stats['failed_attempts']}")
@@ -290,8 +290,6 @@ class TokenTracker:
         logger.info(
             "  (Note: Actual cost = $0 if using free tier without billing enabled)"
         )
-        logger.info("\nPer-Agent Breakdown:")
-        logger.info("-" * 80)
 
         if stats["failed_by_provider"]:
             logger.info(f"Failed by Provider: {stats['failed_by_provider']}")
@@ -303,8 +301,9 @@ class TokenTracker:
             stats["agents"].items(), key=lambda x: x[1]["cost_usd"], reverse=True
         )
 
+        logger.debug("Per-Agent Breakdown:")
         for agent_name, agent_stats in sorted_agents:
-            logger.info(
+            logger.debug(
                 f"\n{agent_name}:\n"
                 f"  Calls: {agent_stats['calls']}\n"
                 f"  Prompt Tokens: {agent_stats['prompt_tokens']:,}\n"
@@ -312,8 +311,6 @@ class TokenTracker:
                 f"  Total Tokens: {agent_stats['total_tokens']:,}\n"
                 f"  Cost: ${agent_stats['cost_usd']:.4f}"
             )
-
-        logger.info("=" * 80)
 
 
 class TokenTrackingCallback(BaseCallbackHandler):
@@ -389,7 +386,15 @@ class TokenTrackingCallback(BaseCallbackHandler):
                     if self.api_output_token_cap
                     else None
                 )
-                logger.info(
+                log_method = logger.info
+                utilization_values = [
+                    value
+                    for value in (intent_utilization, api_utilization)
+                    if value is not None
+                ]
+                if not any(value >= 0.8 for value in utilization_values):
+                    log_method = logger.debug
+                log_method(
                     "llm_output_budget_usage",
                     agent=self.agent_name,
                     model=model_name,

@@ -310,7 +310,8 @@ Notes:
 
 - `--read-only` is the safest way to understand the tool before you touch live broker data.
 - `--recommend` produces actionable suggestions and sizing guidance. Order execution is currently disabled, so the tool remains advisory.
-- Concentration warnings, stale-analysis flags, cash timing, and macro-demoted review items are part of the normal report output.
+- Concentration warnings, stale-analysis flags, cash timing, macro-demoted review items, and capital-allocation `PROFIT_TAKE` candidates are part of the normal report output.
+- `PROFIT_TAKE` is reserved for positions with intact business quality, material gains versus IBKR average cost, and saved analysis evidence of idle-cash capital-allocation risk. Unknown or short-term holding periods are surfaced as reviews unless severe idle-cash risk and a very large gain justify a sell candidate.
 
 ## Local Flask Dashboard
 

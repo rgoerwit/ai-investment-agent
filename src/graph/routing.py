@@ -7,7 +7,6 @@ from langgraph.types import RunnableConfig
 
 from src.agents import AgentState
 from src.config import config
-from src.llms import is_openai_consultant_available
 from src.runtime_diagnostics import get_artifact_status, is_artifact_complete
 
 logger = structlog.get_logger(__name__)
@@ -21,6 +20,14 @@ ANALYST_FAN_OUT_DESTINATIONS = (
     "Legal Counsel",
     "Value Trap Detector",
 )
+
+
+def is_openai_consultant_available() -> bool:
+    from src.llms import (
+        is_openai_consultant_available as _is_openai_consultant_available,
+    )
+
+    return _is_openai_consultant_available()
 
 
 def dispatch_destinations(*, include_auditor: bool) -> list[str]:
@@ -46,7 +53,7 @@ def should_continue_analyst(
 
     result = "tools" if has_tool_calls else "continue"
 
-    logger.info(
+    logger.debug(
         "analyst_routing", sender=sender, has_tool_calls=has_tool_calls, result=result
     )
 
@@ -122,7 +129,7 @@ def fundamentals_sync_router(
     foreign_done = is_artifact_complete(state, "foreign_language_report")
     legal_done = is_artifact_complete(state, "legal_report")
 
-    logger.info(
+    logger.debug(
         "fundamentals_sync_status",
         junior_done=junior_done,
         foreign_done=foreign_done,
@@ -168,7 +175,7 @@ def sync_check_router(
         ]
     )
 
-    logger.info(
+    logger.debug(
         "sync_check_status",
         market_done=market_done,
         sentiment_done=sentiment_done,

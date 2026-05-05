@@ -145,7 +145,7 @@ class FinancialSituationMemory:
 
             # Log collection stats
             count = self.situation_collection.count()
-            logger.info(
+            logger.debug(
                 "chromadb_initialized",
                 collection=self.name,
                 persist_dir=str(config.chroma_persist_directory),
@@ -203,7 +203,7 @@ class FinancialSituationMemory:
                     raise ValueError("Embedding test returned empty result")
                 cls._shared_embeddings = embeddings
                 cls._shared_embeddings_available = True
-                logger.info(
+                logger.debug(
                     "embeddings_initialized",
                     model=cls._EMBEDDING_MODEL,
                     collection=collection_name,
@@ -257,7 +257,7 @@ class FinancialSituationMemory:
                 path=persist_key,
                 settings=Settings(anonymized_telemetry=False, allow_reset=True),
             )
-            logger.info(
+            logger.debug(
                 "chromadb_client_initialized",
                 collection=collection_name,
                 persist_dir=persist_key,
@@ -430,7 +430,7 @@ class FinancialSituationMemory:
                 metadatas=approved_metadata,
             )
 
-            logger.info(
+            logger.debug(
                 "situations_added",
                 collection=self.name,
                 count=len(approved_situations),
@@ -652,7 +652,10 @@ class FinancialSituationMemory:
             target_prefix = None
             if ticker:
                 target_prefix = sanitize_ticker_for_collection(ticker)
-                logger.info(f"Scoping memory cleanup to ticker prefix: {target_prefix}")
+                logger.debug(
+                    "memory_cleanup_scoped",
+                    target_prefix=target_prefix,
+                )
 
             for collection_item in collections:
                 try:
@@ -674,7 +677,7 @@ class FinancialSituationMemory:
                         count = collection.count()
                         client.delete_collection(collection_name)
                         results[collection_name] = count
-                        logger.info(
+                        logger.debug(
                             "collection_deleted",
                             name=collection_name,
                             documents_deleted=count,
@@ -700,7 +703,7 @@ class FinancialSituationMemory:
                         if ids_to_delete:
                             collection.delete(ids=ids_to_delete)
                             results[collection_name] = len(ids_to_delete)
-                            logger.info(
+                            logger.debug(
                                 "old_documents_deleted",
                                 collection=collection_name,
                                 count=len(ids_to_delete),
@@ -833,7 +836,7 @@ def create_memory_instances(ticker: str) -> dict[str, FinancialSituationMemory]:
     for name in memory_configs:
         try:
             instances[name] = FinancialSituationMemory(name)
-            logger.info(
+            logger.debug(
                 "ticker_memory_created",
                 ticker=ticker,
                 collection_name=name,
@@ -952,7 +955,10 @@ def cleanup_all_memories(days: int = 0, ticker: str | None = None) -> dict[str, 
         target_prefix = None
         if ticker:
             target_prefix = sanitize_ticker_for_collection(ticker)
-            logger.info(f"Scoping memory cleanup to ticker prefix: {target_prefix}")
+            logger.debug(
+                "memory_cleanup_scoped",
+                target_prefix=target_prefix,
+            )
 
         for collection_item in collections:
             try:
@@ -974,7 +980,7 @@ def cleanup_all_memories(days: int = 0, ticker: str | None = None) -> dict[str, 
                     count = collection.count()
                     client.delete_collection(collection_name)
                     results[collection_name] = count
-                    logger.info(
+                    logger.debug(
                         "collection_deleted",
                         name=collection_name,
                         documents_deleted=count,
@@ -1000,7 +1006,7 @@ def cleanup_all_memories(days: int = 0, ticker: str | None = None) -> dict[str, 
                     if ids_to_delete:
                         collection.delete(ids=ids_to_delete)
                         results[collection_name] = len(ids_to_delete)
-                        logger.info(
+                        logger.debug(
                             "old_documents_deleted",
                             collection=collection_name,
                             count=len(ids_to_delete),
@@ -1205,7 +1211,7 @@ class MacroEventsStore:
                 }
             )
             if existing and existing.get("ids"):
-                logger.info("macro_event_dedup_skipped", event_date=event.event_date)
+                logger.debug("macro_event_dedup_skipped", event_date=event.event_date)
                 return False
 
             event_id = f"macro_{event.event_date}_{event.detected_date}"
@@ -1235,7 +1241,7 @@ class MacroEventsStore:
                     }
                 ],
             )
-            logger.info(
+            logger.debug(
                 "macro_event_stored",
                 event_date=event.event_date,
                 impact=event.impact,
