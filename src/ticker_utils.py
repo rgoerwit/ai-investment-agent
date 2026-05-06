@@ -13,6 +13,7 @@ import structlog
 from src.exchange_metadata import (
     EXCHANGES_BY_SUFFIX,
     IBKR_TO_YFINANCE,
+    canonical_suffix_for_reuters_exchange,
     canonical_suffix_for_token,
 )
 
@@ -174,23 +175,24 @@ class TickerFormatter:
         reuters_match = cls.TICKER_PATTERNS["reuters"].match(ticker)
         if reuters_match:
             symbol, reuters_code, country_code = reuters_match.groups()
-            exchange_mapping = cls._map_reuters_to_exchange(reuters_code, country_code)
+            canonical_suffix = cls._map_reuters_to_exchange(reuters_code, country_code)
 
-            if exchange_mapping:
+            if canonical_suffix:
+                exchange_info = EXCHANGES_BY_SUFFIX[canonical_suffix]
                 if target_format == "yfinance":
-                    normalized = f"{symbol}{exchange_mapping[0]}"
+                    normalized = f"{symbol}{exchange_info.yf_suffix}"
                 elif target_format == "ibkr":
-                    normalized = f"{symbol}:{exchange_mapping[3]}"
+                    normalized = f"{symbol}:{exchange_info.ibkr_code}"
                 else:
                     normalized = ticker
 
                 metadata = {
                     "original": original_ticker,
                     "symbol": symbol,
-                    "exchange_suffix": exchange_mapping[0],
-                    "exchange_name": exchange_mapping[1],
-                    "country": exchange_mapping[2],
-                    "ibkr_exchange": exchange_mapping[3],
+                    "exchange_suffix": exchange_info.yf_suffix,
+                    "exchange_name": exchange_info.exchange_name,
+                    "country": exchange_info.country,
+                    "ibkr_exchange": exchange_info.ibkr_code,
                     "format": "reuters",
                 }
                 return normalized, metadata
@@ -343,40 +345,9 @@ class TickerFormatter:
     @classmethod
     def _map_reuters_to_exchange(
         cls, reuters_code: str, country_code: str
-    ) -> tuple[str, str, str, str] | None:
-        """Map Reuters exchange codes to exchange info (yfinance_suffix, name, country, ibkr_code)."""
-        reuters_mapping = {
-            "N": {
-                "CH": ("SW", "SIX Swiss Exchange", "Switzerland", "SWX"),
-                "DE": ("DE", "XETRA", "Germany", "IBIS"),
-                "FR": ("PA", "Euronext Paris", "France", "SBF"),
-                "JP": ("T", "Tokyo Stock Exchange", "Japan", "TSE"),
-                "GB": ("L", "London Stock Exchange", "UK", "LSE"),
-            },
-            "O": {
-                "CH": ("SW", "SIX Swiss Exchange", "Switzerland", "SWX"),
-            },
-            "S": {
-                "CH": ("SW", "SIX Swiss Exchange", "Switzerland", "SWX"),
-            },
-            "VX": {
-                "CH": ("SW", "SIX Swiss Exchange", "Switzerland", "SWX"),
-            },
-        }
-
-        if (
-            reuters_code in reuters_mapping
-            and country_code in reuters_mapping[reuters_code]
-        ):
-            suffix, name, country, ibkr = reuters_mapping[reuters_code][country_code]
-            return (
-                f".{suffix}" if not suffix.startswith(".") else suffix,
-                name,
-                country,
-                ibkr,
-            )
-
-        return None
+    ) -> str | None:
+        """Return the canonical yfinance suffix for a Reuters exchange/country pair."""
+        return canonical_suffix_for_reuters_exchange(reuters_code, country_code)
 
     @classmethod
     def to_yfinance(cls, ticker: str) -> str:

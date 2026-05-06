@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import re
 
+_NULL_TOKENS = frozenset({"N/A", "NA", "NONE", "-", ""})
+_FIELD_VALUE_PATTERN = r"(?m)^{field_name}:\s*(.+?)\s*$"
+_NUMBER_TOKEN_PATTERN = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?")
+
 
 def _compile_named_block_pattern(block_name: str) -> re.Pattern[str]:
     escaped_name = re.escape(block_name)
@@ -143,7 +147,8 @@ def extract_last_fenced_block(
     if not report or not isinstance(report, str):
         return None
 
-    blocks = list(_compile_named_block_pattern(block_name).finditer(report))
+    normalized_report = normalize_structured_block_boundaries(report) or report
+    blocks = list(_compile_named_block_pattern(block_name).finditer(normalized_report))
     if not blocks:
         return None
 
@@ -179,6 +184,95 @@ def extract_last_data_block(
 def has_parseable_data_block(report: str | None) -> bool:
     """Return True only when a fenced DATA_BLOCK can actually be parsed."""
     return extract_last_data_block(report, include_markers=True) is not None
+
+
+def find_fenced_block_spans(
+    report: str | None,
+    block_name: str,
+    *,
+    include_markers: bool = False,
+) -> list[tuple[int, int, str]]:
+    """Return spans and content for each parseable fenced block."""
+    if not report or not isinstance(report, str):
+        return []
+
+    normalized_report = normalize_structured_block_boundaries(report) or report
+    matches = list(_compile_named_block_pattern(block_name).finditer(normalized_report))
+    group_index = 0 if include_markers else 1
+    return [
+        (match.start(group_index), match.end(group_index), match.group(group_index))
+        for match in matches
+    ]
+
+
+def extract_block_field_from_text(
+    block_text: str | None, field_name: str
+) -> str | None:
+    """Extract a normalized field value from an already extracted block body."""
+    if not block_text or not isinstance(block_text, str):
+        return None
+
+    pattern = _FIELD_VALUE_PATTERN.format(field_name=re.escape(field_name))
+    match = re.search(pattern, block_text, re.IGNORECASE)
+    if not match:
+        return None
+
+    value = match.group(1).strip()
+    return None if value.upper() in _NULL_TOKENS else value
+
+
+def extract_block_number_from_text(
+    block_text: str | None, field_name: str
+) -> float | None:
+    """Extract a numeric field value from an already extracted block body."""
+    raw = extract_block_field_from_text(block_text, field_name)
+    if raw is None:
+        return None
+
+    match = _NUMBER_TOKEN_PATTERN.search(raw)
+    if not match:
+        return None
+
+    try:
+        return float(match.group(0).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def extract_block_field(
+    report: str | None,
+    block_name: str,
+    field_name: str,
+) -> str | None:
+    """Extract a normalized field value from the last parseable structured block."""
+    if block_name == "DATA_BLOCK":
+        block_text = extract_last_data_block(report)
+    else:
+        block_text = extract_last_fenced_block(report, block_name)
+    return extract_block_field_from_text(block_text, field_name)
+
+
+def extract_block_number(
+    report: str | None,
+    block_name: str,
+    field_name: str,
+) -> float | None:
+    """Extract a numeric field value from the last parseable structured block."""
+    if block_name == "DATA_BLOCK":
+        block_text = extract_last_data_block(report)
+    else:
+        block_text = extract_last_fenced_block(report, block_name)
+    return extract_block_number_from_text(block_text, field_name)
+
+
+def extract_data_block_field(report: str | None, field_name: str) -> str | None:
+    """Extract a normalized field value from the last parseable DATA_BLOCK."""
+    return extract_block_field(report, "DATA_BLOCK", field_name)
+
+
+def extract_data_block_number(report: str | None, field_name: str) -> float | None:
+    """Extract a numeric field value from the last parseable DATA_BLOCK."""
+    return extract_block_number(report, "DATA_BLOCK", field_name)
 
 
 def normalize_structured_block_boundaries(report: str | None) -> str | None:

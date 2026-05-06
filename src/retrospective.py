@@ -27,7 +27,10 @@ from typing import Any
 import structlog
 
 from src.config import config
-from src.data_block_utils import extract_last_data_block
+from src.data_block_utils import (
+    extract_data_block_field,
+    extract_data_block_number,
+)
 from src.exchange_metadata import SUFFIX_TO_CURRENCY_CODE
 from src.runtime_diagnostics import classify_failure
 from src.runtime_services import get_current_inspection_service
@@ -180,38 +183,15 @@ def _extract_bear_risks(result: dict) -> str:
 
 
 def _extract_data_block_field(fundamentals_report: str, field_name: str) -> str | None:
-    """Extract a single field from the last DATA_BLOCK in fundamentals report."""
-    if not fundamentals_report:
-        return None
-
-    data_block = extract_last_data_block(fundamentals_report)
-    if not data_block:
-        return None
-
-    match = re.search(rf"{field_name}:\s*(.+?)(?:\n|$)", data_block, re.IGNORECASE)
-    if match:
-        value = match.group(1).strip()
-        if value.upper() in ("N/A", "NA", "NONE", "-", ""):
-            return None
-        return value
-    return None
+    """Compatibility wrapper over the shared DATA_BLOCK accessor layer."""
+    return extract_data_block_field(fundamentals_report, field_name)
 
 
 def _extract_data_block_float(
     fundamentals_report: str, field_name: str
 ) -> float | None:
-    """Extract a float field from the last DATA_BLOCK."""
-    raw = _extract_data_block_field(fundamentals_report, field_name)
-    if raw is None:
-        return None
-    # Strip trailing % or other text
-    cleaned = re.match(r"[-+]?[\d.]+", raw)
-    if cleaned:
-        try:
-            return float(cleaned.group(0))
-        except ValueError:
-            return None
-    return None
+    """Compatibility wrapper over the shared DATA_BLOCK numeric accessor."""
+    return extract_data_block_number(fundamentals_report, field_name)
 
 
 def _extract_trade_block_price(text: str, field: str) -> float | None:

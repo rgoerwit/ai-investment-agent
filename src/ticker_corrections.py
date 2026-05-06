@@ -13,6 +13,8 @@ Common issues:
 
 import structlog
 
+from src.exchange_metadata import EXCHANGES_BY_SUFFIX, canonical_suffix_for_token
+
 logger = structlog.get_logger(__name__)
 
 
@@ -62,109 +64,58 @@ ALTERNATIVE_FORMATS = {
 }
 
 
-# Known valid tickers for quick validation
-KNOWN_VALID_TICKERS = {
-    # Swiss Securities
-    "NOVN.SW": {
-        "name": "Novartis AG",
-        "exchange": "SIX Swiss Exchange",
-        "country": "Switzerland",
-    },
-    "ROG.SW": {
-        "name": "Roche Holding AG",
-        "exchange": "SIX Swiss Exchange",
-        "country": "Switzerland",
-    },
-    "NESN.SW": {
-        "name": "Nestlé S.A.",
-        "exchange": "SIX Swiss Exchange",
-        "country": "Switzerland",
-    },
-    "UBSG.SW": {
-        "name": "UBS Group AG",
-        "exchange": "SIX Swiss Exchange",
-        "country": "Switzerland",
-    },
-    "CSGN.SW": {
-        "name": "Credit Suisse Group AG",
-        "exchange": "SIX Swiss Exchange",
-        "country": "Switzerland",
-    },
-    "ZURN.SW": {
-        "name": "Zurich Insurance Group AG",
-        "exchange": "SIX Swiss Exchange",
-        "country": "Switzerland",
-    },
-    "ABBN.SW": {
-        "name": "ABB Ltd",
-        "exchange": "SIX Swiss Exchange",
-        "country": "Switzerland",
-    },
-    "LONN.SW": {
-        "name": "Lonza Group AG",
-        "exchange": "SIX Swiss Exchange",
-        "country": "Switzerland",
-    },
-    # US Securities
-    "AAPL": {"name": "Apple Inc.", "exchange": "NASDAQ", "country": "United States"},
-    "MSFT": {
-        "name": "Microsoft Corporation",
-        "exchange": "NASDAQ",
-        "country": "United States",
-    },
-    "GOOGL": {
-        "name": "Alphabet Inc.",
-        "exchange": "NASDAQ",
-        "country": "United States",
-    },
-    "AMZN": {
-        "name": "Amazon.com Inc.",
-        "exchange": "NASDAQ",
-        "country": "United States",
-    },
-    "TSLA": {"name": "Tesla Inc.", "exchange": "NASDAQ", "country": "United States"},
-    "META": {
-        "name": "Meta Platforms Inc.",
-        "exchange": "NASDAQ",
-        "country": "United States",
-    },
-    "NVDA": {
-        "name": "NVIDIA Corporation",
-        "exchange": "NASDAQ",
-        "country": "United States",
-    },
-    # German Securities
-    "SAP.DE": {"name": "SAP SE", "exchange": "XETRA", "country": "Germany"},
-    "SIE.DE": {"name": "Siemens AG", "exchange": "XETRA", "country": "Germany"},
-    "DAI.DE": {"name": "Daimler AG", "exchange": "XETRA", "country": "Germany"},
-    # UK Securities
-    "BP.L": {
-        "name": "BP plc",
-        "exchange": "London Stock Exchange",
-        "country": "United Kingdom",
-    },
-    "HSBA.L": {
-        "name": "HSBC Holdings plc",
-        "exchange": "London Stock Exchange",
-        "country": "United Kingdom",
-    },
-    "MEGP.L": {
-        "name": "ME Group International plc",
-        "exchange": "London Stock Exchange",
-        "country": "United Kingdom",
-    },
-    # Japanese Securities
-    "7203.T": {
-        "name": "Toyota Motor Corporation",
-        "exchange": "Tokyo Stock Exchange",
-        "country": "Japan",
-    },
-    "6758.T": {
-        "name": "Sony Group Corporation",
-        "exchange": "Tokyo Stock Exchange",
-        "country": "Japan",
-    },
+KNOWN_VALID_TICKER_NAMES = {
+    "NOVN.SW": "Novartis AG",
+    "ROG.SW": "Roche Holding AG",
+    "NESN.SW": "Nestlé S.A.",
+    "UBSG.SW": "UBS Group AG",
+    "CSGN.SW": "Credit Suisse Group AG",
+    "ZURN.SW": "Zurich Insurance Group AG",
+    "ABBN.SW": "ABB Ltd",
+    "LONN.SW": "Lonza Group AG",
+    "AAPL": "Apple Inc.",
+    "MSFT": "Microsoft Corporation",
+    "GOOGL": "Alphabet Inc.",
+    "AMZN": "Amazon.com Inc.",
+    "TSLA": "Tesla Inc.",
+    "META": "Meta Platforms Inc.",
+    "NVDA": "NVIDIA Corporation",
+    "SAP.DE": "SAP SE",
+    "SIE.DE": "Siemens AG",
+    "DAI.DE": "Daimler AG",
+    "BP.L": "BP plc",
+    "HSBA.L": "HSBC Holdings plc",
+    "MEGP.L": "ME Group International plc",
+    "7203.T": "Toyota Motor Corporation",
+    "6758.T": "Sony Group Corporation",
 }
+
+
+def _derive_ticker_metadata(
+    ticker: str,
+    *,
+    company_name: str | None = None,
+) -> dict[str, str]:
+    """Build ticker metadata from canonical exchange facts plus optional name."""
+    suffix = ""
+    symbol = ticker
+    if "." in ticker:
+        symbol, suffix_token = ticker.rsplit(".", 1)
+        suffix = canonical_suffix_for_token(suffix_token) or ""
+
+    if suffix:
+        exchange = EXCHANGES_BY_SUFFIX[suffix]
+        return {
+            "name": company_name or ticker,
+            "exchange": exchange.exchange_name,
+            "country": exchange.country,
+        }
+
+    return {
+        "name": company_name or ticker,
+        "exchange": "NASDAQ",
+        "country": "United States",
+    }
 
 
 class TickerCorrector:
@@ -227,8 +178,9 @@ class TickerCorrector:
         """
         ticker = ticker.strip().upper()
 
-        if ticker in KNOWN_VALID_TICKERS:
-            return True, KNOWN_VALID_TICKERS[ticker]
+        company_name = KNOWN_VALID_TICKER_NAMES.get(ticker)
+        if company_name is not None:
+            return True, _derive_ticker_metadata(ticker, company_name=company_name)
 
         return False, None
 
@@ -258,13 +210,13 @@ class TickerCorrector:
                 return suggested
 
         # Check for partial matches in valid tickers
-        for valid_ticker, info in KNOWN_VALID_TICKERS.items():
+        for valid_ticker, company_name in KNOWN_VALID_TICKER_NAMES.items():
             if valid_ticker.startswith(failed_ticker[:3]):
                 logger.info(
                     "correction_suggested",
                     failed=failed_ticker,
                     suggested=valid_ticker,
-                    company=info["name"],
+                    company=company_name,
                 )
                 return valid_ticker
 
@@ -295,12 +247,8 @@ class TickerCorrector:
         )
 
         corrected_full = f"{corrected_symbol}.{exchange_suffix}"
-        if corrected_full not in KNOWN_VALID_TICKERS:
-            KNOWN_VALID_TICKERS[corrected_full] = {
-                "name": company_name,
-                "exchange": "Unknown",
-                "country": "Unknown",
-            }
+        if corrected_full not in KNOWN_VALID_TICKER_NAMES:
+            KNOWN_VALID_TICKER_NAMES[corrected_full] = company_name
 
         logger.info(
             "correction_added",

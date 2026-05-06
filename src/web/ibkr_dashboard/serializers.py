@@ -10,11 +10,14 @@ from src.ibkr.models import (
     ReconciliationItem,
 )
 from src.ibkr.portfolio_presentation import (
+    PortfolioActionGroups,
+    build_action_display_sections,
     build_action_summary_counts,
     build_cash_summary,
     build_freshness_overview,
     build_live_order_note,
     build_portfolio_overview,
+    get_sell_type_label,
     group_portfolio_actions,
 )
 from src.ibkr.recommendation_service import PortfolioRecommendationBundle
@@ -112,6 +115,7 @@ def serialize_item(
         "ticker_ibkr": item.ticker.ibkr,
         "action": item.action,
         "sell_type": item.sell_type,
+        "sell_type_label": get_sell_type_label(item.sell_type),
         "reason": item.reason,
         "urgency": item.urgency,
         "is_watchlist": item.is_watchlist,
@@ -293,10 +297,45 @@ def _serialize_actions(
         "watchlist_remove": [
             serialize_item(item, live_orders=live_orders) for item in groups.removes
         ],
+        "action_sections": _serialize_action_sections(
+            groups,
+            dip_watch=tuple(dip_watch),
+            live_orders=live_orders,
+        ),
         "macro_event_detected": any(
             "CORRELATED_SELL_EVENT" in flag for flag in health_flags
         ),
     }
+
+
+def _serialize_action_sections(
+    groups: PortfolioActionGroups,
+    *,
+    dip_watch: tuple[dict[str, Any], ...] | tuple[Any, ...],
+    live_orders: list[dict] | None,
+) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    for section in build_action_display_sections(groups, dip_watch_items=dip_watch):
+        if section.kind == "dip_watch":
+            items = [
+                candidate
+                if isinstance(candidate, dict)
+                else _serialize_dip_watch(candidate)
+                for candidate in section.items
+            ]
+        else:
+            items = [
+                serialize_item(item, live_orders=live_orders) for item in section.items
+            ]
+        payload.append(
+            {
+                "key": section.key,
+                "title": section.title,
+                "kind": section.kind,
+                "items": items,
+            }
+        )
+    return payload
 
 
 def _serialize_dip_watch(candidate: DipWatchCandidate) -> dict[str, Any]:

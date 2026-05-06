@@ -7,6 +7,15 @@ from src.ibkr.models import PortfolioSummary, ReconciliationItem
 from src.ibkr.refresh_service import AnalysisFreshnessSummary, RefreshActivity
 
 _DEFAULT_DIP_WATCH_LIMIT = 7
+SELL_RECOMMENDATIONS_TITLE = "SELL RECOMMENDATIONS"
+SELL_RELATED_REVIEWS_TITLE = "SELL-RELATED REVIEWS"
+SELL_TYPE_LABELS: dict[str | None, str] = {
+    "STOP_BREACH": "STOP BREACH",
+    "HARD_REJECT": "FUNDAMENTAL FAILURE",
+    "SOFT_REJECT": "SOFT REJECTION",
+    "PROFIT_TAKE": "PROFIT TAKE",
+    None: "SELL",
+}
 
 
 @dataclass(frozen=True)
@@ -90,6 +99,19 @@ class LiveOrderMatch:
     price: float | str | None
     order_type: str
     status: str
+
+
+@dataclass(frozen=True)
+class ActionDisplaySection:
+    key: str
+    title: str
+    kind: str
+    items: tuple[object, ...]
+
+
+def get_sell_type_label(sell_type: str | None) -> str:
+    """Return the canonical human label for a sell_type token."""
+    return SELL_TYPE_LABELS.get(sell_type, "SELL")
 
 
 def group_portfolio_actions(
@@ -238,6 +260,96 @@ def build_action_summary_counts(groups: PortfolioActionGroups) -> dict[str, int]
     if groups.macro_reviews:
         counts["MACRO_WATCH"] = len(groups.macro_reviews)
     return counts
+
+
+def build_action_display_sections(
+    groups: PortfolioActionGroups,
+    *,
+    dip_watch_items: tuple[object, ...] | None = None,
+) -> tuple[ActionDisplaySection, ...]:
+    """Return canonical action sections for operator-facing held-position views."""
+    sections: list[ActionDisplaySection] = []
+
+    sell_recommendations = (
+        groups.stop_sells
+        + groups.hard_sells
+        + groups.profit_take_sells
+        + groups.soft_sells
+    )
+    if sell_recommendations:
+        sections.append(
+            ActionDisplaySection(
+                key="sell_recommendations",
+                title=SELL_RECOMMENDATIONS_TITLE,
+                kind="reconciliation_items",
+                items=sell_recommendations,
+            )
+        )
+
+    sell_related_reviews = (
+        groups.macro_stop_reviews + groups.macro_reviews + groups.profit_take_reviews
+    )
+    if sell_related_reviews:
+        sections.append(
+            ActionDisplaySection(
+                key="sell_related_reviews",
+                title=SELL_RELATED_REVIEWS_TITLE,
+                kind="reconciliation_items",
+                items=sell_related_reviews,
+            )
+        )
+
+    if groups.adds:
+        sections.append(
+            ActionDisplaySection(
+                key="add",
+                title="Adds",
+                kind="reconciliation_items",
+                items=groups.adds,
+            )
+        )
+    if groups.trims:
+        sections.append(
+            ActionDisplaySection(
+                key="trim",
+                title="Trims",
+                kind="reconciliation_items",
+                items=groups.trims,
+            )
+        )
+    if groups.reviews:
+        sections.append(
+            ActionDisplaySection(
+                key="review",
+                title="Review Queue",
+                kind="reconciliation_items",
+                items=groups.reviews,
+            )
+        )
+    if groups.dip_candidates:
+        sections.append(
+            ActionDisplaySection(
+                key="dip_watch",
+                title="Dip Watch",
+                kind="dip_watch",
+                items=(
+                    dip_watch_items
+                    if dip_watch_items is not None
+                    else groups.dip_candidates
+                ),
+            )
+        )
+    if groups.holds_real:
+        sections.append(
+            ActionDisplaySection(
+                key="hold",
+                title="Holds",
+                kind="reconciliation_items",
+                items=groups.holds_real,
+            )
+        )
+
+    return tuple(sections)
 
 
 def build_cash_timeline(

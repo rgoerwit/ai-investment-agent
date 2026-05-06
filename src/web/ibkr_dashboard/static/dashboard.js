@@ -152,13 +152,7 @@ function renderActionTable(title, items, extraColumns = []) {
 }
 
 function sellTypeLabel(item) {
-  const labels = {
-    STOP_BREACH: "Stop breach",
-    HARD_REJECT: "Fundamental",
-    SOFT_REJECT: "Soft reject",
-    PROFIT_TAKE: "Profit take",
-  };
-  return labels[item.sell_type] || "Sell";
+  return item.sell_type_label || item.sell_type || "Sell";
 }
 
 function profitTakeDetail(item) {
@@ -439,24 +433,26 @@ function renderOverview() {
 
 function renderActions() {
   const actions = state.snapshot.actions;
-  const sellItems = [
+  const canonicalSections = actions.action_sections || [];
+  const fallbackSellItems = [
     ...(actions.sell_stop_breach || []),
     ...(actions.sell_hard || []),
     ...(actions.sell_profit_take || []),
     ...(actions.sell_soft_review || []),
   ];
-  const actionSections = [
-    sellItems,
-    actions.review_macro,
-    actions.review_stop_breach,
-    actions.review_profit_take,
-    actions.add,
-    actions.trim,
-    actions.review,
-    actions.dip_watch,
-    actions.hold,
+  const fallbackSections = [
+    { key: "sell_recommendations", title: "Sell Recommendations", kind: "reconciliation_items", items: fallbackSellItems },
+    { key: "sell_related_reviews", title: "Sell-Related Reviews", kind: "reconciliation_items", items: [...(actions.review_stop_breach || []), ...(actions.review_macro || []), ...(actions.review_profit_take || [])] },
+    { key: "add", title: "Adds", kind: "reconciliation_items", items: actions.add || [] },
+    { key: "trim", title: "Trims", kind: "reconciliation_items", items: actions.trim || [] },
+    { key: "review", title: "Review Queue", kind: "reconciliation_items", items: actions.review || [] },
+    { key: "dip_watch", title: "Dip Watch", kind: "dip_watch", items: actions.dip_watch || [] },
+    { key: "hold", title: "Holds", kind: "reconciliation_items", items: actions.hold || [] },
   ];
-  if (actionSections.every((items) => !items || items.length === 0)) {
+  const actionSections = (canonicalSections.length ? canonicalSections : fallbackSections).filter(
+    (section) => section.items && section.items.length > 0,
+  );
+  if (actionSections.length === 0) {
     return `
       <section>
         <h3 class="section-title">Held-Position Actions</h3>
@@ -466,58 +462,68 @@ function renderActions() {
       ${renderCandidatePreview("Watchlist Buys Ready For Review", actions.watchlist_buy)}
     `;
   }
-  return `
-    ${renderActionTable("Sell Recommendations", sellItems, [
-      { label: "Type", render: (item) => escapeHtml(sellTypeLabel(item)) },
-      { label: "Price", render: (item) => fmtNumber(item.suggested_price, 2) },
-      {
-        label: "Would Settle",
-        render: (item) => escapeHtml(item.settlement_date || "—"),
-      },
-      { label: "Profit-Take Detail", render: profitTakeDetail },
-    ])}
-    ${renderActionTable("Macro Reviews", actions.review_macro, [
-      { label: "Health", render: (item) => escapeHtml(item.analysis?.health_adj ?? "—") },
-      { label: "Growth", render: (item) => escapeHtml(item.analysis?.growth_adj ?? "—") },
-    ])}
-    ${renderActionTable("Stop Breaches Under Review", actions.review_stop_breach, [
-      { label: "Health", render: (item) => escapeHtml(item.analysis?.health_adj ?? "—") },
-      { label: "Growth", render: (item) => escapeHtml(item.analysis?.growth_adj ?? "—") },
-    ])}
-    ${renderActionTable("Profit-Take Reviews", actions.review_profit_take, [
-      { label: "Detail", render: profitTakeDetail },
-      { label: "Health", render: (item) => escapeHtml(item.analysis?.health_adj ?? "—") },
-      { label: "Growth", render: (item) => escapeHtml(item.analysis?.growth_adj ?? "—") },
-    ])}
-    ${renderActionTable("Adds", actions.add, [
-      { label: "Price", render: (item) => fmtNumber(item.suggested_price, 2) },
-      { label: "Cost", render: (item) => fmtCurrency(Math.abs(item.cash_impact_usd ?? 0)) },
-    ])}
-    ${renderActionTable("Trims", actions.trim, [
-      { label: "Price", render: (item) => fmtNumber(item.suggested_price, 2) },
-      {
-        label: "Would Settle",
-        render: (item) => escapeHtml(item.settlement_date || "—"),
-      },
-    ])}
-    ${renderActionTable("Review Queue", actions.review, [
-      { label: "Health", render: (item) => escapeHtml(item.analysis?.health_adj ?? "—") },
-      { label: "Growth", render: (item) => escapeHtml(item.analysis?.growth_adj ?? "—") },
-    ])}
-    ${renderDipWatch(actions.dip_watch)}
-    ${renderActionTable("Holds", actions.hold, [
-      {
-        label: "Entry",
-        render: (item) =>
-          fmtLocalMoney(item.analysis?.entry_price, item.analysis?.currency),
-      },
-      {
-        label: "Current",
-        render: (item) =>
-          fmtLocalMoney(item.position?.current_price_local, item.position?.currency),
-      },
-    ])}
-  `;
+  return actionSections
+    .map((section) => {
+      if (section.key === "sell_recommendations") {
+        return renderActionTable(section.title, section.items, [
+          { label: "Type", render: (item) => escapeHtml(sellTypeLabel(item)) },
+          { label: "Price", render: (item) => fmtNumber(item.suggested_price, 2) },
+          {
+            label: "Would Settle",
+            render: (item) => escapeHtml(item.settlement_date || "—"),
+          },
+          { label: "Profit-Take Detail", render: profitTakeDetail },
+        ]);
+      }
+      if (section.key === "sell_related_reviews") {
+        return renderActionTable(section.title, section.items, [
+          { label: "Type", render: (item) => escapeHtml(sellTypeLabel(item)) },
+          { label: "Health", render: (item) => escapeHtml(item.analysis?.health_adj ?? "—") },
+          { label: "Growth", render: (item) => escapeHtml(item.analysis?.growth_adj ?? "—") },
+          { label: "Profit-Take Detail", render: profitTakeDetail },
+        ]);
+      }
+      if (section.key === "add") {
+        return renderActionTable(section.title, section.items, [
+          { label: "Price", render: (item) => fmtNumber(item.suggested_price, 2) },
+          { label: "Cost", render: (item) => fmtCurrency(Math.abs(item.cash_impact_usd ?? 0)) },
+        ]);
+      }
+      if (section.key === "trim") {
+        return renderActionTable(section.title, section.items, [
+          { label: "Price", render: (item) => fmtNumber(item.suggested_price, 2) },
+          {
+            label: "Would Settle",
+            render: (item) => escapeHtml(item.settlement_date || "—"),
+          },
+        ]);
+      }
+      if (section.key === "review") {
+        return renderActionTable(section.title, section.items, [
+          { label: "Health", render: (item) => escapeHtml(item.analysis?.health_adj ?? "—") },
+          { label: "Growth", render: (item) => escapeHtml(item.analysis?.growth_adj ?? "—") },
+        ]);
+      }
+      if (section.key === "dip_watch") {
+        return renderDipWatch(section.items);
+      }
+      if (section.key === "hold") {
+        return renderActionTable(section.title, section.items, [
+          {
+            label: "Entry",
+            render: (item) =>
+              fmtLocalMoney(item.analysis?.entry_price, item.analysis?.currency),
+          },
+          {
+            label: "Current",
+            render: (item) =>
+              fmtLocalMoney(item.position?.current_price_local, item.position?.currency),
+          },
+        ]);
+      }
+      return renderActionTable(section.title, section.items, []);
+    })
+    .join("");
 }
 
 function renderDipWatch(items) {

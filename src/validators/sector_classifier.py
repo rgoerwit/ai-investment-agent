@@ -7,7 +7,7 @@ from enum import Enum
 
 import structlog
 
-from src.data_block_utils import extract_last_data_block
+from src.data_block_utils import extract_data_block_field
 
 logger = structlog.get_logger(__name__)
 
@@ -102,12 +102,9 @@ def detect_sector(fundamentals_report: str) -> Sector:
     if not fundamentals_report:
         return Sector.INDUSTRIALS
 
-    data_block = extract_last_data_block(fundamentals_report)
-    sector_match = (
-        re.search(r"SECTOR:\s*(.+?)(?:\n|$)", data_block) if data_block else None
-    )
+    sector_text = extract_data_block_field(fundamentals_report, "SECTOR")
 
-    if not sector_match:
+    if not sector_text:
         marker_positions = [
             pos
             for pos in (
@@ -121,15 +118,13 @@ def detect_sector(fundamentals_report: str) -> Sector:
             if marker_positions
             else fundamentals_report
         )
-        sector_match = re.search(
-            r"SECTOR:\s*(.+?)(?:\n|$)", header_region, re.IGNORECASE
-        )
+        match = re.search(r"SECTOR:\s*(.+?)(?:\n|$)", header_region, re.IGNORECASE)
+        sector_text = match.group(1).strip() if match else ""
 
-    if not sector_match:
+    if not sector_text:
         logger.debug("no_sector_found_in_report", fallback="INDUSTRIALS")
         return Sector.INDUSTRIALS
 
-    sector_text = sector_match.group(1).strip()
     exact_match = _GICS_EXACT.get(sector_text.lower())
     if exact_match is not None:
         return exact_match

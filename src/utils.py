@@ -11,7 +11,12 @@ import structlog
 
 from src.agents import extract_string_content
 from src.config import Config
-from src.data_block_utils import has_parseable_data_block, has_parseable_fenced_block
+from src.data_block_utils import (
+    find_fenced_block_spans,
+    has_parseable_data_block,
+    has_parseable_fenced_block,
+    normalize_structured_block_boundaries,
+)
 from src.llms import quick_thinking_llm
 
 logger = structlog.get_logger(__name__)
@@ -266,28 +271,29 @@ def clean_duplicate_data_blocks(report: str) -> str:
     if not report or not isinstance(report, str):
         return report
 
-    # Pattern to match DATA_BLOCK sections (tolerates optional descriptive text after "DATA_BLOCK")
-    pattern = r"### --- START DATA_BLOCK[^\n]*---.*?### --- END DATA_BLOCK ---"
-
-    # Find all occurrences
-    blocks = list(re.finditer(pattern, report, re.DOTALL))
+    normalized_report = normalize_structured_block_boundaries(report) or report
+    blocks = find_fenced_block_spans(
+        normalized_report,
+        "DATA_BLOCK",
+        include_markers=True,
+    )
 
     if len(blocks) <= 1:
-        # No duplicates, return as-is
-        return report
+        return normalized_report
 
-    # Remove all blocks except the last one (the corrected version)
-    cleaned_report = report
-
-    for i, block in enumerate(blocks[:-1], 1):  # All except last
-        # Replace with note explaining why it was removed
+    cleaned_parts: list[str] = []
+    cursor = 0
+    for i, (start, end, _text) in enumerate(blocks[:-1], 1):
+        cleaned_parts.append(normalized_report[cursor:start])
         replacement = (
             f"### --- DATA_BLOCK #{i} REMOVED ---\n"
             f"*(Agent self-corrected below - keeping final accurate version)*\n\n"
         )
-        cleaned_report = cleaned_report.replace(block.group(0), replacement, 1)
+        cleaned_parts.append(replacement)
+        cursor = end
 
-    return cleaned_report
+    cleaned_parts.append(normalized_report[cursor:])
+    return "".join(cleaned_parts)
 
 
 def detect_truncation(text: str, agent: str | None = None) -> dict:

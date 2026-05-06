@@ -40,6 +40,12 @@ def test_serialize_dashboard_snapshot_shapes_payload(sample_bundle):
     assert payload["actions"]["watchlist_candidate"][0]["ticker_yf"] == "BMW.DE"
     assert payload["overview"]["candidates"] == 1
     assert payload["freshness_overview"]["blocking_now"] == 1
+    assert payload["actions"]["action_sections"][0]["key"] == "sell_recommendations"
+    assert payload["actions"]["action_sections"][1]["key"] == "sell_related_reviews"
+    assert (
+        payload["actions"]["action_sections"][0]["items"][0]["sell_type_label"]
+        == "FUNDAMENTAL FAILURE"
+    )
 
 
 def test_serialize_dashboard_snapshot_handles_empty_lists(sample_bundle):

@@ -53,8 +53,11 @@ from src.ibkr.models import (
     ReconciliationItem,
 )
 from src.ibkr.portfolio_presentation import (
+    SELL_RECOMMENDATIONS_TITLE,
+    SELL_RELATED_REVIEWS_TITLE,
     build_action_summary_counts,
     build_cash_summary,
+    get_sell_type_label,
     group_portfolio_actions,
 )
 from src.ibkr.portfolio_presentation import (
@@ -1480,13 +1483,7 @@ def format_report(
         return segments
 
     def _sell_type_label(item: ReconciliationItem) -> str:
-        labels = {
-            "STOP_BREACH": "STOP BREACH",
-            "HARD_REJECT": "FUNDAMENTAL FAILURE",
-            "SOFT_REJECT": "SOFT REJECTION",
-            "PROFIT_TAKE": "PROFIT TAKE",
-        }
-        return labels.get(item.sell_type or "", "SELL")
+        return get_sell_type_label(item.sell_type)
 
     def _profit_take_segments(item: ReconciliationItem) -> list[str]:
         segments: list[str] = []
@@ -1772,7 +1769,10 @@ def format_report(
     # ── SELL RECOMMENDATIONS ─────────────────────────────────────────────────
     sell_recommendations = stop_sells + hard_sells + profit_take_sells + soft_sells
     if sell_recommendations:
-        _section("SELL RECOMMENDATIONS", "review sell reason labels before executing")
+        _section(
+            SELL_RECOMMENDATIONS_TITLE,
+            "review sell reason labels before executing",
+        )
         for item in sell_recommendations:
             ccy = _item_currency(item)
             reason = (
@@ -1806,7 +1806,8 @@ def format_report(
     sell_reviews = macro_stop_reviews + macro_reviews + profit_take_reviews
     if sell_reviews:
         _section(
-            "SELL-RELATED REVIEWS", "tax, macro, or intact-thesis review before acting"
+            SELL_RELATED_REVIEWS_TITLE,
+            "tax, macro, or intact-thesis review before acting",
         )
         for item in sell_reviews:
             ccy = _item_currency(item)
