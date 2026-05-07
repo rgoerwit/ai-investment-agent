@@ -143,6 +143,8 @@ write_pipeline_marker() {
 }
 
 resolve_python_cmd() {
+    local active_python_missing_deps=false
+
     if [[ -n "${INVESTMENT_AGENT_CONTAINER:-}" ]] || [[ -f "/.dockerenv" ]] || [[ -f "/run/.containerenv" ]]; then
         PYTHON_CMD=(python)
         PYTHON_CMD_DISPLAY="python"
@@ -150,15 +152,29 @@ resolve_python_cmd() {
     fi
 
     if [[ -n "${VIRTUAL_ENV:-}" ]]; then
-        PYTHON_CMD=(python)
-        PYTHON_CMD_DISPLAY="python"
-        return
+        if python -c "import pandas, requests, yfinance" >/dev/null 2>&1; then
+            PYTHON_CMD=(python)
+            PYTHON_CMD_DISPLAY="python"
+            return
+        fi
+        active_python_missing_deps=true
     fi
 
     if command -v poetry &> /dev/null; then
+        if $active_python_missing_deps; then
+            warn "Active virtual environment lacks repo dependencies; falling back to Poetry runtime"
+            info "If this keeps happening, deactivate the unrelated venv or run: poetry install"
+        fi
         PYTHON_CMD=(poetry run python)
         PYTHON_CMD_DISPLAY="poetry run python"
         return
+    fi
+
+    if $active_python_missing_deps; then
+        fail "Active virtual environment is missing repo dependencies"
+        info "Deactivate the unrelated venv, or install this project's dependencies into it"
+        info "Recommended: poetry install"
+        exit 1
     fi
 
     fail "Poetry is not installed and no active virtual environment was detected"
@@ -289,7 +305,6 @@ OPTIONS:
                         ./scripts/run_pipeline.sh --stage 2 --buys-file scratch/buys_2026-02-24.txt
   --strict            Apply strict mode to Stage 2 full analysis (tighter D/E, reject
                       REITs/PFIC/VIE, escalate value traps, higher BUY conviction bar).
-                      Stage 1 screening always runs strict regardless of this flag.
   -y, --yes           Skip confirmation prompts (run non-interactively)
   -h, --help          Show this help message
 
@@ -427,7 +442,7 @@ if [[ $START_STAGE -le 0 ]]; then
         info "Already completed:   $STAGE1_SKIP (will be skipped)"
     fi
     info "Est. time:           ~$(format_duration $STAGE1_SECS) (${COOLDOWN}s cooldown)"
-    info "Mode:                --quick --strict --brief --no-memory"
+    info "Mode:                --quick --brief --no-memory"
     info "Output dir:          $SCRATCH/"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
@@ -480,7 +495,7 @@ if [[ $START_STAGE -le 1 ]]; then
             info "Already completed:   $STAGE1_SKIP (will be skipped)"
         fi
         info "Est. time:           ~$(format_duration $STAGE1_SECS) (${COOLDOWN}s cooldown)"
-        info "Mode:                --quick --strict --brief --no-memory"
+        info "Mode:                --quick --brief --no-memory"
         info "Output dir:          $SCRATCH/"
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
@@ -519,7 +534,7 @@ if [[ $START_STAGE -le 1 ]]; then
 
         if "${PYTHON_CMD[@]}" -m src.main \
             --ticker "$ticker" \
-            --quick --strict --no-charts --quiet --brief --no-memory \
+            --quick --no-charts --quiet --brief --no-memory \
             --output "$OUTFILE" \
             2> "$LOGFILE"; then
             VERDICT=$(extract_report_verdict "$OUTFILE")

@@ -601,7 +601,7 @@ async def run_analysis(
             from src.token_tracker import get_tracker
 
             tracker = get_tracker()
-            tracker.print_summary()
+            tracker.print_summary(ticker=ticker)
 
             if isinstance(result, dict):
                 result["macro_context_report"] = macro_context_report

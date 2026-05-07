@@ -4,6 +4,12 @@ This repository is a multi-agent international equity research system. It can an
 
 You need Python 3.12+, Poetry, and at least one working LLM API key. A Gemini key is the minimum practical setup; optional data-provider keys improve coverage and reliability.
 
+Environment note:
+
+- `poetry run ...` is the safest default for this repo.
+- If you activate a virtual environment manually, make sure it is this project's environment and that it has the repo dependencies installed.
+- If you have some other venv active, deactivate it or let the pipeline fall back to Poetry.
+
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![LangGraph](https://img.shields.io/badge/LangGraph-1.0+-green.svg)](https://github.com/langchain-ai/langgraph)
@@ -275,6 +281,11 @@ Outputs land in `scratch/`. In practice you will see:
 - a `buys_YYYY-MM-DD.txt` list
 - full reports for BUY names
 
+Practical notes:
+
+- Stage 1 is a broad quick screen: `--quick --no-charts --brief --no-memory`, not strict mode.
+- The upstream `find_gems.py` filter still starts conservative, but now allows a modest higher-P/E band when profitability, leverage, cash-flow quality, and coverage are stronger.
+
 Resumption is built in:
 
 - Re-running the same command family skips completed outputs.
@@ -464,6 +475,14 @@ If you are changing core runtime behavior, run the full suite before you call it
 ```bash
 poetry env remove --all
 poetry install
+```
+
+If `./scripts/run_pipeline.sh` or another script unexpectedly uses plain `python`, check whether you have an unrelated virtual environment active. The pipeline now falls back to Poetry when the active venv is missing core repo dependencies, but the cleanest fix is still one of:
+
+```bash
+deactivate
+poetry install
+poetry run python -m src.main --ticker 0005.HK
 ```
 
 If `poetry run ibkr-dashboard` or `poetry run ibkr-dashboard-worker` warns that the entry point "isn't installed as a script", the commands were added to `pyproject.toml` after the virtualenv was created, or the project root was not reinstalled. `poetry install` fixes that. As a fallback, run:

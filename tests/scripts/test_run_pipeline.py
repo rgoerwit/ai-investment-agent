@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+_RUN_PIPELINE_PATH = Path(__file__).parent.parent.parent / "scripts" / "run_pipeline.sh"
+
 
 # ============================================================
 # TestVerdictExtraction — regex patterns matching report format
@@ -288,6 +290,53 @@ class TestResumability:
 
         result = self._run_skip_check(outfile, force=False)
         assert result == "SKIP"
+
+
+class TestStage1Contract:
+    @staticmethod
+    def _script_text() -> str:
+        return _RUN_PIPELINE_PATH.read_text()
+
+    def test_stage1_preview_mode_no_longer_mentions_strict(self):
+        script = self._script_text()
+        assert "Mode:                --quick --brief --no-memory" in script
+        assert "Mode:                --quick --strict --brief --no-memory" not in script
+
+    def test_stage1_quick_command_is_non_strict(self):
+        script = self._script_text()
+        assert "--quick --no-charts --quiet --brief --no-memory \\" in script
+        assert (
+            "--quick --strict --no-charts --quiet --brief --no-memory \\" not in script
+        )
+
+    def test_help_text_limits_strict_to_stage2(self):
+        script = self._script_text()
+        assert "Apply strict mode to Stage 2 full analysis" in script
+        assert (
+            "Stage 1 screening always runs strict regardless of this flag."
+            not in script
+        )
+
+
+class TestPythonRuntimeResolution:
+    @staticmethod
+    def _script_text() -> str:
+        return _RUN_PIPELINE_PATH.read_text()
+
+    def test_active_venv_is_validated_before_use(self):
+        script = self._script_text()
+        assert 'python -c "import pandas, requests, yfinance"' in script
+
+    def test_missing_active_venv_deps_falls_back_to_poetry(self):
+        script = self._script_text()
+        assert (
+            "Active virtual environment lacks repo dependencies; falling back to Poetry runtime"
+            in script
+        )
+        assert (
+            "Deactivate the unrelated venv, or install this project's dependencies into it"
+            in script
+        )
 
 
 class TestPipelineMarkerPayload:

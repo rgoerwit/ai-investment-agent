@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
+from rich.console import Console
 
 from src.token_tracker import (
     AgentTokenStats,
@@ -374,6 +375,109 @@ class TestTokenTracker:
         assert stats["total_tokens"] == 4500
         assert "agent1" in stats["agents"]
         assert "agent2" in stats["agents"]
+
+    def test_get_top_spenders_sorted_by_cost_tokens_then_name(self):
+        tracker = TokenTracker()
+        tracker.reset()
+
+        tracker.record_usage(
+            agent_name="zeta",
+            model_name="gemini-2.5-flash",
+            prompt_tokens=1_000_000,
+            completion_tokens=1_000_000,
+        )
+        tracker.record_usage(
+            agent_name="alpha",
+            model_name="gemini-2.5-flash",
+            prompt_tokens=1_000_000,
+            completion_tokens=1_000_000,
+        )
+        tracker.record_usage(
+            agent_name="beta",
+            model_name="gemini-2.5-flash",
+            prompt_tokens=500_000,
+            completion_tokens=500_000,
+        )
+
+        top_spenders = tracker.get_top_spenders()
+
+        assert [entry["agent"] for entry in top_spenders] == ["alpha", "zeta", "beta"]
+
+    def test_get_top_spenders_handles_empty_zero_and_large_limit(self):
+        tracker = TokenTracker()
+        tracker.reset()
+
+        assert tracker.get_top_spenders() == []
+        assert tracker.get_top_spenders(limit=0) == []
+
+        tracker.record_usage(
+            agent_name="solo",
+            model_name="gemini-2.5-flash",
+            prompt_tokens=100,
+            completion_tokens=50,
+        )
+        assert [entry["agent"] for entry in tracker.get_top_spenders(limit=99)] == [
+            "solo"
+        ]
+
+    def test_print_summary_logs_top_spenders_info_event(self):
+        tracker = TokenTracker()
+        tracker.reset()
+        tracker.record_usage(
+            agent_name="pm",
+            model_name="gemini-3-pro-preview",
+            prompt_tokens=1000,
+            completion_tokens=500,
+        )
+        tracker.record_usage(
+            agent_name="news",
+            model_name="gemini-2.5-flash",
+            prompt_tokens=500,
+            completion_tokens=100,
+        )
+
+        with patch("src.token_tracker.logger.info") as mock_info:
+            tracker.print_summary(ticker="AAPL")
+
+        summary_calls = [
+            call
+            for call in mock_info.call_args_list
+            if call.args and call.args[0] == "analysis_cost_summary"
+        ]
+        assert len(summary_calls) == 1
+        payload = summary_calls[0].kwargs
+        assert payload["ticker"] == "AAPL"
+        assert payload["total_calls"] == 2
+        assert payload["top_spenders"][0]["agent"] == "pm"
+
+    def test_display_token_summary_includes_top_spenders(self):
+        import io
+
+        from src.output import display_token_summary
+
+        tracker = TokenTracker()
+        tracker.reset()
+        tracker.record_usage(
+            agent_name="portfolio_manager",
+            model_name="gemini-3-pro-preview",
+            prompt_tokens=1000,
+            completion_tokens=500,
+        )
+        tracker.record_usage(
+            agent_name="market_analyst",
+            model_name="gemini-2.5-flash",
+            prompt_tokens=500,
+            completion_tokens=100,
+        )
+
+        buf = io.StringIO()
+        console = Console(file=buf, width=120)
+        display_token_summary(console_obj=console)
+
+        output = buf.getvalue()
+        assert "Token Usage Summary" in output
+        assert "Top Spenders" in output
+        assert "portfolio_manager" in output
 
     def test_reset(self):
         """Test resetting the tracker."""

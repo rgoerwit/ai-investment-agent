@@ -235,6 +235,33 @@ class TokenTracker:
             "failed_by_kind": self._count_failures("failure_kind"),
         }
 
+    def get_top_spenders(self, limit: int = 5) -> list[dict[str, Any]]:
+        """Return top spenders sorted by cost, then total tokens, then name."""
+        if limit <= 0:
+            return []
+
+        stats = self.get_total_stats()
+        sorted_agents = sorted(
+            stats["agents"].items(),
+            key=lambda item: (
+                -item[1].get("cost_usd", 0.0),
+                -item[1].get("total_tokens", 0),
+                item[0],
+            ),
+        )
+
+        return [
+            {
+                "agent": agent_name,
+                "calls": agent_stats.get("calls", 0),
+                "prompt_tokens": agent_stats.get("prompt_tokens", 0),
+                "completion_tokens": agent_stats.get("completion_tokens", 0),
+                "total_tokens": agent_stats.get("total_tokens", 0),
+                "cost_usd": agent_stats.get("cost_usd", 0.0),
+            }
+            for agent_name, agent_stats in sorted_agents[:limit]
+        ]
+
     def _count_failures(self, key: str) -> dict[str, int]:
         counts: dict[str, int] = {}
         for failure in self.failed_attempts:
@@ -271,12 +298,13 @@ class TokenTracker:
         if not self._quiet_mode:
             logger.debug("token_tracker_reset", session_start=self.session_start)
 
-    def print_summary(self):
+    def print_summary(self, *, ticker: str | None = None):
         """Print a formatted summary of token usage to logger."""
         if self._quiet_mode:
             return
 
         stats = self.get_total_stats()
+        top_spenders = self.get_top_spenders()
 
         logger.info("TOKEN USAGE SUMMARY")
         logger.info(f"Session Start: {stats['session_start']}")
@@ -296,9 +324,21 @@ class TokenTracker:
         if stats["failed_by_kind"]:
             logger.info(f"Failed by Kind: {stats['failed_by_kind']}")
 
+        logger.info(
+            "analysis_cost_summary",
+            ticker=ticker,
+            total_calls=stats["total_calls"],
+            total_prompt_tokens=stats["total_prompt_tokens"],
+            total_completion_tokens=stats["total_completion_tokens"],
+            total_tokens=stats["total_tokens"],
+            total_cost_usd=round(stats["total_cost_usd"], 6),
+            top_spenders=top_spenders,
+        )
+
         # Sort agents by cost (descending)
         sorted_agents = sorted(
-            stats["agents"].items(), key=lambda x: x[1]["cost_usd"], reverse=True
+            stats["agents"].items(),
+            key=lambda x: (-x[1]["cost_usd"], -x[1]["total_tokens"], x[0]),
         )
 
         logger.debug("Per-Agent Breakdown:")

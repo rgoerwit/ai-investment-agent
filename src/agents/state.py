@@ -1,7 +1,12 @@
 from typing import Annotated, Any
 
+from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
 from langgraph.graph import MessagesState
+from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
+
+PROVENANCE_MARKERS = ('"_field_sources"', '"_source_conflicts"')
+MESSAGE_TAIL_LIMIT = 12
 
 
 class InvestDebateState(TypedDict):
@@ -37,6 +42,66 @@ class RiskDebateState(TypedDict):
 def take_last(x, y):
     """Reducer: takes the most recent value. Used with Annotated fields."""
     return y
+
+
+def _message_key(message: BaseMessage) -> tuple[str, str, str]:
+    return (
+        type(message).__name__,
+        getattr(message, "id", "") or "",
+        getattr(message, "tool_call_id", "") or "",
+    )
+
+
+def _is_provenance_tool_message(message: BaseMessage) -> bool:
+    if not isinstance(message, ToolMessage):
+        return False
+    try:
+        content = (
+            message.content
+            if isinstance(message.content, str)
+            else str(message.content)
+        )
+    except Exception:
+        return False
+    return any(marker in content for marker in PROVENANCE_MARKERS)
+
+
+def merge_and_cap_messages(
+    x: list[BaseMessage] | None, y: list[BaseMessage] | BaseMessage | None
+) -> list[BaseMessage]:
+    """Merge messages using LangGraph semantics, then cap generic history."""
+    merged = add_messages(x or [], y or [])
+    if not merged:
+        return []
+
+    preserved_indices: set[int] = set()
+
+    for idx, message in enumerate(merged):
+        if isinstance(message, HumanMessage):
+            preserved_indices.add(idx)
+            break
+
+    for idx, message in enumerate(merged):
+        if _is_provenance_tool_message(message):
+            preserved_indices.add(idx)
+
+    tail_candidates = [
+        idx for idx in range(len(merged)) if idx not in preserved_indices
+    ]
+    preserved_indices.update(tail_candidates[-MESSAGE_TAIL_LIMIT:])
+
+    result: list[BaseMessage] = []
+    seen_keys: set[tuple[str, str, str, int]] = set()
+    for idx, message in enumerate(merged):
+        if idx not in preserved_indices:
+            continue
+        identity_key = (*_message_key(message), id(message))
+        if identity_key in seen_keys:
+            continue
+        seen_keys.add(identity_key)
+        result.append(message)
+
+    return result
 
 
 def merge_dicts(x: dict | None, y: dict | None) -> dict:
@@ -108,6 +173,7 @@ def merge_invest_debate_state(
 
 
 class AgentState(MessagesState):
+    messages: Annotated[list[BaseMessage], merge_and_cap_messages]
     company_of_interest: str
     company_name: str
     company_name_resolved: bool

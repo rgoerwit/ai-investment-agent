@@ -142,6 +142,24 @@ def display_token_summary(*, console_obj: Console = console) -> None:
     )
 
     console_obj.print(summary_table)
+    top_spenders = tracker.get_top_spenders(limit=5)
+    if top_spenders:
+        console_obj.print("\n[bold cyan]Top Spenders:[/bold cyan]\n")
+        top_table = Table(show_header=True, box=box.ROUNDED)
+        top_table.add_column("Agent", style="cyan")
+        top_table.add_column("Calls", style="yellow", justify="right")
+        top_table.add_column("Total Tokens", style="green", justify="right")
+        top_table.add_column("Cost (USD)", style="red", justify="right")
+
+        for entry in top_spenders:
+            top_table.add_row(
+                entry["agent"],
+                str(entry["calls"]),
+                f"{entry['total_tokens']:,}",
+                f"${entry['cost_usd']:.4f}",
+            )
+
+        console_obj.print(top_table)
     console_obj.print("\n[bold cyan]Per-Agent Token Usage:[/bold cyan]\n")
 
     agent_table = Table(show_header=True, box=box.ROUNDED)

@@ -94,7 +94,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Forensic Auditor PERIOD Labeling** — META block now outputs `PERIOD: FY/H1/H2/Q1–Q4`; balance sheet date extracted in fetcher (`auditor.json` v2.6).
 - **Consultant COVERAGE_GAP Rule** — Neutral rule broadened from Taiwan/Japan micro-caps to all ex-US markets (`.AX`, `.TO/.V`, `.OL`, `.BR/.AS/.PA/.DE`) (`consultant.json` v2.4).
 - **PFIC Detection** — Short-term investments (STI) added to cash definition; balance sheet PFIC fields extracted directly.
-- **`--strict` in Stage 1** — Hardcoded to enforce thesis filters before LLM spend is incurred.
+- **Stage 1 quick screen** — Now runs in non-strict quick mode; strict thesis enforcement is reserved for Stage 2 full analysis.
 - **Taiwanese Equity Gap Handling** — Data gaps no longer treated as integrity failures; construction-sector debt thresholds and extra equity-match checks added.
 - **Cross-Day Run Resumption** — Interrupted batch runs can resume mid-ticker-list without reprocessing completed tickers.
 
