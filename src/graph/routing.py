@@ -101,6 +101,8 @@ def _is_auditor_enabled() -> bool:
     Check if auditor node should be enabled.
 
     Must match the logic in create_auditor_llm() to avoid graph/router mismatch.
+    ENABLE_CONSULTANT currently gates the shared OpenAI cross-check plane, so
+    it applies to the auditor path too even though the setting name is narrower.
     Returns True only if:
     - ENABLE_CONSULTANT is True
     - OPENAI_API_KEY is available

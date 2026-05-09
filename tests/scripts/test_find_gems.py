@@ -654,6 +654,82 @@ class TestFetchAndFilter:
         assert "P/E<=18 or <=24 with stronger quality" in stderr
         assert "Contextual band requires ROE>=16%/ROA>=7%" in stderr
 
+    def test_process_pool_collector_closes_and_joins_on_normal_completion(self):
+        records = [{"YF_Ticker": "7203.T"}, {"YF_Ticker": "6758.T"}]
+        lifecycle: list[str] = []
+
+        class FakePool:
+            def imap_unordered(self, worker_fn, tasks, chunksize=1):
+                for task in tasks:
+                    yield {"YF_Ticker": task[0]["YF_Ticker"]}
+
+            def close(self):
+                lifecycle.append("close")
+
+            def terminate(self):
+                lifecycle.append("terminate")
+
+            def join(self):
+                lifecycle.append("join")
+
+        class FakeContext:
+            def Pool(self, processes):
+                assert processes == 2
+                lifecycle.append("pool")
+                return FakePool()
+
+        with patch("find_gems.mp.get_context", return_value=FakeContext()):
+            with patch("find_gems._passes_filters", return_value=True):
+                passing, enriched = find_gems._collect_enrichment_results(
+                    records,
+                    fx_rates={"USD": 1.0},
+                    criteria=find_gems.ScreenCriteria(),
+                    workers=2,
+                )
+
+        assert [row["YF_Ticker"] for row in passing] == ["7203.T", "6758.T"]
+        assert [row["YF_Ticker"] for row in enriched] == ["7203.T", "6758.T"]
+        assert lifecycle == ["pool", "close", "join"]
+
+    def test_process_pool_collector_terminates_and_joins_on_interrupt(self):
+        records = [{"YF_Ticker": "7203.T"}, {"YF_Ticker": "6758.T"}]
+        lifecycle: list[str] = []
+
+        class FakePool:
+            def imap_unordered(self, worker_fn, tasks, chunksize=1):
+                task_iter = iter(tasks)
+                first = next(task_iter)
+                yield {"YF_Ticker": first[0]["YF_Ticker"]}
+                raise KeyboardInterrupt()
+
+            def close(self):
+                lifecycle.append("close")
+
+            def terminate(self):
+                lifecycle.append("terminate")
+
+            def join(self):
+                lifecycle.append("join")
+
+        class FakeContext:
+            def Pool(self, processes):
+                assert processes == 2
+                lifecycle.append("pool")
+                return FakePool()
+
+        with patch("find_gems.mp.get_context", return_value=FakeContext()):
+            with patch("find_gems._passes_filters", return_value=True):
+                passing, enriched = find_gems._collect_enrichment_results(
+                    records,
+                    fx_rates={"USD": 1.0},
+                    criteria=find_gems.ScreenCriteria(),
+                    workers=2,
+                )
+
+        assert [row["YF_Ticker"] for row in passing] == ["7203.T"]
+        assert [row["YF_Ticker"] for row in enriched] == ["7203.T"]
+        assert lifecycle == ["pool", "terminate", "join"]
+
 
 # ============================================================
 # TestWriteOutputs — filesystem with tmp_path

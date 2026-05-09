@@ -256,11 +256,7 @@ class TestConfigurationEdgeCases:
 
     def test_consultant_with_empty_api_key(self):
         """Test consultant with empty string API key (not missing)."""
-        import src.llms
         from src.llms import get_consultant_llm
-
-        # Reset singleton to force re-evaluation
-        src.llms._consultant_llm_instance = None
 
         with patch("src.llms.config") as mock_config:
             mock_config.enable_consultant = True
@@ -270,24 +266,14 @@ class TestConfigurationEdgeCases:
             # Should return None (empty key treated same as missing)
             assert llm is None
 
-        # Reset for other tests
-        src.llms._consultant_llm_instance = None
-
     def test_consultant_enable_flag_disabled(self):
         """Test that consultant is disabled when enable_consultant=False."""
-        import src.llms
         from src.llms import get_consultant_llm
-
-        # Reset singleton to force re-evaluation
-        src.llms._consultant_llm_instance = None
 
         with patch("src.llms.config") as mock_config:
             mock_config.enable_consultant = False
             llm = get_consultant_llm()
             assert llm is None, "Should be disabled when enable_consultant=False"
-
-        # Reset for other tests
-        src.llms._consultant_llm_instance = None
 
 
 class TestErrorPropagation:

@@ -11,7 +11,7 @@
 #   --force             Re-run even if output files exist (disables resumability)
 #   --skip-scrape FILE  Use existing ticker list instead of running find_gems.py
 #   --include-us        Pass --include-us to find_gems.py
-#   --cooldown N        Override COOLDOWN_SECONDS (default: 60)
+#   --cooldown N        Override COOLDOWN_SECONDS (default: 10)
 #   --stage N           Start from stage N (0, 1, or 2). Requires prior stages' outputs.
 #   --run-date DATE     Force output/resume date (YYYY-MM-DD), useful for cross-day resume
 #   --buys-file FILE    Explicit BUY list path (bypasses date-based default; use with --stage 2
@@ -20,7 +20,7 @@
 #   -h, --help          Show this help message
 #
 # Environment:
-#   COOLDOWN_SECONDS    Seconds between tickers (default: 60, use 10 for paid tier)
+#   COOLDOWN_SECONDS    Seconds between tickers (default: 10)
 
 set -euo pipefail
 
@@ -34,7 +34,7 @@ DATE=$(date +%Y-%m-%d)
 SCRATCH="scratch"
 TICKER_LIST="${SCRATCH}/gems_${DATE}.txt"
 BUY_LIST="${SCRATCH}/buys_${DATE}.txt"
-COOLDOWN="${COOLDOWN_SECONDS:-60}"
+COOLDOWN="${COOLDOWN_SECONDS:-10}"
 FORCE=false
 SKIP_SCRAPE=""
 INCLUDE_US=""
@@ -59,6 +59,21 @@ info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
 success() { echo -e "${GREEN}[OK]${NC} $1"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
 fail()    { echo -e "${RED}[FAIL]${NC} $1"; }
+
+# Detect inherited SIG_IGN for SIGINT. If the parent shell session has left
+# SIGINT in an ignored state (a borked tty after a crashed prompt-toolkit app
+# such as aider, a non-interactive parent shell, etc.), bash inherits that
+# disposition and Ctrl-C produces no signal — there is no in-script remedy
+# (an explicit `trap` here cannot override an inherited SIG_IGN reliably on
+# bash 3.2). Warn the operator so they know to use kill from another terminal
+# instead of expecting Ctrl-C to abort.
+case "$(trap -p INT)" in
+    *"-- ''"*)
+        warn "SIGINT appears to be ignored in this shell session — Ctrl-C will NOT abort this run."
+        warn "If you need to stop this run, use 'kill <pid>' from another terminal."
+        warn "To restore Ctrl-C behavior: open a fresh terminal (or run 'stty sane' and start a new shell)."
+        ;;
+esac
 
 # --- Confirmation prompt (skipped with --yes) ---
 confirm() {
@@ -296,7 +311,7 @@ OPTIONS:
   --force             Re-run even if output files exist (disables resumability)
   --skip-scrape FILE  Use existing ticker list instead of running find_gems.py
   --include-us        Include US exchanges in scrape phase
-  --cooldown N        Seconds between ticker analyses (default: 60)
+  --cooldown N        Seconds between ticker analyses (default: 10)
   --stage N           Start from stage N (0, 1, or 2)
   --run-date DATE     Force the pipeline/output date (YYYY-MM-DD) for cross-day resume
   --buys-file FILE    Explicit BUY list path — bypasses the date-based default
@@ -310,6 +325,10 @@ OPTIONS:
 
 ENVIRONMENT:
   COOLDOWN_SECONDS    Default cooldown (overridden by --cooldown flag)
+
+CANCELLATION:
+  Ctrl-C             Stop the active stage cleanly
+  Force stop         Kill the whole process group, not only the shell PID
 
 EXAMPLES:
   # Full pipeline from scratch
@@ -379,6 +398,10 @@ mkdir -p "$SCRATCH"
 resolve_python_cmd
 info "Python runtime:      $PYTHON_CMD_DISPLAY"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/pipeline_signals.sh"
+
 # ============================================================
 # STAGE 0: Scrape + Filter
 # ============================================================
@@ -402,9 +425,11 @@ if [[ $START_STAGE -le 0 ]]; then
         fi
 
         info "Running: ${GEMS_CMD[*]}"
-        if "${GEMS_CMD[@]}"; then
+        if run_tracked_child "" "${GEMS_CMD[@]}"; then
             success "Scrape + filter complete"
         else
+            status=$?
+            exit_if_interrupted_status "$status"
             fail "find_gems.py failed"
             exit 1
         fi
@@ -532,14 +557,15 @@ if [[ $START_STAGE -le 1 ]]; then
         STAGE1_PROCESSED=$((STAGE1_PROCESSED + 1))
         info "[$STAGE1_PROCESSED/$STAGE1_TODO, $TICKER_COUNT total] Quick: $ticker"
 
-        if "${PYTHON_CMD[@]}" -m src.main \
+        if run_tracked_child "$LOGFILE" "${PYTHON_CMD[@]}" -m src.main \
             --ticker "$ticker" \
             --quick --no-charts --quiet --brief --no-memory \
-            --output "$OUTFILE" \
-            2> "$LOGFILE"; then
+            --output "$OUTFILE"; then
             VERDICT=$(extract_report_verdict "$OUTFILE")
             [[ -n "$VERDICT" ]] && success "$ticker done [Verdict=${VERDICT}]" || success "$ticker done"
         else
+            status=$?
+            exit_if_interrupted_status "$status"
             fail "FAILED: $ticker (see $LOGFILE)"
             STAGE1_FAILED=$((STAGE1_FAILED + 1))
         fi
@@ -701,15 +727,16 @@ if [[ $START_STAGE -le 2 ]]; then
         STAGE2_PROCESSED=$((STAGE2_PROCESSED + 1))
         info "[$STAGE2_PROCESSED/$STAGE2_TODO, $BUY_TOTAL total] Full: $ticker"
 
-        if "${PYTHON_CMD[@]}" -m src.main \
+        if run_tracked_child "$LOGFILE" "${PYTHON_CMD[@]}" -m src.main \
             --ticker "$ticker" \
             --transparent --quiet \
             $STRICT_FLAG \
-            --output "$OUTFILE" \
-            2> "$LOGFILE"; then
+            --output "$OUTFILE"; then
             VERDICT=$(extract_report_verdict "$OUTFILE")
             [[ -n "$VERDICT" ]] && success "$ticker done [Verdict=${VERDICT}]" || success "$ticker done"
         else
+            status=$?
+            exit_if_interrupted_status "$status"
             fail "FAILED: $ticker (see $LOGFILE)"
             STAGE2_FAILED=$((STAGE2_FAILED + 1))
         fi

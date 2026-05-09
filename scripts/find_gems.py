@@ -19,10 +19,11 @@ import argparse
 import io
 import json
 import logging
+import multiprocessing as mp
 import random
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -820,6 +821,147 @@ def _process_row(row, *, fx_rates=None, min_mcap=None, min_volume=None, debug=Fa
     return None
 
 
+def _process_row_pool_task(task):
+    row, fx_rates, min_mcap, min_volume, debug = task
+    return _process_row(
+        dict(row),
+        fx_rates=fx_rates,
+        min_mcap=min_mcap,
+        min_volume=min_volume,
+        debug=debug,
+    )
+
+
+def _process_row_serial_task(task):
+    return _process_row_pool_task(task)
+
+
+def _handle_enriched_row_result(
+    data,
+    *,
+    criteria: ScreenCriteria,
+    debug: bool,
+    passing: list[dict],
+    all_enriched: list[dict],
+):
+    if data is None:
+        return
+
+    all_enriched.append(data)
+    if _passes_filters(data, criteria=criteria, debug=debug):
+        passing.append(data)
+
+
+def _log_filter_progress(
+    *,
+    processed_count: int,
+    total: int,
+    start_time: float,
+    passing: list[dict],
+):
+    if processed_count % 50 != 0:
+        return
+
+    elapsed = time.time() - start_time
+    rate = processed_count / elapsed if elapsed > 0 else 0
+    n_pass = len(passing)
+    print(
+        f"Progress: {processed_count}/{total} ({rate:.1f} t/s, {n_pass} passing)",
+        file=sys.stderr,
+    )
+
+
+def _iter_enrichment_tasks(records, *, fx_rates, criteria: ScreenCriteria, debug: bool):
+    for row in records:
+        yield (row, fx_rates, criteria.min_mcap, criteria.min_volume, debug)
+
+
+def _collect_enrichment_results(
+    records,
+    *,
+    fx_rates,
+    criteria: ScreenCriteria,
+    workers: int,
+    debug: bool = False,
+    worker_fn=_process_row_pool_task,
+):
+    passing = []
+    all_enriched = []
+    processed_count = 0
+    total = len(records)
+    start_time = time.time()
+
+    if workers <= 1:
+        try:
+            for task in _iter_enrichment_tasks(
+                records,
+                fx_rates=fx_rates,
+                criteria=criteria,
+                debug=debug,
+            ):
+                processed_count += 1
+                try:
+                    data = _process_row_serial_task(task)
+                except Exception:
+                    data = None
+                _handle_enriched_row_result(
+                    data,
+                    criteria=criteria,
+                    debug=debug,
+                    passing=passing,
+                    all_enriched=all_enriched,
+                )
+                _log_filter_progress(
+                    processed_count=processed_count,
+                    total=total,
+                    start_time=start_time,
+                    passing=passing,
+                )
+        except KeyboardInterrupt:
+            print("\nInterrupted! Returning partial results...", file=sys.stderr)
+        return passing, all_enriched
+
+    pool = None
+    try:
+        pool = mp.get_context("spawn").Pool(processes=workers)
+        for data in pool.imap_unordered(
+            worker_fn,
+            _iter_enrichment_tasks(
+                records,
+                fx_rates=fx_rates,
+                criteria=criteria,
+                debug=debug,
+            ),
+            chunksize=1,
+        ):
+            processed_count += 1
+            _handle_enriched_row_result(
+                data,
+                criteria=criteria,
+                debug=debug,
+                passing=passing,
+                all_enriched=all_enriched,
+            )
+            _log_filter_progress(
+                processed_count=processed_count,
+                total=total,
+                start_time=start_time,
+                passing=passing,
+            )
+    except KeyboardInterrupt:
+        print("\nInterrupted! Returning partial results...", file=sys.stderr)
+        if pool is not None:
+            pool.terminate()
+    else:
+        if pool is not None:
+            pool.close()
+    finally:
+        if pool is not None:
+            pool.join()
+
+    return passing, all_enriched
+
+
 def _safe_float(val):
     try:
         return float(val)
@@ -1145,47 +1287,13 @@ def fetch_and_filter(
     )
     print(f"Criteria: {criteria.describe()}", file=sys.stderr)
 
-    passing = []
-    all_enriched = []
-    processed_count = 0
-    start_time = time.time()
-
-    try:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            future_to_row = {
-                executor.submit(
-                    _process_row,
-                    row,
-                    fx_rates=fx_rates,
-                    min_mcap=criteria.min_mcap,
-                    min_volume=criteria.min_volume,
-                    debug=debug,
-                ): row
-                for row in records
-            }
-
-            for future in as_completed(future_to_row):
-                processed_count += 1
-                try:
-                    data = future.result()
-                    if data is not None:
-                        all_enriched.append(data)
-
-                        if _passes_filters(data, criteria=criteria, debug=debug):
-                            passing.append(data)
-
-                    if processed_count % 50 == 0:
-                        elapsed = time.time() - start_time
-                        rate = processed_count / elapsed if elapsed > 0 else 0
-                        n_pass = len(passing)
-                        print(
-                            f"Progress: {processed_count}/{total} ({rate:.1f} t/s, {n_pass} passing)",
-                            file=sys.stderr,
-                        )
-                except Exception:
-                    pass
-    except KeyboardInterrupt:
-        print("\nInterrupted! Returning partial results...", file=sys.stderr)
+    passing, all_enriched = _collect_enrichment_results(
+        records,
+        fx_rates=fx_rates,
+        criteria=criteria,
+        workers=workers,
+        debug=debug,
+    )
 
     passing_df = (
         pd.DataFrame(passing) if passing else pd.DataFrame(columns=ENRICHED_COLUMNS)

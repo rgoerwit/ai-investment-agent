@@ -61,6 +61,7 @@ class InspectionDecision:
     sanitized_content: str | None = None
     findings: list[str] = field(default_factory=list)
     reason: str | None = None
+    expected_wrapper_cleanup: bool = False
 
 
 @runtime_checkable

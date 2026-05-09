@@ -541,13 +541,10 @@ def create_consultant_llm(
 
     # Get model name from config (not os.environ)
     if model:
-        # Explicit model override
         model_name = model
     elif quick_mode:
-        # Quick mode: use faster/cheaper model (defaults to gpt-4o-mini)
-        model_name = config.consultant_quick_model
+        model_name = config.consultant_quick_model or config.consultant_model
     else:
-        # Normal mode: use full model (defaults to gpt-4o)
         model_name = config.consultant_model
 
     logger.info(
@@ -573,11 +570,11 @@ def create_consultant_llm(
         "output_version": "responses/v1",
     }
 
-    # GPT-5 non-pro models support configurable reasoning effort. Pinning the
-    # consultant to medium keeps it thoughtful without inheriting the much
-    # slower deep-thinking behavior of pro variants.
+    # GPT-5 non-pro models support configurable reasoning effort. Quick mode
+    # uses a lower setting to keep the consultant active without paying full
+    # synthesis cost; normal mode preserves the current medium effort.
     if model_name.startswith("gpt-5") and "pro" not in model_name:
-        kwargs["reasoning_effort"] = "medium"
+        kwargs["reasoning_effort"] = "low" if quick_mode else "medium"
 
     budget = _resolve_generation_budget(
         intent_tokens=kwargs["max_completion_tokens"],
@@ -841,7 +838,9 @@ def create_editor_llm(
     return llm
 
 
-# Initialize consultant LLM (lazy initialization to handle missing API key gracefully)
+# Legacy symbol kept for compatibility with older tests/importers. Consultant
+# instances are now created per call so quick/full mode configuration and
+# per-run callbacks cannot bleed into one another.
 _consultant_llm_instance = None
 
 
@@ -851,9 +850,9 @@ def get_consultant_llm(
     max_completion_tokens: int | None = None,
 ) -> BaseChatModel | None:
     """
-    Get or create the consultant LLM instance.
+    Get a consultant LLM instance for the current run.
 
-    Uses lazy initialization to gracefully handle missing OPENAI_API_KEY.
+    Uses lazy dependency checks to gracefully handle missing OPENAI_API_KEY.
     If consultant is disabled or API key is missing, returns None.
 
     Args:
@@ -863,18 +862,7 @@ def get_consultant_llm(
     Returns:
         ChatOpenAI instance or None if consultant disabled/unavailable
 
-    Note:
-        Caching is NOT affected by quick_mode - the instance is created once
-        with the mode that was first requested. This matches Gemini behavior
-        where models are configured at graph build time, not per-run.
     """
-    global _consultant_llm_instance
-
-    # Skip consultant in quick mode for performance
-    if quick_mode:
-        logger.info("consultant_quick_mode_skip")
-        return None
-
     # Check if consultant is enabled (via config, not os.environ)
     if not config.enable_consultant:
         logger.info("consultant_disabled")
@@ -885,23 +873,23 @@ def get_consultant_llm(
         logger.warning("consultant_no_api_key")
         return None
 
-    # Lazy initialization
-    if _consultant_llm_instance is None:
-        try:
-            _consultant_llm_instance = create_consultant_llm(
-                callbacks=callbacks,
-                quick_mode=quick_mode,
-                max_completion_tokens=max_completion_tokens,
-            )
-        except Exception as e:
-            logger.error(
-                "consultant_llm_init_failed",
-                model=config.consultant_model,
-                quick_mode=quick_mode,
-                error_type=type(e).__name__,
-                error=str(e),
-                exc_info=True,
-            )
-            return None
-
-    return _consultant_llm_instance
+    try:
+        return create_consultant_llm(
+            callbacks=callbacks,
+            quick_mode=quick_mode,
+            max_completion_tokens=max_completion_tokens,
+        )
+    except Exception as e:
+        logger.error(
+            "consultant_llm_init_failed",
+            model=(
+                config.consultant_quick_model or config.consultant_model
+                if quick_mode
+                else config.consultant_model
+            ),
+            quick_mode=quick_mode,
+            error_type=type(e).__name__,
+            error=str(e),
+            exc_info=True,
+        )
+        return None

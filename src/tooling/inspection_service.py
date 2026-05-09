@@ -19,6 +19,7 @@ available so structured payload shapes are not lost.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Literal
 
 import structlog
@@ -33,6 +34,7 @@ from src.tooling.inspector import (
 logger = structlog.get_logger(__name__)
 
 _BLOCKED_PLACEHOLDER = "TOOL_BLOCKED: {reason}"
+_SUPPRESSED_DUPLICATE_MILESTONES = frozenset({1, 5, 10, 25, 50, 100})
 
 
 class InspectionService:
@@ -57,6 +59,7 @@ class InspectionService:
         self._inspector: ContentInspector = inspector or NullInspector()
         self._mode = mode
         self._fail_policy = fail_policy
+        self._finding_counts: dict[tuple[str, ...], int] = {}
 
     def configure(
         self,
@@ -68,10 +71,96 @@ class InspectionService:
         self._inspector = inspector
         self._mode = mode
         self._fail_policy = fail_policy
+        self._finding_counts.clear()
 
     @property
     def mode(self) -> str:
         return self._mode
+
+    @staticmethod
+    def _is_low_risk_sanitize(decision: InspectionDecision) -> bool:
+        return decision.action == "sanitize" and set(decision.threat_types) == {
+            "delimiter_breakout"
+        }
+
+    @staticmethod
+    def _base_log_payload(
+        envelope: InspectionEnvelope,
+        decision: InspectionDecision,
+    ) -> dict[str, Any]:
+        return {
+            "source_kind": envelope.source_kind.value,
+            "source_name": envelope.source_name,
+            "tool_name": envelope.tool_name,
+            "agent_key": envelope.agent_key,
+            "action": decision.action,
+            "threat_level": decision.threat_level,
+            "threat_types": decision.threat_types,
+            "confidence": decision.confidence,
+            "findings": decision.findings,
+            "reason": decision.reason,
+            "expected_wrapper_cleanup": decision.expected_wrapper_cleanup,
+        }
+
+    def _low_risk_dedupe_key(
+        self,
+        envelope: InspectionEnvelope,
+        decision: InspectionDecision,
+    ) -> tuple[str, ...]:
+        content_hash = hashlib.sha1(envelope.content_text.encode("utf-8")).hexdigest()[
+            :12
+        ]
+        return (
+            envelope.source_kind.value,
+            envelope.source_name,
+            envelope.tool_name or "",
+            envelope.agent_key or "",
+            decision.action,
+            ",".join(sorted(decision.threat_types)),
+            decision.reason or "",
+            content_hash,
+        )
+
+    def _duplicate_count(
+        self,
+        envelope: InspectionEnvelope,
+        decision: InspectionDecision,
+    ) -> int:
+        dedupe_key = self._low_risk_dedupe_key(envelope, decision)
+        count = self._finding_counts.get(dedupe_key, 0) + 1
+        self._finding_counts[dedupe_key] = count
+        return count
+
+    def _log_inspection_finding(
+        self,
+        envelope: InspectionEnvelope,
+        decision: InspectionDecision,
+    ) -> None:
+        payload = self._base_log_payload(envelope, decision)
+        count = self._duplicate_count(envelope, decision)
+        if count > 1:
+            suppressed = count - 1
+            if suppressed in _SUPPRESSED_DUPLICATE_MILESTONES:
+                logger.debug(
+                    "content_inspection_suppressed_duplicates",
+                    suppressed_duplicates=suppressed,
+                    **payload,
+                )
+            return
+
+        if decision.action in ("block", "degrade"):
+            logger.warning("content_inspection_finding", **payload)
+            return
+
+        if self._is_low_risk_sanitize(decision):
+            logger.debug("content_inspection_finding", **payload)
+            return
+
+        if decision.action == "sanitize":
+            logger.warning("content_inspection_finding", **payload)
+            return
+
+        logger.debug("content_inspection_finding", **payload)
 
     async def evaluate(
         self,
@@ -126,19 +215,7 @@ class InspectionService:
 
         # Log findings for non-trivial decisions regardless of mode.
         if decision.findings or decision.threat_types:
-            logger.warning(
-                "content_inspection_finding",
-                source_kind=envelope.source_kind.value,
-                source_name=envelope.source_name,
-                tool_name=envelope.tool_name,
-                agent_key=envelope.agent_key,
-                action=decision.action,
-                threat_level=decision.threat_level,
-                threat_types=decision.threat_types,
-                confidence=decision.confidence,
-                findings=decision.findings,
-                reason=decision.reason,
-            )
+            self._log_inspection_finding(envelope, decision)
 
         if decision.action in ("block", "degrade"):
             if self._mode == "block":

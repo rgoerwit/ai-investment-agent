@@ -26,6 +26,7 @@ from typing import Any
 
 import structlog
 
+from src.async_utils import run_with_hard_timeout
 from src.config import config
 from src.data_block_utils import (
     extract_data_block_field,
@@ -668,9 +669,10 @@ async def compare_to_reality(snapshot: dict[str, Any]) -> dict[str, Any] | None:
 
             return result
 
-        data = await asyncio.wait_for(
+        data = await run_with_hard_timeout(
             asyncio.to_thread(_fetch_current_data),
             timeout=15.0,
+            label=f"retrospective_yfinance:{ticker}",
         )
 
     except asyncio.TimeoutError:

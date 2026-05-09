@@ -525,22 +525,20 @@ class TestCompareToReality:
     @pytest.mark.asyncio
     async def test_yfinance_failure_returns_none(self):
         """Graceful None return when yfinance raises."""
-        import asyncio as real_asyncio
-
         snapshot = _make_snapshot(
             analysis_date=(datetime.now() - timedelta(days=200)).strftime("%Y-%m-%d"),
         )
 
-        # Patch asyncio.wait_for inside the module
-        original_wait_for = real_asyncio.wait_for
-
-        async def failing_wait_for(coro, timeout):
+        async def failing_run_with_hard_timeout(coro, *, timeout, label):
             # Cancel the coroutine to avoid RuntimeWarning
             if hasattr(coro, "close"):
                 coro.close()
             raise Exception("yfinance down")
 
-        with patch("asyncio.wait_for", side_effect=failing_wait_for):
+        with patch(
+            "src.retrospective.run_with_hard_timeout",
+            side_effect=failing_run_with_hard_timeout,
+        ):
             result = await compare_to_reality(snapshot)
             assert result is None
 

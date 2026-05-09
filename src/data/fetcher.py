@@ -44,6 +44,7 @@ import pandas as pd
 import structlog
 import yfinance as yf
 
+from src.async_utils import run_with_hard_timeout
 from src.config import config
 from src.data.gap_fill import (
     calculate_coverage as calculate_coverage_impl,
@@ -1363,7 +1364,11 @@ class SmartMarketDataFetcher(FinancialFetcher):
         try:
             from yahooquery import search as yq_search
 
-            result = await asyncio.to_thread(yq_search, base)
+            result = await run_with_hard_timeout(
+                asyncio.to_thread(yq_search, base),
+                timeout=10,
+                label=f"yahooquery_search:{base}",
+            )
             quotes = result.get("quotes", []) if isinstance(result, dict) else []
             for q in quotes:
                 sym = q.get("symbol", "")
@@ -1409,8 +1414,10 @@ class SmartMarketDataFetcher(FinancialFetcher):
             query = f"{symbol} yahoo finance ticker numeric code"
 
             # Use Tavily to find the mapping
-            result = await asyncio.to_thread(
-                self.tavily_client.search, query, max_results=1
+            result = await run_with_hard_timeout(
+                asyncio.to_thread(self.tavily_client.search, query, max_results=1),
+                timeout=10,
+                label=f"tavily_ticker_resolve:{symbol}",
             )
 
             if not result or "results" not in result or not result["results"]:
@@ -1757,7 +1764,11 @@ class SmartMarketDataFetcher(FinancialFetcher):
             if not history_kwargs:
                 history_kwargs["period"] = period
 
-            hist = await asyncio.to_thread(stock.history, **history_kwargs)
+            hist = await run_with_hard_timeout(
+                asyncio.to_thread(stock.history, **history_kwargs),
+                timeout=15,
+                label=f"yfinance.history:{ticker}",
+            )
             if hist.empty:
                 resolved = await self._resolve_ticker_via_search(ticker)
                 if resolved:
@@ -1765,7 +1776,11 @@ class SmartMarketDataFetcher(FinancialFetcher):
                         "history_ticker_resolved", original=ticker, resolved=resolved
                     )
                     stock = yf.Ticker(resolved)
-                    hist = await asyncio.to_thread(stock.history, **history_kwargs)
+                    hist = await run_with_hard_timeout(
+                        asyncio.to_thread(stock.history, **history_kwargs),
+                        timeout=15,
+                        label=f"yfinance.history:{resolved}",
+                    )
             return hist
         except Exception as e:
             logger.error(

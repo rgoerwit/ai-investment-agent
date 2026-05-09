@@ -9,6 +9,7 @@ import structlog
 import yfinance as yf
 from langchain_core.tools import tool
 
+from src.async_utils import run_with_hard_timeout
 from src.ticker_utils import normalize_ticker
 
 logger = structlog.get_logger(__name__)
@@ -21,9 +22,10 @@ async def _load_ownership_property(
 ) -> object:
     """Bound blocking yfinance ownership-property access."""
     try:
-        return await asyncio.wait_for(
+        return await run_with_hard_timeout(
             asyncio.to_thread(lambda: getattr(yf_ticker, property_name)),
             timeout=OWNERSHIP_SECTION_TIMEOUT_SECONDS,
+            label=f"yfinance.{property_name}:{ticker}",
         )
     except asyncio.TimeoutError:
         logger.debug(

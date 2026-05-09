@@ -26,6 +26,7 @@ import src.cli as cli
 # Import config FIRST to set telemetry/system env vars before any library imports
 import src.output as output
 import src.persistence as persistence
+from src.async_utils import run_with_hard_timeout
 from src.config import config, validate_environment_variables
 from src.error_safety import format_error_message, summarize_exception
 from src.eval import (
@@ -281,8 +282,10 @@ async def _fetch_market_context(ticker: str, trade_date: str) -> str:
 
         suffix = get_ticker_suffix(ticker)
         benchmark = EXCHANGE_BENCHMARK.get(suffix, FALLBACK_BENCHMARK)
-        hist = await asyncio.to_thread(
-            lambda: yf.Ticker(benchmark).history(period="2d")
+        hist = await run_with_hard_timeout(
+            asyncio.to_thread(lambda: yf.Ticker(benchmark).history(period="2d")),
+            timeout=10,
+            label=f"market_context:{benchmark}",
         )
         if len(hist) >= 2:
             pct = (

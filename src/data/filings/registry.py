@@ -2,6 +2,7 @@
 
 import structlog
 
+from src.async_utils import run_with_hard_timeout
 from src.data.filings.base import FilingFetcher, FilingResult
 
 logger = structlog.get_logger(__name__)
@@ -34,7 +35,15 @@ class FilingRegistry:
         if not fetcher:
             return None
         try:
-            return await fetcher.get_filing_data(ticker)
+            # Hard wall-clock so a hung HTTP call inside the fetcher (EDINET,
+            # SEC EDGAR, etc.) cannot block the analysis pipeline. Internal
+            # asyncio.to_thread calls in fetcher implementations rely on this
+            # outer wrapper rather than each carrying its own timeout.
+            return await run_with_hard_timeout(
+                fetcher.get_filing_data(ticker),
+                timeout=30,
+                label=f"filing_fetch:{fetcher.source_name}:{ticker}",
+            )
         except Exception as e:
             logger.warning(
                 "filing_fetch_error",

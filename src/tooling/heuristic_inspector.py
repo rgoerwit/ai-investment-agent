@@ -202,11 +202,6 @@ _SIGNALS: list[_Signal] = [
         1.5,
         "override",
     ),
-    _Signal(
-        re.compile(r"[\u200b-\u200f\u2028-\u202f\u2060-\u206f\ufeff]"),
-        1.5,
-        "hidden_markup",
-    ),
 ]
 
 # Delimiter tags that can be safely stripped.
@@ -221,6 +216,11 @@ _STRIPPABLE_DELIMITERS: list[re.Pattern[str]] = [
 _CONTROL_CHAR_DENSITY_THRESHOLD = 0.03
 _CONTROL_CHAR_MIN_LENGTH = 50  # skip short strings
 _CONTEXT_BOMB_THRESHOLD = 15_000
+_FORMATTING_CHAR_MIN_SUSPICIOUS_COUNT = 3
+_FORMATTING_CHAR_WEIGHT = 1.5
+_FORMATTING_CHARS_PATTERN = re.compile(
+    r"[\u200b-\u200f\u2028-\u202f\u2060-\u206f\ufeff]"
+)
 
 # Source kinds that receive lighter treatment (lower risk, structured data).
 _LIGHT_TREATMENT_SOURCES: frozenset[SourceKind] = frozenset(
@@ -246,10 +246,99 @@ def _detect_signals(text: str) -> list[_Hit]:
     """Run all pattern families against *text* and return hits."""
     hits: list[_Hit] = []
     for sig in _SIGNALS:
+        if sig.pattern.pattern == r"</search_results>":
+            continue
         m = sig.pattern.search(text)
         if m:
             hits.append(_Hit(signal=sig, match_text=m.group()[:120]))
     return hits
+
+
+def _detect_formatting_char_artifact(text: str) -> _Hit | None:
+    matches = list(_FORMATTING_CHARS_PATTERN.finditer(text))
+    if len(matches) < _FORMATTING_CHAR_MIN_SUSPICIOUS_COUNT:
+        return None
+
+    preview = (
+        "".join(match.group() for match in matches[:8])
+        .encode("unicode_escape")
+        .decode("ascii")
+    )
+    return _Hit(
+        signal=_Signal(
+            _FORMATTING_CHARS_PATTERN, _FORMATTING_CHAR_WEIGHT, "hidden_markup"
+        ),
+        match_text=f"{preview} (count={len(matches)})",
+    )
+
+
+def _search_results_closer_signal() -> _Signal:
+    for sig in _SIGNALS:
+        if sig.pattern.pattern == r"</search_results>":
+            return sig
+    raise RuntimeError("search_results delimiter signal missing")
+
+
+def _detect_search_results_breakouts(text: str) -> tuple[list[_Hit], bool]:
+    """Return unmatched-closer hits and whether the terminal closer is legitimate.
+
+    Multiple stacked ``<search_results>...</search_results>`` blocks are valid:
+    callers that merge several Tavily searches (e.g. ``get_news`` general+local,
+    ``research.search_foreign_sources`` merged native-language results) emit a
+    sequence of well-formed wrappers concatenated with intervening text. A
+    closer is only treated as a breakout if no preceding opener is unmatched.
+
+    The second return value is ``True`` iff the *terminal* closer (last
+    ``</search_results>`` with only whitespace following it) is matched by an
+    opener — used downstream by the sanitize path to preserve that legitimate
+    footer when stripping any embedded breakout closers.
+    """
+    closers = list(re.finditer(r"</search_results>", text, re.I))
+    if not closers:
+        return [], False
+
+    openers = list(re.finditer(r"<search_results\b[^>]*>", text, re.I))
+
+    # The *terminal* closer is the last one with only whitespace following it.
+    # Treated as the wrapper's legitimate footer iff at least one opener
+    # precedes it. Earlier closers are evaluated under stricter trust-boundary
+    # semantics below — a closer mid-content is suspicious unless it's clearly
+    # the seam between two stacked wrapped blocks.
+    last_closer = closers[-1]
+    terminal_match: re.Match[str] | None = (
+        last_closer if text[last_closer.end() :].strip() == "" else None
+    )
+    terminal_legit = terminal_match is not None and any(
+        o.start() < terminal_match.start() for o in openers
+    )
+
+    def _is_inner_wrapper_seam(closer: re.Match[str]) -> bool:
+        """A non-terminal closer is legitimate only if it's the seam between
+        a properly-paired wrapped block and the *next* wrapped block: there
+        must be at least one preceding opener available to pair with it, and
+        an immediately following opener with no intervening closer."""
+        openers_before = sum(1 for o in openers if o.start() < closer.start())
+        closers_up_to = sum(1 for c in closers if c.start() <= closer.start())
+        if openers_before < closers_up_to:
+            return False  # not balanced — extra closer
+        next_opener = next((o for o in openers if o.start() > closer.end()), None)
+        if next_opener is None:
+            return False
+        for c in closers:
+            if closer.end() < c.start() < next_opener.start():
+                return False
+        return True
+
+    signal = _search_results_closer_signal()
+    hits: list[_Hit] = []
+    for c in closers:
+        if c is terminal_match and terminal_legit:
+            continue
+        if c is not terminal_match and _is_inner_wrapper_seam(c):
+            continue
+        hits.append(_Hit(signal=signal, match_text=c.group()[:120]))
+
+    return hits, terminal_legit
 
 
 def _detect_context_bomb(
@@ -302,11 +391,26 @@ def _control_char_density(text: str) -> float:
     return count / len(text)
 
 
-def _strip_known_breakouts(text: str) -> str:
+def _strip_known_breakouts(
+    text: str,
+    *,
+    preserve_terminal_search_results: bool = False,
+) -> str:
     """Remove delimiter-breakout tags that can be safely stripped."""
     result = text
+    sentinel = "__EXPECTED_SEARCH_RESULTS_FOOTER__"
+    if preserve_terminal_search_results:
+        result = re.sub(
+            r"</search_results>\s*$",
+            sentinel,
+            result,
+            count=1,
+            flags=re.I,
+        )
     for pat in _STRIPPABLE_DELIMITERS:
         result = pat.sub("", result)
+    if preserve_terminal_search_results:
+        result = result.replace(sentinel, "</search_results>")
     return result
 
 
@@ -350,6 +454,10 @@ class HeuristicInspector:
 
         # --- Pattern matching ---
         hits = _detect_signals(text)
+        search_result_hits, expected_search_results_wrapper = (
+            _detect_search_results_breakouts(text)
+        )
+        hits.extend(search_result_hits)
         context_bomb_hit = _detect_context_bomb(
             text,
             envelope.source_kind,
@@ -357,6 +465,9 @@ class HeuristicInspector:
         )
         if context_bomb_hit is not None:
             hits.append(context_bomb_hit)
+        formatting_char_hit = _detect_formatting_char_artifact(text)
+        if formatting_char_hit is not None:
+            hits.append(formatting_char_hit)
 
         if not hits and not cc_hit:
             return InspectionDecision(action="allow", threat_level="safe")
@@ -367,9 +478,14 @@ class HeuristicInspector:
 
         # Adjust weight for structured MCP output
         if envelope.source_kind == SourceKind.mcp_tool_output:
-            payload_profile = (envelope.metadata or {}).get("payload_profile", "free_text")
+            payload_profile = (envelope.metadata or {}).get(
+                "payload_profile", "free_text"
+            )
             trust_tier = (envelope.metadata or {}).get("trust_tier", "unknown")
-            if payload_profile == "structured_financial" and trust_tier == "official_vendor":
+            if (
+                payload_profile == "structured_financial"
+                and trust_tier == "official_vendor"
+            ):
                 total_weight *= 0.5
 
         threat_types: list[str] = sorted(
@@ -393,7 +509,13 @@ class HeuristicInspector:
             and not cc_hit
         )
         if all_delimiter_breakout:
-            sanitized = _strip_known_breakouts(text)
+            preserve_terminal_wrapper = expected_search_results_wrapper and bool(
+                search_result_hits
+            )
+            sanitized = _strip_known_breakouts(
+                text,
+                preserve_terminal_search_results=preserve_terminal_wrapper,
+            )
             return InspectionDecision(
                 action="sanitize",
                 threat_level=severity,

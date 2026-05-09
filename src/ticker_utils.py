@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 import structlog
 
+from src.async_utils import run_with_hard_timeout
 from src.exchange_metadata import (
     EXCHANGES_BY_SUFFIX,
     IBKR_TO_YFINANCE,
@@ -457,9 +458,10 @@ async def _try_yfinance(ticker: str) -> str | None:
     try:
         import yfinance as yf
 
-        info = await asyncio.wait_for(
+        info = await run_with_hard_timeout(
             asyncio.to_thread(lambda: yf.Ticker(ticker).info),
             timeout=5,
+            label=f"yfinance.info:{ticker}",
         )
         if info:
             return info.get("longName") or info.get("shortName")
@@ -473,9 +475,10 @@ async def _try_yahooquery(ticker: str) -> str | None:
     try:
         from yahooquery import Ticker as YQTicker
 
-        result = await asyncio.wait_for(
+        result = await run_with_hard_timeout(
             asyncio.to_thread(lambda: YQTicker(ticker).quote_type),
             timeout=5,
+            label=f"yahooquery.quote_type:{ticker}",
         )
         if isinstance(result, dict) and ticker in result:
             data = result[ticker]
@@ -536,7 +539,11 @@ def _get_ibkr_name_service():
     return _ibkr_name_service
 
 
-async def resolve_company_name(ticker: str) -> CompanyNameResult:
+async def resolve_company_name(
+    ticker: str,
+    *,
+    allow_ibkr_probe: bool = False,
+) -> CompanyNameResult:
     """
     Resolve company name from multiple sources with fallback chain.
 
@@ -545,6 +552,10 @@ async def resolve_company_name(ticker: str) -> CompanyNameResult:
     2. yahooquery (free, different backend)
     3. FMP (paid, lightweight profile call)
     4. EODHD (paid, filtered General endpoint)
+
+    The optional IBKR probe is disabled by default because its brokerage
+    connection path can perform synchronous retries that are too expensive for
+    normal analysis startup.
 
     Each source has a 5-second timeout. Names are validated to ensure
     they aren't just the ticker string echoed back.
@@ -600,41 +611,44 @@ async def resolve_company_name(ticker: str) -> CompanyNameResult:
                     error=str(e),
                 )
 
-    try:
-        raw_name = await _try_ibkr(ticker)
-        if _is_valid_company_name(raw_name, ticker):
-            normalized = normalize_company_name(raw_name)
+    if allow_ibkr_probe:
+        try:
+            raw_name = await _try_ibkr(ticker)
+            if _is_valid_company_name(raw_name, ticker):
+                normalized = normalize_company_name(raw_name)
+                logger.debug(
+                    "company_name_resolved",
+                    ticker=ticker,
+                    requested_ticker=ticker,
+                    lookup_ticker=ticker,
+                    lookup_strategy="ibkr_probe",
+                    name=normalized,
+                    source="ibkr",
+                )
+                return CompanyNameResult(
+                    name=normalized, source="ibkr", is_resolved=True
+                )
+            if raw_name:
+                logger.debug(
+                    "company_name_rejected",
+                    ticker=ticker,
+                    requested_ticker=ticker,
+                    lookup_ticker=ticker,
+                    lookup_strategy="ibkr_probe",
+                    raw_name=raw_name,
+                    source="ibkr",
+                    reason="name matches lookup ticker string",
+                )
+        except Exception as e:
             logger.debug(
-                "company_name_resolved",
+                "company_name_source_error",
                 ticker=ticker,
                 requested_ticker=ticker,
                 lookup_ticker=ticker,
                 lookup_strategy="ibkr_probe",
-                name=normalized,
                 source="ibkr",
+                error=str(e),
             )
-            return CompanyNameResult(name=normalized, source="ibkr", is_resolved=True)
-        if raw_name:
-            logger.debug(
-                "company_name_rejected",
-                ticker=ticker,
-                requested_ticker=ticker,
-                lookup_ticker=ticker,
-                lookup_strategy="ibkr_probe",
-                raw_name=raw_name,
-                source="ibkr",
-                reason="name matches lookup ticker string",
-            )
-    except Exception as e:
-        logger.debug(
-            "company_name_source_error",
-            ticker=ticker,
-            requested_ticker=ticker,
-            lookup_ticker=ticker,
-            lookup_strategy="ibkr_probe",
-            source="ibkr",
-            error=str(e),
-        )
 
     logger.debug(
         "company_name_unresolved",

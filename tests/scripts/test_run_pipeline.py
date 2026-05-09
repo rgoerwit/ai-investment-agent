@@ -338,6 +338,50 @@ class TestPythonRuntimeResolution:
             in script
         )
 
+    def test_default_cooldown_is_ten_seconds(self):
+        script = self._script_text()
+        assert 'COOLDOWN="${COOLDOWN_SECONDS:-10}"' in script
+        assert (
+            "--cooldown N        Seconds between ticker analyses (default: 10)"
+            in script
+        )
+
+
+class TestPipelineCancellationContract:
+    @staticmethod
+    def _script_text() -> str:
+        return _RUN_PIPELINE_PATH.read_text()
+
+    def test_script_sources_shared_signal_helper(self):
+        script = self._script_text()
+        assert 'source "${SCRIPT_DIR}/pipeline_signals.sh"' in script
+        assert "signal_proxy.py" not in script
+
+    def test_stage_commands_run_through_tracked_child_helper(self):
+        script = self._script_text()
+        assert 'if run_tracked_child "" "${GEMS_CMD[@]}"; then' in script
+        assert (
+            'if run_tracked_child "$LOGFILE" "${PYTHON_CMD[@]}" -m src.main \\'
+            in script
+        )
+
+    def test_interrupt_status_aborts_later_stages(self):
+        script = self._script_text()
+        assert "exit_if_interrupted_status" in script
+
+    def test_dead_pg_tracking_and_setsid_branch_are_removed(self):
+        script = self._script_text()
+        assert "process_group_id_for_pid" not in script
+        assert "setsid" not in script
+        assert "PIPELINE_SIGNAL_PROXY" not in script
+
+    def test_help_text_mentions_process_group_force_stop(self):
+        script = self._script_text()
+        assert (
+            "Force stop         Kill the whole process group, not only the shell PID"
+            in script
+        )
+
 
 class TestPipelineMarkerPayload:
     @staticmethod
