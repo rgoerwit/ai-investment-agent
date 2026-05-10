@@ -1250,16 +1250,87 @@ class SmartMarketDataFetcher(FinancialFetcher):
                 info["trailingPE"] = forward
                 info["_trailingPE_source"] = "normalized_forward_proxy"
             elif not ratio_reasonable:
-                # Log suspicious divergence - don't replace, keep trailing
-                logger.warning(
-                    "pe_divergence_suspicious",
-                    symbol=symbol,
-                    trailing=trailing,
-                    forward=forward,
-                    ratio=f"{divergence_ratio:.1f}x",
-                    action="keeping_trailing_pe",
-                    hint="extreme divergence suggests stale/incorrect forward estimate",
+                # Distinguish unit/decimal/currency error from genuine
+                # staleness. Pattern: ratio ≈ 10/100/1000×, with one value in
+                # the plausible band [MIN_REASONABLE_PE..PLAUSIBLE_PE_HIGH]
+                # and the other extreme. Staleness produces drifty ratios,
+                # not clean powers of ten — a near-exact ×100 with one side
+                # in [10, 25] and the other ≪ 1 is almost certainly an EPS
+                # unit mismatch (cents vs dollars, GBp vs GBP, …).
+                PLAUSIBLE_PE_HIGH = 30.0
+                EXTREME_LOW = 1.0
+                EXTREME_HIGH = 98.0
+                POWER_OF_TEN_TOLERANCE = 0.05
+
+                log_ratio = math.log10(divergence_ratio)
+                power_magnitude = round(log_ratio)
+                near_power_of_ten = (
+                    1 <= power_magnitude <= 3
+                    and abs(log_ratio - power_magnitude) < POWER_OF_TEN_TOLERANCE
                 )
+                trailing_plausible = MIN_REASONABLE_PE <= trailing <= PLAUSIBLE_PE_HIGH
+                forward_plausible = MIN_REASONABLE_PE <= forward <= PLAUSIBLE_PE_HIGH
+                trailing_extreme = trailing < EXTREME_LOW or trailing > EXTREME_HIGH
+                forward_extreme = forward < EXTREME_LOW or forward > EXTREME_HIGH
+
+                unit_error = (
+                    near_power_of_ten
+                    and (trailing_plausible ^ forward_plausible)
+                    and (trailing_extreme ^ forward_extreme)
+                )
+
+                if unit_error:
+                    suspect = "forward" if forward_extreme else "trailing"
+                    # Quarantine the suspect — same pattern as
+                    # _quarantine_recent_split_forward_metrics.
+                    notes = info.get("_data_quality_notes")
+                    if not isinstance(notes, list):
+                        notes = [] if notes in (None, "") else [str(notes)]
+                        info["_data_quality_notes"] = notes
+                    notes.append(
+                        f"Suspected unit/decimal/currency error in {suspect} "
+                        f"P/E (ratio ≈ {10**power_magnitude}× to plausible "
+                        f"side); quarantined {suspect} valuation metrics."
+                    )
+                    if suspect == "forward":
+                        info["forwardPE"] = None
+                        info["forwardEps"] = None
+                        info["pegRatio"] = None
+                    else:
+                        info["trailingPE"] = None
+                        info["epsTrailingTwelveMonths"] = None
+                    info["_pe_unit_error_quarantined"] = suspect
+                    logger.warning(
+                        "pe_divergence_unit_error_suspect",
+                        symbol=symbol,
+                        trailing=trailing,
+                        forward=forward,
+                        ratio=f"{divergence_ratio:.1f}x",
+                        power_of_ten=power_magnitude,
+                        suspect=suspect,
+                        action=f"quarantined_{suspect}_metrics",
+                        hint=(
+                            "ratio within tolerance of 10/100/1000×; one "
+                            "value plausible, the other out of range — "
+                            "likely unit/decimal/currency mismatch (e.g. "
+                            "EPS in minor units, GBp vs GBP) in the "
+                            "suspect source"
+                        ),
+                    )
+                else:
+                    # Genuine staleness/incorrectness — keep trailing as before.
+                    logger.warning(
+                        "pe_divergence_suspicious",
+                        symbol=symbol,
+                        trailing=trailing,
+                        forward=forward,
+                        ratio=f"{divergence_ratio:.1f}x",
+                        action="keeping_trailing_pe",
+                        hint=(
+                            "extreme divergence suggests stale/incorrect "
+                            "forward estimate"
+                        ),
+                    )
             elif not forward_reasonable and trailing_reasonable:
                 # Forward is too low to be trusted, keep trailing
                 logger.debug(
