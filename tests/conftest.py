@@ -52,6 +52,38 @@ def setup_test_env():
 
 
 @pytest.fixture(autouse=True)
+def _pin_config_singleton_identity():
+    """Pin ``src.config.config`` to its session-baseline object identity.
+
+    Some tests in this suite call ``importlib.reload(src.config)`` —
+    typically to test pydantic validation errors or environment overrides.
+    A reload swaps the module-level ``src.config.config`` for a brand-new
+    Settings instance while every already-imported production module
+    (``src.persistence``, ``src.agents.research_nodes``,
+    ``src.retrospective``, …) still holds a reference to the OLD object.
+
+    Subsequent tests that ``monkeypatch.setattr(config, …)`` then mutate
+    a different instance from the one production reads, producing silent
+    cross-test leakage that is invisible in single-file runs but fails
+    only under full-suite ordering. The May 2026 cross-test leakage
+    incident traced back to exactly this pattern.
+
+    This fixture re-aliases ``src.config.config`` back to the original
+    session-baseline object before every test. Cheap (~µs identity
+    check), and makes future reload regressions self-healing.
+    """
+    import src.config
+
+    baseline = getattr(_pin_config_singleton_identity, "_baseline", None)
+    if baseline is None:
+        _pin_config_singleton_identity._baseline = src.config.config
+    else:
+        if src.config.config is not baseline:
+            src.config.config = baseline
+    yield
+
+
+@pytest.fixture(autouse=True)
 def configure_structlog_for_tests():
     """Configure structlog for test environment."""
     structlog.configure(

@@ -477,83 +477,52 @@ class TestFormatAndTruncateTavilyResult:
 
 
 class TestTavilyMaxCharsConfig:
-    """Tests for TAVILY_MAX_CHARS configuration."""
+    """Tests for TAVILY_MAX_CHARS configuration.
 
-    def test_default_value(self):
+    These tests assert that a fresh `Settings` instance (i.e. a new
+    process) would pick up the configured value from the environment.
+    They MUST NOT call `importlib.reload(src.config)` — that creates a
+    brand new `config` Settings object while every previously-imported
+    module (`src.persistence`, `src.agents.research_nodes`, etc.) still
+    holds a reference to the OLD object. Subsequent tests that
+    monkeypatch the now-newest `src.config.config` then mutate a
+    different instance from the one production code reads, producing
+    silent cross-test leakage. The May 2026 test-suite ordering bug
+    traced back to exactly this pattern. Use `Settings()` for fresh
+    reads instead.
+    """
+
+    def test_default_value(self, monkeypatch):
         """Should default to 7000 when env var not set."""
-        # Clear the env var if set
-        original = os.environ.pop("TAVILY_MAX_CHARS", None)
+        from src.config import Settings
 
-        try:
-            # Re-import to get fresh config
-            import importlib
+        monkeypatch.delenv("TAVILY_MAX_CHARS", raising=False)
+        assert Settings().tavily_max_chars == 7000
 
-            import src.config
-
-            importlib.reload(src.config)
-
-            assert src.config.config.tavily_max_chars == 7000
-        finally:
-            # Restore original value
-            if original is not None:
-                os.environ["TAVILY_MAX_CHARS"] = original
-
-    def test_custom_value_from_env(self):
+    def test_custom_value_from_env(self, monkeypatch):
         """Should use custom value from TAVILY_MAX_CHARS env var."""
-        original = os.environ.get("TAVILY_MAX_CHARS")
+        from src.config import Settings
 
-        try:
-            os.environ["TAVILY_MAX_CHARS"] = "5000"
+        monkeypatch.setenv("TAVILY_MAX_CHARS", "5000")
+        assert Settings().tavily_max_chars == 5000
 
-            # Re-import to get fresh config
-            import importlib
+    def test_truncation_uses_env_value(self, monkeypatch):
+        """Truncation should respect the configured value.
 
-            import src.config
+        The production helper reads ``config.tavily_max_chars`` at call
+        time, so we override that field on the live config object via
+        ``monkeypatch.setitem(config.__dict__, ...)``. setitem mutates
+        the dict directly and is restored on test teardown — no module
+        reload, no aliasing of the singleton.
+        """
+        from src.config import config as live_config
+        from src.tools.shared import _format_and_truncate_tavily_result
 
-            importlib.reload(src.config)
+        monkeypatch.setitem(live_config.__dict__, "tavily_max_chars", 500)
 
-            assert src.config.config.tavily_max_chars == 5000
-        finally:
-            # Restore original value
-            if original is not None:
-                os.environ["TAVILY_MAX_CHARS"] = original
-            else:
-                os.environ.pop("TAVILY_MAX_CHARS", None)
-
-    def test_truncation_uses_env_value(self):
-        """Truncation should respect the env var value."""
-        original = os.environ.get("TAVILY_MAX_CHARS")
-
-        try:
-            os.environ["TAVILY_MAX_CHARS"] = "500"
-
-            # Re-import to get fresh config
-            import importlib
-
-            import src.config
-
-            importlib.reload(src.config)
-
-            from src.tools.shared import _format_and_truncate_tavily_result
-
-            long_result = "x" * 2000
-            result = _format_and_truncate_tavily_result(long_result)
-
-            # Should be truncated to ~500 chars (plus message)
-            assert len(result) < 600
-        finally:
-            # Restore original value
-            if original is not None:
-                os.environ["TAVILY_MAX_CHARS"] = original
-            else:
-                os.environ.pop("TAVILY_MAX_CHARS", None)
-
-            # Reload config to restore defaults
-            import importlib
-
-            import src.config
-
-            importlib.reload(src.config)
+        long_result = "x" * 2000
+        result = _format_and_truncate_tavily_result(long_result)
+        assert len(result) < 600
 
 
 class TestNewsHighlightsIntegration:

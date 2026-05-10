@@ -75,6 +75,15 @@ def _detect_provider_partial_response(result: Any) -> str | None:
     finish reason in different keys; we accept any of them. Returning
     None means "looks like a clean finish, don't retry."
     """
+    # An active tool-loop step is not a partial response: the model paused
+    # to call a tool, content can legitimately be empty. The agent loop
+    # will continue with tool results. Skip the entire partial check here
+    # — finish_reason might also be missing on Mock-style test responses
+    # that legitimately use tool_calls.
+    tool_calls = getattr(result, "tool_calls", None)
+    if isinstance(tool_calls, list) and tool_calls:
+        return None
+
     response_metadata = getattr(result, "response_metadata", None)
     if not isinstance(response_metadata, dict):
         response_metadata = {}

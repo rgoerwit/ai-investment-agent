@@ -177,11 +177,21 @@ async def test_maybe_save_rejection_record_canonicalizes_snapshot_sector(
     monkeypatch,
 ):
     """Note: tests/conftest.py sets ENABLE_MEMORY=false session-wide; this
-    test asserts the memory-enabled code path so it must opt back in."""
+    test asserts the memory-enabled code path so it must opt back in.
+
+    We mutate `config.__dict__["enable_memory"]` via `monkeypatch.setitem`
+    rather than `monkeypatch.setattr(config, ...)`. The latter goes through
+    pydantic-settings BaseModel `__setattr__`, which under full-suite test
+    ordering has been observed not to take effect reliably (see the May
+    2026 cross-test leakage incident — three otherwise-isolated tests
+    failed only when run alongside the broader suite). `setitem` bypasses
+    pydantic's setter entirely and is properly tracked/restored by
+    monkeypatch.
+    """
     from src.config import config
     from src.persistence import _maybe_save_rejection_record
 
-    monkeypatch.setattr(config, "enable_memory", True)
+    monkeypatch.setitem(config.__dict__, "enable_memory", True)
 
     args = SimpleNamespace(ticker="7203.T", quick=False)
     logger = MagicMock()
@@ -224,8 +234,11 @@ async def test_maybe_save_rejection_record_skips_when_memory_disabled(monkeypatc
     from src.persistence import _maybe_save_rejection_record
 
     # Conftest already sets enable_memory=False session-wide; pin it
-    # explicitly so the test is robust to future conftest changes.
-    monkeypatch.setattr(config, "enable_memory", False)
+    # explicitly so the test is robust to future conftest changes. Use
+    # setitem to bypass pydantic-settings' BaseModel __setattr__ for
+    # consistency with peer tests (see canonicalizes_snapshot_sector
+    # docstring for full background).
+    monkeypatch.setitem(config.__dict__, "enable_memory", False)
 
     args = SimpleNamespace(ticker="2099.HK", quick=True)
     logger = MagicMock()
@@ -257,7 +270,8 @@ async def test_maybe_save_rejection_record_runs_when_memory_enabled(monkeypatch)
     from src.config import config
     from src.persistence import _maybe_save_rejection_record
 
-    monkeypatch.setattr(config, "enable_memory", True)
+    # See canonicalizes_snapshot_sector docstring re setitem vs setattr.
+    monkeypatch.setitem(config.__dict__, "enable_memory", True)
 
     args = SimpleNamespace(ticker="7203.T", quick=False)
     logger = MagicMock()

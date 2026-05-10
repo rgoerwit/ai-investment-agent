@@ -292,6 +292,27 @@ class TestProviderPartialResponseDetection:
         # Default response_metadata is the empty dict; no provider tail.
         assert _detect_provider_partial_response(msg) is None
 
+    def test_tool_call_response_with_empty_content_is_NOT_partial(self):
+        """An active tool-loop step is not a partial response. The
+        consultant + auditor agent loops produce responses where
+        ``content`` is empty and ``tool_calls`` is populated — the next
+        loop turn feeds tool results back into the model. Flagging these
+        as partial would short-circuit the loop and break the consultant
+        verification mitigations (see
+        tests/advanced/test_verification_mitigations.py
+        ::test_consultant_with_tools_executes_loop)."""
+        from unittest.mock import MagicMock as _MagicMock
+
+        from src.agents.runtime import _detect_provider_partial_response
+
+        msg = _MagicMock()
+        msg.content = ""
+        msg.tool_calls = [{"name": "spot_check_metric", "args": {}, "id": "call_1"}]
+        # MagicMock's response_metadata attribute returns another MagicMock
+        # (not a dict). The detector tolerates that and falls through to
+        # the tool_calls early-return.
+        assert _detect_provider_partial_response(msg) is None
+
 
 class TestProviderPartialResponseRetry:
     @pytest.mark.asyncio

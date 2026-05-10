@@ -2,7 +2,9 @@
 
 This repository is a multi-agent international equity research system. It can analyze single tickers, run broader screening pipelines, and optionally reconcile saved results against an Interactive Brokers portfolio through either a CLI workflow or a local Flask dashboard.
 
-You need Python 3.12+, Poetry, and at least one working LLM API key. A Gemini key is the minimum practical setup; optional data-provider keys improve coverage and reliability.
+You need Python 3.12+, Poetry, and at least one working LLM API key. A Gemini key is the minimum practical setup.
+
+I've gone to a lot of trouble to make this work with inexpensive/free services (at the cost of a lot of code complexity).  Practically speaking, Tavily, ChatGTP, plus some data-service API keys are needed to get truly useful results.  See the .env.example file.
 
 Environment note:
 
@@ -222,7 +224,6 @@ Set these env vars before using it:
 Practical notes:
 
 - Langfuse is bypassed unless `--enable-langfuse` is supplied.
-- `--trace-langfuse` still works as a deprecated alias during the transition.
 - Set `LANGFUSE_SESSION_ID` if you want multiple CLI invocations to land in one shared Langfuse session, for example in a batch runner.
 - Prompt fetch from Langfuse is off by default; local prompts remain authoritative unless you enable remote prompt fetch in config.
 - Traced runs log a trace URL when Langfuse returns one.
@@ -286,7 +287,7 @@ Outputs land in `scratch/`. In practice you will see:
 Practical notes:
 
 - Stage 1 is a broad quick screen: `--quick --no-charts --brief --no-memory`, not strict mode.
-- The upstream `find_gems.py` filter still starts conservative, but now allows a modest higher-P/E band when profitability, leverage, cash-flow quality, and coverage are stronger.
+- The upstream `find_gems.py` filter starts conservative, with a modest higher-P/E band allowed when profitability, leverage, cash-flow quality, and coverage are stronger.
 
 Resumption is built in:
 
@@ -297,7 +298,7 @@ Resumption is built in:
 ## IBKR Portfolio Management
 
 `scripts/portfolio_manager.py` sits on top of the saved analysis JSONs in `results/`. It bridges the evaluator output with live or offline portfolio context.
-The IBKR reconciliation path is now split by ownership: `src/ibkr/reconciler.py` orchestrates while `analysis_index.py`, `reconciliation_rules.py`, `position_evaluator.py`, `watchlist_evaluator.py`, `opportunity_finder.py`, and `portfolio_health.py` own the underlying loading, rule, and routing logic.
+The IBKR reconciliation path is split by ownership: `src/ibkr/reconciler.py` orchestrates while `analysis_index.py`, `reconciliation_rules.py`, `position_evaluator.py`, `watchlist_evaluator.py`, `opportunity_finder.py`, and `portfolio_health.py` own the underlying loading, rule, and routing logic.
 
 ```bash
 # Verify credentials and IBKR connectivity first
@@ -442,7 +443,7 @@ tests/                       Unit and integration coverage
 
 How the pieces connect:
 
-- `src/main.py` is now orchestration-first: runtime setup, macro-context prefetch, graph execution, tracing, and mode dispatch.
+- `src/main.py` is orchestration-first: runtime setup, macro-context prefetch, graph execution, tracing, and mode dispatch.
 - `src/cli.py` owns CLI parsing, flag validation, and output/article path resolution.
 - `src/persistence.py` owns saved artifact assembly, JSON persistence, and rejection-record helpers.
 - `src/output.py` owns banners, CLI/report rendering, and optional article generation.
@@ -451,7 +452,7 @@ How the pieces connect:
 - `src/graph/` wires the workflow, `src/agents/` owns node logic and state handling, and `src/tools/` plus `src/tools/registry.py` provide the tool surface used by agent tool nodes.
 - `src/tooling/` owns the execution plane around those tools: inspection, audit hooks, and argument-policy enforcement.
 - `src/data/`, `src/validators/`, `src/memory.py`, and `src/charts/` are shared subsystems used by the main analysis path.
-- `src/data/fetcher.py` is now an orchestration seam over `src/data/source_fetchers.py`, `src/data/metric_extraction.py`, `src/data/merge_policy.py`, and `src/data/gap_fill.py`.
+- `src/data/fetcher.py` is an orchestration seam over `src/data/source_fetchers.py`, `src/data/metric_extraction.py`, `src/data/merge_policy.py`, and `src/data/gap_fill.py`.
 - `src/report_generator.py` turns the final graph state into the structured markdown report; `src/article_writer.py` is the optional long-form writing pass on top of that report.
 - `scripts/portfolio_manager.py`, `src/ibkr/`, and `src/web/ibkr_dashboard/` are the operator-facing portfolio workflows built on top of saved analysis outputs and, optionally, live broker context.
 
@@ -479,7 +480,7 @@ poetry env remove --all
 poetry install
 ```
 
-If `./scripts/run_pipeline.sh` or another script unexpectedly uses plain `python`, check whether you have an unrelated virtual environment active. The pipeline now falls back to Poetry when the active venv is missing core repo dependencies, but the cleanest fix is still one of:
+If `./scripts/run_pipeline.sh` or another script unexpectedly uses plain `python`, check whether you have an unrelated virtual environment active. The pipeline falls back to Poetry when the active venv is missing core repo dependencies, but the cleanest fix is one of:
 
 ```bash
 deactivate
@@ -521,7 +522,6 @@ These are real features, but they are not required to get started:
 - **Observability**: Langfuse and LangSmith hooks exist for tracing and diagnostics. For sensitive deployments, LangSmith also supports `LANGSMITH_HIDE_INPUTS` and `LANGSMITH_HIDE_OUTPUTS`.
 - **Inspection and tool audit hooks**: see `src/tooling/` if you want to inspect or audit untrusted external content before it reaches LLM context.
 - **Deployment references**: `terraform/` contains reference infrastructure, not a turnkey hosted product.
-- **Dependency note**: `yfinance 1.2.0` still pins `curl-cffi <0.14` upstream. The repo tracks the current SSRF advisory and currently treats it as a constrained transitive risk because Yahoo data paths here are driven by ticker-like symbols, not attacker-controlled URLs.
 
 ## Limitations
 

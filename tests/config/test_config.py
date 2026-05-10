@@ -411,12 +411,10 @@ class TestPydanticSettingsValidation:
 
         with patch.dict(os.environ, {"MAX_DEBATE_ROUNDS": "not_a_number"}, clear=False):
             # Must reimport to trigger validation with new env
-            import importlib
-
-            import src.config
+            from src.config import Settings
 
             with pytest.raises(ValidationError) as exc_info:
-                importlib.reload(src.config)
+                Settings()
 
             # Verify the error mentions the field
             error_str = str(exc_info.value)
@@ -432,12 +430,10 @@ class TestPydanticSettingsValidation:
         with patch.dict(
             os.environ, {"MAX_POSITION_SIZE": "invalid_float"}, clear=False
         ):
-            import importlib
-
-            import src.config
+            from src.config import Settings
 
             with pytest.raises(ValidationError) as exc_info:
-                importlib.reload(src.config)
+                Settings()
 
             error_str = str(exc_info.value)
             assert (
@@ -450,12 +446,10 @@ class TestPydanticSettingsValidation:
         from pydantic import ValidationError
 
         with patch.dict(os.environ, {"API_TIMEOUT": "-10"}, clear=False):
-            import importlib
-
-            import src.config
+            from src.config import Settings
 
             with pytest.raises(ValidationError) as exc_info:
-                importlib.reload(src.config)
+                Settings()
 
             # Should mention the constraint violation
             error_str = str(exc_info.value)
@@ -469,12 +463,10 @@ class TestPydanticSettingsValidation:
         from pydantic import ValidationError
 
         with patch.dict(os.environ, {"MAX_POSITION_SIZE": "1.5"}, clear=False):
-            import importlib
-
-            import src.config
+            from src.config import Settings
 
             with pytest.raises(ValidationError) as exc_info:
-                importlib.reload(src.config)
+                Settings()
 
             error_str = str(exc_info.value)
             assert (
@@ -487,12 +479,10 @@ class TestPydanticSettingsValidation:
         from pydantic import ValidationError
 
         with patch.dict(os.environ, {"MAX_POSITION_SIZE": "-0.1"}, clear=False):
-            import importlib
-
-            import src.config
+            from src.config import Settings
 
             with pytest.raises(ValidationError) as exc_info:
-                importlib.reload(src.config)
+                Settings()
 
             error_str = str(exc_info.value)
             assert (
@@ -505,12 +495,10 @@ class TestPydanticSettingsValidation:
         from pydantic import ValidationError
 
         with patch.dict(os.environ, {"GEMINI_RPM_LIMIT": "0"}, clear=False):
-            import importlib
-
-            import src.config
+            from src.config import Settings
 
             with pytest.raises(ValidationError) as exc_info:
-                importlib.reload(src.config)
+                Settings()
 
             error_str = str(exc_info.value)
             assert (

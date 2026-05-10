@@ -240,19 +240,16 @@ async def test_lessons_injection_skipped_when_no_memory(monkeypatch):
 async def test_lessons_injection_runs_when_memory_enabled(monkeypatch):
     """Regression guard for the memory-enabled path.
 
-    Set `enable_memory` on the *exact reference* the production code uses
-    (`src.agents.research_nodes.settings_config`) — earlier tests in the
-    full suite mutate the global config without proper teardown
-    (`src/main.py:670` does `config.enable_memory = False` directly when
-    a test runs `_apply_runtime_overrides` with `args.no_memory=True`),
-    so a plain `monkeypatch.setattr(config, ...)` can be ineffective in
-    full-suite ordering.
+    Use ``monkeypatch.setitem(config.__dict__, ...)`` rather than
+    ``monkeypatch.setattr(config, ...)``: the latter goes through
+    pydantic-settings BaseModel ``__setattr__``, which under full-suite
+    test ordering has been observed not to take effect reliably (May
+    2026 cross-test leakage incident). ``setitem`` mutates the underlying
+    dict directly and is properly tracked/restored by monkeypatch.
     """
-    from src.agents import research_nodes as research_nodes_module
     from src.config import config
 
-    monkeypatch.setattr(config, "enable_memory", True)
-    monkeypatch.setattr(research_nodes_module.settings_config, "enable_memory", True)
+    monkeypatch.setitem(config.__dict__, "enable_memory", True)
 
     llm = MagicMock()
     captured = {}
