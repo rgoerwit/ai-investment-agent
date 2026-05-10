@@ -79,9 +79,32 @@ class InspectionService:
 
     @staticmethod
     def _is_low_risk_sanitize(decision: InspectionDecision) -> bool:
-        return decision.action == "sanitize" and set(decision.threat_types) == {
-            "delimiter_breakout"
-        }
+        """Should this sanitize decision be logged at debug instead of warning?
+
+        Two cases qualify:
+
+        1. ``threat_level == "low"`` — the inspector found a minor artifact
+           and successfully scrubbed it. Bidi marks (U+200E/U+202A/…) in CJK
+           or Arabic web text routinely fall here; warnings would just be
+           noise for the operator. The data was already replaced or passed
+           through, depending on mode.
+
+        2. ``threat_types == {"delimiter_breakout"}`` regardless of severity
+           — a stray ``</search_results>`` in Tavily output is the canonical
+           case. It scores medium under the heuristic weights but is benign
+           when the wrapper is the only finding.
+
+        Mixed scrubs (e.g. delimiter_breakout + formatting_chars at "high")
+        and any non-low non-delimiter-only sanitize still warn, so genuine
+        attempts at delimiter breakout in CJK content remain visible.
+        """
+        if decision.action != "sanitize":
+            return False
+        if decision.threat_level == "low":
+            return True
+        if set(decision.threat_types) == {"delimiter_breakout"}:
+            return True
+        return False
 
     @staticmethod
     def _base_log_payload(

@@ -437,3 +437,186 @@ def test_configure_content_inspection_replaces_backend():
         INSPECTION_SERVICE.configure(
             original_inspector, mode="warn", fail_policy="fail_open"
         )
+
+
+# ---------------------------------------------------------------------------
+# Sanitize log-level escalation rules
+#
+# Operators want to see findings that matter. A successful sanitize of a
+# benign artifact (e.g. bidi marks in CJK / Arabic web text) is just noise
+# at warning level; the data was already cleaned or passed through. Genuine
+# breakout / role-play / exfiltration attempts still produce warnings even
+# when the inspector can scrub them.
+# ---------------------------------------------------------------------------
+
+
+class _LowThreatFormattingCharsSanitizeInspector:
+    """Reproduces the heuristic_inspector.py path that fires on 3+ bidi /
+    zero-width / BOM marks in otherwise-benign content (CJK and Arabic web
+    text, BOM at file boundaries, etc.). Always emits threat_level='low'."""
+
+    async def inspect(self, envelope: InspectionEnvelope) -> InspectionDecision:
+        return InspectionDecision(
+            action="sanitize",
+            threat_level="low",
+            threat_types=["formatting_chars"],
+            sanitized_content="cleaned",
+            findings=["formatting_chars: '\\u200e\\u200e\\u200e (count=3)'"],
+            reason="stripped inert formatting characters",
+        )
+
+
+class _HighThreatMixedSanitizeInspector:
+    """Reproduces the third user-reported log: delimiter_breakout +
+    formatting_chars together at threat_level='high'. The breakout attempt
+    matters even if scrubbable — keep the warning."""
+
+    async def inspect(self, envelope: InspectionEnvelope) -> InspectionDecision:
+        return InspectionDecision(
+            action="sanitize",
+            threat_level="high",
+            threat_types=["delimiter_breakout", "formatting_chars"],
+            sanitized_content="cleaned",
+            findings=[
+                "delimiter_breakout: '</search_results>'",
+                "formatting_chars: '\\u202a\\u202c\\u202a\\u202c (count=4)'",
+            ],
+            reason="stripped delimiter-breakout tags + inert formatting characters",
+        )
+
+
+@pytest.mark.asyncio
+async def test_low_threat_formatting_chars_sanitize_logs_at_debug():
+    """The 1979.HK / 2006.TW / 1F2.SI class of false-positive: low-threat
+    sanitize on bidi marks must NOT raise warnings."""
+    svc = InspectionService(
+        _LowThreatFormattingCharsSanitizeInspector(), mode="sanitize"
+    )
+    with (
+        patch("src.tooling.inspection_service.logger.debug") as mock_debug,
+        patch("src.tooling.inspection_service.logger.warning") as mock_warning,
+    ):
+        await svc.check(_envelope("text\u200e\u200e\u200e"))
+
+    mock_warning.assert_not_called()
+    mock_debug.assert_called_once()
+    assert mock_debug.call_args.args[0] == "content_inspection_finding"
+    assert mock_debug.call_args.kwargs["threat_level"] == "low"
+    assert mock_debug.call_args.kwargs["action"] == "sanitize"
+
+
+@pytest.mark.asyncio
+async def test_high_threat_mixed_sanitize_still_warns():
+    """A scrubbable delimiter breakout at high severity is still worth
+    surfacing — the breakout attempt itself signals adversarial input even
+    though we cleaned it."""
+    svc = InspectionService(_HighThreatMixedSanitizeInspector(), mode="sanitize")
+    with (
+        patch("src.tooling.inspection_service.logger.debug") as mock_debug,
+        patch("src.tooling.inspection_service.logger.warning") as mock_warning,
+    ):
+        await svc.check(_envelope("</search_results>\u202a\u202c..."))
+
+    mock_debug.assert_not_called()
+    mock_warning.assert_called_once()
+    assert mock_warning.call_args.args[0] == "content_inspection_finding"
+    assert mock_warning.call_args.kwargs["threat_level"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_block_action_still_warns():
+    """Regression guard: blocks always warn regardless of severity."""
+    svc = InspectionService(_BlockingInspector(), mode="block")
+    with (
+        patch("src.tooling.inspection_service.logger.debug") as mock_debug,
+        patch("src.tooling.inspection_service.logger.warning") as mock_warning,
+    ):
+        await svc.check(_envelope("dangerous"))
+
+    mock_warning.assert_called_once()
+    assert mock_warning.call_args.args[0] == "content_inspection_finding"
+    # The duplicate-suppression debug isn't expected on a single call.
+    mock_debug.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed: harmless bidi in CJK / Arabic does NOT shut things down
+#
+# fail_closed only applies when the inspector itself raises. A successful
+# sanitize decision is a *normal* return — it must propagate without
+# blocking, regardless of fail_policy.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fail_closed_with_benign_cjk_bidi_passes_through_in_warn_mode():
+    """Chinese text with U+202A/U+202C/U+200E around tokens must not be
+    blocked. In warn mode the original (un-stripped) content flows through;
+    fail_closed only triggers on inspector exceptions."""
+    svc = InspectionService(
+        _LowThreatFormattingCharsSanitizeInspector(),
+        mode="warn",
+        fail_policy="fail_closed",
+    )
+    text = "\u202a\u202c香港交易所有限公司公布全年业绩，现金流稳健。"
+    result = await svc.check(_envelope(text))
+    # Warn mode preserves original; never returns a blocked placeholder.
+    assert result == text
+    assert "TOOL_BLOCKED" not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_fail_closed_with_benign_arabic_rtl_passes_through_in_sanitize_mode():
+    """Arabic financial text with RTL/LRM marks gets scrubbed (since mode is
+    sanitize) but must NOT be blocked under fail_closed."""
+    svc = InspectionService(
+        _LowThreatFormattingCharsSanitizeInspector(),
+        mode="sanitize",
+        fail_policy="fail_closed",
+    )
+    text = "Saudi Aramco \u202bأرامكو\u202c reports Q4 net income."
+    result = await svc.check(_envelope(text))
+    # The fixture inspector returns sanitized_content="cleaned" — proves we
+    # took the sanitize path, not the fail-closed block path.
+    assert result == "cleaned"
+    assert "TOOL_BLOCKED" not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_fail_closed_inspector_exception_still_blocks():
+    """Sanity: fail_closed semantics are preserved for actual inspector
+    failures (so the new low-threat carve-out doesn't accidentally relax
+    the block-on-error contract)."""
+    svc = InspectionService(_ErrorInspector(), mode="warn", fail_policy="fail_closed")
+    decision, value = await svc.evaluate(_envelope("anything"))
+    assert decision.action == "block"
+    assert isinstance(value, str) and "TOOL_BLOCKED" in value
+
+
+@pytest.mark.asyncio
+async def test_fail_open_inspector_exception_passes_original():
+    """Mirror coverage for fail_open on inspector failure: original flows."""
+    svc = InspectionService(_ErrorInspector(), mode="warn", fail_policy="fail_open")
+    text = "anything"
+    result = await svc.check(_envelope(text))
+    assert result == text
+
+
+# ---------------------------------------------------------------------------
+# Mode × low-threat-sanitize matrix
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["warn", "sanitize", "block"])
+@pytest.mark.asyncio
+async def test_low_threat_sanitize_logs_at_debug_in_all_modes(mode):
+    """Operator-noise reduction must apply regardless of inspection mode."""
+    svc = InspectionService(_LowThreatFormattingCharsSanitizeInspector(), mode=mode)
+    with (
+        patch("src.tooling.inspection_service.logger.debug") as mock_debug,
+        patch("src.tooling.inspection_service.logger.warning") as mock_warning,
+    ):
+        await svc.check(_envelope("\u200e\u200e\u200e content"))
+
+    mock_warning.assert_not_called()
+    mock_debug.assert_called_once()
