@@ -271,6 +271,8 @@ The screening pipeline is the shortest path from broad discovery to a shortlist 
 
 # Step-by-step alternative
 poetry run python scripts/find_gems.py --output scratch/gems.txt
+# Run this next; this is also how you would restart an aborted run, 
+# where stage0-scrape finished, but stage1 didn't (fully) finish
 ./scripts/run_pipeline.sh --skip-scrape scratch/gems.txt
 ```
 

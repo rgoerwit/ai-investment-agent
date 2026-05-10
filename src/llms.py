@@ -573,8 +573,12 @@ def create_consultant_llm(
     # GPT-5 non-pro models support configurable reasoning effort. Quick mode
     # uses a lower setting to keep the consultant active without paying full
     # synthesis cost; normal mode preserves the current medium effort.
+    # Note: gpt-5.x-mini variants reject "minimal" — only full gpt-5.x accepts it.
     if model_name.startswith("gpt-5") and "pro" not in model_name:
-        kwargs["reasoning_effort"] = "low" if quick_mode else "medium"
+        if quick_mode:
+            kwargs["reasoning_effort"] = "low" if "mini" in model_name else "minimal"
+        else:
+            kwargs["reasoning_effort"] = "medium"
 
     budget = _resolve_generation_budget(
         intent_tokens=kwargs["max_completion_tokens"],
@@ -602,6 +606,7 @@ def create_consultant_llm(
 def create_auditor_llm(
     callbacks: list[BaseCallbackHandler] | None = None,
     max_completion_tokens: int | None = None,
+    quick_mode: bool = False,
 ) -> BaseChatModel | None:
     """
     Create Auditor LLM with fallback logic.
@@ -609,9 +614,13 @@ def create_auditor_llm(
 
     Logic:
     1. If ENABLE_CONSULTANT is False -> None
-    2. If AUDITOR_MODEL is set -> Use it
-    3. If CONSULTANT_MODEL is set -> Use it (Fallback)
-    4. Default -> gpt-4o
+    2. quick_mode=True and AUDITOR_QUICK_MODEL is set -> Use it
+    3. If AUDITOR_MODEL is set -> Use it
+    4. If CONSULTANT_MODEL is set -> Use it (Fallback)
+    5. Default -> gpt-4o
+
+    In quick mode, gpt-5 reasoning effort is dropped to "minimal" to keep the
+    auditor cheap on screening passes; normal mode preserves "medium".
     """
     try:
         from langchain_openai import ChatOpenAI
@@ -628,10 +637,13 @@ def create_auditor_llm(
         logger.warning("auditor_no_api_key")
         return None
 
-    # Determine model: Specific -> Consultant -> Default
-    model_name = config.auditor_model or config.consultant_model or "gpt-4o"
+    # Determine model: quick override -> specific -> consultant -> default
+    if quick_mode and config.auditor_quick_model:
+        model_name = config.auditor_quick_model
+    else:
+        model_name = config.auditor_model or config.consultant_model or "gpt-4o"
 
-    logger.info("auditor_llm_init", model=model_name)
+    logger.info("auditor_llm_init", model=model_name, quick_mode=quick_mode)
 
     # Do NOT set temperature — multiple OpenAI model families (o-series reasoning
     # models, gpt-5.x) reject temperature != 1.0.  Forensic precision comes from
@@ -644,14 +656,19 @@ def create_auditor_llm(
         "max_retries": 3,
         "api_key": api_key,
         "callbacks": callbacks or [],
-        "max_completion_tokens": max_completion_tokens or 16384,
+        "max_completion_tokens": max_completion_tokens
+        or (6144 if quick_mode else 16384),
         "streaming": False,
         "use_responses_api": True,
         "output_version": "responses/v1",
     }
 
+    # gpt-5.x-mini variants reject "minimal" — only full gpt-5.x accepts it.
     if model_name.startswith("gpt-5") and "pro" not in model_name:
-        kwargs["reasoning_effort"] = "medium"
+        if quick_mode:
+            kwargs["reasoning_effort"] = "low" if "mini" in model_name else "minimal"
+        else:
+            kwargs["reasoning_effort"] = "medium"
 
     budget = _resolve_generation_budget(
         intent_tokens=kwargs["max_completion_tokens"],

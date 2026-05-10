@@ -354,6 +354,11 @@ class Settings(BaseSettings):
         validation_alias="AUDITOR_MODEL",
         description="Model for the auditor agent (optional)",
     )
+    auditor_quick_model: str = Field(
+        default="gpt-5.4-mini",
+        validation_alias="AUDITOR_QUICK_MODEL",
+        description="Model for the auditor agent in --quick mode",
+    )
     editor_model: str | None = Field(
         default=None,
         validation_alias="EDITOR_MODEL",
@@ -482,12 +487,30 @@ class Settings(BaseSettings):
         validation_alias="API_TIMEOUT",
         description="API request timeout in seconds",
     )
-    # Retries from 3 -> 10 to aggressively handle 504/503 transient errors
+    # Lowered from 10 -> 2: at 10 retries × 300s timeout, a single hung Gemini
+    # call could legitimately consume 50min before raising. The outer
+    # `invoke_with_rate_limit_handling` already retries 3× with backoff, so
+    # SDK-level retries are deliberately tight. Bump if you see frequent
+    # transient 5xx errors that aren't being absorbed.
     api_retry_attempts: int = Field(
-        default=10,
+        default=2,
         ge=0,
         validation_alias="API_RETRY_ATTEMPTS",
         description="Number of retry attempts for failed API calls",
+    )
+    # Wall-clock ceiling for a single `runnable.ainvoke()` call. Enforced via
+    # `run_with_hard_timeout` in `invoke_with_rate_limit_handling` so a hung
+    # provider SDK can't park a worker for hours. Sized to comfortably cover
+    # api_timeout × api_retry_attempts plus headroom for deep/thinking-heavy
+    # generation.
+    llm_call_hard_timeout_seconds: float = Field(
+        default=600.0,
+        gt=0.0,
+        validation_alias="LLM_CALL_HARD_TIMEOUT_SECONDS",
+        description=(
+            "Hard wall-clock cap (seconds) for a single LLM ainvoke; "
+            "raised as TimeoutError if exceeded."
+        ),
     )
     llm_base_output_tokens: int = Field(
         default=32768,

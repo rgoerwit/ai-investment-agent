@@ -219,7 +219,14 @@ class SignalProcessor:
                 ),
                 ("human", full_signal),
             ]
-            result = await self.llm.ainvoke(messages)
+            from src.agents.runtime import invoke_with_rate_limit_handling
+
+            result = await invoke_with_rate_limit_handling(
+                self.llm,
+                messages,
+                max_attempts=2,
+                context="SignalProcessor",
+            )
             # CRITICAL FIX: Normalize response.content to string (Gemini may return dict)
             content = extract_string_content(result.content).strip().upper()
 

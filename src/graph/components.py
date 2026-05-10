@@ -332,6 +332,7 @@ def build_graph_components(
         create_auditor_llm(
             callbacks=tracked_callbacks("Global Forensic Auditor"),
             max_completion_tokens=output_budget("Global Forensic Auditor"),
+            quick_mode=quick_mode,
         )
         if auditor_requested
         else None

@@ -6,6 +6,7 @@ from typing import Any
 
 import structlog
 
+from src.async_utils import run_with_hard_timeout
 from src.config import config as settings_config
 from src.runtime_diagnostics import (
     classify_failure,
@@ -80,9 +81,17 @@ async def invoke_with_rate_limit_handling(
             max_attempts=max_attempts,
         )
 
+    hard_timeout = float(
+        getattr(settings_config, "llm_call_hard_timeout_seconds", 600.0)
+    )
+
     for attempt in range(max_attempts):
         try:
-            result = await runnable.ainvoke(input_data)
+            result = await run_with_hard_timeout(
+                runnable.ainvoke(input_data),
+                timeout=hard_timeout,
+                label=f"llm:{context}:{resolved_provider}:{resolved_model}",
+            )
             try:
                 capture_manager = _get_capture_manager()
                 if capture_manager is not None:

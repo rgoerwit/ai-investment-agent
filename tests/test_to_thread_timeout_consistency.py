@@ -174,6 +174,9 @@ def _enclosing_timeout_call(to_thread_node: ast.Call) -> str | None:
             | ast.Yield
             | ast.YieldFrom,
         ):
+            # Walk up: the to_thread node may be wrapped in await / assignment
+            # / etc.; we still want to find an enclosing timeout call above.
+            node = parent
             continue
         # Anything else (FunctionDef, ClassDef, Module, etc.): stop. The
         # to_thread is not in a recognized "passed-as-first-arg" shape.

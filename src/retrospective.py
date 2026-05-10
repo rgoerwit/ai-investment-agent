@@ -914,12 +914,23 @@ FAILURE_MODE: CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_BLEED | OPERATIONAL_MISS | 
                 "ticker": comparison.get("ticker"),
             }
         )
+        from src.config import config as settings_config
+
+        hard_timeout = float(
+            getattr(settings_config, "llm_call_hard_timeout_seconds", 600.0)
+        )
         if invoke_config:
-            response = await llm.ainvoke(
-                [HumanMessage(content=prompt)], config=invoke_config
+            response = await run_with_hard_timeout(
+                llm.ainvoke([HumanMessage(content=prompt)], config=invoke_config),
+                timeout=hard_timeout,
+                label=f"llm:retrospective_lesson:{comparison.get('ticker', '?')}",
             )
         else:
-            response = await llm.ainvoke([HumanMessage(content=prompt)])
+            response = await run_with_hard_timeout(
+                llm.ainvoke([HumanMessage(content=prompt)]),
+                timeout=hard_timeout,
+                label=f"llm:retrospective_lesson:{comparison.get('ticker', '?')}",
+            )
 
         from src.agents import extract_string_content
 
