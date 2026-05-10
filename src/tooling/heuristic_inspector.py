@@ -38,6 +38,7 @@ _ThreatType = Literal[
     "role_play",
     "delimiter_breakout",
     "hidden_markup",
+    "formatting_chars",
     "encoded_payload",
     "exfiltration",
     "control_chars",
@@ -255,6 +256,14 @@ def _detect_signals(text: str) -> list[_Hit]:
 
 
 def _detect_formatting_char_artifact(text: str) -> _Hit | None:
+    """Flag clusters of bidi / zero-width / BOM characters.
+
+    These characters have no semantic value for an LLM but appear naturally in
+    CJK web text (bidi marks for mixed-script rendering, NNBSP in numerals,
+    BOM at file boundaries). The sanitize path scrubs them rather than block
+    so legitimate Foreign Language Analyst output isn't discarded — see the
+    May 2026 HK ticker false-positive incident.
+    """
     matches = list(_FORMATTING_CHARS_PATTERN.finditer(text))
     if len(matches) < _FORMATTING_CHAR_MIN_SUSPICIOUS_COUNT:
         return None
@@ -266,7 +275,7 @@ def _detect_formatting_char_artifact(text: str) -> _Hit | None:
     )
     return _Hit(
         signal=_Signal(
-            _FORMATTING_CHARS_PATTERN, _FORMATTING_CHAR_WEIGHT, "hidden_markup"
+            _FORMATTING_CHARS_PATTERN, _FORMATTING_CHAR_WEIGHT, "formatting_chars"
         ),
         match_text=f"{preview} (count={len(matches)})",
     )
@@ -380,14 +389,26 @@ def _detect_context_bomb(
 
 
 def _control_char_density(text: str) -> float:
-    """Return fraction of invisible / control characters in *text*."""
+    """Return fraction of invisible / control characters in *text*.
+
+    Excludes bidi / zero-width / BOM marks already covered by
+    ``_FORMATTING_CHARS_PATTERN`` — those are attributed to the
+    ``formatting_chars`` signal so we don't double-count them. Without this,
+    a short Arabic / Hebrew / CJK passage with a few legitimate bidi marks
+    can cross the 3% control-char density threshold and be misclassified as
+    suspicious.
+    """
     if len(text) < _CONTROL_CHAR_MIN_LENGTH:
         return 0.0
-    count = sum(
-        1
-        for ch in text
-        if unicodedata.category(ch).startswith("C") and ch not in ("\n", "\r", "\t")
-    )
+    count = 0
+    for ch in text:
+        if not unicodedata.category(ch).startswith("C"):
+            continue
+        if ch in ("\n", "\r", "\t"):
+            continue
+        if _FORMATTING_CHARS_PATTERN.match(ch):
+            continue
+        count += 1
     return count / len(text)
 
 
@@ -395,8 +416,14 @@ def _strip_known_breakouts(
     text: str,
     *,
     preserve_terminal_search_results: bool = False,
+    strip_formatting_chars: bool = False,
 ) -> str:
-    """Remove delimiter-breakout tags that can be safely stripped."""
+    """Remove delimiter-breakout tags (and optionally inert formatting chars).
+
+    Bidi / zero-width / BOM characters carry no semantic value for the LLM
+    but appear naturally in CJK web text. ``strip_formatting_chars=True``
+    scrubs them along with any strippable delimiters.
+    """
     result = text
     sentinel = "__EXPECTED_SEARCH_RESULTS_FOOTER__"
     if preserve_terminal_search_results:
@@ -409,6 +436,8 @@ def _strip_known_breakouts(
         )
     for pat in _STRIPPABLE_DELIMITERS:
         result = pat.sub("", result)
+    if strip_formatting_chars:
+        result = _FORMATTING_CHARS_PATTERN.sub("", result)
     if preserve_terminal_search_results:
         result = result.replace(sentinel, "</search_results>")
     return result
@@ -503,26 +532,37 @@ class HeuristicInspector:
 
         severity = _classify_severity(total_weight, envelope.source_kind)
 
-        # Can we safely sanitize?  Only if the only hits are strippable delimiters.
-        all_delimiter_breakout = (
-            all(h.signal.threat_type == "delimiter_breakout" for h in hits)
-            and not cc_hit
+        # Can we safely sanitize? Only if every hit is a scrubbable artifact —
+        # delimiter breakouts (Tavily wrappers etc.) and inert formatting chars
+        # (bidi marks, zero-width, BOM) both qualify. They convey no LLM-
+        # actionable instruction; stripping is preferable to discarding the
+        # whole tool output.
+        scrubbable_types = {"delimiter_breakout", "formatting_chars"}
+        all_scrubbable = (
+            all(h.signal.threat_type in scrubbable_types for h in hits) and not cc_hit
         )
-        if all_delimiter_breakout:
+        if all_scrubbable:
             preserve_terminal_wrapper = expected_search_results_wrapper and bool(
                 search_result_hits
             )
+            strip_fmt = any(h.signal.threat_type == "formatting_chars" for h in hits)
             sanitized = _strip_known_breakouts(
                 text,
                 preserve_terminal_search_results=preserve_terminal_wrapper,
+                strip_formatting_chars=strip_fmt,
             )
+            reason_parts = []
+            if any(h.signal.threat_type == "delimiter_breakout" for h in hits):
+                reason_parts.append("delimiter-breakout tags")
+            if strip_fmt:
+                reason_parts.append("inert formatting characters")
             return InspectionDecision(
                 action="sanitize",
                 threat_level=severity,
                 threat_types=threat_types,
                 sanitized_content=sanitized,
                 findings=findings,
-                reason="stripped delimiter-breakout tags",
+                reason=f"stripped {' + '.join(reason_parts)}",
             )
 
         action: Literal["allow", "sanitize", "block", "degrade"]
