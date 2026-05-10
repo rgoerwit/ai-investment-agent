@@ -126,6 +126,133 @@ class TestSearchForeignSourcesTool:
 
                 assert "no results" in result.lower()
 
+    @pytest.mark.asyncio
+    async def test_output_terminates_with_search_results_closer(self):
+        """The Tavily `<search_results>...</search_results>` wrapper must be
+        the LAST meaningful element of the returned text.
+
+        The heuristic content inspector
+        (`_detect_search_results_breakouts`) treats the terminal closer as
+        a legitimate trust-boundary footer only when nothing follows it
+        (whitespace allowed). A trailing 'Note: ...' footer would surface
+        every search as a `delimiter_breakout` warning at threat_level=high
+        — exactly the May 2026 2364.TW false-positive pattern the user
+        flagged.
+
+        Header / metadata / 'Verify dates' note must therefore live BEFORE
+        the wrapper, never after.
+        """
+        import re
+        from unittest.mock import AsyncMock
+
+        from src.tools.research import search_foreign_sources
+
+        # Stub Tavily to return realistic wrapped output.
+        async def fake_tavily(_args):
+            return {
+                "results": [
+                    {
+                        "title": "Toyota Q3 results",
+                        "url": "https://example.com/toyota",
+                        "content": "Toyota reported Q3 revenue of ¥2.4T ‪JPY‬.",
+                    }
+                ]
+            }
+
+        with (
+            patch(
+                "src.tools.shared._tavily_search_with_timeout",
+                new=AsyncMock(side_effect=fake_tavily),
+            ),
+            patch("src.tools.shared._ddg_search", new=AsyncMock(return_value=[])),
+            patch(
+                "src.tools.shared.extract_company_name_async",
+                new=AsyncMock(return_value="Toyota Motor Corp"),
+            ),
+        ):
+            result = await search_foreign_sources.ainvoke(
+                {"ticker": "7203.T", "search_query": "Toyota 決算短信"}
+            )
+
+        # The wrapper closer must appear, and must be terminal.
+        closers = list(re.finditer(r"</search_results>", result, re.I))
+        assert closers, "Output must contain a </search_results> closer"
+        last_closer = closers[-1]
+        # Whitespace only between last closer and end of string.
+        assert result[last_closer.end() :].strip() == "", (
+            "Text after the final </search_results> closer trips the "
+            "delimiter-breakout heuristic. Move metadata/footers BEFORE "
+            "the wrapper. Trailing text was: "
+            f"{result[last_closer.end():]!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_benign_act_as_the_phrase_does_not_trigger_block(self):
+        """Reproducer for the May 2026 2373.HK incident: financial news
+        routinely contains phrases like 'will act as the lead underwriter',
+        which triggers the heuristic's `role_play` weight-1.5 signal.
+
+        Pre-fix, that landed in the same `tool_output` envelope as the
+        spurious `delimiter_breakout` from the post-wrapper `Note:` footer
+        — combined weight 4.5 → severity 'high' → action 'block'. With the
+        producer fix (closer is terminal), only the role_play signal
+        remains; severity 'low' → action 'allow' → debug log only.
+        """
+        from unittest.mock import AsyncMock as _AsyncMock
+
+        from src.tooling.heuristic_inspector import HeuristicInspector
+        from src.tooling.inspector import InspectionEnvelope, SourceKind
+        from src.tools.research import search_foreign_sources
+
+        async def fake_tavily(_args):
+            return {
+                "results": [
+                    {
+                        "title": "Underwriting note",
+                        "url": "https://example.com/x",
+                        "content": (
+                            "Morgan Stanley will act as the lead "
+                            "underwriter for the IPO."
+                        ),
+                    }
+                ]
+            }
+
+        with (
+            patch(
+                "src.tools.shared._tavily_search_with_timeout",
+                new=_AsyncMock(side_effect=fake_tavily),
+            ),
+            patch("src.tools.shared._ddg_search", new=_AsyncMock(return_value=[])),
+            patch(
+                "src.tools.shared.extract_company_name_async",
+                new=_AsyncMock(return_value="Test Co"),
+            ),
+        ):
+            output = await search_foreign_sources.ainvoke(
+                {"ticker": "2373.HK", "search_query": "lead underwriter"}
+            )
+
+        decision = await HeuristicInspector().inspect(
+            InspectionEnvelope(
+                content_text=output,
+                source_kind=SourceKind.tool_output,
+                source_name="search_foreign_sources",
+                tool_name="search_foreign_sources",
+                agent_key="foreign_language_analyst",
+            )
+        )
+
+        assert decision.action == "allow", (
+            f"Benign 'act as the' phrase wrongly triggered "
+            f"action={decision.action} (threat_level={decision.threat_level}, "
+            f"types={decision.threat_types})"
+        )
+        assert "delimiter_breakout" not in decision.threat_types, (
+            "Producer wrapper must keep the </search_results> closer "
+            "terminal so the breakout heuristic stays clean"
+        )
+
 
 class TestAgentStateField:
     """Tests for foreign_language_report field in AgentState."""

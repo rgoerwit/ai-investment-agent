@@ -178,9 +178,15 @@ def save_results_to_file(
     *,
     results_dir: Path | str | None = None,
     trace_id: str | None = None,
+    strict_mode: bool = False,
     logger_obj=logger,
 ) -> Path:
-    """Save analysis results to a JSON file in the results directory."""
+    """Save analysis results to a JSON file in the results directory.
+
+    `strict_mode` is recorded in the prediction_snapshot so retrospectives
+    can weight strict-mode rejections differently from normal-mode ones
+    (strict mode rejects valid REIT/PFIC/VIE candidates at the gate).
+    """
     from src.error_safety import summarize_exception
     from src.memory import get_ticker_memory_stats
     from src.prompts import get_all_prompts
@@ -391,6 +397,7 @@ def save_results_to_file(
                 ticker,
                 quick_mode,
                 trace_id=trace_id,
+                is_strict_mode=strict_mode,
             )
         )
     except Exception as exc:
@@ -474,6 +481,7 @@ def _persist_analysis_outputs(
             quick_mode=args.quick,
             results_dir=Path(config.results_dir),
             trace_id=trace_id,
+            strict_mode=getattr(args, "strict", False),
             logger_obj=logger_obj,
         )
         if not args.quiet and not args.brief and console_obj is not None:
@@ -503,8 +511,22 @@ async def _maybe_save_rejection_record(
     trace_id: str | None = None,
     logger_obj=logger,
 ) -> None:
-    """Persist non-BUY verdicts as retrospective rejection records."""
+    """Persist non-BUY verdicts as retrospective rejection records.
+
+    Honors ``--no-memory`` (``config.enable_memory == False``) — the
+    rejection record lives in the same global ``lessons_learned`` ChromaDB
+    collection as full retrospective lessons, and skipping memory should
+    skip *all* writes to it. The retrospective comparison itself is gated
+    in ``src/main.py``; this matches that contract.
+    """
     from src.error_safety import summarize_exception
+
+    if not config.enable_memory:
+        logger_obj.debug(
+            "rejection_record_save_skipped_no_memory",
+            ticker=getattr(args, "ticker", None),
+        )
+        return
 
     try:
         from src.retrospective import (
@@ -519,6 +541,7 @@ async def _maybe_save_rejection_record(
                 args.ticker,
                 is_quick_mode=args.quick,
                 trace_id=trace_id,
+                is_strict_mode=getattr(args, "strict", False),
             )
         )
         verdict = (snapshot or {}).get("verdict", "")

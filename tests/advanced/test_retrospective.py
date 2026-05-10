@@ -199,6 +199,28 @@ class TestExtractSnapshot:
         snapshot = extract_snapshot(_make_result(), "2767.T", trace_id="trace-123")
         assert snapshot["trace_id"] == "trace-123"
 
+    def test_extract_snapshot_records_run_options_for_weighting(self):
+        """Not all analyses are of equal weight: --quick uses cheaper models
+        and skips a debate round; --strict tightens gates and rejects valid
+        REIT/PFIC/VIE candidates. Both flags must be in the snapshot so
+        downstream lesson weighting can discount accordingly."""
+        # Standard mode (defaults).
+        s_default = extract_snapshot(_make_result(), "TEST")
+        assert s_default["is_quick_mode"] is False
+        assert s_default["is_strict_mode"] is False
+
+        # --quick + --strict combination.
+        s_both = extract_snapshot(
+            _make_result(), "TEST", is_quick_mode=True, is_strict_mode=True
+        )
+        assert s_both["is_quick_mode"] is True
+        assert s_both["is_strict_mode"] is True
+
+        # --strict alone.
+        s_strict = extract_snapshot(_make_result(), "TEST", is_strict_mode=True)
+        assert s_strict["is_quick_mode"] is False
+        assert s_strict["is_strict_mode"] is True
+
 
 @pytest.mark.asyncio
 async def test_generate_lesson_logs_structured_failure_details():

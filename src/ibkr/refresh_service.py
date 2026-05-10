@@ -257,6 +257,24 @@ class AnalysisRefreshService:
             )
             if result:
                 save_results_fn(result, ticker, quick_mode=execution.quick_mode)
+                # Mirror the direct `python -m src.main` path: persist
+                # non-BUY verdicts as retrospective rejection records so
+                # portfolio refreshes feed the same lessons_learned
+                # collection as direct analysis runs. The helper already
+                # gates on `config.enable_memory`, so `--no-memory` runs
+                # are a no-op.
+                from types import SimpleNamespace
+
+                from src.persistence import _maybe_save_rejection_record
+
+                await _maybe_save_rejection_record(
+                    result,
+                    SimpleNamespace(
+                        ticker=ticker,
+                        quick=execution.quick_mode,
+                        strict=False,
+                    ),
+                )
                 updated.refreshed.append(ticker)
             else:
                 updated.failed.append(ticker)

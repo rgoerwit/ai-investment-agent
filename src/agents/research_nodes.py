@@ -7,6 +7,7 @@ import structlog
 from langchain_core.messages import HumanMessage
 from langgraph.types import RunnableConfig
 
+from src.config import config as settings_config
 from src.runtime_diagnostics import failure_artifact, success_artifact
 from src.tooling.text_boundary import format_untrusted_block
 
@@ -165,28 +166,40 @@ Now provide your Round 2 rebuttal, addressing the opponent's key points."""
                 logger.error("memory_retrieval_failed", ticker=ticker, error=str(exc))
 
         lessons_text = ""
-        try:
-            from src.retrospective import (
-                create_lessons_memory,
-                format_lessons_for_injection,
-            )
-
-            lessons_memory = create_lessons_memory()
-            sector = support._extract_sector_from_state(state)
-            lessons_text = await format_lessons_for_injection(
-                lessons_memory, ticker, sector
-            )
-            if lessons_text:
-                logger.info(
-                    "lessons_injected",
-                    agent=agent_key,
-                    ticker=ticker,
-                    lessons_length=len(lessons_text),
+        if settings_config.enable_memory:
+            try:
+                from src.retrospective import (
+                    create_lessons_memory,
+                    format_lessons_for_injection,
                 )
-            else:
-                logger.debug("no_lessons_available", agent=agent_key, ticker=ticker)
-        except Exception as exc:
-            logger.warning("lessons_injection_failed", agent=agent_key, error=str(exc))
+
+                lessons_memory = create_lessons_memory()
+                sector = support._extract_sector_from_state(state)
+                lessons_text = await format_lessons_for_injection(
+                    lessons_memory, ticker, sector
+                )
+                if lessons_text:
+                    logger.info(
+                        "lessons_injected",
+                        agent=agent_key,
+                        ticker=ticker,
+                        lessons_length=len(lessons_text),
+                    )
+                else:
+                    logger.debug("no_lessons_available", agent=agent_key, ticker=ticker)
+            except Exception as exc:
+                logger.warning(
+                    "lessons_injection_failed", agent=agent_key, error=str(exc)
+                )
+        else:
+            # --no-memory: don't even touch the global lessons_learned
+            # collection. Mirrors the per-ticker retrospective gate in
+            # `_maybe_run_ticker_retrospective` (src/main.py).
+            logger.debug(
+                "lessons_injection_skipped_no_memory",
+                agent=agent_key,
+                ticker=ticker,
+            )
 
         unresolved_warning = (
             "" if company_resolved else f"\n{support._UNRESOLVED_NAME_WARNING}"

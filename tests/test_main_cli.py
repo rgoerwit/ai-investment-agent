@@ -953,12 +953,43 @@ class TestRuntimeOverrides:
             trace_langfuse=True,
         )
 
-        _apply_runtime_overrides(args)
+        restore = _apply_runtime_overrides(args)
 
         assert config.quick_think_llm == "new-quick"
         assert config.deep_think_llm == "new-deep"
         assert config.enable_memory is False
         assert config.langfuse_enabled is True
+
+        # The restore callable reverts every overridden field. monkeypatch
+        # would also restore on test teardown, but the production caller
+        # (`main()`) relies on this restore to be present so that
+        # in-process callers running multiple analyses don't inherit one
+        # run's CLI flags through the global config singleton.
+        restore()
+        assert config.quick_think_llm == "old-quick"
+        assert config.deep_think_llm == "old-deep"
+        assert config.enable_memory is True
+        assert config.langfuse_enabled is False
+
+    def test_apply_runtime_overrides_restore_is_idempotent(self, monkeypatch):
+        """Calling restore twice must be safe (production `finally` blocks
+        sometimes fire under unusual unwinding paths)."""
+        from src.main import _apply_runtime_overrides, config
+
+        monkeypatch.setattr(config, "enable_memory", True)
+        args = SimpleNamespace(
+            quick_model=None,
+            deep_model=None,
+            no_memory=True,
+            enable_langfuse=False,
+            trace_langfuse=False,
+        )
+        restore = _apply_runtime_overrides(args)
+        assert config.enable_memory is False
+        restore()
+        assert config.enable_memory is True
+        restore()  # second call must be a no-op
+        assert config.enable_memory is True
 
     def test_enable_langfuse_flag_updates_config(self, monkeypatch):
         from src.main import _apply_runtime_overrides, config
@@ -1059,6 +1090,31 @@ class TestMainOrchestration:
 
         assert asyncio.run(_run_retrospective_only(args)) == 1
 
+    def test_run_retrospective_only_skips_when_no_memory(self, monkeypatch):
+        """`--no-memory --retrospective-only` must not write to lessons_learned.
+
+        Mirrors the per-ticker gate at `_maybe_run_ticker_retrospective`.
+        Distinct event name `retrospective_batch_skipped_no_memory` so log
+        greps can tell the two paths apart.
+        """
+        from src.main import _run_retrospective_only
+
+        called = {"count": 0}
+
+        async def fake_run_retrospective(*_args, **_kwargs):
+            called["count"] += 1
+            return []
+
+        monkeypatch.setattr(
+            "src.retrospective.run_retrospective", fake_run_retrospective
+        )
+
+        args = SimpleNamespace(quiet=True, brief=False, no_memory=True)
+        assert asyncio.run(_run_retrospective_only(args)) == 0
+        assert (
+            called["count"] == 0
+        ), "run_retrospective must NOT be called when --no-memory is set"
+
     def test_retrospective_only_returns_early(self, monkeypatch):
         from src.cli import OutputTargets
         from src.main import main
@@ -1072,7 +1128,7 @@ class TestMainOrchestration:
 
         monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
         monkeypatch.setattr(
-            "src.main._apply_runtime_overrides", lambda passed_args: None
+            "src.main._apply_runtime_overrides", lambda passed_args: (lambda: None)
         )
         monkeypatch.setattr("src.main.cli._validate_cli_args", lambda passed_args: None)
         monkeypatch.setattr(
@@ -1209,7 +1265,7 @@ class TestMainOrchestration:
 
         monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
         monkeypatch.setattr(
-            "src.main._apply_runtime_overrides", lambda passed_args: None
+            "src.main._apply_runtime_overrides", lambda passed_args: (lambda: None)
         )
         monkeypatch.setattr(
             "src.main.cli._validate_cli_args",
@@ -1240,7 +1296,7 @@ class TestMainOrchestration:
 
         monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
         monkeypatch.setattr(
-            "src.main._apply_runtime_overrides", lambda passed_args: None
+            "src.main._apply_runtime_overrides", lambda passed_args: (lambda: None)
         )
         monkeypatch.setattr("src.main.cli._validate_cli_args", lambda passed_args: None)
         monkeypatch.setattr(
@@ -1303,7 +1359,7 @@ class TestMainOrchestration:
         monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
         monkeypatch.setattr("src.main.config.results_dir", original_results_dir)
         monkeypatch.setattr(
-            "src.main._apply_runtime_overrides", lambda passed_args: None
+            "src.main._apply_runtime_overrides", lambda passed_args: (lambda: None)
         )
         monkeypatch.setattr("src.main.cli._validate_cli_args", lambda passed_args: None)
         monkeypatch.setattr(
@@ -1381,7 +1437,7 @@ class TestMainOrchestration:
         monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
         monkeypatch.setattr("src.main.config.results_dir", original_results_dir)
         monkeypatch.setattr(
-            "src.main._apply_runtime_overrides", lambda passed_args: None
+            "src.main._apply_runtime_overrides", lambda passed_args: (lambda: None)
         )
         monkeypatch.setattr("src.main.cli._validate_cli_args", lambda passed_args: None)
         monkeypatch.setattr(
@@ -1443,7 +1499,7 @@ class TestMainOrchestration:
         monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
         monkeypatch.setattr("src.main.config.results_dir", Path("results"))
         monkeypatch.setattr(
-            "src.main._apply_runtime_overrides", lambda passed_args: None
+            "src.main._apply_runtime_overrides", lambda passed_args: (lambda: None)
         )
         monkeypatch.setattr("src.main.cli._validate_cli_args", lambda passed_args: None)
         monkeypatch.setattr(

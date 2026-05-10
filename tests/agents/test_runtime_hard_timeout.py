@@ -182,3 +182,194 @@ class TestHardTimeoutWrap:
 
         assert call_count["n"] == 2
         assert getattr(result, "content", None) == "recovered"
+
+
+# ---------------------------------------------------------------------------
+# Provider partial-response detection (May 2026 2382.HK auditor truncation)
+#
+# Some providers occasionally return a "200 OK" with truncated content and
+# either a missing or `length` finish_reason — the call looks "successful"
+# but the response is half-baked. We detect the partial via finish_reason
+# and surface it as a transient failure so the existing retry loop can
+# reattempt before passing partial output downstream.
+# ---------------------------------------------------------------------------
+
+
+def _resp(content: str, finish_reason: object = "stop") -> AIMessage:
+    """Construct an AIMessage with response_metadata.finish_reason set
+    the way LangChain wraps OpenAI / Anthropic / Gemini responses."""
+    msg = AIMessage(content=content)
+    metadata: dict = {}
+    if finish_reason is not _SENTINEL:
+        metadata["finish_reason"] = finish_reason
+    msg.response_metadata = metadata
+    return msg
+
+
+_SENTINEL = object()
+
+
+class TestProviderPartialResponseDetection:
+    """Pin the finish_reason classifier behavior so future provider quirks
+    don't quietly slip through."""
+
+    def test_clean_stop_is_not_partial(self):
+        from src.agents.runtime import _detect_provider_partial_response
+
+        assert (
+            _detect_provider_partial_response(_resp("done", finish_reason="stop"))
+            is None
+        )
+
+    def test_anthropic_end_turn_is_not_partial(self):
+        from src.agents.runtime import _detect_provider_partial_response
+
+        assert (
+            _detect_provider_partial_response(_resp("done", finish_reason="end_turn"))
+            is None
+        )
+
+    def test_tool_calls_finish_reason_is_not_partial(self):
+        """Agent loop continues with tool results; not a retry signal."""
+        from src.agents.runtime import _detect_provider_partial_response
+
+        assert (
+            _detect_provider_partial_response(
+                _resp("calling tool", finish_reason="tool_calls")
+            )
+            is None
+        )
+
+    def test_content_filter_is_not_partial(self):
+        """Provider intentionally stopped — retry would just loop."""
+        from src.agents.runtime import _detect_provider_partial_response
+
+        assert (
+            _detect_provider_partial_response(
+                _resp("blocked", finish_reason="content_filter")
+            )
+            is None
+        )
+
+    def test_missing_finish_reason_is_partial(self):
+        """The May 2026 2382.HK case: stream cut without finalizing."""
+        from src.agents.runtime import _detect_provider_partial_response
+
+        assert (
+            _detect_provider_partial_response(_resp("partial", finish_reason=None))
+            is not None
+        )
+
+    def test_length_finish_reason_is_partial(self):
+        """Hit max_completion_tokens before finishing — surface to caller."""
+        from src.agents.runtime import _detect_provider_partial_response
+
+        result = _detect_provider_partial_response(
+            _resp("ran out", finish_reason="length")
+        )
+        assert result is not None
+        assert "length" in result
+
+    def test_empty_content_with_no_metadata_is_partial(self):
+        """Defensive: empty body and no metadata → suspect partial."""
+        from src.agents.runtime import _detect_provider_partial_response
+
+        msg = AIMessage(content="")
+        # No response_metadata at all
+        assert _detect_provider_partial_response(msg) is not None
+
+    def test_bare_aimessage_with_content_is_NOT_partial(self):
+        """Pin the regression that an over-aggressive partial detector
+        (one that flags ANY missing finish_reason as partial) would have
+        broken `tests/config/test_rate_limit_handling.py
+        ::test_success_on_first_try`. Many call sites and tests construct
+        plain AIMessages without setting response_metadata; those must
+        flow through as clean responses, not trigger a phantom retry.
+        """
+        from src.agents.runtime import _detect_provider_partial_response
+
+        msg = AIMessage(content="some normal content")
+        # Default response_metadata is the empty dict; no provider tail.
+        assert _detect_provider_partial_response(msg) is None
+
+
+class TestProviderPartialResponseRetry:
+    @pytest.mark.asyncio
+    async def test_partial_response_triggers_retry_and_recovers(self):
+        """First call returns a partial; second returns a clean stop."""
+        call_count = {"n": 0}
+
+        async def fake_invoke(_input):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                # Stream-cut style: no finish_reason at all.
+                return _resp("partial header", finish_reason=None)
+            return _resp("clean output", finish_reason="stop")
+
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(side_effect=fake_invoke)
+
+        with patch("src.agents.runtime.asyncio.sleep", new_callable=AsyncMock):
+            with patch("src.agents.runtime.random.uniform", return_value=2.0):
+                result = await invoke_with_rate_limit_handling(
+                    runnable,
+                    {"input": "x"},
+                    max_attempts=2,
+                    context="PartialRetryTest",
+                )
+
+        assert call_count["n"] == 2
+        assert result.content == "clean output"
+
+    @pytest.mark.asyncio
+    async def test_clean_response_is_not_retried(self):
+        """Regression guard: a clean response must NOT trigger an extra
+        invoke. Otherwise every successful call costs 2x the API quota."""
+        call_count = {"n": 0}
+
+        async def fake_invoke(_input):
+            call_count["n"] += 1
+            return _resp("clean", finish_reason="stop")
+
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(side_effect=fake_invoke)
+
+        result = await invoke_with_rate_limit_handling(
+            runnable,
+            {"input": "x"},
+            max_attempts=3,
+            context="CleanResponseTest",
+        )
+
+        assert call_count["n"] == 1
+        assert result.content == "clean"
+
+    @pytest.mark.asyncio
+    async def test_persistent_partial_after_max_attempts_returns_partial(self):
+        """If every attempt is partial, return the last partial rather
+        than retrying forever. The structural validators downstream
+        (output_validation.detect_truncation, agent_invalid_structure)
+        will then correctly fail-closed on it."""
+        call_count = {"n": 0}
+
+        async def fake_invoke(_input):
+            call_count["n"] += 1
+            return _resp("always partial", finish_reason=None)
+
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(side_effect=fake_invoke)
+
+        with patch("src.agents.runtime.asyncio.sleep", new_callable=AsyncMock):
+            with patch("src.agents.runtime.random.uniform", return_value=2.0):
+                result = await invoke_with_rate_limit_handling(
+                    runnable,
+                    {"input": "x"},
+                    max_attempts=2,
+                    context="PersistentPartialTest",
+                )
+
+        # On the FINAL attempt, the partial-response check is bypassed
+        # (`attempt < max_attempts - 1` is False), so we return the
+        # partial content rather than burning all retries.
+        assert call_count["n"] == 2
+        assert result.content == "always partial"

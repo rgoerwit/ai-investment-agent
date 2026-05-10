@@ -20,6 +20,7 @@ FailureKind = Literal[
     "model_not_found",
     "bad_request",
     "application_error",
+    "provider_partial_response",
     "unknown_provider_error",
 ]
 ArtifactErrorKind = FailureKind | Literal["application_error"]
@@ -195,6 +196,9 @@ def classify_failure(
     ):
         kind = "auth_error"
         retryable = False
+    elif "provider_partial_response" in combined:
+        kind = "provider_partial_response"
+        retryable = True
     elif any(
         marker in combined
         for marker in ("500", "502", "503", "504", "internal server error")

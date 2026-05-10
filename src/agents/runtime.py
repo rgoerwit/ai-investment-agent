@@ -52,6 +52,84 @@ except ImportError:
         return value
 
 
+def _detect_provider_partial_response(result: Any) -> str | None:
+    """Return a non-None reason string iff *result* is a suspected partial
+    response from the provider — otherwise None.
+
+    The canonical signal is `response.response_metadata.finish_reason`.
+    Each provider returns a value here on a successful call:
+
+    - ``"stop"``: model emitted a stop sequence or naturally finished. ✓
+    - ``"tool_calls"`` / ``"tool_use"``: paused for tool execution. ✓
+      (the agent loop continues with tool results.)
+    - ``"length"``: hit ``max_completion_tokens`` cap before finishing.
+      Treat as partial — re-running rarely helps but at least surfaces
+      the issue and lets `agent_output_truncated` correctly classify it.
+    - ``"content_filter"``: provider safety filter; not a transient
+      glitch — propagate as-is, do NOT retry.
+    - missing / ``None``: response was not finalized cleanly; commonly a
+      provider-side stream interruption (the May 2026 2382.HK auditor
+      truncation). Worth a retry.
+
+    Some response shapes (Gemini, certain LangChain wrappers) place the
+    finish reason in different keys; we accept any of them. Returning
+    None means "looks like a clean finish, don't retry."
+    """
+    response_metadata = getattr(result, "response_metadata", None)
+    if not isinstance(response_metadata, dict):
+        response_metadata = {}
+
+    finish_reason = (
+        response_metadata.get("finish_reason")
+        or response_metadata.get("stop_reason")
+        or response_metadata.get("done_reason")
+    )
+
+    if finish_reason in ("stop", "end_turn", "STOP", "tool_calls", "tool_use"):
+        return None
+    if finish_reason in ("length", "max_tokens", "MAX_TOKENS"):
+        return f"finish_reason_{finish_reason}"
+    if finish_reason in ("content_filter", "SAFETY"):
+        # Intentional stop, not a partial. Caller decides what to do.
+        return None
+
+    # finish_reason missing. This is the suspect case BUT we want to avoid
+    # flagging non-provider AIMessages (test mocks, agents constructing
+    # synthetic messages) as partial. Two corroborating signals tell us
+    # we're looking at an actual provider response that came back wrong:
+    #
+    # 1. ``response_metadata`` is non-empty (provider sent SOMETHING but
+    #    omitted finish_reason).
+    # 2. ``content`` is empty or whitespace-only.
+    #
+    # Either alone is enough; both together is the canonical 2382.HK
+    # auditor truncation pattern. Pure ``AIMessage(content="...")`` with
+    # no metadata is treated as a clean response.
+    has_provider_metadata = bool(response_metadata)
+    content = getattr(result, "content", None)
+    has_empty_content = isinstance(content, str) and content.strip() == ""
+
+    if has_provider_metadata and not has_empty_content:
+        # Provider returned other metadata but no finish_reason; suspect.
+        return "finish_reason_missing"
+    if has_empty_content:
+        # Content vanished — definitely not a clean finish.
+        return "empty_content_no_finish_reason"
+
+    # No corroborating signal — let it through. Common for AIMessage
+    # constructed in tests or for non-streaming providers that don't
+    # populate response_metadata.
+    return None
+
+
+class ProviderPartialResponseError(RuntimeError):
+    """Raised when an LLM call returned successfully but the response
+    looks like a provider-side partial (no finish_reason, length cap,
+    etc). The marker `provider_partial_response` in the message routes
+    the failure to the transient-retry branch in
+    `invoke_with_rate_limit_handling`."""
+
+
 async def invoke_with_rate_limit_handling(
     runnable,
     input_data: dict[str, Any] | list[Any],
@@ -92,6 +170,17 @@ async def invoke_with_rate_limit_handling(
                 timeout=hard_timeout,
                 label=f"llm:{context}:{resolved_provider}:{resolved_model}",
             )
+            # Inspect finish_reason: providers occasionally return a "200 OK"
+            # with truncated content and no finish_reason under load. Raise
+            # the marker exception so the existing transient-retry branch
+            # handles it like any other recoverable failure.
+            partial_reason = _detect_provider_partial_response(result)
+            if partial_reason is not None and attempt < max_attempts - 1:
+                raise ProviderPartialResponseError(
+                    f"provider_partial_response: {partial_reason} "
+                    f"(context={context}, provider={resolved_provider}, "
+                    f"model={resolved_model})"
+                )
             try:
                 capture_manager = _get_capture_manager()
                 if capture_manager is not None:
@@ -191,6 +280,7 @@ async def invoke_with_rate_limit_handling(
                 "connect_error",
                 "timeout",
                 "server_error",
+                "provider_partial_response",
             }
 
             if is_rate_limit and attempt < max_attempts - 1:

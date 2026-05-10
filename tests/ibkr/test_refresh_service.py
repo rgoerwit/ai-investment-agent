@@ -390,3 +390,77 @@ class TestExecute:
 
         assert updated.refreshed == []
         assert updated.failed == ["7203.T"]
+
+    @pytest.mark.asyncio
+    async def test_execute_persists_rejection_record_after_save(self, monkeypatch):
+        """Portfolio refresh path must mirror src.main: after save_results_fn,
+        non-BUY verdicts feed the global lessons_learned collection.
+        Honors --no-memory via the existing gate inside
+        _maybe_save_rejection_record.
+        """
+        from unittest.mock import AsyncMock
+
+        rejection_calls: list[tuple] = []
+
+        async def fake_maybe_save_rejection_record(result, args, **kwargs):
+            rejection_calls.append(
+                (args.ticker, args.quick, getattr(args, "strict", False))
+            )
+
+        monkeypatch.setattr(
+            "src.persistence._maybe_save_rejection_record",
+            AsyncMock(side_effect=fake_maybe_save_rejection_record),
+        )
+
+        service = AnalysisRefreshService()
+
+        async def fake_run_analysis(
+            *, ticker: str, quick_mode: bool, skip_charts: bool
+        ):
+            return {"ticker": ticker, "verdict": "HOLD"}
+
+        def fake_save_results(result, ticker: str, *, quick_mode: bool) -> Path:
+            return Path(f"/tmp/{ticker}.json")
+
+        activity = RefreshActivity(policy="blocking", limit=10, queued=["7203.T"])
+        await service.execute(
+            activity,
+            execution=RefreshExecutionOptions(quick_mode=True),
+            run_analysis_fn=fake_run_analysis,
+            save_results_fn=fake_save_results,
+        )
+
+        assert rejection_calls == [("7203.T", True, False)], (
+            "_maybe_save_rejection_record must be awaited once per refreshed "
+            "ticker, after save_results_fn"
+        )
+
+    @pytest.mark.asyncio
+    async def test_execute_skips_rejection_record_when_run_analysis_returns_none(
+        self, monkeypatch
+    ):
+        """Failed analyses must NOT fire the rejection-record save path."""
+        from unittest.mock import AsyncMock
+
+        rejection_mock = AsyncMock()
+        monkeypatch.setattr(
+            "src.persistence._maybe_save_rejection_record", rejection_mock
+        )
+
+        service = AnalysisRefreshService()
+
+        async def fake_run_analysis(**kwargs):
+            return None
+
+        def fake_save_results(*args, **kwargs):
+            raise AssertionError("save not expected on failure")
+
+        activity = RefreshActivity(policy="blocking", limit=10, queued=["7203.T"])
+        await service.execute(
+            activity,
+            execution=RefreshExecutionOptions(quick_mode=True),
+            run_analysis_fn=fake_run_analysis,
+            save_results_fn=fake_save_results,
+        )
+
+        rejection_mock.assert_not_awaited()

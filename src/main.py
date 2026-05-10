@@ -11,6 +11,7 @@ import os
 import socket
 import sys
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from datetime import datetime
@@ -660,18 +661,57 @@ def _enable_quiet_runtime_if_needed(args: argparse.Namespace) -> None:
     config.quiet_mode = True
 
 
-def _apply_runtime_overrides(args: argparse.Namespace) -> None:
-    """Apply per-run CLI overrides to the config singleton."""
+_RUNTIME_OVERRIDE_FIELDS: tuple[str, ...] = (
+    "quick_think_llm",
+    "deep_think_llm",
+    "enable_memory",
+    "langfuse_enabled",
+)
+
+
+def _apply_runtime_overrides(args: argparse.Namespace) -> Callable[[], None]:
+    """Apply per-run CLI overrides to the config singleton.
+
+    Returns a callable that restores every overridden field to its
+    pre-override value. The caller is expected to invoke it in a
+    ``try/finally`` so a single process running multiple analyses (e.g.
+    `scripts/portfolio_manager.py` calling `run_analysis` repeatedly) does
+    NOT inherit the previous run's CLI flags via the global config
+    singleton.
+
+    The mutation-with-no-restore pattern was the source of cross-test
+    leakage in `tests/test_main_cli.py::TestRuntimeOverrides`; the same
+    fragility would affect any future in-process orchestrator that
+    wraps multiple invocations. Making the override reversible eliminates
+    the production smell at the source.
+    """
+    saved: dict[str, Any] = {}
+
+    def _save(field: str) -> None:
+        if field not in saved:
+            saved[field] = getattr(config, field)
+
     if args.quick_model:
+        _save("quick_think_llm")
         config.quick_think_llm = args.quick_model
     if args.deep_model:
+        _save("deep_think_llm")
         config.deep_think_llm = args.deep_model
     if args.no_memory:
+        _save("enable_memory")
         config.enable_memory = False
     if getattr(args, "enable_langfuse", False) or getattr(
         args, "trace_langfuse", False
     ):
+        _save("langfuse_enabled")
         config.langfuse_enabled = True
+
+    def _restore() -> None:
+        for field, value in saved.items():
+            setattr(config, field, value)
+        saved.clear()
+
+    return _restore
 
 
 def _setup_runtime(
@@ -738,6 +778,16 @@ def _setup_runtime(
 
 async def _run_retrospective_only(args: argparse.Namespace) -> int:
     """Run retrospective-only mode and return the process exit code."""
+    if getattr(args, "no_memory", False):
+        # Match the per-ticker retrospective gate (line ~842): --no-memory
+        # disables ALL writes to the global lessons_learned ChromaDB
+        # collection, including the batch retrospective. Distinct event
+        # name from `retrospective_skipped_no_memory` so log greps can
+        # disambiguate the two paths.
+        logger.info("retrospective_batch_skipped_no_memory")
+        if not getattr(args, "quiet", False) and not getattr(args, "brief", False):
+            console.print("[yellow]Retrospective batch skipped (--no-memory).[/yellow]")
+        return 0
     try:
         from src.observability import flush_traces, get_observability_runtime
         from src.retrospective import SnapshotLoadProgress, run_retrospective
@@ -1118,8 +1168,8 @@ async def run_with_args(
     # `kill -USR1 <pid>` will dump every pending asyncio task with stack so
     # operators can diagnose hangs without restarting the process.
     _uninstall_dump_handler = install_pending_task_dump_handler()
+    _restore_runtime_overrides = _apply_runtime_overrides(args)
     try:
-        _apply_runtime_overrides(args)
         cli._validate_cli_args(args)
         output_targets = cli._resolve_output_targets(args)
         provider_preflight, runtime_services = _setup_runtime(args, output_targets)
@@ -1330,6 +1380,14 @@ async def run_with_args(
             pass
         try:
             _uninstall_dump_handler()
+        except Exception:
+            pass
+        # Restore the global config singleton to its pre-override state so
+        # that follow-on in-process callers (e.g. portfolio_manager.py
+        # batching analyses, future orchestrators) see fresh defaults
+        # rather than this run's CLI flags.
+        try:
+            _restore_runtime_overrides()
         except Exception:
             pass
 

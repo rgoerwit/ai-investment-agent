@@ -261,6 +261,7 @@ def extract_snapshot(
     is_quick_mode: bool = False,
     *,
     trace_id: str | None = None,
+    is_strict_mode: bool = False,
 ) -> dict[str, Any]:
     """
     Extract a compact prediction snapshot from an analysis result.
@@ -394,6 +395,13 @@ def extract_snapshot(
         "deep_model": config.deep_think_llm,
         "quick_model": config.quick_think_llm,
         "is_quick_mode": is_quick_mode,
+        # `is_strict_mode` records whether `--strict` was active during
+        # analysis. Strict gates reject some valid candidates (REIT, PFIC,
+        # VIE) at the screening layer, so a non-BUY verdict in strict mode
+        # carries different signal than the same verdict in normal mode —
+        # downstream lesson weighting can use this to discount strict-mode
+        # rejections.
+        "is_strict_mode": is_strict_mode,
         "trace_id": trace_id,
     }
 
@@ -1022,6 +1030,7 @@ async def save_rejection_record(
     analysis_date = snapshot.get("analysis_date", "")
     verdict = snapshot.get("verdict", "")
     is_quick_mode = bool(snapshot.get("is_quick_mode", False))
+    is_strict_mode = bool(snapshot.get("is_strict_mode", False))
 
     if not verdict or verdict == "BUY":
         return False
@@ -1093,17 +1102,33 @@ async def save_rejection_record(
     zone = snapshot.get("zone") or "N/A"
     bear_risks = (snapshot.get("bear_risks_excerpt") or "")[:300]
 
+    mode_note = (
+        "Quick mode + strict gates"
+        if is_quick_mode and is_strict_mode
+        else "Quick mode"
+        if is_quick_mode
+        else "Strict gates"
+        if is_strict_mode
+        else "Standard mode"
+    )
     document = (
         f"PRIOR SCREENING RECORD: {ticker} ({sector} / {exchange}) — "
         f"{verdict} on {analysis_date}. "
         f"Health {health_adj}/100, Growth {growth_adj}/100, risk tally {risk_tally}. "
-        f"Risk zone: {zone}. Quick mode: {is_quick_mode}."
+        f"Risk zone: {zone}. Mode: {mode_note}."
     )
     if bear_risks:
         document += f"\nBear risks excerpt: {bear_risks}"
 
     # 4. Build metadata (extends existing schema)
+    # Strict-mode rejections are softer signal: strict gates reject some
+    # valid candidates (REIT/PFIC/VIE) at the screening layer, so a non-BUY
+    # in strict mode is partly an artifact of the gates rather than a pure
+    # quality signal. Multiplicatively discount the existing quick-mode
+    # weight by 0.7 for strict rejections.
     confidence_weight = 0.3 if is_quick_mode else 0.5
+    if is_strict_mode:
+        confidence_weight *= 0.7
     deep_model = snapshot.get("deep_model") or config.deep_think_llm or "unknown"
 
     metadata = {
@@ -1123,6 +1148,7 @@ async def save_rejection_record(
         "retrospective_date": analysis_date,
         "timestamp": datetime.now().isoformat(),
         "is_quick_mode": is_quick_mode,
+        "is_strict_mode": is_strict_mode,
         "analysis_model": deep_model,
     }
 

@@ -422,13 +422,55 @@ class FinancialSituationMemory:
             # Prepare IDs (use timestamp + index)
             ids = [f"{timestamp}_{i}" for i in range(len(approved_situations))]
 
-            # Add to collection
-            self.situation_collection.add(
-                ids=ids,
-                embeddings=embeddings,
-                documents=approved_situations,
-                metadatas=approved_metadata,
-            )
+            # Add to collection. The cached `situation_collection` handle can
+            # become stale across processes if the model-mismatch deletion
+            # path (lines ~113-129) ran in a concurrent process. Re-fetch
+            # once on NotFoundError before giving up — this turns the
+            # `add_situations_failed` + `rejection_record_storage_failed`
+            # noise pair (May 2026 2099.HK incident) into a single recovered
+            # write.
+            try:
+                self.situation_collection.add(
+                    ids=ids,
+                    embeddings=embeddings,
+                    documents=approved_situations,
+                    metadatas=approved_metadata,
+                )
+            except Exception as exc:
+                # Also catch type-name match because chromadb's exception
+                # class lineage has shifted across versions.
+                if not (
+                    _is_missing_collection_error(exc)
+                    or type(exc).__name__ == "NotFoundError"
+                ):
+                    raise
+                logger.warning(
+                    "situation_collection_handle_stale_refetching",
+                    collection=self.name,
+                    error_type=type(exc).__name__,
+                    message_preview=str(exc)[:120],
+                )
+                self.situation_collection = self.chroma_client.get_or_create_collection(
+                    name=self.name,
+                    metadata={
+                        "description": f"Financial debate memory for {self.name}",
+                        "embedding_model": self._EMBEDDING_MODEL,
+                        "embedding_dimension": self._EMBEDDING_DIMENSION,
+                        "created_at": datetime.now().isoformat(),
+                        "version": "2.0",
+                    },
+                )
+                self.situation_collection.add(
+                    ids=ids,
+                    embeddings=embeddings,
+                    documents=approved_situations,
+                    metadatas=approved_metadata,
+                )
+                logger.info(
+                    "situation_collection_refetch_recovered",
+                    collection=self.name,
+                    count=len(approved_situations),
+                )
 
             logger.debug(
                 "situations_added",
