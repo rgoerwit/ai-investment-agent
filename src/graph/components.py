@@ -321,10 +321,16 @@ def build_graph_components(
         max_output_tokens=output_budget("Valuation Calculator"),
     )
 
+    consultant_output_budget = output_budget("Consultant")
+    if quick_mode:
+        consultant_output_budget = min(
+            consultant_output_budget,
+            int(config.consultant_quick_max_completion_tokens),
+        )
     consultant_llm = get_consultant_llm(
         callbacks=tracked_callbacks("Consultant"),
         quick_mode=quick_mode,
-        max_completion_tokens=output_budget("Consultant"),
+        max_completion_tokens=consultant_output_budget,
     )
 
     auditor_requested = _is_auditor_enabled()
@@ -492,7 +498,10 @@ def build_graph_components(
 
         consultant_tools = get_consultant_tools()
         consultant = create_consultant_node(
-            consultant_llm, "consultant", tools=consultant_tools
+            consultant_llm,
+            "consultant",
+            tools=consultant_tools,
+            quick_mode=quick_mode,
         )
         logger.debug("consultant_node_enabled", ticker=ticker)
     else:

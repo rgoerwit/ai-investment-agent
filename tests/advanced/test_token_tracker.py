@@ -9,6 +9,7 @@ Tests the token tracking functionality:
 - Statistics aggregation and reporting
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from langchain_core.messages import AIMessage
@@ -376,6 +377,75 @@ class TestTokenTracker:
         assert "agent1" in stats["agents"]
         assert "agent2" in stats["agents"]
 
+    def test_record_call_attempts_and_diagnostics(self):
+        tracker = TokenTracker()
+        tracker.reset()
+
+        tracker.record_call_attempt(
+            agent_name="Consultant",
+            provider="openai",
+            model_name="gpt-5.4-mini",
+            status="failure",
+            attempt=1,
+            elapsed_seconds=60.2,
+            failure_kind="timeout",
+            retryable=True,
+        )
+        tracker.record_call_attempt(
+            agent_name="Consultant",
+            provider="openai",
+            model_name="gpt-5.4-mini",
+            status="success",
+            attempt=2,
+            elapsed_seconds=3.1,
+            prompt_tokens=100,
+            completion_tokens=50,
+            total_tokens=150,
+        )
+
+        stats = tracker.get_total_stats()
+
+        assert stats["failed_attempts"] == 1
+        assert stats["failed_by_provider"] == {"openai": 1}
+        assert stats["failed_by_kind"] == {"timeout": 1}
+        assert len(stats["call_attempts"]) == 2
+        assert stats["call_attempts"][1]["total_tokens"] == 150
+        assert stats["call_diagnostics"]["consultant_timeout"] is True
+        assert stats["call_diagnostics"]["timeout_seconds_lost"] == 60.2
+        assert stats["call_diagnostics"]["failed_by_agent"] == {"Consultant": 1}
+
+    def test_concurrent_recording_keeps_usage_and_attempts_consistent(self):
+        tracker = TokenTracker()
+        tracker.reset()
+
+        def record_pair(index: int) -> None:
+            tracker.record_usage(
+                agent_name=f"agent-{index % 4}",
+                model_name="gemini-2.5-flash",
+                prompt_tokens=10,
+                completion_tokens=5,
+            )
+            tracker.record_call_attempt(
+                agent_name=f"agent-{index % 4}",
+                provider="google",
+                model_name="gemini-2.5-flash",
+                status="success",
+                attempt=1,
+                elapsed_seconds=0.01,
+                prompt_tokens=10,
+                completion_tokens=5,
+                total_tokens=15,
+            )
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            list(executor.map(record_pair, range(100)))
+
+        stats = tracker.get_total_stats()
+        assert stats["total_calls"] == 100
+        assert stats["total_prompt_tokens"] == 1000
+        assert stats["total_completion_tokens"] == 500
+        assert stats["call_diagnostics"]["total_attempts"] == 100
+
     def test_get_top_spenders_sorted_by_cost_tokens_then_name(self):
         tracker = TokenTracker()
         tracker.reset()
@@ -719,6 +789,7 @@ class TestTokenTrackingCallback:
             },
         )
 
+        callback.on_llm_start({}, ["prompt"], run_id="run-1")
         callback.on_llm_end(llm_result)
 
         # Verify usage was recorded
@@ -727,6 +798,7 @@ class TestTokenTrackingCallback:
         assert stats.total_calls == 1
         assert stats.total_prompt_tokens == 1000
         assert stats.total_completion_tokens == 500
+        assert stats.calls[0].elapsed_seconds is not None
 
     def test_on_llm_end_with_deprecated_token_usage(self):
         """Test callback with deprecated token_usage field (fallback)."""

@@ -324,12 +324,13 @@ class TestErrorPropagation:
 
     @pytest.mark.asyncio
     async def test_consultant_wall_clock_timeout_cuts_off_stalled_invoke(self):
-        """A hanging consultant call should be bounded by the node timeout budget."""
+        """Consultant deadlines should be passed into the shared LLM runtime."""
         mock_llm = Mock()
+        seen_timeouts: list[float] = []
 
         async def mock_invoke_hang(*args, **kwargs):
-            await asyncio.sleep(1.0)
-            raise AssertionError("consultant invoke should have been cancelled first")
+            seen_timeouts.append(kwargs["overall_timeout_seconds"])
+            raise TimeoutError("shared runtime timeout")
 
         with patch(
             "src.agents.runtime.invoke_with_rate_limit_handling",
@@ -368,6 +369,10 @@ class TestErrorPropagation:
                         elapsed = time.monotonic() - started
 
         assert elapsed < 0.5
+        assert seen_timeouts
+        assert seen_timeouts[0] <= 0.05
+        status = result["artifact_statuses"]["consultant_review"]
+        assert status["error_kind"] == "timeout"
         assert result["consultant_review"] == ""
         status = result["artifact_statuses"]["consultant_review"]
         assert status["ok"] is False

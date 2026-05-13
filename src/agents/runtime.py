@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 from typing import Any
 
 import structlog
 
 from src.async_utils import run_with_hard_timeout
 from src.config import config as settings_config
+from src.llm_usage import extract_token_usage_breakdown
 from src.runtime_diagnostics import (
     classify_failure,
     get_class_name,
@@ -88,6 +90,27 @@ def _detect_provider_partial_response(result: Any) -> str | None:
     if not isinstance(response_metadata, dict):
         response_metadata = {}
 
+    # OpenAI Responses API path: when create_consultant_llm /
+    # create_auditor_llm / create_editor_llm pass `use_responses_api=True`
+    # + `output_version="responses/v1"`, langchain_openai populates
+    # response_metadata with {created_at, id, incomplete_details, metadata,
+    # object, status, user, model, service_tier} — but NOT finish_reason.
+    # Status values: "completed" (clean), "incomplete" (length/refusal —
+    # see incomplete_details.reason), "failed" (error). Recognize this
+    # shape FIRST so we don't false-positive on every successful auditor /
+    # consultant call.
+    status = response_metadata.get("status")
+    if status == "completed":
+        return None
+    if status == "incomplete":
+        details = response_metadata.get("incomplete_details") or {}
+        reason = (
+            details.get("reason") if isinstance(details, dict) else None
+        ) or "incomplete"
+        return f"responses_api_incomplete:{reason}"
+    if status == "failed":
+        return "responses_api_failed"
+
     finish_reason = (
         response_metadata.get("finish_reason")
         or response_metadata.get("stop_reason")
@@ -143,9 +166,11 @@ async def invoke_with_rate_limit_handling(
     runnable,
     input_data: dict[str, Any] | list[Any],
     max_attempts: int = 3,
+    max_transient_attempts: int = 2,
     context: str = "LLM",
     provider: str | None = None,
     model_name: str | None = None,
+    overall_timeout_seconds: float | None = None,
 ) -> Any:
     """
     Invoke an LLM with explicit 429 and transient error handling.
@@ -166,17 +191,35 @@ async def invoke_with_rate_limit_handling(
             model=resolved_model,
             runnable_class=class_name,
             max_attempts=max_attempts,
+            max_transient_attempts=max_transient_attempts,
+            overall_timeout_seconds=overall_timeout_seconds,
         )
 
     hard_timeout = float(
         getattr(settings_config, "llm_call_hard_timeout_seconds", 600.0)
     )
+    deadline = (
+        time.monotonic() + float(overall_timeout_seconds)
+        if overall_timeout_seconds is not None
+        else None
+    )
 
     for attempt in range(max_attempts):
+        attempt_started = time.monotonic()
         try:
+            effective_timeout = hard_timeout
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"{context} exceeded {overall_timeout_seconds:.1f}s "
+                        "overall LLM timeout"
+                    )
+                effective_timeout = min(hard_timeout, max(0.1, remaining))
+
             result = await run_with_hard_timeout(
                 runnable.ainvoke(input_data),
-                timeout=hard_timeout,
+                timeout=effective_timeout,
                 label=f"llm:{context}:{resolved_provider}:{resolved_model}",
             )
             # Inspect finish_reason: providers occasionally return a "200 OK"
@@ -184,7 +227,8 @@ async def invoke_with_rate_limit_handling(
             # the marker exception so the existing transient-retry branch
             # handles it like any other recoverable failure.
             partial_reason = _detect_provider_partial_response(result)
-            if partial_reason is not None and attempt < max_attempts - 1:
+            transient_max_attempts = max(1, min(max_attempts, max_transient_attempts))
+            if partial_reason is not None and attempt < transient_max_attempts - 1:
                 raise ProviderPartialResponseError(
                     f"provider_partial_response: {partial_reason} "
                     f"(context={context}, provider={resolved_provider}, "
@@ -222,6 +266,23 @@ async def invoke_with_rate_limit_handling(
                     )
             except Exception:
                 pass
+            try:
+                from src.token_tracker import get_tracker
+
+                usage = extract_token_usage_breakdown(result)
+                get_tracker().record_call_attempt(
+                    agent_name=context,
+                    provider=resolved_provider,
+                    model_name=resolved_model or "",
+                    status="success",
+                    attempt=attempt + 1,
+                    elapsed_seconds=time.monotonic() - attempt_started,
+                    prompt_tokens=usage.input_tokens,
+                    completion_tokens=usage.total_output_tokens,
+                    total_tokens=usage.total_tokens,
+                )
+            except Exception:
+                pass
             if not quiet_mode:
                 logger.info(
                     "llm_call_success",
@@ -239,6 +300,7 @@ async def invoke_with_rate_limit_handling(
                 model_name=resolved_model,
                 class_name=class_name,
             )
+            elapsed_seconds = time.monotonic() - attempt_started
             try:
                 capture_manager = _get_capture_manager()
                 if capture_manager is not None:
@@ -274,11 +336,15 @@ async def invoke_with_rate_limit_handling(
             try:
                 from src.token_tracker import get_tracker
 
-                get_tracker().record_failure(
+                get_tracker().record_call_attempt(
                     agent_name=context,
                     provider=details.provider,
-                    failure_kind=details.kind,
                     model_name=resolved_model or "",
+                    status="failure",
+                    attempt=attempt + 1,
+                    elapsed_seconds=elapsed_seconds,
+                    failure_kind=details.kind,
+                    retryable=details.retryable,
                 )
             except Exception:
                 pass
@@ -295,6 +361,26 @@ async def invoke_with_rate_limit_handling(
             if is_rate_limit and attempt < max_attempts - 1:
                 jitter = random.uniform(1, 10)
                 wait_time = (60 * (attempt + 1)) + jitter
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        logger.error(
+                            "llm_call_failed",
+                            context=context,
+                            provider=resolved_provider,
+                            model=resolved_model,
+                            runnable_class=class_name,
+                            attempt=attempt + 1,
+                            max_attempts=max_attempts,
+                            failure_kind=details.kind,
+                            host=details.host,
+                            retryable=details.retryable,
+                            error_type=details.error_type,
+                            root_cause_type=details.root_cause_type,
+                            error_message=details.message,
+                        )
+                        raise
+                    wait_time = min(wait_time, max(0.0, remaining))
                 logger.warning(
                     "llm_call_retry",
                     context=context,
@@ -313,15 +399,36 @@ async def invoke_with_rate_limit_handling(
                 await asyncio.sleep(wait_time)
                 continue
 
-            if is_transient and attempt < max_attempts - 1:
+            transient_max_attempts = max(1, min(max_attempts, max_transient_attempts))
+            if is_transient and attempt < transient_max_attempts - 1:
                 wait_time = 5 * (attempt + 1) + random.uniform(1, 3)
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        logger.error(
+                            "llm_call_failed",
+                            context=context,
+                            provider=resolved_provider,
+                            model=resolved_model,
+                            runnable_class=class_name,
+                            attempt=attempt + 1,
+                            max_attempts=max_attempts,
+                            failure_kind=details.kind,
+                            host=details.host,
+                            retryable=details.retryable,
+                            error_type=details.error_type,
+                            root_cause_type=details.root_cause_type,
+                            error_message=details.message,
+                        )
+                        raise
+                    wait_time = min(wait_time, max(0.0, remaining))
                 logger.warning(
                     "llm_call_retry",
                     context=context,
                     provider=resolved_provider,
                     model=resolved_model,
                     attempt=attempt + 1,
-                    max_attempts=max_attempts,
+                    max_attempts=transient_max_attempts,
                     failure_kind=details.kind,
                     host=details.host,
                     retryable=details.retryable,

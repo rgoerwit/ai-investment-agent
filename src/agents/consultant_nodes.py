@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 import time
@@ -12,6 +11,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.messages import ToolMessage as TM
 from langgraph.types import RunnableConfig
 
+from src.config import config as settings_config
 from src.runtime_diagnostics import ArtifactStatus, failure_artifact, success_artifact
 from src.runtime_services import get_current_tool_service
 from src.tooling.runtime import ToolInvocation
@@ -204,23 +204,25 @@ async def _invoke_consultant_with_deadline(
     model_name: str,
     ticker: str,
     deadline: float,
+    total_timeout: float = CONSULTANT_TOTAL_TIMEOUT_SECONDS,
 ) -> object:
     remaining = _remaining_consultant_budget(deadline)
     if remaining <= 0:
         raise TimeoutError(
-            f"Consultant node exceeded total wall-clock timeout of {CONSULTANT_TOTAL_TIMEOUT_SECONDS:.0f}s for {ticker}"
+            f"Consultant node exceeded total wall-clock timeout of {total_timeout:.0f}s for {ticker}"
         )
 
     timeout_s = min(CONSULTANT_CALL_TIMEOUT_SECONDS, remaining)
     try:
-        async with asyncio.timeout(timeout_s):
-            return await agent_runtime.invoke_with_rate_limit_handling(
-                runnable,
-                messages,
-                context=context,
-                provider=provider,
-                model_name=model_name,
-            )
+        return await agent_runtime.invoke_with_rate_limit_handling(
+            runnable,
+            messages,
+            context=context,
+            provider=provider,
+            model_name=model_name,
+            max_transient_attempts=1,
+            overall_timeout_seconds=timeout_s,
+        )
     except TimeoutError as exc:
         raise TimeoutError(
             f"Consultant call exceeded {timeout_s:.1f}s wall-clock timeout for {ticker}"
@@ -267,16 +269,26 @@ def _build_legal_fallback_report(
 
 
 def create_consultant_node(
-    llm, agent_key: str = "consultant", tools: list | None = None
+    llm,
+    agent_key: str = "consultant",
+    tools: list | None = None,
+    *,
+    quick_mode: bool = False,
 ) -> Callable:
     """
     Create external consultant node for cross-validation.
     """
-    max_tool_iterations = 3
-    max_tool_calls_per_turn = 4
+    max_tool_iterations = 1 if quick_mode else 3
+    max_tool_calls_per_turn = 2 if quick_mode else 4
+    tools_enabled = bool(tools) and (
+        not quick_mode or settings_config.consultant_tools_in_quick
+    )
+    if quick_mode and not settings_config.consultant_tools_in_quick:
+        max_tool_iterations = 0
 
-    tools_by_name = {tool.name: tool for tool in tools} if tools else {}
-    llm_with_tools = llm.bind_tools(tools) if tools else None
+    active_tools = tools if tools_enabled else []
+    tools_by_name = {tool.name: tool for tool in active_tools} if active_tools else {}
+    llm_with_tools = llm.bind_tools(active_tools) if active_tools else None
 
     async def consultant_node(
         state: AgentState, config: RunnableConfig
@@ -380,7 +392,12 @@ Provide your independent consultant review."""
             content_str = ""
             had_tool_errors = False
             tool_failure_count = 0
-            consultant_deadline = time.monotonic() + CONSULTANT_TOTAL_TIMEOUT_SECONDS
+            total_timeout = (
+                settings_config.consultant_quick_total_timeout_seconds
+                if quick_mode
+                else CONSULTANT_TOTAL_TIMEOUT_SECONDS
+            )
+            consultant_deadline = time.monotonic() + total_timeout
             fmp_alt_disabled_kind: str | None = None
             active_llm_provider = support.infer_provider_name(active_llm)
             active_llm_model = support.get_model_name(active_llm)
@@ -396,6 +413,7 @@ Provide your independent consultant review."""
                     model_name=active_llm_model,
                     ticker=ticker,
                     deadline=consultant_deadline,
+                    total_timeout=total_timeout,
                 )
                 tool_calls = getattr(response, "tool_calls", None)
                 if (
@@ -436,7 +454,7 @@ Provide your independent consultant review."""
                         else:
                             if _remaining_consultant_budget(consultant_deadline) <= 0:
                                 raise TimeoutError(
-                                    f"Consultant node exceeded total wall-clock timeout of {CONSULTANT_TOTAL_TIMEOUT_SECONDS:.0f}s for {ticker}"
+                                    f"Consultant node exceeded total wall-clock timeout of {total_timeout:.0f}s for {ticker}"
                                 )
                             try:
                                 tool_result = await get_current_tool_service().execute(
@@ -544,6 +562,7 @@ Provide your independent consultant review."""
                         model_name=fallback_llm_model,
                         ticker=ticker,
                         deadline=consultant_deadline,
+                        total_timeout=total_timeout,
                     )
                     content_str = message_utils.extract_string_content(response.content)
                     break
@@ -557,6 +576,7 @@ Provide your independent consultant review."""
                     model_name=fallback_llm_model,
                     ticker=ticker,
                     deadline=consultant_deadline,
+                    total_timeout=total_timeout,
                 )
                 content_str = message_utils.extract_string_content(response.content)
 

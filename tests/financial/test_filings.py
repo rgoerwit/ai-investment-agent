@@ -570,14 +570,18 @@ class TestDdgSearch:
         """Outer timeout should turn stalled DDG search into an empty result."""
         from src.tools.shared import _ddg_search
 
-        async def slow_to_thread(_func):
-            await asyncio.sleep(1)
+        class SlowDDGS:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def text(self, *args, **kwargs):
+                import time
+
+                time.sleep(1)
+                return []
 
         with patch("src.tools.shared.DDG_SEARCH_TIMEOUT_SECONDS", 0.01):
-            with patch(
-                "src.tools.shared.asyncio.to_thread",
-                side_effect=slow_to_thread,
-            ):
+            with patch("ddgs.DDGS", SlowDDGS):
                 result = await _ddg_search("test query")
 
         assert result == []

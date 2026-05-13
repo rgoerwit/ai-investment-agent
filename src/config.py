@@ -349,6 +349,23 @@ class Settings(BaseSettings):
         validation_alias="CONSULTANT_QUICK_MODEL",
         description="OpenAI model for consultant in quick mode",
     )
+    consultant_tools_in_quick: bool = Field(
+        default=False,
+        validation_alias="CONSULTANT_TOOLS_IN_QUICK",
+        description="Allow Consultant MCP/tool loop during --quick screening runs",
+    )
+    consultant_quick_total_timeout_seconds: float = Field(
+        default=60.0,
+        gt=0.0,
+        validation_alias="CONSULTANT_QUICK_TOTAL_TIMEOUT_SECONDS",
+        description="Total wall-clock Consultant budget in --quick mode",
+    )
+    consultant_quick_max_completion_tokens: int = Field(
+        default=4096,
+        ge=1024,
+        validation_alias="CONSULTANT_QUICK_MAX_COMPLETION_TOKENS",
+        description="Maximum Consultant completion token budget in --quick mode",
+    )
     auditor_model: str | None = Field(
         default=None,
         validation_alias="AUDITOR_MODEL",
@@ -500,11 +517,10 @@ class Settings(BaseSettings):
     )
     # Wall-clock ceiling for a single `runnable.ainvoke()` call. Enforced via
     # `run_with_hard_timeout` in `invoke_with_rate_limit_handling` so a hung
-    # provider SDK can't park a worker for hours. Sized to comfortably cover
-    # api_timeout × api_retry_attempts plus headroom for deep/thinking-heavy
-    # generation.
+    # provider SDK can't park a worker for hours. Keep tight for screening; use
+    # env override if a specific deep/manual run needs more headroom.
     llm_call_hard_timeout_seconds: float = Field(
-        default=600.0,
+        default=120.0,
         gt=0.0,
         validation_alias="LLM_CALL_HARD_TIMEOUT_SECONDS",
         description=(

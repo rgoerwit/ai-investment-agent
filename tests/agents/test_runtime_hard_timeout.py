@@ -22,7 +22,9 @@ These tests pin two defenses against that pathology:
 
 from __future__ import annotations
 
+import ast
 import asyncio
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -64,6 +66,7 @@ class TestApiRetryAttemptsDefault:
             f"llm_call_hard_timeout_seconds default {default} is out of the "
             "sane range [60s, 1800s]."
         )
+        assert default == 120.0
         # Also verify the field exists on the runtime object (so the wrap can
         # actually look it up).
         assert hasattr(settings_config, "llm_call_hard_timeout_seconds")
@@ -154,6 +157,30 @@ class TestHardTimeoutWrap:
         assert seen_calls[0]["label"].startswith("llm:WrapPresenceTest:")
 
     @pytest.mark.asyncio
+    async def test_overall_timeout_shortens_effective_timeout(self):
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(return_value=AIMessage(content="ok"))
+
+        seen_calls: list[dict] = []
+
+        async def spy(coro, *, timeout, label):
+            seen_calls.append({"timeout": timeout, "label": label})
+            return await coro
+
+        with patch.object(settings_config, "llm_call_hard_timeout_seconds", 12.5):
+            with patch("src.agents.runtime.run_with_hard_timeout", new=spy):
+                await invoke_with_rate_limit_handling(
+                    runnable,
+                    {"input": "x"},
+                    max_attempts=1,
+                    context="OverallTimeoutTest",
+                    overall_timeout_seconds=0.5,
+                )
+
+        assert len(seen_calls) == 1
+        assert 0 < seen_calls[0]["timeout"] <= 0.5
+
+    @pytest.mark.asyncio
     async def test_hard_timeout_retries_via_outer_loop(self):
         """When attempt 1 hits the hard timeout, attempt 2 should run with backoff."""
         call_count = {"n": 0}
@@ -182,6 +209,52 @@ class TestHardTimeoutWrap:
 
         assert call_count["n"] == 2
         assert getattr(result, "content", None) == "recovered"
+
+    @pytest.mark.asyncio
+    async def test_timeout_uses_transient_attempt_budget(self):
+        async def always_times_out(*_args, **_kwargs):
+            await asyncio.get_event_loop().create_future()
+
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(side_effect=always_times_out)
+
+        with patch.object(settings_config, "llm_call_hard_timeout_seconds", 0.01):
+            with patch("src.agents.runtime.asyncio.sleep", new_callable=AsyncMock):
+                with pytest.raises(TimeoutError):
+                    await invoke_with_rate_limit_handling(
+                        runnable,
+                        {"input": "x"},
+                        max_attempts=3,
+                        max_transient_attempts=2,
+                        context="TransientBudgetTest",
+                    )
+
+        assert runnable.ainvoke.call_count == 2
+
+
+def test_no_external_asyncio_timeout_wrapping_shared_llm_helper():
+    """LLM call deadlines should flow through the shared runtime helper."""
+    source_path = Path("src/agents/consultant_nodes.py")
+    tree = ast.parse(source_path.read_text())
+    offenders: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncWith):
+            continue
+        for item in node.items:
+            call = item.context_expr
+            if not isinstance(call, ast.Call):
+                continue
+            func = call.func
+            is_asyncio_timeout = (
+                isinstance(func, ast.Attribute)
+                and func.attr == "timeout"
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "asyncio"
+            )
+            if is_asyncio_timeout:
+                offenders.append(node.lineno)
+
+    assert offenders == []
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +385,64 @@ class TestProviderPartialResponseDetection:
         # (not a dict). The detector tolerates that and falls through to
         # the tool_calls early-return.
         assert _detect_provider_partial_response(msg) is None
+
+    def test_responses_api_completed_status_is_NOT_partial(self):
+        """OpenAI's Responses API (`use_responses_api=True` +
+        `output_version="responses/v1"`, used by the consultant, auditor,
+        and editor LLMs) populates `response_metadata` with `status`
+        rather than `finish_reason`. A `status="completed"` response is
+        clean and must not trigger a retry.
+
+        Pre-fix, every gpt-4o-mini auditor call was getting flagged as
+        `provider_partial_response` with `finish_reason_missing` because
+        the detector only knew about Chat-Completions-shaped metadata.
+        """
+        from src.agents.runtime import _detect_provider_partial_response
+
+        msg = AIMessage(content="FORENSIC_DATA_BLOCK: ...")
+        msg.response_metadata = {
+            "id": "resp_abc",
+            "object": "response",
+            "model_name": "gpt-4o-mini",
+            "model": "gpt-4o-mini",
+            "status": "completed",
+            "service_tier": "default",
+        }
+        assert _detect_provider_partial_response(msg) is None
+
+    def test_responses_api_incomplete_status_is_partial_with_reason(self):
+        """`status="incomplete"` with `incomplete_details.reason` is the
+        Responses-API equivalent of `finish_reason="length"` or similar
+        early-stop conditions. Surface the reason."""
+        from src.agents.runtime import _detect_provider_partial_response
+
+        msg = AIMessage(content="cut off mid-")
+        msg.response_metadata = {
+            "id": "resp_abc",
+            "object": "response",
+            "model_name": "gpt-4o-mini",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+        }
+        result = _detect_provider_partial_response(msg)
+        assert result is not None
+        assert "max_output_tokens" in result
+
+    def test_responses_api_failed_status_is_partial(self):
+        """`status="failed"` is a hard provider error reported via the
+        Responses-API metadata; treat as partial so the outer retry loop
+        reattempts."""
+        from src.agents.runtime import _detect_provider_partial_response
+
+        msg = AIMessage(content="")
+        msg.response_metadata = {
+            "id": "resp_abc",
+            "object": "response",
+            "status": "failed",
+        }
+        result = _detect_provider_partial_response(msg)
+        assert result is not None
+        assert "failed" in result
 
 
 class TestProviderPartialResponseRetry:
