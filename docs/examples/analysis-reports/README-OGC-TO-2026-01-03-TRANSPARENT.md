@@ -42,12 +42,12 @@ DECISION: BUY
 ---
 ## Thesis Alignment
 
-![Thesis Alignment Radar](images/README-OGC-TO-2026-01-03-TRANSPARENT_radar.png)
+![Thesis Alignment Radar](../analysis-images/README-OGC-TO-2026-01-03-TRANSPARENT_radar.png)
 
 ---
 ## Valuation Chart
 
-![Football Field Chart](images/README-OGC-TO-2026-01-03-TRANSPARENT_football_field.png)
+![Football Field Chart](../analysis-images/README-OGC-TO-2026-01-03-TRANSPARENT_football_field.png)
 
 ---
 ## Executive Summary

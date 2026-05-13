@@ -13,7 +13,10 @@ import pytest
 from langgraph.types import RunnableConfig
 
 from src.agents import create_consultant_node
-from src.agents.consultant_nodes import _canonicalize_forensic_auditor_output
+from src.agents.consultant_nodes import (
+    _canonicalize_forensic_auditor_output,
+    _create_openai_responses_fallback_llm,
+)
 from src.report_generator import QuietModeReporter
 
 
@@ -274,6 +277,14 @@ class TestConfigurationEdgeCases:
             mock_config.enable_consultant = False
             llm = get_consultant_llm()
             assert llm is None, "Should be disabled when enable_consultant=False"
+
+    def test_auditor_openai_fallback_rejects_non_openai_primary(self):
+        """The fallback path must not apply OpenAI-only params to Gemini clients."""
+        mock_llm = Mock()
+        mock_llm.model_name = "gemini-3-flash-preview"
+
+        with pytest.raises(ValueError, match="OpenAI"):
+            _create_openai_responses_fallback_llm(mock_llm)
 
 
 class TestErrorPropagation:

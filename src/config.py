@@ -812,7 +812,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def setup_environment(self) -> "Settings":
-        """Post-initialization setup: create directories, configure logging, and export SDK settings.
+        """Post-initialization setup: normalize paths, configure logging, and export SDK settings.
 
         Note: Third-party SDKs (LangSmith, etc.) expect configuration in os.environ.
         Since we removed load_dotenv(), we must export necessary settings here.
@@ -828,16 +828,6 @@ class Settings(BaseSettings):
         self.prompts_dir = Path(os.path.expanduser(str(self.prompts_dir)))
         self.mcp_servers_path = Path(os.path.expanduser(str(self.mcp_servers_path)))
         self.mcp_usage_db_path = Path(os.path.expanduser(str(self.mcp_usage_db_path)))
-
-        # Create required directories
-        for directory in [
-            self.results_dir,
-            self.data_cache_dir,
-            Path(self.chroma_persist_directory),
-            self.images_dir,
-            self.mcp_usage_db_path.parent,
-        ]:
-            directory.mkdir(parents=True, exist_ok=True)
 
         # Set logging level
         log_level_value = getattr(logging, self.log_level.upper(), logging.INFO)
@@ -896,6 +886,16 @@ class Settings(BaseSettings):
             os.environ["GRPC_POLL_STRATEGY"] = self.grpc_poll_strategy
 
         return self
+
+    def runtime_directories(self) -> list[Path]:
+        """Directories the CLI runtime should create explicitly at startup."""
+        return [
+            Path(self.results_dir),
+            Path(self.data_cache_dir),
+            Path(self.chroma_persist_directory),
+            Path(self.images_dir),
+            Path(self.mcp_usage_db_path).parent,
+        ]
 
     def get_google_api_key(self) -> str:
         """

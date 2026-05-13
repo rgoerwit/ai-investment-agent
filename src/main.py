@@ -39,6 +39,7 @@ from src.eval import (
     set_active_capture_manager,
 )
 from src.runtime_diagnostics import build_analysis_validity
+from src.runtime_init import initialize_runtime_environment
 
 # IMPORTANT: Don't import get_tracker here - it instantiates the singleton immediately
 # Import it lazily in functions that need it, after quiet mode is set
@@ -720,6 +721,7 @@ def _setup_runtime(
     """Configure logging, runtime paths, and environment validation."""
     _enable_quiet_runtime_if_needed(args)
     config.images_dir = output_targets.image_dir
+    initialize_runtime_environment(config)
 
     provider_preflight = configure_cli_logging(args)
     enable_tool_audit = cli._cli_logging_mode(args) in {"verbose", "debug"}

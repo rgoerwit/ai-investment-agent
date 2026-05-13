@@ -276,16 +276,14 @@ class TestConfigDataclass:
 class TestConfigPostInit:
     """Test Config.__post_init__ behavior."""
 
-    def test_directories_created(self):
-        """Test that required directories are created on init."""
-
-        # Config.__post_init__ runs and creates dirs using actual env values
-        # Can't easily test with @patch.dict since Config is already instantiated
-        # Just verify the actual directories exist
+    def test_runtime_directories_lists_required_startup_paths(self):
+        """Settings exposes runtime dirs without creating them at import time."""
         from src.config import config
 
-        assert config.results_dir.exists()
-        assert config.data_cache_dir.exists()
+        runtime_dirs = config.runtime_directories()
+
+        assert config.results_dir in runtime_dirs
+        assert config.data_cache_dir in runtime_dirs
 
     def test_nested_directories_created(self):
         """Test that nested directories are created correctly."""

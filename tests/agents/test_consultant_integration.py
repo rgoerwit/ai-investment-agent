@@ -74,6 +74,22 @@ class TestConsultantNodeCreation:
         assert callable(node_func)
         assert node_func.__name__ == "consultant_node"
 
+    def test_quick_consultant_does_not_bind_tools_by_default(self):
+        """Quick screening keeps Consultant enabled but skips the tool loop."""
+        mock_llm = Mock()
+        mock_tool = Mock()
+        mock_tool.name = "spot_check_metric"
+
+        node_func = create_consultant_node(
+            mock_llm,
+            "consultant",
+            tools=[mock_tool],
+            quick_mode=True,
+        )
+
+        assert callable(node_func)
+        mock_llm.bind_tools.assert_not_called()
+
 
 class TestConsultantNodeExecution:
     """Test suite for consultant node execution logic."""
