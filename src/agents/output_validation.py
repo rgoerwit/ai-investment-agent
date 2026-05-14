@@ -148,7 +148,7 @@ def should_fail_closed(
         return truncated or not validation["ok"]
 
     if agent_key == "consultant":
-        return truncated and len(content.strip()) >= 200
+        return not content.strip() or (truncated and len(content.strip()) >= 200)
 
     return truncated or len(content.strip()) < 200
 

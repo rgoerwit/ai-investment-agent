@@ -1785,6 +1785,122 @@ class TestSavedDiagnostics:
         assert summary["macro_context_report_present"] is True
         assert summary["macro_context_injected_into_news"] is True
 
+    def test_build_run_summary_includes_compact_quick_consultant(self, monkeypatch):
+        from src.persistence import build_run_summary
+
+        class StubTracker:
+            def get_total_stats(self):
+                return {
+                    "failed_attempts": 1,
+                    "total_calls": 1,
+                    "agents": {"Consultant": {"total_tokens": 1234}},
+                    "call_attempts": [
+                        {
+                            "agent_name": "External Consultant",
+                            "elapsed_seconds": 12.5,
+                            "failure_kind": None,
+                        },
+                        {
+                            "agent_name": "External Consultant",
+                            "elapsed_seconds": 3.0,
+                            "failure_kind": "timeout",
+                        },
+                    ],
+                }
+
+        monkeypatch.setattr("src.token_tracker.get_tracker", lambda: StubTracker())
+        summary = build_run_summary(
+            {
+                "analysis_validity": {"publishable": True},
+                "consultant_tool_failures": 2,
+                "artifact_statuses": {
+                    "consultant_review": {"complete": True, "ok": False}
+                },
+            },
+            quick_mode=True,
+            article_requested=False,
+        )
+
+        assert summary["quick_consultant"] == {
+            "status": "failed",
+            "elapsed_seconds": 15.5,
+            "tokens": 1234,
+            "attempts": 2,
+            "timeout": True,
+            "tool_failures": 2,
+        }
+
+    def test_log_final_summary_emits_one_quick_slow_tail_warning(self, monkeypatch):
+        from src import main
+
+        class StubTracker:
+            def get_total_stats(self):
+                return {
+                    "call_diagnostics": {
+                        "timeout_seconds_lost": 61.0,
+                        "consultant_timeout": True,
+                        "slowest_call": {
+                            "agent_name": "External Consultant",
+                            "provider": "openai",
+                            "model_name": "gpt-5.4-mini",
+                            "status": "failure",
+                            "failure_kind": "timeout",
+                            "elapsed_seconds": 60.1,
+                        },
+                    }
+                }
+
+        logger = MagicMock()
+        monkeypatch.setattr("src.token_tracker.get_tracker", lambda: StubTracker())
+        monkeypatch.setattr(main, "logger", logger)
+
+        main._log_final_summary(
+            {"run_summary": {"quick_mode": True}},
+            SimpleNamespace(ticker="TEST", quick=True),
+            article_generated=False,
+        )
+
+        logger.info.assert_called_once()
+        logger.warning.assert_called_once()
+        warning = logger.warning.call_args
+        assert warning.args == ("quick_run_slow_tail_warning",)
+        assert warning.kwargs["ticker"] == "TEST"
+        assert warning.kwargs["slowest_agent"] == "External Consultant"
+        assert (
+            warning.kwargs["suggested_knob"] == "CONSULTANT_QUICK_TOTAL_TIMEOUT_SECONDS"
+        )
+
+    def test_log_final_summary_skips_slow_tail_warning_for_normal_quick_run(
+        self, monkeypatch
+    ):
+        from src import main
+
+        class StubTracker:
+            def get_total_stats(self):
+                return {
+                    "call_diagnostics": {
+                        "timeout_seconds_lost": 0.0,
+                        "consultant_timeout": False,
+                        "slowest_call": {
+                            "agent_name": "Market Analyst",
+                            "elapsed_seconds": 5.0,
+                        },
+                    }
+                }
+
+        logger = MagicMock()
+        monkeypatch.setattr("src.token_tracker.get_tracker", lambda: StubTracker())
+        monkeypatch.setattr(main, "logger", logger)
+
+        main._log_final_summary(
+            {"run_summary": {"quick_mode": True}},
+            SimpleNamespace(ticker="TEST", quick=True),
+            article_generated=False,
+        )
+
+        logger.info.assert_called_once()
+        logger.warning.assert_not_called()
+
     def test_save_results_includes_pre_screening_and_run_summary(
         self, tmp_path, monkeypatch
     ):

@@ -1151,6 +1151,55 @@ def _log_final_summary(
         ticker=args.ticker,
         **{**result.get("run_summary", {}), "article_generated": article_generated},
     )
+    _log_quick_slow_tail_warning(result, args)
+
+
+def _log_quick_slow_tail_warning(result: dict, args: argparse.Namespace) -> None:
+    """Emit one actionable warning when a quick run still hits slow-tail behavior."""
+    if not getattr(args, "quick", False):
+        return
+
+    from src.token_tracker import get_tracker
+
+    diagnostics = (
+        (get_tracker().get_total_stats().get("call_diagnostics") or {})
+        if result is not None
+        else {}
+    )
+    slowest = diagnostics.get("slowest_call") or {}
+    slowest_elapsed = float(slowest.get("elapsed_seconds") or 0.0)
+    timeout_seconds_lost = float(diagnostics.get("timeout_seconds_lost") or 0.0)
+    consultant_timeout = bool(diagnostics.get("consultant_timeout"))
+    exceeded_quick_budget = slowest_elapsed >= float(
+        config.consultant_quick_total_timeout_seconds
+    )
+
+    if (
+        timeout_seconds_lost < 30.0
+        and not consultant_timeout
+        and not exceeded_quick_budget
+    ):
+        return
+
+    slowest_agent = str(slowest.get("agent_name") or "unknown")
+    suggested_knob = (
+        "CONSULTANT_QUICK_TOTAL_TIMEOUT_SECONDS"
+        if "consultant" in slowest_agent.lower() or consultant_timeout
+        else "LLM_CALL_HARD_TIMEOUT_SECONDS"
+    )
+    logger.warning(
+        "quick_run_slow_tail_warning",
+        ticker=args.ticker,
+        slowest_agent=slowest_agent,
+        slowest_provider=slowest.get("provider") or "unknown",
+        slowest_model=slowest.get("model_name") or "unknown",
+        slowest_status=slowest.get("status") or "unknown",
+        slowest_failure_kind=slowest.get("failure_kind"),
+        slowest_elapsed_seconds=round(slowest_elapsed, 4),
+        timeout_seconds_lost=round(timeout_seconds_lost, 4),
+        consultant_timeout=consultant_timeout,
+        suggested_knob=suggested_knob,
+    )
 
 
 async def main() -> int:

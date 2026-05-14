@@ -122,6 +122,129 @@ class TestDataFormatEdgeCases:
                 assert result["consultant_review"]  # Should still return something
 
     @pytest.mark.asyncio
+    async def test_quick_consultant_no_tools_does_not_fallback_on_empty_content(self):
+        """Quick/no-tool Consultant should not spend a second LLM call on empty output."""
+        mock_llm = Mock()
+        mock_response = Mock()
+        mock_response.content = ""
+        mock_response.tool_calls = [{"name": "spot_check_metric_alt", "args": {}}]
+        invoke_calls = []
+
+        async def mock_invoke(*args, **kwargs):
+            invoke_calls.append((args, kwargs))
+            return mock_response
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                mock_prompt = Mock()
+                mock_prompt.system_message = "You are a consultant."
+                mock_prompt.agent_name = "External Consultant"
+                mock_get_prompt.return_value = mock_prompt
+
+                consultant_node = create_consultant_node(
+                    mock_llm, "consultant", tools=[], quick_mode=True
+                )
+                state = {
+                    "company_of_interest": "TEST",
+                    "company_name": "Test Co",
+                    "market_report": "Report",
+                    "sentiment_report": "Report",
+                    "news_report": "Report",
+                    "fundamentals_report": "Report",
+                    "investment_debate_state": {"history": "Debate"},
+                    "investment_plan": "BUY",
+                    "red_flags": [],
+                    "pre_screening_result": "PASS",
+                }
+                config = RunnableConfig(
+                    configurable={"context": Mock(trade_date="2025-12-13")}
+                )
+
+                result = await consultant_node(state, config)
+
+        assert len(invoke_calls) == 1
+        status = result["artifact_statuses"]["consultant_review"]
+        assert status["ok"] is False
+        assert status["error_kind"] == "application_error"
+
+    @pytest.mark.asyncio
+    async def test_quick_consultant_prompt_addendum_and_context_caps(self):
+        """Quick prompt keeps evidence channels while using smaller section caps."""
+        mock_llm = Mock()
+        mock_response = Mock()
+        mock_response.content = (
+            "### CONSULTANT REVIEW: APPROVED\n\n"
+            "### FINAL CONSULTANT VERDICT\nAPPROVED"
+        )
+        invoke_messages = []
+        summarize_calls = []
+
+        async def mock_invoke(_llm, messages, **kwargs):
+            invoke_messages.extend(messages)
+            return mock_response
+
+        def fake_summarize(value, section, budget):
+            summarize_calls.append((section, budget))
+            return f"{section}:{budget}:{value}"
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                with patch(
+                    "src.agents.consultant_nodes.support.summarize_for_pm",
+                    side_effect=fake_summarize,
+                ):
+                    mock_prompt = Mock()
+                    mock_prompt.system_message = "You are a consultant."
+                    mock_prompt.agent_name = "External Consultant"
+                    mock_get_prompt.return_value = mock_prompt
+
+                    consultant_node = create_consultant_node(
+                        mock_llm, "consultant", tools=[], quick_mode=True
+                    )
+                    state = {
+                        "company_of_interest": "TEST",
+                        "company_name": "Test Co",
+                        "market_report": "Market",
+                        "sentiment_report": "Sentiment",
+                        "news_report": "News",
+                        "fundamentals_report": "Fundamentals",
+                        "investment_debate_state": {"history": "Debate"},
+                        "investment_plan": "Research",
+                        "auditor_report": "Auditor",
+                        "red_flags": [],
+                        "pre_screening_result": "PASS",
+                    }
+                    config = RunnableConfig(
+                        configurable={"context": Mock(trade_date="2025-12-13")}
+                    )
+
+                    await consultant_node(state, config)
+
+        prompt = invoke_messages[0].content
+        assert "QUICK SCREENING MODE" in prompt
+        assert (
+            "Do not request tools unless tool results are explicitly available"
+            in prompt
+        )
+        assert "CONSULTANT REVIEW" in prompt
+        assert "FINAL CONSULTANT VERDICT" in prompt
+        assert "MARKET ANALYST REPORT:" in prompt
+        assert "SENTIMENT ANALYST REPORT:" in prompt
+        assert "NEWS ANALYST REPORT:" in prompt
+        assert "FUNDAMENTALS ANALYST REPORT:" in prompt
+        assert "BULL/BEAR DEBATE HISTORY" in prompt
+        assert "RESEARCH MANAGER SYNTHESIS" in prompt
+        assert "INDEPENDENT FORENSIC AUDIT" in prompt
+        assert ("market", 900) in summarize_calls
+        assert ("fundamentals", 2500) in summarize_calls
+        assert ("research", 1400) in summarize_calls
+        assert ("auditor", 1200) in summarize_calls
+
+    @pytest.mark.asyncio
     async def test_consultant_handles_missing_debate_state(self):
         """Test consultant handles missing investment_debate_state gracefully and logs diagnostic."""
         mock_llm = Mock()

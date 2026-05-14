@@ -31,6 +31,35 @@ logger = structlog.get_logger(__name__)
 
 CONSULTANT_CALL_TIMEOUT_SECONDS = 90.0
 CONSULTANT_TOTAL_TIMEOUT_SECONDS = 240.0
+_CONSULTANT_QUICK_SCREENING_ADDENDUM = """
+## QUICK SCREENING MODE
+
+This is a bounded screening cross-check, not a full re-analysis.
+- Do not request tools unless tool results are explicitly available in this turn.
+- Preserve the required CONSULTANT REVIEW and FINAL CONSULTANT VERDICT headers.
+- Focus only on decision-changing factual errors, biases, synthesis gaps, and mandate breaches.
+- If the internal analysis is sound enough for screening, say so briefly.
+"""
+_CONSULTANT_CONTEXT_BUDGETS = {
+    "full": {
+        "market": 2000,
+        "sentiment": 1500,
+        "news": 2000,
+        "fundamentals": 5000,
+        "debate": 4000,
+        "research": 4000,
+        "auditor": 3000,
+    },
+    "quick": {
+        "market": 900,
+        "sentiment": 600,
+        "news": 900,
+        "fundamentals": 2500,
+        "debate": 1400,
+        "research": 1400,
+        "auditor": 1200,
+    },
+}
 
 _RECOVERABLE_AUDITOR_STATUSES = frozenset(
     {"INSUFFICIENT_DATA", "UNAVAILABLE", "CONTEXT_LIMIT_EXCEEDED"}
@@ -291,7 +320,12 @@ async def _run_bounded_consultant_loop(
     deadline: float,
     total_timeout: float,
 ) -> ConsultantLoopResult:
-    """Run the Consultant's bounded tool loop under a shared deadline."""
+    """Run the Consultant's bounded tool loop under a shared deadline.
+
+    The manual loop is intentional for now: it gives quick and full modes an
+    explicit wall-clock budget. A LangGraph subgraph/tool-node rewrite can
+    replace this later if Consultant tool use expands.
+    """
     content_str = ""
     had_tool_errors = False
     tool_failure_count = 0
@@ -463,7 +497,7 @@ async def _run_bounded_consultant_loop(
             content_str = message_utils.extract_string_content(response.content)
             break
 
-    if not content_str:
+    if not content_str and (tools_by_name or max_tool_iterations > 0):
         response = await _invoke_consultant_with_deadline(
             fallback_llm,
             messages,
@@ -482,6 +516,11 @@ async def _run_bounded_consultant_loop(
         had_tool_errors=had_tool_errors,
         tool_failure_count=tool_failure_count,
     )
+
+
+def _consultant_context_budget(section: str, *, quick_mode: bool) -> int:
+    profile = "quick" if quick_mode else "full"
+    return _CONSULTANT_CONTEXT_BUDGETS[profile][section]
 
 
 def _create_openai_responses_fallback_llm(llm):
@@ -578,24 +617,24 @@ def create_consultant_node(
 === ANALYST REPORTS (SOURCE DATA) ===
 
 MARKET ANALYST REPORT:
-{support.summarize_for_pm(market, "market", 2000) if market != "N/A" else "N/A"}
+{support.summarize_for_pm(market, "market", _consultant_context_budget("market", quick_mode=quick_mode)) if market != "N/A" else "N/A"}
 
 SENTIMENT ANALYST REPORT:
-{support.summarize_for_pm(sentiment, "sentiment", 1500) if sentiment != "N/A" else "N/A"}
+{support.summarize_for_pm(sentiment, "sentiment", _consultant_context_budget("sentiment", quick_mode=quick_mode)) if sentiment != "N/A" else "N/A"}
 
 NEWS ANALYST REPORT:
-{support.summarize_for_pm(news, "news", 2000) if news != "N/A" else "N/A"}
+{support.summarize_for_pm(news, "news", _consultant_context_budget("news", quick_mode=quick_mode)) if news != "N/A" else "N/A"}
 
 FUNDAMENTALS ANALYST REPORT:
-{support.summarize_for_pm(fundamentals, "fundamentals", 5000) if fundamentals != "N/A" else "N/A"}
+{support.summarize_for_pm(fundamentals, "fundamentals", _consultant_context_budget("fundamentals", quick_mode=quick_mode)) if fundamentals != "N/A" else "N/A"}
 {attribution_table}{conflict_table}
 === BULL/BEAR DEBATE HISTORY ===
 
-{support.summarize_for_pm(debate_history, "debate", 4000) if debate_history != "N/A" else "N/A"}
+{support.summarize_for_pm(debate_history, "debate", _consultant_context_budget("debate", quick_mode=quick_mode)) if debate_history != "N/A" else "N/A"}
 
 === RESEARCH MANAGER SYNTHESIS ===
 
-{support.summarize_for_pm(investment_plan, "research", 4000) if investment_plan != "N/A" else "N/A"}
+{support.summarize_for_pm(investment_plan, "research", _consultant_context_budget("research", quick_mode=quick_mode)) if investment_plan != "N/A" else "N/A"}
 
 === RED FLAGS (Pre-Screening Results) ===
 
@@ -603,7 +642,7 @@ Red Flags Detected: {state.get("red_flags", [])}
 Pre-Screening Result: {state.get("pre_screening_result", "UNKNOWN")}
 
 === INDEPENDENT FORENSIC AUDIT ===
-{support.summarize_for_pm(auditor, "auditor", 3000) if auditor != "N/A" else "N/A"}
+{support.summarize_for_pm(auditor, "auditor", _consultant_context_budget("auditor", quick_mode=quick_mode)) if auditor != "N/A" else "N/A"}
 """
 
         company_warning = (
@@ -614,6 +653,7 @@ Pre-Screening Result: {state.get("pre_screening_result", "UNKNOWN")}
 ANALYSIS DATE: {support._format_date_with_fy_hint(current_date)}
 TICKER: {ticker}
 COMPANY: {company_name}{company_warning}
+{_CONSULTANT_QUICK_SCREENING_ADDENDUM if quick_mode else ""}
 
 {all_context}
 
