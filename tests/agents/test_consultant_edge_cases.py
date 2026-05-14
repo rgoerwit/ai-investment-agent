@@ -16,6 +16,7 @@ from src.agents import create_consultant_node
 from src.agents.consultant_nodes import (
     _canonicalize_forensic_auditor_output,
     _create_openai_responses_fallback_llm,
+    _select_quick_consultant_profile,
 )
 from src.report_generator import QuietModeReporter
 
@@ -222,7 +223,7 @@ class TestDataFormatEdgeCases:
                         configurable={"context": Mock(trade_date="2025-12-13")}
                     )
 
-                    await consultant_node(state, config)
+                    result = await consultant_node(state, config)
 
         prompt = invoke_messages[0].content
         assert "QUICK SCREENING MODE" in prompt
@@ -243,6 +244,89 @@ class TestDataFormatEdgeCases:
         assert ("fundamentals", 2500) in summarize_calls
         assert ("research", 1400) in summarize_calls
         assert ("auditor", 1200) in summarize_calls
+        assert result["consultant_quick_profile"] == "quick_standard"
+
+    def test_quick_consultant_profile_expands_for_borderline_inputs(self):
+        assert _select_quick_consultant_profile({"red_flags": [{"type": "PFIC"}]}) == (
+            "quick_expanded"
+        )
+        assert (
+            _select_quick_consultant_profile(
+                {"artifact_statuses": {"auditor_report": {"ok": False}}}
+            )
+            == "quick_expanded"
+        )
+        assert (
+            _select_quick_consultant_profile(
+                {"investment_plan": "Recommendation: HOLD"}
+            )
+            == "quick_expanded"
+        )
+        assert _select_quick_consultant_profile({"investment_plan": "BUY"}) == (
+            "quick_standard"
+        )
+
+    @pytest.mark.asyncio
+    async def test_quick_consultant_expanded_profile_adds_evidence_index(self):
+        mock_llm = Mock()
+        mock_response = Mock()
+        mock_response.content = (
+            "### CONSULTANT REVIEW: APPROVED\n\n"
+            "### FINAL CONSULTANT VERDICT\nAPPROVED"
+        )
+        invoke_messages = []
+        summarize_calls = []
+
+        async def mock_invoke(_llm, messages, **kwargs):
+            invoke_messages.extend(messages)
+            return mock_response
+
+        def fake_summarize(value, section, budget):
+            summarize_calls.append((section, budget))
+            return f"{section}:{budget}:{value}"
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                with patch(
+                    "src.agents.consultant_nodes.support.summarize_for_pm",
+                    side_effect=fake_summarize,
+                ):
+                    mock_prompt = Mock()
+                    mock_prompt.system_message = "You are a consultant."
+                    mock_prompt.agent_name = "External Consultant"
+                    mock_get_prompt.return_value = mock_prompt
+
+                    consultant_node = create_consultant_node(
+                        mock_llm, "consultant", tools=[], quick_mode=True
+                    )
+                    result = await consultant_node(
+                        {
+                            "company_of_interest": "TEST",
+                            "company_name": "Test Co",
+                            "market_report": "Market",
+                            "sentiment_report": "Sentiment",
+                            "news_report": "News",
+                            "fundamentals_report": "Fundamentals",
+                            "investment_debate_state": {"history": "Debate"},
+                            "investment_plan": "HOLD due to liquidity risk",
+                            "auditor_report": "Auditor",
+                            "red_flags": [{"type": "LIQUIDITY", "detail": "thin"}],
+                            "pre_screening_result": "PASS",
+                        },
+                        RunnableConfig(
+                            configurable={"context": Mock(trade_date="2025-12-13")}
+                        ),
+                    )
+
+        prompt = invoke_messages[0].content
+        assert "DECISION-CRITICAL EVIDENCE INDEX" in prompt
+        assert "LIQUIDITY" in prompt
+        assert "MARKET ANALYST REPORT:" in prompt
+        assert ("fundamentals", 3600) in summarize_calls
+        assert ("research", 2200) in summarize_calls
+        assert result["consultant_quick_profile"] == "quick_expanded"
 
     @pytest.mark.asyncio
     async def test_consultant_handles_missing_debate_state(self):

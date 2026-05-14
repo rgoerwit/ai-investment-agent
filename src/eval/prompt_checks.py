@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import json
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +68,18 @@ class RunCheckReport:
 
 
 @dataclass(frozen=True)
+class QuickFullComparison:
+    ticker: str
+    quick_verdict: str
+    full_verdict: str
+    verdict_diverged: bool
+    quick_publishable: bool
+    full_publishable: bool
+    consultant_quick: str
+    consultant_full: str
+
+
+@dataclass(frozen=True)
 class PromptCheckScenarioReport:
     ticker: str
     quick: bool
@@ -75,6 +87,7 @@ class PromptCheckScenarioReport:
     passed: bool
     run_report: RunCheckReport | None = None
     error: str | None = None
+    quick_full_comparison: QuickFullComparison | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +102,7 @@ class PromptCheckSuiteReport:
 class PromptCheckScenarioExecution:
     report: PromptCheckScenarioReport
     outputs: Mapping[str, PromptCheckNodeOutput]
+    result: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -320,17 +334,67 @@ def _load_suite_manifest(
     return suite.name, suite.description, suite.scenarios
 
 
-async def _run_prompt_check_scenario(
+def _extract_pm_verdict(result: Mapping[str, Any]) -> str:
+    text = str(result.get("final_trade_decision") or "")
+    block = extract_pm_block(text)
+    return block.verdict or extract_verdict_from_text(text) or "UNKNOWN"
+
+
+def _extract_consultant_verdict(outputs: Mapping[str, PromptCheckNodeOutput]) -> str:
+    output = outputs.get("consultant")
+    if output is None:
+        return "UNKNOWN"
+    return str(
+        RedFlagDetector.parse_consultant_conditions(output.artifact_text).get("verdict")
+        or "UNKNOWN"
+    )
+
+
+def _build_quick_full_comparison(
+    quick_execution: PromptCheckScenarioExecution,
+    full_execution: PromptCheckScenarioExecution,
+) -> QuickFullComparison:
+    quick_result = quick_execution.result
+    full_result = full_execution.result
+    quick_verdict = _extract_pm_verdict(quick_result)
+    full_verdict = _extract_pm_verdict(full_result)
+    return QuickFullComparison(
+        ticker=quick_execution.report.ticker,
+        quick_verdict=quick_verdict,
+        full_verdict=full_verdict,
+        verdict_diverged=quick_verdict != full_verdict,
+        quick_publishable=bool(
+            (quick_result.get("analysis_validity") or {}).get("publishable")
+        ),
+        full_publishable=bool(
+            (full_result.get("analysis_validity") or {}).get("publishable")
+        ),
+        consultant_quick=_extract_consultant_verdict(quick_execution.outputs),
+        consultant_full=_extract_consultant_verdict(full_execution.outputs),
+    )
+
+
+async def _run_single_prompt_check_scenario(
     scenario: PromptCheckScenario,
 ) -> PromptCheckScenarioExecution:
     collector = PromptCheckCollector()
-    result = await run_analysis(
-        scenario.ticker,
-        scenario.quick,
-        strict_mode=scenario.strict,
-        skip_charts=True,
-        node_observer=collector,
-    )
+    try:
+        result = await run_analysis(
+            scenario.ticker,
+            scenario.quick,
+            strict_mode=scenario.strict,
+            skip_charts=True,
+            node_observer=collector,
+        )
+    except Exception as exc:
+        report = PromptCheckScenarioReport(
+            ticker=scenario.ticker,
+            quick=scenario.quick,
+            strict=scenario.strict,
+            passed=False,
+            error=f"analysis raised {type(exc).__name__}: {exc}",
+        )
+        return PromptCheckScenarioExecution(report=report, outputs={})
     if not isinstance(result, dict):
         report = PromptCheckScenarioReport(
             ticker=scenario.ticker,
@@ -350,15 +414,55 @@ async def _run_prompt_check_scenario(
         passed=run_report.passed,
         run_report=run_report,
     )
-    return PromptCheckScenarioExecution(report=report, outputs=outputs)
+    return PromptCheckScenarioExecution(report=report, outputs=outputs, result=result)
+
+
+async def _run_prompt_check_scenario(
+    scenario: PromptCheckScenario,
+    *,
+    compare_full: bool = False,
+) -> PromptCheckScenarioExecution:
+    quick_execution = await _run_single_prompt_check_scenario(scenario)
+    if not compare_full or quick_execution.report.error:
+        return quick_execution
+
+    full_execution = await _run_single_prompt_check_scenario(
+        replace(scenario, quick=False)
+    )
+    if full_execution.report.error:
+        report = replace(
+            quick_execution.report,
+            passed=False,
+            error=f"full comparison failed: {full_execution.report.error}",
+        )
+        return PromptCheckScenarioExecution(
+            report=report,
+            outputs=quick_execution.outputs,
+            result=quick_execution.result,
+        )
+
+    comparison = _build_quick_full_comparison(quick_execution, full_execution)
+    report = replace(
+        quick_execution.report,
+        passed=quick_execution.report.passed and full_execution.report.passed,
+        quick_full_comparison=comparison,
+    )
+    return PromptCheckScenarioExecution(
+        report=report,
+        outputs=quick_execution.outputs,
+        result=quick_execution.result,
+    )
 
 
 async def run_prompt_check_suite(
     suite: PromptCheckSuite,
+    *,
+    compare_full: bool = False,
 ) -> PromptCheckSuiteExecution:
     validate_environment_variables()
     scenario_executions = [
-        await _run_prompt_check_scenario(scenario) for scenario in suite.scenarios
+        await _run_prompt_check_scenario(scenario, compare_full=compare_full)
+        for scenario in suite.scenarios
     ]
     suite_report = PromptCheckSuiteReport(
         suite=suite.name,
@@ -398,6 +502,14 @@ def _print_suite_report(report: PromptCheckSuiteReport) -> None:
             continue
         if not scenario.run_report:
             continue
+        if scenario.quick_full_comparison is not None:
+            comparison = scenario.quick_full_comparison
+            diverged = "diverged" if comparison.verdict_diverged else "same"
+            print(
+                "  - quick/full: "
+                f"{comparison.quick_verdict} vs {comparison.full_verdict} "
+                f"({diverged})"
+            )
         for node_report in scenario.run_report.node_reports:
             if node_report.skipped:
                 print(f"  - {node_report.node_name}: skipped")
@@ -442,6 +554,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--compare-full",
+        action="store_true",
+        help=(
+            "For each suite scenario, also run the same ticker in full mode "
+            "and record compact quick/full verdict comparison fields."
+        ),
+    )
+    parser.add_argument(
         "--allow-missing-baseline",
         action="store_true",
         help="Mark missing baselines as skipped instead of failing.",
@@ -473,7 +593,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 async def _main_async() -> int:
     args = build_arg_parser().parse_args()
     suite = load_prompt_check_suite(args.suite)
-    execution = await run_prompt_check_suite(suite)
+    execution = await run_prompt_check_suite(suite, compare_full=args.compare_full)
     report = execution.suite_report
     _print_suite_report(report)
     stage3_report = None

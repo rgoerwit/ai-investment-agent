@@ -47,6 +47,7 @@ def _build_quick_consultant_summary(
         "attempts": len(attempts),
         "timeout": timeout,
         "tool_failures": int(result.get("consultant_tool_failures") or 0),
+        "profile": result.get("consultant_quick_profile") or "unknown",
     }
 
 

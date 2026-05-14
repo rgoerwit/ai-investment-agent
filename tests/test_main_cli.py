@@ -1828,6 +1828,7 @@ class TestSavedDiagnostics:
             "attempts": 2,
             "timeout": True,
             "tool_failures": 2,
+            "profile": "unknown",
         }
 
     def test_log_final_summary_emits_one_quick_slow_tail_warning(self, monkeypatch):

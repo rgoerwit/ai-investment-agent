@@ -50,7 +50,7 @@ _CONSULTANT_CONTEXT_BUDGETS = {
         "research": 4000,
         "auditor": 3000,
     },
-    "quick": {
+    "quick_standard": {
         "market": 900,
         "sentiment": 600,
         "news": 900,
@@ -58,6 +58,15 @@ _CONSULTANT_CONTEXT_BUDGETS = {
         "debate": 1400,
         "research": 1400,
         "auditor": 1200,
+    },
+    "quick_expanded": {
+        "market": 1200,
+        "sentiment": 800,
+        "news": 1200,
+        "fundamentals": 3600,
+        "debate": 2000,
+        "research": 2200,
+        "auditor": 1800,
     },
 }
 
@@ -518,9 +527,40 @@ async def _run_bounded_consultant_loop(
     )
 
 
-def _consultant_context_budget(section: str, *, quick_mode: bool) -> int:
-    profile = "quick" if quick_mode else "full"
+def _select_quick_consultant_profile(state: AgentState) -> str:
+    if state.get("red_flags"):
+        return "quick_expanded"
+
+    artifact_statuses = state.get("artifact_statuses", {}) or {}
+    auditor_status = artifact_statuses.get("auditor_report") or {}
+    if auditor_status and not auditor_status.get("ok", True):
+        return "quick_expanded"
+
+    investment_plan = str(state.get("investment_plan") or "").upper()
+    if "HOLD" in investment_plan or "CONDITIONAL" in investment_plan:
+        return "quick_expanded"
+
+    return "quick_standard"
+
+
+def _consultant_context_budget(section: str, *, profile: str) -> int:
     return _CONSULTANT_CONTEXT_BUDGETS[profile][section]
+
+
+def _build_decision_critical_evidence_index(state: AgentState) -> str:
+    lines: list[str] = []
+    for flag in (state.get("red_flags") or [])[:5]:
+        lines.append(str(flag))
+
+    plan_upper = str(state.get("investment_plan") or "").upper()
+    for marker in ("PFIC", "CMIC", "VALUE TRAP", "LIQUIDITY", "LEVERAGE"):
+        if marker in plan_upper:
+            lines.append(f"Research synthesis mentions {marker}")
+
+    if not lines:
+        return ""
+    compact = "\n".join(f"- {line[:220]}" for line in lines[:8])
+    return f"=== DECISION-CRITICAL EVIDENCE INDEX ===\n{compact}\n\n"
 
 
 def _create_openai_responses_fallback_llm(llm):
@@ -612,29 +652,36 @@ def create_consultant_node(
         fundamentals = state.get("fundamentals_report", "N/A")
         investment_plan = state.get("investment_plan", "N/A")
         auditor = state.get("auditor_report", "N/A")
+        consultant_profile = (
+            _select_quick_consultant_profile(state) if quick_mode else "full"
+        )
+        evidence_index = (
+            _build_decision_critical_evidence_index(state) if quick_mode else ""
+        )
 
         all_context = f"""
+{evidence_index}\
 === ANALYST REPORTS (SOURCE DATA) ===
 
 MARKET ANALYST REPORT:
-{support.summarize_for_pm(market, "market", _consultant_context_budget("market", quick_mode=quick_mode)) if market != "N/A" else "N/A"}
+{support.summarize_for_pm(market, "market", _consultant_context_budget("market", profile=consultant_profile)) if market != "N/A" else "N/A"}
 
 SENTIMENT ANALYST REPORT:
-{support.summarize_for_pm(sentiment, "sentiment", _consultant_context_budget("sentiment", quick_mode=quick_mode)) if sentiment != "N/A" else "N/A"}
+{support.summarize_for_pm(sentiment, "sentiment", _consultant_context_budget("sentiment", profile=consultant_profile)) if sentiment != "N/A" else "N/A"}
 
 NEWS ANALYST REPORT:
-{support.summarize_for_pm(news, "news", _consultant_context_budget("news", quick_mode=quick_mode)) if news != "N/A" else "N/A"}
+{support.summarize_for_pm(news, "news", _consultant_context_budget("news", profile=consultant_profile)) if news != "N/A" else "N/A"}
 
 FUNDAMENTALS ANALYST REPORT:
-{support.summarize_for_pm(fundamentals, "fundamentals", _consultant_context_budget("fundamentals", quick_mode=quick_mode)) if fundamentals != "N/A" else "N/A"}
+{support.summarize_for_pm(fundamentals, "fundamentals", _consultant_context_budget("fundamentals", profile=consultant_profile)) if fundamentals != "N/A" else "N/A"}
 {attribution_table}{conflict_table}
 === BULL/BEAR DEBATE HISTORY ===
 
-{support.summarize_for_pm(debate_history, "debate", _consultant_context_budget("debate", quick_mode=quick_mode)) if debate_history != "N/A" else "N/A"}
+{support.summarize_for_pm(debate_history, "debate", _consultant_context_budget("debate", profile=consultant_profile)) if debate_history != "N/A" else "N/A"}
 
 === RESEARCH MANAGER SYNTHESIS ===
 
-{support.summarize_for_pm(investment_plan, "research", _consultant_context_budget("research", quick_mode=quick_mode)) if investment_plan != "N/A" else "N/A"}
+{support.summarize_for_pm(investment_plan, "research", _consultant_context_budget("research", profile=consultant_profile)) if investment_plan != "N/A" else "N/A"}
 
 === RED FLAGS (Pre-Screening Results) ===
 
@@ -642,7 +689,7 @@ Red Flags Detected: {state.get("red_flags", [])}
 Pre-Screening Result: {state.get("pre_screening_result", "UNKNOWN")}
 
 === INDEPENDENT FORENSIC AUDIT ===
-{support.summarize_for_pm(auditor, "auditor", _consultant_context_budget("auditor", quick_mode=quick_mode)) if auditor != "N/A" else "N/A"}
+{support.summarize_for_pm(auditor, "auditor", _consultant_context_budget("auditor", profile=consultant_profile)) if auditor != "N/A" else "N/A"}
 """
 
         company_warning = (
@@ -719,12 +766,15 @@ Provide your independent consultant review."""
                     ticker=ticker,
                     missing_sections=validation["missing"],
                 )
-                return failure_artifact(
+                result = failure_artifact(
                     "consultant_review",
                     "Consultant output missing required structure",
                     provider=support.infer_provider_name(llm),
                     fallback_content=content_str,
                 )
+                if quick_mode:
+                    result["consultant_quick_profile"] = consultant_profile
+                return result
 
             logger.info(
                 "consultant_review_complete",
@@ -747,15 +797,23 @@ Provide your independent consultant review."""
                 return {
                     "consultant_review": content_str,
                     "consultant_tool_failures": tool_failure_count,
+                    **(
+                        {"consultant_quick_profile": consultant_profile}
+                        if quick_mode
+                        else {}
+                    ),
                     "artifact_statuses": {
                         "consultant_review": status.as_dict(),
                     },
                 }
-            return success_artifact(
+            result = success_artifact(
                 "consultant_review",
                 content_str,
                 provider=support.infer_provider_name(llm),
             ) | {"consultant_tool_failures": tool_failure_count}
+            if quick_mode:
+                result["consultant_quick_profile"] = consultant_profile
+            return result
         except Exception as exc:
             logger.error(
                 "consultant_node_error",
@@ -763,11 +821,16 @@ Provide your independent consultant review."""
                 error=str(exc),
                 exc_info=True,
             )
-            return failure_artifact(
+            result = failure_artifact(
                 "consultant_review",
                 exc,
                 provider=support.infer_provider_name(llm),
             )
+            if quick_mode:
+                result["consultant_quick_profile"] = (
+                    locals().get("consultant_profile") or "quick_standard"
+                )
+            return result
 
     return consultant_node
 
