@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+
+@pytest.mark.asyncio
+async def test_load_company_name_for_output_async_uses_thread_wrapper(monkeypatch):
+    import src.output as output
+
+    monkeypatch.setattr(output, "_load_company_name_for_output", lambda ticker: ticker)
+
+    assert await output._load_company_name_for_output_async("3406.TW") == "3406.TW"
 
 
 def test_load_company_name_for_output_retries_normalized_alias():
@@ -54,6 +64,31 @@ def test_load_company_name_for_output_retries_normalized_alias():
         )
 
     assert requested_symbols == ["TRUE.B.ST", "TRUE-B.ST"]
+
+
+def test_load_company_name_for_output_timeout_does_not_wait_for_executor_shutdown():
+    from src.output import _load_company_name_for_output
+
+    fake_yfinance = MagicMock()
+    fake_yfinance.Ticker.return_value.info = {"longName": "Should Not Return"}
+
+    mock_future = MagicMock()
+    mock_future.result.side_effect = FuturesTimeoutError()
+
+    mock_executor = MagicMock()
+    mock_executor.submit.return_value = mock_future
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setitem(__import__("sys").modules, "yfinance", fake_yfinance)
+        assert (
+            _load_company_name_for_output(
+                "SNTIA.OL",
+                thread_pool_executor_cls=lambda max_workers=1: mock_executor,
+            )
+            is None
+        )
+
+    mock_executor.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
 
 
 def test_render_primary_output_writes_report_without_banner(tmp_path):

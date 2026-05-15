@@ -78,6 +78,10 @@ class TestHardTimeoutWrap:
     @pytest.mark.asyncio
     async def test_hung_ainvoke_is_force_cancelled_after_hard_timeout(self):
         """A coroutine that never resolves must not block longer than the cap."""
+        from src.token_tracker import get_tracker
+
+        tracker = get_tracker()
+        tracker.reset()
 
         async def never_resolves(*_args, **_kwargs):
             # Awaiting an unresolved Future never returns; this simulates a
@@ -104,6 +108,9 @@ class TestHardTimeoutWrap:
             isinstance(exc_info.value, asyncio.TimeoutError)
             or "timeout" in str(exc_info.value).lower()
         )
+        attempt = tracker.get_total_stats()["call_attempts"][-1]
+        assert attempt["failure_kind"] == "timeout"
+        assert attempt["failure_origin"] == "hard_timeout"
 
     @pytest.mark.asyncio
     async def test_fast_ainvoke_is_unaffected(self):

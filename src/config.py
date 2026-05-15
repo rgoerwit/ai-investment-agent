@@ -504,6 +504,16 @@ class Settings(BaseSettings):
         validation_alias="API_TIMEOUT",
         description="API request timeout in seconds",
     )
+    # Quick-mode screening should not inherit a 5-minute SDK socket/read
+    # timeout. The outer runtime helper still enforces the hard wall-clock cap;
+    # this SDK timeout catches provider stalls earlier and avoids 300s slow-tail
+    # failures from quick Gemini calls.
+    quick_llm_api_timeout_seconds: int = Field(
+        default=120,
+        ge=1,
+        validation_alias="QUICK_LLM_API_TIMEOUT_SECONDS",
+        description="Provider SDK timeout in seconds for quick-mode Gemini LLMs",
+    )
     # Lowered from 10 -> 2: at 10 retries × 300s timeout, a single hung Gemini
     # call could legitimately consume 50min before raising. The outer
     # `invoke_with_rate_limit_handling` already retries 3× with backoff, so

@@ -389,6 +389,7 @@ class TestTokenTracker:
             attempt=1,
             elapsed_seconds=60.2,
             failure_kind="timeout",
+            failure_origin="hard_timeout",
             retryable=True,
         )
         tracker.record_call_attempt(
@@ -408,7 +409,9 @@ class TestTokenTracker:
         assert stats["failed_attempts"] == 1
         assert stats["failed_by_provider"] == {"openai": 1}
         assert stats["failed_by_kind"] == {"timeout": 1}
+        assert stats["call_diagnostics"]["failed_by_origin"] == {"hard_timeout": 1}
         assert len(stats["call_attempts"]) == 2
+        assert stats["call_attempts"][0]["failure_origin"] == "hard_timeout"
         assert stats["call_attempts"][1]["total_tokens"] == 150
         assert stats["call_diagnostics"]["consultant_timeout"] is True
         assert stats["call_diagnostics"]["timeout_seconds_lost"] == 60.2

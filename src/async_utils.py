@@ -26,7 +26,9 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any, TypeVar
 
 import structlog
@@ -36,21 +38,85 @@ logger = structlog.get_logger(__name__)
 T = TypeVar("T")
 
 
+@dataclass
+class HardTimeoutOrphan:
+    """Diagnostic record for a task orphaned by a hard timeout."""
+
+    label: str
+    started_monotonic: float
+    timeout_seconds: float
+    orphaned_monotonic: float
+    done: bool = False
+
+
+_ORPHANS: dict[int, HardTimeoutOrphan] = {}
+
+
+def _track_orphan(
+    task: asyncio.Task[Any],
+    *,
+    label: str,
+    started_monotonic: float,
+    timeout_seconds: float,
+) -> None:
+    _ORPHANS[id(task)] = HardTimeoutOrphan(
+        label=label,
+        started_monotonic=started_monotonic,
+        timeout_seconds=timeout_seconds,
+        orphaned_monotonic=time.monotonic(),
+    )
+
+
 def _silence_orphan(task: asyncio.Task[Any], *, label: str) -> None:
     """Drain *task*'s exception when it eventually finishes, so no warning fires."""
 
     def _drain(t: asyncio.Task[Any]) -> None:
-        if t.cancelled():
-            return
-        exc = t.exception()
-        if exc is not None:
-            logger.debug(
-                "hard_timeout_orphan_failed",
-                label=label,
-                error_type=type(exc).__name__,
-            )
+        record = _ORPHANS.get(id(t))
+        if record is not None:
+            record.done = True
+        try:
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.debug(
+                    "hard_timeout_orphan_failed",
+                    label=label,
+                    error_type=type(exc).__name__,
+                )
+        finally:
+            # Keep active stuck tasks visible, but remove completed ones quickly
+            # so long-running batch processes do not accumulate old records.
+            if t.done():
+                _ORPHANS.pop(id(t), None)
 
     task.add_done_callback(_drain)
+
+
+def get_hard_timeout_orphan_snapshot(
+    *,
+    min_age_seconds: float = 30.0,
+) -> list[dict[str, Any]]:
+    """Return diagnostic records for still-pending hard-timeout orphans."""
+    now = time.monotonic()
+    records: list[dict[str, Any]] = []
+    for record in _ORPHANS.values():
+        if record.done:
+            continue
+        age_seconds = now - record.orphaned_monotonic
+        if age_seconds < min_age_seconds:
+            continue
+        records.append(
+            {
+                "label": record.label,
+                "age_seconds": round(age_seconds, 1),
+                "runtime_seconds": round(now - record.started_monotonic, 1),
+                "timeout_seconds": record.timeout_seconds,
+                "done": record.done,
+            }
+        )
+    records.sort(key=lambda item: item["age_seconds"], reverse=True)
+    return records
 
 
 async def run_with_hard_timeout(
@@ -72,6 +138,7 @@ async def run_with_hard_timeout(
     if timeout <= 0:
         raise ValueError(f"timeout must be positive, got {timeout!r}")
 
+    started = time.monotonic()
     task: asyncio.Task[T] = asyncio.ensure_future(coro)
     try:
         done, _pending = await asyncio.wait({task}, timeout=timeout)
@@ -80,6 +147,12 @@ async def run_with_hard_timeout(
         # the inner to stop. We do not wait on it.
         if not task.done():
             task.cancel()
+            _track_orphan(
+                task,
+                label=label,
+                started_monotonic=started,
+                timeout_seconds=timeout,
+            )
             _silence_orphan(task, label=label)
         raise
 
@@ -88,6 +161,12 @@ async def run_with_hard_timeout(
 
     # Timeout: orphan the task.
     task.cancel()
+    _track_orphan(
+        task,
+        label=label,
+        started_monotonic=started,
+        timeout_seconds=timeout,
+    )
     _silence_orphan(task, label=label)
     logger.warning(
         "hard_timeout_exceeded",
@@ -182,6 +261,7 @@ def install_pending_task_dump_handler(
 
 __all__ = [
     "dump_pending_tasks",
+    "get_hard_timeout_orphan_snapshot",
     "install_pending_task_dump_handler",
     "run_with_hard_timeout",
 ]

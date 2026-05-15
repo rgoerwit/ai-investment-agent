@@ -13,6 +13,7 @@ from src.agents import (
     RiskDebateState,
     merge_and_cap_messages,
     merge_dicts,
+    merge_flag_lists,
     merge_invest_debate_state,
     merge_risk_state,
 )
@@ -49,6 +50,22 @@ class TestMergeDicts:
         merge_dicts(x, y)
         assert "b" not in x
         assert "a" not in y
+
+
+class TestMergeFlagLists:
+    def test_distinct_parallel_red_flags_are_preserved(self):
+        x = [{"type": "GEOPOLITICAL_RISK", "severity": "high"}]
+        y = [{"type": "CUSTOMER_CONCENTRATION", "severity": "medium"}]
+
+        assert merge_flag_lists(x, y) == [*x, *y]
+
+    def test_duplicate_red_flags_are_deduped(self):
+        flag = {"type": "PFIC_RISK", "severity": "medium"}
+
+        assert merge_flag_lists([flag], [dict(flag)]) == [flag]
+
+    def test_none_inputs_return_empty_list(self):
+        assert merge_flag_lists(None, None) == []
 
 
 # ─── merge_invest_debate_state ───────────────────────────────────────────────

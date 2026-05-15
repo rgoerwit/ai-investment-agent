@@ -401,6 +401,7 @@ info "Python runtime:      $PYTHON_CMD_DISPLAY"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/pipeline_signals.sh"
+export PIPELINE_TIMEOUT_RECORD_FILE="${PIPELINE_TIMEOUT_RECORD_FILE:-${SCRATCH}/pipeline-timeouts-${DATE}.jsonl}"
 
 # ============================================================
 # STAGE 0: Scrape + Filter

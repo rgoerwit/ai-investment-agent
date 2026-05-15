@@ -36,7 +36,7 @@ import re
 import time
 from collections import namedtuple
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +89,7 @@ from src.data.metric_extraction import (
 from src.data.metric_extraction import (
     extract_quarterly_horizons as extract_quarterly_horizons_impl,
 )
+from src.data.pattern_extraction import FinancialPatternExtractor
 from src.data.source_fetchers import (
     classify_aggregate_source_failure as classify_aggregate_source_failure_impl,
 )
@@ -164,7 +165,6 @@ except ImportError:
 
 
 # Constants
-ROE_PERCENTAGE_THRESHOLD = 1.0
 # D/E > 10 (1000%) is extremely rare; values like 14.77 are percentages (14.77%)
 DEBT_EQUITY_PERCENTAGE_THRESHOLD = 10.0
 PRICE_TO_BOOK_CURRENCY_MISMATCH_THRESHOLD = 5.0
@@ -342,10 +342,10 @@ def _coerce_epoch_date(value: Any) -> datetime | None:
             if not stripped:
                 return None
             if stripped.isdigit():
-                return datetime.utcfromtimestamp(int(stripped))
+                return datetime.fromtimestamp(int(stripped), UTC).replace(tzinfo=None)
             return datetime.strptime(stripped, "%Y-%m-%d")
         if isinstance(value, int | float):
-            return datetime.utcfromtimestamp(int(value))
+            return datetime.fromtimestamp(int(value), UTC).replace(tzinfo=None)
     except (OverflowError, OSError, TypeError, ValueError):
         return None
     return None
@@ -394,158 +394,6 @@ class DataQuality:
             self.sources_used = []
         if self.suspicious_fields is None:
             self.suspicious_fields = []
-
-
-class FinancialPatternExtractor:
-    """Handles regex-based extraction of financial metrics from text."""
-
-    def __init__(self):
-        self.patterns = {
-            "trailingPE": [
-                re.compile(
-                    r"(?:Trailing P/E|P/E \(TTM\)|P/E Ratio \(TTM\))(?:.*?)\s*[:=]?\s*(\d+[\.,]\d+)",
-                    re.IGNORECASE,
-                ),
-                re.compile(
-                    r"(?:P/E|est|trading at|valuation).*?\s+(\d+[\.,]\d+)x",
-                    re.IGNORECASE,
-                ),
-                re.compile(r"P/E\s+(?:of|is|around)\s+(\d+[\.,]\d+)", re.IGNORECASE),
-                re.compile(
-                    r"(?<!Forward\s)(?<!Fwd\s)(?:P/E|Price[- ]to[- ]Earnings)(?:.*?)(?:Ratio)?\s*[:=]?\s*(\d+[\.,]\d+)",
-                    re.IGNORECASE,
-                ),
-                re.compile(r"\btrades?\s+at\s+(\d+[\.,]\d+)x", re.IGNORECASE),
-                re.compile(r"\bvalued\s+at\s+(\d+[\.,]\d+)x", re.IGNORECASE),
-                re.compile(
-                    r"\btrading\s+at\s+(\d+(?:[\.,]\d+)?)\s+times", re.IGNORECASE
-                ),
-            ],
-            "forwardPE": [
-                re.compile(
-                    r"(?:Forward P/E|Fwd P/E)(?:.*?)\s*[:=]?\s*(\d+[\.,]\d+)",
-                    re.IGNORECASE,
-                ),
-                re.compile(r"(?:Forward P/E|Fwd P/E).*?(\d+[\.,]\d+)x", re.IGNORECASE),
-                re.compile(r"est.*?P/E.*?(\d+[\.,]\d+)x", re.IGNORECASE),
-            ],
-            "priceToBook": [
-                re.compile(
-                    r"(?:P/B|Price[- ]to[- ]Book)(?:.*?)(?:Ratio)?\s*[:=]?\s*(\d+[\.,]\d+)",
-                    re.IGNORECASE,
-                ),
-                re.compile(r"PB\s*Ratio\s*[:=]?\s*(\d+[\.,]\d+)", re.IGNORECASE),
-                re.compile(r"Price\s*/\s*Book\s*[:=]?\s*(\d+[\.,]\d+)", re.IGNORECASE),
-                re.compile(r"trading at\s+(\d+[\.,]\d+)x\s+book", re.IGNORECASE),
-            ],
-            "returnOnEquity": [
-                re.compile(r"(?:ROE|Return on Equity).*?(\d+[\.,]\d+)%?", re.IGNORECASE)
-            ],
-            "marketCap": [
-                re.compile(
-                    r"(?:Market Cap|Valuation).*?(\d{1,3}(?:[,\.]\d{3})*(?:[,\.]\d+)?)\s*([TBM])",
-                    re.IGNORECASE,
-                )
-            ],
-            "enterpriseToEbitda": [
-                re.compile(
-                    r"(?:EV/EBITDA|Enterprise Value/EBITDA)(?:.*?)\s*[:=]?\s*(\d+[\.,]\d+)",
-                    re.IGNORECASE,
-                ),
-                re.compile(r"EV/EBITDA.*?(\d+[\.,]\d+)x", re.IGNORECASE),
-            ],
-            "numberOfAnalystOpinions": [
-                re.compile(r"(\d+)\s+analyst(?:s)?\s+cover", re.IGNORECASE),
-                re.compile(r"covered\s+by\s+(\d+)\s+analyst", re.IGNORECASE),
-                re.compile(r"(\d+)\s+analyst(?:s)?\s+rating", re.IGNORECASE),
-                re.compile(r"analyst\s+coverage:\s*(\d+)", re.IGNORECASE),
-                re.compile(r"based\s+on\s+(\d+)\s+analyst", re.IGNORECASE),
-                re.compile(r"consensus.*?(\d+)\s+analyst", re.IGNORECASE),
-                re.compile(r"(\d+)\s+wall\s+street\s+analyst", re.IGNORECASE),
-            ],
-            "us_revenue_pct": [
-                re.compile(r"US\s+revenue\s+.*?\s+(\d+(?:\.\d+)?)%", re.IGNORECASE),
-                re.compile(
-                    r"North\s+America\s+revenue\s+.*?\s+(\d+(?:\.\d+)?)%", re.IGNORECASE
-                ),
-                re.compile(
-                    r"revenue\s+from\s+.*?Americas.*?\s+(\d+(?:\.\d+)?)%", re.IGNORECASE
-                ),
-            ],
-        }
-
-        self.multipliers = {"T": 1e12, "B": 1e9, "M": 1e6}
-
-    def _normalize_number(self, val_str: str) -> float:
-        try:
-            val_str = val_str.strip()
-            val_str = re.sub(r"[xX%]$", "", val_str).strip()
-
-            # Robust International Format Handling
-            if "," in val_str and "." in val_str:
-                if val_str.rfind(",") < val_str.rfind("."):
-                    clean_str = val_str.replace(",", "")  # US: 1,234.56
-                else:
-                    clean_str = val_str.replace(".", "").replace(
-                        ",", "."
-                    )  # EU: 1.234,56
-            elif "," in val_str:
-                # Ambiguous: 1,234 vs 12,34. Assume comma as decimal if not xxx,xxx format
-                if re.match(r"^\d{1,3},\d{3}$", val_str):
-                    clean_str = val_str.replace(",", "")
-                else:
-                    clean_str = val_str.replace(",", ".")
-            else:
-                clean_str = val_str
-
-            return float(clean_str)
-        except ValueError:
-            return 0.0
-
-    def extract_from_text(
-        self, content: str, skip_fields: set = None
-    ) -> dict[str, Any]:
-        skip_fields = skip_fields or set()
-        extracted = {}
-
-        for field, pattern_list in self.patterns.items():
-            if field != "forwardPE" and field in skip_fields:
-                continue
-
-            for pattern in pattern_list:
-                match = pattern.search(content)
-                if match:
-                    try:
-                        val_str = match.group(1)
-                        val = self._normalize_number(val_str)
-
-                        if field == "returnOnEquity" and val > ROE_PERCENTAGE_THRESHOLD:
-                            val = val / 100.0
-                        elif field == "marketCap":
-                            suffix = match.group(2).upper()
-                            multiplier = self.multipliers.get(suffix, 1)
-                            val = val * multiplier
-                        elif field == "numberOfAnalystOpinions":
-                            val = int(val)
-                            if val < 0 or val > 200:
-                                continue  # Sanity check
-
-                        extracted[field] = val
-                        extracted[f"_{field}_source"] = "web_search_extraction"
-                        break
-                    except (ValueError, IndexError):
-                        continue
-
-        # Proxy fill
-        if (
-            "trailingPE" not in skip_fields
-            and "trailingPE" not in extracted
-            and "forwardPE" in extracted
-        ):
-            extracted["trailingPE"] = extracted["forwardPE"]
-            extracted["_trailingPE_source"] = "proxy_from_forward_pe"
-
-        return extracted
 
 
 class SmartMarketDataFetcher(FinancialFetcher):
@@ -1121,7 +969,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         reference_dt = (
             _coerce_epoch_date(info.get("regularMarketTime"))
             or _coerce_epoch_date(info.get("currentDate"))
-            or datetime.utcnow()
+            or datetime.now(UTC).replace(tzinfo=None)
         )
         if (reference_dt - split_date).days > RECENT_SPLIT_WINDOW_DAYS:
             return info

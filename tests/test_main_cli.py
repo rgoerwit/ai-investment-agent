@@ -137,7 +137,7 @@ class TestOutputCompanyNameLookup:
         mock_future.result.side_effect = FuturesTimeoutError()
 
         mock_executor = MagicMock()
-        mock_executor.__enter__.return_value.submit.return_value = mock_future
+        mock_executor.submit.return_value = mock_future
 
         with patch.dict(sys.modules, {"yfinance": fake_yfinance}):
             assert (
@@ -147,6 +147,7 @@ class TestOutputCompanyNameLookup:
                 )
                 is None
             )
+        mock_executor.shutdown.assert_called()
 
     def test_run_analysis_warns_with_lookup_candidates_after_company_name_exhaustion(
         self,
@@ -1900,6 +1901,43 @@ class TestSavedDiagnostics:
         )
 
         logger.info.assert_called_once()
+        logger.warning.assert_not_called()
+
+    def test_warn_quick_timeout_config_drift_logs_once(self, monkeypatch):
+        from src import main
+
+        logger = MagicMock()
+        monkeypatch.setattr(main, "logger", logger)
+        monkeypatch.setattr(main, "_QUICK_TIMEOUT_CONFIG_WARNED", False)
+        monkeypatch.setattr(main.config, "quick_llm_api_timeout_seconds", 300)
+        monkeypatch.setattr(main.config, "llm_call_hard_timeout_seconds", 600.0)
+        monkeypatch.setattr(main.config, "api_retry_attempts", 3)
+        monkeypatch.setattr(main.config, "gemini_rpm_limit", 1000)
+
+        args = SimpleNamespace(ticker="TEST", quick=True)
+        main._warn_quick_timeout_config_drift(args)
+        main._warn_quick_timeout_config_drift(args)
+
+        logger.warning.assert_called_once()
+        warning = logger.warning.call_args
+        assert warning.args == ("quick_timeout_config_drift",)
+        assert warning.kwargs["config"]["QUICK_LLM_API_TIMEOUT_SECONDS"] == 300
+        assert warning.kwargs["config"]["LLM_CALL_HARD_TIMEOUT_SECONDS"] == 600.0
+        assert warning.kwargs["config"]["API_RETRY_ATTEMPTS"] == 3
+        assert warning.kwargs["config"]["GEMINI_RPM_LIMIT"] == 1000
+
+    def test_warn_quick_timeout_config_drift_skips_full_mode(self, monkeypatch):
+        from src import main
+
+        logger = MagicMock()
+        monkeypatch.setattr(main, "logger", logger)
+        monkeypatch.setattr(main, "_QUICK_TIMEOUT_CONFIG_WARNED", False)
+        monkeypatch.setattr(main.config, "quick_llm_api_timeout_seconds", 300)
+
+        main._warn_quick_timeout_config_drift(
+            SimpleNamespace(ticker="TEST", quick=False)
+        )
+
         logger.warning.assert_not_called()
 
     def test_save_results_includes_pre_screening_and_run_summary(

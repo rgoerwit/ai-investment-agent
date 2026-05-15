@@ -12,7 +12,6 @@ import socket
 import sys
 import uuid
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from datetime import datetime
 from functools import partial
@@ -116,10 +115,6 @@ def suppress_all_logging():
         logger_factory=structlog.PrintLoggerFactory(),
         cache_logger_on_first_use=False,  # False: force-apply to already-imported loggers
     )
-
-    import warnings
-
-    warnings.filterwarnings("ignore")
 
 
 def run_provider_preflight() -> dict[str, dict[str, str]]:
@@ -586,16 +581,34 @@ async def run_analysis(
                 capture_token = set_active_capture_manager(baseline_capture)
 
             try:
-                result = await graph.ainvoke(
-                    initial_state,
-                    config={
-                        "recursion_limit": 100,
-                        "configurable": {"context": context},
-                        "callbacks": tracing_callbacks or [],
-                        "tags": tags,
-                        "metadata": graph_metadata,
-                    },
-                )
+                try:
+                    result = await graph.ainvoke(
+                        initial_state,
+                        config={
+                            "recursion_limit": 100,
+                            "configurable": {"context": context},
+                            "callbacks": tracing_callbacks or [],
+                            "tags": tags,
+                            "metadata": graph_metadata,
+                        },
+                    )
+                except (asyncio.CancelledError, KeyboardInterrupt):
+                    from src.async_utils import (
+                        dump_pending_tasks,
+                        get_hard_timeout_orphan_snapshot,
+                    )
+
+                    pending = dump_pending_tasks()
+                    orphans = get_hard_timeout_orphan_snapshot(min_age_seconds=0)
+                    logger.warning(
+                        "analysis_interrupted_pending_tasks",
+                        ticker=ticker,
+                        pending_count=len(pending),
+                        orphan_count=len(orphans),
+                        pending_tasks=pending[:8],
+                        orphan_tasks=orphans[:8],
+                    )
+                    raise
             finally:
                 if capture_token is not None:
                     reset_active_capture_manager(capture_token)
@@ -607,6 +620,17 @@ async def run_analysis(
 
             tracker = get_tracker()
             tracker.print_summary(ticker=ticker)
+            from src.async_utils import get_hard_timeout_orphan_snapshot
+
+            orphans = get_hard_timeout_orphan_snapshot(min_age_seconds=30.0)
+            if orphans:
+                logger.warning(
+                    "analysis_hard_timeout_orphans_pending",
+                    ticker=ticker,
+                    orphan_count=len(orphans),
+                    oldest_age_seconds=orphans[0]["age_seconds"],
+                    labels=[item["label"] for item in orphans[:8]],
+                )
 
             if isinstance(result, dict):
                 result["macro_context_report"] = macro_context_report
@@ -626,6 +650,17 @@ async def run_analysis(
             return result
 
     except Exception as e:
+        from src.async_utils import get_hard_timeout_orphan_snapshot
+
+        orphans = get_hard_timeout_orphan_snapshot(min_age_seconds=0)
+        if orphans:
+            logger.warning(
+                "analysis_failed_hard_timeout_orphans_pending",
+                ticker=ticker,
+                orphan_count=len(orphans),
+                oldest_age_seconds=orphans[0]["age_seconds"],
+                labels=[item["label"] for item in orphans[:8]],
+            )
         if baseline_capture:
             baseline_capture.reject_run(
                 [f"analysis_exception:{type(e).__name__}"],
@@ -1154,6 +1189,42 @@ def _log_final_summary(
     _log_quick_slow_tail_warning(result, args)
 
 
+_QUICK_TIMEOUT_CONFIG_WARNED = False
+
+
+def _warn_quick_timeout_config_drift(args: argparse.Namespace) -> None:
+    """Warn once when quick-mode timeout config contradicts screening semantics."""
+    global _QUICK_TIMEOUT_CONFIG_WARNED
+    if _QUICK_TIMEOUT_CONFIG_WARNED or not getattr(args, "quick", False):
+        return
+
+    drift: dict[str, float | int] = {}
+    if config.quick_llm_api_timeout_seconds > 120:
+        drift["QUICK_LLM_API_TIMEOUT_SECONDS"] = config.quick_llm_api_timeout_seconds
+    if config.llm_call_hard_timeout_seconds > 120:
+        drift["LLM_CALL_HARD_TIMEOUT_SECONDS"] = config.llm_call_hard_timeout_seconds
+    if config.api_retry_attempts > 2:
+        drift["API_RETRY_ATTEMPTS"] = config.api_retry_attempts
+    if config.gemini_rpm_limit > 360:
+        drift["GEMINI_RPM_LIMIT"] = config.gemini_rpm_limit
+
+    if not drift:
+        return
+
+    _QUICK_TIMEOUT_CONFIG_WARNED = True
+    logger.warning(
+        "quick_timeout_config_drift",
+        ticker=getattr(args, "ticker", None),
+        config=drift,
+        suggested_defaults={
+            "QUICK_LLM_API_TIMEOUT_SECONDS": 120,
+            "LLM_CALL_HARD_TIMEOUT_SECONDS": 120,
+            "API_RETRY_ATTEMPTS": 2,
+            "GEMINI_RPM_LIMIT": "15-360",
+        },
+    )
+
+
 def _log_quick_slow_tail_warning(result: dict, args: argparse.Namespace) -> None:
     """Emit one actionable warning when a quick run still hits slow-tail behavior."""
     if not getattr(args, "quick", False):
@@ -1224,6 +1295,7 @@ async def run_with_args(
         cli._validate_cli_args(args)
         output_targets = cli._resolve_output_targets(args)
         provider_preflight, runtime_services = _setup_runtime(args, output_targets)
+        _warn_quick_timeout_config_drift(args)
         baseline_capture = _create_baseline_capture_manager(args)
 
         if baseline_capture is not None and capture_preflight_override is not None:
@@ -1332,10 +1404,13 @@ async def run_with_args(
                 _score_analysis_trace(result, trace_context)
                 capture_path = _finalize_baseline_capture(baseline_capture, result)
                 _print_capture_result(args, baseline_capture, capture_path)
-                company_name_loader = partial(
-                    output._load_company_name_for_output,
-                    thread_pool_executor_cls=ThreadPoolExecutor,
+                loaded_company_name = await output._load_company_name_for_output_async(
+                    args.ticker
                 )
+
+                def company_name_loader(_ticker: str) -> str | None:
+                    return loaded_company_name
+
                 company_name, report, reporter = output._render_primary_output(
                     result,
                     args,

@@ -1,3 +1,4 @@
+import json
 from typing import Annotated, Any
 
 from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
@@ -113,6 +114,24 @@ def merge_dicts(x: dict | None, y: dict | None) -> dict:
     return {**x, **y}
 
 
+def merge_flag_lists(
+    x: list[dict[str, Any]] | None,
+    y: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Merge cumulative red-flag findings without losing parallel updates."""
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for item in [*(x or []), *(y or [])]:
+        key = json.dumps(item, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+
+    return merged
+
+
 def merge_risk_state(
     x: RiskDebateState | None, y: RiskDebateState | None
 ) -> RiskDebateState:
@@ -200,7 +219,7 @@ class AgentState(MessagesState):
     prompts_used: Annotated[dict[str, dict[str, str]], merge_dicts]
     artifact_statuses: Annotated[dict[str, dict[str, Any]], merge_dicts]
     consultant_tool_failures: Annotated[int, take_last]
-    red_flags: Annotated[list[dict[str, Any]], take_last]
+    red_flags: Annotated[list[dict[str, Any]], merge_flag_lists]
     pre_screening_result: Annotated[str, take_last]
     chart_paths: Annotated[dict[str, str], take_last]
     macro_context_injected_into_news: Annotated[bool, take_last]

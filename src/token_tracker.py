@@ -148,6 +148,7 @@ class LLMCallAttempt:
     completion_tokens: int | None = None
     total_tokens: int | None = None
     failure_kind: str | None = None
+    failure_origin: str | None = None
     retryable: bool | None = None
 
 
@@ -241,6 +242,7 @@ class TokenTracker:
         completion_tokens: int | None = None,
         total_tokens: int | None = None,
         failure_kind: str | None = None,
+        failure_origin: str | None = None,
         retryable: bool | None = None,
     ) -> None:
         """Record one provider call attempt, including failed attempts.
@@ -261,6 +263,7 @@ class TokenTracker:
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
             failure_kind=failure_kind,
+            failure_origin=failure_origin,
             retryable=retryable,
         )
         with self._lock:
@@ -271,6 +274,7 @@ class TokenTracker:
                         "agent_name": agent_name,
                         "provider": provider or "unknown",
                         "failure_kind": failure_kind or "unknown",
+                        "failure_origin": failure_origin or "unknown",
                         "model_name": model_name or "",
                         "elapsed_seconds": f"{attempt_record.elapsed_seconds:.4f}",
                     }
@@ -331,6 +335,7 @@ class TokenTracker:
                 "failed_by_agent": {},
                 "failed_by_provider": self._count_failures("provider"),
                 "failed_by_kind": self._count_failures("failure_kind"),
+                "failed_by_origin": self._count_failures("failure_origin"),
             }
 
         failures = [
@@ -363,6 +368,7 @@ class TokenTracker:
             "failed_by_agent": failed_by_agent,
             "failed_by_provider": self._count_failures("provider"),
             "failed_by_kind": self._count_failures("failure_kind"),
+            "failed_by_origin": self._count_failures("failure_origin"),
         }
 
     def get_top_spenders(self, limit: int = 5) -> list[dict[str, Any]]:

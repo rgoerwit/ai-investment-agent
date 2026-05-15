@@ -355,6 +355,7 @@ class TestConfigSingleton:
             "online_tools",
             "enable_memory",
             "api_timeout",
+            "quick_llm_api_timeout_seconds",
             "api_retry_attempts",
             "langsmith_tracing_enabled",
         ]
@@ -581,6 +582,16 @@ class TestValidConstraintValues:
         with patch.dict(os.environ, {"API_TIMEOUT": "1"}, clear=False):
             settings = Settings()
             assert settings.api_timeout == 1
+
+    def test_minimum_quick_llm_timeout_allowed(self):
+        """Test that quick LLM SDK timeout of 1 second is allowed (ge=1)."""
+        from src.config import Settings
+
+        with patch.dict(
+            os.environ, {"QUICK_LLM_API_TIMEOUT_SECONDS": "1"}, clear=False
+        ):
+            settings = Settings()
+            assert settings.quick_llm_api_timeout_seconds == 1
 
     def test_zero_position_size_allowed(self):
         """Test that zero position size is allowed (ge=0.0)."""

@@ -162,6 +162,23 @@ class ProviderPartialResponseError(RuntimeError):
     `invoke_with_rate_limit_handling`."""
 
 
+def _timeout_failure_origin(exc: BaseException) -> str | None:
+    """Classify timeout source without changing the stable failure_kind."""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    cause = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+    cause_type = type(cause).__name__ if cause is not None else ""
+
+    if "exceeded hard timeout" in text:
+        return "hard_timeout"
+    if type(exc).__name__ == "TimeoutError" and cause_type == "CancelledError":
+        return "provider_sdk_timeout"
+    if "node timeout" in text or "nodetimeout" in text:
+        return "graph_node_timeout"
+    if "watchdog" in text or "pipeline" in text:
+        return "pipeline_watchdog"
+    return None
+
+
 async def invoke_with_rate_limit_handling(
     runnable,
     input_data: dict[str, Any] | list[Any],
@@ -336,6 +353,9 @@ async def invoke_with_rate_limit_handling(
             try:
                 from src.token_tracker import get_tracker
 
+                failure_origin = (
+                    _timeout_failure_origin(exc) if details.kind == "timeout" else None
+                )
                 get_tracker().record_call_attempt(
                     agent_name=context,
                     provider=details.provider,
@@ -344,6 +364,7 @@ async def invoke_with_rate_limit_handling(
                     attempt=attempt + 1,
                     elapsed_seconds=elapsed_seconds,
                     failure_kind=details.kind,
+                    failure_origin=failure_origin,
                     retryable=details.retryable,
                 )
             except Exception:

@@ -21,6 +21,7 @@ def test_find_gems_pool_interrupt_exits_promptly_without_active_children(tmp_pat
             import threading
             import time
 
+            sys.path.insert(0, {str(_REPO_ROOT)!r})
             sys.path.insert(0, {str(_SCRIPTS_DIR)!r})
             import find_gems
 
@@ -62,3 +63,31 @@ def test_find_gems_pool_interrupt_exits_promptly_without_active_children(tmp_pat
     assert completed.returncode == 0
     assert "Interrupted! Returning partial results..." in output
     assert "ACTIVE_CHILDREN=0" in output
+
+
+def test_pipeline_watchdog_dumps_before_killing_timed_out_child():
+    """Pin watchdog behavior without executing Bash signal machinery.
+
+    On macOS/VSCode, repeated full-suite runs have shown the Bash harness itself
+    can exit via SIGSEGV (-11) while exercising fake kill/sleep paths. That is a
+    shell/runtime crash, not a failure of the watchdog contract. This test keeps
+    the useful assertions at the script boundary: timeout must dump before
+    termination, escalate USR1 -> TERM -> KILL, return 124, and write a JSONL
+    breadcrumb for recovery.
+    """
+    script = (_SCRIPTS_DIR / "pipeline_signals.sh").read_text()
+
+    timeout_pos = script.index("[pipeline_child_timeout]")
+    usr1_pos = script.index("[pipeline_child_signal] SIGUSR1")
+    term_pos = script.index("[pipeline_child_signal] SIGTERM")
+    kill_pos = script.index("[pipeline_child_signal] SIGKILL")
+    return_pos = script.index("return 124")
+
+    assert timeout_pos < usr1_pos < term_pos < kill_pos < return_pos
+    assert "PIPELINE_TIMEOUT_RECORD_FILE" in script
+    assert '"status":"timeout"' in script
+    assert "_pipeline_kill -USR1" in script
+    assert "_pipeline_kill -TERM" in script
+    assert "_pipeline_kill -KILL" in script
+    assert '_pipeline_sleep "$dump_grace_seconds"' in script
+    assert '_pipeline_sleep "$term_grace_seconds"' in script

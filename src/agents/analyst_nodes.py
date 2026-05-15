@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.types import RunnableConfig
 
+from src.config import config as settings_config
 from src.data_block_utils import (
     detect_legacy_data_block_shape,
     extract_last_data_block,
@@ -548,6 +549,9 @@ def create_analyst_node(
                             context=f"{agent_prompt.agent_name} (RETRY-HIGH)",
                             provider=support.infer_provider_name(retry_llm),
                             model_name=support.get_model_name(retry_llm),
+                            overall_timeout_seconds=float(
+                                settings_config.llm_call_hard_timeout_seconds
+                            ),
                         )
                     )
                     retry_response.name = agent_key

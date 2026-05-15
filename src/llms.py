@@ -404,7 +404,11 @@ def create_quick_thinking_llm(
     If the QUICK_MODEL is Gemini 3+ or Gemini 2.5, this will set low reasoning.
     """
     model_name = model or config.quick_think_llm
-    final_timeout = timeout if timeout is not None else config.api_timeout
+    final_timeout = (
+        timeout
+        if timeout is not None
+        else min(config.api_timeout, config.quick_llm_api_timeout_seconds)
+    )
     final_retries = (
         max_retries if max_retries is not None else config.api_retry_attempts
     )
