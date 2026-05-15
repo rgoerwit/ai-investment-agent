@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -346,16 +347,25 @@ async def _run_bounded_consultant_loop(
     fallback_llm_model = support.get_model_name(fallback_llm)
 
     for iteration in range(max_tool_iterations + 1):
-        response = await _invoke_consultant_with_deadline(
-            active_llm,
-            messages,
-            context=agent_name,
-            provider=active_llm_provider,
-            model_name=active_llm_model,
-            ticker=ticker,
-            deadline=deadline,
-            total_timeout=total_timeout,
-        )
+        try:
+            response = await _invoke_consultant_with_deadline(
+                active_llm,
+                messages,
+                context=agent_name,
+                provider=active_llm_provider,
+                model_name=active_llm_model,
+                ticker=ticker,
+                deadline=deadline,
+                total_timeout=total_timeout,
+            )
+        except (TimeoutError, asyncio.TimeoutError):
+            logger.warning(
+                "consultant_deadline_mid_loop",
+                ticker=ticker,
+                iteration=iteration,
+                tool_failures_so_far=tool_failure_count,
+            )
+            break
         tool_calls = getattr(response, "tool_calls", None)
         if (
             not isinstance(tool_calls, list)
@@ -706,6 +716,8 @@ COMPANY: {company_name}{company_warning}
 
 Provide your independent consultant review."""
 
+        content_str = ""
+        tool_failure_count = 0
         try:
             messages = [HumanMessage(content=prompt)]
             active_llm = llm_with_tools or llm
@@ -826,6 +838,7 @@ Provide your independent consultant review."""
                 exc,
                 provider=support.infer_provider_name(llm),
             )
+            result["consultant_tool_failures"] = tool_failure_count
             if quick_mode:
                 result["consultant_quick_profile"] = (
                     locals().get("consultant_profile") or "quick_standard"

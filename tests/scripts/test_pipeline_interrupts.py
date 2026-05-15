@@ -86,8 +86,8 @@ def test_pipeline_watchdog_dumps_before_killing_timed_out_child():
     assert timeout_pos < usr1_pos < term_pos < kill_pos < return_pos
     assert "PIPELINE_TIMEOUT_RECORD_FILE" in script
     assert '"status":"timeout"' in script
-    assert "_pipeline_kill -USR1" in script
-    assert "_pipeline_kill -TERM" in script
-    assert "_pipeline_kill -KILL" in script
-    assert '_pipeline_sleep "$dump_grace_seconds"' in script
-    assert '_pipeline_sleep "$term_grace_seconds"' in script
+    assert "kill -USR1" in script
+    assert "kill -TERM" in script
+    assert "kill -KILL" in script
+    assert 'sleep "$dump_grace_seconds"' in script
+    assert 'sleep "$term_grace_seconds"' in script

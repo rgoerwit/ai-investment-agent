@@ -1582,7 +1582,7 @@ async def run_retrospective(
 
     if not all_snapshots:
         msg = f"for {ticker}" if ticker else "in results directory"
-        logger.info(f"No past analyses with snapshots found {msg}")
+        logger.info("retrospective_no_snapshots", ticker=ticker or "all", detail=msg)
         return []
 
     total_snapshots = sum(len(s) for s in all_snapshots.values())

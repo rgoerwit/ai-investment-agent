@@ -212,9 +212,14 @@ async def invoke_with_rate_limit_handling(
             overall_timeout_seconds=overall_timeout_seconds,
         )
 
-    hard_timeout = float(
-        getattr(settings_config, "llm_call_hard_timeout_seconds", 600.0)
-    )
+    if getattr(settings_config, "quick_mode_active", False):
+        hard_timeout = float(
+            getattr(settings_config, "quick_llm_call_hard_timeout_seconds", 60.0)
+        )
+    else:
+        hard_timeout = float(
+            getattr(settings_config, "llm_call_hard_timeout_seconds", 120.0)
+        )
     deadline = (
         time.monotonic() + float(overall_timeout_seconds)
         if overall_timeout_seconds is not None
@@ -281,8 +286,8 @@ async def invoke_with_rate_limit_handling(
                             "response": _normalize_for_json(result),
                         }
                     )
-            except Exception:
-                pass
+            except Exception as _acct_exc:
+                logger.debug("accounting_hook_failed", error=str(_acct_exc))
             try:
                 from src.token_tracker import get_tracker
 
@@ -298,8 +303,8 @@ async def invoke_with_rate_limit_handling(
                     completion_tokens=usage.total_output_tokens,
                     total_tokens=usage.total_tokens,
                 )
-            except Exception:
-                pass
+            except Exception as _acct_exc:
+                logger.debug("accounting_hook_failed", error=str(_acct_exc))
             if not quiet_mode:
                 logger.info(
                     "llm_call_success",
@@ -348,8 +353,8 @@ async def invoke_with_rate_limit_handling(
                             "error_message": details.message,
                         }
                     )
-            except Exception:
-                pass
+            except Exception as _acct_exc:
+                logger.debug("accounting_hook_failed", error=str(_acct_exc))
             try:
                 from src.token_tracker import get_tracker
 
@@ -367,8 +372,8 @@ async def invoke_with_rate_limit_handling(
                     failure_origin=failure_origin,
                     retryable=details.retryable,
                 )
-            except Exception:
-                pass
+            except Exception as _acct_exc:
+                logger.debug("accounting_hook_failed", error=str(_acct_exc))
 
             is_rate_limit = details.kind in {"rate_limit", "quota_error"}
             is_transient = details.kind in {

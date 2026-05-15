@@ -558,7 +558,8 @@ if [[ $START_STAGE -le 1 ]]; then
         STAGE1_PROCESSED=$((STAGE1_PROCESSED + 1))
         info "[$STAGE1_PROCESSED/$STAGE1_TODO, $TICKER_COUNT total] Quick: $ticker"
 
-        if run_tracked_child "$LOGFILE" "${PYTHON_CMD[@]}" -m src.main \
+        if PIPELINE_TICKER_TIMEOUT_SECONDS="${STAGE1_TICKER_TIMEOUT_SECONDS:-360}" \
+            run_tracked_child "$LOGFILE" "${PYTHON_CMD[@]}" -m src.main \
             --ticker "$ticker" \
             --quick --no-charts --quiet --brief --no-memory \
             --output "$OUTFILE"; then

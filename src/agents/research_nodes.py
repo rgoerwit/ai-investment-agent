@@ -148,7 +148,7 @@ Now provide your Round 2 rebuttal, addressing the opponent's key points."""
         company_resolved = state.get("company_name_resolved", True)
 
         past_insights = ""
-        if memory:
+        if memory and settings_config.enable_memory:
             try:
                 relevant = await memory.query_similar_situations(
                     f"risks and upside for {ticker}",

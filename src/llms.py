@@ -191,6 +191,39 @@ GLOBAL_RATE_LIMITER = _LazyRateLimiterProxy(
     lambda: _create_rate_limiter_from_rpm(config_module.config.gemini_rpm_limit)
 )
 
+# Lazily-constructed OpenAI rate limiter.  None when OPENAI_RPM_LIMIT is unset
+# (the default) so existing deployments are not throttled without opt-in.
+_openai_rate_limiter: InMemoryRateLimiter | None = None
+_openai_rate_limiter_initialized: bool = False
+_warned_openai_unthrottled: set[str] = set()
+
+
+def _get_openai_rate_limiter() -> InMemoryRateLimiter | None:
+    """Return the shared OpenAI rate limiter, initializing it on first call."""
+    global _openai_rate_limiter, _openai_rate_limiter_initialized
+    if not _openai_rate_limiter_initialized:
+        _openai_rate_limiter_initialized = True
+        rpm = config_module.config.openai_rpm_limit
+        if rpm is not None:
+            _openai_rate_limiter = _create_rate_limiter_from_rpm(rpm)
+    return _openai_rate_limiter
+
+
+def _warn_openai_unthrottled_once(llm_kind: str) -> None:
+    """Log once per LLM kind when no OpenAI rate limiter is configured."""
+    if llm_kind not in _warned_openai_unthrottled:
+        _warned_openai_unthrottled.add(llm_kind)
+        logger.debug("openai_llm_unthrottled", llm_kind=llm_kind)
+
+
+def _reset_openai_rate_limiter_for_tests() -> None:
+    """Reset OpenAI rate-limiter state between tests."""
+    global _openai_rate_limiter, _openai_rate_limiter_initialized
+    _openai_rate_limiter = None
+    _openai_rate_limiter_initialized = False
+    _warned_openai_unthrottled.clear()
+
+
 # Track LLM instances for cleanup
 _llm_instances: dict = {}
 _llm_instance_counter: int = 0
@@ -560,7 +593,7 @@ def create_consultant_llm(
     # The consultant's precision comes from its structured prompt and
     # spot-check tool methodology, not from temperature settings.
 
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "model": model_name,
         "timeout": timeout,
         "max_retries": max_retries,
@@ -573,6 +606,11 @@ def create_consultant_llm(
         "use_responses_api": True,
         "output_version": "responses/v1",
     }
+    _rl = _get_openai_rate_limiter()
+    if _rl is not None:
+        kwargs["rate_limiter"] = _rl
+    else:
+        _warn_openai_unthrottled_once("consultant")
 
     # GPT-5 non-pro models support configurable reasoning effort. Quick mode
     # uses a lower setting to keep the consultant active without paying full
@@ -654,7 +692,7 @@ def create_auditor_llm(
     # the structured prompt and deterministic tool calls, not from temperature=0.
     # Omitting temperature lets the SDK use each model's default safely.
 
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "model": model_name,
         "timeout": 120,
         "max_retries": 3,
@@ -666,6 +704,11 @@ def create_auditor_llm(
         "use_responses_api": True,
         "output_version": "responses/v1",
     }
+    _rl = _get_openai_rate_limiter()
+    if _rl is not None:
+        kwargs["rate_limiter"] = _rl
+    else:
+        _warn_openai_unthrottled_once("auditor")
 
     # gpt-5.x-mini variants reject "minimal" — only full gpt-5.x accepts it.
     if model_name.startswith("gpt-5") and "pro" not in model_name:
@@ -824,7 +867,7 @@ def create_editor_llm(
 
     logger.info("editor_llm_init", model=model_name)
 
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "model": model_name,
         "timeout": 120,
         "max_retries": 3,
@@ -835,6 +878,11 @@ def create_editor_llm(
         "use_responses_api": True,
         "output_version": "responses/v1",
     }
+    _rl = _get_openai_rate_limiter()
+    if _rl is not None:
+        kwargs["rate_limiter"] = _rl
+    else:
+        _warn_openai_unthrottled_once("editor")
     if model_name.startswith("gpt-5") and "pro" not in model_name:
         kwargs["reasoning_effort"] = "medium"
     budget = _resolve_generation_budget(

@@ -480,14 +480,18 @@ def save_results_to_file(
         )
 
     logger_obj.info(
-        f"Results saved to {filepath} ({len(prompts_used)} prompts tracked, {len(custom_prompts_loaded)} custom)"
+        "results_saved",
+        filepath=str(filepath),
+        prompts_tracked=len(prompts_used),
+        custom_prompts=len(custom_prompts_loaded),
     )
     if token_stats["total_calls"] > 0:
         logger_obj.info(
-            f"Token usage tracked: {token_stats['total_calls']} LLM calls, "
-            f"{token_stats['total_tokens']:,} total tokens, "
-            f"${token_stats['total_cost_usd']:.4f} projected cost (paid tier) - "
-            f"saved to {filepath}"
+            "token_usage_tracked",
+            llm_calls=token_stats["total_calls"],
+            total_tokens=token_stats["total_tokens"],
+            projected_cost_usd=round(token_stats["total_cost_usd"], 4),
+            filepath=str(filepath),
         )
     return filepath
 

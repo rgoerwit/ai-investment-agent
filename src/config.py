@@ -538,6 +538,24 @@ class Settings(BaseSettings):
             "raised as TimeoutError if exceeded."
         ),
     )
+    # Tighter per-call cap for --quick mode. Quick Gemini Flash calls should
+    # resolve in 10-30s; 60s surfaces a hung provider ~2x faster than the
+    # normal cap, cutting worst-case stage-1 screening time significantly.
+    quick_llm_call_hard_timeout_seconds: float = Field(
+        default=60.0,
+        gt=0.0,
+        validation_alias="QUICK_LLM_CALL_HARD_TIMEOUT_SECONDS",
+        description=(
+            "Hard wall-clock cap (seconds) for a single LLM ainvoke in --quick mode."
+        ),
+    )
+    # Set by _apply_runtime_overrides when --quick is passed; allows
+    # invoke_with_rate_limit_handling to pick the tighter quick timeout.
+    quick_mode_active: bool = Field(
+        default=False,
+        validation_alias="QUICK_MODE_ACTIVE",
+        description="True when the current run was started with --quick.",
+    )
     llm_base_output_tokens: int = Field(
         default=32768,
         ge=1024,
@@ -573,6 +591,14 @@ class Settings(BaseSettings):
         ge=1,
         validation_alias="GEMINI_RPM_LIMIT",
         description="Gemini API rate limit (requests per minute)",
+    )
+    # OpenAI RPM limit for consultant/auditor/editor LLMs. None (default) means
+    # no rate limiter is attached — set OPENAI_RPM_LIMIT in .env to enable.
+    openai_rpm_limit: int | None = Field(
+        default=None,
+        ge=1,
+        validation_alias="OPENAI_RPM_LIMIT",
+        description="OpenAI API rate limit (requests per minute); unset = no throttle",
     )
 
     # --- Token Management ---

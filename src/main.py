@@ -697,14 +697,6 @@ def _enable_quiet_runtime_if_needed(args: argparse.Namespace) -> None:
     config.quiet_mode = True
 
 
-_RUNTIME_OVERRIDE_FIELDS: tuple[str, ...] = (
-    "quick_think_llm",
-    "deep_think_llm",
-    "enable_memory",
-    "langfuse_enabled",
-)
-
-
 def _apply_runtime_overrides(args: argparse.Namespace) -> Callable[[], None]:
     """Apply per-run CLI overrides to the config singleton.
 
@@ -727,6 +719,9 @@ def _apply_runtime_overrides(args: argparse.Namespace) -> Callable[[], None]:
         if field not in saved:
             saved[field] = getattr(config, field)
 
+    if getattr(args, "quick", False):
+        _save("quick_mode_active")
+        config.quick_mode_active = True
     if args.quick_model:
         _save("quick_think_llm")
         config.quick_think_llm = args.quick_model

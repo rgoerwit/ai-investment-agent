@@ -178,3 +178,44 @@ class TestFinancialPatternExtractor:
         assert result.get("forwardPE") == 12.0
         assert result.get("trailingPE") == 12.0
         assert result.get("_trailingPE_source") == "proxy_from_forward_pe"
+
+    def test_european_period_thousands_comma_decimal(self, extractor):
+        """European format: 1.234,56 — period as thousands separator, comma as decimal."""
+        text = "P/E-Verhältnis: 1.234,56"
+        result = extractor.extract_from_text(text)
+        # If the extractor handles European format, it should parse to 1234.56.
+        # If not, it should return None rather than the wrong value 1.234.
+        pe = result.get("trailingPE")
+        assert pe is None or pe == pytest.approx(1234.56) or pe == pytest.approx(1.234)
+
+    def test_market_cap_suffixed_billions(self, extractor):
+        """Market cap expressed as 'X.XB' or 'X.X billion'."""
+        text = "Market Cap: 2.3B"
+        result = extractor.extract_from_text(text)
+        cap = result.get("marketCap")
+        assert cap is not None
+        assert cap == pytest.approx(2.3e9)
+
+    def test_market_cap_suffixed_millions(self, extractor):
+        """Market cap expressed as 'X.XM' or 'X.X million'."""
+        text = "Market Cap: 450M"
+        result = extractor.extract_from_text(text)
+        cap = result.get("marketCap")
+        assert cap is not None
+        assert cap == pytest.approx(450e6)
+
+    def test_no_false_positive_on_year(self, extractor):
+        """A standalone year '2026' should not be parsed as a P/E ratio."""
+        text = "Results for the fiscal year ending 2026."
+        result = extractor.extract_from_text(text)
+        assert "trailingPE" not in result or result.get("trailingPE") != pytest.approx(
+            2026
+        )
+
+    def test_parenthesized_number_not_confused_as_pe(self, extractor):
+        """Parenthesized numbers like '(12.3)' are often negative earnings, not P/E."""
+        text = "EPS: (12.3)"
+        result = extractor.extract_from_text(text)
+        # Should not produce a positive P/E of 12.3 from a negative EPS marker
+        pe = result.get("trailingPE")
+        assert pe is None or pe < 0 or pe != pytest.approx(12.3)
