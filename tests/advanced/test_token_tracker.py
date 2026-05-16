@@ -1030,3 +1030,122 @@ class TestCostAccuracy:
             1 - flash_lite_usage.estimated_cost_usd / flash_usage.estimated_cost_usd
         ) * 100
         assert savings_percentage > 80  # At least 80% cheaper
+
+
+class TestPerAgentWallClock:
+    """Per-agent wall-clock accumulation and slowest_agents diagnostics."""
+
+    def test_records_wall_clock_per_agent(self):
+        tracker = TokenTracker()
+        tracker.reset()
+
+        tracker.record_usage(
+            agent_name="Consultant",
+            model_name="gpt-5.4-mini",
+            prompt_tokens=10,
+            completion_tokens=5,
+            elapsed_seconds=12.5,
+        )
+        tracker.record_usage(
+            agent_name="Consultant",
+            model_name="gpt-5.4-mini",
+            prompt_tokens=10,
+            completion_tokens=5,
+            elapsed_seconds=4.0,
+        )
+        tracker.record_usage(
+            agent_name="Fundamentals Analyst",
+            model_name="gemini-3-flash-preview",
+            prompt_tokens=20,
+            completion_tokens=10,
+            elapsed_seconds=30.0,
+        )
+
+        agents = tracker.get_total_stats()["agents"]
+        assert agents["Consultant"]["wall_clock_seconds"] == 16.5
+        assert agents["Consultant"]["wall_clock_max_seconds"] == 12.5
+        assert agents["Fundamentals Analyst"]["wall_clock_seconds"] == 30.0
+        assert agents["Fundamentals Analyst"]["wall_clock_max_seconds"] == 30.0
+
+    def test_missing_elapsed_does_not_break_aggregation(self):
+        tracker = TokenTracker()
+        tracker.reset()
+
+        tracker.record_usage(
+            agent_name="X",
+            model_name="gemini-2.5-flash",
+            prompt_tokens=1,
+            completion_tokens=1,
+            elapsed_seconds=None,
+        )
+        agents = tracker.get_total_stats()["agents"]
+        assert agents["X"]["wall_clock_seconds"] == 0.0
+        assert agents["X"]["wall_clock_max_seconds"] == 0.0
+
+    def test_slowest_agents_top_in_call_diagnostics(self):
+        tracker = TokenTracker()
+        tracker.reset()
+        tracker.record_usage(
+            agent_name="A",
+            model_name="m",
+            prompt_tokens=0,
+            completion_tokens=0,
+            elapsed_seconds=10.0,
+        )
+        tracker.record_usage(
+            agent_name="B",
+            model_name="m",
+            prompt_tokens=0,
+            completion_tokens=0,
+            elapsed_seconds=40.0,
+        )
+        tracker.record_usage(
+            agent_name="C",
+            model_name="m",
+            prompt_tokens=0,
+            completion_tokens=0,
+            elapsed_seconds=25.0,
+        )
+        # An agent with no wall-clock data should not appear.
+        tracker.record_usage(
+            agent_name="D-no-time",
+            model_name="m",
+            prompt_tokens=0,
+            completion_tokens=0,
+        )
+        tracker.record_call_attempt(
+            agent_name="A",
+            provider="google",
+            model_name="m",
+            status="success",
+            attempt=1,
+            elapsed_seconds=10.0,
+        )
+
+        diag = tracker.get_total_stats()["call_diagnostics"]
+        top = diag["slowest_agents"]
+        assert [entry["agent_name"] for entry in top] == ["B", "C", "A"]
+        assert top[0]["wall_clock_seconds"] == 40.0
+        assert all(entry["agent_name"] != "D-no-time" for entry in top)
+
+    def test_slowest_agents_empty_when_no_calls(self):
+        tracker = TokenTracker()
+        tracker.reset()
+        diag = tracker.get_total_stats()["call_diagnostics"]
+        assert diag["slowest_agents"] == []
+
+    def test_callback_on_llm_error_clears_run_starts(self):
+        callback = TokenTrackingCallback(agent_name="agent")
+        callback.on_llm_start({}, ["prompt"], run_id="run-1")
+        assert "run-1" in callback._run_starts
+        callback.on_llm_error(RuntimeError("boom"), run_id="run-1")
+        assert "run-1" not in callback._run_starts
+
+    def test_callback_default_key_used_when_run_id_missing(self):
+        """A callback invocation with no run_id must not leak the default slot
+        across subsequent calls."""
+        callback = TokenTrackingCallback(agent_name="agent")
+        callback.on_llm_start({}, ["prompt"])
+        # Simulate an error path with no run_id passed back.
+        callback.on_llm_error(RuntimeError("boom"))
+        assert "__default__" not in callback._run_starts

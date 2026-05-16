@@ -121,6 +121,8 @@ class AgentTokenStats:
     total_completion_tokens: int = 0
     total_tokens: int = 0
     total_cost_usd: float = 0.0
+    wall_clock_seconds: float = 0.0
+    wall_clock_max_seconds: float = 0.0
     calls: list[TokenUsage] = field(default_factory=list)
 
     def add_usage(self, usage: TokenUsage):
@@ -131,6 +133,10 @@ class AgentTokenStats:
         self.total_completion_tokens += usage.completion_tokens
         self.total_tokens += usage.total_tokens
         self.total_cost_usd += usage.estimated_cost_usd
+        if usage.elapsed_seconds is not None:
+            self.wall_clock_seconds += usage.elapsed_seconds
+            if usage.elapsed_seconds > self.wall_clock_max_seconds:
+                self.wall_clock_max_seconds = usage.elapsed_seconds
 
 
 @dataclass
@@ -314,6 +320,10 @@ class TokenTracker:
                         "completion_tokens": stats.total_completion_tokens,
                         "total_tokens": stats.total_tokens,
                         "cost_usd": stats.total_cost_usd,
+                        "wall_clock_seconds": round(stats.wall_clock_seconds, 4),
+                        "wall_clock_max_seconds": round(
+                            stats.wall_clock_max_seconds, 4
+                        ),
                     }
                     for name, stats in self.agent_stats.items()
                 },
@@ -330,6 +340,7 @@ class TokenTracker:
                 "successful_attempts": 0,
                 "failed_attempts": len(self.failed_attempts),
                 "slowest_call": None,
+                "slowest_agents": self._slowest_agents_top(3),
                 "timeout_seconds_lost": 0.0,
                 "consultant_timeout": False,
                 "failed_by_agent": {},
@@ -359,6 +370,7 @@ class TokenTracker:
             ),
             "failed_attempts": len(self.failed_attempts),
             "slowest_call": asdict(slowest),
+            "slowest_agents": self._slowest_agents_top(3),
             "timeout_seconds_lost": round(timeout_seconds_lost, 4),
             "consultant_timeout": any(
                 attempt.failure_kind == "timeout"
@@ -370,6 +382,28 @@ class TokenTracker:
             "failed_by_kind": self._count_failures("failure_kind"),
             "failed_by_origin": self._count_failures("failure_origin"),
         }
+
+    def _slowest_agents_top(self, limit: int) -> list[dict[str, Any]]:
+        """Top-N agents by total wall-clock seconds (callback-measured).
+
+        Complements ``slowest_call`` (which is one attempt) with cumulative
+        per-agent latency. Agents with no wall-clock data are skipped.
+        """
+        candidates = [
+            (name, stats)
+            for name, stats in self.agent_stats.items()
+            if stats.wall_clock_seconds > 0
+        ]
+        candidates.sort(key=lambda item: -item[1].wall_clock_seconds)
+        return [
+            {
+                "agent_name": name,
+                "wall_clock_seconds": round(stats.wall_clock_seconds, 4),
+                "wall_clock_max_seconds": round(stats.wall_clock_max_seconds, 4),
+                "calls": stats.total_calls,
+            }
+            for name, stats in candidates[:limit]
+        ]
 
     def get_top_spenders(self, limit: int = 5) -> list[dict[str, Any]]:
         """Return top spenders sorted by cost, then total tokens, then name."""
@@ -527,6 +561,12 @@ class TokenTrackingCallback(BaseCallbackHandler):
         run_id = kwargs.get("run_id")
         key = str(run_id) if run_id is not None else "__default__"
         self._run_starts[key] = time.monotonic()
+
+    def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
+        """Drop the start timestamp on error so failed runs don't leak entries."""
+        run_id = kwargs.get("run_id")
+        key = str(run_id) if run_id is not None else "__default__"
+        self._run_starts.pop(key, None)
 
     def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
         """Called when LLM completes a generation."""

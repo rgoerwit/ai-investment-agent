@@ -719,9 +719,37 @@ def _apply_runtime_overrides(args: argparse.Namespace) -> Callable[[], None]:
         if field not in saved:
             saved[field] = getattr(config, field)
 
+    def _clamp(field: str, ceiling: int | float) -> tuple[Any, Any] | None:
+        """Set ``config.<field>`` to ``min(current, ceiling)``, recording the
+        original for restore. Returns ``(before, after)`` when a change was
+        applied, ``None`` otherwise."""
+        before = getattr(config, field)
+        after = min(before, ceiling)
+        if after < before:
+            _save(field)
+            setattr(config, field, after)
+            return before, after
+        return None
+
     if getattr(args, "quick", False):
         _save("quick_mode_active")
         config.quick_mode_active = True
+        clamps: dict[str, dict[str, Any]] = {}
+        for field, ceiling in (
+            ("api_retry_attempts", 2),
+            ("gemini_rpm_limit", 360),
+            ("llm_call_hard_timeout_seconds", 120.0),
+        ):
+            outcome = _clamp(field, ceiling)
+            if outcome is not None:
+                before, after = outcome
+                clamps[field] = {"from": before, "to": after}
+        if clamps:
+            logger.info(
+                "quick_timeout_config_overridden",
+                ticker=getattr(args, "ticker", None),
+                clamped=clamps,
+            )
     if args.quick_model:
         _save("quick_think_llm")
         config.quick_think_llm = args.quick_model
@@ -1253,6 +1281,7 @@ def _log_quick_slow_tail_warning(result: dict, args: argparse.Namespace) -> None
         if "consultant" in slowest_agent.lower() or consultant_timeout
         else "LLM_CALL_HARD_TIMEOUT_SECONDS"
     )
+    slowest_agents_top3 = diagnostics.get("slowest_agents") or []
     logger.warning(
         "quick_run_slow_tail_warning",
         ticker=args.ticker,
@@ -1264,6 +1293,7 @@ def _log_quick_slow_tail_warning(result: dict, args: argparse.Namespace) -> None
         slowest_elapsed_seconds=round(slowest_elapsed, 4),
         timeout_seconds_lost=round(timeout_seconds_lost, 4),
         consultant_timeout=consultant_timeout,
+        slowest_agents_top3=slowest_agents_top3,
         suggested_knob=suggested_knob,
     )
 

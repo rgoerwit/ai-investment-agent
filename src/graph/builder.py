@@ -12,6 +12,8 @@ from src.eval import BaselineCaptureManager
 
 from .components import build_graph_components
 from .routing import (
+    CONSULTANT_SKIP_SENTINEL,
+    consultant_gate_router,
     dispatch_destinations,
     fan_out_to_analysts,
     fundamentals_sync_router,
@@ -299,8 +301,31 @@ BEAR RESEARCHER:
     workflow.add_edge("Valuation Calculator", "Trader")
 
     if components.consultant_enabled:
-        workflow.add_edge("Research Manager", "Consultant")
+        from src.runtime_diagnostics import success_artifact
+
+        from .routing import should_invoke_consultant
+
+        async def consultant_skip_node(state: AgentState, config: RunnableConfig):
+            """Sentinel node activated when consultant_gate_router bypasses the
+            Consultant LLM in quick-mode screening. Writes a transparent
+            sentinel so downstream agents and the saved report still record
+            the skip rather than seeing a missing field.
+            """
+            _, reason = should_invoke_consultant(state, config)
+            return success_artifact(
+                "consultant_review",
+                CONSULTANT_SKIP_SENTINEL.format(reason=reason),
+                provider="bypass",
+            )
+
+        workflow.add_node("Consultant Skip", consultant_skip_node)
+        workflow.add_conditional_edges(
+            "Research Manager",
+            consultant_gate_router,
+            ["Consultant", "Consultant Skip"],
+        )
         workflow.add_edge("Consultant", "Trader")
+        workflow.add_edge("Consultant Skip", "Trader")
 
     workflow.add_edge("Trader", "Risky Analyst")
     workflow.add_edge("Trader", "Safe Analyst")

@@ -46,6 +46,7 @@ def collect_slow_tail_rows(
             "consultant_timeout"
         ):
             continue
+        slowest_agents = diagnostics.get("slowest_agents") or []
         rows.append(
             {
                 "ticker": _ticker_from_artifact(data, path),
@@ -57,6 +58,16 @@ def collect_slow_tail_rows(
                     float(slowest.get("elapsed_seconds") or 0.0), 1
                 ),
                 "consultant_timeout": bool(diagnostics.get("consultant_timeout")),
+                "slowest_agents_top3": [
+                    {
+                        "agent_name": entry.get("agent_name") or "unknown",
+                        "wall_clock_seconds": round(
+                            float(entry.get("wall_clock_seconds") or 0.0), 1
+                        ),
+                        "calls": int(entry.get("calls") or 0),
+                    }
+                    for entry in slowest_agents[:3]
+                ],
                 "path": str(path),
             }
         )
@@ -75,6 +86,13 @@ def format_summary(rows: list[dict[str, Any]], *, limit: int) -> str:
         f"quick_slow_tail_summary count={len(rows)} timeout_seconds_lost={total_loss:.1f}"
     ]
     for row in rows[:limit]:
+        top3 = (
+            ",".join(
+                f"{entry['agent_name']}={entry['wall_clock_seconds']}s"
+                for entry in row.get("slowest_agents_top3", [])
+            )
+            or "n/a"
+        )
         lines.append(
             " ".join(
                 [
@@ -85,6 +103,7 @@ def format_summary(rows: list[dict[str, Any]], *, limit: int) -> str:
                     f"origin={row['slowest_origin']}",
                     f"elapsed={row['slowest_elapsed_seconds']}s",
                     f"consultant_timeout={row['consultant_timeout']}",
+                    f"top3=[{top3}]",
                 ]
             )
         )
