@@ -354,8 +354,14 @@ class Settings(BaseSettings):
         validation_alias="CONSULTANT_TOOLS_IN_QUICK",
         description="Allow Consultant MCP/tool loop during --quick screening runs",
     )
+    # P1-5: lowered 60s → 35s. Saved-artifact data shows Consultant finishes
+    # well under 30s when it returns at all; the 60s cap mostly hid hung
+    # provider calls. The Consultant gate (P0-2) already short-circuits the
+    # cheap "clean consensus" and "RM-negative" cases, so the residual
+    # invocations are exactly the adversarial reviews where a tighter deadline
+    # is acceptable.
     consultant_quick_total_timeout_seconds: float = Field(
-        default=60.0,
+        default=35.0,
         gt=0.0,
         validation_alias="CONSULTANT_QUICK_TOTAL_TIMEOUT_SECONDS",
         description="Total wall-clock Consultant budget in --quick mode",
@@ -548,6 +554,35 @@ class Settings(BaseSettings):
         description=(
             "Hard wall-clock cap (seconds) for a single LLM ainvoke in --quick mode."
         ),
+    )
+
+    # --- LLM circuit breaker (P2-7) ----------------------------------------
+    # When a provider/model starts serving back-to-back hard-timeouts (e.g.,
+    # regional Gemini Flash degradation), the breaker short-circuits the
+    # next call with CircuitOpenError instead of waiting another full
+    # timeout. In-memory only; reset per process.
+    llm_circuit_breaker_enabled: bool = Field(
+        default=True,
+        validation_alias="LLM_CIRCUIT_BREAKER_ENABLED",
+        description="Enable per-(agent, provider, model) circuit breaker on chronic timeouts",
+    )
+    llm_circuit_breaker_threshold: int = Field(
+        default=3,
+        ge=1,
+        validation_alias="LLM_CIRCUIT_BREAKER_THRESHOLD",
+        description="Consecutive timeout failures within the window before the breaker opens",
+    )
+    llm_circuit_breaker_window_seconds: float = Field(
+        default=300.0,
+        gt=0.0,
+        validation_alias="LLM_CIRCUIT_BREAKER_WINDOW_SECONDS",
+        description="Sliding-window length (s) for counting timeout failures",
+    )
+    llm_circuit_breaker_cool_off_seconds: float = Field(
+        default=60.0,
+        gt=0.0,
+        validation_alias="LLM_CIRCUIT_BREAKER_COOL_OFF_SECONDS",
+        description="Cool-off (s) before the breaker enters half-open to probe recovery",
     )
     # Set by _apply_runtime_overrides when --quick is passed; allows
     # invoke_with_rate_limit_handling to pick the tighter quick timeout.

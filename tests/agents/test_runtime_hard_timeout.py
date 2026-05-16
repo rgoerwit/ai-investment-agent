@@ -34,6 +34,19 @@ from src.agents import invoke_with_rate_limit_handling
 from src.config import config as settings_config
 
 
+@pytest.fixture(autouse=True)
+def _reset_circuit_breaker():
+    """The breaker is process-global. Reset before each test so accumulated
+    state from earlier hard-timeout exercises does not silently open a
+    circuit for a later test reusing the same (context, provider, model)
+    key."""
+    from src.agents.circuit_breaker import reset_circuit_breaker_for_tests
+
+    reset_circuit_breaker_for_tests()
+    yield
+    reset_circuit_breaker_for_tests()
+
+
 class TestApiRetryAttemptsDefault:
     """The SDK retry budget must stay small to bound worst-case call duration.
 
@@ -532,3 +545,108 @@ class TestProviderPartialResponseRetry:
         # partial content rather than burning all retries.
         assert call_count["n"] == 2
         assert result.content == "always partial"
+
+
+class TestCircuitBreakerIntegration:
+    """P2-7: The runtime wires the breaker so chronic timeouts fast-fail."""
+
+    @pytest.mark.asyncio
+    async def test_three_timeouts_open_circuit_and_fourth_call_is_fast(self):
+        from src.agents.circuit_breaker import (
+            CircuitOpenError,
+            get_circuit_breaker,
+            reset_circuit_breaker_for_tests,
+        )
+        from src.token_tracker import get_tracker
+
+        reset_circuit_breaker_for_tests()
+        breaker = get_circuit_breaker()
+        # Force a tight, deterministic threshold for the test.
+        breaker.threshold = 3
+        breaker.window_seconds = 300.0
+        breaker.cool_off_seconds = 60.0
+        breaker.reset()
+
+        tracker = get_tracker()
+        tracker.reset()
+
+        async def always_hangs(*_a, **_kw):
+            await asyncio.get_event_loop().create_future()
+            return AIMessage(content="never")
+
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(side_effect=always_hangs)
+
+        with patch.object(settings_config, "llm_call_hard_timeout_seconds", 0.05):
+            with patch.object(settings_config, "quick_mode_active", False):
+                with patch.object(settings_config, "llm_circuit_breaker_enabled", True):
+                    # Three attempts: each hangs to hard-timeout and counts
+                    # as a breaker-eligible failure. The hard-timeout wrap
+                    # surfaces TimeoutError (asyncio.TimeoutError aliases to
+                    # builtin TimeoutError on 3.11+).
+                    for _ in range(3):
+                        with pytest.raises(TimeoutError):
+                            await invoke_with_rate_limit_handling(
+                                runnable,
+                                {"input": "x"},
+                                max_attempts=1,
+                                context="BreakerAgent",
+                                provider="google",
+                                model_name="gemini-3.1-flash-lite",
+                            )
+
+                    # Fourth call: breaker is open, must raise
+                    # CircuitOpenError immediately without invoking ainvoke.
+                    before_calls = runnable.ainvoke.call_count
+                    with pytest.raises(CircuitOpenError):
+                        await invoke_with_rate_limit_handling(
+                            runnable,
+                            {"input": "x"},
+                            max_attempts=1,
+                            context="BreakerAgent",
+                            provider="google",
+                            model_name="gemini-3.1-flash-lite",
+                        )
+                    assert runnable.ainvoke.call_count == before_calls
+
+        attempts = tracker.get_total_stats()["call_attempts"]
+        # Last attempt was the fast-fail; record_call_attempt tagged it
+        # with the canonical circuit_open kind/origin.
+        assert attempts[-1]["failure_kind"] == "circuit_open"
+        assert attempts[-1]["failure_origin"] == "circuit_breaker"
+
+        reset_circuit_breaker_for_tests()
+
+    @pytest.mark.asyncio
+    async def test_disabled_breaker_does_not_short_circuit(self):
+        from src.agents.circuit_breaker import (
+            CircuitOpenError,
+            reset_circuit_breaker_for_tests,
+        )
+
+        reset_circuit_breaker_for_tests()
+
+        async def always_hangs(*_a, **_kw):
+            await asyncio.get_event_loop().create_future()
+            return AIMessage(content="never")
+
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(side_effect=always_hangs)
+
+        with patch.object(settings_config, "llm_call_hard_timeout_seconds", 0.05):
+            with patch.object(settings_config, "llm_circuit_breaker_enabled", False):
+                # With breaker disabled, repeated timeouts still time out
+                # normally — never as CircuitOpenError.
+                for _ in range(5):
+                    with pytest.raises(TimeoutError) as info:
+                        await invoke_with_rate_limit_handling(
+                            runnable,
+                            {"input": "x"},
+                            max_attempts=1,
+                            context="BreakerDisabledAgent",
+                            provider="google",
+                            model_name="gemini-3.1-flash-lite",
+                        )
+                    assert not isinstance(info.value, CircuitOpenError)
+
+        reset_circuit_breaker_for_tests()

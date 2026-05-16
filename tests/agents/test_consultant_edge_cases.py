@@ -1013,5 +1013,110 @@ class TestLargeContextHandling:
                 # Should handle large context without crashing
 
 
+class TestConsultantQuickEnvelope:
+    """P1-5: Quick-mode Consultant total-deadline envelope is tight (35s default)."""
+
+    def test_default_quick_total_timeout_is_35s(self):
+        """The shipped default must be 35s — earlier 60s value hid hung calls.
+        Operators can still override via CONSULTANT_QUICK_TOTAL_TIMEOUT_SECONDS."""
+        from src.config import Settings
+
+        settings = Settings()
+        assert settings.consultant_quick_total_timeout_seconds == 35.0
+
+    @pytest.mark.asyncio
+    async def test_quick_mode_deadline_flows_into_runtime(self, monkeypatch):
+        """The Consultant node passes the quick-mode total budget through as
+        the per-call timeout ceiling to invoke_with_rate_limit_handling."""
+        from src.agents import consultant_nodes as cn_mod
+        from src.config import config as config_singleton
+
+        monkeypatch.setattr(
+            config_singleton, "consultant_quick_total_timeout_seconds", 35.0
+        )
+        # Force the per-call cap above the total so the total is the binding
+        # constraint and shows up in the recorded timeout.
+        monkeypatch.setattr(cn_mod, "CONSULTANT_CALL_TIMEOUT_SECONDS", 999.0)
+
+        seen_timeouts: list[float] = []
+
+        async def fake_invoke(*args, **kwargs):
+            seen_timeouts.append(float(kwargs["overall_timeout_seconds"]))
+            raise TimeoutError("stubbed")
+
+        monkeypatch.setattr(
+            "src.agents.runtime.invoke_with_rate_limit_handling", fake_invoke
+        )
+
+        mock_prompt = Mock()
+        mock_prompt.system_message = "You are a consultant."
+        mock_prompt.agent_name = "External Consultant"
+        with patch("src.prompts.get_prompt", return_value=mock_prompt):
+            node = create_consultant_node(Mock(), "consultant", quick_mode=True)
+            state = {
+                "company_of_interest": "TST",
+                "company_name": "Test Co",
+                "market_report": "x",
+                "sentiment_report": "x",
+                "news_report": "x",
+                "fundamentals_report": "x",
+                "investment_debate_state": {"history": "x"},
+                "investment_plan": "BUY",
+            }
+            config = RunnableConfig(
+                configurable={"context": Mock(trade_date="2026-05-15")}
+            )
+            await node(state, config)
+
+        assert seen_timeouts, "consultant node never invoked the LLM runtime"
+        # First call: the full quick budget is still available, so the
+        # passed timeout should be at-or-below the 35s envelope.
+        assert seen_timeouts[0] <= 35.0
+        assert seen_timeouts[0] > 0.0
+
+    @pytest.mark.asyncio
+    async def test_env_override_takes_precedence(self, monkeypatch):
+        """If CONSULTANT_QUICK_TOTAL_TIMEOUT_SECONDS is set lower at runtime,
+        the consultant node honors it (the deadline shrinks, not grows)."""
+        from src.agents import consultant_nodes as cn_mod
+        from src.config import config as config_singleton
+
+        monkeypatch.setattr(
+            config_singleton, "consultant_quick_total_timeout_seconds", 10.0
+        )
+        monkeypatch.setattr(cn_mod, "CONSULTANT_CALL_TIMEOUT_SECONDS", 999.0)
+
+        seen_timeouts: list[float] = []
+
+        async def fake_invoke(*args, **kwargs):
+            seen_timeouts.append(float(kwargs["overall_timeout_seconds"]))
+            raise TimeoutError("stubbed")
+
+        monkeypatch.setattr(
+            "src.agents.runtime.invoke_with_rate_limit_handling", fake_invoke
+        )
+
+        mock_prompt = Mock()
+        mock_prompt.system_message = "x"
+        mock_prompt.agent_name = "External Consultant"
+        with patch("src.prompts.get_prompt", return_value=mock_prompt):
+            node = create_consultant_node(Mock(), "consultant", quick_mode=True)
+            await node(
+                {
+                    "company_of_interest": "TST",
+                    "company_name": "Test Co",
+                    "market_report": "x",
+                    "sentiment_report": "x",
+                    "news_report": "x",
+                    "fundamentals_report": "x",
+                    "investment_debate_state": {"history": "x"},
+                    "investment_plan": "BUY",
+                },
+                RunnableConfig(configurable={"context": Mock(trade_date="2026-05-15")}),
+            )
+
+        assert seen_timeouts[0] <= 10.0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

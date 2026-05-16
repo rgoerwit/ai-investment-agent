@@ -7,6 +7,7 @@ from typing import Any
 
 import structlog
 
+from src.agents.circuit_breaker import CircuitOpenError, get_circuit_breaker
 from src.async_utils import run_with_hard_timeout
 from src.config import config as settings_config
 from src.llm_usage import extract_token_usage_breakdown
@@ -226,6 +227,11 @@ async def invoke_with_rate_limit_handling(
         else None
     )
 
+    breaker_enabled = bool(
+        getattr(settings_config, "llm_circuit_breaker_enabled", True)
+    )
+    breaker = get_circuit_breaker() if breaker_enabled else None
+
     for attempt in range(max_attempts):
         attempt_started = time.monotonic()
         try:
@@ -239,6 +245,13 @@ async def invoke_with_rate_limit_handling(
                     )
                 effective_timeout = min(hard_timeout, max(0.1, remaining))
 
+            if breaker is not None:
+                breaker.before_call(
+                    agent_name=context,
+                    provider=resolved_provider,
+                    model_name=resolved_model or "",
+                )
+
             result = await run_with_hard_timeout(
                 runnable.ainvoke(input_data),
                 timeout=effective_timeout,
@@ -250,6 +263,13 @@ async def invoke_with_rate_limit_handling(
             # handles it like any other recoverable failure.
             partial_reason = _detect_provider_partial_response(result)
             transient_max_attempts = max(1, min(max_attempts, max_transient_attempts))
+            if partial_reason is None and breaker is not None:
+                breaker.record_outcome(
+                    agent_name=context,
+                    provider=resolved_provider,
+                    model_name=resolved_model or "",
+                    ok=True,
+                )
             if partial_reason is not None and attempt < transient_max_attempts - 1:
                 raise ProviderPartialResponseError(
                     f"provider_partial_response: {partial_reason} "
@@ -315,6 +335,37 @@ async def invoke_with_rate_limit_handling(
                     attempt=attempt + 1,
                 )
             return result
+        except CircuitOpenError as exc:
+            # Fast-fail: the breaker already classified this provider/model
+            # as bad. Record a stub failure attempt so call_diagnostics
+            # surface the short-circuit, then propagate without sleeping
+            # or retrying — the whole point is to skip the wait.
+            elapsed_seconds = time.monotonic() - attempt_started
+            try:
+                from src.token_tracker import get_tracker
+
+                get_tracker().record_call_attempt(
+                    agent_name=context,
+                    provider=resolved_provider,
+                    model_name=resolved_model or "",
+                    status="failure",
+                    attempt=attempt + 1,
+                    elapsed_seconds=elapsed_seconds,
+                    failure_kind="circuit_open",
+                    failure_origin="circuit_breaker",
+                    retryable=False,
+                )
+            except Exception as _acct_exc:
+                logger.debug("accounting_hook_failed", error=str(_acct_exc))
+            logger.warning(
+                "llm_call_circuit_open",
+                context=context,
+                provider=resolved_provider,
+                model=resolved_model,
+                attempt=attempt + 1,
+                reopens_in_seconds=round(exc.opens_remaining_seconds, 2),
+            )
+            raise
         except Exception as exc:
             details = classify_failure(
                 exc,
@@ -323,6 +374,14 @@ async def invoke_with_rate_limit_handling(
                 class_name=class_name,
             )
             elapsed_seconds = time.monotonic() - attempt_started
+            if breaker is not None:
+                breaker.record_outcome(
+                    agent_name=context,
+                    provider=resolved_provider,
+                    model_name=resolved_model or "",
+                    ok=False,
+                    failure_kind=details.kind,
+                )
             try:
                 capture_manager = _get_capture_manager()
                 if capture_manager is not None:
