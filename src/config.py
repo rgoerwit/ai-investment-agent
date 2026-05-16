@@ -584,6 +584,49 @@ class Settings(BaseSettings):
         validation_alias="LLM_CIRCUIT_BREAKER_COOL_OFF_SECONDS",
         description="Cool-off (s) before the breaker enters half-open to probe recovery",
     )
+    # --- Network breaker (process-global, host-level DNS/connect failures) --
+    # Distinct from `llm_circuit_breaker_*` (per-(agent,provider,model),
+    # timeout-only). This breaker watches dns_resolution + connect_error
+    # across ALL contexts so a host network outage doesn't cause every
+    # parallel analyst to independently burn its retry budget. Tuned tight:
+    # 4 failures in 30s opens; cool_off 45s. See src/agents/network_breaker.py.
+    network_breaker_enabled: bool = Field(
+        default=True,
+        validation_alias="NETWORK_BREAKER_ENABLED",
+        description="Enable process-global circuit breaker on DNS/connect failures",
+    )
+    network_breaker_threshold: int = Field(
+        default=4,
+        ge=1,
+        validation_alias="NETWORK_BREAKER_THRESHOLD",
+        description="DNS/connect failures within the window before the breaker opens",
+    )
+    network_breaker_window_seconds: float = Field(
+        default=30.0,
+        gt=0.0,
+        validation_alias="NETWORK_BREAKER_WINDOW_SECONDS",
+        description="Sliding-window length (s) for counting network failures",
+    )
+    network_breaker_cool_off_seconds: float = Field(
+        default=45.0,
+        gt=0.0,
+        validation_alias="NETWORK_BREAKER_COOL_OFF_SECONDS",
+        description="Cool-off (s) before the network breaker probes recovery",
+    )
+    # Hard ceiling on shutdown cleanup (cleanup_async_resources). Protects
+    # against httpx.AsyncClient.aclose() and similar paths that block on
+    # dead sockets when the host's DNS / network is down — observed during
+    # the May 2026 overnight macOS DNS outage where a "completed" run sat
+    # in the finally block for minutes waiting on socket close.
+    shutdown_hard_timeout_seconds: float = Field(
+        default=15.0,
+        gt=0.0,
+        validation_alias="SHUTDOWN_HARD_TIMEOUT_SECONDS",
+        description=(
+            "Hard wall-clock cap (seconds) for cleanup_async_resources at "
+            "process shutdown; on timeout the process forces os._exit()."
+        ),
+    )
     # Set by _apply_runtime_overrides when --quick is passed; allows
     # invoke_with_rate_limit_handling to pick the tighter quick timeout.
     quick_mode_active: bool = Field(

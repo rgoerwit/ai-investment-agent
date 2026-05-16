@@ -1523,10 +1523,27 @@ async def run_with_args(
             console.print(f"\n[bold red]Unexpected error:[/bold red] {message}\n")
         return 1
     finally:
-        try:
-            from src.cleanup import cleanup_async_resources
+        from src.cleanup import cleanup_async_resources
 
-            await cleanup_async_resources()
+        shutdown_timeout = float(getattr(config, "shutdown_hard_timeout_seconds", 15.0))
+        forced_exit_code: int | None = None
+        try:
+            await run_with_hard_timeout(
+                cleanup_async_resources(),
+                timeout=shutdown_timeout,
+                label="shutdown.cleanup_async_resources",
+            )
+        except TimeoutError:
+            logger.warning(
+                "shutdown_cleanup_hard_timeout",
+                timeout_seconds=shutdown_timeout,
+                note=(
+                    "cleanup_async_resources exceeded hard timeout; "
+                    "forcing process exit. Likely a stuck socket close "
+                    "(httpx.AsyncClient.aclose) under network failure."
+                ),
+            )
+            forced_exit_code = 0
         except Exception:
             pass
         try:
@@ -1541,6 +1558,8 @@ async def run_with_args(
             _restore_runtime_overrides()
         except Exception:
             pass
+        if forced_exit_code is not None:
+            os._exit(forced_exit_code)
 
 
 if __name__ == "__main__":

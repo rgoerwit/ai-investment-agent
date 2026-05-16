@@ -8,6 +8,10 @@ from typing import Any
 import structlog
 
 from src.agents.circuit_breaker import CircuitOpenError, get_circuit_breaker
+from src.agents.network_breaker import (
+    NetworkBreakerOpenError,
+    get_network_breaker,
+)
 from src.async_utils import run_with_hard_timeout
 from src.config import config as settings_config
 from src.llm_usage import extract_token_usage_breakdown
@@ -231,6 +235,10 @@ async def invoke_with_rate_limit_handling(
         getattr(settings_config, "llm_circuit_breaker_enabled", True)
     )
     breaker = get_circuit_breaker() if breaker_enabled else None
+    network_breaker_enabled = bool(
+        getattr(settings_config, "network_breaker_enabled", True)
+    )
+    network_breaker = get_network_breaker() if network_breaker_enabled else None
 
     for attempt in range(max_attempts):
         attempt_started = time.monotonic()
@@ -251,6 +259,8 @@ async def invoke_with_rate_limit_handling(
                     provider=resolved_provider,
                     model_name=resolved_model or "",
                 )
+            if network_breaker is not None:
+                network_breaker.before_call()
 
             result = await run_with_hard_timeout(
                 runnable.ainvoke(input_data),
@@ -270,6 +280,9 @@ async def invoke_with_rate_limit_handling(
                     model_name=resolved_model or "",
                     ok=True,
                 )
+            if partial_reason is None and network_breaker is not None:
+                # Any successful call demonstrates the host network is fine.
+                network_breaker.record_outcome(ok=True)
             if partial_reason is not None and attempt < transient_max_attempts - 1:
                 raise ProviderPartialResponseError(
                     f"provider_partial_response: {partial_reason} "
@@ -366,6 +379,38 @@ async def invoke_with_rate_limit_handling(
                 reopens_in_seconds=round(exc.opens_remaining_seconds, 2),
             )
             raise
+        except NetworkBreakerOpenError as exc:
+            # Process-global network breaker is open — short-circuit
+            # without retry. The host's DNS/TCP is unhealthy; sleeping
+            # 30s then retrying achieves nothing. The graceful-degradation
+            # paths in analyst/researcher nodes already handle this
+            # exception the same way they handle a final llm_call_failed.
+            elapsed_seconds = time.monotonic() - attempt_started
+            try:
+                from src.token_tracker import get_tracker
+
+                get_tracker().record_call_attempt(
+                    agent_name=context,
+                    provider=resolved_provider,
+                    model_name=resolved_model or "",
+                    status="failure",
+                    attempt=attempt + 1,
+                    elapsed_seconds=elapsed_seconds,
+                    failure_kind="network_breaker_open",
+                    failure_origin="network_breaker",
+                    retryable=False,
+                )
+            except Exception as _acct_exc:
+                logger.debug("accounting_hook_failed", error=str(_acct_exc))
+            logger.warning(
+                "llm_call_network_breaker_open",
+                context=context,
+                provider=resolved_provider,
+                model=resolved_model,
+                attempt=attempt + 1,
+                reopens_in_seconds=round(exc.opens_remaining_seconds, 2),
+            )
+            raise
         except Exception as exc:
             details = classify_failure(
                 exc,
@@ -382,6 +427,8 @@ async def invoke_with_rate_limit_handling(
                     ok=False,
                     failure_kind=details.kind,
                 )
+            if network_breaker is not None:
+                network_breaker.record_outcome(ok=False, failure_kind=details.kind)
             try:
                 capture_manager = _get_capture_manager()
                 if capture_manager is not None:

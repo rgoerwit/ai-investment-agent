@@ -265,6 +265,51 @@ detect_stage1_resume_date() {
     fi
 }
 
+# Foot-gun guard: when the chosen $DATE matches very few existing quick
+# reports for tickers in $TICKER_LIST but some OTHER date matches dramatically
+# more, warn the operator that they probably gave us the wrong saved file
+# / wrong --run-date. We only fire when the discrepancy is large (≥10x,
+# absolute floor of 25) so normal small drift stays silent. Stdout is the
+# winning date, or empty if no warning is warranted.
+suggest_better_resume_date() {
+    local ticker_list="$1"
+    local chosen_date="$2"
+    local chosen_count="$3"
+    # Find candidate dates from existing scratch/*_quick.md filenames.
+    # Skip if there's nothing to scan.
+    local candidate_dates
+    candidate_dates=$(
+        find "$SCRATCH" -maxdepth 1 -name 'README-*-*_quick.md' 2>/dev/null \
+            | sed -E 's/.*-([0-9]{4}-[0-9]{2}-[0-9]{2})_quick\.md$/\1/' \
+            | sort -u
+    )
+    [[ -z "$candidate_dates" ]] && return 0
+
+    # Among candidate dates that dominate the chosen date by ≥10x AND have
+    # at least 25 absolute matches, prefer the most RECENT (ISO 8601 sorts
+    # lexically — sort -r gives newest first). This matches operator
+    # intent: "I ran something yesterday; help me resume that," not
+    # "show me the date that historically had the most reports."
+    local threshold=$((chosen_count * 10 + 1))
+    [[ "$threshold" -lt 25 ]] && threshold=25
+
+    local best_date="" best_count=0 count date
+    while IFS= read -r date; do
+        [[ -z "$date" || "$date" == "$chosen_date" ]] && continue
+        count=$(count_completed_quick_reports_for_date "$ticker_list" "$date")
+        if [[ "$count" -ge "$threshold" ]]; then
+            # First match wins (we walk newest → oldest).
+            best_date="$date"
+            best_count="$count"
+            break
+        fi
+    done <<< "$(sort -r <<< "$candidate_dates")"
+
+    if [[ -n "$best_date" ]]; then
+        printf '%s %s\n' "$best_date" "$best_count"
+    fi
+}
+
 # --- Parse arguments ---
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -461,6 +506,20 @@ if [[ $START_STAGE -le 0 ]]; then
     STAGE1_SKIP=$((TICKER_COUNT - STAGE1_TODO))
     STAGE1_SECS=$((STAGE1_TODO * (COOLDOWN + 120)))
 
+    # Foot-gun guard: if a different date in scratch/ has dramatically more
+    # matching reports than the resume date we settled on, the operator
+    # probably handed us the wrong saved file. Surface a hint before they
+    # confirm the run — silent otherwise.
+    BETTER_DATE_HINT=$(suggest_better_resume_date "$TICKER_LIST" "$DATE" "$STAGE1_SKIP")
+    if [[ -n "$BETTER_DATE_HINT" ]]; then
+        BETTER_DATE=${BETTER_DATE_HINT%% *}
+        BETTER_COUNT=${BETTER_DATE_HINT##* }
+        echo ""
+        warn "Resume-date mismatch suspected:"
+        warn "  Chosen date ${DATE} matches ${STAGE1_SKIP} existing quick reports,"
+        warn "  but ${BETTER_DATE} matches ${BETTER_COUNT}. Did you mean --run-date ${BETTER_DATE}?"
+    fi
+
     echo ""
     echo -e "${CYAN}━━━ Stage 1 Preview ━━━━━━━━━━━━━━━━━━━━${NC}"
     info "Tickers to analyze:  $STAGE1_TODO (of $TICKER_COUNT candidates)"
@@ -564,11 +623,25 @@ if [[ $START_STAGE -le 1 ]]; then
             --quick --no-charts --quiet --brief --no-memory \
             --output "$OUTFILE"; then
             VERDICT=$(extract_report_verdict "$OUTFILE")
-            [[ -n "$VERDICT" ]] && success "$ticker done [Verdict=${VERDICT}]" || success "$ticker done"
+            BADGE=$(python3 "${SCRIPT_DIR}/extract_run_health.py" "$LOGFILE" 2>/dev/null)
+            if [[ -n "$VERDICT" && -n "$BADGE" ]]; then
+                success "$ticker done [Verdict=${VERDICT}] [${BADGE}]"
+            elif [[ -n "$VERDICT" ]]; then
+                success "$ticker done [Verdict=${VERDICT}]"
+            elif [[ -n "$BADGE" ]]; then
+                success "$ticker done [${BADGE}]"
+            else
+                success "$ticker done"
+            fi
         else
             status=$?
             exit_if_interrupted_status "$status"
-            fail "FAILED: $ticker (see $LOGFILE)"
+            BADGE=$(python3 "${SCRIPT_DIR}/extract_run_health.py" "$LOGFILE" 2>/dev/null)
+            if [[ -n "$BADGE" ]]; then
+                fail "FAILED: $ticker [${BADGE}] (see $LOGFILE)"
+            else
+                fail "FAILED: $ticker (see $LOGFILE)"
+            fi
             STAGE1_FAILED=$((STAGE1_FAILED + 1))
         fi
 
@@ -735,11 +808,25 @@ if [[ $START_STAGE -le 2 ]]; then
             $STRICT_FLAG \
             --output "$OUTFILE"; then
             VERDICT=$(extract_report_verdict "$OUTFILE")
-            [[ -n "$VERDICT" ]] && success "$ticker done [Verdict=${VERDICT}]" || success "$ticker done"
+            BADGE=$(python3 "${SCRIPT_DIR}/extract_run_health.py" "$LOGFILE" 2>/dev/null)
+            if [[ -n "$VERDICT" && -n "$BADGE" ]]; then
+                success "$ticker done [Verdict=${VERDICT}] [${BADGE}]"
+            elif [[ -n "$VERDICT" ]]; then
+                success "$ticker done [Verdict=${VERDICT}]"
+            elif [[ -n "$BADGE" ]]; then
+                success "$ticker done [${BADGE}]"
+            else
+                success "$ticker done"
+            fi
         else
             status=$?
             exit_if_interrupted_status "$status"
-            fail "FAILED: $ticker (see $LOGFILE)"
+            BADGE=$(python3 "${SCRIPT_DIR}/extract_run_health.py" "$LOGFILE" 2>/dev/null)
+            if [[ -n "$BADGE" ]]; then
+                fail "FAILED: $ticker [${BADGE}] (see $LOGFILE)"
+            else
+                fail "FAILED: $ticker (see $LOGFILE)"
+            fi
             STAGE2_FAILED=$((STAGE2_FAILED + 1))
         fi
 
@@ -777,4 +864,13 @@ if [[ -f "$BUY_LIST" ]]; then
             echo "  $t"
         done < "$BUY_LIST"
     fi
+fi
+
+# Batch-level health summary: a single [WARN] line is emitted only if the
+# batch had failures, watchdog timeouts, breaker trips, or a sustained
+# DNS cluster. Clean runs print nothing. See scripts/pipeline_batch_summary.py.
+BATCH_SUMMARY=$(python3 "${SCRIPT_DIR}/pipeline_batch_summary.py" "$SCRATCH" 2>/dev/null)
+if [[ -n "$BATCH_SUMMARY" ]]; then
+    echo ""
+    warn "$BATCH_SUMMARY"
 fi

@@ -1050,11 +1050,16 @@ class TestRuntimeOverrides:
         monkeypatch.setattr(config, "gemini_rpm_limit", 60)
         monkeypatch.setattr(config, "llm_call_hard_timeout_seconds", 45.0)
 
-        _apply_runtime_overrides(self._quick_args())
-
-        assert config.api_retry_attempts == 1
-        assert config.gemini_rpm_limit == 60
-        assert config.llm_call_hard_timeout_seconds == 45.0
+        restore = _apply_runtime_overrides(self._quick_args())
+        try:
+            assert config.api_retry_attempts == 1
+            assert config.gemini_rpm_limit == 60
+            assert config.llm_call_hard_timeout_seconds == 45.0
+        finally:
+            # Must restore — otherwise `config.quick_mode_active=True` leaks
+            # to every subsequent test in the process, which then sees the
+            # 60s quick-mode hard timeout instead of the normal 120s default.
+            restore()
 
     def test_quick_clamp_is_idempotent(self, monkeypatch):
         """Calling the override twice (e.g., in-process orchestrator) must not
