@@ -381,14 +381,14 @@ class TestPathHandling:
         clear=True,
     )
     def test_tilde_expansion_in_paths(self):
-        """Test that tilde in paths is NOT automatically expanded."""
+        """Config expands ~ in path-typed settings via os.path.expanduser."""
         from src.config import Config
 
         config = Config()
 
-        # Path() doesn't expand ~, so this will literally be "~/results"
-        # If your code needs tilde expansion, you need Path.expanduser()
-        assert "~" in str(config.results_dir) or config.results_dir.exists()
+        expected = Path(os.path.expanduser("~/results"))
+        assert config.results_dir == expected
+        assert "~" not in str(config.results_dir)
 
 
 # =============================================================================
