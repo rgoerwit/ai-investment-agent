@@ -6,16 +6,24 @@ backend wiring from config, and end-to-end check→decision→approved flows.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
+from src.runtime_services import (
+    ProviderRuntime,
+    build_runtime_services_from_config,
+    use_runtime_services,
+)
 from src.tooling.inspection_service import InspectionService
 from src.tooling.inspector import (
     InspectionEnvelope,
     NullInspector,
     SourceKind,
 )
+from src.tooling.runtime import ToolInvocation
+from tests.helpers.injection_corpus import load_corpus
 
 
 def _envelope(
@@ -28,6 +36,10 @@ def _envelope(
         source_kind=source_kind,
         source_name="integration_test",
     )
+
+
+async def _async_value(value):
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -295,3 +307,31 @@ class TestBackendWiring:
         hook_types = [type(h).__name__ for h in services.tool_service.hooks]
         assert "ContentInspectionHook" not in hook_types
         assert "ToolArgumentPolicyHook" not in hook_types
+
+
+@pytest.mark.security
+@pytest.mark.asyncio
+async def test_runtime_services_config_blocks_corpus_payload_through_tool_service():
+    config = SimpleNamespace(
+        untrusted_content_inspection_enabled=True,
+        untrusted_content_backend="python",
+        untrusted_content_inspection_mode="block",
+        untrusted_content_fail_policy="fail_closed",
+        mcp_enabled=False,
+    )
+    services = build_runtime_services_from_config(
+        config,
+        enable_tool_audit=False,
+        provider_runtime=ProviderRuntime(fetcher=None, rate_limiter=None),
+    )
+    case = load_corpus(source_kind="tool_output", expectation="must_block")[0]
+
+    with use_runtime_services(services):
+        result = await services.tool_service.execute(
+            ToolInvocation(name="configured_tool", args={}, source="toolnode"),
+            lambda _args: _async_value(case["payload"]),
+        )
+
+    assert result.blocked is True
+    assert str(result.value).startswith("TOOL_BLOCKED:")
+    assert case["payload"] not in str(result.value)
