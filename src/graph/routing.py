@@ -7,7 +7,6 @@ from langgraph.types import RunnableConfig
 
 from src.agents import AgentState
 from src.config import config
-from src.llms import is_openai_consultant_available
 from src.runtime_diagnostics import get_artifact_status, is_artifact_complete
 
 logger = structlog.get_logger(__name__)
@@ -21,6 +20,14 @@ ANALYST_FAN_OUT_DESTINATIONS = (
     "Legal Counsel",
     "Value Trap Detector",
 )
+
+
+def is_openai_consultant_available() -> bool:
+    from src.llms import (
+        is_openai_consultant_available as _is_openai_consultant_available,
+    )
+
+    return _is_openai_consultant_available()
 
 
 def dispatch_destinations(*, include_auditor: bool) -> list[str]:
@@ -46,7 +53,7 @@ def should_continue_analyst(
 
     result = "tools" if has_tool_calls else "continue"
 
-    logger.info(
+    logger.debug(
         "analyst_routing", sender=sender, has_tool_calls=has_tool_calls, result=result
     )
 
@@ -94,6 +101,8 @@ def _is_auditor_enabled() -> bool:
     Check if auditor node should be enabled.
 
     Must match the logic in create_auditor_llm() to avoid graph/router mismatch.
+    ENABLE_CONSULTANT currently gates the shared OpenAI cross-check plane, so
+    it applies to the auditor path too even though the setting name is narrower.
     Returns True only if:
     - ENABLE_CONSULTANT is True
     - OPENAI_API_KEY is available
@@ -122,7 +131,7 @@ def fundamentals_sync_router(
     foreign_done = is_artifact_complete(state, "foreign_language_report")
     legal_done = is_artifact_complete(state, "legal_report")
 
-    logger.info(
+    logger.debug(
         "fundamentals_sync_status",
         junior_done=junior_done,
         foreign_done=foreign_done,
@@ -168,7 +177,7 @@ def sync_check_router(
         ]
     )
 
-    logger.info(
+    logger.debug(
         "sync_check_status",
         market_done=market_done,
         sentiment_done=sentiment_done,
@@ -199,3 +208,153 @@ def sync_check_router(
         message="All analysts complete - proceeding to Bull/Bear Debate Round 1",
     )
     return ["Bull Researcher R1", "Bear Researcher R1"]
+
+
+# --- Consultant bypass gate (P0-2) ------------------------------------------
+
+CONSULTANT_SKIP_SENTINEL = (
+    "SKIPPED_BY_GATE: External Consultant bypass active for quick-mode screening. "
+    "Reason: {reason}. The internal analysis (analyst reports, debate, Research "
+    "Manager synthesis, and forensic audit) was retained for the Portfolio "
+    "Manager's decision."
+)
+
+# Warning-level flags that should keep the Consultant active even on a clean
+# Auditor pass — these are exactly the situations where a second opinion is
+# load-bearing for the final verdict.
+_GATE_BLOCKING_RED_FLAGS = frozenset(
+    {
+        "VALUE_TRAP_HIGH_RISK",
+        "VALUE_TRAP_MODERATE_RISK",
+        "VALUE_TRAP_VERDICT",
+        "PFIC_PROBABLE",
+        "PFIC_UNCERTAIN",
+        "VIE_STRUCTURE",
+        "SEGMENT_DETERIORATION",
+        "OCF_SOURCE_DISCREPANCY",
+        "NO_CATALYST_DETECTED",
+        "CMIC_LISTED",
+    }
+)
+
+_AUDITOR_CLEAN_STATUSES = frozenset({"CLEAN", "INSUFFICIENT_DATA", "UNAVAILABLE"})
+
+
+def _auditor_status_clean(auditor_report: object) -> bool:
+    """True when the auditor produced no actionable problem."""
+    if auditor_report is None:
+        return True
+    if not isinstance(auditor_report, str):
+        return False
+    text = auditor_report.strip()
+    if not text or text.upper() == "N/A":
+        return True
+    import re
+
+    match = re.search(r"(?im)^\s*STATUS\s*[:=]\s*([A-Z_]+)", text)
+    if match:
+        return match.group(1).upper() in _AUDITOR_CLEAN_STATUSES
+    # No explicit status field — fall back to a conservative "keep Consultant"
+    # decision so a misformatted auditor output never silently disables it.
+    return False
+
+
+def _has_blocking_red_flag(red_flags: object) -> bool:
+    if not red_flags:
+        return False
+    if isinstance(red_flags, list | tuple | set):
+        items = list(red_flags)
+    else:
+        items = [red_flags]
+    for raw in items:
+        text = str(raw).upper()
+        if any(marker in text for marker in _GATE_BLOCKING_RED_FLAGS):
+            return True
+    return False
+
+
+def _investment_plan_has_conflict(investment_plan: object) -> bool:
+    if not isinstance(investment_plan, str):
+        return False
+    upper = investment_plan.upper()
+    return "CONFLICT" in upper or "DISAGREEMENT" in upper
+
+
+_POSITIVE_VERDICT_RE = None
+_NEGATIVE_VERDICT_RE = None
+
+
+def _classify_rm_verdict(investment_plan: object) -> str:
+    """Return one of "positive", "negative", "ambiguous"."""
+    if not isinstance(investment_plan, str) or not investment_plan.strip():
+        return "ambiguous"
+
+    import re
+
+    global _POSITIVE_VERDICT_RE, _NEGATIVE_VERDICT_RE
+    if _POSITIVE_VERDICT_RE is None:
+        _POSITIVE_VERDICT_RE = re.compile(
+            r"(?im)^\s*(?:FINAL\s+)?(?:RECOMMENDATION|VERDICT|DECISION)\s*[:=]\s*"
+            r"(STRONG[\s_-]*BUY|BUY|ACCUMULATE|WATCH|INITIATE)"
+        )
+        _NEGATIVE_VERDICT_RE = re.compile(
+            r"(?im)^\s*(?:FINAL\s+)?(?:RECOMMENDATION|VERDICT|DECISION)\s*[:=]\s*"
+            r"(SELL|STRONG[\s_-]*SELL|DO[\s_-]*NOT[\s_-]*INITIATE|REJECT|AVOID|"
+            r"STRONG[\s_-]*HOLD)"
+        )
+
+    if _NEGATIVE_VERDICT_RE.search(investment_plan):
+        return "negative"
+    if _POSITIVE_VERDICT_RE.search(investment_plan):
+        return "positive"
+    return "ambiguous"
+
+
+def _quick_mode_active(config: RunnableConfig) -> bool:
+    """Extract quick_mode from the TradingContext attached to the runnable config."""
+    context = (config or {}).get("configurable", {}).get("context")
+    return bool(getattr(context, "quick_mode", False))
+
+
+def should_invoke_consultant(
+    state: AgentState, config: RunnableConfig
+) -> tuple[bool, str]:
+    """Decide whether the Consultant LLM should run after Research Manager.
+
+    Returns ``(True, reason)`` to invoke and ``(False, reason)`` to skip.
+    Skips fire only in ``--quick`` mode; full runs always invoke Consultant
+    so the deeper review remains the source of truth for production reports.
+    """
+    if not _quick_mode_active(config):
+        return True, "full_mode"
+
+    investment_plan = state.get("investment_plan")
+    verdict = _classify_rm_verdict(investment_plan)
+
+    if verdict == "negative":
+        return False, "rm_clear_negative"
+
+    if verdict == "positive":
+        auditor_clean = _auditor_status_clean(state.get("auditor_report"))
+        red_flags = state.get("red_flags") or []
+        has_conflict = _investment_plan_has_conflict(investment_plan)
+        if auditor_clean and not _has_blocking_red_flag(red_flags) and not has_conflict:
+            return False, "clean_consensus"
+
+    return True, "default_invoke"
+
+
+def consultant_gate_router(
+    state: AgentState, config: RunnableConfig
+) -> Literal["Consultant", "Consultant Skip"]:
+    """Conditional edge after Research Manager — gates the Consultant LLM call."""
+    invoke, reason = should_invoke_consultant(state, config)
+    if invoke:
+        logger.debug("consultant_gate", decision="invoke", reason=reason)
+        return "Consultant"
+    logger.info(
+        "consultant_skipped_for_screening",
+        reason=reason,
+        message="Quick-mode Consultant bypass active",
+    )
+    return "Consultant Skip"

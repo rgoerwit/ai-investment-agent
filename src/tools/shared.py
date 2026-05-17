@@ -1,7 +1,8 @@
 """Shared helpers for tool modules."""
 
 import asyncio
-import math
+import concurrent.futures
+import math  # noqa: E402  (kept after concurrent.futures for grouping)
 from typing import Any
 
 import structlog
@@ -11,6 +12,64 @@ from src.config import config
 logger = structlog.get_logger(__name__)
 
 DDG_SEARCH_TIMEOUT_SECONDS = 8.0
+
+# DDG concurrency safety
+# ----------------------
+# Background: ``ddgs`` is lazy-loaded on first call, and its HTTP-client
+# ``__init__`` calls ``logging.getLogger`` while doing internal setup that
+# holds the GIL. Production hang on 2026-05-09 (0883.HK) showed multiple
+# asyncio worker threads entering DDG init concurrently — one held the GIL
+# inside DDG init while peers waited on the import lock + ``logging._lock``.
+# The asyncio loop in the main thread was starved; ``run_with_hard_timeout``
+# deadlines never fired. py-spy confirmed three threads simultaneously
+# stuck in ``ddgs/http_client.py:__init__`` and ``ddgs/__init__.py:_load_real``.
+#
+# The structural fix is a dedicated single-thread executor for every DDG
+# call. Concurrent re-entry of DDG's constructor from multiple threads is
+# impossible by construction, not by convention, because there is exactly
+# one thread that ever runs DDG code. The executor's queue naturally
+# serializes calls; the explicit ``_DDG_CALL_LOCK`` surfaces that
+# serialization at the asyncio level so ``run_with_hard_timeout`` can
+# cancel a *queued* call before it ever runs (cleaner than waiting for the
+# executor to dequeue and immediately drop it).
+#
+# We also pre-warm DDG once on the main thread at module load. Any
+# first-time module-state init then happens single-threaded, before any
+# event loop or worker thread exists. Failure of the warm-up is non-fatal.
+try:
+    import ddgs as _ddgs_module  # noqa: F401  (force eager import)
+    from ddgs import DDGS as _DDGS_warm
+
+    try:
+        _DDGS_warm(timeout=1)
+    except Exception as _warm_exc:  # noqa: BLE001
+        logger.debug("ddgs_warm_skip", error=str(_warm_exc))
+    del _DDGS_warm
+
+    DDGS_AVAILABLE = True
+except ImportError:
+    DDGS_AVAILABLE = False
+    logger.debug("ddgs_not_installed_at_startup")
+
+_DDG_EXECUTOR: concurrent.futures.ThreadPoolExecutor | None = None
+_DDG_CALL_LOCK = asyncio.Lock()
+
+
+def _get_ddg_executor() -> concurrent.futures.ThreadPoolExecutor:
+    """Return the dedicated single-thread executor for DDG calls.
+
+    Lazy so that test harnesses which don't touch DDG don't pay the cost of
+    a thread, and so a worker process that forks before DDG is used gets a
+    fresh executor in the child rather than inheriting a half-initialized
+    one from the parent.
+    """
+    global _DDG_EXECUTOR
+    if _DDG_EXECUTOR is None:
+        _DDG_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="ddg-search"
+        )
+    return _DDG_EXECUTOR
+
 
 TAVILY_AVAILABLE = False
 tavily_tool = None
@@ -205,8 +264,18 @@ def _sanitize_for_json(data: dict) -> dict:
 
 
 async def _ddg_search(query: str, max_results: int = 5) -> list[dict]:
-    """DuckDuckGo fallback search. Returns list of {title, href, body}."""
+    """DuckDuckGo fallback search. Returns list of {title, href, body}.
+
+    Every call runs on the dedicated single-thread DDG executor and is
+    serialized through ``_DDG_CALL_LOCK``. Together these prevent the
+    import-lock / logging-lock deadlock observed in production where
+    multiple worker threads re-entered DDG's lazy-loaded HTTP-client
+    constructor simultaneously. See module-level note for full background.
+    """
     from src.async_utils import run_with_hard_timeout
+
+    if not DDGS_AVAILABLE:
+        return []
 
     try:
         from ddgs import DDGS
@@ -214,15 +283,14 @@ async def _ddg_search(query: str, max_results: int = 5) -> list[dict]:
         def _sync_search():
             return DDGS(timeout=5).text(query, max_results=max_results)
 
-        results = await run_with_hard_timeout(
-            asyncio.to_thread(_sync_search),
-            timeout=DDG_SEARCH_TIMEOUT_SECONDS,
-            label=f"ddg:{query[:60]}",
-        )
+        loop = asyncio.get_running_loop()
+        async with _DDG_CALL_LOCK:
+            results = await run_with_hard_timeout(
+                loop.run_in_executor(_get_ddg_executor(), _sync_search),
+                timeout=DDG_SEARCH_TIMEOUT_SECONDS,
+                label=f"ddg:{query[:60]}",
+            )
         return results if results else []
-    except ImportError:
-        logger.debug("ddgs_not_installed")
-        return []
     except asyncio.TimeoutError:
         logger.debug(
             "ddg_search_timeout",

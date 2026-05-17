@@ -174,7 +174,30 @@ class TestResolveCompanyName:
         mock_logger.warning.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_ibkr_resolves_after_non_ibkr_sources_fail(self):
+    async def test_default_path_does_not_probe_ibkr_after_non_ibkr_sources_fail(self):
+        with (
+            patch("src.ticker_utils._try_yfinance", new_callable=AsyncMock) as mock_yf,
+            patch(
+                "src.ticker_utils._try_yahooquery", new_callable=AsyncMock
+            ) as mock_yq,
+            patch("src.ticker_utils._try_fmp", new_callable=AsyncMock) as mock_fmp,
+            patch("src.ticker_utils._try_eodhd", new_callable=AsyncMock) as mock_eodhd,
+            patch("src.ticker_utils._try_ibkr", new_callable=AsyncMock) as mock_ibkr,
+        ):
+            mock_yf.return_value = None
+            mock_yq.return_value = None
+            mock_fmp.return_value = None
+            mock_eodhd.return_value = None
+
+            result = await resolve_company_name("3600.HK")
+
+        assert result.is_resolved is False
+        assert result.source == "unresolved"
+        assert result.name == "3600.HK"
+        mock_ibkr.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_ibkr_resolves_after_non_ibkr_sources_fail_when_opted_in(self):
         with (
             patch("src.ticker_utils._try_yfinance", new_callable=AsyncMock) as mock_yf,
             patch(
@@ -190,7 +213,7 @@ class TestResolveCompanyName:
             mock_eodhd.return_value = None
             mock_ibkr.return_value = "Modern Dental Group"
 
-            result = await resolve_company_name("3600.HK")
+            result = await resolve_company_name("3600.HK", allow_ibkr_probe=True)
 
         assert result.is_resolved is True
         assert result.source == "ibkr"

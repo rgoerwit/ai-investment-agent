@@ -269,12 +269,16 @@ class TestResearcherNode:
         assert "Bull Analyst" in result["investment_debate_state"]["bull_round2"]
 
     @pytest.mark.asyncio
-    async def test_researcher_memory_contamination_fix(self):
+    async def test_researcher_memory_contamination_fix(self, monkeypatch):
         """
         REGRESSION TEST: Verify that memory retrieval strictly filters by ticker metadata
         to prevent Cross-Contamination (e.g. Canon data bleeding into HSBC report).
         """
+        import src.agents.research_nodes as rn
         from src.agents import create_researcher_node
+
+        # Explicitly enable memory for this test (conftest sets ENABLE_MEMORY=false globally)
+        monkeypatch.setattr(rn.settings_config, "enable_memory", True)
 
         # Mock LLM
         mock_llm = MagicMock()

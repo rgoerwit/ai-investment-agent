@@ -39,10 +39,14 @@ from .research_nodes import (
 )
 from .runtime import invoke_with_rate_limit_handling
 from .state import (
+    MESSAGE_TAIL_LIMIT,
+    PROVENANCE_MARKERS,
     AgentState,
     InvestDebateState,
     RiskDebateState,
+    merge_and_cap_messages,
     merge_dicts,
+    merge_flag_lists,
     merge_invest_debate_state,
     merge_risk_state,
     take_last,
@@ -71,6 +75,8 @@ _format_date_with_fy_hint = _support._format_date_with_fy_hint
 __all__ = [
     "AgentState",
     "InvestDebateState",
+    "MESSAGE_TAIL_LIMIT",
+    "PROVENANCE_MARKERS",
     "RiskDebateState",
     "compute_data_conflicts",
     "create_analyst_node",
@@ -97,7 +103,9 @@ __all__ = [
     "get_analysis_context",
     "get_context_from_config",
     "invoke_with_rate_limit_handling",
+    "merge_and_cap_messages",
     "merge_dicts",
+    "merge_flag_lists",
     "merge_invest_debate_state",
     "merge_risk_state",
     "summarize_for_pm",

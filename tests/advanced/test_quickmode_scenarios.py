@@ -62,6 +62,7 @@ def mock_config():
     """Mocks the config object in the llms module to control model names."""
     with patch("src.llms.config") as mock_conf:
         mock_conf.api_timeout = 300
+        mock_conf.quick_llm_api_timeout_seconds = 120
         mock_conf.api_retry_attempts = 10
         yield mock_conf
 
@@ -193,6 +194,24 @@ def test_quick_llm_passes_through_max_output_tokens(
     call_kwargs = mock_create_gemini_model.call_args.kwargs
     assert call_kwargs.get("max_output_tokens") == 4096
     assert call_kwargs.get("reserve_class") == "default"
+
+
+def test_quick_llm_uses_quick_timeout_cap(mock_create_gemini_model, mock_config):
+    mock_config.quick_think_llm = GEMINI_3_PRO
+    mock_config.api_timeout = 300
+    mock_config.quick_llm_api_timeout_seconds = 120
+
+    _create_quick_thinking_llm()
+
+    assert mock_create_gemini_model.call_args.args[2] == 120
+
+
+def test_quick_llm_explicit_timeout_wins(mock_create_gemini_model, mock_config):
+    mock_config.quick_think_llm = GEMINI_3_PRO
+
+    _create_quick_thinking_llm(timeout=45)
+
+    assert mock_create_gemini_model.call_args.args[2] == 45
 
 
 def test_deep_llm_passes_through_max_output_tokens(

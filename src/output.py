@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import datetime
@@ -142,6 +143,24 @@ def display_token_summary(*, console_obj: Console = console) -> None:
     )
 
     console_obj.print(summary_table)
+    top_spenders = tracker.get_top_spenders(limit=5)
+    if top_spenders:
+        console_obj.print("\n[bold cyan]Top Spenders:[/bold cyan]\n")
+        top_table = Table(show_header=True, box=box.ROUNDED)
+        top_table.add_column("Agent", style="cyan")
+        top_table.add_column("Calls", style="yellow", justify="right")
+        top_table.add_column("Total Tokens", style="green", justify="right")
+        top_table.add_column("Cost (USD)", style="red", justify="right")
+
+        for entry in top_spenders:
+            top_table.add_row(
+                entry["agent"],
+                str(entry["calls"]),
+                f"{entry['total_tokens']:,}",
+                f"${entry['cost_usd']:.4f}",
+            )
+
+        console_obj.print(top_table)
     console_obj.print("\n[bold cyan]Per-Agent Token Usage:[/bold cyan]\n")
 
     agent_table = Table(show_header=True, box=box.ROUNDED)
@@ -355,6 +374,7 @@ def _load_company_name_for_output(
     thread_pool_executor_cls=ThreadPoolExecutor,
 ) -> str | None:
     """Best-effort company-name lookup for markdown output contexts."""
+    executor = None
     try:
         import yfinance as yf
 
@@ -364,23 +384,42 @@ def _load_company_name_for_output(
             normalize_company_name,
         )
 
-        with thread_pool_executor_cls(max_workers=1) as executor:
-            for lookup_ticker, _lookup_strategy in _company_name_lookup_candidates(
-                ticker
-            ):
-                future = executor.submit(
-                    lambda symbol=lookup_ticker: yf.Ticker(symbol).info
-                )
-                info = future.result(timeout=5)
-                if not info:
-                    continue
-                raw_name = info.get("longName") or info.get("shortName")
-                if _is_valid_company_name(raw_name, lookup_ticker):
-                    return normalize_company_name(raw_name)
+        executor = thread_pool_executor_cls(max_workers=1)
+        for lookup_ticker, _lookup_strategy in _company_name_lookup_candidates(ticker):
+            future = executor.submit(
+                lambda symbol=lookup_ticker: yf.Ticker(symbol).info
+            )
+            info = future.result(timeout=5)
+            if not info:
+                continue
+            raw_name = info.get("longName") or info.get("shortName")
+            if _is_valid_company_name(raw_name, lookup_ticker):
+                return normalize_company_name(raw_name)
         return None
     except FuturesTimeoutError:
         return None
     except Exception:
+        return None
+    finally:
+        shutdown = getattr(executor, "shutdown", None)
+        if shutdown is not None:
+            try:
+                shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                shutdown(wait=False)
+
+
+async def _load_company_name_for_output_async(ticker: str) -> str | None:
+    """Async wrapper for output paths running inside the main event loop."""
+    from src.async_utils import run_with_hard_timeout
+
+    try:
+        return await run_with_hard_timeout(
+            asyncio.to_thread(_load_company_name_for_output, ticker),
+            timeout=6.0,
+            label=f"output_company_name:{ticker}",
+        )
+    except TimeoutError:
         return None
 
 

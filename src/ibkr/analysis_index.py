@@ -19,14 +19,17 @@ from typing import Any
 
 import structlog
 
+from src.currency_resolver import resolve_local_trading_currency
 from src.error_safety import summarize_exception
+from src.fx_normalization import FALLBACK_RATES_TO_USD, normalize_minor_unit_currency
 from src.ibkr.models import AnalysisRecord, TradeBlockData
 from src.ibkr.order_builder import parse_trade_block
 from src.ibkr.reconciliation_rules import _exchange_from_ticker, _normalize_verdict
 from src.sector_normalization import normalize_sector_label
+from src.validators.supplemental_flags import detect_capital_efficiency_flags
 
 logger = structlog.get_logger(__name__)
-_ANALYSIS_INDEX_VERSION = 2
+_ANALYSIS_INDEX_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +239,37 @@ def _extract_filename_analysis_date(filename: str) -> str:
     return match.group(1) if match else ""
 
 
+_PROFIT_TAKE_CAPITAL_FLAGS = frozenset(
+    {"CAPITAL_IDLE_CASH_RISK", "CAPITAL_IDLE_CASH_SEVERE"}
+)
+
+
+def _extract_capital_flag_types(data: dict[str, Any], ticker: str) -> tuple[str, ...]:
+    """Derive capital-allocation flags from the saved fundamentals report."""
+    fundamentals_report = (
+        (data.get("reports") or {}).get("fundamentals_report")
+        or data.get("fundamentals_report")
+        or ""
+    )
+    if not fundamentals_report:
+        return ()
+    try:
+        flags = detect_capital_efficiency_flags(fundamentals_report, ticker=ticker)
+    except Exception as exc:
+        logger.warning(
+            "capital_flag_extraction_failed",
+            ticker=ticker,
+            **_safe_exception_fields(exc, operation="extracting capital flags"),
+        )
+        return ()
+    filtered = (
+        flag_type
+        for flag in flags
+        if (flag_type := flag.get("type")) in _PROFIT_TAKE_CAPITAL_FLAGS
+    )
+    return tuple(dict.fromkeys(filtered))
+
+
 def _build_analysis_record_from_data(
     filepath: Path, data: dict[str, Any]
 ) -> AnalysisRecord | None:
@@ -268,6 +302,17 @@ def _build_analysis_record_from_data(
     trader_plan = data.get("investment_analysis", {}).get("trader_plan", "") or ""
     trade_block = parse_trade_block(trader_plan) or TradeBlockData()
 
+    repaired_currency = _repair_legacy_snapshot_currency(
+        snapshot,
+        ticker=ticker,
+        file_name=filepath.name,
+    )
+    currency = repaired_currency["currency"]
+    fx_rate_to_usd = repaired_currency["fx_rate_to_usd"]
+    currency_source = repaired_currency["currency_source"]
+    currency_repaired = repaired_currency["currency_repaired"]
+    currency_repair_reason = repaired_currency["currency_repair_reason"]
+
     return AnalysisRecord(
         ticker=ticker,
         analysis_date=snapshot.get("analysis_date", "")
@@ -279,8 +324,11 @@ def _build_analysis_record_from_data(
         zone=snapshot.get("zone") or "",
         position_size=snapshot.get("position_size"),
         current_price=snapshot.get("current_price"),
-        currency=snapshot.get("currency") or "USD",
-        fx_rate_to_usd=snapshot.get("fx_rate_to_usd"),
+        currency=currency,
+        currency_source=currency_source,
+        fx_rate_to_usd=fx_rate_to_usd,
+        currency_repaired=currency_repaired,
+        currency_repair_reason=currency_repair_reason,
         trade_block=trade_block,
         entry_price=snapshot.get("entry_price") or trade_block.entry_price,
         stop_price=snapshot.get("stop_price") or trade_block.stop_price,
@@ -290,7 +338,55 @@ def _build_analysis_record_from_data(
         sector=normalize_sector_label(snapshot.get("sector")),
         exchange=snapshot.get("exchange") or _exchange_from_ticker(ticker),
         is_quick_mode=bool(snapshot.get("is_quick_mode", False)),
+        capital_flag_types=_extract_capital_flag_types(data, ticker),
     )
+
+
+def _repair_legacy_snapshot_currency(
+    snapshot: dict[str, Any], *, ticker: str, file_name: str
+) -> dict[str, Any]:
+    """Repair legacy snapshots that were incorrectly persisted as USD."""
+    actual_currency = (snapshot.get("currency") or "USD").upper()
+    fx_rate_to_usd = snapshot.get("fx_rate_to_usd")
+    currency_source = snapshot.get("currency_source")
+    currency_repaired = False
+    currency_repair_reason = None
+
+    resolution = resolve_local_trading_currency(ticker=ticker)
+    suspicious_usd = actual_currency == "USD" and fx_rate_to_usd in {None, 1.0}
+    missing_currency = not snapshot.get("currency")
+
+    if (
+        resolution.source == "exchange_suffix"
+        and resolution.code
+        and resolution.code != "USD"
+        and (missing_currency or suspicious_usd)
+    ):
+        normalized_currency, scale = normalize_minor_unit_currency(resolution.code)
+        major_rate = FALLBACK_RATES_TO_USD.get(normalized_currency or "")
+        repaired_fx_rate = major_rate * scale if major_rate is not None else None
+        logger.info(
+            "legacy_snapshot_currency_repaired",
+            ticker=ticker,
+            from_currency=actual_currency,
+            repaired_currency=resolution.code,
+            file=file_name,
+        )
+        return {
+            "currency": resolution.code,
+            "fx_rate_to_usd": repaired_fx_rate,
+            "currency_source": "repair_on_load",
+            "currency_repaired": True,
+            "currency_repair_reason": "legacy_snapshot_usd_default",
+        }
+
+    return {
+        "currency": actual_currency,
+        "fx_rate_to_usd": fx_rate_to_usd,
+        "currency_source": currency_source,
+        "currency_repaired": currency_repaired,
+        "currency_repair_reason": currency_repair_reason,
+    }
 
 
 def _build_analysis_record_from_file(filepath: Path) -> AnalysisRecord | None:
@@ -571,7 +667,7 @@ def load_latest_analyses(
             )
         )
 
-    heartbeat_state: dict[str, object] = {"file": "", "n": 0, "loaded": 0}
+    heartbeat_state: dict[str, int | str] = {"file": "", "n": 0, "loaded": 0}
     heartbeat_stop = threading.Event()
 
     def _heartbeat_worker() -> None:

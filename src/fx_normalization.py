@@ -14,6 +14,8 @@ import asyncio
 
 import structlog
 
+from src.async_utils import run_with_hard_timeout
+
 logger = structlog.get_logger(__name__)
 
 MINOR_UNIT_CURRENCY_ALIASES = {
@@ -78,9 +80,10 @@ async def get_fx_rate_yfinance(
             info = ticker.info
             return info.get("regularMarketPrice") or info.get("previousClose")
 
-        rate = await asyncio.wait_for(
+        rate = await run_with_hard_timeout(
             asyncio.to_thread(_fetch_rate),
             timeout=3.0,  # Quick timeout - we have fallbacks
+            label=f"fx_rate:{fx_ticker}",
         )
 
         if rate and rate > 0:

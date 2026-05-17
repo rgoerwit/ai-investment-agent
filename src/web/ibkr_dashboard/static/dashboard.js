@@ -55,9 +55,11 @@ function fmtCurrency(value) {
   }).format(value);
 }
 
-function fmtLocalMoney(value, currency = "") {
+function fmtLocalMoney(value, currency) {
   if (value === null || value === undefined) return "—";
-  return `${Number(value).toFixed(2)}${currency ? ` ${currency}` : ""}`;
+  const num = Number(value).toFixed(2);
+  if (!currency) return `? ${num}`;
+  return `${currency.toUpperCase()} ${num}`;
 }
 
 function fmtNumber(value, digits = 1) {
@@ -147,6 +149,24 @@ function renderActionTable(title, items, extraColumns = []) {
       </table>
     </section>
   `;
+}
+
+function sellTypeLabel(item) {
+  return item.sell_type_label || item.sell_type || "Sell";
+}
+
+function profitTakeDetail(item) {
+  const parts = [];
+  if (typeof item.cost_basis_return_pct === "number") {
+    parts.push(`${item.cost_basis_return_pct.toFixed(1)}% gain`);
+  }
+  if (item.position?.tax_term) {
+    parts.push(`tax: ${item.position.tax_term}`);
+  }
+  if (item.reason) {
+    parts.push(item.reason);
+  }
+  return escapeHtml(parts.join(" · ") || "—");
 }
 
 function renderCandidatePreview(title, items, limit = 5) {
@@ -413,19 +433,26 @@ function renderOverview() {
 
 function renderActions() {
   const actions = state.snapshot.actions;
-  const actionSections = [
-    actions.sell_stop_breach,
-    actions.sell_hard,
-    actions.sell_soft_review,
-    actions.review_macro,
-    actions.review_stop_breach,
-    actions.add,
-    actions.trim,
-    actions.review,
-    actions.dip_watch,
-    actions.hold,
+  const canonicalSections = actions.action_sections || [];
+  const fallbackSellItems = [
+    ...(actions.sell_stop_breach || []),
+    ...(actions.sell_hard || []),
+    ...(actions.sell_profit_take || []),
+    ...(actions.sell_soft_review || []),
   ];
-  if (actionSections.every((items) => !items || items.length === 0)) {
+  const fallbackSections = [
+    { key: "sell_recommendations", title: "Sell Recommendations", kind: "reconciliation_items", items: fallbackSellItems },
+    { key: "sell_related_reviews", title: "Sell-Related Reviews", kind: "reconciliation_items", items: [...(actions.review_stop_breach || []), ...(actions.review_macro || []), ...(actions.review_profit_take || [])] },
+    { key: "add", title: "Adds", kind: "reconciliation_items", items: actions.add || [] },
+    { key: "trim", title: "Trims", kind: "reconciliation_items", items: actions.trim || [] },
+    { key: "review", title: "Review Queue", kind: "reconciliation_items", items: actions.review || [] },
+    { key: "dip_watch", title: "Dip Watch", kind: "dip_watch", items: actions.dip_watch || [] },
+    { key: "hold", title: "Holds", kind: "reconciliation_items", items: actions.hold || [] },
+  ];
+  const actionSections = (canonicalSections.length ? canonicalSections : fallbackSections).filter(
+    (section) => section.items && section.items.length > 0,
+  );
+  if (actionSections.length === 0) {
     return `
       <section>
         <h3 class="section-title">Held-Position Actions</h3>
@@ -435,62 +462,68 @@ function renderActions() {
       ${renderCandidatePreview("Watchlist Buys Ready For Review", actions.watchlist_buy)}
     `;
   }
-  return `
-    ${renderActionTable("Stop Breaches", actions.sell_stop_breach, [
-      { label: "Price", render: (item) => fmtNumber(item.suggested_price, 2) },
-      {
-        label: "Would Settle",
-        render: (item) => escapeHtml(item.settlement_date || "—"),
-      },
-    ])}
-    ${renderActionTable("Fundamental Sells", actions.sell_hard, [
-      { label: "Price", render: (item) => fmtNumber(item.suggested_price, 2) },
-      {
-        label: "Would Settle",
-        render: (item) => escapeHtml(item.settlement_date || "—"),
-      },
-    ])}
-    ${renderActionTable("Soft Rejections", actions.sell_soft_review, [
-      { label: "Health", render: (item) => escapeHtml(item.analysis?.health_adj ?? "—") },
-      { label: "Growth", render: (item) => escapeHtml(item.analysis?.growth_adj ?? "—") },
-    ])}
-    ${renderActionTable("Macro Reviews", actions.review_macro, [
-      { label: "Health", render: (item) => escapeHtml(item.analysis?.health_adj ?? "—") },
-      { label: "Growth", render: (item) => escapeHtml(item.analysis?.growth_adj ?? "—") },
-    ])}
-    ${renderActionTable("Stop Breaches Under Review", actions.review_stop_breach, [
-      { label: "Health", render: (item) => escapeHtml(item.analysis?.health_adj ?? "—") },
-      { label: "Growth", render: (item) => escapeHtml(item.analysis?.growth_adj ?? "—") },
-    ])}
-    ${renderActionTable("Adds", actions.add, [
-      { label: "Price", render: (item) => fmtNumber(item.suggested_price, 2) },
-      { label: "Cost", render: (item) => fmtCurrency(Math.abs(item.cash_impact_usd ?? 0)) },
-    ])}
-    ${renderActionTable("Trims", actions.trim, [
-      { label: "Price", render: (item) => fmtNumber(item.suggested_price, 2) },
-      {
-        label: "Would Settle",
-        render: (item) => escapeHtml(item.settlement_date || "—"),
-      },
-    ])}
-    ${renderActionTable("Review Queue", actions.review, [
-      { label: "Health", render: (item) => escapeHtml(item.analysis?.health_adj ?? "—") },
-      { label: "Growth", render: (item) => escapeHtml(item.analysis?.growth_adj ?? "—") },
-    ])}
-    ${renderDipWatch(actions.dip_watch)}
-    ${renderActionTable("Holds", actions.hold, [
-      {
-        label: "Entry",
-        render: (item) =>
-          fmtLocalMoney(item.analysis?.entry_price, item.analysis?.currency),
-      },
-      {
-        label: "Current",
-        render: (item) =>
-          fmtLocalMoney(item.position?.current_price_local, item.position?.currency),
-      },
-    ])}
-  `;
+  return actionSections
+    .map((section) => {
+      if (section.key === "sell_recommendations") {
+        return renderActionTable(section.title, section.items, [
+          { label: "Type", render: (item) => escapeHtml(sellTypeLabel(item)) },
+          { label: "Price", render: (item) => fmtNumber(item.suggested_price, 2) },
+          {
+            label: "Would Settle",
+            render: (item) => escapeHtml(item.settlement_date || "—"),
+          },
+          { label: "Profit-Take Detail", render: profitTakeDetail },
+        ]);
+      }
+      if (section.key === "sell_related_reviews") {
+        return renderActionTable(section.title, section.items, [
+          { label: "Type", render: (item) => escapeHtml(sellTypeLabel(item)) },
+          { label: "Health", render: (item) => escapeHtml(item.analysis?.health_adj ?? "—") },
+          { label: "Growth", render: (item) => escapeHtml(item.analysis?.growth_adj ?? "—") },
+          { label: "Profit-Take Detail", render: profitTakeDetail },
+        ]);
+      }
+      if (section.key === "add") {
+        return renderActionTable(section.title, section.items, [
+          { label: "Price", render: (item) => fmtNumber(item.suggested_price, 2) },
+          { label: "Cost", render: (item) => fmtCurrency(Math.abs(item.cash_impact_usd ?? 0)) },
+        ]);
+      }
+      if (section.key === "trim") {
+        return renderActionTable(section.title, section.items, [
+          { label: "Price", render: (item) => fmtNumber(item.suggested_price, 2) },
+          {
+            label: "Would Settle",
+            render: (item) => escapeHtml(item.settlement_date || "—"),
+          },
+        ]);
+      }
+      if (section.key === "review") {
+        return renderActionTable(section.title, section.items, [
+          { label: "Health", render: (item) => escapeHtml(item.analysis?.health_adj ?? "—") },
+          { label: "Growth", render: (item) => escapeHtml(item.analysis?.growth_adj ?? "—") },
+        ]);
+      }
+      if (section.key === "dip_watch") {
+        return renderDipWatch(section.items);
+      }
+      if (section.key === "hold") {
+        return renderActionTable(section.title, section.items, [
+          {
+            label: "Entry",
+            render: (item) =>
+              fmtLocalMoney(item.analysis?.entry_price, item.analysis?.currency),
+          },
+          {
+            label: "Current",
+            render: (item) =>
+              fmtLocalMoney(item.position?.current_price_local, item.position?.currency),
+          },
+        ]);
+      }
+      return renderActionTable(section.title, section.items, []);
+    })
+    .join("");
 }
 
 function renderDipWatch(items) {

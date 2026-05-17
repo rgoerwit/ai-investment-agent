@@ -10,6 +10,7 @@ import pytest
 
 from src.async_utils import (
     dump_pending_tasks,
+    get_hard_timeout_orphan_snapshot,
     install_pending_task_dump_handler,
     run_with_hard_timeout,
 )
@@ -24,6 +25,7 @@ class TestRunWithHardTimeout:
 
         result = await run_with_hard_timeout(quick(), timeout=1.0, label="quick")
         assert result == 42
+        assert get_hard_timeout_orphan_snapshot(min_age_seconds=0) == []
 
     @pytest.mark.asyncio
     async def test_raises_timeouterror_after_deadline(self):
@@ -42,6 +44,7 @@ class TestRunWithHardTimeout:
         ``asyncio.wait_for`` waiting for a cancelled task that never finishes.
         """
         inner_started = asyncio.Event()
+        release_inner = asyncio.Event()
 
         async def uncancellable_inner():
             inner_started.set()
@@ -50,7 +53,7 @@ class TestRunWithHardTimeout:
                 # keep going, mimicking a thread blocked in a sync I/O call.
                 await asyncio.sleep(10)
             except asyncio.CancelledError:
-                await asyncio.sleep(10)  # ignore cancellation, keep blocking
+                await release_inner.wait()  # ignore cancellation until released
             return "never"
 
         start = time.monotonic()
@@ -61,6 +64,10 @@ class TestRunWithHardTimeout:
         elapsed = time.monotonic() - start
         assert elapsed < 1.0, f"caller blocked for {elapsed:.2f}s past timeout"
         assert inner_started.is_set()
+        snapshot = get_hard_timeout_orphan_snapshot(min_age_seconds=0)
+        assert any(item["label"] == "uncancellable" for item in snapshot)
+        release_inner.set()
+        await asyncio.sleep(0.05)
 
     @pytest.mark.asyncio
     async def test_orphan_exception_is_silenced(self, caplog):
@@ -77,6 +84,33 @@ class TestRunWithHardTimeout:
         # Let the orphan finish; there should be no "Task exception was never
         # retrieved" warning issued.
         await asyncio.sleep(0.1)
+
+    @pytest.mark.asyncio
+    async def test_orphan_snapshot_removes_completed_orphan(self):
+        release = asyncio.Event()
+
+        async def inner():
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                await release.wait()
+            return "done"
+
+        with pytest.raises(asyncio.TimeoutError):
+            await run_with_hard_timeout(inner(), timeout=0.01, label="tracked")
+
+        assert any(
+            item["label"] == "tracked"
+            for item in get_hard_timeout_orphan_snapshot(min_age_seconds=0)
+        )
+
+        release.set()
+        await asyncio.sleep(0.05)
+
+        assert not any(
+            item["label"] == "tracked"
+            for item in get_hard_timeout_orphan_snapshot(min_age_seconds=0)
+        )
 
     @pytest.mark.asyncio
     async def test_zero_or_negative_timeout_rejected(self):

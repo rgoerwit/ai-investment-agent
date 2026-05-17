@@ -10,11 +10,14 @@ from src.ibkr.models import (
     ReconciliationItem,
 )
 from src.ibkr.portfolio_presentation import (
+    PortfolioActionGroups,
+    build_action_display_sections,
     build_action_summary_counts,
     build_cash_summary,
     build_freshness_overview,
     build_live_order_note,
     build_portfolio_overview,
+    get_sell_type_label,
     group_portfolio_actions,
 )
 from src.ibkr.recommendation_service import PortfolioRecommendationBundle
@@ -112,6 +115,7 @@ def serialize_item(
         "ticker_ibkr": item.ticker.ibkr,
         "action": item.action,
         "sell_type": item.sell_type,
+        "sell_type_label": get_sell_type_label(item.sell_type),
         "reason": item.reason,
         "urgency": item.urgency,
         "is_watchlist": item.is_watchlist,
@@ -120,6 +124,8 @@ def serialize_item(
         "suggested_order_type": item.suggested_order_type,
         "cash_impact_usd": item.cash_impact_usd,
         "settlement_date": item.settlement_date,
+        "cost_basis_return_pct": item.cost_basis_return_pct,
+        "profit_take_reasons": list(item.profit_take_reasons),
         "live_order_note": build_live_order_note(item, live_orders),
         "position": _serialize_position(item.ibkr_position),
         "analysis": _serialize_analysis(item.analysis),
@@ -248,8 +254,16 @@ def _serialize_actions(
         "sell_hard": [
             serialize_item(item, live_orders=live_orders) for item in groups.hard_sells
         ],
+        "sell_profit_take": [
+            serialize_item(item, live_orders=live_orders)
+            for item in groups.profit_take_sells
+        ],
         "sell_soft_review": [
             serialize_item(item, live_orders=live_orders) for item in groups.soft_sells
+        ],
+        "review_profit_take": [
+            serialize_item(item, live_orders=live_orders)
+            for item in groups.profit_take_reviews
         ],
         "review_macro": [
             serialize_item(item, live_orders=live_orders)
@@ -283,10 +297,45 @@ def _serialize_actions(
         "watchlist_remove": [
             serialize_item(item, live_orders=live_orders) for item in groups.removes
         ],
+        "action_sections": _serialize_action_sections(
+            groups,
+            dip_watch=tuple(dip_watch),
+            live_orders=live_orders,
+        ),
         "macro_event_detected": any(
             "CORRELATED_SELL_EVENT" in flag for flag in health_flags
         ),
     }
+
+
+def _serialize_action_sections(
+    groups: PortfolioActionGroups,
+    *,
+    dip_watch: tuple[dict[str, Any], ...] | tuple[Any, ...],
+    live_orders: list[dict] | None,
+) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    for section in build_action_display_sections(groups, dip_watch_items=dip_watch):
+        if section.kind == "dip_watch":
+            items = [
+                candidate
+                if isinstance(candidate, dict)
+                else _serialize_dip_watch(candidate)
+                for candidate in section.items
+            ]
+        else:
+            items = [
+                serialize_item(item, live_orders=live_orders) for item in section.items
+            ]
+        payload.append(
+            {
+                "key": section.key,
+                "title": section.title,
+                "kind": section.kind,
+                "items": items,
+            }
+        )
+    return payload
 
 
 def _serialize_dip_watch(candidate: DipWatchCandidate) -> dict[str, Any]:
@@ -319,6 +368,9 @@ def _serialize_position(position: NormalizedPosition | None) -> dict[str, Any] |
         "currency": position.currency,
         "market_value_usd": position.market_value_usd,
         "unrealized_pnl_usd": position.unrealized_pnl_usd,
+        "acquired_date": position.acquired_date,
+        "holding_period_days": position.holding_period_days,
+        "tax_term": position.tax_term,
     }
 
 
@@ -336,6 +388,9 @@ def _serialize_analysis(analysis: AnalysisRecord | None) -> dict[str, Any] | Non
         "position_size": analysis.position_size,
         "current_price": analysis.current_price,
         "currency": analysis.currency,
+        "currency_source": analysis.currency_source,
+        "currency_repaired": analysis.currency_repaired,
+        "currency_repair_reason": analysis.currency_repair_reason,
         "entry_price": analysis.entry_price,
         "stop_price": analysis.stop_price,
         "target_1_price": analysis.target_1_price,
@@ -344,6 +399,7 @@ def _serialize_analysis(analysis: AnalysisRecord | None) -> dict[str, Any] | Non
         "sector": analysis.sector,
         "exchange": analysis.exchange,
         "is_quick_mode": analysis.is_quick_mode,
+        "capital_flag_types": list(analysis.capital_flag_types),
         "trade_block": {
             "action": analysis.trade_block.action,
             "size_pct": analysis.trade_block.size_pct,

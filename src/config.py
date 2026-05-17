@@ -349,10 +349,38 @@ class Settings(BaseSettings):
         validation_alias="CONSULTANT_QUICK_MODEL",
         description="OpenAI model for consultant in quick mode",
     )
+    consultant_tools_in_quick: bool = Field(
+        default=False,
+        validation_alias="CONSULTANT_TOOLS_IN_QUICK",
+        description="Allow Consultant MCP/tool loop during --quick screening runs",
+    )
+    # P1-5: lowered 60s → 35s. Saved-artifact data shows Consultant finishes
+    # well under 30s when it returns at all; the 60s cap mostly hid hung
+    # provider calls. The Consultant gate (P0-2) already short-circuits the
+    # cheap "clean consensus" and "RM-negative" cases, so the residual
+    # invocations are exactly the adversarial reviews where a tighter deadline
+    # is acceptable.
+    consultant_quick_total_timeout_seconds: float = Field(
+        default=35.0,
+        gt=0.0,
+        validation_alias="CONSULTANT_QUICK_TOTAL_TIMEOUT_SECONDS",
+        description="Total wall-clock Consultant budget in --quick mode",
+    )
+    consultant_quick_max_completion_tokens: int = Field(
+        default=4096,
+        ge=1024,
+        validation_alias="CONSULTANT_QUICK_MAX_COMPLETION_TOKENS",
+        description="Maximum Consultant completion token budget in --quick mode",
+    )
     auditor_model: str | None = Field(
         default=None,
         validation_alias="AUDITOR_MODEL",
         description="Model for the auditor agent (optional)",
+    )
+    auditor_quick_model: str = Field(
+        default="gpt-5.4-mini",
+        validation_alias="AUDITOR_QUICK_MODEL",
+        description="Model for the auditor agent in --quick mode",
     )
     editor_model: str | None = Field(
         default=None,
@@ -482,12 +510,129 @@ class Settings(BaseSettings):
         validation_alias="API_TIMEOUT",
         description="API request timeout in seconds",
     )
-    # Retries from 3 -> 10 to aggressively handle 504/503 transient errors
+    # Quick-mode screening should not inherit a 5-minute SDK socket/read
+    # timeout. The outer runtime helper still enforces the hard wall-clock cap;
+    # this SDK timeout catches provider stalls earlier and avoids 300s slow-tail
+    # failures from quick Gemini calls.
+    quick_llm_api_timeout_seconds: int = Field(
+        default=120,
+        ge=1,
+        validation_alias="QUICK_LLM_API_TIMEOUT_SECONDS",
+        description="Provider SDK timeout in seconds for quick-mode Gemini LLMs",
+    )
+    # Lowered from 10 -> 2: at 10 retries × 300s timeout, a single hung Gemini
+    # call could legitimately consume 50min before raising. The outer
+    # `invoke_with_rate_limit_handling` already retries 3× with backoff, so
+    # SDK-level retries are deliberately tight. Bump if you see frequent
+    # transient 5xx errors that aren't being absorbed.
     api_retry_attempts: int = Field(
-        default=10,
+        default=2,
         ge=0,
         validation_alias="API_RETRY_ATTEMPTS",
         description="Number of retry attempts for failed API calls",
+    )
+    # Wall-clock ceiling for a single `runnable.ainvoke()` call. Enforced via
+    # `run_with_hard_timeout` in `invoke_with_rate_limit_handling` so a hung
+    # provider SDK can't park a worker for hours. Keep tight for screening; use
+    # env override if a specific deep/manual run needs more headroom.
+    llm_call_hard_timeout_seconds: float = Field(
+        default=120.0,
+        gt=0.0,
+        validation_alias="LLM_CALL_HARD_TIMEOUT_SECONDS",
+        description=(
+            "Hard wall-clock cap (seconds) for a single LLM ainvoke; "
+            "raised as TimeoutError if exceeded."
+        ),
+    )
+    # Tighter per-call cap for --quick mode. Quick Gemini Flash calls should
+    # resolve in 10-30s; 60s surfaces a hung provider ~2x faster than the
+    # normal cap, cutting worst-case stage-1 screening time significantly.
+    quick_llm_call_hard_timeout_seconds: float = Field(
+        default=60.0,
+        gt=0.0,
+        validation_alias="QUICK_LLM_CALL_HARD_TIMEOUT_SECONDS",
+        description=(
+            "Hard wall-clock cap (seconds) for a single LLM ainvoke in --quick mode."
+        ),
+    )
+
+    # --- LLM circuit breaker (P2-7) ----------------------------------------
+    # When a provider/model starts serving back-to-back hard-timeouts (e.g.,
+    # regional Gemini Flash degradation), the breaker short-circuits the
+    # next call with CircuitOpenError instead of waiting another full
+    # timeout. In-memory only; reset per process.
+    llm_circuit_breaker_enabled: bool = Field(
+        default=True,
+        validation_alias="LLM_CIRCUIT_BREAKER_ENABLED",
+        description="Enable per-(agent, provider, model) circuit breaker on chronic timeouts",
+    )
+    llm_circuit_breaker_threshold: int = Field(
+        default=3,
+        ge=1,
+        validation_alias="LLM_CIRCUIT_BREAKER_THRESHOLD",
+        description="Consecutive timeout failures within the window before the breaker opens",
+    )
+    llm_circuit_breaker_window_seconds: float = Field(
+        default=300.0,
+        gt=0.0,
+        validation_alias="LLM_CIRCUIT_BREAKER_WINDOW_SECONDS",
+        description="Sliding-window length (s) for counting timeout failures",
+    )
+    llm_circuit_breaker_cool_off_seconds: float = Field(
+        default=60.0,
+        gt=0.0,
+        validation_alias="LLM_CIRCUIT_BREAKER_COOL_OFF_SECONDS",
+        description="Cool-off (s) before the breaker enters half-open to probe recovery",
+    )
+    # --- Network breaker (process-global, host-level DNS/connect failures) --
+    # Distinct from `llm_circuit_breaker_*` (per-(agent,provider,model),
+    # timeout-only). This breaker watches dns_resolution + connect_error
+    # across ALL contexts so a host network outage doesn't cause every
+    # parallel analyst to independently burn its retry budget. Tuned tight:
+    # 4 failures in 30s opens; cool_off 45s. See src/agents/network_breaker.py.
+    network_breaker_enabled: bool = Field(
+        default=True,
+        validation_alias="NETWORK_BREAKER_ENABLED",
+        description="Enable process-global circuit breaker on DNS/connect failures",
+    )
+    network_breaker_threshold: int = Field(
+        default=4,
+        ge=1,
+        validation_alias="NETWORK_BREAKER_THRESHOLD",
+        description="DNS/connect failures within the window before the breaker opens",
+    )
+    network_breaker_window_seconds: float = Field(
+        default=30.0,
+        gt=0.0,
+        validation_alias="NETWORK_BREAKER_WINDOW_SECONDS",
+        description="Sliding-window length (s) for counting network failures",
+    )
+    network_breaker_cool_off_seconds: float = Field(
+        default=45.0,
+        gt=0.0,
+        validation_alias="NETWORK_BREAKER_COOL_OFF_SECONDS",
+        description="Cool-off (s) before the network breaker probes recovery",
+    )
+    # Hard ceiling on shutdown cleanup (cleanup_async_resources). Protects
+    # against httpx.AsyncClient.aclose() and similar paths that block on
+    # dead sockets when the host's DNS / network is down — observed during
+    # the May 2026 overnight macOS DNS outage where a "completed" run sat
+    # in the finally block for minutes waiting on socket close.
+    shutdown_hard_timeout_seconds: float = Field(
+        default=15.0,
+        gt=0.0,
+        validation_alias="SHUTDOWN_HARD_TIMEOUT_SECONDS",
+        description=(
+            "Hard wall-clock cap (seconds) for cleanup_async_resources at "
+            "process shutdown; on timeout the process forces os._exit()."
+        ),
+    )
+    # Set by _apply_runtime_overrides when --quick is passed; allows
+    # invoke_with_rate_limit_handling to pick the tighter quick timeout.
+    quick_mode_active: bool = Field(
+        default=False,
+        validation_alias="QUICK_MODE_ACTIVE",
+        description="True when the current run was started with --quick.",
     )
     llm_base_output_tokens: int = Field(
         default=32768,
@@ -524,6 +669,14 @@ class Settings(BaseSettings):
         ge=1,
         validation_alias="GEMINI_RPM_LIMIT",
         description="Gemini API rate limit (requests per minute)",
+    )
+    # OpenAI RPM limit for consultant/auditor/editor LLMs. None (default) means
+    # no rate limiter is attached — set OPENAI_RPM_LIMIT in .env to enable.
+    openai_rpm_limit: int | None = Field(
+        default=None,
+        ge=1,
+        validation_alias="OPENAI_RPM_LIMIT",
+        description="OpenAI API rate limit (requests per minute); unset = no throttle",
     )
 
     # --- Token Management ---
@@ -773,7 +926,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def setup_environment(self) -> "Settings":
-        """Post-initialization setup: create directories, configure logging, and export SDK settings.
+        """Post-initialization setup: normalize paths, configure logging, and export SDK settings.
 
         Note: Third-party SDKs (LangSmith, etc.) expect configuration in os.environ.
         Since we removed load_dotenv(), we must export necessary settings here.
@@ -789,16 +942,6 @@ class Settings(BaseSettings):
         self.prompts_dir = Path(os.path.expanduser(str(self.prompts_dir)))
         self.mcp_servers_path = Path(os.path.expanduser(str(self.mcp_servers_path)))
         self.mcp_usage_db_path = Path(os.path.expanduser(str(self.mcp_usage_db_path)))
-
-        # Create required directories
-        for directory in [
-            self.results_dir,
-            self.data_cache_dir,
-            Path(self.chroma_persist_directory),
-            self.images_dir,
-            self.mcp_usage_db_path.parent,
-        ]:
-            directory.mkdir(parents=True, exist_ok=True)
 
         # Set logging level
         log_level_value = getattr(logging, self.log_level.upper(), logging.INFO)
@@ -857,6 +1000,16 @@ class Settings(BaseSettings):
             os.environ["GRPC_POLL_STRATEGY"] = self.grpc_poll_strategy
 
         return self
+
+    def runtime_directories(self) -> list[Path]:
+        """Directories the CLI runtime should create explicitly at startup."""
+        return [
+            Path(self.results_dir),
+            Path(self.data_cache_dir),
+            Path(self.chroma_persist_directory),
+            Path(self.images_dir),
+            Path(self.mcp_usage_db_path).parent,
+        ]
 
     def get_google_api_key(self) -> str:
         """

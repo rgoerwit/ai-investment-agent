@@ -603,3 +603,92 @@ class TestAllMemoryStats:
         stats = get_all_memory_stats()
 
         assert stats == {}
+
+
+class TestAddSituationsCollectionNotFoundRetry:
+    """May 2026 2099.HK incident: a stale `situation_collection` handle
+    (e.g. across a model-mismatch deletion in a concurrent process)
+    surfaces as `add_situations_failed` (NotFoundError) and a downstream
+    `rejection_record_storage_failed` warning. The retry recovers from
+    that by re-fetching the collection via `get_or_create_collection`."""
+
+    @pytest.mark.asyncio
+    async def test_retries_on_collection_notfound_and_recovers(self):
+        from src.memory import FinancialSituationMemory
+
+        memory = FinancialSituationMemory.__new__(FinancialSituationMemory)
+        memory.name = "lessons_learned"
+        memory.available = True
+        memory._EMBEDDING_MODEL = "test-model"
+        memory._EMBEDDING_DIMENSION = 768
+
+        # First add() raises a NotFoundError-like exception; second succeeds.
+        first_collection = MagicMock()
+        first_collection.add.side_effect = Exception(
+            "Error getting collection: Collection [lessons_learned] does not exist."
+        )
+        recovered_collection = MagicMock()
+        recovered_collection.add.return_value = None
+
+        memory.situation_collection = first_collection
+        memory.chroma_client = MagicMock()
+        memory.chroma_client.get_or_create_collection.return_value = (
+            recovered_collection
+        )
+
+        async def fake_embedding(_text):
+            return [0.1] * 768
+
+        memory._get_embedding = fake_embedding
+
+        # Mock inspection to allow content through.
+        with patch(
+            "src.memory.get_current_inspection_service"
+        ) as mock_inspection_service:
+            mock_inspection = MagicMock()
+            mock_inspection.check = AsyncMock(return_value="approved content")
+            mock_inspection_service.return_value = mock_inspection
+
+            ok = await memory.add_situations(["test situation"], [{"ticker": "T"}])
+
+        assert ok is True
+        # Both the original and the recovered collection saw an .add() call.
+        assert first_collection.add.call_count == 1
+        assert recovered_collection.add.call_count == 1
+        memory.chroma_client.get_or_create_collection.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_propagates_non_notfound_errors_without_retry(self):
+        """Other errors (e.g. validation) must NOT trigger a refetch retry —
+        we'd just be papering over real bugs. Caller sees the standard
+        `add_situations_failed` log + False return value."""
+        from src.memory import FinancialSituationMemory
+
+        memory = FinancialSituationMemory.__new__(FinancialSituationMemory)
+        memory.name = "lessons_learned"
+        memory.available = True
+        memory._EMBEDDING_MODEL = "test-model"
+        memory._EMBEDDING_DIMENSION = 768
+
+        collection = MagicMock()
+        collection.add.side_effect = ValueError("schema mismatch")
+        memory.situation_collection = collection
+        memory.chroma_client = MagicMock()
+
+        async def fake_embedding(_text):
+            return [0.1] * 768
+
+        memory._get_embedding = fake_embedding
+
+        with patch(
+            "src.memory.get_current_inspection_service"
+        ) as mock_inspection_service:
+            mock_inspection = MagicMock()
+            mock_inspection.check = AsyncMock(return_value="approved")
+            mock_inspection_service.return_value = mock_inspection
+
+            ok = await memory.add_situations(["test"], [{}])
+
+        assert ok is False
+        assert collection.add.call_count == 1
+        memory.chroma_client.get_or_create_collection.assert_not_called()

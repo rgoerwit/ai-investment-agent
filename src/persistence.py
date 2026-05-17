@@ -15,6 +15,42 @@ from src.sector_normalization import normalize_sector_label
 logger = structlog.get_logger(__name__)
 
 
+def _build_quick_consultant_summary(
+    result: dict[str, Any], tracker_stats: dict[str, Any]
+) -> dict[str, object]:
+    artifact_statuses = result.get("artifact_statuses", {}) or {}
+    consultant_status = artifact_statuses.get("consultant_review") or {}
+    attempts = [
+        attempt
+        for attempt in tracker_stats.get("call_attempts", []) or []
+        if "consultant" in str(attempt.get("agent_name", "")).lower()
+    ]
+    agent_rows = tracker_stats.get("agents", {}) or {}
+    token_rows = [
+        row for name, row in agent_rows.items() if "consultant" in str(name).lower()
+    ]
+    tokens = sum(int(row.get("total_tokens") or 0) for row in token_rows)
+    elapsed = sum(float(attempt.get("elapsed_seconds") or 0.0) for attempt in attempts)
+    timeout = any(attempt.get("failure_kind") == "timeout" for attempt in attempts)
+
+    if consultant_status.get("complete"):
+        status = "ok" if consultant_status.get("ok") else "failed"
+    elif attempts:
+        status = "attempted"
+    else:
+        status = "not_run"
+
+    return {
+        "status": status,
+        "elapsed_seconds": round(elapsed, 4),
+        "tokens": tokens,
+        "attempts": len(attempts),
+        "timeout": timeout,
+        "tool_failures": int(result.get("consultant_tool_failures") or 0),
+        "profile": result.get("consultant_quick_profile") or "unknown",
+    }
+
+
 def build_run_summary(
     result: dict,
     *,
@@ -82,7 +118,7 @@ def build_run_summary(
     auditor_finished = bool(auditor_status.get("complete"))
     providers_used = _collect_used_providers()
 
-    return {
+    summary = {
         "quick_mode": quick_mode,
         "quick_model": config.quick_think_llm,
         "deep_model": config.deep_think_llm,
@@ -122,6 +158,11 @@ def build_run_summary(
             .keys()
         ),
     }
+    if quick_mode:
+        summary["quick_consultant"] = _build_quick_consultant_summary(
+            result, tracker_stats
+        )
+    return summary
 
 
 def _normalize_macro_context_metadata(
@@ -178,9 +219,15 @@ def save_results_to_file(
     *,
     results_dir: Path | str | None = None,
     trace_id: str | None = None,
+    strict_mode: bool = False,
     logger_obj=logger,
 ) -> Path:
-    """Save analysis results to a JSON file in the results directory."""
+    """Save analysis results to a JSON file in the results directory.
+
+    `strict_mode` is recorded in the prediction_snapshot so retrospectives
+    can weight strict-mode rejections differently from normal-mode ones
+    (strict mode rejects valid REIT/PFIC/VIE candidates at the gate).
+    """
     from src.error_safety import summarize_exception
     from src.memory import get_ticker_memory_stats
     from src.prompts import get_all_prompts
@@ -391,6 +438,7 @@ def save_results_to_file(
                 ticker,
                 quick_mode,
                 trace_id=trace_id,
+                is_strict_mode=strict_mode,
             )
         )
     except Exception as exc:
@@ -432,14 +480,18 @@ def save_results_to_file(
         )
 
     logger_obj.info(
-        f"Results saved to {filepath} ({len(prompts_used)} prompts tracked, {len(custom_prompts_loaded)} custom)"
+        "results_saved",
+        filepath=str(filepath),
+        prompts_tracked=len(prompts_used),
+        custom_prompts=len(custom_prompts_loaded),
     )
     if token_stats["total_calls"] > 0:
         logger_obj.info(
-            f"Token usage tracked: {token_stats['total_calls']} LLM calls, "
-            f"{token_stats['total_tokens']:,} total tokens, "
-            f"${token_stats['total_cost_usd']:.4f} projected cost (paid tier) - "
-            f"saved to {filepath}"
+            "token_usage_tracked",
+            llm_calls=token_stats["total_calls"],
+            total_tokens=token_stats["total_tokens"],
+            projected_cost_usd=round(token_stats["total_cost_usd"], 4),
+            filepath=str(filepath),
         )
     return filepath
 
@@ -474,6 +526,7 @@ def _persist_analysis_outputs(
             quick_mode=args.quick,
             results_dir=Path(config.results_dir),
             trace_id=trace_id,
+            strict_mode=getattr(args, "strict", False),
             logger_obj=logger_obj,
         )
         if not args.quiet and not args.brief and console_obj is not None:
@@ -503,8 +556,22 @@ async def _maybe_save_rejection_record(
     trace_id: str | None = None,
     logger_obj=logger,
 ) -> None:
-    """Persist non-BUY verdicts as retrospective rejection records."""
+    """Persist non-BUY verdicts as retrospective rejection records.
+
+    Honors ``--no-memory`` (``config.enable_memory == False``) — the
+    rejection record lives in the same global ``lessons_learned`` ChromaDB
+    collection as full retrospective lessons, and skipping memory should
+    skip *all* writes to it. The retrospective comparison itself is gated
+    in ``src/main.py``; this matches that contract.
+    """
     from src.error_safety import summarize_exception
+
+    if not config.enable_memory:
+        logger_obj.debug(
+            "rejection_record_save_skipped_no_memory",
+            ticker=getattr(args, "ticker", None),
+        )
+        return
 
     try:
         from src.retrospective import (
@@ -519,6 +586,7 @@ async def _maybe_save_rejection_record(
                 args.ticker,
                 is_quick_mode=args.quick,
                 trace_id=trace_id,
+                is_strict_mode=getattr(args, "strict", False),
             )
         )
         verdict = (snapshot or {}).get("verdict", "")

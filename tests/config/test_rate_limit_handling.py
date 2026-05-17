@@ -211,7 +211,10 @@ class TestNonRateLimitErrors:
 
         with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             result = await invoke_with_rate_limit_handling(
-                runnable, {"input": "test"}, max_attempts=3
+                runnable,
+                {"input": "test"},
+                max_attempts=3,
+                max_transient_attempts=3,
             )
 
         assert result == "success"

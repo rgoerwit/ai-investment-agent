@@ -84,14 +84,23 @@ async def search_foreign_sources(
             sources_used.append("DuckDuckGo")
         source_note = f"Sources: {', '.join(sources_used)}" if sources_used else ""
 
+        # IMPORTANT: keep `{results_str}` at the very end of the returned
+        # string. `results_str` is the Tavily `<search_results>...
+        # </search_results>` block; the inspector's
+        # `_detect_search_results_breakouts` heuristic treats the terminal
+        # `</search_results>` as legitimate only when the closer is
+        # followed by whitespace alone. A trailing `Note:` footer (or any
+        # other plain text after the closer) makes the heuristic flag it
+        # as a delimiter_breakout — see the May 2026 2364.TW false-positive
+        # incident. Put metadata BEFORE the wrapper, never after.
         return f"""### Foreign Source Search Results
 Query: {search_query}
 Ticker: {ticker} ({company_name if company_resolved else 'UNVERIFIED COMPANY'})
 {source_note}
 
-{results_str}
+Note: Verify dates and currencies in the source data.
 
-Note: Verify dates and currencies in the source data."""
+{results_str}"""
     except Exception as exc:
         logger.error(f"Foreign source search error: {exc}")
         return f"Error searching foreign sources: {exc}"

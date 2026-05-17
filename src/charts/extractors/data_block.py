@@ -7,9 +7,21 @@ from dataclasses import dataclass
 
 import structlog
 
-from src.data_block_utils import extract_last_data_block
+from src.data_block_utils import (
+    extract_block_field_from_text,
+    extract_block_number_from_text,
+    extract_last_data_block,
+)
 
 logger = structlog.get_logger(__name__)
+
+
+def _first_value(*values):
+    """Return the first non-None value from the given candidates."""
+    for value in values:
+        if value is not None:
+            return value
+    return None
 
 
 @dataclass
@@ -134,52 +146,109 @@ def extract_chart_data_from_data_block(fundamentals_report: str) -> ChartRawData
     num_pattern = r"[*_`$\s]*([\d,.]+)[*_`]*"
 
     result = ChartRawData(
-        current_price=_extract_float(rf"CURRENT_PRICE:\s*{num_pattern}", data_block),
-        fifty_two_week_high=_extract_float(
-            rf"FIFTY_TWO_WEEK_HIGH:\s*{num_pattern}", data_block
+        current_price=_first_value(
+            extract_block_number_from_text(data_block, "CURRENT_PRICE"),
+            _extract_float(rf"CURRENT_PRICE:\s*{num_pattern}", data_block),
         ),
-        fifty_two_week_low=_extract_float(
-            rf"FIFTY_TWO_WEEK_LOW:\s*{num_pattern}", data_block
+        fifty_two_week_high=_first_value(
+            extract_block_number_from_text(data_block, "FIFTY_TWO_WEEK_HIGH"),
+            _extract_float(rf"FIFTY_TWO_WEEK_HIGH:\s*{num_pattern}", data_block),
         ),
-        moving_avg_50=_extract_float(rf"MOVING_AVG_50:\s*{num_pattern}", data_block),
-        moving_avg_200=_extract_float(rf"MOVING_AVG_200:\s*{num_pattern}", data_block),
-        external_target_high=_extract_float(
-            rf"EXTERNAL_ANALYST_TARGET_HIGH:\s*{num_pattern}", data_block
+        fifty_two_week_low=_first_value(
+            extract_block_number_from_text(data_block, "FIFTY_TWO_WEEK_LOW"),
+            _extract_float(rf"FIFTY_TWO_WEEK_LOW:\s*{num_pattern}", data_block),
         ),
-        external_target_low=_extract_float(
-            rf"EXTERNAL_ANALYST_TARGET_LOW:\s*{num_pattern}", data_block
+        moving_avg_50=_first_value(
+            extract_block_number_from_text(data_block, "MOVING_AVG_50"),
+            _extract_float(rf"MOVING_AVG_50:\s*{num_pattern}", data_block),
         ),
-        external_target_mean=_extract_float(
-            rf"EXTERNAL_ANALYST_TARGET_MEAN:\s*{num_pattern}", data_block
+        moving_avg_200=_first_value(
+            extract_block_number_from_text(data_block, "MOVING_AVG_200"),
+            _extract_float(rf"MOVING_AVG_200:\s*{num_pattern}", data_block),
+        ),
+        external_target_high=_first_value(
+            extract_block_number_from_text(data_block, "EXTERNAL_ANALYST_TARGET_HIGH"),
+            _extract_float(
+                rf"EXTERNAL_ANALYST_TARGET_HIGH:\s*{num_pattern}", data_block
+            ),
+        ),
+        external_target_low=_first_value(
+            extract_block_number_from_text(data_block, "EXTERNAL_ANALYST_TARGET_LOW"),
+            _extract_float(
+                rf"EXTERNAL_ANALYST_TARGET_LOW:\s*{num_pattern}", data_block
+            ),
+        ),
+        external_target_mean=_first_value(
+            extract_block_number_from_text(data_block, "EXTERNAL_ANALYST_TARGET_MEAN"),
+            _extract_float(
+                rf"EXTERNAL_ANALYST_TARGET_MEAN:\s*{num_pattern}", data_block
+            ),
         ),
         # Extended metrics
-        pe_ratio_ttm=_extract_float(rf"PE_RATIO_TTM:\s*{num_pattern}", data_block),
-        pb_ratio=_extract_float(rf"PB_RATIO:\s*{num_pattern}", data_block),
-        peg_ratio=_extract_float(rf"PEG_RATIO:\s*{num_pattern}", data_block),
-        adjusted_health_score=_extract_float(
-            rf"ADJUSTED_HEALTH_SCORE:\s*{num_pattern}", data_block
+        pe_ratio_ttm=_first_value(
+            extract_block_number_from_text(data_block, "PE_RATIO_TTM"),
+            _extract_float(rf"PE_RATIO_TTM:\s*{num_pattern}", data_block),
         ),
-        adjusted_growth_score=_extract_float(
-            rf"ADJUSTED_GROWTH_SCORE:\s*{num_pattern}", data_block
+        pb_ratio=_first_value(
+            extract_block_number_from_text(data_block, "PB_RATIO"),
+            _extract_float(rf"PB_RATIO:\s*{num_pattern}", data_block),
+        ),
+        peg_ratio=_first_value(
+            extract_block_number_from_text(data_block, "PEG_RATIO"),
+            _extract_float(rf"PEG_RATIO:\s*{num_pattern}", data_block),
+        ),
+        adjusted_health_score=_first_value(
+            extract_block_number_from_text(data_block, "ADJUSTED_HEALTH_SCORE"),
+            _extract_float(rf"ADJUSTED_HEALTH_SCORE:\s*{num_pattern}", data_block),
+        ),
+        adjusted_growth_score=_first_value(
+            extract_block_number_from_text(data_block, "ADJUSTED_GROWTH_SCORE"),
+            _extract_float(rf"ADJUSTED_GROWTH_SCORE:\s*{num_pattern}", data_block),
         ),
         # ANALYST_COVERAGE_ENGLISH = Refinitiv/FactSet count (skews English-accessible).
         # Falls back to 0 when missing; chart_node.py treats 0 as "unknown" (neutral score).
         analyst_coverage=int(
-            _extract_float(rf"ANALYST_COVERAGE_ENGLISH:\s*{num_pattern}", data_block)
-            or 0
+            _first_value(
+                extract_block_number_from_text(data_block, "ANALYST_COVERAGE_ENGLISH"),
+                _extract_float(
+                    rf"ANALYST_COVERAGE_ENGLISH:\s*{num_pattern}", data_block
+                ),
+                0,
+            )
         ),
-        pfic_risk=_extract_str(r"PFIC_RISK:\s*([A-Za-z]+)", data_block),
-        adr_impact=_extract_str(r"ADR_THESIS_IMPACT:\s*([A-Za-z_]+)", data_block),
-        us_revenue_percent=_extract_str(r"US_REVENUE_PERCENT:\s*(.+)", data_block),
+        pfic_risk=_first_value(
+            extract_block_field_from_text(data_block, "PFIC_RISK"),
+            _extract_str(r"PFIC_RISK:\s*([A-Za-z]+)", data_block),
+        ),
+        adr_impact=_first_value(
+            extract_block_field_from_text(data_block, "ADR_THESIS_IMPACT"),
+            _extract_str(r"ADR_THESIS_IMPACT:\s*([A-Za-z_]+)", data_block),
+        ),
+        us_revenue_percent=_first_value(
+            extract_block_field_from_text(data_block, "US_REVENUE_PERCENT"),
+            _extract_str(r"US_REVENUE_PERCENT:\s*(.+)", data_block),
+        ),
         # Extract from DATA_BLOCK (structured fields added in prompt v7.4)
-        de_ratio=_extract_float(rf"DE_RATIO:\s*{num_pattern}", data_block),
-        roa=_extract_float(rf"ROA_PERCENT:\s*{num_pattern}", data_block),
+        de_ratio=_first_value(
+            extract_block_number_from_text(data_block, "DE_RATIO"),
+            _extract_float(rf"DE_RATIO:\s*{num_pattern}", data_block),
+        ),
+        roa=_first_value(
+            extract_block_number_from_text(data_block, "ROA_PERCENT"),
+            _extract_float(rf"ROA_PERCENT:\s*{num_pattern}", data_block),
+        ),
         # Permissive pattern: captures until newline/comment to handle spaces (e.g., "Hong Kong.HKEX")
-        jurisdiction=_extract_str(r"JURISDICTION:\s*([^\n#]+)", data_block),
+        jurisdiction=_first_value(
+            extract_block_field_from_text(data_block, "JURISDICTION"),
+            _extract_str(r"JURISDICTION:\s*([^\n#]+)", data_block),
+        ),
         vie_structure=_extract_vie_from_block(data_block),
         cmic_flagged=_extract_cmic_from_block(data_block),
         # Pass-through: extract as string to preserve currency/multipliers (e.g., "$14.5B")
-        operating_cash_flow=_extract_str(r"OPERATING_CASH_FLOW:\s*(.+)", data_block),
+        operating_cash_flow=_first_value(
+            extract_block_field_from_text(data_block, "OPERATING_CASH_FLOW"),
+            _extract_str(r"OPERATING_CASH_FLOW:\s*(.+)", data_block),
+        ),
     )
 
     logger.debug(

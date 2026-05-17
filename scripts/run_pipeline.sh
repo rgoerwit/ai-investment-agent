@@ -11,7 +11,7 @@
 #   --force             Re-run even if output files exist (disables resumability)
 #   --skip-scrape FILE  Use existing ticker list instead of running find_gems.py
 #   --include-us        Pass --include-us to find_gems.py
-#   --cooldown N        Override COOLDOWN_SECONDS (default: 60)
+#   --cooldown N        Override COOLDOWN_SECONDS (default: 10)
 #   --stage N           Start from stage N (0, 1, or 2). Requires prior stages' outputs.
 #   --run-date DATE     Force output/resume date (YYYY-MM-DD), useful for cross-day resume
 #   --buys-file FILE    Explicit BUY list path (bypasses date-based default; use with --stage 2
@@ -20,7 +20,7 @@
 #   -h, --help          Show this help message
 #
 # Environment:
-#   COOLDOWN_SECONDS    Seconds between tickers (default: 60, use 10 for paid tier)
+#   COOLDOWN_SECONDS    Seconds between tickers (default: 10)
 
 set -euo pipefail
 
@@ -34,7 +34,7 @@ DATE=$(date +%Y-%m-%d)
 SCRATCH="scratch"
 TICKER_LIST="${SCRATCH}/gems_${DATE}.txt"
 BUY_LIST="${SCRATCH}/buys_${DATE}.txt"
-COOLDOWN="${COOLDOWN_SECONDS:-60}"
+COOLDOWN="${COOLDOWN_SECONDS:-10}"
 FORCE=false
 SKIP_SCRAPE=""
 INCLUDE_US=""
@@ -59,6 +59,21 @@ info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
 success() { echo -e "${GREEN}[OK]${NC} $1"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
 fail()    { echo -e "${RED}[FAIL]${NC} $1"; }
+
+# Detect inherited SIG_IGN for SIGINT. If the parent shell session has left
+# SIGINT in an ignored state (a borked tty after a crashed prompt-toolkit app
+# such as aider, a non-interactive parent shell, etc.), bash inherits that
+# disposition and Ctrl-C produces no signal — there is no in-script remedy
+# (an explicit `trap` here cannot override an inherited SIG_IGN reliably on
+# bash 3.2). Warn the operator so they know to use kill from another terminal
+# instead of expecting Ctrl-C to abort.
+case "$(trap -p INT)" in
+    *"-- ''"*)
+        warn "SIGINT appears to be ignored in this shell session — Ctrl-C will NOT abort this run."
+        warn "If you need to stop this run, use 'kill <pid>' from another terminal."
+        warn "To restore Ctrl-C behavior: open a fresh terminal (or run 'stty sane' and start a new shell)."
+        ;;
+esac
 
 # --- Confirmation prompt (skipped with --yes) ---
 confirm() {
@@ -143,6 +158,8 @@ write_pipeline_marker() {
 }
 
 resolve_python_cmd() {
+    local active_python_missing_deps=false
+
     if [[ -n "${INVESTMENT_AGENT_CONTAINER:-}" ]] || [[ -f "/.dockerenv" ]] || [[ -f "/run/.containerenv" ]]; then
         PYTHON_CMD=(python)
         PYTHON_CMD_DISPLAY="python"
@@ -150,15 +167,29 @@ resolve_python_cmd() {
     fi
 
     if [[ -n "${VIRTUAL_ENV:-}" ]]; then
-        PYTHON_CMD=(python)
-        PYTHON_CMD_DISPLAY="python"
-        return
+        if python -c "import pandas, requests, yfinance" >/dev/null 2>&1; then
+            PYTHON_CMD=(python)
+            PYTHON_CMD_DISPLAY="python"
+            return
+        fi
+        active_python_missing_deps=true
     fi
 
     if command -v poetry &> /dev/null; then
+        if $active_python_missing_deps; then
+            warn "Active virtual environment lacks repo dependencies; falling back to Poetry runtime"
+            info "If this keeps happening, deactivate the unrelated venv or run: poetry install"
+        fi
         PYTHON_CMD=(poetry run python)
         PYTHON_CMD_DISPLAY="poetry run python"
         return
+    fi
+
+    if $active_python_missing_deps; then
+        fail "Active virtual environment is missing repo dependencies"
+        info "Deactivate the unrelated venv, or install this project's dependencies into it"
+        info "Recommended: poetry install"
+        exit 1
     fi
 
     fail "Poetry is not installed and no active virtual environment was detected"
@@ -234,6 +265,51 @@ detect_stage1_resume_date() {
     fi
 }
 
+# Foot-gun guard: when the chosen $DATE matches very few existing quick
+# reports for tickers in $TICKER_LIST but some OTHER date matches dramatically
+# more, warn the operator that they probably gave us the wrong saved file
+# / wrong --run-date. We only fire when the discrepancy is large (≥10x,
+# absolute floor of 25) so normal small drift stays silent. Stdout is the
+# winning date, or empty if no warning is warranted.
+suggest_better_resume_date() {
+    local ticker_list="$1"
+    local chosen_date="$2"
+    local chosen_count="$3"
+    # Find candidate dates from existing scratch/*_quick.md filenames.
+    # Skip if there's nothing to scan.
+    local candidate_dates
+    candidate_dates=$(
+        find "$SCRATCH" -maxdepth 1 -name 'README-*-*_quick.md' 2>/dev/null \
+            | sed -E 's/.*-([0-9]{4}-[0-9]{2}-[0-9]{2})_quick\.md$/\1/' \
+            | sort -u
+    )
+    [[ -z "$candidate_dates" ]] && return 0
+
+    # Among candidate dates that dominate the chosen date by ≥10x AND have
+    # at least 25 absolute matches, prefer the most RECENT (ISO 8601 sorts
+    # lexically — sort -r gives newest first). This matches operator
+    # intent: "I ran something yesterday; help me resume that," not
+    # "show me the date that historically had the most reports."
+    local threshold=$((chosen_count * 10 + 1))
+    [[ "$threshold" -lt 25 ]] && threshold=25
+
+    local best_date="" best_count=0 count date
+    while IFS= read -r date; do
+        [[ -z "$date" || "$date" == "$chosen_date" ]] && continue
+        count=$(count_completed_quick_reports_for_date "$ticker_list" "$date")
+        if [[ "$count" -ge "$threshold" ]]; then
+            # First match wins (we walk newest → oldest).
+            best_date="$date"
+            best_count="$count"
+            break
+        fi
+    done <<< "$(sort -r <<< "$candidate_dates")"
+
+    if [[ -n "$best_date" ]]; then
+        printf '%s %s\n' "$best_date" "$best_count"
+    fi
+}
+
 # --- Parse arguments ---
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -280,7 +356,7 @@ OPTIONS:
   --force             Re-run even if output files exist (disables resumability)
   --skip-scrape FILE  Use existing ticker list instead of running find_gems.py
   --include-us        Include US exchanges in scrape phase
-  --cooldown N        Seconds between ticker analyses (default: 60)
+  --cooldown N        Seconds between ticker analyses (default: 10)
   --stage N           Start from stage N (0, 1, or 2)
   --run-date DATE     Force the pipeline/output date (YYYY-MM-DD) for cross-day resume
   --buys-file FILE    Explicit BUY list path — bypasses the date-based default
@@ -289,12 +365,15 @@ OPTIONS:
                         ./scripts/run_pipeline.sh --stage 2 --buys-file scratch/buys_2026-02-24.txt
   --strict            Apply strict mode to Stage 2 full analysis (tighter D/E, reject
                       REITs/PFIC/VIE, escalate value traps, higher BUY conviction bar).
-                      Stage 1 screening always runs strict regardless of this flag.
   -y, --yes           Skip confirmation prompts (run non-interactively)
   -h, --help          Show this help message
 
 ENVIRONMENT:
   COOLDOWN_SECONDS    Default cooldown (overridden by --cooldown flag)
+
+CANCELLATION:
+  Ctrl-C             Stop the active stage cleanly
+  Force stop         Kill the whole process group, not only the shell PID
 
 EXAMPLES:
   # Full pipeline from scratch
@@ -364,6 +443,11 @@ mkdir -p "$SCRATCH"
 resolve_python_cmd
 info "Python runtime:      $PYTHON_CMD_DISPLAY"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/pipeline_signals.sh"
+export PIPELINE_TIMEOUT_RECORD_FILE="${PIPELINE_TIMEOUT_RECORD_FILE:-${SCRATCH}/pipeline-timeouts-${DATE}.jsonl}"
+
 # ============================================================
 # STAGE 0: Scrape + Filter
 # ============================================================
@@ -387,9 +471,11 @@ if [[ $START_STAGE -le 0 ]]; then
         fi
 
         info "Running: ${GEMS_CMD[*]}"
-        if "${GEMS_CMD[@]}"; then
+        if run_tracked_child "" "${GEMS_CMD[@]}"; then
             success "Scrape + filter complete"
         else
+            status=$?
+            exit_if_interrupted_status "$status"
             fail "find_gems.py failed"
             exit 1
         fi
@@ -420,6 +506,20 @@ if [[ $START_STAGE -le 0 ]]; then
     STAGE1_SKIP=$((TICKER_COUNT - STAGE1_TODO))
     STAGE1_SECS=$((STAGE1_TODO * (COOLDOWN + 120)))
 
+    # Foot-gun guard: if a different date in scratch/ has dramatically more
+    # matching reports than the resume date we settled on, the operator
+    # probably handed us the wrong saved file. Surface a hint before they
+    # confirm the run — silent otherwise.
+    BETTER_DATE_HINT=$(suggest_better_resume_date "$TICKER_LIST" "$DATE" "$STAGE1_SKIP")
+    if [[ -n "$BETTER_DATE_HINT" ]]; then
+        BETTER_DATE=${BETTER_DATE_HINT%% *}
+        BETTER_COUNT=${BETTER_DATE_HINT##* }
+        echo ""
+        warn "Resume-date mismatch suspected:"
+        warn "  Chosen date ${DATE} matches ${STAGE1_SKIP} existing quick reports,"
+        warn "  but ${BETTER_DATE} matches ${BETTER_COUNT}. Did you mean --run-date ${BETTER_DATE}?"
+    fi
+
     echo ""
     echo -e "${CYAN}━━━ Stage 1 Preview ━━━━━━━━━━━━━━━━━━━━${NC}"
     info "Tickers to analyze:  $STAGE1_TODO (of $TICKER_COUNT candidates)"
@@ -427,7 +527,7 @@ if [[ $START_STAGE -le 0 ]]; then
         info "Already completed:   $STAGE1_SKIP (will be skipped)"
     fi
     info "Est. time:           ~$(format_duration $STAGE1_SECS) (${COOLDOWN}s cooldown)"
-    info "Mode:                --quick --strict --brief --no-memory"
+    info "Mode:                --quick --brief --no-memory"
     info "Output dir:          $SCRATCH/"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
@@ -480,7 +580,7 @@ if [[ $START_STAGE -le 1 ]]; then
             info "Already completed:   $STAGE1_SKIP (will be skipped)"
         fi
         info "Est. time:           ~$(format_duration $STAGE1_SECS) (${COOLDOWN}s cooldown)"
-        info "Mode:                --quick --strict --brief --no-memory"
+        info "Mode:                --quick --brief --no-memory"
         info "Output dir:          $SCRATCH/"
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
@@ -517,15 +617,31 @@ if [[ $START_STAGE -le 1 ]]; then
         STAGE1_PROCESSED=$((STAGE1_PROCESSED + 1))
         info "[$STAGE1_PROCESSED/$STAGE1_TODO, $TICKER_COUNT total] Quick: $ticker"
 
-        if "${PYTHON_CMD[@]}" -m src.main \
+        if PIPELINE_TICKER_TIMEOUT_SECONDS="${STAGE1_TICKER_TIMEOUT_SECONDS:-360}" \
+            run_tracked_child "$LOGFILE" "${PYTHON_CMD[@]}" -m src.main \
             --ticker "$ticker" \
-            --quick --strict --no-charts --quiet --brief --no-memory \
-            --output "$OUTFILE" \
-            2> "$LOGFILE"; then
+            --quick --no-charts --quiet --brief --no-memory \
+            --output "$OUTFILE"; then
             VERDICT=$(extract_report_verdict "$OUTFILE")
-            [[ -n "$VERDICT" ]] && success "$ticker done [Verdict=${VERDICT}]" || success "$ticker done"
+            BADGE=$(python3 "${SCRIPT_DIR}/extract_run_health.py" "$LOGFILE" 2>/dev/null)
+            if [[ -n "$VERDICT" && -n "$BADGE" ]]; then
+                success "$ticker done [Verdict=${VERDICT}] [${BADGE}]"
+            elif [[ -n "$VERDICT" ]]; then
+                success "$ticker done [Verdict=${VERDICT}]"
+            elif [[ -n "$BADGE" ]]; then
+                success "$ticker done [${BADGE}]"
+            else
+                success "$ticker done"
+            fi
         else
-            fail "FAILED: $ticker (see $LOGFILE)"
+            status=$?
+            exit_if_interrupted_status "$status"
+            BADGE=$(python3 "${SCRIPT_DIR}/extract_run_health.py" "$LOGFILE" 2>/dev/null)
+            if [[ -n "$BADGE" ]]; then
+                fail "FAILED: $ticker [${BADGE}] (see $LOGFILE)"
+            else
+                fail "FAILED: $ticker (see $LOGFILE)"
+            fi
             STAGE1_FAILED=$((STAGE1_FAILED + 1))
         fi
 
@@ -686,16 +802,31 @@ if [[ $START_STAGE -le 2 ]]; then
         STAGE2_PROCESSED=$((STAGE2_PROCESSED + 1))
         info "[$STAGE2_PROCESSED/$STAGE2_TODO, $BUY_TOTAL total] Full: $ticker"
 
-        if "${PYTHON_CMD[@]}" -m src.main \
+        if run_tracked_child "$LOGFILE" "${PYTHON_CMD[@]}" -m src.main \
             --ticker "$ticker" \
             --transparent --quiet \
             $STRICT_FLAG \
-            --output "$OUTFILE" \
-            2> "$LOGFILE"; then
+            --output "$OUTFILE"; then
             VERDICT=$(extract_report_verdict "$OUTFILE")
-            [[ -n "$VERDICT" ]] && success "$ticker done [Verdict=${VERDICT}]" || success "$ticker done"
+            BADGE=$(python3 "${SCRIPT_DIR}/extract_run_health.py" "$LOGFILE" 2>/dev/null)
+            if [[ -n "$VERDICT" && -n "$BADGE" ]]; then
+                success "$ticker done [Verdict=${VERDICT}] [${BADGE}]"
+            elif [[ -n "$VERDICT" ]]; then
+                success "$ticker done [Verdict=${VERDICT}]"
+            elif [[ -n "$BADGE" ]]; then
+                success "$ticker done [${BADGE}]"
+            else
+                success "$ticker done"
+            fi
         else
-            fail "FAILED: $ticker (see $LOGFILE)"
+            status=$?
+            exit_if_interrupted_status "$status"
+            BADGE=$(python3 "${SCRIPT_DIR}/extract_run_health.py" "$LOGFILE" 2>/dev/null)
+            if [[ -n "$BADGE" ]]; then
+                fail "FAILED: $ticker [${BADGE}] (see $LOGFILE)"
+            else
+                fail "FAILED: $ticker (see $LOGFILE)"
+            fi
             STAGE2_FAILED=$((STAGE2_FAILED + 1))
         fi
 
@@ -733,4 +864,13 @@ if [[ -f "$BUY_LIST" ]]; then
             echo "  $t"
         done < "$BUY_LIST"
     fi
+fi
+
+# Batch-level health summary: a single [WARN] line is emitted only if the
+# batch had failures, watchdog timeouts, breaker trips, or a sustained
+# DNS cluster. Clean runs print nothing. See scripts/pipeline_batch_summary.py.
+BATCH_SUMMARY=$(python3 "${SCRIPT_DIR}/pipeline_batch_summary.py" "$SCRATCH" 2>/dev/null)
+if [[ -n "$BATCH_SUMMARY" ]]; then
+    echo ""
+    warn "$BATCH_SUMMARY"
 fi

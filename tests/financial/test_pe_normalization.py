@@ -314,4 +314,151 @@ class TestDataDivergenceDetection:
         assert len(red_flags) == 1
         assert red_flags[0]["type"] == "EARNINGS_QUALITY_UNCERTAIN"
         assert red_flags[0]["severity"] == "WARNING"
-        assert result == "PASS"  # WARNING doesn't auto-reject
+
+
+class TestPEUnitErrorDetection:
+    """When trailing and forward P/E differ by ~10/100/1000× and one value is
+    plausible (in [MIN_REASONABLE_PE, 30]) while the other is extreme
+    (≤ 1 or > 98), it's almost certainly a unit/decimal/currency error in
+    one source's EPS — not a stale forward estimate. Quarantine the suspect
+    and emit a distinct event so the issue is debuggable.
+
+    Reproducer from production: 1F2.SI showed trailingPE=16.166668,
+    forwardPE=0.15746754, ratio 102.7×. The previous code logged
+    `pe_divergence_suspicious` with hint='stale/incorrect forward estimate',
+    leaving the bogus 0.157 in `forwardPE` for downstream PEG/screening.
+    """
+
+    @pytest.fixture
+    def fetcher(self):
+        from src.data.fetcher import SmartMarketDataFetcher
+
+        return SmartMarketDataFetcher()
+
+    def test_1F2_SI_reproducer_quarantines_forward(self, fetcher):
+        """The exact 1F2.SI values from the May 2026 production log."""
+        info = {
+            "trailingPE": 16.166668,
+            "forwardPE": 0.15746754,
+            "forwardEps": 0.05,
+            "pegRatio": 1.2,
+            "epsTrailingTwelveMonths": 5.13,
+        }
+        result = fetcher._normalize_data_integrity(info, "1F2.SI")
+
+        assert result["trailingPE"] == 16.166668
+        assert result["epsTrailingTwelveMonths"] == 5.13
+        assert result["forwardPE"] is None
+        assert result["forwardEps"] is None
+        assert result["pegRatio"] is None
+        assert result["_pe_unit_error_quarantined"] == "forward"
+        notes = result.get("_data_quality_notes")
+        assert isinstance(notes, list) and any(
+            "forward" in n.lower() and "unit" in n.lower() for n in notes
+        )
+
+    def test_inverse_direction_quarantines_trailing(self, fetcher):
+        """If trailing is the implausible value, null trailing and EPS_TTM
+        instead — the existing 'keep trailing' default would propagate the
+        wrong P/E into downstream filters."""
+        info = {
+            "trailingPE": 0.157,
+            "forwardPE": 16.17,
+            "forwardEps": 0.93,
+            "pegRatio": 1.5,
+            "epsTrailingTwelveMonths": 100.5,
+        }
+        result = fetcher._normalize_data_integrity(info, "TEST.X")
+
+        assert result["forwardPE"] == 16.17
+        assert result["forwardEps"] == 0.93
+        assert result["trailingPE"] is None
+        assert result["epsTrailingTwelveMonths"] is None
+        assert result["_pe_unit_error_quarantined"] == "trailing"
+
+    def test_x10_pattern_quarantines_forward(self, fetcher):
+        info = {"trailingPE": 18.0, "forwardPE": 180.0}
+        result = fetcher._normalize_data_integrity(info, "TEST")
+        assert result["forwardPE"] is None
+        assert result["_pe_unit_error_quarantined"] == "forward"
+
+    def test_x1000_pattern_quarantines_forward(self, fetcher):
+        info = {"trailingPE": 20.0, "forwardPE": 20000.0}
+        result = fetcher._normalize_data_integrity(info, "TEST")
+        assert result["forwardPE"] is None
+        assert result["_pe_unit_error_quarantined"] == "forward"
+
+    def test_4x_divergence_falls_through_to_legacy_log(self, fetcher, monkeypatch):
+        """A 4× divergence is genuine staleness — keep both values and emit
+        the legacy `pe_divergence_suspicious` event (not the unit-error
+        event)."""
+        from src.data import fetcher as fetcher_module
+
+        events: list[str] = []
+        original_warning = fetcher_module.logger.warning
+
+        def capture(event_name, **kwargs):
+            events.append(event_name)
+            return original_warning(event_name, **kwargs)
+
+        monkeypatch.setattr(fetcher_module.logger, "warning", capture)
+
+        info = {"trailingPE": 40.0, "forwardPE": 10.0}
+        result = fetcher._normalize_data_integrity(info, "TEST")
+
+        assert result["trailingPE"] == 40.0
+        assert result["forwardPE"] == 10.0
+        assert "_pe_unit_error_quarantined" not in result
+        assert "pe_divergence_suspicious" in events
+        assert "pe_divergence_unit_error_suspect" not in events
+
+    def test_both_extreme_is_NOT_unit_error(self, fetcher):
+        """Ratio ≈ 100× but neither value is plausible — pattern doesn't
+        match (would need real diagnosis), so fall through to legacy log."""
+        info = {"trailingPE": 120.0, "forwardPE": 1.2}
+        result = fetcher._normalize_data_integrity(info, "TEST")
+        assert result["trailingPE"] == 120.0
+        assert result["forwardPE"] == 1.2
+        assert "_pe_unit_error_quarantined" not in result
+
+    def test_ratio_near_power_but_outside_tolerance(self, fetcher):
+        """Ratio 150× has log10 ≈ 2.18 (distance 0.18 from 2 > 0.05) — not a
+        clean power of ten, so it's not classified as a unit error even
+        though one value is plausible and the other is extreme."""
+        info = {"trailingPE": 18.0, "forwardPE": 0.12}
+        result = fetcher._normalize_data_integrity(info, "TEST")
+        # forwardPE preserved (no quarantine), legacy log fires.
+        assert result["forwardPE"] == 0.12
+        assert "_pe_unit_error_quarantined" not in result
+
+    def test_emits_unit_error_event(self, fetcher, monkeypatch):
+        """The new event name and structured fields are emitted on match."""
+        from src.data import fetcher as fetcher_module
+
+        captured: list[tuple[str, dict]] = []
+        original_warning = fetcher_module.logger.warning
+
+        def capture(event_name, **kwargs):
+            captured.append((event_name, kwargs))
+            return original_warning(event_name, **kwargs)
+
+        monkeypatch.setattr(fetcher_module.logger, "warning", capture)
+
+        info = {"trailingPE": 16.166668, "forwardPE": 0.15746754}
+        fetcher._normalize_data_integrity(info, "1F2.SI")
+
+        names = [n for n, _ in captured]
+        assert "pe_divergence_unit_error_suspect" in names
+        kwargs = next(k for n, k in captured if n == "pe_divergence_unit_error_suspect")
+        assert kwargs["suspect"] == "forward"
+        assert kwargs["power_of_ten"] == 2
+        assert kwargs["symbol"] == "1F2.SI"
+
+    def test_pattern_does_not_fire_when_ratio_under_3x(self, fetcher):
+        """Below MAX_DIVERGENCE_RATIO the legacy code paths handle the
+        decision. The new branch must not be reachable in that regime."""
+        info = {"trailingPE": 25.0, "forwardPE": 18.0}
+        result = fetcher._normalize_data_integrity(info, "TEST")
+        assert "_pe_unit_error_quarantined" not in result
+        assert result["trailingPE"] == 25.0
+        assert result["forwardPE"] == 18.0

@@ -5,6 +5,7 @@ import json
 import re
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 
 import structlog
@@ -12,6 +13,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.messages import ToolMessage as TM
 from langgraph.types import RunnableConfig
 
+from src.config import config as settings_config
 from src.runtime_diagnostics import ArtifactStatus, failure_artifact, success_artifact
 from src.runtime_services import get_current_tool_service
 from src.tooling.runtime import ToolInvocation
@@ -30,10 +32,56 @@ logger = structlog.get_logger(__name__)
 
 CONSULTANT_CALL_TIMEOUT_SECONDS = 90.0
 CONSULTANT_TOTAL_TIMEOUT_SECONDS = 240.0
+_CONSULTANT_QUICK_SCREENING_ADDENDUM = """
+## QUICK SCREENING MODE
+
+This is a bounded screening cross-check, not a full re-analysis.
+- Do not request tools unless tool results are explicitly available in this turn.
+- Preserve the required CONSULTANT REVIEW and FINAL CONSULTANT VERDICT headers.
+- Focus only on decision-changing factual errors, biases, synthesis gaps, and mandate breaches.
+- If the internal analysis is sound enough for screening, say so briefly.
+"""
+_CONSULTANT_CONTEXT_BUDGETS = {
+    "full": {
+        "market": 2000,
+        "sentiment": 1500,
+        "news": 2000,
+        "fundamentals": 5000,
+        "debate": 4000,
+        "research": 4000,
+        "auditor": 3000,
+    },
+    "quick_standard": {
+        "market": 900,
+        "sentiment": 600,
+        "news": 900,
+        "fundamentals": 2500,
+        "debate": 1400,
+        "research": 1400,
+        "auditor": 1200,
+    },
+    "quick_expanded": {
+        "market": 1200,
+        "sentiment": 800,
+        "news": 1200,
+        "fundamentals": 3600,
+        "debate": 2000,
+        "research": 2200,
+        "auditor": 1800,
+    },
+}
 
 _RECOVERABLE_AUDITOR_STATUSES = frozenset(
     {"INSUFFICIENT_DATA", "UNAVAILABLE", "CONTEXT_LIMIT_EXCEEDED"}
 )
+
+
+@dataclass
+class ConsultantLoopResult:
+    content: str
+    response: object | None
+    had_tool_errors: bool
+    tool_failure_count: int
 
 
 def _inject_forensic_verdict_if_missing(content: str) -> str:
@@ -204,23 +252,25 @@ async def _invoke_consultant_with_deadline(
     model_name: str,
     ticker: str,
     deadline: float,
+    total_timeout: float = CONSULTANT_TOTAL_TIMEOUT_SECONDS,
 ) -> object:
     remaining = _remaining_consultant_budget(deadline)
     if remaining <= 0:
         raise TimeoutError(
-            f"Consultant node exceeded total wall-clock timeout of {CONSULTANT_TOTAL_TIMEOUT_SECONDS:.0f}s for {ticker}"
+            f"Consultant node exceeded total wall-clock timeout of {total_timeout:.0f}s for {ticker}"
         )
 
     timeout_s = min(CONSULTANT_CALL_TIMEOUT_SECONDS, remaining)
     try:
-        async with asyncio.timeout(timeout_s):
-            return await agent_runtime.invoke_with_rate_limit_handling(
-                runnable,
-                messages,
-                context=context,
-                provider=provider,
-                model_name=model_name,
-            )
+        return await agent_runtime.invoke_with_rate_limit_handling(
+            runnable,
+            messages,
+            context=context,
+            provider=provider,
+            model_name=model_name,
+            max_transient_attempts=1,
+            overall_timeout_seconds=timeout_s,
+        )
     except TimeoutError as exc:
         raise TimeoutError(
             f"Consultant call exceeded {timeout_s:.1f}s wall-clock timeout for {ticker}"
@@ -266,17 +316,301 @@ def _build_legal_fallback_report(
     )
 
 
+async def _run_bounded_consultant_loop(
+    *,
+    active_llm,
+    fallback_llm,
+    messages: list,
+    tools_by_name: dict,
+    max_tool_iterations: int,
+    max_tool_calls_per_turn: int,
+    agent_name: str,
+    agent_key: str,
+    ticker: str,
+    deadline: float,
+    total_timeout: float,
+) -> ConsultantLoopResult:
+    """Run the Consultant's bounded tool loop under a shared deadline.
+
+    The manual loop is intentional for now: it gives quick and full modes an
+    explicit wall-clock budget. A LangGraph subgraph/tool-node rewrite can
+    replace this later if Consultant tool use expands.
+    """
+    content_str = ""
+    had_tool_errors = False
+    tool_failure_count = 0
+    fmp_alt_disabled_kind: str | None = None
+    response: object | None = None
+    active_llm_provider = support.infer_provider_name(active_llm)
+    active_llm_model = support.get_model_name(active_llm)
+    fallback_llm_provider = support.infer_provider_name(fallback_llm)
+    fallback_llm_model = support.get_model_name(fallback_llm)
+
+    for iteration in range(max_tool_iterations + 1):
+        try:
+            response = await _invoke_consultant_with_deadline(
+                active_llm,
+                messages,
+                context=agent_name,
+                provider=active_llm_provider,
+                model_name=active_llm_model,
+                ticker=ticker,
+                deadline=deadline,
+                total_timeout=total_timeout,
+            )
+        except (TimeoutError, asyncio.TimeoutError):
+            logger.warning(
+                "consultant_deadline_mid_loop",
+                ticker=ticker,
+                iteration=iteration,
+                tool_failures_so_far=tool_failure_count,
+            )
+            break
+        tool_calls = getattr(response, "tool_calls", None)
+        if (
+            not isinstance(tool_calls, list)
+            or not tool_calls
+            or iteration == max_tool_iterations
+        ):
+            content_str = message_utils.extract_string_content(response.content)
+            break
+
+        messages.append(response)
+        capped = tool_calls[:max_tool_calls_per_turn]
+        all_suppressed_this_iter = True
+        if len(tool_calls) > max_tool_calls_per_turn:
+            logger.warning(
+                "consultant_tool_calls_capped",
+                ticker=ticker,
+                requested=len(tool_calls),
+                cap=max_tool_calls_per_turn,
+            )
+
+        for tool_call in capped:
+            tool_fn = tools_by_name.get(tool_call["name"])
+            tool_call_id = tool_call.get("id", tool_call["name"])
+            result_failed = False
+            count_failure = True
+            if tool_fn:
+                if (
+                    tool_call["name"] == "spot_check_metric_alt"
+                    and fmp_alt_disabled_kind is not None
+                ):
+                    result = _build_consultant_fmp_skip_payload(
+                        ticker=tool_call["args"].get("ticker", ticker),
+                        metric=tool_call["args"].get("metric", "unknown"),
+                        failure_kind=fmp_alt_disabled_kind,
+                    )
+                    count_failure = False
+                else:
+                    if _remaining_consultant_budget(deadline) <= 0:
+                        raise TimeoutError(
+                            "Consultant node exceeded total wall-clock timeout "
+                            f"of {total_timeout:.0f}s for {ticker}"
+                        )
+                    try:
+                        tool_result = await get_current_tool_service().execute(
+                            ToolInvocation(
+                                name=tool_call["name"],
+                                args=tool_call["args"],
+                                source="consultant",
+                                agent_key=agent_key,
+                            ),
+                            runner=lambda args, tool=tool_fn: tool.ainvoke(args),
+                        )
+                        result = tool_result.value
+                    except Exception as tool_err:
+                        result_failed = True
+                        logger.warning(
+                            "consultant_tool_failed",
+                            ticker=ticker,
+                            tool=tool_call["name"],
+                            error=str(tool_err),
+                        )
+                        result = f"TOOL_ERROR: {tool_err}"
+            else:
+                result_failed = True
+                result = f"Unknown tool: {tool_call['name']}"
+
+            if isinstance(result, str):
+                stripped = result.strip()
+                if stripped.startswith(("TOOL_ERROR:", "TOOL_BLOCKED:")):
+                    result_failed = True
+                else:
+                    try:
+                        payload = json.loads(stripped)
+                    except (TypeError, ValueError):
+                        payload = None
+                    if isinstance(payload, dict) and payload.get("error"):
+                        is_managed_unavailability = bool(payload.get("skipped"))
+                        if (
+                            tool_call["name"] == "spot_check_metric_alt"
+                            and payload.get("provider") == "fmp"
+                            and payload.get("failure_kind")
+                            in {"auth_error", "rate_limit"}
+                        ):
+                            is_managed_unavailability = True
+                            if fmp_alt_disabled_kind != payload.get("failure_kind"):
+                                fmp_alt_disabled_kind = payload["failure_kind"]
+                                logger.debug(
+                                    "consultant_fmp_disabled",
+                                    ticker=ticker,
+                                    tool=tool_call["name"],
+                                    failure_kind=fmp_alt_disabled_kind,
+                                )
+                        result_failed = not is_managed_unavailability
+                        count_failure = not is_managed_unavailability
+                        if is_managed_unavailability:
+                            logger.debug(
+                                "consultant_tool_suppressed",
+                                ticker=ticker,
+                                tool=tool_call["name"],
+                                failure_kind=payload.get("failure_kind"),
+                            )
+            if result_failed:
+                had_tool_errors = True
+                if count_failure:
+                    tool_failure_count += 1
+                all_suppressed_this_iter = False
+            elif count_failure:
+                all_suppressed_this_iter = False
+            messages.append(TM(content=str(result), tool_call_id=tool_call_id))
+
+        for tool_call in tool_calls[max_tool_calls_per_turn:]:
+            skip_id = tool_call.get("id", f"skip_{tool_call['name']}")
+            messages.append(
+                TM(
+                    content="SKIPPED: Too many tool calls in one turn.",
+                    tool_call_id=skip_id,
+                )
+            )
+
+        logger.debug(
+            "consultant_tool_iteration",
+            ticker=ticker,
+            iteration=iteration + 1,
+            tools_called=[tool_call["name"] for tool_call in capped],
+        )
+
+        if capped and all_suppressed_this_iter:
+            messages.append(
+                HumanMessage(
+                    content=(
+                        "All external verification tools requested in the last "
+                        "turn were unavailable or suppressed. Provide your "
+                        "final consultant review now using the evidence already "
+                        "available and note any verification limits."
+                    )
+                )
+            )
+            response = await _invoke_consultant_with_deadline(
+                fallback_llm,
+                messages,
+                context=agent_name,
+                provider=fallback_llm_provider,
+                model_name=fallback_llm_model,
+                ticker=ticker,
+                deadline=deadline,
+                total_timeout=total_timeout,
+            )
+            content_str = message_utils.extract_string_content(response.content)
+            break
+
+    if not content_str and (tools_by_name or max_tool_iterations > 0):
+        response = await _invoke_consultant_with_deadline(
+            fallback_llm,
+            messages,
+            context=agent_name,
+            provider=fallback_llm_provider,
+            model_name=fallback_llm_model,
+            ticker=ticker,
+            deadline=deadline,
+            total_timeout=total_timeout,
+        )
+        content_str = message_utils.extract_string_content(response.content)
+
+    return ConsultantLoopResult(
+        content=content_str,
+        response=response,
+        had_tool_errors=had_tool_errors,
+        tool_failure_count=tool_failure_count,
+    )
+
+
+def _select_quick_consultant_profile(state: AgentState) -> str:
+    if state.get("red_flags"):
+        return "quick_expanded"
+
+    artifact_statuses = state.get("artifact_statuses", {}) or {}
+    auditor_status = artifact_statuses.get("auditor_report") or {}
+    if auditor_status and not auditor_status.get("ok", True):
+        return "quick_expanded"
+
+    investment_plan = str(state.get("investment_plan") or "").upper()
+    if "HOLD" in investment_plan or "CONDITIONAL" in investment_plan:
+        return "quick_expanded"
+
+    return "quick_standard"
+
+
+def _consultant_context_budget(section: str, *, profile: str) -> int:
+    return _CONSULTANT_CONTEXT_BUDGETS[profile][section]
+
+
+def _build_decision_critical_evidence_index(state: AgentState) -> str:
+    lines: list[str] = []
+    for flag in (state.get("red_flags") or [])[:5]:
+        lines.append(str(flag))
+
+    plan_upper = str(state.get("investment_plan") or "").upper()
+    for marker in ("PFIC", "CMIC", "VALUE TRAP", "LIQUIDITY", "LEVERAGE"):
+        if marker in plan_upper:
+            lines.append(f"Research synthesis mentions {marker}")
+
+    if not lines:
+        return ""
+    compact = "\n".join(f"- {line[:220]}" for line in lines[:8])
+    return f"=== DECISION-CRITICAL EVIDENCE INDEX ===\n{compact}\n\n"
+
+
+def _create_openai_responses_fallback_llm(llm):
+    """Build an OpenAI Responses fallback only for OpenAI-compatible models."""
+    if support.infer_provider_name(llm) != "openai":
+        raise ValueError("OpenAI Responses fallback requires an OpenAI primary LLM")
+
+    from langchain_openai import ChatOpenAI
+
+    return ChatOpenAI(
+        model=support.get_model_name(llm),
+        timeout=120,
+        max_retries=3,
+        streaming=False,
+        use_responses_api=True,
+        output_version="responses/v1",
+    )
+
+
 def create_consultant_node(
-    llm, agent_key: str = "consultant", tools: list | None = None
+    llm,
+    agent_key: str = "consultant",
+    tools: list | None = None,
+    *,
+    quick_mode: bool = False,
 ) -> Callable:
     """
     Create external consultant node for cross-validation.
     """
-    max_tool_iterations = 3
-    max_tool_calls_per_turn = 4
+    max_tool_iterations = 1 if quick_mode else 3
+    max_tool_calls_per_turn = 2 if quick_mode else 4
+    tools_enabled = bool(tools) and (
+        not quick_mode or settings_config.consultant_tools_in_quick
+    )
+    if quick_mode and not settings_config.consultant_tools_in_quick:
+        max_tool_iterations = 0
 
-    tools_by_name = {tool.name: tool for tool in tools} if tools else {}
-    llm_with_tools = llm.bind_tools(tools) if tools else None
+    active_tools = tools if tools_enabled else []
+    tools_by_name = {tool.name: tool for tool in active_tools} if active_tools else {}
+    llm_with_tools = llm.bind_tools(active_tools) if active_tools else None
 
     async def consultant_node(
         state: AgentState, config: RunnableConfig
@@ -328,29 +662,36 @@ def create_consultant_node(
         fundamentals = state.get("fundamentals_report", "N/A")
         investment_plan = state.get("investment_plan", "N/A")
         auditor = state.get("auditor_report", "N/A")
+        consultant_profile = (
+            _select_quick_consultant_profile(state) if quick_mode else "full"
+        )
+        evidence_index = (
+            _build_decision_critical_evidence_index(state) if quick_mode else ""
+        )
 
         all_context = f"""
+{evidence_index}\
 === ANALYST REPORTS (SOURCE DATA) ===
 
 MARKET ANALYST REPORT:
-{support.summarize_for_pm(market, "market", 2000) if market != "N/A" else "N/A"}
+{support.summarize_for_pm(market, "market", _consultant_context_budget("market", profile=consultant_profile)) if market != "N/A" else "N/A"}
 
 SENTIMENT ANALYST REPORT:
-{support.summarize_for_pm(sentiment, "sentiment", 1500) if sentiment != "N/A" else "N/A"}
+{support.summarize_for_pm(sentiment, "sentiment", _consultant_context_budget("sentiment", profile=consultant_profile)) if sentiment != "N/A" else "N/A"}
 
 NEWS ANALYST REPORT:
-{support.summarize_for_pm(news, "news", 2000) if news != "N/A" else "N/A"}
+{support.summarize_for_pm(news, "news", _consultant_context_budget("news", profile=consultant_profile)) if news != "N/A" else "N/A"}
 
 FUNDAMENTALS ANALYST REPORT:
-{support.summarize_for_pm(fundamentals, "fundamentals", 5000) if fundamentals != "N/A" else "N/A"}
+{support.summarize_for_pm(fundamentals, "fundamentals", _consultant_context_budget("fundamentals", profile=consultant_profile)) if fundamentals != "N/A" else "N/A"}
 {attribution_table}{conflict_table}
 === BULL/BEAR DEBATE HISTORY ===
 
-{support.summarize_for_pm(debate_history, "debate", 4000) if debate_history != "N/A" else "N/A"}
+{support.summarize_for_pm(debate_history, "debate", _consultant_context_budget("debate", profile=consultant_profile)) if debate_history != "N/A" else "N/A"}
 
 === RESEARCH MANAGER SYNTHESIS ===
 
-{support.summarize_for_pm(investment_plan, "research", 4000) if investment_plan != "N/A" else "N/A"}
+{support.summarize_for_pm(investment_plan, "research", _consultant_context_budget("research", profile=consultant_profile)) if investment_plan != "N/A" else "N/A"}
 
 === RED FLAGS (Pre-Screening Results) ===
 
@@ -358,7 +699,7 @@ Red Flags Detected: {state.get("red_flags", [])}
 Pre-Screening Result: {state.get("pre_screening_result", "UNKNOWN")}
 
 === INDEPENDENT FORENSIC AUDIT ===
-{support.summarize_for_pm(auditor, "auditor", 3000) if auditor != "N/A" else "N/A"}
+{support.summarize_for_pm(auditor, "auditor", _consultant_context_budget("auditor", profile=consultant_profile)) if auditor != "N/A" else "N/A"}
 """
 
         company_warning = (
@@ -369,196 +710,40 @@ Pre-Screening Result: {state.get("pre_screening_result", "UNKNOWN")}
 ANALYSIS DATE: {support._format_date_with_fy_hint(current_date)}
 TICKER: {ticker}
 COMPANY: {company_name}{company_warning}
+{_CONSULTANT_QUICK_SCREENING_ADDENDUM if quick_mode else ""}
 
 {all_context}
 
 Provide your independent consultant review."""
 
+        content_str = ""
+        tool_failure_count = 0
         try:
             messages = [HumanMessage(content=prompt)]
             active_llm = llm_with_tools or llm
-            content_str = ""
-            had_tool_errors = False
-            tool_failure_count = 0
-            consultant_deadline = time.monotonic() + CONSULTANT_TOTAL_TIMEOUT_SECONDS
-            fmp_alt_disabled_kind: str | None = None
-            active_llm_provider = support.infer_provider_name(active_llm)
-            active_llm_model = support.get_model_name(active_llm)
-            fallback_llm_provider = support.infer_provider_name(llm)
-            fallback_llm_model = support.get_model_name(llm)
-
-            for iteration in range(max_tool_iterations + 1):
-                response = await _invoke_consultant_with_deadline(
-                    active_llm,
-                    messages,
-                    context=agent_prompt.agent_name,
-                    provider=active_llm_provider,
-                    model_name=active_llm_model,
-                    ticker=ticker,
-                    deadline=consultant_deadline,
-                )
-                tool_calls = getattr(response, "tool_calls", None)
-                if (
-                    not isinstance(tool_calls, list)
-                    or not tool_calls
-                    or iteration == max_tool_iterations
-                ):
-                    content_str = message_utils.extract_string_content(response.content)
-                    break
-
-                messages.append(response)
-                capped = tool_calls[:max_tool_calls_per_turn]
-                all_suppressed_this_iter = True
-                if len(tool_calls) > max_tool_calls_per_turn:
-                    logger.warning(
-                        "consultant_tool_calls_capped",
-                        ticker=ticker,
-                        requested=len(tool_calls),
-                        cap=max_tool_calls_per_turn,
-                    )
-
-                for tool_call in capped:
-                    tool_fn = tools_by_name.get(tool_call["name"])
-                    tool_call_id = tool_call.get("id", tool_call["name"])
-                    result_failed = False
-                    count_failure = True
-                    if tool_fn:
-                        if (
-                            tool_call["name"] == "spot_check_metric_alt"
-                            and fmp_alt_disabled_kind is not None
-                        ):
-                            result = _build_consultant_fmp_skip_payload(
-                                ticker=tool_call["args"].get("ticker", ticker),
-                                metric=tool_call["args"].get("metric", "unknown"),
-                                failure_kind=fmp_alt_disabled_kind,
-                            )
-                            count_failure = False
-                        else:
-                            if _remaining_consultant_budget(consultant_deadline) <= 0:
-                                raise TimeoutError(
-                                    f"Consultant node exceeded total wall-clock timeout of {CONSULTANT_TOTAL_TIMEOUT_SECONDS:.0f}s for {ticker}"
-                                )
-                            try:
-                                tool_result = await get_current_tool_service().execute(
-                                    ToolInvocation(
-                                        name=tool_call["name"],
-                                        args=tool_call["args"],
-                                        source="consultant",
-                                        agent_key=agent_key,
-                                    ),
-                                    runner=lambda args, tool=tool_fn: tool.ainvoke(
-                                        args
-                                    ),
-                                )
-                                result = tool_result.value
-                            except Exception as tool_err:
-                                result_failed = True
-                                logger.warning(
-                                    "consultant_tool_failed",
-                                    ticker=ticker,
-                                    tool=tool_call["name"],
-                                    error=str(tool_err),
-                                )
-                                result = f"TOOL_ERROR: {str(tool_err)}"
-                    else:
-                        result_failed = True
-                        result = f"Unknown tool: {tool_call['name']}"
-                    if isinstance(result, str):
-                        stripped = result.strip()
-                        if stripped.startswith(("TOOL_ERROR:", "TOOL_BLOCKED:")):
-                            result_failed = True
-                        else:
-                            try:
-                                payload = json.loads(stripped)
-                            except (TypeError, ValueError):
-                                payload = None
-                            if isinstance(payload, dict) and payload.get("error"):
-                                is_managed_unavailability = bool(payload.get("skipped"))
-                                if (
-                                    tool_call["name"] == "spot_check_metric_alt"
-                                    and payload.get("provider") == "fmp"
-                                    and payload.get("failure_kind")
-                                    in {"auth_error", "rate_limit"}
-                                ):
-                                    is_managed_unavailability = True
-                                    if fmp_alt_disabled_kind != payload.get(
-                                        "failure_kind"
-                                    ):
-                                        fmp_alt_disabled_kind = payload["failure_kind"]
-                                        logger.info(
-                                            "consultant_fmp_disabled",
-                                            ticker=ticker,
-                                            tool=tool_call["name"],
-                                            failure_kind=fmp_alt_disabled_kind,
-                                        )
-                                result_failed = not is_managed_unavailability
-                                count_failure = not is_managed_unavailability
-                                if is_managed_unavailability:
-                                    logger.info(
-                                        "consultant_tool_suppressed",
-                                        ticker=ticker,
-                                        tool=tool_call["name"],
-                                        failure_kind=payload.get("failure_kind"),
-                                    )
-                    if result_failed:
-                        had_tool_errors = True
-                        if count_failure:
-                            tool_failure_count += 1
-                        all_suppressed_this_iter = False
-                    elif count_failure:
-                        all_suppressed_this_iter = False
-                    messages.append(TM(content=str(result), tool_call_id=tool_call_id))
-
-                for tool_call in tool_calls[max_tool_calls_per_turn:]:
-                    skip_id = tool_call.get("id", f"skip_{tool_call['name']}")
-                    messages.append(
-                        TM(
-                            content="SKIPPED: Too many tool calls in one turn.",
-                            tool_call_id=skip_id,
-                        )
-                    )
-
-                logger.info(
-                    "consultant_tool_iteration",
-                    ticker=ticker,
-                    iteration=iteration + 1,
-                    tools_called=[tool_call["name"] for tool_call in capped],
-                )
-
-                if capped and all_suppressed_this_iter:
-                    messages.append(
-                        HumanMessage(
-                            content=(
-                                "All external verification tools requested in the last "
-                                "turn were unavailable or suppressed. Provide your "
-                                "final consultant review now using the evidence already "
-                                "available and note any verification limits."
-                            )
-                        )
-                    )
-                    response = await _invoke_consultant_with_deadline(
-                        llm,
-                        messages,
-                        context=agent_prompt.agent_name,
-                        provider=fallback_llm_provider,
-                        model_name=fallback_llm_model,
-                        ticker=ticker,
-                        deadline=consultant_deadline,
-                    )
-                    content_str = message_utils.extract_string_content(response.content)
-                    break
-
-            if not content_str:
-                response = await _invoke_consultant_with_deadline(
-                    llm,
-                    messages,
-                    context=agent_prompt.agent_name,
-                    provider=fallback_llm_provider,
-                    model_name=fallback_llm_model,
-                    ticker=ticker,
-                    deadline=consultant_deadline,
-                )
-                content_str = message_utils.extract_string_content(response.content)
+            total_timeout = (
+                settings_config.consultant_quick_total_timeout_seconds
+                if quick_mode
+                else CONSULTANT_TOTAL_TIMEOUT_SECONDS
+            )
+            consultant_deadline = time.monotonic() + total_timeout
+            loop_result = await _run_bounded_consultant_loop(
+                active_llm=active_llm,
+                fallback_llm=llm,
+                messages=messages,
+                tools_by_name=tools_by_name,
+                max_tool_iterations=max_tool_iterations,
+                max_tool_calls_per_turn=max_tool_calls_per_turn,
+                agent_name=agent_prompt.agent_name,
+                agent_key=agent_key,
+                ticker=ticker,
+                deadline=consultant_deadline,
+                total_timeout=total_timeout,
+            )
+            content_str = loop_result.content
+            response = loop_result.response
+            had_tool_errors = loop_result.had_tool_errors
+            tool_failure_count = loop_result.tool_failure_count
 
             from src.utils import detect_truncation
 
@@ -593,12 +778,15 @@ Provide your independent consultant review."""
                     ticker=ticker,
                     missing_sections=validation["missing"],
                 )
-                return failure_artifact(
+                result = failure_artifact(
                     "consultant_review",
                     "Consultant output missing required structure",
                     provider=support.infer_provider_name(llm),
                     fallback_content=content_str,
                 )
+                if quick_mode:
+                    result["consultant_quick_profile"] = consultant_profile
+                return result
 
             logger.info(
                 "consultant_review_complete",
@@ -621,15 +809,23 @@ Provide your independent consultant review."""
                 return {
                     "consultant_review": content_str,
                     "consultant_tool_failures": tool_failure_count,
+                    **(
+                        {"consultant_quick_profile": consultant_profile}
+                        if quick_mode
+                        else {}
+                    ),
                     "artifact_statuses": {
                         "consultant_review": status.as_dict(),
                     },
                 }
-            return success_artifact(
+            result = success_artifact(
                 "consultant_review",
                 content_str,
                 provider=support.infer_provider_name(llm),
             ) | {"consultant_tool_failures": tool_failure_count}
+            if quick_mode:
+                result["consultant_quick_profile"] = consultant_profile
+            return result
         except Exception as exc:
             logger.error(
                 "consultant_node_error",
@@ -637,11 +833,17 @@ Provide your independent consultant review."""
                 error=str(exc),
                 exc_info=True,
             )
-            return failure_artifact(
+            result = failure_artifact(
                 "consultant_review",
                 exc,
                 provider=support.infer_provider_name(llm),
             )
+            result["consultant_tool_failures"] = tool_failure_count
+            if quick_mode:
+                result["consultant_quick_profile"] = (
+                    locals().get("consultant_profile") or "quick_standard"
+                )
+            return result
 
     return consultant_node
 
@@ -745,7 +947,7 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
                         tool_output = f"Unknown tool: {tool_call['name']}"
                     messages.append(TM(content=tool_output, tool_call_id=tool_call_id))
 
-                logger.info(
+                logger.debug(
                     "legal_counsel_tool_iteration",
                     ticker=ticker,
                     iteration=iteration + 1,
@@ -754,7 +956,7 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
 
             try:
                 parsed = json.loads(response_str)
-                logger.info(
+                logger.debug(
                     "legal_counsel_complete",
                     ticker=ticker,
                     pfic_status=parsed.get("pfic_status"),
@@ -775,7 +977,7 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
                     extracted = json_match.group()
                     try:
                         json.loads(extracted)
-                        logger.info("legal_counsel_extracted_json", ticker=ticker)
+                        logger.debug("legal_counsel_extracted_json", ticker=ticker)
                         result = success_artifact(
                             "legal_report",
                             extracted,
@@ -963,7 +1165,7 @@ Perform a forensic audit using your tools."""
                         tool_output = f"Unknown tool: {tool_call['name']}"
                     messages.append(TM(content=tool_output, tool_call_id=tool_call_id))
 
-                logger.info(
+                logger.debug(
                     "auditor_tool_iteration",
                     ticker=ticker,
                     iteration=iteration + 1,
@@ -971,7 +1173,7 @@ Perform a forensic audit using your tools."""
                 )
             return ""
 
-        logger.info("auditor_start", ticker=ticker)
+        logger.debug("auditor_start", ticker=ticker)
 
         try:
             response_str = await _run_auditor_loop(llm, agent_prompt.system_message)
@@ -1035,7 +1237,7 @@ Perform a forensic audit using your tools."""
                 result["sender"] = "global_forensic_auditor"
                 return result
 
-            logger.info("auditor_complete", ticker=ticker, length=len(response_str))
+            logger.debug("auditor_complete", ticker=ticker, length=len(response_str))
             result = success_artifact(
                 "auditor_report",
                 response_str,
@@ -1096,21 +1298,12 @@ VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
                     error=error_str,
                 )
                 try:
-                    from langchain_openai import ChatOpenAI
-
-                    fallback_llm = ChatOpenAI(
-                        model=llm.model_name,
-                        timeout=120,
-                        max_retries=3,
-                        streaming=False,
-                        use_responses_api=True,
-                        output_version="responses/v1",
-                    )
+                    fallback_llm = _create_openai_responses_fallback_llm(llm)
                     response_str = await _run_auditor_loop(
                         fallback_llm, agent_prompt.system_message
                     )
                     response_str = _canonicalize_forensic_auditor_output(response_str)
-                    logger.info(
+                    logger.debug(
                         "auditor_complete_after_retry",
                         ticker=ticker,
                         length=len(response_str),

@@ -31,14 +31,14 @@ import json
 import os
 import sys
 import textwrap
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 # Ensure project root is on path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.ibkr.account_service import IbkrAccountService
-from src.ibkr.analysis_index import AnalysisLoadProgress, load_latest_analyses
 from src.ibkr.cli_options import (
     add_common_portfolio_request_args,
     portfolio_request_kwargs_from_args,
@@ -52,11 +52,12 @@ from src.ibkr.models import (
     PortfolioSummary,
     ReconciliationItem,
 )
-from src.ibkr.portfolio_data_service import IbkrPortfolioDataService
-from src.ibkr.portfolio_health import compute_portfolio_health
 from src.ibkr.portfolio_presentation import (
+    SELL_RECOMMENDATIONS_TITLE,
+    SELL_RELATED_REVIEWS_TITLE,
     build_action_summary_counts,
     build_cash_summary,
+    get_sell_type_label,
     group_portfolio_actions,
 )
 from src.ibkr.portfolio_presentation import (
@@ -65,11 +66,6 @@ from src.ibkr.portfolio_presentation import (
 from src.ibkr.portfolio_presentation import (
     find_live_order as shared_find_live_order,
 )
-from src.ibkr.recommendation_service import (
-    PortfolioRecommendationRequest,
-    PortfolioRecommendationService,
-)
-from src.ibkr.reconciler import reconcile
 from src.ibkr.reconciliation_rules import _EXCHANGE_LONG_NAMES
 from src.ibkr.refresh_service import (
     AnalysisFreshnessSummary,
@@ -85,13 +81,80 @@ from src.sector_normalization import (
 from src.sector_normalization import (
     normalize_sector_label as shared_normalize_sector_label,
 )
-from src.tavily_utils import search_tavily_sync_inspected
+
+if TYPE_CHECKING:
+    from src.ibkr.analysis_index import AnalysisLoadProgress
 
 _IBKR_OAUTH_PORTAL = (
     "https://ndcdyn.interactivebrokers.com/sso/Login?action=OAUTH&RL=1&ip2loc=US"
 )
 
 _refresh_service = AnalysisRefreshService()
+
+
+def search_tavily_sync_inspected(*args: Any, **kwargs: Any) -> Any:
+    from src.tavily_utils import (
+        search_tavily_sync_inspected as _search_tavily_sync_inspected,
+    )
+
+    return _search_tavily_sync_inspected(*args, **kwargs)
+
+
+def IbkrAccountService(*args: Any, **kwargs: Any) -> Any:
+    from src.ibkr.account_service import IbkrAccountService as _IbkrAccountService
+
+    return _IbkrAccountService(*args, **kwargs)
+
+
+def load_latest_analyses(*args: Any, **kwargs: Any) -> Any:
+    from src.ibkr.analysis_index import load_latest_analyses as _load_latest_analyses
+
+    return _load_latest_analyses(*args, **kwargs)
+
+
+def IbkrPortfolioDataService(*args: Any, **kwargs: Any) -> Any:
+    from src.ibkr.portfolio_data_service import (
+        IbkrPortfolioDataService as _IbkrPortfolioDataService,
+    )
+
+    return _IbkrPortfolioDataService(*args, **kwargs)
+
+
+def PortfolioRecommendationRequest(*args: Any, **kwargs: Any) -> Any:
+    from src.ibkr.recommendation_service import (
+        PortfolioRecommendationRequest as _PortfolioRecommendationRequest,
+    )
+
+    return _PortfolioRecommendationRequest(*args, **kwargs)
+
+
+class PortfolioRecommendationService:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        from src.ibkr.recommendation_service import (
+            PortfolioRecommendationService as _PortfolioRecommendationService,
+        )
+
+        self._inner = _PortfolioRecommendationService(*args, **kwargs)
+
+    async def build_bundle(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._inner.build_bundle(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def reconcile(*args: Any, **kwargs: Any) -> Any:
+    from src.ibkr.reconciler import reconcile as _reconcile
+
+    return _reconcile(*args, **kwargs)
+
+
+def compute_portfolio_health(*args: Any, **kwargs: Any) -> Any:
+    from src.ibkr.portfolio_health import (
+        compute_portfolio_health as _compute_portfolio_health,
+    )
+
+    return _compute_portfolio_health(*args, **kwargs)
 
 
 def _python_command_prefix() -> str:
@@ -147,7 +210,7 @@ def _prompt_for_missing_secret(config) -> None:
 # Each tuple is (ENV_VAR_NAME, getter_callable).
 # IBKR_OAUTH_ACCESS_TOKEN_SECRET is excluded — handled by _prompt_for_missing_secret.
 # IBKR_OAUTH_DH_PRIME is required by ibind (no built-in default).
-_REQUIRED_CREDENTIALS: list[tuple[str, object]] = [
+_REQUIRED_CREDENTIALS: list[tuple[str, Callable[[Any], object]]] = [
     ("IBKR_ACCOUNT_ID", lambda c: c.ibkr_account_id),
     ("IBKR_OAUTH_CONSUMER_KEY", lambda c: c.get_oauth_consumer_key()),
     ("IBKR_OAUTH_ACCESS_TOKEN", lambda c: c.get_oauth_access_token()),
@@ -916,32 +979,14 @@ _DIVIDER = "═" * 54
 _DETAIL_INDENT = "             "
 _DETAIL_WRAP_WIDTH = 96
 
-_CURRENCY_SYMBOLS: dict[str, str] = {
-    "USD": "$",
-    "HKD": "HK$",
-    "JPY": "¥",
-    "TWD": "NT$",
-    "KRW": "₩",
-    "EUR": "€",
-    "GBP": "£",
-    "SGD": "S$",
-    "AUD": "A$",
-    "CAD": "C$",
-    "CNY": "¥",
-    "CHF": "Fr",
-    "SEK": "kr",
-    "NOK": "kr",
-    "DKK": "kr",
-}
-
 _MAX_DIP_CANDIDATES = 7
 
 
-def _ccy(currency: str) -> str:
-    """Get currency symbol for a currency code."""
-    return _CURRENCY_SYMBOLS.get(
-        (currency or "").upper(), (currency + " ") if currency else "$"
-    )
+def _ccy(currency: str | None) -> str:
+    """Return ISO-code-first local currency display prefix."""
+    if not currency:
+        return "? "
+    return f"{currency.upper()} "
 
 
 def _normalize_sector_label(sector: str) -> str:
@@ -956,12 +1001,12 @@ def _aggregate_sector_weights(
     return shared_aggregate_sector_weights(sector_weights)
 
 
-def _item_currency(item: ReconciliationItem) -> str:
+def _item_currency(item: ReconciliationItem) -> str | None:
     if item.analysis and item.analysis.currency:
         return item.analysis.currency
     if item.ibkr_position and item.ibkr_position.currency:
         return item.ibkr_position.currency
-    return "USD"
+    return None
 
 
 def _urgency_prefix(item: ReconciliationItem) -> str:
@@ -1059,7 +1104,9 @@ def format_report(
     )
     stop_sells = list(action_groups.stop_sells)
     hard_sells = list(action_groups.hard_sells)
+    profit_take_sells = list(action_groups.profit_take_sells)
     soft_sells = list(action_groups.soft_sells)
+    profit_take_reviews = list(action_groups.profit_take_reviews)
     macro_reviews = list(action_groups.macro_reviews)
     macro_stop_reviews = list(action_groups.macro_stop_reviews)
     trims = list(action_groups.trims)
@@ -1435,6 +1482,24 @@ def format_report(
             segments.append(f"settles {item.settlement_date}")
         return segments
 
+    def _sell_type_label(item: ReconciliationItem) -> str:
+        return get_sell_type_label(item.sell_type)
+
+    def _profit_take_segments(item: ReconciliationItem) -> list[str]:
+        segments: list[str] = []
+        if item.cost_basis_return_pct is not None:
+            segments.append(f"gain vs cost: {item.cost_basis_return_pct:+.1f}%")
+        pos = item.ibkr_position
+        if pos:
+            segments.append(f"tax: {pos.tax_term}")
+        if item.profit_take_reasons:
+            segments.append(f"drivers: {item.reason}")
+        if show_recommendations and item.cash_impact_usd:
+            segments.append(f"proceeds ~${item.cash_impact_usd:,.0f} USD")
+        if show_recommendations and item.settlement_date:
+            segments.append(f"settles {item.settlement_date}")
+        return segments
+
     def _append_pnl_proceeds(item: ReconciliationItem, ccy: str) -> None:
         """Append combined gain/loss + proceeds on one line, or each separately if only one exists."""
         pnl = _pnl_line(item)
@@ -1517,7 +1582,8 @@ def format_report(
 
             _mstore = _cms()
             if _mstore.available:
-                _ev = (_mstore.get_active_events() or [None])[0]
+                _active_events = _mstore.get_active_events()
+                _ev = _active_events[0] if _active_events else None
                 if _ev and _ev.news_headline != "unknown":
                     _banner_fields = [
                         f"Macro driver: {_ev.event_type}",
@@ -1700,78 +1766,71 @@ def format_report(
         )
         lines.append("")
 
-    # ── SELLS — STOP BREACHED (mechanical — execute) ─────────────────────────
-    if stop_sells:
-        _section("SELLS — STOP BREACHED", "mechanical — execute these")
-        for item in stop_sells:
-            ccy = _item_currency(item)
-            lines.append(f"{_order_line(item, ccy)}  {_norm_reason(item.reason)}")
-            sl = _score_line(item)
-            if sl:
-                lines.append(sl)
-            _append_pnl_proceeds(item, ccy)
-            note = _order_note(item)
-            if note:
-                lines.append(note)
-            lines.append("")
-
-    # ── STOP BREACHES UNDER REVIEW (macro event — fundamentals intact) ───────
-    if macro_stop_reviews:
+    # ── SELL RECOMMENDATIONS ─────────────────────────────────────────────────
+    sell_recommendations = stop_sells + hard_sells + profit_take_sells + soft_sells
+    if sell_recommendations:
         _section(
-            "STOP BREACHES UNDER REVIEW",
-            "macro event — fundamentals intact — review before executing",
+            SELL_RECOMMENDATIONS_TITLE,
+            "review sell reason labels before executing",
         )
-        for item in macro_stop_reviews:
+        for item in sell_recommendations:
             ccy = _item_currency(item)
-            # Strip internal MACRO_STOP annotation — section header contextualises it
-            _display_reason = _norm_reason(item.reason.split("  [MACRO_STOP:")[0])
-            lines.append(f"{_order_line(item, ccy)}  {_display_reason}")
-            sl = _score_line(item)
-            if sl:
-                lines.append(sl)
-            _append_pnl_proceeds(item, ccy)
-            note = _order_note(item)
-            if note:
-                lines.append(note)
-            lines.append("")
-
-    # ── SELLS — FUNDAMENTAL FAILURE (hard reject — execute) ──────────────────
-    if hard_sells:
-        _section("SELLS — FUNDAMENTAL FAILURE", "hard checks failed — execute")
-        for item in hard_sells:
-            ccy = _item_currency(item)
-            lines.append(f"{_order_line(item, ccy)}  {_as_of_date(item.reason)}")
-            sl = _score_line(item)
-            if sl:
-                lines.append(sl)
-            _append_pnl_proceeds(item, ccy)
-            note = _order_note(item)
-            if note:
-                lines.append(note)
-            lines.append("")
-
-    # ── SELLS — SOFT REJECTION / MACRO REVIEWS ───────────────────────────────
-    # soft_sells: on normal days (no correlated event) — show as SELL
-    # macro_reviews: demoted from SELL on correlated days — show as REVIEW
-    if soft_sells or macro_reviews:
-        if macro_reviews and not soft_sells:
-            subtitle = (
-                "passed hard checks — review before acting (macro event detected)"
+            reason = (
+                _as_of_date(item.reason)
+                if item.sell_type == "HARD_REJECT"
+                else _norm_reason(item.reason)
             )
-        else:
-            subtitle = "passed hard checks — review before acting"
-        _section("SELLS — SOFT REJECTION", subtitle)
-        for item in soft_sells + macro_reviews:
+            lines.append(
+                f"{_order_line(item, ccy)}  [{_sell_type_label(item)}] {reason}"
+            )
+            if item.sell_type in ("STOP_BREACH", "HARD_REJECT"):
+                sl = _score_line(item)
+                if sl:
+                    lines.append(sl)
+                _append_pnl_proceeds(item, ccy)
+            elif item.sell_type == "SOFT_REJECT":
+                _detail_segments = _soft_rejection_score_segments(item)
+                _thesis_segment = _soft_rejection_thesis_segment(item)
+                if _thesis_segment:
+                    _detail_segments.append(_thesis_segment)
+                _append_wrapped_segments(_detail_segments)
+                _append_wrapped_segments(_soft_rejection_pnl_segments(item))
+            elif item.sell_type == "PROFIT_TAKE":
+                _append_wrapped_segments(_profit_take_segments(item))
+            note = _order_note(item)
+            if note:
+                lines.append(note)
+            lines.append("")
+
+    # ── SELL-RELATED REVIEWS ─────────────────────────────────────────────────
+    sell_reviews = macro_stop_reviews + macro_reviews + profit_take_reviews
+    if sell_reviews:
+        _section(
+            SELL_RELATED_REVIEWS_TITLE,
+            "tax, macro, or intact-thesis review before acting",
+        )
+        for item in sell_reviews:
             ccy = _item_currency(item)
-            # Strip internal MACRO_WATCH annotation — section header already contextualises it
-            _display_reason = _norm_reason(item.reason.split("  [MACRO_WATCH:")[0])
-            lines.append(f"{_order_line(item, ccy)}  {_display_reason}")
-            _detail_segments = _soft_rejection_score_segments(item)
-            _thesis_segment = _soft_rejection_thesis_segment(item)
-            if _thesis_segment:
-                _detail_segments.append(_thesis_segment)
-            _append_wrapped_segments(_detail_segments)
-            _append_wrapped_segments(_soft_rejection_pnl_segments(item))
+            _display_reason = _norm_reason(
+                item.reason.split("  [MACRO_STOP:")[0].split("  [MACRO_WATCH:")[0]
+            )
+            lines.append(
+                f"{_order_line(item, ccy)}  [{_sell_type_label(item)}] {_display_reason}"
+            )
+            if item.sell_type == "PROFIT_TAKE":
+                _append_wrapped_segments(_profit_take_segments(item))
+            elif item.sell_type == "SOFT_REJECT":
+                _detail_segments = _soft_rejection_score_segments(item)
+                _thesis_segment = _soft_rejection_thesis_segment(item)
+                if _thesis_segment:
+                    _detail_segments.append(_thesis_segment)
+                _append_wrapped_segments(_detail_segments)
+                _append_wrapped_segments(_soft_rejection_pnl_segments(item))
+            else:
+                sl = _score_line(item)
+                if sl:
+                    lines.append(sl)
+                _append_pnl_proceeds(item, ccy)
             note = _order_note(item)
             if note:
                 lines.append(note)
@@ -2103,10 +2162,10 @@ def format_report(
             lines.append(
                 f"  Pending inflows (sale proceeds, clears {settle_date_str}):"
             )
-            for row in cash_summary.pending_inflows:
-                qty_str = f"({abs(row.quantity)} sh)" if row.quantity else ""
-                label = f"    {row.action}  {row.ticker_ibkr}  {qty_str}:"
-                lines.append(f"{label:<46}+ ${row.cash_impact_usd:>6,.0f}")
+            for cash_row in cash_summary.pending_inflows:
+                qty_str = f"({abs(cash_row.quantity)} sh)" if cash_row.quantity else ""
+                label = f"    {cash_row.action}  {cash_row.ticker_ibkr}  {qty_str}:"
+                lines.append(f"{label:<46}+ ${cash_row.cash_impact_usd:>6,.0f}")
             lines.append(
                 f"{'  Total pending:':<46}  ${cash_summary.pending_inflows_total_usd:>6,.0f}"
             )
@@ -2197,10 +2256,13 @@ def format_report(
                     _order_qty_raw = existing[0].get("remainingSize") or existing[
                         0
                     ].get("totalSize")
-                    try:
-                        _order_qty: int | None = int(_order_qty_raw)
-                    except (TypeError, ValueError):
-                        _order_qty = None
+                    if _order_qty_raw is None:
+                        _order_qty: int | None = None
+                    else:
+                        try:
+                            _order_qty = int(_order_qty_raw)
+                        except (TypeError, ValueError):
+                            _order_qty = None
                     if (
                         _order_qty is not None
                         and i.suggested_quantity is not None
@@ -2573,7 +2635,10 @@ def _configure_external_loggers(debug: bool) -> None:
         "anthropic",
         "google",
         "google_genai",
+        "ddgs",
+        "primp",
         "src.llms",
+        "ibind",
         "ibind.ibkr_client",
     ]
     level = logging.DEBUG if debug else logging.WARNING

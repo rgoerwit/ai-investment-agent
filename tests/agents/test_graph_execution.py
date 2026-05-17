@@ -2,9 +2,62 @@
 
 import sys
 from types import ModuleType
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
+
+
+def _stub_graph_component_dependencies(monkeypatch):
+    import src.graph.components as components
+
+    def stub_node(*args, **kwargs):
+        def _stub_runtime_node(state, config):
+            return {}
+
+        return _stub_runtime_node
+
+    stub_memory = tuple(MagicMock() for _ in range(5))
+
+    monkeypatch.setattr(components, "_create_legacy_memories", lambda: stub_memory)
+    monkeypatch.setattr(
+        components, "create_quick_thinking_llm", lambda **kwargs: Mock()
+    )
+    monkeypatch.setattr(components, "create_deep_thinking_llm", lambda **kwargs: Mock())
+    monkeypatch.setattr(components, "create_analyst_node", stub_node)
+    monkeypatch.setattr(components, "create_auditor_node", stub_node)
+    monkeypatch.setattr(components, "create_consultant_node", stub_node)
+    monkeypatch.setattr(components, "create_financial_health_validator_node", stub_node)
+    monkeypatch.setattr(components, "create_legal_counsel_node", stub_node)
+    monkeypatch.setattr(components, "create_portfolio_manager_node", stub_node)
+    monkeypatch.setattr(components, "create_research_manager_node", stub_node)
+    monkeypatch.setattr(components, "create_researcher_node", stub_node)
+    monkeypatch.setattr(components, "create_risk_debater_node", stub_node)
+    monkeypatch.setattr(components, "create_trader_node", stub_node)
+    monkeypatch.setattr(components, "create_valuation_calculator_node", stub_node)
+    monkeypatch.setattr(
+        components, "create_chart_generator_node", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        components,
+        "create_agent_tool_node",
+        lambda *args, **kwargs: (lambda state, config: {}),
+    )
+
+    def empty_tools():
+        return []
+
+    monkeypatch.setattr(components.toolkit, "get_market_tools", empty_tools)
+    monkeypatch.setattr(components.toolkit, "get_technical_tools", empty_tools)
+    monkeypatch.setattr(components.toolkit, "get_sentiment_tools", empty_tools)
+    monkeypatch.setattr(components.toolkit, "get_news_tools", empty_tools)
+    monkeypatch.setattr(components.toolkit, "get_junior_fundamental_tools", empty_tools)
+    monkeypatch.setattr(components.toolkit, "get_senior_fundamental_tools", empty_tools)
+    monkeypatch.setattr(components.toolkit, "get_foreign_language_tools", empty_tools)
+    monkeypatch.setattr(components.toolkit, "get_legal_tools", empty_tools)
+    monkeypatch.setattr(components.toolkit, "get_value_trap_tools", empty_tools)
+    monkeypatch.setattr(components.toolkit, "get_all_tools", empty_tools)
+
+    return components
 
 
 class TestGraphRouting:
@@ -412,24 +465,70 @@ class TestAuditorLLMConfiguration:
     @patch("src.llms.config")
     def test_consultant_llm_never_sets_temperature(self, mock_config):
         """Consultant LLM should never set temperature (model-agnostic)."""
-        import src.llms
         from src.llms import get_consultant_llm
-
-        # Reset the singleton so our mock config is used
-        src.llms._consultant_llm_instance = None
 
         mock_config.enable_consultant = True
         mock_config.get_openai_api_key.return_value = "fake-key"
         mock_config.consultant_model = "any-model-name"
         mock_config.consultant_quick_model = "any-quick-model"
 
+        llm = get_consultant_llm()
+        assert llm is not None
+        assert llm.temperature != 0.0
+
+    def test_auditor_quick_mode_gpt5_mini_uses_low_effort(self):
+        """Quick-mode gpt-5-mini auditor must use 'low' (mini rejects 'minimal')."""
         try:
-            llm = get_consultant_llm()
-            assert llm is not None
-            assert llm.temperature != 0.0
-        finally:
-            # Clean up singleton for other tests
-            src.llms._consultant_llm_instance = None
+            import langchain_openai  # noqa: F401
+        except ImportError:
+            import pytest
+
+            pytest.skip("langchain-openai not installed (optional dependency)")
+
+        from unittest.mock import MagicMock
+        from unittest.mock import patch as _patch
+
+        from src.llms import create_auditor_llm
+
+        with _patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+            mock_chatgpt.return_value = MagicMock()
+            with _patch("src.llms.config") as cfg:
+                cfg.enable_consultant = True
+                cfg.get_openai_api_key.return_value = "k"
+                cfg.auditor_model = None
+                cfg.auditor_quick_model = "gpt-5.4-mini"
+                cfg.consultant_model = "gpt-5.4"
+                create_auditor_llm(quick_mode=True)
+                kw = mock_chatgpt.call_args[1]
+                assert kw["model"] == "gpt-5.4-mini"
+                assert kw["reasoning_effort"] == "low"
+
+    def test_auditor_quick_mode_full_gpt5_uses_minimal_effort(self):
+        """Quick-mode full gpt-5 auditor should use 'minimal'."""
+        try:
+            import langchain_openai  # noqa: F401
+        except ImportError:
+            import pytest
+
+            pytest.skip("langchain-openai not installed (optional dependency)")
+
+        from unittest.mock import MagicMock
+        from unittest.mock import patch as _patch
+
+        from src.llms import create_auditor_llm
+
+        with _patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+            mock_chatgpt.return_value = MagicMock()
+            with _patch("src.llms.config") as cfg:
+                cfg.enable_consultant = True
+                cfg.get_openai_api_key.return_value = "k"
+                cfg.auditor_model = None
+                cfg.auditor_quick_model = "gpt-5.4"
+                cfg.consultant_model = "gpt-5.4"
+                create_auditor_llm(quick_mode=True)
+                kw = mock_chatgpt.call_args[1]
+                assert kw["model"] == "gpt-5.4"
+                assert kw["reasoning_effort"] == "minimal"
 
 
 class TestAuditorEnablementContract:
@@ -498,6 +597,136 @@ class TestAuditorEnablementContract:
 
         assert llm is not None
         assert captured["reasoning_effort"] == "medium"
+
+
+class TestQuickModeGraphContracts:
+    """Lock down consultant/auditor behavior in quick mode."""
+
+    def test_build_graph_components_keeps_consultant_and_auditor_in_quick_mode(
+        self, monkeypatch
+    ):
+        from src.graph.components import build_graph_components
+
+        components = _stub_graph_component_dependencies(monkeypatch)
+        quick_consultant = Mock(name="quick-consultant")
+        auditor_llm = Mock(name="auditor")
+
+        consultant_calls = []
+
+        def fake_get_consultant_llm(**kwargs):
+            consultant_calls.append(kwargs)
+            return quick_consultant
+
+        monkeypatch.setattr(components, "get_consultant_llm", fake_get_consultant_llm)
+        monkeypatch.setattr(components, "_is_auditor_enabled", lambda: True)
+        monkeypatch.setattr(
+            components, "create_auditor_llm", lambda **kwargs: auditor_llm
+        )
+
+        graph_components = build_graph_components(
+            max_debate_rounds=1,
+            enable_memory=False,
+            ticker="TEST",
+            cleanup_previous=False,
+            quick_mode=True,
+            strict_mode=False,
+            chart_format="png",
+            transparent_charts=False,
+            image_dir=None,
+            skip_charts=True,
+        )
+
+        assert graph_components.consultant_enabled is True
+        assert graph_components.auditor_enabled is True
+        assert "Consultant" in graph_components.nodes
+        assert "Auditor" in graph_components.nodes
+        assert consultant_calls
+        assert consultant_calls[0]["quick_mode"] is True
+
+    def test_build_graph_components_quick_mode_disables_both_when_openai_path_unavailable(
+        self, monkeypatch
+    ):
+        from src.graph.components import build_graph_components
+
+        components = _stub_graph_component_dependencies(monkeypatch)
+        monkeypatch.setattr(components, "get_consultant_llm", lambda **kwargs: None)
+        monkeypatch.setattr(components, "_is_auditor_enabled", lambda: False)
+
+        graph_components = build_graph_components(
+            max_debate_rounds=1,
+            enable_memory=False,
+            ticker="TEST",
+            cleanup_previous=False,
+            quick_mode=True,
+            strict_mode=False,
+            chart_format="png",
+            transparent_charts=False,
+            image_dir=None,
+            skip_charts=True,
+        )
+
+        assert graph_components.consultant_enabled is False
+        assert graph_components.auditor_enabled is False
+        assert "Consultant" not in graph_components.nodes
+        assert "Auditor" not in graph_components.nodes
+
+    def test_quick_mode_raises_when_auditor_routing_and_creation_disagree(
+        self, monkeypatch
+    ):
+        from src.graph.components import build_graph_components
+
+        components = _stub_graph_component_dependencies(monkeypatch)
+        monkeypatch.setattr(components, "get_consultant_llm", lambda **kwargs: Mock())
+        monkeypatch.setattr(components, "_is_auditor_enabled", lambda: True)
+        monkeypatch.setattr(components, "create_auditor_llm", lambda **kwargs: None)
+
+        with pytest.raises(RuntimeError, match="Auditor routing was enabled"):
+            build_graph_components(
+                max_debate_rounds=1,
+                enable_memory=False,
+                ticker="TEST",
+                cleanup_previous=False,
+                quick_mode=True,
+                strict_mode=False,
+                chart_format="png",
+                transparent_charts=False,
+                image_dir=None,
+                skip_charts=True,
+            )
+
+    def test_build_graph_components_uses_full_mode_consultant_when_not_quick(
+        self, monkeypatch
+    ):
+        from src.graph.components import build_graph_components
+
+        components = _stub_graph_component_dependencies(monkeypatch)
+        consultant_calls = []
+
+        def fake_get_consultant_llm(**kwargs):
+            consultant_calls.append(kwargs)
+            return Mock(name="full-consultant")
+
+        monkeypatch.setattr(components, "get_consultant_llm", fake_get_consultant_llm)
+        monkeypatch.setattr(components, "_is_auditor_enabled", lambda: True)
+        monkeypatch.setattr(components, "create_auditor_llm", lambda **kwargs: Mock())
+
+        graph_components = build_graph_components(
+            max_debate_rounds=2,
+            enable_memory=False,
+            ticker="TEST",
+            cleanup_previous=False,
+            quick_mode=False,
+            strict_mode=False,
+            chart_format="png",
+            transparent_charts=False,
+            image_dir=None,
+            skip_charts=True,
+        )
+
+        assert graph_components.consultant_enabled is True
+        assert graph_components.auditor_enabled is True
+        assert consultant_calls
+        assert consultant_calls[0]["quick_mode"] is False
 
 
 class TestTradingContext:

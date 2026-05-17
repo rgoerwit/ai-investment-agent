@@ -15,7 +15,6 @@ import pandas as pd
 import pytest
 
 from src.liquidity_calculation_tool import (
-    EXCHANGE_CURRENCY_MAP,
     calculate_liquidity_metrics,
 )
 
@@ -141,22 +140,6 @@ class TestLiquidityFXConversion:
                 result = await call_tool("7203.T")
 
         assert "fallback" in result
-
-
-class TestExchangeCurrencyMapping:
-    """Test EXCHANGE_CURRENCY_MAP covers all major exchanges."""
-
-    def test_major_asian_exchanges_present(self):
-        """Test major Asian exchanges are in currency map."""
-        assert "HK" in EXCHANGE_CURRENCY_MAP
-        assert "T" in EXCHANGE_CURRENCY_MAP
-        assert "TW" in EXCHANGE_CURRENCY_MAP
-        assert "KS" in EXCHANGE_CURRENCY_MAP
-
-    def test_currency_codes_are_strings(self):
-        """Test all currency codes are strings (not tuples)."""
-        for suffix, currency in EXCHANGE_CURRENCY_MAP.items():
-            assert isinstance(currency, str), f"{suffix} maps to {type(currency)}"
 
 
 class TestBackwardsCompatibility:

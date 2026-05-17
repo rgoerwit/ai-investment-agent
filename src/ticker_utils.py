@@ -10,9 +10,11 @@ from dataclasses import dataclass
 
 import structlog
 
+from src.async_utils import run_with_hard_timeout
 from src.exchange_metadata import (
     EXCHANGES_BY_SUFFIX,
     IBKR_TO_YFINANCE,
+    canonical_suffix_for_reuters_exchange,
     canonical_suffix_for_token,
 )
 
@@ -174,23 +176,24 @@ class TickerFormatter:
         reuters_match = cls.TICKER_PATTERNS["reuters"].match(ticker)
         if reuters_match:
             symbol, reuters_code, country_code = reuters_match.groups()
-            exchange_mapping = cls._map_reuters_to_exchange(reuters_code, country_code)
+            canonical_suffix = cls._map_reuters_to_exchange(reuters_code, country_code)
 
-            if exchange_mapping:
+            if canonical_suffix:
+                exchange_info = EXCHANGES_BY_SUFFIX[canonical_suffix]
                 if target_format == "yfinance":
-                    normalized = f"{symbol}{exchange_mapping[0]}"
+                    normalized = f"{symbol}{exchange_info.yf_suffix}"
                 elif target_format == "ibkr":
-                    normalized = f"{symbol}:{exchange_mapping[3]}"
+                    normalized = f"{symbol}:{exchange_info.ibkr_code}"
                 else:
                     normalized = ticker
 
                 metadata = {
                     "original": original_ticker,
                     "symbol": symbol,
-                    "exchange_suffix": exchange_mapping[0],
-                    "exchange_name": exchange_mapping[1],
-                    "country": exchange_mapping[2],
-                    "ibkr_exchange": exchange_mapping[3],
+                    "exchange_suffix": exchange_info.yf_suffix,
+                    "exchange_name": exchange_info.exchange_name,
+                    "country": exchange_info.country,
+                    "ibkr_exchange": exchange_info.ibkr_code,
                     "format": "reuters",
                 }
                 return normalized, metadata
@@ -343,40 +346,9 @@ class TickerFormatter:
     @classmethod
     def _map_reuters_to_exchange(
         cls, reuters_code: str, country_code: str
-    ) -> tuple[str, str, str, str] | None:
-        """Map Reuters exchange codes to exchange info (yfinance_suffix, name, country, ibkr_code)."""
-        reuters_mapping = {
-            "N": {
-                "CH": ("SW", "SIX Swiss Exchange", "Switzerland", "SWX"),
-                "DE": ("DE", "XETRA", "Germany", "IBIS"),
-                "FR": ("PA", "Euronext Paris", "France", "SBF"),
-                "JP": ("T", "Tokyo Stock Exchange", "Japan", "TSE"),
-                "GB": ("L", "London Stock Exchange", "UK", "LSE"),
-            },
-            "O": {
-                "CH": ("SW", "SIX Swiss Exchange", "Switzerland", "SWX"),
-            },
-            "S": {
-                "CH": ("SW", "SIX Swiss Exchange", "Switzerland", "SWX"),
-            },
-            "VX": {
-                "CH": ("SW", "SIX Swiss Exchange", "Switzerland", "SWX"),
-            },
-        }
-
-        if (
-            reuters_code in reuters_mapping
-            and country_code in reuters_mapping[reuters_code]
-        ):
-            suffix, name, country, ibkr = reuters_mapping[reuters_code][country_code]
-            return (
-                f".{suffix}" if not suffix.startswith(".") else suffix,
-                name,
-                country,
-                ibkr,
-            )
-
-        return None
+    ) -> str | None:
+        """Return the canonical yfinance suffix for a Reuters exchange/country pair."""
+        return canonical_suffix_for_reuters_exchange(reuters_code, country_code)
 
     @classmethod
     def to_yfinance(cls, ticker: str) -> str:
@@ -486,9 +458,10 @@ async def _try_yfinance(ticker: str) -> str | None:
     try:
         import yfinance as yf
 
-        info = await asyncio.wait_for(
+        info = await run_with_hard_timeout(
             asyncio.to_thread(lambda: yf.Ticker(ticker).info),
             timeout=5,
+            label=f"yfinance.info:{ticker}",
         )
         if info:
             return info.get("longName") or info.get("shortName")
@@ -502,9 +475,10 @@ async def _try_yahooquery(ticker: str) -> str | None:
     try:
         from yahooquery import Ticker as YQTicker
 
-        result = await asyncio.wait_for(
+        result = await run_with_hard_timeout(
             asyncio.to_thread(lambda: YQTicker(ticker).quote_type),
             timeout=5,
+            label=f"yahooquery.quote_type:{ticker}",
         )
         if isinstance(result, dict) and ticker in result:
             data = result[ticker]
@@ -565,7 +539,11 @@ def _get_ibkr_name_service():
     return _ibkr_name_service
 
 
-async def resolve_company_name(ticker: str) -> CompanyNameResult:
+async def resolve_company_name(
+    ticker: str,
+    *,
+    allow_ibkr_probe: bool = False,
+) -> CompanyNameResult:
     """
     Resolve company name from multiple sources with fallback chain.
 
@@ -574,6 +552,10 @@ async def resolve_company_name(ticker: str) -> CompanyNameResult:
     2. yahooquery (free, different backend)
     3. FMP (paid, lightweight profile call)
     4. EODHD (paid, filtered General endpoint)
+
+    The optional IBKR probe is disabled by default because its brokerage
+    connection path can perform synchronous retries that are too expensive for
+    normal analysis startup.
 
     Each source has a 5-second timeout. Names are validated to ensure
     they aren't just the ticker string echoed back.
@@ -595,7 +577,7 @@ async def resolve_company_name(ticker: str) -> CompanyNameResult:
                 raw_name = await resolver(lookup_ticker)
                 if _is_valid_company_name(raw_name, lookup_ticker):
                     normalized = normalize_company_name(raw_name)
-                    logger.info(
+                    logger.debug(
                         "company_name_resolved",
                         ticker=ticker,
                         requested_ticker=ticker,
@@ -629,41 +611,44 @@ async def resolve_company_name(ticker: str) -> CompanyNameResult:
                     error=str(e),
                 )
 
-    try:
-        raw_name = await _try_ibkr(ticker)
-        if _is_valid_company_name(raw_name, ticker):
-            normalized = normalize_company_name(raw_name)
-            logger.info(
-                "company_name_resolved",
-                ticker=ticker,
-                requested_ticker=ticker,
-                lookup_ticker=ticker,
-                lookup_strategy="ibkr_probe",
-                name=normalized,
-                source="ibkr",
-            )
-            return CompanyNameResult(name=normalized, source="ibkr", is_resolved=True)
-        if raw_name:
+    if allow_ibkr_probe:
+        try:
+            raw_name = await _try_ibkr(ticker)
+            if _is_valid_company_name(raw_name, ticker):
+                normalized = normalize_company_name(raw_name)
+                logger.debug(
+                    "company_name_resolved",
+                    ticker=ticker,
+                    requested_ticker=ticker,
+                    lookup_ticker=ticker,
+                    lookup_strategy="ibkr_probe",
+                    name=normalized,
+                    source="ibkr",
+                )
+                return CompanyNameResult(
+                    name=normalized, source="ibkr", is_resolved=True
+                )
+            if raw_name:
+                logger.debug(
+                    "company_name_rejected",
+                    ticker=ticker,
+                    requested_ticker=ticker,
+                    lookup_ticker=ticker,
+                    lookup_strategy="ibkr_probe",
+                    raw_name=raw_name,
+                    source="ibkr",
+                    reason="name matches lookup ticker string",
+                )
+        except Exception as e:
             logger.debug(
-                "company_name_rejected",
+                "company_name_source_error",
                 ticker=ticker,
                 requested_ticker=ticker,
                 lookup_ticker=ticker,
                 lookup_strategy="ibkr_probe",
-                raw_name=raw_name,
                 source="ibkr",
-                reason="name matches lookup ticker string",
+                error=str(e),
             )
-    except Exception as e:
-        logger.debug(
-            "company_name_source_error",
-            ticker=ticker,
-            requested_ticker=ticker,
-            lookup_ticker=ticker,
-            lookup_strategy="ibkr_probe",
-            source="ibkr",
-            error=str(e),
-        )
 
     logger.debug(
         "company_name_unresolved",

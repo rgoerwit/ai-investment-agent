@@ -485,3 +485,74 @@ def test_lesson_types_still_includes_originals():
 
     for t in ("missed_risk", "false_positive", "missed_opportunity", "correct_call"):
         assert t in LESSON_TYPES
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Test: --strict mode is recorded and weights are discounted accordingly
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestSaveRejectionRecordRecordsRunOptions:
+    """Not all analyses are of equal weight: --quick uses cheaper models;
+    --strict tightens gates and rejects valid REIT/PFIC/VIE candidates.
+    Both flags must be persisted on the rejection record so downstream
+    lesson weighting can discount accordingly."""
+
+    @pytest.mark.asyncio
+    async def test_strict_mode_persisted_in_metadata(self):
+        mem = _make_memory()
+        snap = _snapshot(verdict="HOLD")
+        snap["is_strict_mode"] = True
+        await save_rejection_record(snap, mem)
+
+        _docs, metas = mem.add_situations.call_args[0]
+        assert metas[0]["is_strict_mode"] is True
+
+    @pytest.mark.asyncio
+    async def test_strict_mode_discounts_confidence_weight(self):
+        """Standard non-strict + non-quick: weight = 0.5.
+        With strict gates: discounted by 0.7 → 0.35."""
+        mem = _make_memory()
+        snap = _snapshot(verdict="HOLD")
+        snap["is_strict_mode"] = True
+        await save_rejection_record(snap, mem)
+
+        _docs, metas = mem.add_situations.call_args[0]
+        assert metas[0]["confidence_weight"] == pytest.approx(0.5 * 0.7)
+
+    @pytest.mark.asyncio
+    async def test_quick_plus_strict_compound_discount(self):
+        """Quick (0.3) × strict (0.7) = 0.21."""
+        mem = _make_memory()
+        snap = _snapshot(verdict="HOLD", is_quick_mode=True)
+        snap["is_strict_mode"] = True
+        await save_rejection_record(snap, mem)
+
+        _docs, metas = mem.add_situations.call_args[0]
+        assert metas[0]["confidence_weight"] == pytest.approx(0.3 * 0.7)
+        assert metas[0]["is_quick_mode"] is True
+        assert metas[0]["is_strict_mode"] is True
+
+    @pytest.mark.asyncio
+    async def test_standard_mode_unchanged(self):
+        """Regression guard: snapshots without is_strict_mode default to
+        non-strict and weights are not discounted."""
+        mem = _make_memory()
+        snap = _snapshot(verdict="HOLD")  # no is_strict_mode key
+        await save_rejection_record(snap, mem)
+
+        _docs, metas = mem.add_situations.call_args[0]
+        assert metas[0]["is_strict_mode"] is False
+        assert metas[0]["confidence_weight"] == 0.5
+
+    @pytest.mark.asyncio
+    async def test_document_text_records_mode_label(self):
+        """The free-text document also records the mode so a human reviewer
+        scanning lessons sees the run options."""
+        mem = _make_memory()
+        snap = _snapshot(verdict="HOLD", is_quick_mode=True)
+        snap["is_strict_mode"] = True
+        await save_rejection_record(snap, mem)
+
+        docs, _metas = mem.add_situations.call_args[0]
+        assert "Quick mode + strict gates" in docs[0]

@@ -104,6 +104,17 @@ IBKR_TO_YFINANCE: dict[str, str] = (
     | US_IBKR_EXCHANGES
 )
 
+REUTERS_EXCHANGE_ALIASES: dict[tuple[str, str], str] = {
+    ("N", "CH"): ".SW",
+    ("N", "DE"): ".DE",
+    ("N", "FR"): ".PA",
+    ("N", "JP"): ".T",
+    ("N", "GB"): ".L",
+    ("O", "CH"): ".SW",
+    ("S", "CH"): ".SW",
+    ("VX", "CH"): ".SW",
+}
+
 
 def canonical_suffix_for_token(token: str) -> str | None:
     """Return the canonical yfinance suffix for a suffix token like 'SWX' or 'TWO'."""
@@ -111,6 +122,16 @@ def canonical_suffix_for_token(token: str) -> str | None:
     if not cleaned:
         return None
     return NORMALIZATION_SUFFIX_ALIASES.get(cleaned)
+
+
+def canonical_suffix_for_reuters_exchange(
+    reuters_code: str,
+    country_code: str,
+) -> str | None:
+    """Return the canonical yfinance suffix for a Reuters exchange/country pair."""
+    return REUTERS_EXCHANGE_ALIASES.get(
+        (reuters_code.strip().upper(), country_code.strip().upper())
+    )
 
 
 def _validate_exchange_metadata() -> None:

@@ -2,7 +2,15 @@
 
 This repository is a multi-agent international equity research system. It can analyze single tickers, run broader screening pipelines, and optionally reconcile saved results against an Interactive Brokers portfolio through either a CLI workflow or a local Flask dashboard.
 
-You need Python 3.12+, Poetry, and at least one working LLM API key. A Gemini key is the minimum practical setup; optional data-provider keys improve coverage and reliability.
+You need Python 3.12+, Poetry, and at least one working LLM API key. A Gemini key is the minimum practical setup.
+
+I've gone to a lot of trouble to make this work with inexpensive/free services (at the cost of a lot of code complexity).  Practically speaking, Tavily, ChatGTP, plus some data-service API keys are needed to get truly useful results.  See the .env.example file.
+
+Environment note:
+
+- `poetry run ...` is the safest default for this repo.
+- If you activate a virtual environment manually, make sure it is this project's environment and that it has the repo dependencies installed.
+- If you have some other venv active, deactivate it or let the pipeline fall back to Poetry.
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -216,7 +224,6 @@ Set these env vars before using it:
 Practical notes:
 
 - Langfuse is bypassed unless `--enable-langfuse` is supplied.
-- `--trace-langfuse` still works as a deprecated alias during the transition.
 - Set `LANGFUSE_SESSION_ID` if you want multiple CLI invocations to land in one shared Langfuse session, for example in a batch runner.
 - Prompt fetch from Langfuse is off by default; local prompts remain authoritative unless you enable remote prompt fetch in config.
 - Traced runs log a trace URL when Langfuse returns one.
@@ -265,6 +272,8 @@ The screening pipeline is the shortest path from broad discovery to a shortlist 
 
 # Step-by-step alternative
 poetry run python scripts/find_gems.py --output scratch/gems.txt
+# Run this next; this is also how you would restart an aborted run, 
+# where stage0-scrape finished, but stage1 didn't (fully) finish
 ./scripts/run_pipeline.sh --skip-scrape scratch/gems.txt
 ```
 
@@ -275,6 +284,11 @@ Outputs land in `scratch/`. In practice you will see:
 - a `buys_YYYY-MM-DD.txt` list
 - full reports for BUY names
 
+Practical notes:
+
+- Stage 1 is a broad quick screen: `--quick --no-charts --brief --no-memory`, not strict mode.
+- The upstream `find_gems.py` filter starts conservative, with a modest higher-P/E band allowed when profitability, leverage, cash-flow quality, and coverage are stronger.
+
 Resumption is built in:
 
 - Re-running the same command family skips completed outputs.
@@ -284,7 +298,7 @@ Resumption is built in:
 ## IBKR Portfolio Management
 
 `scripts/portfolio_manager.py` sits on top of the saved analysis JSONs in `results/`. It bridges the evaluator output with live or offline portfolio context.
-The IBKR reconciliation path is now split by ownership: `src/ibkr/reconciler.py` orchestrates while `analysis_index.py`, `reconciliation_rules.py`, `position_evaluator.py`, `watchlist_evaluator.py`, `opportunity_finder.py`, and `portfolio_health.py` own the underlying loading, rule, and routing logic.
+The IBKR reconciliation path is split by ownership: `src/ibkr/reconciler.py` orchestrates while `analysis_index.py`, `reconciliation_rules.py`, `position_evaluator.py`, `watchlist_evaluator.py`, `opportunity_finder.py`, and `portfolio_health.py` own the underlying loading, rule, and routing logic.
 
 ```bash
 # Verify credentials and IBKR connectivity first
@@ -310,7 +324,8 @@ Notes:
 
 - `--read-only` is the safest way to understand the tool before you touch live broker data.
 - `--recommend` produces actionable suggestions and sizing guidance. Order execution is currently disabled, so the tool remains advisory.
-- Concentration warnings, stale-analysis flags, cash timing, and macro-demoted review items are part of the normal report output.
+- Concentration warnings, stale-analysis flags, cash timing, macro-demoted review items, and capital-allocation `PROFIT_TAKE` candidates are part of the normal report output.
+- `PROFIT_TAKE` is reserved for positions with intact business quality, material gains versus IBKR average cost, and saved analysis evidence of idle-cash capital-allocation risk. Unknown or short-term holding periods are surfaced as reviews unless severe idle-cash risk and a very large gain justify a sell candidate.
 
 ## Local Flask Dashboard
 
@@ -428,7 +443,7 @@ tests/                       Unit and integration coverage
 
 How the pieces connect:
 
-- `src/main.py` is now orchestration-first: runtime setup, macro-context prefetch, graph execution, tracing, and mode dispatch.
+- `src/main.py` is orchestration-first: runtime setup, macro-context prefetch, graph execution, tracing, and mode dispatch.
 - `src/cli.py` owns CLI parsing, flag validation, and output/article path resolution.
 - `src/persistence.py` owns saved artifact assembly, JSON persistence, and rejection-record helpers.
 - `src/output.py` owns banners, CLI/report rendering, and optional article generation.
@@ -437,7 +452,7 @@ How the pieces connect:
 - `src/graph/` wires the workflow, `src/agents/` owns node logic and state handling, and `src/tools/` plus `src/tools/registry.py` provide the tool surface used by agent tool nodes.
 - `src/tooling/` owns the execution plane around those tools: inspection, audit hooks, and argument-policy enforcement.
 - `src/data/`, `src/validators/`, `src/memory.py`, and `src/charts/` are shared subsystems used by the main analysis path.
-- `src/data/fetcher.py` is now an orchestration seam over `src/data/source_fetchers.py`, `src/data/metric_extraction.py`, `src/data/merge_policy.py`, and `src/data/gap_fill.py`.
+- `src/data/fetcher.py` is an orchestration seam over `src/data/source_fetchers.py`, `src/data/metric_extraction.py`, `src/data/merge_policy.py`, and `src/data/gap_fill.py`.
 - `src/report_generator.py` turns the final graph state into the structured markdown report; `src/article_writer.py` is the optional long-form writing pass on top of that report.
 - `scripts/portfolio_manager.py`, `src/ibkr/`, and `src/web/ibkr_dashboard/` are the operator-facing portfolio workflows built on top of saved analysis outputs and, optionally, live broker context.
 
@@ -463,6 +478,14 @@ If you are changing core runtime behavior, run the full suite before you call it
 ```bash
 poetry env remove --all
 poetry install
+```
+
+If `./scripts/run_pipeline.sh` or another script unexpectedly uses plain `python`, check whether you have an unrelated virtual environment active. The pipeline falls back to Poetry when the active venv is missing core repo dependencies, but the cleanest fix is one of:
+
+```bash
+deactivate
+poetry install
+poetry run python -m src.main --ticker 0005.HK
 ```
 
 If `poetry run ibkr-dashboard` or `poetry run ibkr-dashboard-worker` warns that the entry point "isn't installed as a script", the commands were added to `pyproject.toml` after the virtualenv was created, or the project root was not reinstalled. `poetry install` fixes that. As a fallback, run:
@@ -499,7 +522,6 @@ These are real features, but they are not required to get started:
 - **Observability**: Langfuse and LangSmith hooks exist for tracing and diagnostics. For sensitive deployments, LangSmith also supports `LANGSMITH_HIDE_INPUTS` and `LANGSMITH_HIDE_OUTPUTS`.
 - **Inspection and tool audit hooks**: see `src/tooling/` if you want to inspect or audit untrusted external content before it reaches LLM context.
 - **Deployment references**: `terraform/` contains reference infrastructure, not a turnkey hosted product.
-- **Dependency note**: `yfinance 1.2.0` still pins `curl-cffi <0.14` upstream. The repo tracks the current SSRF advisory and currently treats it as a constrained transitive risk because Yahoo data paths here are driven by ticker-like symbols, not attacker-controlled URLs.
 
 ## Limitations
 

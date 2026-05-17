@@ -21,6 +21,9 @@ _KNOWN_SECRET_VALUE_PATTERN = re.compile(
 _HIGH_ENTROPY_VALUE_PATTERN = re.compile(
     r"\b(?=[A-Za-z0-9._\-/+=]{24,}\b)(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9._\-/+=]+\b"
 )
+_SAFE_DEBUG_TOKEN_PATTERN = re.compile(
+    r"(?i)(?:\.(?:csv|json|log|md|txt)\b|^[A-Z0-9]{1,8}(?:[._-][A-Z0-9]{1,8})+$)"
+)
 _PATH_HINT_PATTERN = re.compile(
     r"[/\\]|\.env\b|\.json\b|\.sqlite\b|\.md\b", re.IGNORECASE
 )
@@ -63,6 +66,17 @@ def _redact_url_query_values(text: str) -> str:
         return text
 
 
+def _redact_high_entropy_match(match: re.Match[str]) -> str:
+    value = match.group(0)
+    if "=" in value:
+        key, _sep, _raw_value = value.partition("=")
+        if key and not is_sensitive_key(key):
+            return value
+    if _SAFE_DEBUG_TOKEN_PATTERN.search(value):
+        return value
+    return "[REDACTED]"
+
+
 def redact_sensitive_text(text: str, *, max_chars: int = _DEFAULT_PREVIEW_CHARS) -> str:
     if not text:
         return ""
@@ -71,7 +85,7 @@ def redact_sensitive_text(text: str, *, max_chars: int = _DEFAULT_PREVIEW_CHARS)
     redacted = _INLINE_SECRET_PATTERN.sub(r"\1=[REDACTED]", redacted)
     redacted = _BEARER_PATTERN.sub("Bearer [REDACTED]", redacted)
     redacted = _KNOWN_SECRET_VALUE_PATTERN.sub("[REDACTED]", redacted)
-    redacted = _HIGH_ENTROPY_VALUE_PATTERN.sub("[REDACTED]", redacted)
+    redacted = _HIGH_ENTROPY_VALUE_PATTERN.sub(_redact_high_entropy_match, redacted)
     return _truncate(redacted, max_chars)
 
 

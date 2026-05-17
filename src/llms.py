@@ -191,6 +191,39 @@ GLOBAL_RATE_LIMITER = _LazyRateLimiterProxy(
     lambda: _create_rate_limiter_from_rpm(config_module.config.gemini_rpm_limit)
 )
 
+# Lazily-constructed OpenAI rate limiter.  None when OPENAI_RPM_LIMIT is unset
+# (the default) so existing deployments are not throttled without opt-in.
+_openai_rate_limiter: InMemoryRateLimiter | None = None
+_openai_rate_limiter_initialized: bool = False
+_warned_openai_unthrottled: set[str] = set()
+
+
+def _get_openai_rate_limiter() -> InMemoryRateLimiter | None:
+    """Return the shared OpenAI rate limiter, initializing it on first call."""
+    global _openai_rate_limiter, _openai_rate_limiter_initialized
+    if not _openai_rate_limiter_initialized:
+        _openai_rate_limiter_initialized = True
+        rpm = config_module.config.openai_rpm_limit
+        if rpm is not None:
+            _openai_rate_limiter = _create_rate_limiter_from_rpm(rpm)
+    return _openai_rate_limiter
+
+
+def _warn_openai_unthrottled_once(llm_kind: str) -> None:
+    """Log once per LLM kind when no OpenAI rate limiter is configured."""
+    if llm_kind not in _warned_openai_unthrottled:
+        _warned_openai_unthrottled.add(llm_kind)
+        logger.debug("openai_llm_unthrottled", llm_kind=llm_kind)
+
+
+def _reset_openai_rate_limiter_for_tests() -> None:
+    """Reset OpenAI rate-limiter state between tests."""
+    global _openai_rate_limiter, _openai_rate_limiter_initialized
+    _openai_rate_limiter = None
+    _openai_rate_limiter_initialized = False
+    _warned_openai_unthrottled.clear()
+
+
 # Track LLM instances for cleanup
 _llm_instances: dict = {}
 _llm_instance_counter: int = 0
@@ -404,7 +437,11 @@ def create_quick_thinking_llm(
     If the QUICK_MODEL is Gemini 3+ or Gemini 2.5, this will set low reasoning.
     """
     model_name = model or config.quick_think_llm
-    final_timeout = timeout if timeout is not None else config.api_timeout
+    final_timeout = (
+        timeout
+        if timeout is not None
+        else min(config.api_timeout, config.quick_llm_api_timeout_seconds)
+    )
     final_retries = (
         max_retries if max_retries is not None else config.api_retry_attempts
     )
@@ -541,13 +578,10 @@ def create_consultant_llm(
 
     # Get model name from config (not os.environ)
     if model:
-        # Explicit model override
         model_name = model
     elif quick_mode:
-        # Quick mode: use faster/cheaper model (defaults to gpt-4o-mini)
-        model_name = config.consultant_quick_model
+        model_name = config.consultant_quick_model or config.consultant_model
     else:
-        # Normal mode: use full model (defaults to gpt-4o)
         model_name = config.consultant_model
 
     logger.info(
@@ -559,7 +593,7 @@ def create_consultant_llm(
     # The consultant's precision comes from its structured prompt and
     # spot-check tool methodology, not from temperature settings.
 
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "model": model_name,
         "timeout": timeout,
         "max_retries": max_retries,
@@ -572,12 +606,21 @@ def create_consultant_llm(
         "use_responses_api": True,
         "output_version": "responses/v1",
     }
+    _rl = _get_openai_rate_limiter()
+    if _rl is not None:
+        kwargs["rate_limiter"] = _rl
+    else:
+        _warn_openai_unthrottled_once("consultant")
 
-    # GPT-5 non-pro models support configurable reasoning effort. Pinning the
-    # consultant to medium keeps it thoughtful without inheriting the much
-    # slower deep-thinking behavior of pro variants.
+    # GPT-5 non-pro models support configurable reasoning effort. Quick mode
+    # uses a lower setting to keep the consultant active without paying full
+    # synthesis cost; normal mode preserves the current medium effort.
+    # Note: gpt-5.x-mini variants reject "minimal" — only full gpt-5.x accepts it.
     if model_name.startswith("gpt-5") and "pro" not in model_name:
-        kwargs["reasoning_effort"] = "medium"
+        if quick_mode:
+            kwargs["reasoning_effort"] = "low" if "mini" in model_name else "minimal"
+        else:
+            kwargs["reasoning_effort"] = "medium"
 
     budget = _resolve_generation_budget(
         intent_tokens=kwargs["max_completion_tokens"],
@@ -605,6 +648,7 @@ def create_consultant_llm(
 def create_auditor_llm(
     callbacks: list[BaseCallbackHandler] | None = None,
     max_completion_tokens: int | None = None,
+    quick_mode: bool = False,
 ) -> BaseChatModel | None:
     """
     Create Auditor LLM with fallback logic.
@@ -612,9 +656,13 @@ def create_auditor_llm(
 
     Logic:
     1. If ENABLE_CONSULTANT is False -> None
-    2. If AUDITOR_MODEL is set -> Use it
-    3. If CONSULTANT_MODEL is set -> Use it (Fallback)
-    4. Default -> gpt-4o
+    2. quick_mode=True and AUDITOR_QUICK_MODEL is set -> Use it
+    3. If AUDITOR_MODEL is set -> Use it
+    4. If CONSULTANT_MODEL is set -> Use it (Fallback)
+    5. Default -> gpt-4o
+
+    In quick mode, gpt-5 reasoning effort is dropped to "minimal" to keep the
+    auditor cheap on screening passes; normal mode preserves "medium".
     """
     try:
         from langchain_openai import ChatOpenAI
@@ -631,30 +679,43 @@ def create_auditor_llm(
         logger.warning("auditor_no_api_key")
         return None
 
-    # Determine model: Specific -> Consultant -> Default
-    model_name = config.auditor_model or config.consultant_model or "gpt-4o"
+    # Determine model: quick override -> specific -> consultant -> default
+    if quick_mode and config.auditor_quick_model:
+        model_name = config.auditor_quick_model
+    else:
+        model_name = config.auditor_model or config.consultant_model or "gpt-4o"
 
-    logger.info("auditor_llm_init", model=model_name)
+    logger.info("auditor_llm_init", model=model_name, quick_mode=quick_mode)
 
     # Do NOT set temperature — multiple OpenAI model families (o-series reasoning
     # models, gpt-5.x) reject temperature != 1.0.  Forensic precision comes from
     # the structured prompt and deterministic tool calls, not from temperature=0.
     # Omitting temperature lets the SDK use each model's default safely.
 
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "model": model_name,
         "timeout": 120,
         "max_retries": 3,
         "api_key": api_key,
         "callbacks": callbacks or [],
-        "max_completion_tokens": max_completion_tokens or 16384,
+        "max_completion_tokens": max_completion_tokens
+        or (6144 if quick_mode else 16384),
         "streaming": False,
         "use_responses_api": True,
         "output_version": "responses/v1",
     }
+    _rl = _get_openai_rate_limiter()
+    if _rl is not None:
+        kwargs["rate_limiter"] = _rl
+    else:
+        _warn_openai_unthrottled_once("auditor")
 
+    # gpt-5.x-mini variants reject "minimal" — only full gpt-5.x accepts it.
     if model_name.startswith("gpt-5") and "pro" not in model_name:
-        kwargs["reasoning_effort"] = "medium"
+        if quick_mode:
+            kwargs["reasoning_effort"] = "low" if "mini" in model_name else "minimal"
+        else:
+            kwargs["reasoning_effort"] = "medium"
 
     budget = _resolve_generation_budget(
         intent_tokens=kwargs["max_completion_tokens"],
@@ -806,7 +867,7 @@ def create_editor_llm(
 
     logger.info("editor_llm_init", model=model_name)
 
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "model": model_name,
         "timeout": 120,
         "max_retries": 3,
@@ -817,6 +878,11 @@ def create_editor_llm(
         "use_responses_api": True,
         "output_version": "responses/v1",
     }
+    _rl = _get_openai_rate_limiter()
+    if _rl is not None:
+        kwargs["rate_limiter"] = _rl
+    else:
+        _warn_openai_unthrottled_once("editor")
     if model_name.startswith("gpt-5") and "pro" not in model_name:
         kwargs["reasoning_effort"] = "medium"
     budget = _resolve_generation_budget(
@@ -841,7 +907,9 @@ def create_editor_llm(
     return llm
 
 
-# Initialize consultant LLM (lazy initialization to handle missing API key gracefully)
+# Legacy symbol kept for compatibility with older tests/importers. Consultant
+# instances are now created per call so quick/full mode configuration and
+# per-run callbacks cannot bleed into one another.
 _consultant_llm_instance = None
 
 
@@ -851,9 +919,9 @@ def get_consultant_llm(
     max_completion_tokens: int | None = None,
 ) -> BaseChatModel | None:
     """
-    Get or create the consultant LLM instance.
+    Get a consultant LLM instance for the current run.
 
-    Uses lazy initialization to gracefully handle missing OPENAI_API_KEY.
+    Uses lazy dependency checks to gracefully handle missing OPENAI_API_KEY.
     If consultant is disabled or API key is missing, returns None.
 
     Args:
@@ -863,18 +931,7 @@ def get_consultant_llm(
     Returns:
         ChatOpenAI instance or None if consultant disabled/unavailable
 
-    Note:
-        Caching is NOT affected by quick_mode - the instance is created once
-        with the mode that was first requested. This matches Gemini behavior
-        where models are configured at graph build time, not per-run.
     """
-    global _consultant_llm_instance
-
-    # Skip consultant in quick mode for performance
-    if quick_mode:
-        logger.info("consultant_quick_mode_skip")
-        return None
-
     # Check if consultant is enabled (via config, not os.environ)
     if not config.enable_consultant:
         logger.info("consultant_disabled")
@@ -885,23 +942,23 @@ def get_consultant_llm(
         logger.warning("consultant_no_api_key")
         return None
 
-    # Lazy initialization
-    if _consultant_llm_instance is None:
-        try:
-            _consultant_llm_instance = create_consultant_llm(
-                callbacks=callbacks,
-                quick_mode=quick_mode,
-                max_completion_tokens=max_completion_tokens,
-            )
-        except Exception as e:
-            logger.error(
-                "consultant_llm_init_failed",
-                model=config.consultant_model,
-                quick_mode=quick_mode,
-                error_type=type(e).__name__,
-                error=str(e),
-                exc_info=True,
-            )
-            return None
-
-    return _consultant_llm_instance
+    try:
+        return create_consultant_llm(
+            callbacks=callbacks,
+            quick_mode=quick_mode,
+            max_completion_tokens=max_completion_tokens,
+        )
+    except Exception as e:
+        logger.error(
+            "consultant_llm_init_failed",
+            model=(
+                config.consultant_quick_model or config.consultant_model
+                if quick_mode
+                else config.consultant_model
+            ),
+            quick_mode=quick_mode,
+            error_type=type(e).__name__,
+            error=str(e),
+            exc_info=True,
+        )
+        return None

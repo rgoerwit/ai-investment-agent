@@ -36,7 +36,7 @@ import re
 import time
 from collections import namedtuple
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +44,7 @@ import pandas as pd
 import structlog
 import yfinance as yf
 
+from src.async_utils import run_with_hard_timeout
 from src.config import config
 from src.data.gap_fill import (
     calculate_coverage as calculate_coverage_impl,
@@ -88,6 +89,7 @@ from src.data.metric_extraction import (
 from src.data.metric_extraction import (
     extract_quarterly_horizons as extract_quarterly_horizons_impl,
 )
+from src.data.pattern_extraction import FinancialPatternExtractor
 from src.data.source_fetchers import (
     classify_aggregate_source_failure as classify_aggregate_source_failure_impl,
 )
@@ -163,7 +165,6 @@ except ImportError:
 
 
 # Constants
-ROE_PERCENTAGE_THRESHOLD = 1.0
 # D/E > 10 (1000%) is extremely rare; values like 14.77 are percentages (14.77%)
 DEBT_EQUITY_PERCENTAGE_THRESHOLD = 10.0
 PRICE_TO_BOOK_CURRENCY_MISMATCH_THRESHOLD = 5.0
@@ -341,10 +342,10 @@ def _coerce_epoch_date(value: Any) -> datetime | None:
             if not stripped:
                 return None
             if stripped.isdigit():
-                return datetime.utcfromtimestamp(int(stripped))
+                return datetime.fromtimestamp(int(stripped), UTC).replace(tzinfo=None)
             return datetime.strptime(stripped, "%Y-%m-%d")
         if isinstance(value, int | float):
-            return datetime.utcfromtimestamp(int(value))
+            return datetime.fromtimestamp(int(value), UTC).replace(tzinfo=None)
     except (OverflowError, OSError, TypeError, ValueError):
         return None
     return None
@@ -393,158 +394,6 @@ class DataQuality:
             self.sources_used = []
         if self.suspicious_fields is None:
             self.suspicious_fields = []
-
-
-class FinancialPatternExtractor:
-    """Handles regex-based extraction of financial metrics from text."""
-
-    def __init__(self):
-        self.patterns = {
-            "trailingPE": [
-                re.compile(
-                    r"(?:Trailing P/E|P/E \(TTM\)|P/E Ratio \(TTM\))(?:.*?)\s*[:=]?\s*(\d+[\.,]\d+)",
-                    re.IGNORECASE,
-                ),
-                re.compile(
-                    r"(?:P/E|est|trading at|valuation).*?\s+(\d+[\.,]\d+)x",
-                    re.IGNORECASE,
-                ),
-                re.compile(r"P/E\s+(?:of|is|around)\s+(\d+[\.,]\d+)", re.IGNORECASE),
-                re.compile(
-                    r"(?<!Forward\s)(?<!Fwd\s)(?:P/E|Price[- ]to[- ]Earnings)(?:.*?)(?:Ratio)?\s*[:=]?\s*(\d+[\.,]\d+)",
-                    re.IGNORECASE,
-                ),
-                re.compile(r"\btrades?\s+at\s+(\d+[\.,]\d+)x", re.IGNORECASE),
-                re.compile(r"\bvalued\s+at\s+(\d+[\.,]\d+)x", re.IGNORECASE),
-                re.compile(
-                    r"\btrading\s+at\s+(\d+(?:[\.,]\d+)?)\s+times", re.IGNORECASE
-                ),
-            ],
-            "forwardPE": [
-                re.compile(
-                    r"(?:Forward P/E|Fwd P/E)(?:.*?)\s*[:=]?\s*(\d+[\.,]\d+)",
-                    re.IGNORECASE,
-                ),
-                re.compile(r"(?:Forward P/E|Fwd P/E).*?(\d+[\.,]\d+)x", re.IGNORECASE),
-                re.compile(r"est.*?P/E.*?(\d+[\.,]\d+)x", re.IGNORECASE),
-            ],
-            "priceToBook": [
-                re.compile(
-                    r"(?:P/B|Price[- ]to[- ]Book)(?:.*?)(?:Ratio)?\s*[:=]?\s*(\d+[\.,]\d+)",
-                    re.IGNORECASE,
-                ),
-                re.compile(r"PB\s*Ratio\s*[:=]?\s*(\d+[\.,]\d+)", re.IGNORECASE),
-                re.compile(r"Price\s*/\s*Book\s*[:=]?\s*(\d+[\.,]\d+)", re.IGNORECASE),
-                re.compile(r"trading at\s+(\d+[\.,]\d+)x\s+book", re.IGNORECASE),
-            ],
-            "returnOnEquity": [
-                re.compile(r"(?:ROE|Return on Equity).*?(\d+[\.,]\d+)%?", re.IGNORECASE)
-            ],
-            "marketCap": [
-                re.compile(
-                    r"(?:Market Cap|Valuation).*?(\d{1,3}(?:[,\.]\d{3})*(?:[,\.]\d+)?)\s*([TBM])",
-                    re.IGNORECASE,
-                )
-            ],
-            "enterpriseToEbitda": [
-                re.compile(
-                    r"(?:EV/EBITDA|Enterprise Value/EBITDA)(?:.*?)\s*[:=]?\s*(\d+[\.,]\d+)",
-                    re.IGNORECASE,
-                ),
-                re.compile(r"EV/EBITDA.*?(\d+[\.,]\d+)x", re.IGNORECASE),
-            ],
-            "numberOfAnalystOpinions": [
-                re.compile(r"(\d+)\s+analyst(?:s)?\s+cover", re.IGNORECASE),
-                re.compile(r"covered\s+by\s+(\d+)\s+analyst", re.IGNORECASE),
-                re.compile(r"(\d+)\s+analyst(?:s)?\s+rating", re.IGNORECASE),
-                re.compile(r"analyst\s+coverage:\s*(\d+)", re.IGNORECASE),
-                re.compile(r"based\s+on\s+(\d+)\s+analyst", re.IGNORECASE),
-                re.compile(r"consensus.*?(\d+)\s+analyst", re.IGNORECASE),
-                re.compile(r"(\d+)\s+wall\s+street\s+analyst", re.IGNORECASE),
-            ],
-            "us_revenue_pct": [
-                re.compile(r"US\s+revenue\s+.*?\s+(\d+(?:\.\d+)?)%", re.IGNORECASE),
-                re.compile(
-                    r"North\s+America\s+revenue\s+.*?\s+(\d+(?:\.\d+)?)%", re.IGNORECASE
-                ),
-                re.compile(
-                    r"revenue\s+from\s+.*?Americas.*?\s+(\d+(?:\.\d+)?)%", re.IGNORECASE
-                ),
-            ],
-        }
-
-        self.multipliers = {"T": 1e12, "B": 1e9, "M": 1e6}
-
-    def _normalize_number(self, val_str: str) -> float:
-        try:
-            val_str = val_str.strip()
-            val_str = re.sub(r"[xX%]$", "", val_str).strip()
-
-            # Robust International Format Handling
-            if "," in val_str and "." in val_str:
-                if val_str.rfind(",") < val_str.rfind("."):
-                    clean_str = val_str.replace(",", "")  # US: 1,234.56
-                else:
-                    clean_str = val_str.replace(".", "").replace(
-                        ",", "."
-                    )  # EU: 1.234,56
-            elif "," in val_str:
-                # Ambiguous: 1,234 vs 12,34. Assume comma as decimal if not xxx,xxx format
-                if re.match(r"^\d{1,3},\d{3}$", val_str):
-                    clean_str = val_str.replace(",", "")
-                else:
-                    clean_str = val_str.replace(",", ".")
-            else:
-                clean_str = val_str
-
-            return float(clean_str)
-        except ValueError:
-            return 0.0
-
-    def extract_from_text(
-        self, content: str, skip_fields: set = None
-    ) -> dict[str, Any]:
-        skip_fields = skip_fields or set()
-        extracted = {}
-
-        for field, pattern_list in self.patterns.items():
-            if field != "forwardPE" and field in skip_fields:
-                continue
-
-            for pattern in pattern_list:
-                match = pattern.search(content)
-                if match:
-                    try:
-                        val_str = match.group(1)
-                        val = self._normalize_number(val_str)
-
-                        if field == "returnOnEquity" and val > ROE_PERCENTAGE_THRESHOLD:
-                            val = val / 100.0
-                        elif field == "marketCap":
-                            suffix = match.group(2).upper()
-                            multiplier = self.multipliers.get(suffix, 1)
-                            val = val * multiplier
-                        elif field == "numberOfAnalystOpinions":
-                            val = int(val)
-                            if val < 0 or val > 200:
-                                continue  # Sanity check
-
-                        extracted[field] = val
-                        extracted[f"_{field}_source"] = "web_search_extraction"
-                        break
-                    except (ValueError, IndexError):
-                        continue
-
-        # Proxy fill
-        if (
-            "trailingPE" not in skip_fields
-            and "trailingPE" not in extracted
-            and "forwardPE" in extracted
-        ):
-            extracted["trailingPE"] = extracted["forwardPE"]
-            extracted["_trailingPE_source"] = "proxy_from_forward_pe"
-
-        return extracted
 
 
 class SmartMarketDataFetcher(FinancialFetcher):
@@ -1120,7 +969,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         reference_dt = (
             _coerce_epoch_date(info.get("regularMarketTime"))
             or _coerce_epoch_date(info.get("currentDate"))
-            or datetime.utcnow()
+            or datetime.now(UTC).replace(tzinfo=None)
         )
         if (reference_dt - split_date).days > RECENT_SPLIT_WINDOW_DAYS:
             return info
@@ -1249,16 +1098,87 @@ class SmartMarketDataFetcher(FinancialFetcher):
                 info["trailingPE"] = forward
                 info["_trailingPE_source"] = "normalized_forward_proxy"
             elif not ratio_reasonable:
-                # Log suspicious divergence - don't replace, keep trailing
-                logger.warning(
-                    "pe_divergence_suspicious",
-                    symbol=symbol,
-                    trailing=trailing,
-                    forward=forward,
-                    ratio=f"{divergence_ratio:.1f}x",
-                    action="keeping_trailing_pe",
-                    hint="extreme divergence suggests stale/incorrect forward estimate",
+                # Distinguish unit/decimal/currency error from genuine
+                # staleness. Pattern: ratio ≈ 10/100/1000×, with one value in
+                # the plausible band [MIN_REASONABLE_PE..PLAUSIBLE_PE_HIGH]
+                # and the other extreme. Staleness produces drifty ratios,
+                # not clean powers of ten — a near-exact ×100 with one side
+                # in [10, 25] and the other ≪ 1 is almost certainly an EPS
+                # unit mismatch (cents vs dollars, GBp vs GBP, …).
+                PLAUSIBLE_PE_HIGH = 30.0
+                EXTREME_LOW = 1.0
+                EXTREME_HIGH = 98.0
+                POWER_OF_TEN_TOLERANCE = 0.05
+
+                log_ratio = math.log10(divergence_ratio)
+                power_magnitude = round(log_ratio)
+                near_power_of_ten = (
+                    1 <= power_magnitude <= 3
+                    and abs(log_ratio - power_magnitude) < POWER_OF_TEN_TOLERANCE
                 )
+                trailing_plausible = MIN_REASONABLE_PE <= trailing <= PLAUSIBLE_PE_HIGH
+                forward_plausible = MIN_REASONABLE_PE <= forward <= PLAUSIBLE_PE_HIGH
+                trailing_extreme = trailing < EXTREME_LOW or trailing > EXTREME_HIGH
+                forward_extreme = forward < EXTREME_LOW or forward > EXTREME_HIGH
+
+                unit_error = (
+                    near_power_of_ten
+                    and (trailing_plausible ^ forward_plausible)
+                    and (trailing_extreme ^ forward_extreme)
+                )
+
+                if unit_error:
+                    suspect = "forward" if forward_extreme else "trailing"
+                    # Quarantine the suspect — same pattern as
+                    # _quarantine_recent_split_forward_metrics.
+                    notes = info.get("_data_quality_notes")
+                    if not isinstance(notes, list):
+                        notes = [] if notes in (None, "") else [str(notes)]
+                        info["_data_quality_notes"] = notes
+                    notes.append(
+                        f"Suspected unit/decimal/currency error in {suspect} "
+                        f"P/E (ratio ≈ {10**power_magnitude}× to plausible "
+                        f"side); quarantined {suspect} valuation metrics."
+                    )
+                    if suspect == "forward":
+                        info["forwardPE"] = None
+                        info["forwardEps"] = None
+                        info["pegRatio"] = None
+                    else:
+                        info["trailingPE"] = None
+                        info["epsTrailingTwelveMonths"] = None
+                    info["_pe_unit_error_quarantined"] = suspect
+                    logger.warning(
+                        "pe_divergence_unit_error_suspect",
+                        symbol=symbol,
+                        trailing=trailing,
+                        forward=forward,
+                        ratio=f"{divergence_ratio:.1f}x",
+                        power_of_ten=power_magnitude,
+                        suspect=suspect,
+                        action=f"quarantined_{suspect}_metrics",
+                        hint=(
+                            "ratio within tolerance of 10/100/1000×; one "
+                            "value plausible, the other out of range — "
+                            "likely unit/decimal/currency mismatch (e.g. "
+                            "EPS in minor units, GBp vs GBP) in the "
+                            "suspect source"
+                        ),
+                    )
+                else:
+                    # Genuine staleness/incorrectness — keep trailing as before.
+                    logger.warning(
+                        "pe_divergence_suspicious",
+                        symbol=symbol,
+                        trailing=trailing,
+                        forward=forward,
+                        ratio=f"{divergence_ratio:.1f}x",
+                        action="keeping_trailing_pe",
+                        hint=(
+                            "extreme divergence suggests stale/incorrect "
+                            "forward estimate"
+                        ),
+                    )
             elif not forward_reasonable and trailing_reasonable:
                 # Forward is too low to be trusted, keep trailing
                 logger.debug(
@@ -1363,7 +1283,11 @@ class SmartMarketDataFetcher(FinancialFetcher):
         try:
             from yahooquery import search as yq_search
 
-            result = await asyncio.to_thread(yq_search, base)
+            result = await run_with_hard_timeout(
+                asyncio.to_thread(yq_search, base),
+                timeout=10,
+                label=f"yahooquery_search:{base}",
+            )
             quotes = result.get("quotes", []) if isinstance(result, dict) else []
             for q in quotes:
                 sym = q.get("symbol", "")
@@ -1409,8 +1333,10 @@ class SmartMarketDataFetcher(FinancialFetcher):
             query = f"{symbol} yahoo finance ticker numeric code"
 
             # Use Tavily to find the mapping
-            result = await asyncio.to_thread(
-                self.tavily_client.search, query, max_results=1
+            result = await run_with_hard_timeout(
+                asyncio.to_thread(self.tavily_client.search, query, max_results=1),
+                timeout=10,
+                label=f"tavily_ticker_resolve:{symbol}",
             )
 
             if not result or "results" not in result or not result["results"]:
@@ -1757,7 +1683,11 @@ class SmartMarketDataFetcher(FinancialFetcher):
             if not history_kwargs:
                 history_kwargs["period"] = period
 
-            hist = await asyncio.to_thread(stock.history, **history_kwargs)
+            hist = await run_with_hard_timeout(
+                asyncio.to_thread(stock.history, **history_kwargs),
+                timeout=15,
+                label=f"yfinance.history:{ticker}",
+            )
             if hist.empty:
                 resolved = await self._resolve_ticker_via_search(ticker)
                 if resolved:
@@ -1765,7 +1695,11 @@ class SmartMarketDataFetcher(FinancialFetcher):
                         "history_ticker_resolved", original=ticker, resolved=resolved
                     )
                     stock = yf.Ticker(resolved)
-                    hist = await asyncio.to_thread(stock.history, **history_kwargs)
+                    hist = await run_with_hard_timeout(
+                        asyncio.to_thread(stock.history, **history_kwargs),
+                        timeout=15,
+                        label=f"yfinance.history:{resolved}",
+                    )
             return hist
         except Exception as e:
             logger.error(

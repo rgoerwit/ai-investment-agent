@@ -326,8 +326,14 @@ def test_build_arg_parser_defaults_to_smoke_suite():
     args = pc.build_arg_parser().parse_args([])
     assert args.suite is None
     assert args.stage3 is False
+    assert args.compare_full is False
     assert args.allow_missing_baseline is False
     assert args.baseline_warn_age_days == 30
+
+
+def test_build_arg_parser_accepts_compare_full():
+    args = pc.build_arg_parser().parse_args(["--compare-full"])
+    assert args.compare_full is True
 
 
 @pytest.mark.asyncio
@@ -341,8 +347,9 @@ async def test_run_prompt_check_suite_returns_execution_objects(
     )
 
     async def fake_run_scenario(
-        scenario: sc.PromptCheckScenario,
+        scenario: sc.PromptCheckScenario, *, compare_full: bool = False
     ) -> pc.PromptCheckScenarioExecution:
+        assert compare_full is False
         report = pc.PromptCheckScenarioReport(
             ticker=scenario.ticker,
             quick=scenario.quick,
@@ -372,3 +379,120 @@ async def test_run_prompt_check_suite_returns_execution_objects(
     assert execution.suite_report.passed is True
     assert execution.scenario_executions[0].report.ticker == "AAPL"
     assert "portfolio_manager" in execution.scenario_executions[0].outputs
+
+
+@pytest.mark.asyncio
+async def test_compare_full_attaches_compact_quick_full_comparison(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls = []
+
+    async def fake_run_analysis(
+        ticker, quick, *, strict_mode, skip_charts, node_observer
+    ):
+        calls.append((ticker, quick, strict_mode, skip_charts))
+        consultant_text = (
+            "### CONSULTANT REVIEW: APPROVED\n\n"
+            "### FINAL CONSULTANT VERDICT\nOverall Assessment: APPROVED"
+            if quick
+            else "### CONSULTANT REVIEW: MAJOR CONCERNS\n\n"
+            "### FINAL CONSULTANT VERDICT\nOverall Assessment: MAJOR CONCERNS"
+        )
+        node_observer._records_by_prompt_key["portfolio_manager"] = (
+            pc.PromptCheckNodeOutput(
+                prompt_key="portfolio_manager",
+                node_name="Portfolio Manager",
+                artifact_field="final_trade_decision",
+                artifact_text=VALID_PM_BLOCK
+                if quick
+                else "PORTFOLIO MANAGER VERDICT: HOLD",
+                ran=True,
+            )
+        )
+        node_observer._records_by_prompt_key["consultant"] = pc.PromptCheckNodeOutput(
+            prompt_key="consultant",
+            node_name="Consultant",
+            artifact_field="consultant_review",
+            artifact_text=consultant_text,
+            ran=True,
+        )
+        return {
+            "final_trade_decision": (
+                VALID_PM_BLOCK if quick else "PORTFOLIO MANAGER VERDICT: HOLD"
+            ),
+            "analysis_validity": {"publishable": quick},
+        }
+
+    monkeypatch.setattr("src.eval.prompt_checks.run_analysis", fake_run_analysis)
+    scenario = sc.PromptCheckScenario(ticker="AAPL", quick=True)
+
+    execution = await pc._run_prompt_check_scenario(scenario, compare_full=True)
+
+    comparison = execution.report.quick_full_comparison
+    assert calls == [("AAPL", True, False, True), ("AAPL", False, False, True)]
+    assert comparison is not None
+    assert comparison.ticker == "AAPL"
+    assert comparison.quick_verdict == "BUY"
+    assert comparison.full_verdict == "HOLD"
+    assert comparison.verdict_diverged is True
+    assert comparison.quick_publishable is True
+    assert comparison.full_publishable is False
+    assert comparison.consultant_quick == "APPROVED"
+    assert comparison.consultant_full == "MAJOR_CONCERNS"
+
+
+@pytest.mark.asyncio
+async def test_compare_full_records_full_run_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fake_run_analysis(
+        ticker, quick, *, strict_mode, skip_charts, node_observer
+    ):
+        if not quick:
+            raise RuntimeError("full exploded")
+        return {"final_trade_decision": VALID_PM_BLOCK, "analysis_validity": {}}
+
+    monkeypatch.setattr("src.eval.prompt_checks.run_analysis", fake_run_analysis)
+
+    execution = await pc._run_prompt_check_scenario(
+        sc.PromptCheckScenario(ticker="AAPL", quick=True),
+        compare_full=True,
+    )
+
+    assert execution.report.passed is False
+    assert "full comparison failed" in (execution.report.error or "")
+
+
+def test_write_json_report_includes_quick_full_comparison(tmp_path: Path):
+    comparison = pc.QuickFullComparison(
+        ticker="AAPL",
+        quick_verdict="BUY",
+        full_verdict="HOLD",
+        verdict_diverged=True,
+        quick_publishable=True,
+        full_publishable=True,
+        consultant_quick="APPROVED",
+        consultant_full="CONDITIONAL_APPROVAL",
+    )
+    report = pc.PromptCheckSuiteReport(
+        suite="smoke",
+        description="",
+        passed=True,
+        scenario_reports=(
+            pc.PromptCheckScenarioReport(
+                ticker="AAPL",
+                quick=True,
+                strict=False,
+                passed=True,
+                quick_full_comparison=comparison,
+            ),
+        ),
+    )
+    output_path = tmp_path / "nested" / "report.json"
+
+    pc._write_json_report(output_path, stage2_report=report)
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    actual = payload["stage2"]["scenario_reports"][0]["quick_full_comparison"]
+    assert actual["quick_verdict"] == "BUY"
+    assert actual["full_verdict"] == "HOLD"

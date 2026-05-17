@@ -12,6 +12,8 @@ from src.eval import BaselineCaptureManager
 
 from .components import build_graph_components
 from .routing import (
+    CONSULTANT_SKIP_SENTINEL,
+    consultant_gate_router,
     dispatch_destinations,
     fan_out_to_analysts,
     fundamentals_sync_router,
@@ -85,7 +87,7 @@ BULL RESEARCHER:
 BEAR RESEARCHER:
 {bear_r1}
 """
-        logger.info(
+        logger.debug(
             "debate_sync_r1_complete",
             bull_r1_len=len(bull_r1),
             bear_r1_len=len(bear_r1),
@@ -145,7 +147,7 @@ BEAR RESEARCHER:
             bear_history = bear_r1
             count = 2
 
-        logger.info(
+        logger.debug(
             "debate_sync_final_complete",
             rounds=2 if bull_r2 else 1,
             total_arguments=count,
@@ -279,10 +281,10 @@ BEAR RESEARCHER:
         max_rounds = getattr(context, "max_debate_rounds", 2) if context else 2
 
         if max_rounds <= 1:
-            logger.info("debate_r1_router", decision="skip_r2_quick_mode")
+            logger.debug("debate_r1_router", decision="skip_r2_quick_mode")
             return "Debate Sync Final"
 
-        logger.info("debate_r1_router", decision="proceed_to_r2")
+        logger.debug("debate_r1_router", decision="proceed_to_r2")
         return ["Bull Researcher R2", "Bear Researcher R2"]
 
     workflow.add_conditional_edges(
@@ -299,8 +301,31 @@ BEAR RESEARCHER:
     workflow.add_edge("Valuation Calculator", "Trader")
 
     if components.consultant_enabled:
-        workflow.add_edge("Research Manager", "Consultant")
+        from src.runtime_diagnostics import success_artifact
+
+        from .routing import should_invoke_consultant
+
+        async def consultant_skip_node(state: AgentState, config: RunnableConfig):
+            """Sentinel node activated when consultant_gate_router bypasses the
+            Consultant LLM in quick-mode screening. Writes a transparent
+            sentinel so downstream agents and the saved report still record
+            the skip rather than seeing a missing field.
+            """
+            _, reason = should_invoke_consultant(state, config)
+            return success_artifact(
+                "consultant_review",
+                CONSULTANT_SKIP_SENTINEL.format(reason=reason),
+                provider="bypass",
+            )
+
+        workflow.add_node("Consultant Skip", consultant_skip_node)
+        workflow.add_conditional_edges(
+            "Research Manager",
+            consultant_gate_router,
+            ["Consultant", "Consultant Skip"],
+        )
         workflow.add_edge("Consultant", "Trader")
+        workflow.add_edge("Consultant Skip", "Trader")
 
     workflow.add_edge("Trader", "Risky Analyst")
     workflow.add_edge("Trader", "Safe Analyst")
@@ -311,7 +336,7 @@ BEAR RESEARCHER:
     workflow.add_edge("Portfolio Manager", "Chart Generator")
     workflow.add_edge("Chart Generator", END)
 
-    logger.info(
+    logger.debug(
         "trading_graph_created",
         ticker=ticker,
         architecture="parallel",

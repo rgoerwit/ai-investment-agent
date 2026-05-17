@@ -199,6 +199,28 @@ class TestExtractSnapshot:
         snapshot = extract_snapshot(_make_result(), "2767.T", trace_id="trace-123")
         assert snapshot["trace_id"] == "trace-123"
 
+    def test_extract_snapshot_records_run_options_for_weighting(self):
+        """Not all analyses are of equal weight: --quick uses cheaper models
+        and skips a debate round; --strict tightens gates and rejects valid
+        REIT/PFIC/VIE candidates. Both flags must be in the snapshot so
+        downstream lesson weighting can discount accordingly."""
+        # Standard mode (defaults).
+        s_default = extract_snapshot(_make_result(), "TEST")
+        assert s_default["is_quick_mode"] is False
+        assert s_default["is_strict_mode"] is False
+
+        # --quick + --strict combination.
+        s_both = extract_snapshot(
+            _make_result(), "TEST", is_quick_mode=True, is_strict_mode=True
+        )
+        assert s_both["is_quick_mode"] is True
+        assert s_both["is_strict_mode"] is True
+
+        # --strict alone.
+        s_strict = extract_snapshot(_make_result(), "TEST", is_strict_mode=True)
+        assert s_strict["is_quick_mode"] is False
+        assert s_strict["is_strict_mode"] is True
+
 
 @pytest.mark.asyncio
 async def test_generate_lesson_logs_structured_failure_details():
@@ -525,22 +547,20 @@ class TestCompareToReality:
     @pytest.mark.asyncio
     async def test_yfinance_failure_returns_none(self):
         """Graceful None return when yfinance raises."""
-        import asyncio as real_asyncio
-
         snapshot = _make_snapshot(
             analysis_date=(datetime.now() - timedelta(days=200)).strftime("%Y-%m-%d"),
         )
 
-        # Patch asyncio.wait_for inside the module
-        original_wait_for = real_asyncio.wait_for
-
-        async def failing_wait_for(coro, timeout):
+        async def failing_run_with_hard_timeout(coro, *, timeout, label):
             # Cancel the coroutine to avoid RuntimeWarning
             if hasattr(coro, "close"):
                 coro.close()
             raise Exception("yfinance down")
 
-        with patch("asyncio.wait_for", side_effect=failing_wait_for):
+        with patch(
+            "src.retrospective.run_with_hard_timeout",
+            side_effect=failing_run_with_hard_timeout,
+        ):
             result = await compare_to_reality(snapshot)
             assert result is None
 

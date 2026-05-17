@@ -37,8 +37,7 @@ class TestPipelineCoherence:
         - CORRELATED_SELL_EVENT fires (9 verdict-driven SELLs / 12 total = 75%)
         - All SOFT_REJECT items are demoted to REVIEW
         - MACRO ALERT banner appears in the report
-        - STOP BREACHES UNDER REVIEW section appears (strong-fundamentals stop demoted)
-        - SOFT REJECTION section appears (demoted items as macro_reviews)
+        - SELL-RELATED REVIEWS section appears with explicit sell-type labels
         - Summary counts REVIEW, not SELL, for the 8 demoted items
         """
         positions, analyses, portfolio = _make_multi_sell_scenario(
@@ -52,10 +51,9 @@ class TestPipelineCoherence:
 
         # Macro banner must appear
         assert "MACRO ALERT" in report
-        # Strong-fundamentals stop breach demoted to its own review section
-        assert "STOP BREACHES UNDER REVIEW" in report
-        # Soft-rejection section (macro_reviews) present
-        assert "SOFT REJECTION" in report
+        assert "SELL-RELATED REVIEWS" in report
+        assert "[STOP BREACH]" in report
+        assert "[SOFT REJECTION]" in report
         # All SOFT_REJECT items demoted in the items list
         soft_still_sell = [
             i for i in items if i.action == "SELL" and i.sell_type == "SOFT_REJECT"
@@ -85,7 +83,8 @@ class TestPipelineCoherence:
 
         assert "MACRO ALERT" in report
         # Weak stop-breach stays in the mechanical SELL section
-        assert "STOP BREACHED" in report
+        assert "SELL RECOMMENDATIONS" in report
+        assert "[STOP BREACH]" in report
         stop_sells = [
             i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
         ]
@@ -104,9 +103,9 @@ class TestPipelineCoherence:
             i for i in items if i.sell_type == "SOFT_REJECT" and i.action == "SELL"
         ]
         assert len(soft_sells) == 3
-        # No correlated event → no "STOP BREACHES UNDER REVIEW" section in report
+        # No correlated event → no sell-related review section in report
         report = format_report(items, portfolio, portfolio_health_flags=health_flags)
-        assert "STOP BREACHES UNDER REVIEW" not in report
+        assert "SELL-RELATED REVIEWS" not in report
 
     def test_exactly_at_threshold_triggers(self):
         """5 SOFT_REJECTs + 15 HOLDs = 20 total → 5/20 = 25.0% → event fires."""

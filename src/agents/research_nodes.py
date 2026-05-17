@@ -7,6 +7,7 @@ import structlog
 from langchain_core.messages import HumanMessage
 from langgraph.types import RunnableConfig
 
+from src.config import config as settings_config
 from src.runtime_diagnostics import failure_artifact, success_artifact
 from src.tooling.text_boundary import format_untrusted_block
 
@@ -22,6 +23,20 @@ from .output_validation import (
 from .state import AgentState
 
 logger = structlog.get_logger(__name__)
+
+_ROUND1_REPORT_BUDGETS = {
+    "market": 1800,
+    "sentiment": 1200,
+    "news": 1800,
+    "fundamentals": 4000,
+}
+
+_ROUND2_ANCHOR_BUDGETS = {
+    "market": 400,
+    "sentiment": 250,
+    "news": 500,
+    "fundamentals": 1200,
+}
 
 _STRICT_RM_ADDENDUM = """
 ---
@@ -45,6 +60,31 @@ You are operating in STRICT mode. Apply this lens when synthesizing analyst inpu
 4. **Bear argument weighting**: Give bear arguments proportionally more weight than in
    normal mode. The burden of proof is on the bull case in strict mode.
 """
+
+
+def _summarize_report(report: str, kind: str, budget: int) -> str:
+    if report == "N/A":
+        return "N/A"
+    return support.summarize_for_pm(report, kind, budget)
+
+
+def _build_research_report_bundle(state: AgentState, budgets: dict[str, int]) -> str:
+    market_report = state.get("market_report", "N/A")
+    sentiment_report = state.get("sentiment_report", "N/A")
+    news_report = state.get("news_report", "N/A")
+    fundamentals_report = state.get("fundamentals_report", "N/A")
+
+    return f"""MARKET ANALYST REPORT:
+{_summarize_report(market_report, "market", budgets["market"])}
+
+SENTIMENT ANALYST REPORT:
+{_summarize_report(sentiment_report, "sentiment", budgets["sentiment"])}
+
+NEWS ANALYST REPORT:
+{_summarize_report(news_report, "news", budgets["news"])}
+
+FUNDAMENTALS ANALYST REPORT:
+{_summarize_report(fundamentals_report, "fundamentals", budgets["fundamentals"])}"""
 
 
 def create_researcher_node(
@@ -74,26 +114,15 @@ def create_researcher_node(
                 }
             }
 
-        market_report = state.get("market_report", "N/A")
-        sentiment_report = state.get("sentiment_report", "N/A")
-        news_report = state.get("news_report", "N/A")
-        fundamentals_report = state.get("fundamentals_report", "N/A")
-        reports = f"""MARKET ANALYST REPORT:
-{support.summarize_for_pm(market_report, "market", 1800) if market_report != "N/A" else "N/A"}
-
-SENTIMENT ANALYST REPORT:
-{support.summarize_for_pm(sentiment_report, "sentiment", 1200) if sentiment_report != "N/A" else "N/A"}
-
-NEWS ANALYST REPORT:
-{support.summarize_for_pm(news_report, "news", 1800) if news_report != "N/A" else "N/A"}
-
-FUNDAMENTALS ANALYST REPORT:
-{support.summarize_for_pm(fundamentals_report, "fundamentals", 4000) if fundamentals_report != "N/A" else "N/A"}"""
-
         debate_state = state.get("investment_debate_state", {})
         if round_num == 1:
+            context_section_title = "REPORTS"
+            reports = _build_research_report_bundle(state, _ROUND1_REPORT_BUDGETS)
             debate_history = ""
+            round_instruction = "Provide your initial argument."
         else:
+            context_section_title = "FACTUAL ANCHORS"
+            reports = _build_research_report_bundle(state, _ROUND2_ANCHOR_BUDGETS)
             opponent_r1 = debate_state.get(f"{opponent_type}_round1", "")
             own_r1 = debate_state.get(f"{researcher_type}_round1", "")
             debate_history = f"""
@@ -108,13 +137,18 @@ OPPONENT'S ROUND 1 ARGUMENT (REBUT THIS):
 === END ROUND 1 ===
 
 Now provide your Round 2 rebuttal, addressing the opponent's key points."""
+            round_instruction = (
+                "Provide your rebuttal to the opponent's Round 1 argument. "
+                "Use the factual anchors and round-1 arguments as your basis, "
+                "and do not introduce unsupported new facts."
+            )
 
         ticker = state.get("company_of_interest", "UNKNOWN")
         company_name = state.get("company_name", ticker)
         company_resolved = state.get("company_name_resolved", True)
 
         past_insights = ""
-        if memory:
+        if memory and settings_config.enable_memory:
             try:
                 relevant = await memory.query_similar_situations(
                     f"risks and upside for {ticker}",
@@ -132,28 +166,40 @@ Now provide your Round 2 rebuttal, addressing the opponent's key points."""
                 logger.error("memory_retrieval_failed", ticker=ticker, error=str(exc))
 
         lessons_text = ""
-        try:
-            from src.retrospective import (
-                create_lessons_memory,
-                format_lessons_for_injection,
-            )
-
-            lessons_memory = create_lessons_memory()
-            sector = support._extract_sector_from_state(state)
-            lessons_text = await format_lessons_for_injection(
-                lessons_memory, ticker, sector
-            )
-            if lessons_text:
-                logger.info(
-                    "lessons_injected",
-                    agent=agent_key,
-                    ticker=ticker,
-                    lessons_length=len(lessons_text),
+        if settings_config.enable_memory:
+            try:
+                from src.retrospective import (
+                    create_lessons_memory,
+                    format_lessons_for_injection,
                 )
-            else:
-                logger.debug("no_lessons_available", agent=agent_key, ticker=ticker)
-        except Exception as exc:
-            logger.warning("lessons_injection_failed", agent=agent_key, error=str(exc))
+
+                lessons_memory = create_lessons_memory()
+                sector = support._extract_sector_from_state(state)
+                lessons_text = await format_lessons_for_injection(
+                    lessons_memory, ticker, sector
+                )
+                if lessons_text:
+                    logger.info(
+                        "lessons_injected",
+                        agent=agent_key,
+                        ticker=ticker,
+                        lessons_length=len(lessons_text),
+                    )
+                else:
+                    logger.debug("no_lessons_available", agent=agent_key, ticker=ticker)
+            except Exception as exc:
+                logger.warning(
+                    "lessons_injection_failed", agent=agent_key, error=str(exc)
+                )
+        else:
+            # --no-memory: don't even touch the global lessons_learned
+            # collection. Mirrors the per-ticker retrospective gate in
+            # `_maybe_run_ticker_retrospective` (src/main.py).
+            logger.debug(
+                "lessons_injection_skipped_no_memory",
+                agent=agent_key,
+                ticker=ticker,
+            )
 
         unresolved_warning = (
             "" if company_resolved else f"\n{support._UNRESOLVED_NAME_WARNING}"
@@ -164,12 +210,6 @@ You are analyzing **{ticker} ({company_name})**.{unresolved_warning}
 If the provided context or memory contains information about a different company, you MUST IGNORE IT.
 Only use data explicitly related to {ticker} ({company_name}).
 """
-
-        round_instruction = (
-            "Provide your initial argument."
-            if round_num == 1
-            else "Provide your rebuttal to the opponent's Round 1 argument."
-        )
 
         context_block = ""
         if past_insights:
@@ -189,7 +229,7 @@ Only use data explicitly related to {ticker} ({company_name}).
             )
 
         prompt = (
-            f"{agent_prompt.system_message}\n{negative_constraint}\n\nREPORTS:\n"
+            f"{agent_prompt.system_message}\n{negative_constraint}\n\n{context_section_title}:\n"
             f"{reports}\n{context_block}\n\nDEBATE CONTEXT:\n{debate_history}\n\n"
             f"{round_instruction}"
         )

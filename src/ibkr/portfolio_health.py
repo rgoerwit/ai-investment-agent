@@ -145,6 +145,8 @@ def compute_portfolio_health(
         from datetime import date as _date
         from datetime import timedelta as _td
 
+        # Correlated-sell events are thesis/verdict failures. PROFIT_TAKE is
+        # deliberately excluded because capital-allocation exits are firm-specific.
         verdict_sells = [
             item
             for item in reconciliation_items

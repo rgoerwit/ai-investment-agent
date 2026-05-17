@@ -9,10 +9,12 @@ Tests the token tracking functionality:
 - Statistics aggregation and reporting
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
+from rich.console import Console
 
 from src.token_tracker import (
     AgentTokenStats,
@@ -375,6 +377,181 @@ class TestTokenTracker:
         assert "agent1" in stats["agents"]
         assert "agent2" in stats["agents"]
 
+    def test_record_call_attempts_and_diagnostics(self):
+        tracker = TokenTracker()
+        tracker.reset()
+
+        tracker.record_call_attempt(
+            agent_name="Consultant",
+            provider="openai",
+            model_name="gpt-5.4-mini",
+            status="failure",
+            attempt=1,
+            elapsed_seconds=60.2,
+            failure_kind="timeout",
+            failure_origin="hard_timeout",
+            retryable=True,
+        )
+        tracker.record_call_attempt(
+            agent_name="Consultant",
+            provider="openai",
+            model_name="gpt-5.4-mini",
+            status="success",
+            attempt=2,
+            elapsed_seconds=3.1,
+            prompt_tokens=100,
+            completion_tokens=50,
+            total_tokens=150,
+        )
+
+        stats = tracker.get_total_stats()
+
+        assert stats["failed_attempts"] == 1
+        assert stats["failed_by_provider"] == {"openai": 1}
+        assert stats["failed_by_kind"] == {"timeout": 1}
+        assert stats["call_diagnostics"]["failed_by_origin"] == {"hard_timeout": 1}
+        assert len(stats["call_attempts"]) == 2
+        assert stats["call_attempts"][0]["failure_origin"] == "hard_timeout"
+        assert stats["call_attempts"][1]["total_tokens"] == 150
+        assert stats["call_diagnostics"]["consultant_timeout"] is True
+        assert stats["call_diagnostics"]["timeout_seconds_lost"] == 60.2
+        assert stats["call_diagnostics"]["failed_by_agent"] == {"Consultant": 1}
+
+    def test_concurrent_recording_keeps_usage_and_attempts_consistent(self):
+        tracker = TokenTracker()
+        tracker.reset()
+
+        def record_pair(index: int) -> None:
+            tracker.record_usage(
+                agent_name=f"agent-{index % 4}",
+                model_name="gemini-2.5-flash",
+                prompt_tokens=10,
+                completion_tokens=5,
+            )
+            tracker.record_call_attempt(
+                agent_name=f"agent-{index % 4}",
+                provider="google",
+                model_name="gemini-2.5-flash",
+                status="success",
+                attempt=1,
+                elapsed_seconds=0.01,
+                prompt_tokens=10,
+                completion_tokens=5,
+                total_tokens=15,
+            )
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            list(executor.map(record_pair, range(100)))
+
+        stats = tracker.get_total_stats()
+        assert stats["total_calls"] == 100
+        assert stats["total_prompt_tokens"] == 1000
+        assert stats["total_completion_tokens"] == 500
+        assert stats["call_diagnostics"]["total_attempts"] == 100
+
+    def test_get_top_spenders_sorted_by_cost_tokens_then_name(self):
+        tracker = TokenTracker()
+        tracker.reset()
+
+        tracker.record_usage(
+            agent_name="zeta",
+            model_name="gemini-2.5-flash",
+            prompt_tokens=1_000_000,
+            completion_tokens=1_000_000,
+        )
+        tracker.record_usage(
+            agent_name="alpha",
+            model_name="gemini-2.5-flash",
+            prompt_tokens=1_000_000,
+            completion_tokens=1_000_000,
+        )
+        tracker.record_usage(
+            agent_name="beta",
+            model_name="gemini-2.5-flash",
+            prompt_tokens=500_000,
+            completion_tokens=500_000,
+        )
+
+        top_spenders = tracker.get_top_spenders()
+
+        assert [entry["agent"] for entry in top_spenders] == ["alpha", "zeta", "beta"]
+
+    def test_get_top_spenders_handles_empty_zero_and_large_limit(self):
+        tracker = TokenTracker()
+        tracker.reset()
+
+        assert tracker.get_top_spenders() == []
+        assert tracker.get_top_spenders(limit=0) == []
+
+        tracker.record_usage(
+            agent_name="solo",
+            model_name="gemini-2.5-flash",
+            prompt_tokens=100,
+            completion_tokens=50,
+        )
+        assert [entry["agent"] for entry in tracker.get_top_spenders(limit=99)] == [
+            "solo"
+        ]
+
+    def test_print_summary_logs_top_spenders_info_event(self):
+        tracker = TokenTracker()
+        tracker.reset()
+        tracker.record_usage(
+            agent_name="pm",
+            model_name="gemini-3-pro-preview",
+            prompt_tokens=1000,
+            completion_tokens=500,
+        )
+        tracker.record_usage(
+            agent_name="news",
+            model_name="gemini-2.5-flash",
+            prompt_tokens=500,
+            completion_tokens=100,
+        )
+
+        with patch("src.token_tracker.logger.info") as mock_info:
+            tracker.print_summary(ticker="AAPL")
+
+        summary_calls = [
+            call
+            for call in mock_info.call_args_list
+            if call.args and call.args[0] == "analysis_cost_summary"
+        ]
+        assert len(summary_calls) == 1
+        payload = summary_calls[0].kwargs
+        assert payload["ticker"] == "AAPL"
+        assert payload["total_calls"] == 2
+        assert payload["top_spenders"][0]["agent"] == "pm"
+
+    def test_display_token_summary_includes_top_spenders(self):
+        import io
+
+        from src.output import display_token_summary
+
+        tracker = TokenTracker()
+        tracker.reset()
+        tracker.record_usage(
+            agent_name="portfolio_manager",
+            model_name="gemini-3-pro-preview",
+            prompt_tokens=1000,
+            completion_tokens=500,
+        )
+        tracker.record_usage(
+            agent_name="market_analyst",
+            model_name="gemini-2.5-flash",
+            prompt_tokens=500,
+            completion_tokens=100,
+        )
+
+        buf = io.StringIO()
+        console = Console(file=buf, width=120)
+        display_token_summary(console_obj=console)
+
+        output = buf.getvalue()
+        assert "Token Usage Summary" in output
+        assert "Top Spenders" in output
+        assert "portfolio_manager" in output
+
     def test_reset(self):
         """Test resetting the tracker."""
         tracker = TokenTracker()
@@ -538,12 +715,12 @@ class TestTokenTrackingCallback:
             },
         )
 
-        with patch("src.token_tracker.logger.info") as mock_info:
+        with patch("src.token_tracker.logger.debug") as mock_debug:
             callback.on_llm_end(llm_result)
 
         budget_logs = [
             call
-            for call in mock_info.call_args_list
+            for call in mock_debug.call_args_list
             if call.args and call.args[0] == "llm_output_budget_usage"
         ]
         assert len(budget_logs) == 1
@@ -615,6 +792,7 @@ class TestTokenTrackingCallback:
             },
         )
 
+        callback.on_llm_start({}, ["prompt"], run_id="run-1")
         callback.on_llm_end(llm_result)
 
         # Verify usage was recorded
@@ -623,6 +801,7 @@ class TestTokenTrackingCallback:
         assert stats.total_calls == 1
         assert stats.total_prompt_tokens == 1000
         assert stats.total_completion_tokens == 500
+        assert stats.calls[0].elapsed_seconds is not None
 
     def test_on_llm_end_with_deprecated_token_usage(self):
         """Test callback with deprecated token_usage field (fallback)."""
@@ -851,3 +1030,122 @@ class TestCostAccuracy:
             1 - flash_lite_usage.estimated_cost_usd / flash_usage.estimated_cost_usd
         ) * 100
         assert savings_percentage > 80  # At least 80% cheaper
+
+
+class TestPerAgentWallClock:
+    """Per-agent wall-clock accumulation and slowest_agents diagnostics."""
+
+    def test_records_wall_clock_per_agent(self):
+        tracker = TokenTracker()
+        tracker.reset()
+
+        tracker.record_usage(
+            agent_name="Consultant",
+            model_name="gpt-5.4-mini",
+            prompt_tokens=10,
+            completion_tokens=5,
+            elapsed_seconds=12.5,
+        )
+        tracker.record_usage(
+            agent_name="Consultant",
+            model_name="gpt-5.4-mini",
+            prompt_tokens=10,
+            completion_tokens=5,
+            elapsed_seconds=4.0,
+        )
+        tracker.record_usage(
+            agent_name="Fundamentals Analyst",
+            model_name="gemini-3-flash-preview",
+            prompt_tokens=20,
+            completion_tokens=10,
+            elapsed_seconds=30.0,
+        )
+
+        agents = tracker.get_total_stats()["agents"]
+        assert agents["Consultant"]["wall_clock_seconds"] == 16.5
+        assert agents["Consultant"]["wall_clock_max_seconds"] == 12.5
+        assert agents["Fundamentals Analyst"]["wall_clock_seconds"] == 30.0
+        assert agents["Fundamentals Analyst"]["wall_clock_max_seconds"] == 30.0
+
+    def test_missing_elapsed_does_not_break_aggregation(self):
+        tracker = TokenTracker()
+        tracker.reset()
+
+        tracker.record_usage(
+            agent_name="X",
+            model_name="gemini-2.5-flash",
+            prompt_tokens=1,
+            completion_tokens=1,
+            elapsed_seconds=None,
+        )
+        agents = tracker.get_total_stats()["agents"]
+        assert agents["X"]["wall_clock_seconds"] == 0.0
+        assert agents["X"]["wall_clock_max_seconds"] == 0.0
+
+    def test_slowest_agents_top_in_call_diagnostics(self):
+        tracker = TokenTracker()
+        tracker.reset()
+        tracker.record_usage(
+            agent_name="A",
+            model_name="m",
+            prompt_tokens=0,
+            completion_tokens=0,
+            elapsed_seconds=10.0,
+        )
+        tracker.record_usage(
+            agent_name="B",
+            model_name="m",
+            prompt_tokens=0,
+            completion_tokens=0,
+            elapsed_seconds=40.0,
+        )
+        tracker.record_usage(
+            agent_name="C",
+            model_name="m",
+            prompt_tokens=0,
+            completion_tokens=0,
+            elapsed_seconds=25.0,
+        )
+        # An agent with no wall-clock data should not appear.
+        tracker.record_usage(
+            agent_name="D-no-time",
+            model_name="m",
+            prompt_tokens=0,
+            completion_tokens=0,
+        )
+        tracker.record_call_attempt(
+            agent_name="A",
+            provider="google",
+            model_name="m",
+            status="success",
+            attempt=1,
+            elapsed_seconds=10.0,
+        )
+
+        diag = tracker.get_total_stats()["call_diagnostics"]
+        top = diag["slowest_agents"]
+        assert [entry["agent_name"] for entry in top] == ["B", "C", "A"]
+        assert top[0]["wall_clock_seconds"] == 40.0
+        assert all(entry["agent_name"] != "D-no-time" for entry in top)
+
+    def test_slowest_agents_empty_when_no_calls(self):
+        tracker = TokenTracker()
+        tracker.reset()
+        diag = tracker.get_total_stats()["call_diagnostics"]
+        assert diag["slowest_agents"] == []
+
+    def test_callback_on_llm_error_clears_run_starts(self):
+        callback = TokenTrackingCallback(agent_name="agent")
+        callback.on_llm_start({}, ["prompt"], run_id="run-1")
+        assert "run-1" in callback._run_starts
+        callback.on_llm_error(RuntimeError("boom"), run_id="run-1")
+        assert "run-1" not in callback._run_starts
+
+    def test_callback_default_key_used_when_run_id_missing(self):
+        """A callback invocation with no run_id must not leak the default slot
+        across subsequent calls."""
+        callback = TokenTrackingCallback(agent_name="agent")
+        callback.on_llm_start({}, ["prompt"])
+        # Simulate an error path with no run_id passed back.
+        callback.on_llm_error(RuntimeError("boom"))
+        assert "__default__" not in callback._run_starts

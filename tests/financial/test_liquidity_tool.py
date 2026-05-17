@@ -179,8 +179,8 @@ async def test_liquidity_unknown_suffix_fallback():
         mock_ticker.return_value.history.return_value = mock_data
         result = await calculate_liquidity_metrics.ainvoke({"ticker": "TEST.UNKNOWN"})
 
-    # Should still work, defaulting to USD
-    assert "PASS" in result or "FAIL" in result
+    assert "Status: ERROR" in result
+    assert "Could not determine trading currency" in result
 
 
 @pytest.mark.asyncio

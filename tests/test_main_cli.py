@@ -137,7 +137,7 @@ class TestOutputCompanyNameLookup:
         mock_future.result.side_effect = FuturesTimeoutError()
 
         mock_executor = MagicMock()
-        mock_executor.__enter__.return_value.submit.return_value = mock_future
+        mock_executor.submit.return_value = mock_future
 
         with patch.dict(sys.modules, {"yfinance": fake_yfinance}):
             assert (
@@ -147,6 +147,7 @@ class TestOutputCompanyNameLookup:
                 )
                 is None
             )
+        mock_executor.shutdown.assert_called()
 
     def test_run_analysis_warns_with_lookup_candidates_after_company_name_exhaustion(
         self,
@@ -953,12 +954,43 @@ class TestRuntimeOverrides:
             trace_langfuse=True,
         )
 
-        _apply_runtime_overrides(args)
+        restore = _apply_runtime_overrides(args)
 
         assert config.quick_think_llm == "new-quick"
         assert config.deep_think_llm == "new-deep"
         assert config.enable_memory is False
         assert config.langfuse_enabled is True
+
+        # The restore callable reverts every overridden field. monkeypatch
+        # would also restore on test teardown, but the production caller
+        # (`main()`) relies on this restore to be present so that
+        # in-process callers running multiple analyses don't inherit one
+        # run's CLI flags through the global config singleton.
+        restore()
+        assert config.quick_think_llm == "old-quick"
+        assert config.deep_think_llm == "old-deep"
+        assert config.enable_memory is True
+        assert config.langfuse_enabled is False
+
+    def test_apply_runtime_overrides_restore_is_idempotent(self, monkeypatch):
+        """Calling restore twice must be safe (production `finally` blocks
+        sometimes fire under unusual unwinding paths)."""
+        from src.main import _apply_runtime_overrides, config
+
+        monkeypatch.setattr(config, "enable_memory", True)
+        args = SimpleNamespace(
+            quick_model=None,
+            deep_model=None,
+            no_memory=True,
+            enable_langfuse=False,
+            trace_langfuse=False,
+        )
+        restore = _apply_runtime_overrides(args)
+        assert config.enable_memory is False
+        restore()
+        assert config.enable_memory is True
+        restore()  # second call must be a no-op
+        assert config.enable_memory is True
 
     def test_enable_langfuse_flag_updates_config(self, monkeypatch):
         from src.main import _apply_runtime_overrides, config
@@ -975,6 +1007,105 @@ class TestRuntimeOverrides:
         _apply_runtime_overrides(args)
 
         assert config.langfuse_enabled is True
+
+    def _quick_args(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            quick=True,
+            quick_model=None,
+            deep_model=None,
+            no_memory=False,
+            enable_langfuse=False,
+            trace_langfuse=False,
+            ticker="TEST",
+        )
+
+    def test_quick_clamps_timeouts_retries_and_rpm(self, monkeypatch):
+        """P0-3: --quick auto-clamps the three knobs that historically leaked
+        from full-mode env values into screening runs."""
+        from src.main import _apply_runtime_overrides, config
+
+        monkeypatch.setattr(config, "api_retry_attempts", 3)
+        monkeypatch.setattr(config, "gemini_rpm_limit", 1000)
+        monkeypatch.setattr(config, "llm_call_hard_timeout_seconds", 600.0)
+
+        restore = _apply_runtime_overrides(self._quick_args())
+
+        assert config.api_retry_attempts == 2
+        assert config.gemini_rpm_limit == 360
+        assert config.llm_call_hard_timeout_seconds == 120.0
+        assert config.quick_mode_active is True
+
+        restore()
+        assert config.api_retry_attempts == 3
+        assert config.gemini_rpm_limit == 1000
+        assert config.llm_call_hard_timeout_seconds == 600.0
+        assert config.quick_mode_active is False
+
+    def test_quick_does_not_raise_existing_values(self, monkeypatch):
+        """If the env is already tighter than the clamp ceiling, the clamp
+        leaves the value alone."""
+        from src.main import _apply_runtime_overrides, config
+
+        monkeypatch.setattr(config, "api_retry_attempts", 1)
+        monkeypatch.setattr(config, "gemini_rpm_limit", 60)
+        monkeypatch.setattr(config, "llm_call_hard_timeout_seconds", 45.0)
+
+        restore = _apply_runtime_overrides(self._quick_args())
+        try:
+            assert config.api_retry_attempts == 1
+            assert config.gemini_rpm_limit == 60
+            assert config.llm_call_hard_timeout_seconds == 45.0
+        finally:
+            # Must restore — otherwise `config.quick_mode_active=True` leaks
+            # to every subsequent test in the process, which then sees the
+            # 60s quick-mode hard timeout instead of the normal 120s default.
+            restore()
+
+    def test_quick_clamp_is_idempotent(self, monkeypatch):
+        """Calling the override twice (e.g., in-process orchestrator) must not
+        stack saves or leak after restore."""
+        from src.main import _apply_runtime_overrides, config
+
+        monkeypatch.setattr(config, "api_retry_attempts", 5)
+        monkeypatch.setattr(config, "gemini_rpm_limit", 800)
+        monkeypatch.setattr(config, "llm_call_hard_timeout_seconds", 600.0)
+
+        restore1 = _apply_runtime_overrides(self._quick_args())
+        restore2 = _apply_runtime_overrides(self._quick_args())
+
+        assert config.api_retry_attempts == 2
+        assert config.gemini_rpm_limit == 360
+        assert config.llm_call_hard_timeout_seconds == 120.0
+
+        restore2()
+        restore1()
+
+        assert config.api_retry_attempts == 5
+        assert config.gemini_rpm_limit == 800
+        assert config.llm_call_hard_timeout_seconds == 600.0
+
+    def test_no_quick_does_not_clamp(self, monkeypatch):
+        """Without --quick, the knobs are untouched even if they exceed the
+        quick-mode ceilings."""
+        from src.main import _apply_runtime_overrides, config
+
+        monkeypatch.setattr(config, "api_retry_attempts", 3)
+        monkeypatch.setattr(config, "gemini_rpm_limit", 1000)
+        monkeypatch.setattr(config, "llm_call_hard_timeout_seconds", 600.0)
+
+        args = SimpleNamespace(
+            quick=False,
+            quick_model=None,
+            deep_model=None,
+            no_memory=False,
+            enable_langfuse=False,
+            trace_langfuse=False,
+        )
+        _apply_runtime_overrides(args)
+
+        assert config.api_retry_attempts == 3
+        assert config.gemini_rpm_limit == 1000
+        assert config.llm_call_hard_timeout_seconds == 600.0
 
 
 class TestValidateCliArgs:
@@ -1059,6 +1190,31 @@ class TestMainOrchestration:
 
         assert asyncio.run(_run_retrospective_only(args)) == 1
 
+    def test_run_retrospective_only_skips_when_no_memory(self, monkeypatch):
+        """`--no-memory --retrospective-only` must not write to lessons_learned.
+
+        Mirrors the per-ticker gate at `_maybe_run_ticker_retrospective`.
+        Distinct event name `retrospective_batch_skipped_no_memory` so log
+        greps can tell the two paths apart.
+        """
+        from src.main import _run_retrospective_only
+
+        called = {"count": 0}
+
+        async def fake_run_retrospective(*_args, **_kwargs):
+            called["count"] += 1
+            return []
+
+        monkeypatch.setattr(
+            "src.retrospective.run_retrospective", fake_run_retrospective
+        )
+
+        args = SimpleNamespace(quiet=True, brief=False, no_memory=True)
+        assert asyncio.run(_run_retrospective_only(args)) == 0
+        assert (
+            called["count"] == 0
+        ), "run_retrospective must NOT be called when --no-memory is set"
+
     def test_retrospective_only_returns_early(self, monkeypatch):
         from src.cli import OutputTargets
         from src.main import main
@@ -1072,7 +1228,7 @@ class TestMainOrchestration:
 
         monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
         monkeypatch.setattr(
-            "src.main._apply_runtime_overrides", lambda passed_args: None
+            "src.main._apply_runtime_overrides", lambda passed_args: (lambda: None)
         )
         monkeypatch.setattr("src.main.cli._validate_cli_args", lambda passed_args: None)
         monkeypatch.setattr(
@@ -1209,7 +1365,7 @@ class TestMainOrchestration:
 
         monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
         monkeypatch.setattr(
-            "src.main._apply_runtime_overrides", lambda passed_args: None
+            "src.main._apply_runtime_overrides", lambda passed_args: (lambda: None)
         )
         monkeypatch.setattr(
             "src.main.cli._validate_cli_args",
@@ -1240,7 +1396,7 @@ class TestMainOrchestration:
 
         monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
         monkeypatch.setattr(
-            "src.main._apply_runtime_overrides", lambda passed_args: None
+            "src.main._apply_runtime_overrides", lambda passed_args: (lambda: None)
         )
         monkeypatch.setattr("src.main.cli._validate_cli_args", lambda passed_args: None)
         monkeypatch.setattr(
@@ -1303,7 +1459,7 @@ class TestMainOrchestration:
         monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
         monkeypatch.setattr("src.main.config.results_dir", original_results_dir)
         monkeypatch.setattr(
-            "src.main._apply_runtime_overrides", lambda passed_args: None
+            "src.main._apply_runtime_overrides", lambda passed_args: (lambda: None)
         )
         monkeypatch.setattr("src.main.cli._validate_cli_args", lambda passed_args: None)
         monkeypatch.setattr(
@@ -1381,7 +1537,7 @@ class TestMainOrchestration:
         monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
         monkeypatch.setattr("src.main.config.results_dir", original_results_dir)
         monkeypatch.setattr(
-            "src.main._apply_runtime_overrides", lambda passed_args: None
+            "src.main._apply_runtime_overrides", lambda passed_args: (lambda: None)
         )
         monkeypatch.setattr("src.main.cli._validate_cli_args", lambda passed_args: None)
         monkeypatch.setattr(
@@ -1443,7 +1599,7 @@ class TestMainOrchestration:
         monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
         monkeypatch.setattr("src.main.config.results_dir", Path("results"))
         monkeypatch.setattr(
-            "src.main._apply_runtime_overrides", lambda passed_args: None
+            "src.main._apply_runtime_overrides", lambda passed_args: (lambda: None)
         )
         monkeypatch.setattr("src.main.cli._validate_cli_args", lambda passed_args: None)
         monkeypatch.setattr(
@@ -1728,6 +1884,160 @@ class TestSavedDiagnostics:
         assert summary["macro_context_region"] == "SEA"
         assert summary["macro_context_report_present"] is True
         assert summary["macro_context_injected_into_news"] is True
+
+    def test_build_run_summary_includes_compact_quick_consultant(self, monkeypatch):
+        from src.persistence import build_run_summary
+
+        class StubTracker:
+            def get_total_stats(self):
+                return {
+                    "failed_attempts": 1,
+                    "total_calls": 1,
+                    "agents": {"Consultant": {"total_tokens": 1234}},
+                    "call_attempts": [
+                        {
+                            "agent_name": "External Consultant",
+                            "elapsed_seconds": 12.5,
+                            "failure_kind": None,
+                        },
+                        {
+                            "agent_name": "External Consultant",
+                            "elapsed_seconds": 3.0,
+                            "failure_kind": "timeout",
+                        },
+                    ],
+                }
+
+        monkeypatch.setattr("src.token_tracker.get_tracker", lambda: StubTracker())
+        summary = build_run_summary(
+            {
+                "analysis_validity": {"publishable": True},
+                "consultant_tool_failures": 2,
+                "artifact_statuses": {
+                    "consultant_review": {"complete": True, "ok": False}
+                },
+            },
+            quick_mode=True,
+            article_requested=False,
+        )
+
+        assert summary["quick_consultant"] == {
+            "status": "failed",
+            "elapsed_seconds": 15.5,
+            "tokens": 1234,
+            "attempts": 2,
+            "timeout": True,
+            "tool_failures": 2,
+            "profile": "unknown",
+        }
+
+    def test_log_final_summary_emits_one_quick_slow_tail_warning(self, monkeypatch):
+        from src import main
+
+        class StubTracker:
+            def get_total_stats(self):
+                return {
+                    "call_diagnostics": {
+                        "timeout_seconds_lost": 61.0,
+                        "consultant_timeout": True,
+                        "slowest_call": {
+                            "agent_name": "External Consultant",
+                            "provider": "openai",
+                            "model_name": "gpt-5.4-mini",
+                            "status": "failure",
+                            "failure_kind": "timeout",
+                            "elapsed_seconds": 60.1,
+                        },
+                    }
+                }
+
+        logger = MagicMock()
+        monkeypatch.setattr("src.token_tracker.get_tracker", lambda: StubTracker())
+        monkeypatch.setattr(main, "logger", logger)
+
+        main._log_final_summary(
+            {"run_summary": {"quick_mode": True}},
+            SimpleNamespace(ticker="TEST", quick=True),
+            article_generated=False,
+        )
+
+        logger.info.assert_called_once()
+        logger.warning.assert_called_once()
+        warning = logger.warning.call_args
+        assert warning.args == ("quick_run_slow_tail_warning",)
+        assert warning.kwargs["ticker"] == "TEST"
+        assert warning.kwargs["slowest_agent"] == "External Consultant"
+        assert (
+            warning.kwargs["suggested_knob"] == "CONSULTANT_QUICK_TOTAL_TIMEOUT_SECONDS"
+        )
+
+    def test_log_final_summary_skips_slow_tail_warning_for_normal_quick_run(
+        self, monkeypatch
+    ):
+        from src import main
+
+        class StubTracker:
+            def get_total_stats(self):
+                return {
+                    "call_diagnostics": {
+                        "timeout_seconds_lost": 0.0,
+                        "consultant_timeout": False,
+                        "slowest_call": {
+                            "agent_name": "Market Analyst",
+                            "elapsed_seconds": 5.0,
+                        },
+                    }
+                }
+
+        logger = MagicMock()
+        monkeypatch.setattr("src.token_tracker.get_tracker", lambda: StubTracker())
+        monkeypatch.setattr(main, "logger", logger)
+
+        main._log_final_summary(
+            {"run_summary": {"quick_mode": True}},
+            SimpleNamespace(ticker="TEST", quick=True),
+            article_generated=False,
+        )
+
+        logger.info.assert_called_once()
+        logger.warning.assert_not_called()
+
+    def test_warn_quick_timeout_config_drift_logs_once(self, monkeypatch):
+        from src import main
+
+        logger = MagicMock()
+        monkeypatch.setattr(main, "logger", logger)
+        monkeypatch.setattr(main, "_QUICK_TIMEOUT_CONFIG_WARNED", False)
+        monkeypatch.setattr(main.config, "quick_llm_api_timeout_seconds", 300)
+        monkeypatch.setattr(main.config, "llm_call_hard_timeout_seconds", 600.0)
+        monkeypatch.setattr(main.config, "api_retry_attempts", 3)
+        monkeypatch.setattr(main.config, "gemini_rpm_limit", 1000)
+
+        args = SimpleNamespace(ticker="TEST", quick=True)
+        main._warn_quick_timeout_config_drift(args)
+        main._warn_quick_timeout_config_drift(args)
+
+        logger.warning.assert_called_once()
+        warning = logger.warning.call_args
+        assert warning.args == ("quick_timeout_config_drift",)
+        assert warning.kwargs["config"]["QUICK_LLM_API_TIMEOUT_SECONDS"] == 300
+        assert warning.kwargs["config"]["LLM_CALL_HARD_TIMEOUT_SECONDS"] == 600.0
+        assert warning.kwargs["config"]["API_RETRY_ATTEMPTS"] == 3
+        assert warning.kwargs["config"]["GEMINI_RPM_LIMIT"] == 1000
+
+    def test_warn_quick_timeout_config_drift_skips_full_mode(self, monkeypatch):
+        from src import main
+
+        logger = MagicMock()
+        monkeypatch.setattr(main, "logger", logger)
+        monkeypatch.setattr(main, "_QUICK_TIMEOUT_CONFIG_WARNED", False)
+        monkeypatch.setattr(main.config, "quick_llm_api_timeout_seconds", 300)
+
+        main._warn_quick_timeout_config_drift(
+            SimpleNamespace(ticker="TEST", quick=False)
+        )
+
+        logger.warning.assert_not_called()
 
     def test_save_results_includes_pre_screening_and_run_summary(
         self, tmp_path, monkeypatch

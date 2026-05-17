@@ -99,6 +99,9 @@ class NormalizedPosition(BaseModel):
     unrealized_pnl_usd: float = 0.0  # USD (FX-converted)
     currency: str = "USD"  # ISO code for the LOCAL currency above
     current_price_local: float = 0.0  # LOCAL currency
+    acquired_date: str | None = None  # YYYY-MM-DD if lot/history data is available
+    holding_period_days: int | None = None
+    tax_term: Literal["SHORT_TERM", "LONG_TERM", "UNKNOWN"] = "UNKNOWN"
 
     @field_validator("ticker", mode="before")
     @classmethod
@@ -165,7 +168,10 @@ class AnalysisRecord(BaseModel):
     position_size: float | None = None
     current_price: float | None = None  # LOCAL currency (see class docstring)
     currency: str = "USD"  # ISO code for all price fields above
+    currency_source: str | None = None
     fx_rate_to_usd: float | None = None  # LOCAL → USD conversion rate at analysis time
+    currency_repaired: bool = False
+    currency_repair_reason: str | None = None
     trade_block: TradeBlockData = Field(default_factory=TradeBlockData)
     # Snapshot fields (may be missing in older analyses)
     entry_price: float | None = None  # LOCAL currency
@@ -176,6 +182,7 @@ class AnalysisRecord(BaseModel):
     sector: str = ""  # GICS sector (e.g. "Industrials"), if available in snapshot
     exchange: str = ""  # Exchange suffix (e.g. "HK", "T"), inferred from ticker
     is_quick_mode: bool = False  # True if analysis was run with --quick (less thorough)
+    capital_flag_types: tuple[str, ...] = ()
 
     @property
     def age_days(self) -> int:
@@ -219,7 +226,11 @@ class ReconciliationItem(BaseModel):
     cash_impact_usd: float = 0.0  # USD (negative = cost, positive = proceeds)
     settlement_date: str | None = None  # for sells/trims: "YYYY-MM-DD"
     is_watchlist: bool = False  # True when sourced from IBKR watchlist (zero holdings)
-    sell_type: str | None = None  # "STOP_BREACH" | "HARD_REJECT" | "SOFT_REJECT" | None
+    sell_type: str | None = (
+        None  # STOP_BREACH | HARD_REJECT | SOFT_REJECT | PROFIT_TAKE | None
+    )
+    cost_basis_return_pct: float | None = None
+    profit_take_reasons: tuple[str, ...] = ()
 
     @field_validator("ticker", mode="before")
     @classmethod

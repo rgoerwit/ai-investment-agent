@@ -21,34 +21,18 @@ class TestConsultantNodeCreation:
 
     def test_consultant_llm_disabled_env_var(self):
         """Test that consultant is disabled when ENABLE_CONSULTANT=false."""
-        import src.llms
-
-        # Reset singleton to force re-evaluation
-        src.llms._consultant_llm_instance = None
-
         with patch("src.llms.config") as mock_config:
             mock_config.enable_consultant = False
             llm = get_consultant_llm()
             assert llm is None
 
-        # Reset for other tests
-        src.llms._consultant_llm_instance = None
-
     def test_consultant_llm_missing_api_key(self):
         """Test that consultant returns None when OPENAI_API_KEY missing."""
-        import src.llms
-
-        # Reset singleton to force re-evaluation
-        src.llms._consultant_llm_instance = None
-
         with patch("src.llms.config") as mock_config:
             mock_config.enable_consultant = True
             mock_config.get_openai_api_key.return_value = ""
             llm = get_consultant_llm()
             assert llm is None
-
-        # Reset for other tests
-        src.llms._consultant_llm_instance = None
 
     def test_consultant_llm_creation_success(self):
         """Test successful consultant LLM creation with valid config."""
@@ -89,6 +73,22 @@ class TestConsultantNodeCreation:
 
         assert callable(node_func)
         assert node_func.__name__ == "consultant_node"
+
+    def test_quick_consultant_does_not_bind_tools_by_default(self):
+        """Quick screening keeps Consultant enabled but skips the tool loop."""
+        mock_llm = Mock()
+        mock_tool = Mock()
+        mock_tool.name = "spot_check_metric"
+
+        node_func = create_consultant_node(
+            mock_llm,
+            "consultant",
+            tools=[mock_tool],
+            quick_mode=True,
+        )
+
+        assert callable(node_func)
+        mock_llm.bind_tools.assert_not_called()
 
 
 class TestConsultantNodeExecution:
@@ -916,6 +916,7 @@ class TestConsultantQuickMode:
                 call_kwargs = mock_chatgpt.call_args[1]
                 assert call_kwargs["model"] == "gpt-4o-mini"
                 assert call_kwargs["max_completion_tokens"] == 8192
+                assert "reasoning_effort" not in call_kwargs
 
     def test_consultant_uses_normal_model_when_quick_disabled(self):
         """Test that consultant uses CONSULTANT_MODEL when quick_mode=False."""
@@ -1000,9 +1001,8 @@ class TestConsultantQuickMode:
                 assert llm._configured_api_completion_tokens == 10240
                 assert llm._configured_reasoning_reserve_tokens == 2048
 
-    def test_get_consultant_llm_respects_quick_mode(self):
-        """Test that get_consultant_llm passes quick_mode to create_consultant_llm."""
-        # Skip if langchain-openai not installed (it's optional)
+    def test_consultant_quick_gpt5_mini_uses_low_reasoning_effort(self):
+        """Quick-mode gpt-5-mini variants should use 'low' (mini rejects 'minimal')."""
         try:
             import langchain_openai
         except ImportError:
@@ -1010,16 +1010,131 @@ class TestConsultantQuickMode:
 
         from unittest.mock import MagicMock, patch
 
-        import src.llms
-        from src.llms import get_consultant_llm
+        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+            mock_chatgpt.return_value = MagicMock()
 
-        # Reset the global instance
-        src.llms._consultant_llm_instance = None
+            with patch("src.llms.config") as mock_config:
+                mock_config.enable_consultant = True
+                mock_config.consultant_quick_model = "gpt-5.4-mini"
+                mock_config.consultant_model = "gpt-5.4"
+                mock_config.get_openai_api_key.return_value = "test-key"
 
-        # quick_mode now skips the consultant entirely for performance
-        # (saves ~34 seconds per analysis)
-        llm = get_consultant_llm(quick_mode=True)
-        assert llm is None, "quick_mode should skip consultant for performance"
+                llm = create_consultant_llm(quick_mode=True)
 
-        # Reset for other tests
-        src.llms._consultant_llm_instance = None
+                assert llm is not None
+                call_kwargs = mock_chatgpt.call_args[1]
+                assert call_kwargs["model"] == "gpt-5.4-mini"
+                assert call_kwargs["reasoning_effort"] == "low"
+                assert call_kwargs["max_completion_tokens"] == 10240
+                assert llm._configured_max_completion_tokens == 8192
+                assert llm._configured_api_completion_tokens == 10240
+                assert llm._configured_reasoning_reserve_tokens == 2048
+
+    def test_consultant_quick_full_gpt5_uses_minimal_reasoning_effort(self):
+        """Quick-mode full gpt-5 (non-mini) should use 'minimal'."""
+        try:
+            import langchain_openai  # noqa: F401
+        except ImportError:
+            pytest.skip("langchain-openai not installed (optional dependency)")
+
+        from unittest.mock import MagicMock, patch
+
+        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+            mock_chatgpt.return_value = MagicMock()
+
+            with patch("src.llms.config") as mock_config:
+                mock_config.enable_consultant = True
+                mock_config.consultant_quick_model = "gpt-5.4"
+                mock_config.consultant_model = "gpt-5.4"
+                mock_config.get_openai_api_key.return_value = "test-key"
+
+                create_consultant_llm(quick_mode=True)
+
+                call_kwargs = mock_chatgpt.call_args[1]
+                assert call_kwargs["model"] == "gpt-5.4"
+                assert call_kwargs["reasoning_effort"] == "minimal"
+
+    def test_quick_mode_falls_back_to_full_consultant_model_when_blank(self):
+        """Blank quick model should not disable consultant; it should fall back."""
+        try:
+            import langchain_openai
+        except ImportError:
+            pytest.skip("langchain-openai not installed (optional dependency)")
+
+        from unittest.mock import MagicMock, patch
+
+        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+            mock_chatgpt.return_value = MagicMock()
+
+            with patch("src.llms.config") as mock_config:
+                mock_config.enable_consultant = True
+                mock_config.consultant_quick_model = ""
+                mock_config.consultant_model = "gpt-5.4"
+                mock_config.get_openai_api_key.return_value = "test-key"
+
+                llm = create_consultant_llm(quick_mode=True)
+
+                assert llm is not None
+                call_kwargs = mock_chatgpt.call_args[1]
+                assert call_kwargs["model"] == "gpt-5.4"
+                assert call_kwargs["reasoning_effort"] == "minimal"
+
+    def test_get_consultant_llm_keeps_consultant_enabled_in_quick_mode(self):
+        """Quick mode should still build the consultant with quick settings."""
+        mock_llm = Mock(name="quick-consultant")
+
+        with patch("src.llms.config") as mock_config:
+            mock_config.enable_consultant = True
+            mock_config.get_openai_api_key.return_value = "test-key"
+            with patch(
+                "src.llms.create_consultant_llm", return_value=mock_llm
+            ) as factory:
+                llm = get_consultant_llm(quick_mode=True, max_completion_tokens=2048)
+
+        assert llm is mock_llm
+        factory.assert_called_once_with(
+            callbacks=None,
+            quick_mode=True,
+            max_completion_tokens=2048,
+        )
+
+    def test_get_consultant_llm_does_not_reuse_wrong_mode_instance(self):
+        """Quick/full consultant calls should not share a stale cached instance."""
+        quick_llm = Mock(name="quick-consultant")
+        full_llm = Mock(name="full-consultant")
+
+        with patch("src.llms.config") as mock_config:
+            mock_config.enable_consultant = True
+            mock_config.get_openai_api_key.return_value = "test-key"
+            with patch(
+                "src.llms.create_consultant_llm",
+                side_effect=[quick_llm, full_llm],
+            ) as factory:
+                first = get_consultant_llm(quick_mode=True)
+                second = get_consultant_llm(quick_mode=False)
+
+        assert first is quick_llm
+        assert second is full_llm
+        assert factory.call_count == 2
+        assert factory.call_args_list[0].kwargs["quick_mode"] is True
+        assert factory.call_args_list[1].kwargs["quick_mode"] is False
+
+    def test_get_consultant_llm_preserves_callback_lists_per_call(self):
+        """Per-run callbacks should not be dropped or reused across consultant calls."""
+        quick_llm = Mock(name="quick-consultant")
+        full_llm = Mock(name="full-consultant")
+        quick_callbacks = [Mock(name="quick-callback")]
+        full_callbacks = [Mock(name="full-callback")]
+
+        with patch("src.llms.config") as mock_config:
+            mock_config.enable_consultant = True
+            mock_config.get_openai_api_key.return_value = "test-key"
+            with patch(
+                "src.llms.create_consultant_llm",
+                side_effect=[quick_llm, full_llm],
+            ) as factory:
+                get_consultant_llm(callbacks=quick_callbacks, quick_mode=True)
+                get_consultant_llm(callbacks=full_callbacks, quick_mode=False)
+
+        assert factory.call_args_list[0].kwargs["callbacks"] == quick_callbacks
+        assert factory.call_args_list[1].kwargs["callbacks"] == full_callbacks

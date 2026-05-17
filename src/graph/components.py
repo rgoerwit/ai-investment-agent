@@ -22,19 +22,6 @@ from src.agents import (
 from src.charts.chart_node import create_chart_generator_node
 from src.config import config
 from src.llm_budgets import get_agent_output_budget
-from src.llms import (
-    create_auditor_llm,
-    create_deep_thinking_llm,
-    create_quick_thinking_llm,
-    get_consultant_llm,
-    is_gemini_v3_or_greater,
-)
-from src.memory import (
-    FinancialSituationMemory,
-    cleanup_all_memories,
-    create_memory_instances,
-    sanitize_ticker_for_collection,
-)
 from src.token_tracker import TokenTrackingCallback, get_tracker
 from src.tools.registry import toolkit
 
@@ -71,15 +58,39 @@ class GraphComponents:
     auditor_enabled: bool
 
 
-def _create_legacy_memories() -> (
-    tuple[
-        FinancialSituationMemory,
-        FinancialSituationMemory,
-        FinancialSituationMemory,
-        FinancialSituationMemory,
-        FinancialSituationMemory,
-    ]
-):
+def create_auditor_llm(*args: Any, **kwargs: Any) -> Any:
+    from src.llms import create_auditor_llm as _create_auditor_llm
+
+    return _create_auditor_llm(*args, **kwargs)
+
+
+def create_deep_thinking_llm(*args: Any, **kwargs: Any) -> Any:
+    from src.llms import create_deep_thinking_llm as _create_deep_thinking_llm
+
+    return _create_deep_thinking_llm(*args, **kwargs)
+
+
+def create_quick_thinking_llm(*args: Any, **kwargs: Any) -> Any:
+    from src.llms import create_quick_thinking_llm as _create_quick_thinking_llm
+
+    return _create_quick_thinking_llm(*args, **kwargs)
+
+
+def get_consultant_llm(*args: Any, **kwargs: Any) -> Any:
+    from src.llms import get_consultant_llm as _get_consultant_llm
+
+    return _get_consultant_llm(*args, **kwargs)
+
+
+def is_gemini_v3_or_greater(*args: Any, **kwargs: Any) -> Any:
+    from src.llms import is_gemini_v3_or_greater as _is_gemini_v3_or_greater
+
+    return _is_gemini_v3_or_greater(*args, **kwargs)
+
+
+def _create_legacy_memories() -> tuple[Any, Any, Any, Any, Any]:
+    from src.memory import FinancialSituationMemory
+
     return (
         FinancialSituationMemory("legacy_bull_memory"),
         FinancialSituationMemory("legacy_bear_memory"),
@@ -87,6 +98,26 @@ def _create_legacy_memories() -> (
         FinancialSituationMemory("legacy_trader_memory"),
         FinancialSituationMemory("legacy_risk_manager_memory"),
     )
+
+
+def cleanup_all_memories(*args: Any, **kwargs: Any) -> Any:
+    from src.memory import cleanup_all_memories as _cleanup_all_memories
+
+    return _cleanup_all_memories(*args, **kwargs)
+
+
+def create_memory_instances(*args: Any, **kwargs: Any) -> Any:
+    from src.memory import create_memory_instances as _create_memory_instances
+
+    return _create_memory_instances(*args, **kwargs)
+
+
+def sanitize_ticker_for_collection(*args: Any, **kwargs: Any) -> Any:
+    from src.memory import (
+        sanitize_ticker_for_collection as _sanitize_ticker_for_collection,
+    )
+
+    return _sanitize_ticker_for_collection(*args, **kwargs)
 
 
 def build_graph_components(
@@ -105,10 +136,10 @@ def build_graph_components(
     """Build graph memories, LLMs, nodes, and agent-specific tool nodes."""
     if ticker and enable_memory:
         if cleanup_previous:
-            logger.info("cleaning_previous_memories", ticker=ticker)
+            logger.debug("cleaning_previous_memories", ticker=ticker)
             cleanup_all_memories(days=0, ticker=ticker)
 
-        logger.info("creating_ticker_memories", ticker=ticker)
+        logger.debug("creating_ticker_memories", ticker=ticker)
         memories = create_memory_instances(ticker)
 
         safe_ticker = sanitize_ticker_for_collection(ticker)
@@ -141,7 +172,7 @@ def build_graph_components(
                 f"Failed to create memory instances for {ticker}. Missing: {', '.join(missing)}"
             )
 
-        logger.info(
+        logger.debug(
             "ticker_memories_ready",
             ticker=ticker,
             bull_available=bull_memory.available,
@@ -151,7 +182,7 @@ def build_graph_components(
         if enable_memory:
             logger.warning("using_legacy_memories_no_ticker")
         else:
-            logger.info("memory_disabled_using_legacy_memories", ticker=ticker)
+            logger.debug("memory_disabled_using_legacy_memories", ticker=ticker)
 
         (
             bull_memory,
@@ -161,7 +192,7 @@ def build_graph_components(
             risk_manager_memory,
         ) = _create_legacy_memories()
 
-    logger.info(
+    logger.debug(
         "creating_trading_graph",
         ticker=ticker,
         max_debate_rounds=max_debate_rounds,
@@ -216,12 +247,12 @@ def build_graph_components(
             callbacks=tracked_callbacks("Retry Agent (Deep)"),
         )
         allow_retry = True
-        logger.info("retry_llm_enabled", ticker=ticker)
+        logger.debug("retry_llm_enabled", ticker=ticker)
     elif quick_mode:
-        logger.info("retry_llm_disabled_quick_mode", ticker=ticker)
+        logger.debug("retry_llm_disabled_quick_mode", ticker=ticker)
 
     if quick_mode:
-        logger.info("synthesis_llm_mode", quick_mode=quick_mode, thinking_level="low")
+        logger.debug("synthesis_llm_mode", quick_mode=quick_mode, thinking_level="low")
         bull_llm = create_quick_thinking_llm(
             callbacks=tracked_callbacks("Bull Researcher"),
             max_output_tokens=output_budget("Bull Researcher"),
@@ -251,7 +282,7 @@ def build_graph_components(
             max_output_tokens=output_budget("Neutral Analyst"),
         )
     else:
-        logger.info("synthesis_llm_mode", quick_mode=quick_mode, thinking_level="high")
+        logger.debug("synthesis_llm_mode", quick_mode=quick_mode, thinking_level="high")
         bull_llm = create_deep_thinking_llm(
             callbacks=tracked_callbacks("Bull Researcher"),
             max_output_tokens=output_budget("Bull Researcher"),
@@ -290,10 +321,16 @@ def build_graph_components(
         max_output_tokens=output_budget("Valuation Calculator"),
     )
 
+    consultant_output_budget = output_budget("Consultant")
+    if quick_mode:
+        consultant_output_budget = min(
+            consultant_output_budget,
+            int(config.consultant_quick_max_completion_tokens),
+        )
     consultant_llm = get_consultant_llm(
         callbacks=tracked_callbacks("Consultant"),
         quick_mode=quick_mode,
-        max_completion_tokens=output_budget("Consultant"),
+        max_completion_tokens=consultant_output_budget,
     )
 
     auditor_requested = _is_auditor_enabled()
@@ -301,6 +338,7 @@ def build_graph_components(
         create_auditor_llm(
             callbacks=tracked_callbacks("Global Forensic Auditor"),
             max_completion_tokens=output_budget("Global Forensic Auditor"),
+            quick_mode=quick_mode,
         )
         if auditor_requested
         else None
@@ -313,7 +351,7 @@ def build_graph_components(
     consultant_enabled = consultant_llm is not None
     auditor_enabled = auditor_llm is not None
 
-    logger.info(
+    logger.debug(
         "graph_llm_plan",
         quick_mode=quick_mode,
         quick_model_name=config.quick_think_llm,
@@ -392,7 +430,7 @@ def build_graph_components(
         auditor_tools = create_agent_tool_node(
             auditor_tool_list, "global_forensic_auditor"
         )
-        logger.info("auditor_node_enabled", ticker=ticker)
+        logger.debug("auditor_node_enabled", ticker=ticker)
 
     junior_fund = create_analyst_node(
         junior_fund_llm,
@@ -460,11 +498,14 @@ def build_graph_components(
 
         consultant_tools = get_consultant_tools()
         consultant = create_consultant_node(
-            consultant_llm, "consultant", tools=consultant_tools
+            consultant_llm,
+            "consultant",
+            tools=consultant_tools,
+            quick_mode=quick_mode,
         )
-        logger.info("consultant_node_enabled", ticker=ticker)
+        logger.debug("consultant_node_enabled", ticker=ticker)
     else:
-        logger.info("consultant_node_disabled", ticker=ticker)
+        logger.debug("consultant_node_disabled", ticker=ticker)
 
     valuation_calc = create_valuation_calculator_node(valuation_llm)
     chart_generator = create_chart_generator_node(

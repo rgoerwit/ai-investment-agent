@@ -19,10 +19,12 @@ import argparse
 import io
 import json
 import logging
+import multiprocessing as mp
 import random
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -42,6 +44,22 @@ configure_yfinance_defaults()
 DEFAULT_CONFIG_PATH = "config/exchanges.json"
 DEFAULT_WORKERS = 4
 BATCH_SIZE = 50
+DEFAULT_MAX_PE = 18.0
+DEFAULT_MAX_PE_CONTEXTUAL = 24.0
+DEFAULT_MIN_ROE = 13.0
+DEFAULT_MIN_ROA = 6.0
+DEFAULT_MAX_DE = 150.0
+DEFAULT_MIN_MCAP = 50_000_000
+DEFAULT_MIN_VOLUME = 100_000
+DEFAULT_MAX_COVERAGE = 30
+DEFAULT_MIN_OCF_NI_RATIO = 0.8
+DEFAULT_MIN_REVENUE_YEARS = 3
+
+CONTEXTUAL_MIN_ROE = 16.0
+CONTEXTUAL_MIN_ROA = 7.0
+CONTEXTUAL_MAX_DE = 100.0
+CONTEXTUAL_MAX_COVERAGE = 20
+CONTEXTUAL_MIN_OCF_NI_RATIO = 1.0
 
 USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
@@ -112,6 +130,56 @@ ENRICHED_COLUMNS = [
     "Exchange",
     "Ticker_Raw",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class ScreenCriteria:
+    """Central owner for Stage 0 screening thresholds and display text."""
+
+    max_pe: float = DEFAULT_MAX_PE
+    max_pe_contextual: float = DEFAULT_MAX_PE_CONTEXTUAL
+    min_roe: float = DEFAULT_MIN_ROE
+    min_roa: float = DEFAULT_MIN_ROA
+    max_de: float = DEFAULT_MAX_DE
+    min_mcap: float = DEFAULT_MIN_MCAP
+    min_volume: float = DEFAULT_MIN_VOLUME
+    max_coverage: int = DEFAULT_MAX_COVERAGE
+    min_ocf_ni_ratio: float = DEFAULT_MIN_OCF_NI_RATIO
+    min_revenue_years: int = DEFAULT_MIN_REVENUE_YEARS
+    ocf_waiver: bool = True
+    contextual_min_roe: float = CONTEXTUAL_MIN_ROE
+    contextual_min_roa: float = CONTEXTUAL_MIN_ROA
+    contextual_max_de: float = CONTEXTUAL_MAX_DE
+    contextual_max_coverage: int = CONTEXTUAL_MAX_COVERAGE
+    contextual_min_ocf_ni_ratio: float = CONTEXTUAL_MIN_OCF_NI_RATIO
+
+    def describe(self) -> str:
+        criteria_parts = [
+            (
+                f"P/E<={self.max_pe:g} or <={self.max_pe_contextual:g} "
+                "with stronger quality"
+            ),
+            f"ROE>{self.min_roe:g}%/ROA>{self.min_roa:g}%",
+            f"D/E<={self.max_de:g}%",
+            "OCF>0",
+        ]
+        if self.min_mcap and self.min_mcap > 0:
+            criteria_parts.append(f"MCap>${self.min_mcap / 1e6:.0f}M")
+        if self.min_volume and self.min_volume > 0:
+            criteria_parts.append(f"Vol>${self.min_volume / 1e3:.0f}K")
+        if self.max_coverage and self.max_coverage > 0:
+            criteria_parts.append(f"Analysts<={self.max_coverage}")
+        criteria_parts.append(
+            "Contextual band requires "
+            f"ROE>={self.contextual_min_roe:g}%/ROA>={self.contextual_min_roa:g}%, "
+            f"D/E<={self.contextual_max_de:g}%, "
+            f"OCF/NI>={self.contextual_min_ocf_ni_ratio:g}, "
+            f"Analysts<={self.contextual_max_coverage}"
+        )
+        return ", ".join(criteria_parts)
+
+    def uses_contextual_valuation(self, pe: float) -> bool:
+        return self.max_pe < pe <= self.max_pe_contextual
 
 
 # ============================================================
@@ -753,6 +821,147 @@ def _process_row(row, *, fx_rates=None, min_mcap=None, min_volume=None, debug=Fa
     return None
 
 
+def _process_row_pool_task(task):
+    row, fx_rates, min_mcap, min_volume, debug = task
+    return _process_row(
+        dict(row),
+        fx_rates=fx_rates,
+        min_mcap=min_mcap,
+        min_volume=min_volume,
+        debug=debug,
+    )
+
+
+def _process_row_serial_task(task):
+    return _process_row_pool_task(task)
+
+
+def _handle_enriched_row_result(
+    data,
+    *,
+    criteria: ScreenCriteria,
+    debug: bool,
+    passing: list[dict],
+    all_enriched: list[dict],
+):
+    if data is None:
+        return
+
+    all_enriched.append(data)
+    if _passes_filters(data, criteria=criteria, debug=debug):
+        passing.append(data)
+
+
+def _log_filter_progress(
+    *,
+    processed_count: int,
+    total: int,
+    start_time: float,
+    passing: list[dict],
+):
+    if processed_count % 50 != 0:
+        return
+
+    elapsed = time.time() - start_time
+    rate = processed_count / elapsed if elapsed > 0 else 0
+    n_pass = len(passing)
+    print(
+        f"Progress: {processed_count}/{total} ({rate:.1f} t/s, {n_pass} passing)",
+        file=sys.stderr,
+    )
+
+
+def _iter_enrichment_tasks(records, *, fx_rates, criteria: ScreenCriteria, debug: bool):
+    for row in records:
+        yield (row, fx_rates, criteria.min_mcap, criteria.min_volume, debug)
+
+
+def _collect_enrichment_results(
+    records,
+    *,
+    fx_rates,
+    criteria: ScreenCriteria,
+    workers: int,
+    debug: bool = False,
+    worker_fn=_process_row_pool_task,
+):
+    passing = []
+    all_enriched = []
+    processed_count = 0
+    total = len(records)
+    start_time = time.time()
+
+    if workers <= 1:
+        try:
+            for task in _iter_enrichment_tasks(
+                records,
+                fx_rates=fx_rates,
+                criteria=criteria,
+                debug=debug,
+            ):
+                processed_count += 1
+                try:
+                    data = _process_row_serial_task(task)
+                except Exception:
+                    data = None
+                _handle_enriched_row_result(
+                    data,
+                    criteria=criteria,
+                    debug=debug,
+                    passing=passing,
+                    all_enriched=all_enriched,
+                )
+                _log_filter_progress(
+                    processed_count=processed_count,
+                    total=total,
+                    start_time=start_time,
+                    passing=passing,
+                )
+        except KeyboardInterrupt:
+            print("\nInterrupted! Returning partial results...", file=sys.stderr)
+        return passing, all_enriched
+
+    pool = None
+    try:
+        pool = mp.get_context("spawn").Pool(processes=workers)
+        for data in pool.imap_unordered(
+            worker_fn,
+            _iter_enrichment_tasks(
+                records,
+                fx_rates=fx_rates,
+                criteria=criteria,
+                debug=debug,
+            ),
+            chunksize=1,
+        ):
+            processed_count += 1
+            _handle_enriched_row_result(
+                data,
+                criteria=criteria,
+                debug=debug,
+                passing=passing,
+                all_enriched=all_enriched,
+            )
+            _log_filter_progress(
+                processed_count=processed_count,
+                total=total,
+                start_time=start_time,
+                passing=passing,
+            )
+    except KeyboardInterrupt:
+        print("\nInterrupted! Returning partial results...", file=sys.stderr)
+        if pool is not None:
+            pool.terminate()
+    else:
+        if pool is not None:
+            pool.close()
+    finally:
+        if pool is not None:
+            pool.join()
+
+    return passing, all_enriched
+
+
 def _safe_float(val):
     try:
         return float(val)
@@ -760,146 +969,237 @@ def _safe_float(val):
         return None
 
 
-def _passes_filters(
-    row,
-    *,
-    max_pe,
-    min_roe,
-    min_roa,
-    max_de,
-    min_ocf_ni_ratio=0.8,
-    min_revenue_years=3,
-    max_coverage=30,
-    ocf_waiver=True,
-    debug=False,
-):
+def _has_required_profitability(row, *, min_roe, min_roa):
+    roe = _safe_float(row.get("ROE"))
+    roa = _safe_float(row.get("ROA"))
+    roe_threshold = min_roe / 100.0
+    roa_threshold = min_roa / 100.0
+    return (
+        (
+            (roe is not None and roe >= roe_threshold)
+            or (roa is not None and roa >= roa_threshold)
+        ),
+        roe,
+        roa,
+    )
+
+
+def _has_acceptable_leverage(row, *, max_de, ticker, debug=False):
+    de = _safe_float(row.get("Debt_to_Equity"))
+    if de is None:
+        if debug:
+            print(f"[SKIP] {ticker}: Missing D/E", file=sys.stderr)
+        return False, None
+
+    if de <= max_de:
+        return True, de
+
+    net_de = _safe_float(row.get("Net_Debt_to_Equity"))
+    if net_de is not None and net_de <= max_de:
+        if debug:
+            print(
+                f"[NOTE] {ticker}: Gross D/E {de}% > {max_de}%, "
+                f"but Net D/E {net_de:.0f}% OK",
+                file=sys.stderr,
+            )
+        return True, de
+
+    if debug:
+        net_str = f"{net_de:.0f}%" if net_de is not None else "N/A"
+        print(
+            f"[SKIP] {ticker}: High Debt (D/E={de}%, Net D/E={net_str})",
+            file=sys.stderr,
+        )
+    return False, de
+
+
+def _within_coverage_limit(row, *, max_coverage, ticker, debug=False):
+    if not max_coverage or max_coverage <= 0:
+        return True
+
+    coverage = row.get("Analyst_Coverage")
+    if coverage is None:
+        return True
+
+    try:
+        coverage_value = int(coverage)
+    except (ValueError, TypeError):
+        return True
+
+    if coverage_value > max_coverage:
+        if debug:
+            print(
+                f"[SKIP] {ticker}: Too many analysts ({coverage_value} > {max_coverage})",
+                file=sys.stderr,
+            )
+        return False
+
+    return True
+
+
+def _passes_ocf_gate(row, *, ticker, ocf_waiver, debug=False):
+    ocf = _safe_float(row.get("Operating_Cash_Flow"))
+    if ocf is not None and ocf > 0:
+        return True
+
+    if ocf_waiver and ocf is not None and ocf <= 0:
+        fwd_pe = _safe_float(row.get("Forward_PE"))
+        trailing_pe = _safe_float(row.get("P/E"))
+        if (
+            fwd_pe is not None
+            and trailing_pe is not None
+            and fwd_pe < trailing_pe
+            and fwd_pe < 15
+        ):
+            if debug:
+                print(
+                    f"[WAIVER] {ticker}: OCF negative but forward PE {fwd_pe:.1f} "
+                    f"< trailing {trailing_pe:.1f} and < 15 → recovery expected",
+                    file=sys.stderr,
+                )
+            return True
+
+    if debug:
+        print(f"[SKIP] {ticker}: Negative/No OCF", file=sys.stderr)
+    return False
+
+
+def _has_required_earnings_quality(row, *, min_ocf_ni_ratio, ticker, debug=False):
+    ni = _safe_float(row.get("Net_Income"))
+    if ni is None or ni <= 0:
+        return True
+
+    ocf_ni = _safe_float(row.get("OCF_NI_Ratio"))
+    if ocf_ni is not None and ocf_ni < min_ocf_ni_ratio:
+        if debug:
+            print(
+                f"[SKIP] {ticker}: Low earnings quality "
+                f"(OCF/NI={ocf_ni:.2f} < {min_ocf_ni_ratio})",
+                file=sys.stderr,
+            )
+        return False
+
+    return True
+
+
+def _passes_revenue_history(row, *, min_revenue_years, ticker, debug=False):
+    rev_years = row.get("Revenue_Years_Positive")
+    if rev_years is None:
+        return True
+
+    rev_years = int(rev_years)
+    if rev_years < min_revenue_years:
+        if debug:
+            print(
+                f"[SKIP] {ticker}: Insufficient revenue history "
+                f"({rev_years}yr positive < {min_revenue_years}yr required)",
+                file=sys.stderr,
+            )
+        return False
+
+    return True
+
+
+def _passes_filters(row, *, criteria: ScreenCriteria, debug=False):
     """Apply hard financial filters to an enriched row."""
     if not row:
         return False
 
     ticker = row.get("YF_Ticker", "?")
-
-    # --- P/E ---
     pe = _safe_float(row.get("P/E"))
     if pe is None:
         if debug:
             print(f"[SKIP] {ticker}: Missing P/E", file=sys.stderr)
         return False
-    if pe > max_pe:
-        if debug:
-            print(f"[SKIP] {ticker}: P/E {pe} > {max_pe}", file=sys.stderr)
-        return False
 
-    # --- Profitability (ROE OR ROA) ---
-    roe = _safe_float(row.get("ROE"))
-    roa = _safe_float(row.get("ROA"))
-    roe_threshold = min_roe / 100.0
-    roa_threshold = min_roa / 100.0
-
-    has_good_roe = roe is not None and roe > roe_threshold
-    has_good_roa = roa is not None and roa > roa_threshold
-
-    if not (has_good_roe or has_good_roa):
+    if pe > criteria.max_pe_contextual:
         if debug:
             print(
-                f"[SKIP] {ticker}: Low Profit (ROE={roe}, ROA={roa})", file=sys.stderr
+                f"[SKIP] {ticker}: P/E {pe} > contextual max {criteria.max_pe_contextual}",
+                file=sys.stderr,
             )
         return False
 
-    # --- Leverage: Gross D/E with net debt fallback ---
-    de = _safe_float(row.get("Debt_to_Equity"))
-    if de is None:
+    profitability_ok, roe, roa = _has_required_profitability(
+        row, min_roe=criteria.min_roe, min_roa=criteria.min_roa
+    )
+    if not profitability_ok:
         if debug:
-            print(f"[SKIP] {ticker}: Missing D/E", file=sys.stderr)
+            print(
+                f"[SKIP] {ticker}: Low Profit (ROE={roe}, ROA={roa})",
+                file=sys.stderr,
+            )
         return False
-    if de > max_de:
-        # Fallback: net debt/equity = (Debt - Cash) / Equity
-        net_de = _safe_float(row.get("Net_Debt_to_Equity"))
-        if net_de is not None and net_de <= max_de:
+
+    leverage_ok, de = _has_acceptable_leverage(
+        row, max_de=criteria.max_de, ticker=ticker, debug=debug
+    )
+    if not leverage_ok:
+        return False
+
+    if not _within_coverage_limit(
+        row, max_coverage=criteria.max_coverage, ticker=ticker, debug=debug
+    ):
+        return False
+
+    if not _passes_ocf_gate(
+        row, ticker=ticker, ocf_waiver=criteria.ocf_waiver, debug=debug
+    ):
+        return False
+
+    if not _has_required_earnings_quality(
+        row,
+        min_ocf_ni_ratio=criteria.min_ocf_ni_ratio,
+        ticker=ticker,
+        debug=debug,
+    ):
+        return False
+
+    if not _passes_revenue_history(
+        row,
+        min_revenue_years=criteria.min_revenue_years,
+        ticker=ticker,
+        debug=debug,
+    ):
+        return False
+
+    if criteria.uses_contextual_valuation(pe):
+        contextual_profitability_ok, _, _ = _has_required_profitability(
+            row,
+            min_roe=criteria.contextual_min_roe,
+            min_roa=criteria.contextual_min_roa,
+        )
+        if not contextual_profitability_ok:
             if debug:
                 print(
-                    f"[NOTE] {ticker}: Gross D/E {de}% > {max_de}%, "
-                    f"but Net D/E {net_de:.0f}% OK",
-                    file=sys.stderr,
-                )
-        else:
-            if debug:
-                net_str = f"{net_de:.0f}%" if net_de is not None else "N/A"
-                print(
-                    f"[SKIP] {ticker}: High Debt (D/E={de}%, Net D/E={net_str})",
-                    file=sys.stderr,
-                )
-            return False
-
-    # --- Filter D: Maximum analyst coverage ---
-    if max_coverage and max_coverage > 0:
-        coverage = row.get("Analyst_Coverage")
-        if coverage is not None:
-            try:
-                coverage = int(coverage)
-                if coverage > max_coverage:
-                    if debug:
-                        print(
-                            f"[SKIP] {ticker}: Too many analysts ({coverage} > {max_coverage})",
-                            file=sys.stderr,
-                        )
-                    return False
-            except (ValueError, TypeError):
-                pass  # fail-open: non-numeric coverage → skip check
-
-    # --- Operating Cash Flow > 0 (with Filter E: forward-PE recovery waiver) ---
-    ocf = _safe_float(row.get("Operating_Cash_Flow"))
-    if ocf is None or ocf <= 0:
-        # Filter E: waiver for transient OCF dips when forward PE signals recovery
-        if ocf_waiver and ocf is not None and ocf <= 0:
-            fwd_pe = _safe_float(row.get("Forward_PE"))
-            trailing_pe = _safe_float(row.get("P/E"))
-            if (
-                fwd_pe is not None
-                and trailing_pe is not None
-                and fwd_pe < trailing_pe
-                and fwd_pe < 15
-            ):
-                if debug:
-                    print(
-                        f"[WAIVER] {ticker}: OCF negative but forward PE {fwd_pe:.1f} "
-                        f"< trailing {trailing_pe:.1f} and < 15 → recovery expected",
-                        file=sys.stderr,
-                    )
-                # Fall through to remaining checks (don't return False)
-            else:
-                if debug:
-                    print(f"[SKIP] {ticker}: Negative/No OCF", file=sys.stderr)
-                return False
-        else:
-            if debug:
-                print(f"[SKIP] {ticker}: Negative/No OCF", file=sys.stderr)
-            return False
-
-    # --- Earnings quality: OCF / Net Income (when NI positive) ---
-    ni = _safe_float(row.get("Net_Income"))
-    if ni is not None and ni > 0:
-        ocf_ni = _safe_float(row.get("OCF_NI_Ratio"))
-        if ocf_ni is not None and ocf_ni < min_ocf_ni_ratio:
-            if debug:
-                print(
-                    f"[SKIP] {ticker}: Low earnings quality "
-                    f"(OCF/NI={ocf_ni:.2f} < {min_ocf_ni_ratio})",
+                    f"[SKIP] {ticker}: P/E {pe} requires stronger profitability",
                     file=sys.stderr,
                 )
             return False
 
-    # --- Revenue history: 3+ years of positive revenue ---
-    rev_years = row.get("Revenue_Years_Positive")
-    if rev_years is not None:
-        rev_years = int(rev_years)
-        if rev_years < min_revenue_years:
-            if debug:
-                print(
-                    f"[SKIP] {ticker}: Insufficient revenue history "
-                    f"({rev_years}yr positive < {min_revenue_years}yr required)",
-                    file=sys.stderr,
-                )
+        contextual_leverage_ok, _ = _has_acceptable_leverage(
+            row,
+            max_de=criteria.contextual_max_de,
+            ticker=ticker,
+            debug=debug,
+        )
+        if not contextual_leverage_ok:
+            return False
+
+        if not _within_coverage_limit(
+            row,
+            max_coverage=criteria.contextual_max_coverage,
+            ticker=ticker,
+            debug=debug,
+        ):
+            return False
+
+        if not _has_required_earnings_quality(
+            row,
+            min_ocf_ni_ratio=criteria.contextual_min_ocf_ni_ratio,
+            ticker=ticker,
+            debug=debug,
+        ):
             return False
 
     if debug:
@@ -946,13 +1246,14 @@ def _load_csv_robust(filepath):
 def fetch_and_filter(
     tickers_df: pd.DataFrame,
     *,
-    max_pe: float = 18.0,
-    min_roe: float = 13.0,
-    min_roa: float = 6.0,
-    max_de: float = 150.0,
-    min_mcap: float = 50_000_000,
-    min_volume: float = 100_000,
-    max_coverage: int = 30,
+    max_pe: float = DEFAULT_MAX_PE,
+    max_pe_contextual: float = DEFAULT_MAX_PE_CONTEXTUAL,
+    min_roe: float = DEFAULT_MIN_ROE,
+    min_roa: float = DEFAULT_MIN_ROA,
+    max_de: float = DEFAULT_MAX_DE,
+    min_mcap: float = DEFAULT_MIN_MCAP,
+    min_volume: float = DEFAULT_MIN_VOLUME,
+    max_coverage: int = DEFAULT_MAX_COVERAGE,
     ocf_waiver: bool = True,
     workers: int = 4,
     debug: bool = False,
@@ -963,6 +1264,17 @@ def fetch_and_filter(
     """
     records = tickers_df.to_dict("records")
     total = len(records)
+    criteria = ScreenCriteria(
+        max_pe=max_pe,
+        max_pe_contextual=max_pe_contextual,
+        min_roe=min_roe,
+        min_roa=min_roa,
+        max_de=max_de,
+        min_mcap=min_mcap,
+        min_volume=min_volume,
+        max_coverage=max_coverage,
+        ocf_waiver=ocf_waiver,
+    )
 
     # Fetch FX rates once (parallel, ~2s)
     print("Fetching live FX rates...", file=sys.stderr, end=" ")
@@ -973,70 +1285,15 @@ def fetch_and_filter(
         f"Scanning {total} tickers with {workers} workers...",
         file=sys.stderr,
     )
-    criteria_parts = [
-        f"P/E<{max_pe}",
-        f"ROE>{min_roe}%/ROA>{min_roa}%",
-        f"D/E<{max_de}%",
-        "OCF>0",
-    ]
-    if min_mcap and min_mcap > 0:
-        criteria_parts.append(f"MCap>${min_mcap / 1e6:.0f}M")
-    if min_volume and min_volume > 0:
-        criteria_parts.append(f"Vol>${min_volume / 1e3:.0f}K")
-    if max_coverage and max_coverage > 0:
-        criteria_parts.append(f"Analysts<={max_coverage}")
-    print(f"Criteria: {', '.join(criteria_parts)}", file=sys.stderr)
+    print(f"Criteria: {criteria.describe()}", file=sys.stderr)
 
-    passing = []
-    all_enriched = []
-    processed_count = 0
-    start_time = time.time()
-
-    try:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            future_to_row = {
-                executor.submit(
-                    _process_row,
-                    row,
-                    fx_rates=fx_rates,
-                    min_mcap=min_mcap,
-                    min_volume=min_volume,
-                    debug=debug,
-                ): row
-                for row in records
-            }
-
-            for future in as_completed(future_to_row):
-                processed_count += 1
-                try:
-                    data = future.result()
-                    if data is not None:
-                        all_enriched.append(data)
-
-                        if _passes_filters(
-                            data,
-                            max_pe=max_pe,
-                            min_roe=min_roe,
-                            min_roa=min_roa,
-                            max_de=max_de,
-                            max_coverage=max_coverage,
-                            ocf_waiver=ocf_waiver,
-                            debug=debug,
-                        ):
-                            passing.append(data)
-
-                    if processed_count % 50 == 0:
-                        elapsed = time.time() - start_time
-                        rate = processed_count / elapsed if elapsed > 0 else 0
-                        n_pass = len(passing)
-                        print(
-                            f"Progress: {processed_count}/{total} ({rate:.1f} t/s, {n_pass} passing)",
-                            file=sys.stderr,
-                        )
-                except Exception:
-                    pass
-    except KeyboardInterrupt:
-        print("\nInterrupted! Returning partial results...", file=sys.stderr)
+    passing, all_enriched = _collect_enrichment_results(
+        records,
+        fx_rates=fx_rates,
+        criteria=criteria,
+        workers=workers,
+        debug=debug,
+    )
 
     passing_df = (
         pd.DataFrame(passing) if passing else pd.DataFrame(columns=ENRICHED_COLUMNS)
@@ -1109,6 +1366,9 @@ Examples:
 
   # Include US exchanges
   python scripts/find_gems.py --include-us --output scratch/gems.txt --debug
+
+Screening favors conservative value, but permits a modest higher-P/E band
+when profitability, leverage, cash-flow quality, and coverage are stronger.
 """,
     )
 
@@ -1143,36 +1403,51 @@ Examples:
         help="Include US exchanges (excluded by default)",
     )
     parser.add_argument(
-        "--max-pe", type=float, default=18.0, help="Max P/E ratio (default: 18.0)"
+        "--max-pe",
+        type=float,
+        default=DEFAULT_MAX_PE,
+        help="Base max P/E ratio before contextual quality checks (default: 18.0)",
     )
     parser.add_argument(
-        "--min-roe", type=float, default=13.0, help="Min ROE %% (default: 13.0)"
+        "--max-pe-contextual",
+        type=float,
+        default=DEFAULT_MAX_PE_CONTEXTUAL,
+        help="Higher-P/E band allowed only with stronger quality (default: 24.0)",
     )
     parser.add_argument(
-        "--min-roa", type=float, default=6.0, help="Min ROA %% (default: 6.0)"
+        "--min-roe",
+        type=float,
+        default=DEFAULT_MIN_ROE,
+        help="Min ROE %% (default: 13.0)",
+    )
+    parser.add_argument(
+        "--min-roa",
+        type=float,
+        default=DEFAULT_MIN_ROA,
+        help="Min ROA %% (default: 6.0)",
     )
     parser.add_argument(
         "--max-de",
         type=float,
-        default=150.0,
+        default=DEFAULT_MAX_DE,
         help="Max D/E %% (default: 150.0, i.e. 1.5x)",
     )
     parser.add_argument(
         "--min-mcap",
         type=float,
-        default=50_000_000,
+        default=DEFAULT_MIN_MCAP,
         help="Min market cap in USD (default: 50000000, set 0 to disable)",
     )
     parser.add_argument(
         "--min-volume",
         type=float,
-        default=100_000,
+        default=DEFAULT_MIN_VOLUME,
         help="Min daily dollar volume in USD (default: 100000, set 0 to disable)",
     )
     parser.add_argument(
         "--max-coverage",
         type=int,
-        default=30,
+        default=DEFAULT_MAX_COVERAGE,
         help="Max analyst coverage count (default: 30, set 0 to disable)",
     )
     parser.add_argument(
@@ -1220,6 +1495,7 @@ def main():
         passing_df, enriched_df = fetch_and_filter(
             tickers_df,
             max_pe=args.max_pe,
+            max_pe_contextual=args.max_pe_contextual,
             min_roe=args.min_roe,
             min_roa=args.min_roa,
             max_de=args.max_de,
@@ -1251,6 +1527,7 @@ def main():
     passing_df, enriched_df = fetch_and_filter(
         scraped_df,
         max_pe=args.max_pe,
+        max_pe_contextual=args.max_pe_contextual,
         min_roe=args.min_roe,
         min_roa=args.min_roa,
         max_de=args.max_de,

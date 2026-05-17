@@ -160,6 +160,57 @@ async def test_foreign_search_toolnode_replaces_injected_merged_results_before_a
 
 
 @pytest.mark.asyncio
+async def test_foreign_search_wrapped_results_do_not_emit_warning_spam():
+    """A legitimate wrapped search payload should survive both inspection layers quietly."""
+    _configure_inspection("sanitize")
+
+    agent_node = create_agent_tool_node(
+        [search_foreign_sources],
+        agent_key="foreign_language_analyst",
+    )
+    state = _tool_state(
+        "foreign_language_analyst",
+        "search_foreign_sources",
+        {"ticker": "7203.T", "search_query": "Toyota 決算短信"},
+    )
+
+    tavily_results = {
+        "results": [
+            {
+                "title": "Normal IR page",
+                "url": "https://example.com/ir",
+                "content": "Toyota posted normal earnings guidance.",
+            }
+        ]
+    }
+
+    with (
+        patch(
+            "src.tools.research.shared.extract_company_name_async",
+            AsyncMock(return_value="Toyota Motor Corporation"),
+        ),
+        patch("src.tools.research.shared.tavily_tool", object()),
+        patch(
+            "src.tools.research.shared._tavily_search_with_timeout",
+            AsyncMock(return_value=tavily_results),
+        ),
+        patch(
+            "src.tools.research.shared._ddg_search",
+            AsyncMock(return_value=[]),
+        ),
+        patch("src.tooling.inspection_service.logger.warning") as mock_warning,
+    ):
+        result = await agent_node(state, {"configurable": {}})
+
+    assert len(result["messages"]) == 1
+    msg = result["messages"][0]
+    assert isinstance(msg, ToolMessage)
+    assert "TOOL_BLOCKED:" not in msg.content
+    findings = _inspection_findings(mock_warning)
+    assert findings == []
+
+
+@pytest.mark.asyncio
 async def test_yfinance_tool_output_is_blocked_before_toolmessage_reaches_agent():
     """Suspicious yfinance-derived output should be blocked on the tool-output seam."""
     _configure_inspection("block")

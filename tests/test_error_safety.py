@@ -26,6 +26,21 @@ def test_redact_sensitive_text_redacts_secret_patterns():
     assert "[REDACTED]" in bearer_redacted
 
 
+def test_redact_sensitive_text_preserves_debug_identifiers():
+    text = (
+        "ticker=3406.TW file=3406-TW-LOG-2026-05-08_quick.txt "
+        "provider=google model=gemini-3-flash-preview"
+    )
+
+    redacted = redact_sensitive_text(text, max_chars=200)
+
+    assert "3406.TW" in redacted
+    assert "3406-TW-LOG-2026-05-08_quick.txt" in redacted
+    assert "google" in redacted
+    assert "gemini-3-flash-preview" in redacted
+    assert "[REDACTED]" not in redacted
+
+
 def test_safe_trace_input_allowlists_and_masks_paths():
     payload = safe_trace_input(
         {

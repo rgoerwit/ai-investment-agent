@@ -13,7 +13,11 @@ import pytest
 from langgraph.types import RunnableConfig
 
 from src.agents import create_consultant_node
-from src.agents.consultant_nodes import _canonicalize_forensic_auditor_output
+from src.agents.consultant_nodes import (
+    _canonicalize_forensic_auditor_output,
+    _create_openai_responses_fallback_llm,
+    _select_quick_consultant_profile,
+)
 from src.report_generator import QuietModeReporter
 
 
@@ -117,6 +121,212 @@ class TestDataFormatEdgeCases:
 
                 assert "consultant_review" in result
                 assert result["consultant_review"]  # Should still return something
+
+    @pytest.mark.asyncio
+    async def test_quick_consultant_no_tools_does_not_fallback_on_empty_content(self):
+        """Quick/no-tool Consultant should not spend a second LLM call on empty output."""
+        mock_llm = Mock()
+        mock_response = Mock()
+        mock_response.content = ""
+        mock_response.tool_calls = [{"name": "spot_check_metric_alt", "args": {}}]
+        invoke_calls = []
+
+        async def mock_invoke(*args, **kwargs):
+            invoke_calls.append((args, kwargs))
+            return mock_response
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                mock_prompt = Mock()
+                mock_prompt.system_message = "You are a consultant."
+                mock_prompt.agent_name = "External Consultant"
+                mock_get_prompt.return_value = mock_prompt
+
+                consultant_node = create_consultant_node(
+                    mock_llm, "consultant", tools=[], quick_mode=True
+                )
+                state = {
+                    "company_of_interest": "TEST",
+                    "company_name": "Test Co",
+                    "market_report": "Report",
+                    "sentiment_report": "Report",
+                    "news_report": "Report",
+                    "fundamentals_report": "Report",
+                    "investment_debate_state": {"history": "Debate"},
+                    "investment_plan": "BUY",
+                    "red_flags": [],
+                    "pre_screening_result": "PASS",
+                }
+                config = RunnableConfig(
+                    configurable={"context": Mock(trade_date="2025-12-13")}
+                )
+
+                result = await consultant_node(state, config)
+
+        assert len(invoke_calls) == 1
+        status = result["artifact_statuses"]["consultant_review"]
+        assert status["ok"] is False
+        assert status["error_kind"] == "application_error"
+
+    @pytest.mark.asyncio
+    async def test_quick_consultant_prompt_addendum_and_context_caps(self):
+        """Quick prompt keeps evidence channels while using smaller section caps."""
+        mock_llm = Mock()
+        mock_response = Mock()
+        mock_response.content = (
+            "### CONSULTANT REVIEW: APPROVED\n\n"
+            "### FINAL CONSULTANT VERDICT\nAPPROVED"
+        )
+        invoke_messages = []
+        summarize_calls = []
+
+        async def mock_invoke(_llm, messages, **kwargs):
+            invoke_messages.extend(messages)
+            return mock_response
+
+        def fake_summarize(value, section, budget):
+            summarize_calls.append((section, budget))
+            return f"{section}:{budget}:{value}"
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                with patch(
+                    "src.agents.consultant_nodes.support.summarize_for_pm",
+                    side_effect=fake_summarize,
+                ):
+                    mock_prompt = Mock()
+                    mock_prompt.system_message = "You are a consultant."
+                    mock_prompt.agent_name = "External Consultant"
+                    mock_get_prompt.return_value = mock_prompt
+
+                    consultant_node = create_consultant_node(
+                        mock_llm, "consultant", tools=[], quick_mode=True
+                    )
+                    state = {
+                        "company_of_interest": "TEST",
+                        "company_name": "Test Co",
+                        "market_report": "Market",
+                        "sentiment_report": "Sentiment",
+                        "news_report": "News",
+                        "fundamentals_report": "Fundamentals",
+                        "investment_debate_state": {"history": "Debate"},
+                        "investment_plan": "Research",
+                        "auditor_report": "Auditor",
+                        "red_flags": [],
+                        "pre_screening_result": "PASS",
+                    }
+                    config = RunnableConfig(
+                        configurable={"context": Mock(trade_date="2025-12-13")}
+                    )
+
+                    result = await consultant_node(state, config)
+
+        prompt = invoke_messages[0].content
+        assert "QUICK SCREENING MODE" in prompt
+        assert (
+            "Do not request tools unless tool results are explicitly available"
+            in prompt
+        )
+        assert "CONSULTANT REVIEW" in prompt
+        assert "FINAL CONSULTANT VERDICT" in prompt
+        assert "MARKET ANALYST REPORT:" in prompt
+        assert "SENTIMENT ANALYST REPORT:" in prompt
+        assert "NEWS ANALYST REPORT:" in prompt
+        assert "FUNDAMENTALS ANALYST REPORT:" in prompt
+        assert "BULL/BEAR DEBATE HISTORY" in prompt
+        assert "RESEARCH MANAGER SYNTHESIS" in prompt
+        assert "INDEPENDENT FORENSIC AUDIT" in prompt
+        assert ("market", 900) in summarize_calls
+        assert ("fundamentals", 2500) in summarize_calls
+        assert ("research", 1400) in summarize_calls
+        assert ("auditor", 1200) in summarize_calls
+        assert result["consultant_quick_profile"] == "quick_standard"
+
+    def test_quick_consultant_profile_expands_for_borderline_inputs(self):
+        assert _select_quick_consultant_profile({"red_flags": [{"type": "PFIC"}]}) == (
+            "quick_expanded"
+        )
+        assert (
+            _select_quick_consultant_profile(
+                {"artifact_statuses": {"auditor_report": {"ok": False}}}
+            )
+            == "quick_expanded"
+        )
+        assert (
+            _select_quick_consultant_profile(
+                {"investment_plan": "Recommendation: HOLD"}
+            )
+            == "quick_expanded"
+        )
+        assert _select_quick_consultant_profile({"investment_plan": "BUY"}) == (
+            "quick_standard"
+        )
+
+    @pytest.mark.asyncio
+    async def test_quick_consultant_expanded_profile_adds_evidence_index(self):
+        mock_llm = Mock()
+        mock_response = Mock()
+        mock_response.content = (
+            "### CONSULTANT REVIEW: APPROVED\n\n"
+            "### FINAL CONSULTANT VERDICT\nAPPROVED"
+        )
+        invoke_messages = []
+        summarize_calls = []
+
+        async def mock_invoke(_llm, messages, **kwargs):
+            invoke_messages.extend(messages)
+            return mock_response
+
+        def fake_summarize(value, section, budget):
+            summarize_calls.append((section, budget))
+            return f"{section}:{budget}:{value}"
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                with patch(
+                    "src.agents.consultant_nodes.support.summarize_for_pm",
+                    side_effect=fake_summarize,
+                ):
+                    mock_prompt = Mock()
+                    mock_prompt.system_message = "You are a consultant."
+                    mock_prompt.agent_name = "External Consultant"
+                    mock_get_prompt.return_value = mock_prompt
+
+                    consultant_node = create_consultant_node(
+                        mock_llm, "consultant", tools=[], quick_mode=True
+                    )
+                    result = await consultant_node(
+                        {
+                            "company_of_interest": "TEST",
+                            "company_name": "Test Co",
+                            "market_report": "Market",
+                            "sentiment_report": "Sentiment",
+                            "news_report": "News",
+                            "fundamentals_report": "Fundamentals",
+                            "investment_debate_state": {"history": "Debate"},
+                            "investment_plan": "HOLD due to liquidity risk",
+                            "auditor_report": "Auditor",
+                            "red_flags": [{"type": "LIQUIDITY", "detail": "thin"}],
+                            "pre_screening_result": "PASS",
+                        },
+                        RunnableConfig(
+                            configurable={"context": Mock(trade_date="2025-12-13")}
+                        ),
+                    )
+
+        prompt = invoke_messages[0].content
+        assert "DECISION-CRITICAL EVIDENCE INDEX" in prompt
+        assert "LIQUIDITY" in prompt
+        assert "MARKET ANALYST REPORT:" in prompt
+        assert ("fundamentals", 3600) in summarize_calls
+        assert ("research", 2200) in summarize_calls
+        assert result["consultant_quick_profile"] == "quick_expanded"
 
     @pytest.mark.asyncio
     async def test_consultant_handles_missing_debate_state(self):
@@ -256,11 +466,7 @@ class TestConfigurationEdgeCases:
 
     def test_consultant_with_empty_api_key(self):
         """Test consultant with empty string API key (not missing)."""
-        import src.llms
         from src.llms import get_consultant_llm
-
-        # Reset singleton to force re-evaluation
-        src.llms._consultant_llm_instance = None
 
         with patch("src.llms.config") as mock_config:
             mock_config.enable_consultant = True
@@ -270,24 +476,22 @@ class TestConfigurationEdgeCases:
             # Should return None (empty key treated same as missing)
             assert llm is None
 
-        # Reset for other tests
-        src.llms._consultant_llm_instance = None
-
     def test_consultant_enable_flag_disabled(self):
         """Test that consultant is disabled when enable_consultant=False."""
-        import src.llms
         from src.llms import get_consultant_llm
-
-        # Reset singleton to force re-evaluation
-        src.llms._consultant_llm_instance = None
 
         with patch("src.llms.config") as mock_config:
             mock_config.enable_consultant = False
             llm = get_consultant_llm()
             assert llm is None, "Should be disabled when enable_consultant=False"
 
-        # Reset for other tests
-        src.llms._consultant_llm_instance = None
+    def test_auditor_openai_fallback_rejects_non_openai_primary(self):
+        """The fallback path must not apply OpenAI-only params to Gemini clients."""
+        mock_llm = Mock()
+        mock_llm.model_name = "gemini-3-flash-preview"
+
+        with pytest.raises(ValueError, match="OpenAI"):
+            _create_openai_responses_fallback_llm(mock_llm)
 
 
 class TestErrorPropagation:
@@ -338,12 +542,13 @@ class TestErrorPropagation:
 
     @pytest.mark.asyncio
     async def test_consultant_wall_clock_timeout_cuts_off_stalled_invoke(self):
-        """A hanging consultant call should be bounded by the node timeout budget."""
+        """Consultant deadlines should be passed into the shared LLM runtime."""
         mock_llm = Mock()
+        seen_timeouts: list[float] = []
 
         async def mock_invoke_hang(*args, **kwargs):
-            await asyncio.sleep(1.0)
-            raise AssertionError("consultant invoke should have been cancelled first")
+            seen_timeouts.append(kwargs["overall_timeout_seconds"])
+            raise TimeoutError("shared runtime timeout")
 
         with patch(
             "src.agents.runtime.invoke_with_rate_limit_handling",
@@ -382,6 +587,10 @@ class TestErrorPropagation:
                         elapsed = time.monotonic() - started
 
         assert elapsed < 0.5
+        assert seen_timeouts
+        assert seen_timeouts[0] <= 0.05
+        status = result["artifact_statuses"]["consultant_review"]
+        assert status["error_kind"] == "timeout"
         assert result["consultant_review"] == ""
         status = result["artifact_statuses"]["consultant_review"]
         assert status["ok"] is False
@@ -802,6 +1011,111 @@ class TestLargeContextHandling:
 
                 assert "consultant_review" in result
                 # Should handle large context without crashing
+
+
+class TestConsultantQuickEnvelope:
+    """P1-5: Quick-mode Consultant total-deadline envelope is tight (35s default)."""
+
+    def test_default_quick_total_timeout_is_35s(self):
+        """The shipped default must be 35s — earlier 60s value hid hung calls.
+        Operators can still override via CONSULTANT_QUICK_TOTAL_TIMEOUT_SECONDS."""
+        from src.config import Settings
+
+        settings = Settings()
+        assert settings.consultant_quick_total_timeout_seconds == 35.0
+
+    @pytest.mark.asyncio
+    async def test_quick_mode_deadline_flows_into_runtime(self, monkeypatch):
+        """The Consultant node passes the quick-mode total budget through as
+        the per-call timeout ceiling to invoke_with_rate_limit_handling."""
+        from src.agents import consultant_nodes as cn_mod
+        from src.config import config as config_singleton
+
+        monkeypatch.setattr(
+            config_singleton, "consultant_quick_total_timeout_seconds", 35.0
+        )
+        # Force the per-call cap above the total so the total is the binding
+        # constraint and shows up in the recorded timeout.
+        monkeypatch.setattr(cn_mod, "CONSULTANT_CALL_TIMEOUT_SECONDS", 999.0)
+
+        seen_timeouts: list[float] = []
+
+        async def fake_invoke(*args, **kwargs):
+            seen_timeouts.append(float(kwargs["overall_timeout_seconds"]))
+            raise TimeoutError("stubbed")
+
+        monkeypatch.setattr(
+            "src.agents.runtime.invoke_with_rate_limit_handling", fake_invoke
+        )
+
+        mock_prompt = Mock()
+        mock_prompt.system_message = "You are a consultant."
+        mock_prompt.agent_name = "External Consultant"
+        with patch("src.prompts.get_prompt", return_value=mock_prompt):
+            node = create_consultant_node(Mock(), "consultant", quick_mode=True)
+            state = {
+                "company_of_interest": "TST",
+                "company_name": "Test Co",
+                "market_report": "x",
+                "sentiment_report": "x",
+                "news_report": "x",
+                "fundamentals_report": "x",
+                "investment_debate_state": {"history": "x"},
+                "investment_plan": "BUY",
+            }
+            config = RunnableConfig(
+                configurable={"context": Mock(trade_date="2026-05-15")}
+            )
+            await node(state, config)
+
+        assert seen_timeouts, "consultant node never invoked the LLM runtime"
+        # First call: the full quick budget is still available, so the
+        # passed timeout should be at-or-below the 35s envelope.
+        assert seen_timeouts[0] <= 35.0
+        assert seen_timeouts[0] > 0.0
+
+    @pytest.mark.asyncio
+    async def test_env_override_takes_precedence(self, monkeypatch):
+        """If CONSULTANT_QUICK_TOTAL_TIMEOUT_SECONDS is set lower at runtime,
+        the consultant node honors it (the deadline shrinks, not grows)."""
+        from src.agents import consultant_nodes as cn_mod
+        from src.config import config as config_singleton
+
+        monkeypatch.setattr(
+            config_singleton, "consultant_quick_total_timeout_seconds", 10.0
+        )
+        monkeypatch.setattr(cn_mod, "CONSULTANT_CALL_TIMEOUT_SECONDS", 999.0)
+
+        seen_timeouts: list[float] = []
+
+        async def fake_invoke(*args, **kwargs):
+            seen_timeouts.append(float(kwargs["overall_timeout_seconds"]))
+            raise TimeoutError("stubbed")
+
+        monkeypatch.setattr(
+            "src.agents.runtime.invoke_with_rate_limit_handling", fake_invoke
+        )
+
+        mock_prompt = Mock()
+        mock_prompt.system_message = "x"
+        mock_prompt.agent_name = "External Consultant"
+        with patch("src.prompts.get_prompt", return_value=mock_prompt):
+            node = create_consultant_node(Mock(), "consultant", quick_mode=True)
+            await node(
+                {
+                    "company_of_interest": "TST",
+                    "company_name": "Test Co",
+                    "market_report": "x",
+                    "sentiment_report": "x",
+                    "news_report": "x",
+                    "fundamentals_report": "x",
+                    "investment_debate_state": {"history": "x"},
+                    "investment_plan": "BUY",
+                },
+                RunnableConfig(configurable={"context": Mock(trade_date="2026-05-15")}),
+            )
+
+        assert seen_timeouts[0] <= 10.0
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ import os
 import socket
 import sys
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable
 from contextlib import nullcontext
 from datetime import datetime
 from functools import partial
@@ -26,6 +26,7 @@ import src.cli as cli
 # Import config FIRST to set telemetry/system env vars before any library imports
 import src.output as output
 import src.persistence as persistence
+from src.async_utils import run_with_hard_timeout
 from src.config import config, validate_environment_variables
 from src.error_safety import format_error_message, summarize_exception
 from src.eval import (
@@ -37,6 +38,7 @@ from src.eval import (
     set_active_capture_manager,
 )
 from src.runtime_diagnostics import build_analysis_validity
+from src.runtime_init import initialize_runtime_environment
 
 # IMPORTANT: Don't import get_tracker here - it instantiates the singleton immediately
 # Import it lazily in functions that need it, after quiet mode is set
@@ -113,10 +115,6 @@ def suppress_all_logging():
         logger_factory=structlog.PrintLoggerFactory(),
         cache_logger_on_first_use=False,  # False: force-apply to already-imported loggers
     )
-
-    import warnings
-
-    warnings.filterwarnings("ignore")
 
 
 def run_provider_preflight() -> dict[str, dict[str, str]]:
@@ -281,8 +279,10 @@ async def _fetch_market_context(ticker: str, trade_date: str) -> str:
 
         suffix = get_ticker_suffix(ticker)
         benchmark = EXCHANGE_BENCHMARK.get(suffix, FALLBACK_BENCHMARK)
-        hist = await asyncio.to_thread(
-            lambda: yf.Ticker(benchmark).history(period="2d")
+        hist = await run_with_hard_timeout(
+            asyncio.to_thread(lambda: yf.Ticker(benchmark).history(period="2d")),
+            timeout=10,
+            label=f"market_context:{benchmark}",
         )
         if len(hist) >= 2:
             pct = (
@@ -581,16 +581,34 @@ async def run_analysis(
                 capture_token = set_active_capture_manager(baseline_capture)
 
             try:
-                result = await graph.ainvoke(
-                    initial_state,
-                    config={
-                        "recursion_limit": 100,
-                        "configurable": {"context": context},
-                        "callbacks": tracing_callbacks or [],
-                        "tags": tags,
-                        "metadata": graph_metadata,
-                    },
-                )
+                try:
+                    result = await graph.ainvoke(
+                        initial_state,
+                        config={
+                            "recursion_limit": 100,
+                            "configurable": {"context": context},
+                            "callbacks": tracing_callbacks or [],
+                            "tags": tags,
+                            "metadata": graph_metadata,
+                        },
+                    )
+                except (asyncio.CancelledError, KeyboardInterrupt):
+                    from src.async_utils import (
+                        dump_pending_tasks,
+                        get_hard_timeout_orphan_snapshot,
+                    )
+
+                    pending = dump_pending_tasks()
+                    orphans = get_hard_timeout_orphan_snapshot(min_age_seconds=0)
+                    logger.warning(
+                        "analysis_interrupted_pending_tasks",
+                        ticker=ticker,
+                        pending_count=len(pending),
+                        orphan_count=len(orphans),
+                        pending_tasks=pending[:8],
+                        orphan_tasks=orphans[:8],
+                    )
+                    raise
             finally:
                 if capture_token is not None:
                     reset_active_capture_manager(capture_token)
@@ -601,7 +619,18 @@ async def run_analysis(
             from src.token_tracker import get_tracker
 
             tracker = get_tracker()
-            tracker.print_summary()
+            tracker.print_summary(ticker=ticker)
+            from src.async_utils import get_hard_timeout_orphan_snapshot
+
+            orphans = get_hard_timeout_orphan_snapshot(min_age_seconds=30.0)
+            if orphans:
+                logger.warning(
+                    "analysis_hard_timeout_orphans_pending",
+                    ticker=ticker,
+                    orphan_count=len(orphans),
+                    oldest_age_seconds=orphans[0]["age_seconds"],
+                    labels=[item["label"] for item in orphans[:8]],
+                )
 
             if isinstance(result, dict):
                 result["macro_context_report"] = macro_context_report
@@ -621,6 +650,17 @@ async def run_analysis(
             return result
 
     except Exception as e:
+        from src.async_utils import get_hard_timeout_orphan_snapshot
+
+        orphans = get_hard_timeout_orphan_snapshot(min_age_seconds=0)
+        if orphans:
+            logger.warning(
+                "analysis_failed_hard_timeout_orphans_pending",
+                ticker=ticker,
+                orphan_count=len(orphans),
+                oldest_age_seconds=orphans[0]["age_seconds"],
+                labels=[item["label"] for item in orphans[:8]],
+            )
         if baseline_capture:
             baseline_capture.reject_run(
                 [f"analysis_exception:{type(e).__name__}"],
@@ -657,18 +697,80 @@ def _enable_quiet_runtime_if_needed(args: argparse.Namespace) -> None:
     config.quiet_mode = True
 
 
-def _apply_runtime_overrides(args: argparse.Namespace) -> None:
-    """Apply per-run CLI overrides to the config singleton."""
+def _apply_runtime_overrides(args: argparse.Namespace) -> Callable[[], None]:
+    """Apply per-run CLI overrides to the config singleton.
+
+    Returns a callable that restores every overridden field to its
+    pre-override value. The caller is expected to invoke it in a
+    ``try/finally`` so a single process running multiple analyses (e.g.
+    `scripts/portfolio_manager.py` calling `run_analysis` repeatedly) does
+    NOT inherit the previous run's CLI flags via the global config
+    singleton.
+
+    The mutation-with-no-restore pattern was the source of cross-test
+    leakage in `tests/test_main_cli.py::TestRuntimeOverrides`; the same
+    fragility would affect any future in-process orchestrator that
+    wraps multiple invocations. Making the override reversible eliminates
+    the production smell at the source.
+    """
+    saved: dict[str, Any] = {}
+
+    def _save(field: str) -> None:
+        if field not in saved:
+            saved[field] = getattr(config, field)
+
+    def _clamp(field: str, ceiling: int | float) -> tuple[Any, Any] | None:
+        """Set ``config.<field>`` to ``min(current, ceiling)``, recording the
+        original for restore. Returns ``(before, after)`` when a change was
+        applied, ``None`` otherwise."""
+        before = getattr(config, field)
+        after = min(before, ceiling)
+        if after < before:
+            _save(field)
+            setattr(config, field, after)
+            return before, after
+        return None
+
+    if getattr(args, "quick", False):
+        _save("quick_mode_active")
+        config.quick_mode_active = True
+        clamps: dict[str, dict[str, Any]] = {}
+        for field, ceiling in (
+            ("api_retry_attempts", 2),
+            ("gemini_rpm_limit", 360),
+            ("llm_call_hard_timeout_seconds", 120.0),
+        ):
+            outcome = _clamp(field, ceiling)
+            if outcome is not None:
+                before, after = outcome
+                clamps[field] = {"from": before, "to": after}
+        if clamps:
+            logger.info(
+                "quick_timeout_config_overridden",
+                ticker=getattr(args, "ticker", None),
+                clamped=clamps,
+            )
     if args.quick_model:
+        _save("quick_think_llm")
         config.quick_think_llm = args.quick_model
     if args.deep_model:
+        _save("deep_think_llm")
         config.deep_think_llm = args.deep_model
     if args.no_memory:
+        _save("enable_memory")
         config.enable_memory = False
     if getattr(args, "enable_langfuse", False) or getattr(
         args, "trace_langfuse", False
     ):
+        _save("langfuse_enabled")
         config.langfuse_enabled = True
+
+    def _restore() -> None:
+        for field, value in saved.items():
+            setattr(config, field, value)
+        saved.clear()
+
+    return _restore
 
 
 def _setup_runtime(
@@ -677,6 +779,7 @@ def _setup_runtime(
     """Configure logging, runtime paths, and environment validation."""
     _enable_quiet_runtime_if_needed(args)
     config.images_dir = output_targets.image_dir
+    initialize_runtime_environment(config)
 
     provider_preflight = configure_cli_logging(args)
     enable_tool_audit = cli._cli_logging_mode(args) in {"verbose", "debug"}
@@ -735,6 +838,16 @@ def _setup_runtime(
 
 async def _run_retrospective_only(args: argparse.Namespace) -> int:
     """Run retrospective-only mode and return the process exit code."""
+    if getattr(args, "no_memory", False):
+        # Match the per-ticker retrospective gate (line ~842): --no-memory
+        # disables ALL writes to the global lessons_learned ChromaDB
+        # collection, including the batch retrospective. Distinct event
+        # name from `retrospective_skipped_no_memory` so log greps can
+        # disambiguate the two paths.
+        logger.info("retrospective_batch_skipped_no_memory")
+        if not getattr(args, "quiet", False) and not getattr(args, "brief", False):
+            console.print("[yellow]Retrospective batch skipped (--no-memory).[/yellow]")
+        return 0
     try:
         from src.observability import flush_traces, get_observability_runtime
         from src.retrospective import SnapshotLoadProgress, run_retrospective
@@ -1096,6 +1209,93 @@ def _log_final_summary(
         ticker=args.ticker,
         **{**result.get("run_summary", {}), "article_generated": article_generated},
     )
+    _log_quick_slow_tail_warning(result, args)
+
+
+_QUICK_TIMEOUT_CONFIG_WARNED = False
+
+
+def _warn_quick_timeout_config_drift(args: argparse.Namespace) -> None:
+    """Warn once when quick-mode timeout config contradicts screening semantics."""
+    global _QUICK_TIMEOUT_CONFIG_WARNED
+    if _QUICK_TIMEOUT_CONFIG_WARNED or not getattr(args, "quick", False):
+        return
+
+    drift: dict[str, float | int] = {}
+    if config.quick_llm_api_timeout_seconds > 120:
+        drift["QUICK_LLM_API_TIMEOUT_SECONDS"] = config.quick_llm_api_timeout_seconds
+    if config.llm_call_hard_timeout_seconds > 120:
+        drift["LLM_CALL_HARD_TIMEOUT_SECONDS"] = config.llm_call_hard_timeout_seconds
+    if config.api_retry_attempts > 2:
+        drift["API_RETRY_ATTEMPTS"] = config.api_retry_attempts
+    if config.gemini_rpm_limit > 360:
+        drift["GEMINI_RPM_LIMIT"] = config.gemini_rpm_limit
+
+    if not drift:
+        return
+
+    _QUICK_TIMEOUT_CONFIG_WARNED = True
+    logger.warning(
+        "quick_timeout_config_drift",
+        ticker=getattr(args, "ticker", None),
+        config=drift,
+        suggested_defaults={
+            "QUICK_LLM_API_TIMEOUT_SECONDS": 120,
+            "LLM_CALL_HARD_TIMEOUT_SECONDS": 120,
+            "API_RETRY_ATTEMPTS": 2,
+            "GEMINI_RPM_LIMIT": "15-360",
+        },
+    )
+
+
+def _log_quick_slow_tail_warning(result: dict, args: argparse.Namespace) -> None:
+    """Emit one actionable warning when a quick run still hits slow-tail behavior."""
+    if not getattr(args, "quick", False):
+        return
+
+    from src.token_tracker import get_tracker
+
+    diagnostics = (
+        (get_tracker().get_total_stats().get("call_diagnostics") or {})
+        if result is not None
+        else {}
+    )
+    slowest = diagnostics.get("slowest_call") or {}
+    slowest_elapsed = float(slowest.get("elapsed_seconds") or 0.0)
+    timeout_seconds_lost = float(diagnostics.get("timeout_seconds_lost") or 0.0)
+    consultant_timeout = bool(diagnostics.get("consultant_timeout"))
+    exceeded_quick_budget = slowest_elapsed >= float(
+        config.consultant_quick_total_timeout_seconds
+    )
+
+    if (
+        timeout_seconds_lost < 30.0
+        and not consultant_timeout
+        and not exceeded_quick_budget
+    ):
+        return
+
+    slowest_agent = str(slowest.get("agent_name") or "unknown")
+    suggested_knob = (
+        "CONSULTANT_QUICK_TOTAL_TIMEOUT_SECONDS"
+        if "consultant" in slowest_agent.lower() or consultant_timeout
+        else "LLM_CALL_HARD_TIMEOUT_SECONDS"
+    )
+    slowest_agents_top3 = diagnostics.get("slowest_agents") or []
+    logger.warning(
+        "quick_run_slow_tail_warning",
+        ticker=args.ticker,
+        slowest_agent=slowest_agent,
+        slowest_provider=slowest.get("provider") or "unknown",
+        slowest_model=slowest.get("model_name") or "unknown",
+        slowest_status=slowest.get("status") or "unknown",
+        slowest_failure_kind=slowest.get("failure_kind"),
+        slowest_elapsed_seconds=round(slowest_elapsed, 4),
+        timeout_seconds_lost=round(timeout_seconds_lost, 4),
+        consultant_timeout=consultant_timeout,
+        slowest_agents_top3=slowest_agents_top3,
+        suggested_knob=suggested_knob,
+    )
 
 
 async def main() -> int:
@@ -1115,11 +1315,12 @@ async def run_with_args(
     # `kill -USR1 <pid>` will dump every pending asyncio task with stack so
     # operators can diagnose hangs without restarting the process.
     _uninstall_dump_handler = install_pending_task_dump_handler()
+    _restore_runtime_overrides = _apply_runtime_overrides(args)
     try:
-        _apply_runtime_overrides(args)
         cli._validate_cli_args(args)
         output_targets = cli._resolve_output_targets(args)
         provider_preflight, runtime_services = _setup_runtime(args, output_targets)
+        _warn_quick_timeout_config_drift(args)
         baseline_capture = _create_baseline_capture_manager(args)
 
         if baseline_capture is not None and capture_preflight_override is not None:
@@ -1228,10 +1429,13 @@ async def run_with_args(
                 _score_analysis_trace(result, trace_context)
                 capture_path = _finalize_baseline_capture(baseline_capture, result)
                 _print_capture_result(args, baseline_capture, capture_path)
-                company_name_loader = partial(
-                    output._load_company_name_for_output,
-                    thread_pool_executor_cls=ThreadPoolExecutor,
+                loaded_company_name = await output._load_company_name_for_output_async(
+                    args.ticker
                 )
+
+                def company_name_loader(_ticker: str) -> str | None:
+                    return loaded_company_name
+
                 company_name, report, reporter = output._render_primary_output(
                     result,
                     args,
@@ -1319,16 +1523,43 @@ async def run_with_args(
             console.print(f"\n[bold red]Unexpected error:[/bold red] {message}\n")
         return 1
     finally:
-        try:
-            from src.cleanup import cleanup_async_resources
+        from src.cleanup import cleanup_async_resources
 
-            await cleanup_async_resources()
+        shutdown_timeout = float(getattr(config, "shutdown_hard_timeout_seconds", 15.0))
+        forced_exit_code: int | None = None
+        try:
+            await run_with_hard_timeout(
+                cleanup_async_resources(),
+                timeout=shutdown_timeout,
+                label="shutdown.cleanup_async_resources",
+            )
+        except TimeoutError:
+            logger.warning(
+                "shutdown_cleanup_hard_timeout",
+                timeout_seconds=shutdown_timeout,
+                note=(
+                    "cleanup_async_resources exceeded hard timeout; "
+                    "forcing process exit. Likely a stuck socket close "
+                    "(httpx.AsyncClient.aclose) under network failure."
+                ),
+            )
+            forced_exit_code = 0
         except Exception:
             pass
         try:
             _uninstall_dump_handler()
         except Exception:
             pass
+        # Restore the global config singleton to its pre-override state so
+        # that follow-on in-process callers (e.g. portfolio_manager.py
+        # batching analyses, future orchestrators) see fresh defaults
+        # rather than this run's CLI flags.
+        try:
+            _restore_runtime_overrides()
+        except Exception:
+            pass
+        if forced_exit_code is not None:
+            os._exit(forced_exit_code)
 
 
 if __name__ == "__main__":

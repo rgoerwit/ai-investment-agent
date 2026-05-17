@@ -5,10 +5,15 @@ correctness is critical for data integrity under concurrent Bull/Bear/Risk
 agent execution.
 """
 
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
 from src.agents import (
+    MESSAGE_TAIL_LIMIT,
     InvestDebateState,
     RiskDebateState,
+    merge_and_cap_messages,
     merge_dicts,
+    merge_flag_lists,
     merge_invest_debate_state,
     merge_risk_state,
 )
@@ -45,6 +50,22 @@ class TestMergeDicts:
         merge_dicts(x, y)
         assert "b" not in x
         assert "a" not in y
+
+
+class TestMergeFlagLists:
+    def test_distinct_parallel_red_flags_are_preserved(self):
+        x = [{"type": "GEOPOLITICAL_RISK", "severity": "high"}]
+        y = [{"type": "CUSTOMER_CONCENTRATION", "severity": "medium"}]
+
+        assert merge_flag_lists(x, y) == [*x, *y]
+
+    def test_duplicate_red_flags_are_deduped(self):
+        flag = {"type": "PFIC_RISK", "severity": "medium"}
+
+        assert merge_flag_lists([flag], [dict(flag)]) == [flag]
+
+    def test_none_inputs_return_empty_list(self):
+        assert merge_flag_lists(None, None) == []
 
 
 # ─── merge_invest_debate_state ───────────────────────────────────────────────
@@ -191,3 +212,88 @@ class TestMergeRiskState:
         y = _risk(neutral="B", latest_speaker="neutral_analyst")
         result = merge_risk_state(x, y)
         assert result["latest_speaker"] == "neutral_analyst"
+
+
+class TestMergeAndCapMessages:
+    def test_preserves_first_human_and_recent_tail(self):
+        initial = HumanMessage(content="analyze AAPL")
+        generic_tail = [AIMessage(content=f"msg-{idx}") for idx in range(20)]
+
+        result = merge_and_cap_messages([initial], generic_tail)
+
+        assert result[0] is initial
+        assert len(result) == 1 + MESSAGE_TAIL_LIMIT
+        assert [msg.content for msg in result[1:]] == [
+            f"msg-{idx}" for idx in range(20 - MESSAGE_TAIL_LIMIT, 20)
+        ]
+
+    def test_preserves_old_provenance_tool_messages(self):
+        initial = HumanMessage(content="analyze AAPL")
+        field_sources = ToolMessage(
+            content='{"_field_sources": {"marketCap": "yfinance"}}',
+            tool_call_id="field-sources",
+        )
+        source_conflicts = ToolMessage(
+            content='{"_source_conflicts": {"pe": {"old": 10, "new": 12}}}',
+            tool_call_id="source-conflicts",
+        )
+        generic_tail = [AIMessage(content=f"tail-{idx}") for idx in range(20)]
+
+        result = merge_and_cap_messages(
+            [initial, field_sources, source_conflicts], generic_tail
+        )
+
+        assert result[0] is initial
+        assert field_sources in result
+        assert source_conflicts in result
+        assert result[-1].content == "tail-19"
+
+    def test_handles_non_string_tool_content_without_crashing(self):
+        initial = HumanMessage(content="analyze AAPL")
+        tool_message = ToolMessage(
+            content={"structured": "value"},
+            tool_call_id="structured-tool",
+        )
+
+        result = merge_and_cap_messages([initial], [tool_message])
+
+        assert result[0] is initial
+        assert tool_message in result
+
+    def test_duplicate_provenance_message_not_repeated(self):
+        initial = HumanMessage(content="analyze AAPL")
+        provenance = ToolMessage(
+            content='{"_field_sources": {"marketCap": "eodhd"}}',
+            tool_call_id="same-tool",
+        )
+
+        result = merge_and_cap_messages([initial, provenance], [provenance])
+
+        assert result.count(provenance) == 1
+
+    def test_handles_empty_and_no_human_message(self):
+        assert merge_and_cap_messages(None, None) == []
+
+        tool_message = ToolMessage(
+            content='{"_field_sources": {"marketCap": "eodhd"}}',
+            tool_call_id="sources",
+        )
+        ai_messages = [AIMessage(content=f"tail-{idx}") for idx in range(3)]
+
+        result = merge_and_cap_messages([tool_message], ai_messages)
+
+        assert result[0] is tool_message
+        assert [msg.content for msg in result[1:]] == ["tail-0", "tail-1", "tail-2"]
+
+    def test_malformed_json_marker_irrelevant_to_preservation(self):
+        initial = HumanMessage(content="analyze AAPL")
+        tool_message = ToolMessage(
+            content='{"_field_sources": not-valid-json}',
+            tool_call_id="bad-json",
+        )
+        generic_tail = [AIMessage(content=f"tail-{idx}") for idx in range(15)]
+
+        result = merge_and_cap_messages([initial, tool_message], generic_tail)
+
+        assert tool_message in result
+        assert len(result) == 2 + MESSAGE_TAIL_LIMIT

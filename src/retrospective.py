@@ -26,8 +26,12 @@ from typing import Any
 
 import structlog
 
+from src.async_utils import run_with_hard_timeout
 from src.config import config
-from src.data_block_utils import extract_last_data_block
+from src.data_block_utils import (
+    extract_data_block_field,
+    extract_data_block_number,
+)
 from src.exchange_metadata import SUFFIX_TO_CURRENCY_CODE
 from src.runtime_diagnostics import classify_failure
 from src.runtime_services import get_current_inspection_service
@@ -180,38 +184,15 @@ def _extract_bear_risks(result: dict) -> str:
 
 
 def _extract_data_block_field(fundamentals_report: str, field_name: str) -> str | None:
-    """Extract a single field from the last DATA_BLOCK in fundamentals report."""
-    if not fundamentals_report:
-        return None
-
-    data_block = extract_last_data_block(fundamentals_report)
-    if not data_block:
-        return None
-
-    match = re.search(rf"{field_name}:\s*(.+?)(?:\n|$)", data_block, re.IGNORECASE)
-    if match:
-        value = match.group(1).strip()
-        if value.upper() in ("N/A", "NA", "NONE", "-", ""):
-            return None
-        return value
-    return None
+    """Compatibility wrapper over the shared DATA_BLOCK accessor layer."""
+    return extract_data_block_field(fundamentals_report, field_name)
 
 
 def _extract_data_block_float(
     fundamentals_report: str, field_name: str
 ) -> float | None:
-    """Extract a float field from the last DATA_BLOCK."""
-    raw = _extract_data_block_field(fundamentals_report, field_name)
-    if raw is None:
-        return None
-    # Strip trailing % or other text
-    cleaned = re.match(r"[-+]?[\d.]+", raw)
-    if cleaned:
-        try:
-            return float(cleaned.group(0))
-        except ValueError:
-            return None
-    return None
+    """Compatibility wrapper over the shared DATA_BLOCK numeric accessor."""
+    return extract_data_block_number(fundamentals_report, field_name)
 
 
 def _extract_trade_block_price(text: str, field: str) -> float | None:
@@ -280,6 +261,7 @@ def extract_snapshot(
     is_quick_mode: bool = False,
     *,
     trace_id: str | None = None,
+    is_strict_mode: bool = False,
 ) -> dict[str, Any]:
     """
     Extract a compact prediction snapshot from an analysis result.
@@ -312,31 +294,59 @@ def extract_snapshot(
     fundamentals = result.get("fundamentals_report", "") or ""
 
     # Exchange/currency/benchmark mapping
+    from src.currency_resolver import resolve_local_trading_currency
+    from src.fx_normalization import (
+        FALLBACK_RATES_TO_USD,
+        normalize_minor_unit_currency,
+    )
+
     suffix = get_ticker_suffix(ticker)
-    currency = EXCHANGE_CURRENCY.get(suffix, FALLBACK_CURRENCY)
+
+    resolution = resolve_local_trading_currency(ticker=ticker)
+    if resolution.code:
+        currency = resolution.code
+        currency_source = resolution.source
+    elif suffix:
+        logger.warning(
+            "snapshot_currency_unresolved",
+            ticker=ticker,
+            suffix=suffix,
+            msg=(
+                "Currency resolver could not determine a canonical local currency "
+                "for a suffixed ticker"
+            ),
+        )
+        currency = None
+        currency_source = "unresolved"
+    else:
+        currency = "USD"
+        currency_source = "fallback_bare_ticker"
+        logger.debug(
+            "snapshot_currency_fallback_bare_ticker",
+            ticker=ticker,
+            msg="Bare ticker has no canonical exchange suffix; using USD fallback",
+        )
+
     benchmark = EXCHANGE_BENCHMARK.get(suffix, FALLBACK_BENCHMARK)
 
     # FX rate at analysis time (synchronous fallback only — no async in snapshot).
     # Saved here so the reconciler has an at-analysis-time rate to use for cost
     # calculations without needing a live FX fetch.
     fx_rate = None
-    try:
-        from src.fx_normalization import FALLBACK_RATES_TO_USD
-
-        fx_rate = FALLBACK_RATES_TO_USD.get(currency)
-        if fx_rate is None:
-            logger.warning(
-                "snapshot_fx_rate_unknown",
-                ticker=ticker,
-                currency=currency,
-                msg=(
-                    "Currency not in FALLBACK_RATES_TO_USD — "
-                    "saving fx_rate_to_usd=None. "
-                    "Add to src/fx_normalization.py to fix cost calculations."
-                ),
-            )
-    except ImportError:
-        fx_rate = None
+    if currency:
+        normalized_currency, scale = normalize_minor_unit_currency(currency)
+        major_rate = FALLBACK_RATES_TO_USD.get(normalized_currency or "")
+        fx_rate = major_rate * scale if major_rate is not None else None
+    if currency and fx_rate is None:
+        logger.warning(
+            "snapshot_fx_rate_unknown",
+            ticker=ticker,
+            currency=currency,
+            msg=(
+                "Currency not in fallback FX table — saving fx_rate_to_usd=None. "
+                "Add to src/fx_normalization.py to fix cost calculations."
+            ),
+        )
 
     # TRADE_BLOCK extraction from trader plan (zero LLM cost — pure regex)
     trader_plan = result.get("investment_analysis", {}).get("trader_plan", "") or ""
@@ -352,6 +362,7 @@ def extract_snapshot(
         "position_size": pm_data.position_size,
         # DATA_BLOCK fields
         "current_price": _extract_data_block_float(fundamentals, "CURRENT_PRICE"),
+        "currency_source": currency_source,
         "sector": _extract_data_block_field(fundamentals, "SECTOR"),
         "pe_ratio": _extract_data_block_float(fundamentals, "PE_RATIO_TTM"),
         "peg_ratio": _extract_data_block_float(fundamentals, "PEG_RATIO"),
@@ -384,6 +395,13 @@ def extract_snapshot(
         "deep_model": config.deep_think_llm,
         "quick_model": config.quick_think_llm,
         "is_quick_mode": is_quick_mode,
+        # `is_strict_mode` records whether `--strict` was active during
+        # analysis. Strict gates reject some valid candidates (REIT, PFIC,
+        # VIE) at the screening layer, so a non-BUY verdict in strict mode
+        # carries different signal than the same verdict in normal mode —
+        # downstream lesson weighting can use this to discount strict-mode
+        # rejections.
+        "is_strict_mode": is_strict_mode,
         "trace_id": trace_id,
     }
 
@@ -659,9 +677,10 @@ async def compare_to_reality(snapshot: dict[str, Any]) -> dict[str, Any] | None:
 
             return result
 
-        data = await asyncio.wait_for(
+        data = await run_with_hard_timeout(
             asyncio.to_thread(_fetch_current_data),
             timeout=15.0,
+            label=f"retrospective_yfinance:{ticker}",
         )
 
     except asyncio.TimeoutError:
@@ -903,12 +922,23 @@ FAILURE_MODE: CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_BLEED | OPERATIONAL_MISS | 
                 "ticker": comparison.get("ticker"),
             }
         )
+        from src.config import config as settings_config
+
+        hard_timeout = float(
+            getattr(settings_config, "llm_call_hard_timeout_seconds", 600.0)
+        )
         if invoke_config:
-            response = await llm.ainvoke(
-                [HumanMessage(content=prompt)], config=invoke_config
+            response = await run_with_hard_timeout(
+                llm.ainvoke([HumanMessage(content=prompt)], config=invoke_config),
+                timeout=hard_timeout,
+                label=f"llm:retrospective_lesson:{comparison.get('ticker', '?')}",
             )
         else:
-            response = await llm.ainvoke([HumanMessage(content=prompt)])
+            response = await run_with_hard_timeout(
+                llm.ainvoke([HumanMessage(content=prompt)]),
+                timeout=hard_timeout,
+                label=f"llm:retrospective_lesson:{comparison.get('ticker', '?')}",
+            )
 
         from src.agents import extract_string_content
 
@@ -1000,6 +1030,7 @@ async def save_rejection_record(
     analysis_date = snapshot.get("analysis_date", "")
     verdict = snapshot.get("verdict", "")
     is_quick_mode = bool(snapshot.get("is_quick_mode", False))
+    is_strict_mode = bool(snapshot.get("is_strict_mode", False))
 
     if not verdict or verdict == "BUY":
         return False
@@ -1071,17 +1102,33 @@ async def save_rejection_record(
     zone = snapshot.get("zone") or "N/A"
     bear_risks = (snapshot.get("bear_risks_excerpt") or "")[:300]
 
+    mode_note = (
+        "Quick mode + strict gates"
+        if is_quick_mode and is_strict_mode
+        else "Quick mode"
+        if is_quick_mode
+        else "Strict gates"
+        if is_strict_mode
+        else "Standard mode"
+    )
     document = (
         f"PRIOR SCREENING RECORD: {ticker} ({sector} / {exchange}) — "
         f"{verdict} on {analysis_date}. "
         f"Health {health_adj}/100, Growth {growth_adj}/100, risk tally {risk_tally}. "
-        f"Risk zone: {zone}. Quick mode: {is_quick_mode}."
+        f"Risk zone: {zone}. Mode: {mode_note}."
     )
     if bear_risks:
         document += f"\nBear risks excerpt: {bear_risks}"
 
     # 4. Build metadata (extends existing schema)
+    # Strict-mode rejections are softer signal: strict gates reject some
+    # valid candidates (REIT/PFIC/VIE) at the screening layer, so a non-BUY
+    # in strict mode is partly an artifact of the gates rather than a pure
+    # quality signal. Multiplicatively discount the existing quick-mode
+    # weight by 0.7 for strict rejections.
     confidence_weight = 0.3 if is_quick_mode else 0.5
+    if is_strict_mode:
+        confidence_weight *= 0.7
     deep_model = snapshot.get("deep_model") or config.deep_think_llm or "unknown"
 
     metadata = {
@@ -1101,6 +1148,7 @@ async def save_rejection_record(
         "retrospective_date": analysis_date,
         "timestamp": datetime.now().isoformat(),
         "is_quick_mode": is_quick_mode,
+        "is_strict_mode": is_strict_mode,
         "analysis_model": deep_model,
     }
 
@@ -1534,7 +1582,7 @@ async def run_retrospective(
 
     if not all_snapshots:
         msg = f"for {ticker}" if ticker else "in results directory"
-        logger.info(f"No past analyses with snapshots found {msg}")
+        logger.info("retrospective_no_snapshots", ticker=ticker or "all", detail=msg)
         return []
 
     total_snapshots = sum(len(s) for s in all_snapshots.values())

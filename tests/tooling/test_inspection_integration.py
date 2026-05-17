@@ -85,6 +85,32 @@ async def test_heuristic_sanitize_mode_strips_delimiters():
 
 
 @pytest.mark.asyncio
+async def test_wrapped_search_results_payload_passes_without_warning_spam():
+    """A well-formed wrapped Tavily payload should pass quietly."""
+    from src.tooling.heuristic_inspector import HeuristicInspector
+
+    svc = InspectionService(
+        inspector=HeuristicInspector(),
+        mode="sanitize",
+        fail_policy="fail_open",
+    )
+    wrapped = (
+        '<search_results source="tavily" data_type="external_web_content">\n'
+        "<result><title>Safe</title><summary>Normal financial text.</summary></result>\n"
+        "</search_results>"
+    )
+    with (
+        patch("src.tooling.inspection_service.logger.warning") as mock_warning,
+        patch("src.tooling.inspection_service.logger.debug") as mock_debug,
+    ):
+        result = await svc.check(_envelope(wrapped))
+
+    assert result == wrapped
+    mock_warning.assert_not_called()
+    mock_debug.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_heuristic_benign_passes_all_modes():
     """Benign financial text passes through in all modes."""
     from src.tooling.heuristic_inspector import HeuristicInspector
@@ -164,6 +190,18 @@ async def test_raw_content_none_falls_back_to_text():
     )
     result = await svc.check(envelope)
     assert result == "the text"
+
+
+def test_backend_wiring_keeps_sanitize_mode_on_runtime_service(monkeypatch):
+    monkeypatch.setattr("src.main.config.untrusted_content_inspection_enabled", True)
+    monkeypatch.setattr("src.main.config.untrusted_content_backend", "python")
+    monkeypatch.setattr("src.main.config.untrusted_content_inspection_mode", "sanitize")
+    monkeypatch.setattr("src.main.config.untrusted_content_fail_policy", "fail_open")
+
+    from src.main import configure_content_inspection_from_config
+
+    services = configure_content_inspection_from_config()
+    assert services.inspection_service.mode == "sanitize"
 
 
 # ---------------------------------------------------------------------------

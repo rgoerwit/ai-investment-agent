@@ -250,7 +250,7 @@ class TestGraphLogging:
 
         # Verify cleanup was logged
         cleanup_logged = False
-        for call in mock_logger.info.call_args_list:
+        for call in mock_logger.debug.call_args_list:
             if len(call[0]) > 0 and "cleaning_previous_memories" in str(call[0][0]):
                 cleanup_logged = True
                 break
@@ -275,7 +275,7 @@ class TestGraphLogging:
 
         # Verify creation was logged
         creation_logged = False
-        for call in mock_logger.info.call_args_list:
+        for call in mock_logger.debug.call_args_list:
             if len(call[0]) > 0 and "creating_ticker_memories" in str(call[0][0]):
                 creation_logged = True
                 break
@@ -300,7 +300,7 @@ class TestGraphLogging:
         assert warning_logged, "Legacy memory usage should trigger warning"
 
     @patch("src.graph.components.logger")
-    def test_memory_disabled_uses_info_not_warning(self, mock_logger):
+    def test_memory_disabled_uses_debug_not_warning(self, mock_logger):
         """Intentional memory disablement should not log a warning."""
         graph = create_trading_graph(
             ticker="TEST", enable_memory=False, max_debate_rounds=1
@@ -308,7 +308,7 @@ class TestGraphLogging:
 
         assert graph is not None
         mock_logger.warning.assert_not_called()
-        mock_logger.info.assert_any_call(
+        mock_logger.debug.assert_any_call(
             "memory_disabled_using_legacy_memories", ticker="TEST"
         )
 

@@ -215,8 +215,14 @@ class TestConfigDataclass:
 
     @patch.dict(os.environ, {}, clear=True)
     def test_config_integer_defaults(self):
-        """Test that integer conversions work correctly."""
-        from src.config import Config
+        """Test that integer conversions work correctly.
+
+        For env-overridable integers (e.g. api_retry_attempts) we read the
+        Settings field default directly rather than instantiate Config(), since
+        pydantic-settings still loads the developer's local .env even after
+        os.environ is cleared.
+        """
+        from src.config import Config, Settings
 
         config = Config()
 
@@ -225,7 +231,7 @@ class TestConfigDataclass:
         assert config.max_daily_trades == 5
         assert isinstance(config.api_timeout, int)
         assert config.api_timeout > 0
-        assert config.api_retry_attempts == 10
+        assert Settings.model_fields["api_retry_attempts"].default == 2
 
     @patch.dict(os.environ, {}, clear=True)
     def test_config_float_defaults(self):
@@ -270,16 +276,14 @@ class TestConfigDataclass:
 class TestConfigPostInit:
     """Test Config.__post_init__ behavior."""
 
-    def test_directories_created(self):
-        """Test that required directories are created on init."""
-
-        # Config.__post_init__ runs and creates dirs using actual env values
-        # Can't easily test with @patch.dict since Config is already instantiated
-        # Just verify the actual directories exist
+    def test_runtime_directories_lists_required_startup_paths(self):
+        """Settings exposes runtime dirs without creating them at import time."""
         from src.config import config
 
-        assert config.results_dir.exists()
-        assert config.data_cache_dir.exists()
+        runtime_dirs = config.runtime_directories()
+
+        assert config.results_dir in runtime_dirs
+        assert config.data_cache_dir in runtime_dirs
 
     def test_nested_directories_created(self):
         """Test that nested directories are created correctly."""
@@ -351,6 +355,7 @@ class TestConfigSingleton:
             "online_tools",
             "enable_memory",
             "api_timeout",
+            "quick_llm_api_timeout_seconds",
             "api_retry_attempts",
             "langsmith_tracing_enabled",
         ]
@@ -376,14 +381,14 @@ class TestPathHandling:
         clear=True,
     )
     def test_tilde_expansion_in_paths(self):
-        """Test that tilde in paths is NOT automatically expanded."""
+        """Config expands ~ in path-typed settings via os.path.expanduser."""
         from src.config import Config
 
         config = Config()
 
-        # Path() doesn't expand ~, so this will literally be "~/results"
-        # If your code needs tilde expansion, you need Path.expanduser()
-        assert "~" in str(config.results_dir) or config.results_dir.exists()
+        expected = Path(os.path.expanduser("~/results"))
+        assert config.results_dir == expected
+        assert "~" not in str(config.results_dir)
 
 
 # =============================================================================
@@ -405,12 +410,10 @@ class TestPydanticSettingsValidation:
 
         with patch.dict(os.environ, {"MAX_DEBATE_ROUNDS": "not_a_number"}, clear=False):
             # Must reimport to trigger validation with new env
-            import importlib
-
-            import src.config
+            from src.config import Settings
 
             with pytest.raises(ValidationError) as exc_info:
-                importlib.reload(src.config)
+                Settings()
 
             # Verify the error mentions the field
             error_str = str(exc_info.value)
@@ -426,12 +429,10 @@ class TestPydanticSettingsValidation:
         with patch.dict(
             os.environ, {"MAX_POSITION_SIZE": "invalid_float"}, clear=False
         ):
-            import importlib
-
-            import src.config
+            from src.config import Settings
 
             with pytest.raises(ValidationError) as exc_info:
-                importlib.reload(src.config)
+                Settings()
 
             error_str = str(exc_info.value)
             assert (
@@ -444,12 +445,10 @@ class TestPydanticSettingsValidation:
         from pydantic import ValidationError
 
         with patch.dict(os.environ, {"API_TIMEOUT": "-10"}, clear=False):
-            import importlib
-
-            import src.config
+            from src.config import Settings
 
             with pytest.raises(ValidationError) as exc_info:
-                importlib.reload(src.config)
+                Settings()
 
             # Should mention the constraint violation
             error_str = str(exc_info.value)
@@ -463,12 +462,10 @@ class TestPydanticSettingsValidation:
         from pydantic import ValidationError
 
         with patch.dict(os.environ, {"MAX_POSITION_SIZE": "1.5"}, clear=False):
-            import importlib
-
-            import src.config
+            from src.config import Settings
 
             with pytest.raises(ValidationError) as exc_info:
-                importlib.reload(src.config)
+                Settings()
 
             error_str = str(exc_info.value)
             assert (
@@ -481,12 +478,10 @@ class TestPydanticSettingsValidation:
         from pydantic import ValidationError
 
         with patch.dict(os.environ, {"MAX_POSITION_SIZE": "-0.1"}, clear=False):
-            import importlib
-
-            import src.config
+            from src.config import Settings
 
             with pytest.raises(ValidationError) as exc_info:
-                importlib.reload(src.config)
+                Settings()
 
             error_str = str(exc_info.value)
             assert (
@@ -499,12 +494,10 @@ class TestPydanticSettingsValidation:
         from pydantic import ValidationError
 
         with patch.dict(os.environ, {"GEMINI_RPM_LIMIT": "0"}, clear=False):
-            import importlib
-
-            import src.config
+            from src.config import Settings
 
             with pytest.raises(ValidationError) as exc_info:
-                importlib.reload(src.config)
+                Settings()
 
             error_str = str(exc_info.value)
             assert (
@@ -589,6 +582,16 @@ class TestValidConstraintValues:
         with patch.dict(os.environ, {"API_TIMEOUT": "1"}, clear=False):
             settings = Settings()
             assert settings.api_timeout == 1
+
+    def test_minimum_quick_llm_timeout_allowed(self):
+        """Test that quick LLM SDK timeout of 1 second is allowed (ge=1)."""
+        from src.config import Settings
+
+        with patch.dict(
+            os.environ, {"QUICK_LLM_API_TIMEOUT_SECONDS": "1"}, clear=False
+        ):
+            settings = Settings()
+            assert settings.quick_llm_api_timeout_seconds == 1
 
     def test_zero_position_size_allowed(self):
         """Test that zero position size is allowed (ge=0.0)."""

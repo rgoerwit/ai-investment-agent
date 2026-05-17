@@ -3,6 +3,20 @@ Test suite for configurable rate limit settings.
 
 Ensures that GEMINI_RPM_LIMIT environment variable correctly configures
 the rate limiter for different API tiers (free, paid tier 1, tier 2).
+
+These tests deliberately avoid ``importlib.reload(src.config)`` for the
+simple "env-var-to-field" assertions: a reload swaps the module-level
+``src.config.config`` for a brand-new Settings instance while every
+already-imported production module (``src.persistence``,
+``src.agents.research_nodes``, …) still holds the OLD reference. Tests
+that run later and ``monkeypatch.setattr(config, …)`` then mutate a
+different object than the one production reads — which silently breaks
+unrelated tests in the full suite (May 2026 cross-test leakage incident).
+
+Use ``Settings()`` to construct a fresh instance against a patched
+environment instead. The two reload-mechanics tests at the bottom of
+this file are guarded by a fixture that restores ``src.config.config``
+to the original singleton object on teardown.
 """
 
 import importlib
@@ -12,62 +26,57 @@ from unittest.mock import patch
 import pytest
 
 
+@pytest.fixture
+def restore_config_singleton():
+    """Restore ``src.config.config`` to the original singleton object on
+    teardown. Use this around any test that calls
+    ``importlib.reload(src.config)`` so the reload doesn't orphan
+    references already held by production modules.
+    """
+    import src.config
+
+    saved = src.config.config
+    yield
+    src.config.config = saved
+
+
 class TestRateLimitConfiguration:
     """Test rate limit configuration from environment variables."""
 
-    def test_default_free_tier_15_rpm(self):
-        """Test that default rate limit is 15 RPM (free tier) when no env var is set.
+    def test_default_free_tier_15_rpm(self, monkeypatch):
+        """Test that default rate limit is 15 RPM (free tier) when no env var is set."""
+        from src.config import Settings
 
-        Skips test if GEMINI_RPM_LIMIT is set (user may be on paid tier).
-        """
-        import src.config
-
-        # Skip if config has non-default value (user may be on paid tier)
-        if src.config.config.gemini_rpm_limit != 15:
+        monkeypatch.delenv("GEMINI_RPM_LIMIT", raising=False)
+        # Skip if a local .env still drives a non-default value (user may
+        # be on paid tier even without the env var explicitly set).
+        if Settings().gemini_rpm_limit != 15:
             pytest.skip(
-                f"GEMINI_RPM_LIMIT is set to {src.config.config.gemini_rpm_limit}, skipping default test"
+                "GEMINI_RPM_LIMIT default in this environment is non-15; "
+                "skipping free-tier default test"
             )
+        assert Settings().gemini_rpm_limit == 15
 
-        assert src.config.config.gemini_rpm_limit == 15
-
-    def test_paid_tier_1_360_rpm(self):
+    def test_paid_tier_1_360_rpm(self, monkeypatch):
         """Test setting rate limit to 360 RPM (paid tier 1)."""
-        os.environ["GEMINI_RPM_LIMIT"] = "360"
+        from src.config import Settings
 
-        import src.config
+        monkeypatch.setenv("GEMINI_RPM_LIMIT", "360")
+        assert Settings().gemini_rpm_limit == 360
 
-        importlib.reload(src.config)
-
-        assert src.config.config.gemini_rpm_limit == 360
-
-        # Clean up
-        del os.environ["GEMINI_RPM_LIMIT"]
-
-    def test_paid_tier_2_1000_rpm(self):
+    def test_paid_tier_2_1000_rpm(self, monkeypatch):
         """Test setting rate limit to 1000 RPM (paid tier 2)."""
-        os.environ["GEMINI_RPM_LIMIT"] = "1000"
+        from src.config import Settings
 
-        import src.config
+        monkeypatch.setenv("GEMINI_RPM_LIMIT", "1000")
+        assert Settings().gemini_rpm_limit == 1000
 
-        importlib.reload(src.config)
-
-        assert src.config.config.gemini_rpm_limit == 1000
-
-        # Clean up
-        del os.environ["GEMINI_RPM_LIMIT"]
-
-    def test_custom_rpm_limit(self):
+    def test_custom_rpm_limit(self, monkeypatch):
         """Test setting custom RPM limit."""
-        os.environ["GEMINI_RPM_LIMIT"] = "500"
+        from src.config import Settings
 
-        import src.config
-
-        importlib.reload(src.config)
-
-        assert src.config.config.gemini_rpm_limit == 500
-
-        # Clean up
-        del os.environ["GEMINI_RPM_LIMIT"]
+        monkeypatch.setenv("GEMINI_RPM_LIMIT", "500")
+        assert Settings().gemini_rpm_limit == 500
 
 
 class TestRateLimiterCreation:
@@ -164,9 +173,14 @@ class TestSafetyMargin:
 class TestGlobalRateLimiterInitialization:
     """Test that global rate limiter is initialized correctly."""
 
-    def test_global_rate_limiter_uses_config(self):
-        """Test that GLOBAL_RATE_LIMITER uses config.gemini_rpm_limit."""
-        # Set specific RPM
+    def test_global_rate_limiter_uses_config(self, restore_config_singleton):
+        """Test that GLOBAL_RATE_LIMITER uses config.gemini_rpm_limit.
+
+        Uses ``restore_config_singleton`` to re-alias ``src.config.config``
+        back to the original singleton on teardown — otherwise the
+        reload here orphans references held by production modules
+        already imported, breaking unrelated tests downstream.
+        """
         os.environ["GEMINI_RPM_LIMIT"] = "100"
 
         # Reimport to pick up new config
@@ -183,13 +197,13 @@ class TestGlobalRateLimiterInitialization:
             expected_rps, abs=0.01
         )
 
-        # Clean up
+        # Clean up env; the fixture re-aliases src.config.config and the
+        # finally-block resets the limiter cache.
         del os.environ["GEMINI_RPM_LIMIT"]
-        importlib.reload(src.config)
         importlib.reload(src.llms)
 
     def test_global_rate_limiter_uses_live_config_after_reload_under_patch(
-        self, monkeypatch
+        self, monkeypatch, restore_config_singleton
     ):
         """Reloading llms under a patched config must not freeze a stale mock."""
         import src.config

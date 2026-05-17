@@ -173,8 +173,25 @@ def test_save_results_to_file_canonicalizes_prediction_snapshot_sector(
 
 
 @pytest.mark.asyncio
-async def test_maybe_save_rejection_record_canonicalizes_snapshot_sector():
+async def test_maybe_save_rejection_record_canonicalizes_snapshot_sector(
+    monkeypatch,
+):
+    """Note: tests/conftest.py sets ENABLE_MEMORY=false session-wide; this
+    test asserts the memory-enabled code path so it must opt back in.
+
+    We mutate `config.__dict__["enable_memory"]` via `monkeypatch.setitem`
+    rather than `monkeypatch.setattr(config, ...)`. The latter goes through
+    pydantic-settings BaseModel `__setattr__`, which under full-suite test
+    ordering has been observed not to take effect reliably (see the May
+    2026 cross-test leakage incident — three otherwise-isolated tests
+    failed only when run alongside the broader suite). `setitem` bypasses
+    pydantic's setter entirely and is properly tracked/restored by
+    monkeypatch.
+    """
+    from src.config import config
     from src.persistence import _maybe_save_rejection_record
+
+    monkeypatch.setitem(config.__dict__, "enable_memory", True)
 
     args = SimpleNamespace(ticker="7203.T", quick=False)
     logger = MagicMock()
@@ -204,6 +221,85 @@ async def test_maybe_save_rejection_record_canonicalizes_snapshot_sector():
 
     snapshot = save_rejection_record.await_args.args[0]
     assert snapshot["sector"] == "Information Technology"
+
+
+@pytest.mark.asyncio
+async def test_maybe_save_rejection_record_skips_when_memory_disabled(monkeypatch):
+    """`--no-memory` (config.enable_memory=False) must skip the rejection
+    record save entirely. Otherwise the path tries to spin up the global
+    `lessons_learned` ChromaDB collection and emits the
+    `add_situations_failed` / `rejection_record_storage_failed` noise that
+    the May 2026 HK-pipeline run produced."""
+    from src.config import config
+    from src.persistence import _maybe_save_rejection_record
+
+    # Conftest already sets enable_memory=False session-wide; pin it
+    # explicitly so the test is robust to future conftest changes. Use
+    # setitem to bypass pydantic-settings' BaseModel __setattr__ for
+    # consistency with peer tests (see canonicalizes_snapshot_sector
+    # docstring for full background).
+    monkeypatch.setitem(config.__dict__, "enable_memory", False)
+
+    args = SimpleNamespace(ticker="2099.HK", quick=True)
+    logger = MagicMock()
+
+    with (
+        patch("src.retrospective.extract_snapshot") as extract_snapshot,
+        patch("src.retrospective.create_lessons_memory") as create_lessons_memory,
+        patch("src.retrospective.save_rejection_record") as save_rejection_record,
+    ):
+        await _maybe_save_rejection_record(
+            {}, args, trace_id="trace-1", logger_obj=logger
+        )
+
+    extract_snapshot.assert_not_called()
+    create_lessons_memory.assert_not_called()
+    save_rejection_record.assert_not_called()
+    # Skipped at debug level — no warnings, no errors.
+    logger.debug.assert_called_once()
+    assert logger.debug.call_args.args[0] == "rejection_record_save_skipped_no_memory"
+    logger.warning.assert_not_called()
+    logger.error.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_maybe_save_rejection_record_runs_when_memory_enabled(monkeypatch):
+    """Regression guard: when memory is enabled, the rejection-save path
+    still fires for non-BUY verdicts (don't accidentally short-circuit it
+    in the no-memory check)."""
+    from src.config import config
+    from src.persistence import _maybe_save_rejection_record
+
+    # See canonicalizes_snapshot_sector docstring re setitem vs setattr.
+    monkeypatch.setitem(config.__dict__, "enable_memory", True)
+
+    args = SimpleNamespace(ticker="7203.T", quick=False)
+    logger = MagicMock()
+
+    with (
+        patch(
+            "src.retrospective.extract_snapshot",
+            return_value={
+                "ticker": "7203.T",
+                "verdict": "HOLD",
+                "analysis_date": "2026-04-25",
+                "sector": "Technology",
+            },
+        ),
+        patch(
+            "src.retrospective.create_lessons_memory",
+            return_value=MagicMock(available=True),
+        ),
+        patch(
+            "src.retrospective.save_rejection_record",
+            new=AsyncMock(return_value=True),
+        ) as save_rejection_record,
+    ):
+        await _maybe_save_rejection_record(
+            {}, args, trace_id="trace-1", logger_obj=logger
+        )
+
+    save_rejection_record.assert_awaited_once()
 
 
 def test_persist_analysis_outputs_surfaces_formatted_warning():

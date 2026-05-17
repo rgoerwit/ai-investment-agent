@@ -21,6 +21,7 @@ import structlog
 import yfinance as yf
 from langchain_core.tools import tool
 
+from src.async_utils import run_with_hard_timeout
 from src.config import config
 from src.error_safety import safe_error_payload, summarize_exception
 from src.mcp.errors import MCPCallError, make_mcp_tool_name
@@ -312,9 +313,10 @@ async def spot_check_metric(
 
     try:
         stock = yf.Ticker(ticker)
-        info = await asyncio.wait_for(
+        info = await run_with_hard_timeout(
             asyncio.to_thread(lambda: stock.info),
             timeout=SPOT_CHECK_TIMEOUT_SECONDS,
+            label=f"consultant_spot_check:{ticker}",
         )
         value = info.get(metric)
 

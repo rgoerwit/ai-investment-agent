@@ -28,8 +28,6 @@ _CONFIG_PATH = Path(__file__).parent.parent.parent / "config" / "exchanges.json"
 class TestPassesFilters:
     """Unit tests for _passes_filters() with default thresholds."""
 
-    DEFAULT_KWARGS = {"max_pe": 18.0, "min_roe": 13.0, "min_roa": 6.0, "max_de": 150.0}
-
     @staticmethod
     def _make_row(**overrides):
         base = {
@@ -51,49 +49,53 @@ class TestPassesFilters:
         base.update(overrides)
         return base
 
+    @staticmethod
+    def _criteria(**overrides):
+        return find_gems.ScreenCriteria(**overrides)
+
     def test_passes_all_criteria(self):
         row = self._make_row()
-        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is True
 
     def test_missing_pe_fails(self):
         row = self._make_row(**{"P/E": None})
-        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is False
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is False
 
     def test_high_pe_fails(self):
         row = self._make_row(**{"P/E": 25.0})
-        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is False
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is False
 
     def test_low_profitability_fails(self):
         row = self._make_row(ROE=0.05, ROA=0.03)
-        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is False
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is False
 
     def test_roe_or_roa_logic_roe_only(self):
         """ROE above threshold with ROA missing should pass (OR logic)."""
         row = self._make_row(ROE=0.15, ROA=None)
-        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is True
 
     def test_roe_or_roa_logic_roa_only(self):
         """ROA above threshold with ROE missing should pass (OR logic)."""
         row = self._make_row(ROE=None, ROA=0.08)
-        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is True
 
     def test_missing_de_fails(self):
         row = self._make_row(Debt_to_Equity=None)
-        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is False
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is False
 
     def test_high_de_fails(self):
         row = self._make_row(Debt_to_Equity=200.0, Net_Debt_to_Equity=180.0)
-        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is False
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is False
 
     def test_high_gross_de_passes_via_net_debt_fallback(self):
         """Gross D/E above threshold but net D/E below should pass."""
         row = self._make_row(Debt_to_Equity=200.0, Net_Debt_to_Equity=100.0)
-        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is True
 
     def test_high_gross_de_no_net_debt_fails(self):
         """Gross D/E above threshold with no net debt data should fail."""
         row = self._make_row(Debt_to_Equity=200.0, Net_Debt_to_Equity=None)
-        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is False
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is False
 
     # --- OCF / Net Income earnings quality ---
 
@@ -102,77 +104,89 @@ class TestPassesFilters:
         row = self._make_row(
             Net_Income=1_000_000, OCF_NI_Ratio=0.5, Operating_Cash_Flow=500_000
         )
-        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is False
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is False
 
     def test_good_ocf_ni_ratio_passes(self):
         """OCF/NI above 0.8 should pass."""
         row = self._make_row(Net_Income=800_000, OCF_NI_Ratio=1.25)
-        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is True
 
     def test_negative_ni_skips_ocf_ni_check(self):
         """When NI is negative, OCF/NI check should be skipped entirely."""
         row = self._make_row(Net_Income=-500_000, OCF_NI_Ratio=None)
-        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is True
 
     def test_missing_ni_skips_ocf_ni_check(self):
         """When NI is None, OCF/NI check should be skipped."""
         row = self._make_row(Net_Income=None, OCF_NI_Ratio=None)
-        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is True
 
     # --- Revenue history ---
 
     def test_insufficient_revenue_history_fails(self):
         """Fewer than 3 years of positive revenue should fail."""
         row = self._make_row(Revenue_Years_Positive=2)
-        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is False
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is False
 
     def test_sufficient_revenue_history_passes(self):
         """3+ years of positive revenue should pass."""
         row = self._make_row(Revenue_Years_Positive=4)
-        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is True
 
     def test_missing_revenue_history_passes(self):
         """When revenue data unavailable, check should be skipped (no penalty)."""
         row = self._make_row(Revenue_Years_Positive=None)
-        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is True
 
     def test_exactly_three_revenue_years_passes(self):
         """Exactly 3 years should pass (boundary check)."""
         row = self._make_row(Revenue_Years_Positive=3)
-        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is True
 
     def test_negative_ocf_fails(self):
         row = self._make_row(Operating_Cash_Flow=-500)
-        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is False
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is False
 
     def test_zero_ocf_fails(self):
         row = self._make_row(Operating_Cash_Flow=0)
-        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is False
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is False
 
     def test_custom_thresholds(self):
         """Relaxed thresholds should allow previously-failing rows."""
-        row = self._make_row(**{"P/E": 22.0}, ROE=0.06, Debt_to_Equity=140.0)
-        # Fails with defaults (P/E 22 > 18, ROE 6% < 13%)
-        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is False
+        row = self._make_row(
+            **{"P/E": 22.0},
+            ROE=0.06,
+            ROA=0.03,
+            Debt_to_Equity=140.0,
+            Net_Debt_to_Equity=120.0,
+        )
+        # Fails with defaults because the contextual band still requires stronger quality.
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is False
         # Passes with relaxed thresholds
         assert (
             find_gems._passes_filters(
-                row, max_pe=25.0, min_roe=5.0, min_roa=6.0, max_de=150.0
+                row,
+                criteria=self._criteria(
+                    max_pe=25.0,
+                    min_roe=5.0,
+                    min_roa=3.0,
+                    max_de=150.0,
+                ),
             )
             is True
         )
 
     def test_none_row_fails(self):
-        assert find_gems._passes_filters(None, **self.DEFAULT_KWARGS) is False
+        assert find_gems._passes_filters(None, criteria=self._criteria()) is False
 
     def test_empty_dict_fails(self):
-        assert find_gems._passes_filters({}, **self.DEFAULT_KWARGS) is False
+        assert find_gems._passes_filters({}, criteria=self._criteria()) is False
 
     def test_boundary_pe_exactly_at_threshold(self):
         """P/E exactly at max_pe should fail (> not >=)."""
         # The code uses `pe > max_pe`, so pe == max_pe should pass
         row = self._make_row(**{"P/E": 18.0})
-        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is True
 
     def test_string_numeric_values_handled(self):
         """Values stored as strings should be converted via _safe_float."""
@@ -182,7 +196,86 @@ class TestPassesFilters:
             Debt_to_Equity="80",
             Operating_Cash_Flow="1000000",
         )
-        assert find_gems._passes_filters(row, **self.DEFAULT_KWARGS) is True
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is True
+
+    def test_contextual_pe_passes_with_stronger_quality(self):
+        row = self._make_row(
+            **{"P/E": 22.0},
+            ROE=0.18,
+            ROA=0.08,
+            Debt_to_Equity=80.0,
+            OCF_NI_Ratio=1.1,
+            Analyst_Coverage=8,
+        )
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is True
+
+    def test_contextual_pe_passes_with_roa_only(self):
+        row = self._make_row(
+            **{"P/E": 22.0},
+            ROE=None,
+            ROA=0.08,
+            Debt_to_Equity=80.0,
+            OCF_NI_Ratio=1.1,
+            Analyst_Coverage=8,
+        )
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is True
+
+    def test_contextual_pe_boundary_passes(self):
+        row = self._make_row(
+            **{"P/E": 24.0},
+            ROE=0.18,
+            Debt_to_Equity=80.0,
+            OCF_NI_Ratio=1.1,
+            Analyst_Coverage=20,
+        )
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is True
+
+    def test_contextual_pe_above_max_fails(self):
+        row = self._make_row(**{"P/E": 24.1}, ROE=0.18, OCF_NI_Ratio=1.1)
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is False
+
+    def test_contextual_pe_weak_profitability_fails(self):
+        row = self._make_row(**{"P/E": 22.0}, ROE=0.14, ROA=0.05)
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is False
+
+    def test_contextual_pe_high_debt_fails(self):
+        row = self._make_row(
+            **{"P/E": 22.0},
+            ROE=0.18,
+            Debt_to_Equity=140.0,
+            Net_Debt_to_Equity=110.0,
+            OCF_NI_Ratio=1.1,
+        )
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is False
+
+    def test_contextual_pe_low_ocf_ni_fails(self):
+        row = self._make_row(
+            **{"P/E": 22.0},
+            ROE=0.18,
+            Debt_to_Equity=80.0,
+            OCF_NI_Ratio=0.7,
+        )
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is False
+
+    def test_contextual_pe_coverage_boundary_passes(self):
+        row = self._make_row(
+            **{"P/E": 22.0},
+            ROE=0.18,
+            Debt_to_Equity=80.0,
+            OCF_NI_Ratio=1.1,
+            Analyst_Coverage=20,
+        )
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is True
+
+    def test_contextual_pe_missing_coverage_passes(self):
+        row = self._make_row(
+            **{"P/E": 22.0},
+            ROE=0.18,
+            Debt_to_Equity=80.0,
+            OCF_NI_Ratio=1.1,
+            Analyst_Coverage=None,
+        )
+        assert find_gems._passes_filters(row, criteria=self._criteria()) is True
 
 
 # ============================================================
@@ -547,6 +640,96 @@ class TestFetchAndFilter:
 
         assert len(passing) == 0
 
+    def test_fetch_and_filter_logs_contextual_criteria(self, capsys):
+        df = self._make_tickers_df("7203.T")
+
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._mock_info_good()
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                find_gems.fetch_and_filter(df, workers=1)
+
+        stderr = capsys.readouterr().err
+        assert "P/E<=18 or <=24 with stronger quality" in stderr
+        assert "Contextual band requires ROE>=16%/ROA>=7%" in stderr
+
+    def test_process_pool_collector_closes_and_joins_on_normal_completion(self):
+        records = [{"YF_Ticker": "7203.T"}, {"YF_Ticker": "6758.T"}]
+        lifecycle: list[str] = []
+
+        class FakePool:
+            def imap_unordered(self, worker_fn, tasks, chunksize=1):
+                for task in tasks:
+                    yield {"YF_Ticker": task[0]["YF_Ticker"]}
+
+            def close(self):
+                lifecycle.append("close")
+
+            def terminate(self):
+                lifecycle.append("terminate")
+
+            def join(self):
+                lifecycle.append("join")
+
+        class FakeContext:
+            def Pool(self, processes):
+                assert processes == 2
+                lifecycle.append("pool")
+                return FakePool()
+
+        with patch("find_gems.mp.get_context", return_value=FakeContext()):
+            with patch("find_gems._passes_filters", return_value=True):
+                passing, enriched = find_gems._collect_enrichment_results(
+                    records,
+                    fx_rates={"USD": 1.0},
+                    criteria=find_gems.ScreenCriteria(),
+                    workers=2,
+                )
+
+        assert [row["YF_Ticker"] for row in passing] == ["7203.T", "6758.T"]
+        assert [row["YF_Ticker"] for row in enriched] == ["7203.T", "6758.T"]
+        assert lifecycle == ["pool", "close", "join"]
+
+    def test_process_pool_collector_terminates_and_joins_on_interrupt(self):
+        records = [{"YF_Ticker": "7203.T"}, {"YF_Ticker": "6758.T"}]
+        lifecycle: list[str] = []
+
+        class FakePool:
+            def imap_unordered(self, worker_fn, tasks, chunksize=1):
+                task_iter = iter(tasks)
+                first = next(task_iter)
+                yield {"YF_Ticker": first[0]["YF_Ticker"]}
+                raise KeyboardInterrupt()
+
+            def close(self):
+                lifecycle.append("close")
+
+            def terminate(self):
+                lifecycle.append("terminate")
+
+            def join(self):
+                lifecycle.append("join")
+
+        class FakeContext:
+            def Pool(self, processes):
+                assert processes == 2
+                lifecycle.append("pool")
+                return FakePool()
+
+        with patch("find_gems.mp.get_context", return_value=FakeContext()):
+            with patch("find_gems._passes_filters", return_value=True):
+                passing, enriched = find_gems._collect_enrichment_results(
+                    records,
+                    fx_rates={"USD": 1.0},
+                    criteria=find_gems.ScreenCriteria(),
+                    workers=2,
+                )
+
+        assert [row["YF_Ticker"] for row in passing] == ["7203.T"]
+        assert [row["YF_Ticker"] for row in enriched] == ["7203.T"]
+        assert lifecycle == ["pool", "terminate", "join"]
+
 
 # ============================================================
 # TestWriteOutputs — filesystem with tmp_path
@@ -632,6 +815,7 @@ class TestCLIParsing:
             args = find_gems.parse_args()
 
         assert args.max_pe == 18.0
+        assert args.max_pe_contextual == 24.0
         assert args.min_roe == 13.0
         assert args.min_roa == 6.0
         assert args.max_de == 150.0
@@ -654,6 +838,8 @@ class TestCLIParsing:
                 "out.txt",
                 "--max-pe",
                 "25",
+                "--max-pe-contextual",
+                "28",
                 "--min-roe",
                 "8",
                 "--min-roa",
@@ -665,6 +851,7 @@ class TestCLIParsing:
             args = find_gems.parse_args()
 
         assert args.max_pe == 25.0
+        assert args.max_pe_contextual == 28.0
         assert args.min_roe == 8.0
         assert args.min_roa == 3.0
         assert args.max_de == 200.0
@@ -1187,8 +1374,6 @@ class TestVolumeFilter:
 class TestCoverageFilter:
     """Filter D: analyst coverage must not exceed threshold."""
 
-    KWARGS = {"max_pe": 18.0, "min_roe": 13.0, "min_roa": 6.0, "max_de": 150.0}
-
     @staticmethod
     def _make_row(**overrides):
         base = {
@@ -1210,28 +1395,47 @@ class TestCoverageFilter:
         base.update(overrides)
         return base
 
+    @staticmethod
+    def _criteria(**overrides):
+        return find_gems.ScreenCriteria(**overrides)
+
     def test_high_coverage_rejected(self):
         row = self._make_row(Analyst_Coverage=35)
-        assert find_gems._passes_filters(row, **self.KWARGS, max_coverage=30) is False
+        assert (
+            find_gems._passes_filters(row, criteria=self._criteria(max_coverage=30))
+            is False
+        )
 
     def test_moderate_coverage_passes(self):
         row = self._make_row(Analyst_Coverage=12)
-        assert find_gems._passes_filters(row, **self.KWARGS, max_coverage=30) is True
+        assert (
+            find_gems._passes_filters(row, criteria=self._criteria(max_coverage=30))
+            is True
+        )
 
     def test_none_coverage_passes(self):
         """Missing coverage data should not reject (fail-open)."""
         row = self._make_row(Analyst_Coverage=None)
-        assert find_gems._passes_filters(row, **self.KWARGS, max_coverage=30) is True
+        assert (
+            find_gems._passes_filters(row, criteria=self._criteria(max_coverage=30))
+            is True
+        )
 
     def test_boundary_coverage_passes(self):
         """Exactly at threshold (30) should pass (> not >=)."""
         row = self._make_row(Analyst_Coverage=30)
-        assert find_gems._passes_filters(row, **self.KWARGS, max_coverage=30) is True
+        assert (
+            find_gems._passes_filters(row, criteria=self._criteria(max_coverage=30))
+            is True
+        )
 
     def test_disabled_when_zero(self):
         """max_coverage=0 should disable the check."""
         row = self._make_row(Analyst_Coverage=100)
-        assert find_gems._passes_filters(row, **self.KWARGS, max_coverage=0) is True
+        assert (
+            find_gems._passes_filters(row, criteria=self._criteria(max_coverage=0))
+            is True
+        )
 
 
 # ============================================================
@@ -1239,8 +1443,6 @@ class TestCoverageFilter:
 # ============================================================
 class TestOCFWaiver:
     """Filter E: forward-PE recovery waiver for negative OCF."""
-
-    KWARGS = {"max_pe": 18.0, "min_roe": 13.0, "min_roa": 6.0, "max_de": 150.0}
 
     @staticmethod
     def _make_row(**overrides):
@@ -1263,6 +1465,10 @@ class TestOCFWaiver:
         base.update(overrides)
         return base
 
+    @staticmethod
+    def _criteria(**overrides):
+        return find_gems.ScreenCriteria(**overrides)
+
     def test_negative_ocf_with_recovery_passes(self):
         """Negative OCF + forward PE < trailing PE and < 15 → waiver fires."""
         row = self._make_row(
@@ -1270,12 +1476,18 @@ class TestOCFWaiver:
             Forward_PE=10.0,
             Operating_Cash_Flow=-500_000,
         )
-        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=True) is True
+        assert (
+            find_gems._passes_filters(row, criteria=self._criteria(ocf_waiver=True))
+            is True
+        )
 
     def test_negative_ocf_no_forward_pe_fails(self):
         """Negative OCF + no forward PE data → strict fail."""
         row = self._make_row(Forward_PE=None, Operating_Cash_Flow=-500_000)
-        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=True) is False
+        assert (
+            find_gems._passes_filters(row, criteria=self._criteria(ocf_waiver=True))
+            is False
+        )
 
     def test_negative_ocf_forward_pe_too_high_fails(self):
         """Negative OCF + forward PE >= 15 → waiver doesn't fire."""
@@ -1284,7 +1496,10 @@ class TestOCFWaiver:
             Forward_PE=16.0,
             Operating_Cash_Flow=-500_000,
         )
-        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=True) is False
+        assert (
+            find_gems._passes_filters(row, criteria=self._criteria(ocf_waiver=True))
+            is False
+        )
 
     def test_negative_ocf_forward_pe_above_trailing_fails(self):
         """Negative OCF + forward PE >= trailing PE → no recovery signal."""
@@ -1293,7 +1508,10 @@ class TestOCFWaiver:
             Forward_PE=12.0,
             Operating_Cash_Flow=-500_000,
         )
-        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=True) is False
+        assert (
+            find_gems._passes_filters(row, criteria=self._criteria(ocf_waiver=True))
+            is False
+        )
 
     def test_waiver_disabled_via_flag(self):
         """With ocf_waiver=False, even valid recovery signals are rejected."""
@@ -1302,7 +1520,10 @@ class TestOCFWaiver:
             Forward_PE=10.0,
             Operating_Cash_Flow=-500_000,
         )
-        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=False) is False
+        assert (
+            find_gems._passes_filters(row, criteria=self._criteria(ocf_waiver=False))
+            is False
+        )
 
     def test_positive_ocf_unaffected(self):
         """Positive OCF should pass regardless of waiver setting."""
@@ -1312,8 +1533,14 @@ class TestOCFWaiver:
             Net_Income=800_000,
             OCF_NI_Ratio=1.25,
         )
-        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=True) is True
-        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=False) is True
+        assert (
+            find_gems._passes_filters(row, criteria=self._criteria(ocf_waiver=True))
+            is True
+        )
+        assert (
+            find_gems._passes_filters(row, criteria=self._criteria(ocf_waiver=False))
+            is True
+        )
 
     def test_zero_ocf_with_recovery_passes(self):
         """OCF == 0 + recovery signal → waiver fires."""
@@ -1322,7 +1549,10 @@ class TestOCFWaiver:
             Forward_PE=10.0,
             Operating_Cash_Flow=0,
         )
-        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=True) is True
+        assert (
+            find_gems._passes_filters(row, criteria=self._criteria(ocf_waiver=True))
+            is True
+        )
 
     def test_none_ocf_fails_even_with_waiver(self):
         """OCF is None (missing data) → fails; waiver only applies to actual negative/zero."""
@@ -1331,7 +1561,10 @@ class TestOCFWaiver:
             Forward_PE=10.0,
             Operating_Cash_Flow=None,
         )
-        assert find_gems._passes_filters(row, **self.KWARGS, ocf_waiver=True) is False
+        assert (
+            find_gems._passes_filters(row, criteria=self._criteria(ocf_waiver=True))
+            is False
+        )
 
 
 # ============================================================
