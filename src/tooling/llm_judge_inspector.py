@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Literal
 
 import structlog
 from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.messages import BaseMessage
 
 from src.tooling.inspector import InspectionDecision, InspectionEnvelope
 
@@ -95,10 +97,17 @@ class LLMJudgeInspector:
     Implements ``ContentInspector`` protocol.
     """
 
-    def __init__(self, model_name: str | None = None) -> None:
+    def __init__(
+        self,
+        model_name: str | None = None,
+        *,
+        llm: Any | None = None,
+        invoker: Callable[[Any, Sequence[BaseMessage]], Awaitable[Any]] | None = None,
+    ) -> None:
         self._model_name = model_name  # defaults to QUICK_MODEL at runtime
         self._cache: dict[str, InspectionDecision] = {}
-        self._llm: Any | None = None  # lazy-init
+        self._llm: Any | None = llm  # lazy-init when not injected
+        self._invoker = invoker
 
     def _build_cache_key(self, envelope: InspectionEnvelope) -> str:
         """Bind cached verdicts to the policy context that shaped them."""
@@ -180,9 +189,8 @@ class LLMJudgeInspector:
         from langchain_core.messages import HumanMessage, SystemMessage
 
         from src.agents.message_utils import extract_string_content
-        from src.agents.runtime import invoke_with_rate_limit_handling
 
-        llm = self._get_llm()
+        llm = self._llm if self._llm is not None else self._get_llm()
 
         # Truncate content to limit token cost.
         content = envelope.content_text
@@ -195,14 +203,20 @@ class LLMJudgeInspector:
         )
 
         try:
-            response = await invoke_with_rate_limit_handling(
-                llm,
-                [
-                    SystemMessage(content=_JUDGE_SYSTEM_PROMPT),
-                    HumanMessage(content=user_msg),
-                ],
-                context="Prompt Injection Judge",
-            )
+            messages = [
+                SystemMessage(content=_JUDGE_SYSTEM_PROMPT),
+                HumanMessage(content=user_msg),
+            ]
+            if self._invoker is not None:
+                response = await self._invoker(llm, messages)
+            else:
+                from src.agents.runtime import invoke_with_rate_limit_handling
+
+                response = await invoke_with_rate_limit_handling(
+                    llm,
+                    messages,
+                    context="Prompt Injection Judge",
+                )
             raw = extract_string_content(getattr(response, "content", response))
             return self._parse_response(raw, content_hash)
         except Exception as exc:

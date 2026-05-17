@@ -30,9 +30,10 @@ from src.tooling.runtime import ToolInvocation, ToolResult
 logger = structlog.get_logger(__name__)
 
 _MAX_INSPECTION_INPUT_CHARS = 50_000
+_UNSAFE_SHAPE_FINDING = "non-string tool output degraded for inspection safety"
 
 
-def _json_fallback(value: Any) -> str:
+def _type_marker(value: Any) -> str:
     return f"<{type(value).__name__}>"
 
 
@@ -46,13 +47,22 @@ def _serialize_for_inspection(
     Preserve the original raw value for shape retention, but keep inspection
     input bounded and avoid arbitrary ``__str__`` execution for complex objects.
     """
+    used_type_fallback = False
+    shape_retention_safe = True
+
     if isinstance(value, str):
         text = value
     elif isinstance(value, dict | list | tuple):
+
+        def json_fallback(fallback_value: Any) -> str:
+            nonlocal used_type_fallback
+            used_type_fallback = True
+            return _type_marker(fallback_value)
+
         text = json.dumps(
             value,
             ensure_ascii=False,
-            default=_json_fallback,
+            default=json_fallback,
             sort_keys=True,
         )
     elif value is None:
@@ -60,7 +70,11 @@ def _serialize_for_inspection(
     elif isinstance(value, int | float | bool):
         text = str(value)
     else:
-        text = f"<{type(value).__name__}>"
+        shape_retention_safe = False
+        text = _type_marker(value)
+
+    if used_type_fallback:
+        shape_retention_safe = False
 
     original_length = len(text)
     truncated = original_length > max_chars
@@ -70,6 +84,7 @@ def _serialize_for_inspection(
     return text, {
         "original_length": original_length,
         "truncated_for_inspection": truncated,
+        "shape_retention_safe": shape_retention_safe,
     }
 
 
@@ -174,6 +189,20 @@ class ContentInspectionHook:
         approved = await service.check(envelope)
 
         if approved is result.value:
+            if metadata.get("shape_retention_safe") is False:
+                logger.warning(
+                    "tool_output_shape_degraded",
+                    tool=call.name,
+                    source=call.source,
+                    agent_key=call.agent_key,
+                    output_type=type(result.value).__name__,
+                )
+                findings = (result.findings or []) + [_UNSAFE_SHAPE_FINDING]
+                return ToolResult(
+                    value=content_text,
+                    blocked=False,
+                    findings=findings,
+                )
             return result
 
         # Content was sanitized or blocked.

@@ -2,6 +2,7 @@
 
 import logging
 import os
+import socket
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -49,6 +50,20 @@ def setup_test_env():
         config.__dict__.update(new_settings.__dict__)
 
         yield
+
+
+@pytest.fixture(autouse=True)
+def _block_network_for_security_tests(request, monkeypatch):
+    """Fail fast if security-marked tests attempt real socket access."""
+    if request.node.get_closest_marker("security") is None:
+        return
+
+    request.getfixturevalue("socket_disabled")
+
+    def blocked_name_resolution(*args, **kwargs):
+        raise RuntimeError("network access blocked for security-marked tests")
+
+    monkeypatch.setattr(socket, "getaddrinfo", blocked_name_resolution)
 
 
 @pytest.fixture(autouse=True)

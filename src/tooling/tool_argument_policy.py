@@ -74,7 +74,19 @@ def _hostname_is_blocked(hostname: str) -> bool:
     return any(addr in network for network in _PRIVATE_NETWORKS)
 
 
-def _is_reasonable_reference_url(url: str) -> bool:
+def _hostname_matches_allowed_domain(hostname: str, allowed_domain: str) -> bool:
+    normalized_host = hostname.strip().lower().rstrip(".")
+    normalized_domain = allowed_domain.strip().lower().rstrip(".")
+    return normalized_host == normalized_domain or normalized_host.endswith(
+        f".{normalized_domain}"
+    )
+
+
+def _is_reasonable_reference_url(
+    url: str,
+    *,
+    allowed_reference_domains: frozenset[str] | None = None,
+) -> bool:
     """Return True if the URL looks like a legitimate reference."""
     try:
         parsed = urlparse(url)
@@ -88,6 +100,12 @@ def _is_reasonable_reference_url(url: str) -> bool:
         return False
 
     if _hostname_is_blocked(parsed.hostname):
+        return False
+
+    if allowed_reference_domains is not None and not any(
+        _hostname_matches_allowed_domain(parsed.hostname, domain)
+        for domain in allowed_reference_domains
+    ):
         return False
 
     # Flag excessively long query strings (exfiltration signal).
@@ -120,8 +138,14 @@ class ToolArgumentPolicyHook:
     Implements ``ToolHook`` protocol.
     """
 
-    def __init__(self, mode: Literal["warn", "block"] = "warn") -> None:
+    def __init__(
+        self,
+        mode: Literal["warn", "block"] = "warn",
+        *,
+        allowed_reference_domains: frozenset[str] | None = None,
+    ) -> None:
         self._mode = mode
+        self._allowed_reference_domains = allowed_reference_domains
 
     async def before(self, call: ToolInvocation) -> ToolInvocation:
         if call.source != "editor":
@@ -129,7 +153,10 @@ class ToolArgumentPolicyHook:
 
         if call.name == "fetch_reference_content":
             url = str(call.args.get("url", ""))
-            if not _is_reasonable_reference_url(url):
+            if not _is_reasonable_reference_url(
+                url,
+                allowed_reference_domains=self._allowed_reference_domains,
+            ):
                 if self._mode == "block":
                     raise ToolCallBlocked("editor reference URL rejected by policy")
                 logger.warning(

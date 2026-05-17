@@ -1,0 +1,21 @@
+[
+  {"source_kind": "web_search", "category": "override", "floor": 1.0},
+  {"source_kind": "web_fetch", "category": "override", "floor": 1.0},
+  {"source_kind": "social_feed", "category": "override", "floor": 1.0},
+  {"source_kind": "tool_output", "category": "override", "floor": 1.0},
+  {"source_kind": "memory_write", "category": "memory_poisoning", "floor": 1.0},
+  {"source_kind": "memory_retrieval", "category": "override", "floor": 1.0},
+  {"source_kind": "cached_context", "category": "override", "floor": 1.0},
+  {"source_kind": "mcp_tool_output", "category": "override", "floor": 1.0},
+  {"source_kind": "web_search", "category": "role_play", "floor": 1.0},
+  {"source_kind": "web_fetch", "category": "role_play", "floor": 1.0},
+  {"source_kind": "tool_output", "category": "role_play", "floor": 1.0},
+  {"source_kind": "web_search", "category": "delimiter_breakout", "floor": 1.0},
+  {"source_kind": "web_fetch", "category": "hidden_markup", "floor": 1.0},
+  {"source_kind": "web_search", "category": "encoded_payload", "floor": 1.0},
+  {"source_kind": "tool_output", "category": "exfiltration", "floor": 1.0},
+  {"source_kind": "financial_api", "category": "override", "floor": 1.0},
+  {"source_kind": "official_filing", "category": "override", "floor": 1.0},
+  {"source_kind": "financial_api", "category": "light_threshold_single_signal", "floor": 0.3},
+  {"source_kind": "official_filing", "category": "light_threshold_single_signal", "floor": 0.3}
+]

@@ -156,6 +156,42 @@ Practical notes:
 - Start with `warn` to inspect logs and false positives before moving to `sanitize` or `block`.
 - `fail_open` is the safer rollout default for a local operator workflow; `fail_closed` is stricter but can suppress content when the inspector itself errors.
 
+### Adversarial Test Suite
+
+Prompt-injection defenses are covered by a deterministic adversarial suite under
+`tests/fixtures/injection_payloads/` and `tests/tooling/test_*corpus*.py`. The
+corpus is static reviewed data; it is never imported as code, executed, or
+fetched automatically. Security-marked tests run with outbound sockets disabled.
+
+Common commands:
+
+```bash
+# Run only the adversarial/security tests
+make security-tests
+
+# Validate a candidate normalized corpus without writing
+make refresh-injection-corpus SOURCE=/tmp/candidate-corpus.json
+
+# Replace the vendored corpus after reviewing the diff and pinning the file hash
+make refresh-injection-corpus SOURCE=/tmp/candidate-corpus.json SHA=<sha256> WRITE=1
+
+# Re-record frozen judge responses; intentionally calls the live model
+GOOGLE_API_KEY=... make refresh-judge-fixtures
+```
+
+The normal test path makes no live LLM calls. `tests/fixtures/judge_replay.json`
+contains recorded raw judge responses keyed by the judge cache key; replay tests
+pin parsing and verdict-to-action behavior, not current live-model accuracy. Use
+`refresh-judge-fixtures` only for a deliberate reviewed refresh. Expected cost is
+small for the current fixture size, but it still requires a real `GOOGLE_API_KEY`.
+
+Current posture:
+
+- third-party scanner libraries stay out of Poetry dependencies
+- corpus refresh is manual and local-file based; there is no scheduled upstream ingestion
+- opt-in editor URL allowlisting is available on `ToolArgumentPolicyHook`
+- lighter-treatment sources such as financial APIs and official filings include explicit marginal cases so current heuristic limits remain visible
+
 ### Optional MCP Cross-Checks for the Consultant
 
 The Consultant can optionally use narrow MCP-backed spot checks to verify a small number of material claims without turning the whole graph into a free-form MCP client.

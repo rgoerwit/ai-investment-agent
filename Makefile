@@ -1,7 +1,7 @@
 # Multi-Agent Investment Analysis System - Makefile
 # Convenient commands for development and deployment
 
-.PHONY: help install test lint format clean docker-build docker-run run-quick run-deep
+.PHONY: help install test security-tests lint format clean docker-build docker-run run-quick run-deep refresh-injection-corpus refresh-judge-fixtures
 
 # Default target
 .DEFAULT_GOAL := help
@@ -72,6 +72,10 @@ run-verbose: ## Run with verbose logging (default: AAPL)
 test: ## Run tests
 	@echo "$(BLUE)Running tests...$(NC)"
 	$(POETRY) run pytest -v
+
+security-tests: ## Run adversarial prompt-injection/security tests
+	@echo "$(BLUE)Running adversarial security tests...$(NC)"
+	$(POETRY) run pytest -m security -v
 
 test-cov: ## Run tests with coverage
 	@echo "$(BLUE)Running tests with coverage...$(NC)"
@@ -175,6 +179,13 @@ deps-export: ## Export dependencies to requirements.txt
 	@echo "$(BLUE)Exporting dependencies...$(NC)"
 	$(POETRY) export -f requirements.txt --output requirements.txt --without-hashes
 	@echo "$(GREEN)Dependencies exported to requirements.txt$(NC)"
+
+refresh-injection-corpus: ## Validate or replace injection corpus: SOURCE=/tmp/corpus.json [SHA=sha256] [WRITE=1]
+	@if [ -z "$(SOURCE)" ]; then echo "Usage: make refresh-injection-corpus SOURCE=path [SHA=sha256] [WRITE=1]"; exit 2; fi
+	$(POETRY) run python scripts/refresh_injection_corpus.py --source-file "$(SOURCE)" $(if $(SHA),--source-sha "$(SHA)",) $(if $(WRITE),--write,)
+
+refresh-judge-fixtures: ## Re-record LLM judge replay fixture; requires real GOOGLE_API_KEY
+	$(POETRY) run python scripts/refresh_judge_replay.py --record
 
 security-check: ## Run security vulnerability checks
 	@echo "$(BLUE)Running security checks...$(NC)"

@@ -94,6 +94,7 @@ mypy = ">=1.13.0,<2.0.0"
 pre-commit = ">=4.0.0,<5.0.0"
 ipython = "^9.8.0"
 pytest-env = "^1.2.0"
+pytest-socket = "^0.7.0"
 
 [tool.poetry.extras]
 observability = ["opentelemetry-api", "opentelemetry-sdk"]
@@ -160,6 +161,7 @@ addopts = """
     --durations=10
     --maxfail=5
     -p no:cacheprovider
+    --allow-unix-socket
 """
 
 # Register custom markers
@@ -171,6 +173,7 @@ markers = [
     "memory: marks tests that require memory/ChromaDB",
     "llm: marks tests that require LLM connectivity",
     "api: marks tests that require external API access",
+    "security: marks tests that must not perform network or external side effects",
     "asyncio: marks tests as asyncio",
 ]
 
