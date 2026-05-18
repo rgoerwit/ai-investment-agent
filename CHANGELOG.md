@@ -5,26 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.0] - 2026-05-17
+
+### Added
+
+- **APAC Regional Specialist** — Optional no-tools regional audit node after Research Manager, before Consultant. Sends a minimized DeepSeek-compatible payload, lets the agent's silence protocol decide when no material APAC exposure exists (listing, supply chain, customers, regulation, FX, or commodities), and threads the audit into Consultant, Trader, and Portfolio Manager context.
+- **Adversarial Prompt-Scanning Corpus** — Added injection-payload corpus, judge-replay fixtures, refresh scripts, and corpus-driven tests for heuristic/LLM-judge inspectors, argument policy, content propagation, and memory-write filtering.
+- **MCP Consultant Tooling** — Added MCP runtime/auth/budget/client modules, example server config, smoke script, docs, and consultant-tool integration tests for controlled external tool access.
+- **Runtime and Inspection Hardening** — Expanded sanitized logging, prompt-boundary wrapping, tool argument policy checks, escalating/LLM-judge inspectors, runtime service scoping, hard-timeout coverage, and network/circuit-breaker protections.
+- **Pipeline Health Tooling** — Added run-health extraction, batch-summary, signal, and slow-tail scripts to make long screening runs easier to diagnose.
+
+### Changed
+
+- **Large Ownership Refactor** — Split the CLI/output/persistence spine, data fetcher, IBKR reconciler, and red-flag validator into smaller ownership modules while preserving public behavior.
+- **Metrics and Prompt Adjustments** — Tightened prompt and metric handling around derived metrics, coverage gaps, entity/period mismatches, local coverage, capital allocation, valuation context, and APAC regional review.
+- **IBKR and Dashboard Surfaces** — Improved reconciliation ownership modules, portfolio presentation, refresh services, serializers, live dashboard behavior, and security data/quote rescue paths.
+- **Dependency and Runtime Updates** — Updated Python dependencies and runtime initialization paths, removed legacy toolkit facades, and kept package roots intentionally lean.
+- **README/Test Organization** — Refreshed architecture documentation, example artifact locations, adversarial test documentation, and regression coverage across agents, MCP, tooling, IBKR, validators, scripts, and web surfaces.
+
+### Fixed
+
+- **Prompt-Injection Regression Coverage** — Added corpus floors and replay tests to catch regressions in tool-output inspection, argument policy, content propagation, and memory-write filtering.
+- **Runtime Failure Surfaces** — Hardened timeout, network, import-laziness, provider-failure, and sanitized error-reporting paths.
+- **Portfolio/Pipeline Edge Cases** — Fixed several screening, cash-summary, interrupted-run, ticker-resolution, and dashboard-refresh edge cases covered by the expanded test suite.
+
 ## [3.9.11] - 2026-04-19
 
 ### Added
 
-- **Cached Regional Macro Context** — New pre-graph `Macro Context Analyst` (`src/macro_context.py`, `src/macro_regions.py`) generates a regional macro brief (rates, sentiment, headwinds) before the analysis graph runs. Brief is injected into the News Analyst's system message only. Results cached per-region with configurable TTL. Full token/cost tracking and Langfuse trace propagation.
-- **IBKR Security Data Service** — `src/ibkr/security_data_service.py`: low-volume probe for identity verification, conid resolution, and quote rescue via brokerage session. Used by reconciler for ticker disambiguation.
-- **Per-Tool-Call Timeout** — `src/graph/tool_nodes.py` wraps each tool invocation with a configurable `asyncio.timeout` (default 90s) to prevent indefinite hangs from concurrent web searches.
-- **Secondary Correlated-Sell Detection** — `compute_portfolio_health()` now fires `CORRELATED_SELL_EVENT` when ≥8 verdict sells AND ≥40% of held positions are sells, even without a tight date cluster. Catches gradual accumulation during extended macro events.
-- **Ownership-Change & Capital Efficiency Validators** — `RedFlagDetector` expanded with ROIC trend analysis, capital allocation scoring, ownership-change detection, and idle-cash penalties. New prompt rules in `portfolio_manager.json` and `fundamentals_analyst.json` for ownership concentration and cash drag.
-
-### Changed
-
-- **Correlated-Sell Window** — Default sliding window widened from 7 to 14 days to capture batch re-analysis patterns spread across multiple nightly runs.
-- **Cash Summary: Confirmed vs Conditional** — `build_cash_timeline()` now excludes SOFT_REJECT sells from pending inflows. Soft-sell proceeds shown separately as "conditional" in both cash summary and action plan settlement projections.
-- **Dashboard Launcher** — `run_ibkr_dashboard.sh` fixed empty-array crash under `set -u`; now prints dashboard URL before starting Flask.
-- **Prompt Updates** — `news_analyst` v5.3 (macro brief injection), `foreign_language_analyst` v1.7, `fundamentals_analyst` v9.11, `portfolio_manager` v8.6, `consultant` v2.6.
-
-### Fixed
-
-- **Macro Analyst Token Tracking** — Macro Context Analyst was not appearing in saved analysis `token_usage` or `prompts_used`; now participates in standard callback path.
+- **Cached Regional Macro Context** — Added a pre-graph macro analyst so individual equity evaluations can include better regional macro context.
+- **Cash-Hoarding Value-Trap Checks** — Enhanced idle-cash and cash-hoarding checks so large cash balances without credible deployment plans are treated as capital-allocation/value-trap risk.
 
 ## [3.9.10] - 2026-04-12
 

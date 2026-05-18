@@ -8,7 +8,7 @@ from typing import Any, Literal
 from src.data_block_utils import has_parseable_data_block
 from src.error_safety import redact_sensitive_text
 
-ProviderName = Literal["google", "openai", "anthropic", "unknown"]
+ProviderName = Literal["google", "openai", "anthropic", "deepseek", "unknown"]
 FailureKind = Literal[
     "dns_resolution",
     "connect_error",
@@ -51,7 +51,7 @@ QUICK_REQUIRED_PUBLISHABLE_ARTIFACTS = REQUIRED_PUBLISHABLE_ARTIFACTS - frozense
     {"value_trap_report"}
 )
 OPTIONAL_PUBLISHABLE_ARTIFACTS = frozenset(
-    {"auditor_report", "consultant_review", "valuation_params"}
+    {"auditor_report", "consultant_review", "valuation_params", "apac_regional_report"}
 )
 QUICK_OPTIONAL_PUBLISHABLE_ARTIFACTS = OPTIONAL_PUBLISHABLE_ARTIFACTS | frozenset(
     {"value_trap_report"}
@@ -112,6 +112,8 @@ def infer_provider(
     haystack = " ".join(part for part in (model_name, class_name) if part).lower()
     if "gemini" in haystack or "google" in haystack:
         return "google"
+    if "deepseek" in haystack:
+        return "deepseek"
     if "gpt" in haystack or "openai" in haystack:
         return "openai"
     if "claude" in haystack or "anthropic" in haystack:

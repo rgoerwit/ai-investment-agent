@@ -299,6 +299,11 @@ BEAR RESEARCHER:
 
     workflow.add_edge("Research Manager", "Valuation Calculator")
     workflow.add_edge("Valuation Calculator", "Trader")
+    if components.apac_specialist_enabled:
+        workflow.add_edge("Research Manager", "APAC Regional Specialist")
+        consultant_gate_source = "APAC Regional Specialist"
+    else:
+        consultant_gate_source = "Research Manager"
 
     if components.consultant_enabled:
         from src.runtime_diagnostics import success_artifact
@@ -320,12 +325,14 @@ BEAR RESEARCHER:
 
         workflow.add_node("Consultant Skip", consultant_skip_node)
         workflow.add_conditional_edges(
-            "Research Manager",
+            consultant_gate_source,
             consultant_gate_router,
             ["Consultant", "Consultant Skip"],
         )
         workflow.add_edge("Consultant", "Trader")
         workflow.add_edge("Consultant Skip", "Trader")
+    elif components.apac_specialist_enabled:
+        workflow.add_edge("APAC Regional Specialist", "Trader")
 
     workflow.add_edge("Trader", "Risky Analyst")
     workflow.add_edge("Trader", "Safe Analyst")
@@ -357,7 +364,11 @@ BEAR RESEARCHER:
             "Sync Final",
         ],
         post_research_parallel=(
-            "Valuation Calculator || Consultant"
+            "Valuation Calculator || APAC Regional Specialist || Consultant"
+            if components.apac_specialist_enabled and components.consultant_enabled
+            else "Valuation Calculator || APAC Regional Specialist"
+            if components.apac_specialist_enabled
+            else "Valuation Calculator || Consultant"
             if components.consultant_enabled
             else "Valuation Calculator"
         ),

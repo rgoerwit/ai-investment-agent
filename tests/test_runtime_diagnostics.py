@@ -284,11 +284,13 @@ class TestArtifactPolicy:
             "final_trade_decision",
         }
         assert OPTIONAL_PUBLISHABLE_ARTIFACTS == {
+            "apac_regional_report",
             "auditor_report",
             "consultant_review",
             "valuation_params",
         }
         assert QUICK_OPTIONAL_PUBLISHABLE_ARTIFACTS == {
+            "apac_regional_report",
             "auditor_report",
             "consultant_review",
             "valuation_params",
@@ -318,6 +320,7 @@ class TestArtifactPolicy:
         assert get_optional_publishable_artifacts(
             {"run_summary": {"quick_mode": True}}
         ) == {
+            "apac_regional_report",
             "auditor_report",
             "consultant_review",
             "valuation_params",

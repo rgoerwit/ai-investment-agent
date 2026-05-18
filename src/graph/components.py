@@ -8,6 +8,7 @@ import structlog
 
 from src.agents import (
     create_analyst_node,
+    create_apac_specialist_node,
     create_auditor_node,
     create_consultant_node,
     create_financial_health_validator_node,
@@ -56,12 +57,19 @@ class GraphComponents:
     tool_nodes: dict[str, Any]
     consultant_enabled: bool
     auditor_enabled: bool
+    apac_specialist_enabled: bool
 
 
 def create_auditor_llm(*args: Any, **kwargs: Any) -> Any:
     from src.llms import create_auditor_llm as _create_auditor_llm
 
     return _create_auditor_llm(*args, **kwargs)
+
+
+def create_apac_specialist_llm(*args: Any, **kwargs: Any) -> Any:
+    from src.llms import create_apac_specialist_llm as _create_apac_specialist_llm
+
+    return _create_apac_specialist_llm(*args, **kwargs)
 
 
 def create_deep_thinking_llm(*args: Any, **kwargs: Any) -> Any:
@@ -350,6 +358,12 @@ def build_graph_components(
 
     consultant_enabled = consultant_llm is not None
     auditor_enabled = auditor_llm is not None
+    apac_specialist_llm = create_apac_specialist_llm(
+        callbacks=tracked_callbacks("APAC Regional Specialist"),
+        max_completion_tokens=output_budget("APAC Regional Specialist"),
+        quick_mode=quick_mode,
+    )
+    apac_specialist_enabled = apac_specialist_llm is not None
 
     logger.debug(
         "graph_llm_plan",
@@ -359,6 +373,7 @@ def build_graph_components(
         retry_llm_enabled=allow_retry,
         consultant_enabled=consultant_enabled,
         auditor_enabled=auditor_enabled,
+        apac_specialist_enabled=apac_specialist_enabled,
     )
 
     market = create_analyst_node(
@@ -507,6 +522,13 @@ def build_graph_components(
     else:
         logger.debug("consultant_node_disabled", ticker=ticker)
 
+    apac_specialist = None
+    if apac_specialist_enabled:
+        apac_specialist = create_apac_specialist_node(apac_specialist_llm)
+        logger.debug("apac_specialist_node_enabled", ticker=ticker)
+    else:
+        logger.debug("apac_specialist_node_disabled", ticker=ticker)
+
     valuation_calc = create_valuation_calculator_node(valuation_llm)
     chart_generator = create_chart_generator_node(
         chart_format=chart_format,
@@ -556,9 +578,13 @@ def build_graph_components(
     if consultant_enabled and consultant is not None:
         nodes["Consultant"] = consultant
 
+    if apac_specialist_enabled and apac_specialist is not None:
+        nodes["APAC Regional Specialist"] = apac_specialist
+
     return GraphComponents(
         nodes=nodes,
         tool_nodes=tool_nodes,
         consultant_enabled=consultant_enabled,
         auditor_enabled=auditor_enabled,
+        apac_specialist_enabled=apac_specialist_enabled,
     )

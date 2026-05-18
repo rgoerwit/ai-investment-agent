@@ -24,6 +24,8 @@ def _stub_graph_component_dependencies(monkeypatch):
     )
     monkeypatch.setattr(components, "create_deep_thinking_llm", lambda **kwargs: Mock())
     monkeypatch.setattr(components, "create_analyst_node", stub_node)
+    monkeypatch.setattr(components, "create_apac_specialist_llm", lambda **kwargs: None)
+    monkeypatch.setattr(components, "create_apac_specialist_node", stub_node)
     monkeypatch.setattr(components, "create_auditor_node", stub_node)
     monkeypatch.setattr(components, "create_consultant_node", stub_node)
     monkeypatch.setattr(components, "create_financial_health_validator_node", stub_node)
@@ -727,6 +729,55 @@ class TestQuickModeGraphContracts:
         assert graph_components.auditor_enabled is True
         assert consultant_calls
         assert consultant_calls[0]["quick_mode"] is False
+
+    def test_build_graph_components_adds_apac_specialist_only_in_full_mode(
+        self, monkeypatch
+    ):
+        from src.graph.components import build_graph_components
+
+        components = _stub_graph_component_dependencies(monkeypatch)
+        calls = []
+
+        def fake_create_apac_llm(**kwargs):
+            calls.append(kwargs)
+            return None if kwargs.get("quick_mode") else Mock(name="apac")
+
+        monkeypatch.setattr(components, "get_consultant_llm", lambda **kwargs: None)
+        monkeypatch.setattr(components, "_is_auditor_enabled", lambda: False)
+        monkeypatch.setattr(
+            components, "create_apac_specialist_llm", fake_create_apac_llm
+        )
+
+        full = build_graph_components(
+            max_debate_rounds=2,
+            enable_memory=False,
+            ticker="7203.T",
+            cleanup_previous=False,
+            quick_mode=False,
+            strict_mode=False,
+            chart_format="png",
+            transparent_charts=False,
+            image_dir=None,
+            skip_charts=False,
+        )
+        quick = build_graph_components(
+            max_debate_rounds=1,
+            enable_memory=False,
+            ticker="7203.T",
+            cleanup_previous=False,
+            quick_mode=True,
+            strict_mode=False,
+            chart_format="png",
+            transparent_charts=False,
+            image_dir=None,
+            skip_charts=True,
+        )
+
+        assert full.apac_specialist_enabled is True
+        assert "APAC Regional Specialist" in full.nodes
+        assert quick.apac_specialist_enabled is False
+        assert "APAC Regional Specialist" not in quick.nodes
+        assert [call["quick_mode"] for call in calls] == [False, True]
 
 
 class TestTradingContext:

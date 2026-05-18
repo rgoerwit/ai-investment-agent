@@ -75,11 +75,14 @@ graph TB
 
     DebateSyncFinal --> ResearchManager["Research Manager<br/>(Synthesis)"]
     ResearchManager --> ValuationCalc["Valuation Calculator"]
+    ResearchManager -.-> APACSpecialist["APAC Regional Specialist<br/>(Regional Audit)<br/>Optional"]
     ResearchManager -.-> Consultant["External Consultant<br/>(Cross-Validation)"]
+    APACSpecialist -.-> Consultant
     Auditor -.->|Independent Forensic Report| Consultant
 
     ValuationCalc --> Trader["Trader<br/>(Plan)"]
     Consultant -.-> Trader
+    APACSpecialist -.-> Trader
 
     Trader --> RiskyAnalyst["Risky Analyst"]
     Trader --> SafeAnalyst["Safe Analyst"]
@@ -98,6 +101,7 @@ graph TB
     style MacroCtx fill:#d4edda,color:#333,stroke-dasharray: 5 5
     style SyncCheck fill:#e0e0e0,color:#333
     style Validator fill:#ffcccc,color:#333
+    style APACSpecialist fill:#e8daff,color:#333,stroke-dasharray: 5 5
     style Consultant fill:#e8daff,color:#333
     style Auditor fill:#e8daff,color:#333,stroke-dasharray: 5 5
     style PMFastFail fill:#ffcccc,color:#333
@@ -112,6 +116,7 @@ At a high level:
 - Parallel analyst fan-out gathers market, news, sentiment, fundamentals, language, legal, and value-trap evidence.
 - Fundamentals are synthesized and then checked by deterministic red-flag rules before the debate path is allowed to continue.
 - Bull and bear researchers argue one or two rounds depending on `--quick`, and Research Manager consolidates the result.
+- Optional APAC Regional Specialist runs after Research Manager when enabled in full mode, using a minimized no-tools payload to check regional hallucinations and APAC transmission channels before Consultant, Trader, and Portfolio Manager. Its silence protocol decides whether the supplied payload shows material APAC exposure.
 - Valuation, trader, and risk personas shape the portfolio decision before Portfolio Manager emits the final verdict.
 - Chart generation and report rendering run after the decision.
 - Memory and retrospective context are optional layers around the core analysis flow, not substitutes for it.

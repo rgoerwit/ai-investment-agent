@@ -739,6 +739,67 @@ def create_auditor_llm(
     return llm
 
 
+def create_apac_specialist_llm(
+    *,
+    callbacks: list[BaseCallbackHandler] | None = None,
+    max_completion_tokens: int | None = None,
+    quick_mode: bool = False,
+) -> BaseChatModel | None:
+    """Create the optional APAC Regional Specialist LLM."""
+    if quick_mode:
+        return None
+    if not config.enable_apac_specialist:
+        return None
+
+    api_key = config.get_apac_specialist_api_key()
+    if not api_key:
+        logger.warning("apac_specialist_no_api_key")
+        return None
+
+    try:
+        from langchain_openai import ChatOpenAI
+    except ImportError as exc:
+        logger.warning("langchain_openai_missing_for_apac_specialist", error=str(exc))
+        return None
+
+    model_name = config.apac_specialist_model
+    logger.info(
+        "apac_specialist_llm_init",
+        model=model_name,
+        base_url=config.apac_specialist_base_url,
+    )
+
+    kwargs: dict[str, Any] = {
+        "model": model_name,
+        "base_url": config.apac_specialist_base_url,
+        "api_key": api_key,
+        "timeout": 240,
+        "max_retries": 1,
+        "callbacks": callbacks or [],
+        "max_completion_tokens": max_completion_tokens or 8192,
+        "streaming": False,
+        "reasoning_effort": "max",
+        "extra_body": {"thinking": {"type": "enabled"}},
+    }
+
+    budget = _resolve_generation_budget(
+        intent_tokens=kwargs["max_completion_tokens"],
+        reserve_class="deep",
+        reserve_enabled=True,
+    )
+    kwargs["max_completion_tokens"] = budget.api_cap_tokens
+
+    llm = ChatOpenAI(**kwargs)
+    _stamp_budget_metadata(
+        llm,
+        callbacks=kwargs["callbacks"],
+        budget=budget,
+        intent_attr="_configured_max_completion_tokens",
+        api_attr="_configured_api_completion_tokens",
+    )
+    return llm
+
+
 def create_writer_llm(
     temperature: float = 0.7,
     timeout: int | None = None,

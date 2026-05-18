@@ -15,6 +15,7 @@ AGENT_OUTPUT_BUDGET_FRACTIONS: dict[str, Fraction] = {
     "Value Trap Detector": Fraction(1, 16),
     "Valuation Calculator": Fraction(1, 32),
     "Global Forensic Auditor": Fraction(1, 4),
+    "APAC Regional Specialist": Fraction(1, 4),
     "Trader": Fraction(1, 8),
     "Risky Analyst": Fraction(1, 8),
     "Safe Analyst": Fraction(1, 8),
