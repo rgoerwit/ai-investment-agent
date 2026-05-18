@@ -30,6 +30,7 @@ def test_build_run_summary_tracks_finished_successful_artifacts(monkeypatch):
         "artifact_statuses": {
             "consultant_review": {"complete": True, "ok": False},
             "auditor_report": {"complete": True, "ok": True},
+            "apac_regional_report": {"complete": True, "ok": True},
         },
         "messages": [ToolMessage(content="done", tool_call_id="call_1", name="tool")],
     }
@@ -45,6 +46,9 @@ def test_build_run_summary_tracks_finished_successful_artifacts(monkeypatch):
     assert summary["consultant_successful"] is False
     assert summary["auditor_finished"] is True
     assert summary["auditor_successful"] is True
+    assert summary["apac_specialist_completed"] is True
+    assert summary["apac_specialist_successful"] is True
+    assert summary["apac_specialist_status"] == "ok"
     assert summary["required_failures"] == ["fundamentals_report"]
     assert summary["optional_failures"] == ["consultant_review"]
     assert summary["llm_attempts"] == 5
@@ -81,6 +85,7 @@ def test_save_results_to_file_preserves_macro_context_metadata(tmp_path, monkeyp
         "sentiment_report": "ok",
         "news_report": "ok",
         "fundamentals_report": "DATA_BLOCK",
+        "apac_regional_report": "### APAC REGIONAL AUDIT: 7203.T",
         "final_trade_decision": "BUY",
         "analysis_validity": {"publishable": True},
         "artifact_statuses": {},
@@ -115,6 +120,9 @@ def test_save_results_to_file_preserves_macro_context_metadata(tmp_path, monkeyp
     assert payload["macro_context"]["llm_invoked"] is True
     assert payload["macro_context"]["cache_dir"] == str(
         tmp_path / ".macro_context_cache"
+    )
+    assert payload["reports"]["apac_regional_report"].startswith(
+        "### APAC REGIONAL AUDIT"
     )
 
 

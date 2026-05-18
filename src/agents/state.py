@@ -211,6 +211,7 @@ class AgentState(MessagesState):
     investment_debate_state: Annotated[InvestDebateState, merge_invest_debate_state]
     investment_plan: Annotated[str, take_last]
     valuation_params: Annotated[str, take_last]
+    apac_regional_report: Annotated[str, take_last]
     consultant_review: Annotated[str, take_last]
     trader_investment_plan: Annotated[str, take_last]
     risk_debate_state: Annotated[RiskDebateState, merge_risk_state]

@@ -114,8 +114,10 @@ def build_run_summary(
     artifact_statuses = result.get("artifact_statuses", {}) or {}
     consultant_status = artifact_statuses.get("consultant_review") or {}
     auditor_status = artifact_statuses.get("auditor_report") or {}
+    apac_status = artifact_statuses.get("apac_regional_report") or {}
     consultant_finished = bool(consultant_status.get("complete"))
     auditor_finished = bool(auditor_status.get("complete"))
+    apac_finished = bool(apac_status.get("complete"))
     providers_used = _collect_used_providers()
 
     summary = {
@@ -131,6 +133,15 @@ def build_run_summary(
         "auditor_finished": auditor_finished,
         "consultant_successful": bool(consultant_status.get("ok")),
         "auditor_successful": bool(auditor_status.get("ok")),
+        "apac_specialist_completed": apac_finished,
+        "apac_specialist_successful": bool(apac_status.get("ok")),
+        "apac_specialist_status": (
+            "not_run"
+            if not apac_status
+            else "ok"
+            if apac_status.get("ok")
+            else "failed"
+        ),
         "article_requested": article_requested,
         "llm_attempts": tracker_stats["total_calls"] + tracker_stats["failed_attempts"],
         "llm_failures": tracker_stats["failed_attempts"],
@@ -321,6 +332,7 @@ def save_results_to_file(
             "sentiment_report": result.get("sentiment_report", ""),
             "news_report": result.get("news_report", ""),
             "fundamentals_report": result.get("fundamentals_report", ""),
+            "apac_regional_report": result.get("apac_regional_report", ""),
         },
         "investment_analysis": {
             "investment_debate": {

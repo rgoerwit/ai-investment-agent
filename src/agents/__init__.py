@@ -10,12 +10,14 @@ The implementation now lives in focused submodules:
 - research_nodes.py
 - decision_nodes.py
 - consultant_nodes.py
+- apac_specialist_node.py
 """
 
 from . import decision_nodes as _decision_nodes
 from . import research_nodes as _research_nodes
 from . import support as _support
 from .analyst_nodes import create_analyst_node, create_valuation_calculator_node
+from .apac_specialist_node import create_apac_specialist_node
 from .consultant_nodes import (
     create_auditor_node,
     create_consultant_node,
@@ -80,6 +82,7 @@ __all__ = [
     "RiskDebateState",
     "compute_data_conflicts",
     "create_analyst_node",
+    "create_apac_specialist_node",
     "create_auditor_node",
     "create_consultant_node",
     "create_financial_health_validator_node",

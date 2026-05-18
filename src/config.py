@@ -382,6 +382,26 @@ class Settings(BaseSettings):
         validation_alias="AUDITOR_QUICK_MODEL",
         description="Model for the auditor agent in --quick mode",
     )
+    enable_apac_specialist: bool = Field(
+        default=False,
+        validation_alias="ENABLE_APAC_SPECIALIST",
+        description="Enable optional APAC Regional Specialist audit node",
+    )
+    apac_specialist_model: str = Field(
+        default="deepseek-v4-pro",
+        validation_alias="APAC_SPECIALIST_MODEL",
+        description="Model for the optional APAC Regional Specialist",
+    )
+    apac_specialist_base_url: str = Field(
+        default="https://api.deepseek.com",
+        validation_alias="APAC_SPECIALIST_BASE_URL",
+        description="OpenAI-compatible base URL for the APAC specialist",
+    )
+    apac_specialist_api_key: SecretStr = Field(
+        default=SecretStr(""),
+        validation_alias="APAC_SPECIALIST_API_KEY",
+        description="API key for the optional APAC Regional Specialist",
+    )
     editor_model: str | None = Field(
         default=None,
         validation_alias="EDITOR_MODEL",
@@ -1039,6 +1059,10 @@ class Settings(BaseSettings):
     def get_openai_api_key(self) -> str:
         """Get OpenAI API key securely from SecretStr field."""
         return self.openai_api_key.get_secret_value()
+
+    def get_apac_specialist_api_key(self) -> str:
+        """Get APAC Regional Specialist API key securely from SecretStr field."""
+        return self.apac_specialist_api_key.get_secret_value()
 
     def get_langsmith_api_key(self) -> str:
         """Get LangSmith API key securely from SecretStr field."""

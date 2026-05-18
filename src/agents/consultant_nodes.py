@@ -50,6 +50,7 @@ _CONSULTANT_CONTEXT_BUDGETS = {
         "debate": 4000,
         "research": 4000,
         "auditor": 3000,
+        "apac": 2500,
     },
     "quick_standard": {
         "market": 900,
@@ -59,6 +60,7 @@ _CONSULTANT_CONTEXT_BUDGETS = {
         "debate": 1400,
         "research": 1400,
         "auditor": 1200,
+        "apac": 1200,
     },
     "quick_expanded": {
         "market": 1200,
@@ -68,6 +70,7 @@ _CONSULTANT_CONTEXT_BUDGETS = {
         "debate": 2000,
         "research": 2200,
         "auditor": 1800,
+        "apac": 1600,
     },
 }
 
@@ -662,6 +665,7 @@ def create_consultant_node(
         fundamentals = state.get("fundamentals_report", "N/A")
         investment_plan = state.get("investment_plan", "N/A")
         auditor = state.get("auditor_report", "N/A")
+        apac = state.get("apac_regional_report", "N/A")
         consultant_profile = (
             _select_quick_consultant_profile(state) if quick_mode else "full"
         )
@@ -700,6 +704,9 @@ Pre-Screening Result: {state.get("pre_screening_result", "UNKNOWN")}
 
 === INDEPENDENT FORENSIC AUDIT ===
 {support.summarize_for_pm(auditor, "auditor", _consultant_context_budget("auditor", profile=consultant_profile)) if auditor != "N/A" else "N/A"}
+
+=== APAC REGIONAL SPECIALIST ===
+{support.summarize_for_pm(apac, "apac", _consultant_context_budget("apac", profile=consultant_profile)) if apac != "N/A" else "N/A"}
 """
 
         company_warning = (

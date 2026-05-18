@@ -196,6 +196,11 @@ def create_trader_node(llm, memory: Any | None) -> Callable:
             "\n\nEXTERNAL CONSULTANT REVIEW (Cross-Validation):\n"
             f"{support.summarize_for_pm(consultant, 'consultant', 2500) if consultant else 'N/A (consultant disabled or unavailable)'}"
         )
+        apac = get_valid_artifact_content(state, "apac_regional_report")
+        apac_section = (
+            "\n\nAPAC REGIONAL SPECIALIST:\n"
+            f"{support.summarize_for_pm(apac, 'apac', 1800) if apac else 'N/A'}"
+        )
         valuation = state.get("valuation_params", "")
         valuation_section = (
             f"\n\nVALUATION PARAMETERS:\n{valuation}" if valuation else ""
@@ -219,7 +224,7 @@ FUNDAMENTALS ANALYST REPORT:
 {support.summarize_for_pm(fundamentals_report, "fundamentals", 6000) if fundamentals_report != "N/A" else "N/A"}
 
 RESEARCH MANAGER PLAN:
-{support.summarize_for_pm(investment_plan, "research", 3500) if investment_plan != "N/A" else "N/A"}{consultant_section}{valuation_section}"""
+{support.summarize_for_pm(investment_plan, "research", 3500) if investment_plan != "N/A" else "N/A"}{apac_section}{consultant_section}{valuation_section}"""
         prompt = f"{agent_prompt.system_message}\n\n{all_input}\n\nCreate Trading Plan."
 
         try:
@@ -448,6 +453,7 @@ NEUTRAL ANALYST (Balanced):
             value_trap_present=bool(state.get("value_trap_report")),
             value_trap_valid=get_artifact_status(state, "value_trap_report").ok,
             consultant_valid=get_artifact_status(state, "consultant_review").ok,
+            apac_specialist_valid=get_artifact_status(state, "apac_regional_report").ok,
             has_datablock=has_parseable_data_block(fundamentals),
             fund_len=len(fundamentals) if fundamentals else 0,
             value_trap_len=len(value_trap) if value_trap else 0,
@@ -476,6 +482,11 @@ NEUTRAL ANALYST (Balanced):
         consultant_section = (
             "\n\nEXTERNAL CONSULTANT REVIEW (Cross-Validation):\n"
             f"{consultant if consultant else 'N/A (consultant disabled or unavailable)'}"
+        )
+        apac = get_valid_artifact_content(state, "apac_regional_report")
+        apac_section = (
+            "\n\nAPAC REGIONAL SPECIALIST:\n"
+            f"{support.summarize_for_pm(apac, 'apac', 1800) if apac else 'N/A'}"
         )
 
         red_flag_section = (
@@ -509,7 +520,7 @@ VALUE TRAP ANALYSIS:
 {support.extract_value_trap_verdict(value_trap)}{support.summarize_for_pm(value_trap, "value_trap", 2500) if value_trap else "N/A"}{red_flag_section}
 
 RESEARCH MANAGER RECOMMENDATION:
-{support.summarize_for_pm(inv_plan, "research", 3000) if inv_plan else "N/A"}{consultant_section}
+{support.summarize_for_pm(inv_plan, "research", 3000) if inv_plan else "N/A"}{apac_section}{consultant_section}
 
 TRADER PROPOSAL:
 {support.summarize_for_pm(trader, "trader", 2000) if trader else "N/A"}
