@@ -57,13 +57,16 @@ _RATIONALE_HEADER = re.compile(
 )
 
 
+_VARIANT_PLACEHOLDER = "Not explicitly stated."
+
+
 @dataclass
 class InvestmentMemo:
     """Structured memo content, ready for markdown rendering."""
 
     decision: str = "UNAVAILABLE"
     one_line_thesis: str = "Thesis unavailable."
-    variant_view: str = "Not explicitly stated."
+    variant_view: str = _VARIANT_PLACEHOLDER
     key_numbers: list[str] = field(default_factory=list)
     valuation: str = "Valuation summary unavailable."
     top_risks: list[str] = field(default_factory=list)
@@ -129,7 +132,7 @@ def extract_variant_view(state: dict) -> str:
     """
     plan = get_investment_plan(state)
     if not plan:
-        return "Not explicitly stated."
+        return _VARIANT_PLACEHOLDER
     variant = re.search(
         r"VARIANT_VIEW\s*:\s*(.+?)(?:\n\n|\n[A-Z_]{3,}\s*:|\Z)",
         plan,
@@ -143,7 +146,7 @@ def extract_variant_view(state: dict) -> str:
         return text
     if "NO VARIANT" in plan.upper():
         return "Synthesis aligns with consensus — no material variant."
-    return "Not explicitly stated."
+    return _VARIANT_PLACEHOLDER
 
 
 # Each row carries one or more DATA_BLOCK field names. Real DATA_BLOCKs in the
@@ -341,7 +344,13 @@ def render_memo_markdown(memo: InvestmentMemo) -> str:
 
     parts: list[str] = [f"## Investment Memo — {memo.decision}\n\n"]
     parts.append(f"**Thesis.** {memo.one_line_thesis}\n\n")
-    parts.append(f"**Variant view.** {memo.variant_view}\n\n")
+    # Tranche 5, Step 8: omit the line entirely when the placeholder fires.
+    # Rendering "Not explicitly stated." as a bolded section adds visual noise
+    # for the reader and lets the quality judge false-positive on a marker
+    # that carries no information. Honest no-variant content (`Synthesis
+    # aligns with consensus — no material variant.`) is kept.
+    if memo.variant_view and memo.variant_view != _VARIANT_PLACEHOLDER:
+        parts.append(f"**Variant view.** {memo.variant_view}\n\n")
 
     if memo.key_numbers:
         parts.append("**Key numbers.**\n\n")
@@ -376,7 +385,13 @@ def render_memo_for_state(state: dict) -> str:
     try:
         return render_memo_markdown(build_memo(state))
     except Exception as exc:  # pragma: no cover — defense-in-depth
-        logger.warning("memo_render_failed", error=str(exc), exc_info=True)
+        from src.error_safety import summarize_exception
+
+        logger.warning(
+            "memo_render_failed",
+            **summarize_exception(exc, operation="render_memo_for_state"),
+            exc_info=True,
+        )
         return (
             "## Investment Memo — UNAVAILABLE\n\n"
             "Memo rendering encountered an error; see logs.\n\n---\n\n"

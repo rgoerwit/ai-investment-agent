@@ -215,18 +215,76 @@ def _ensure_apac_resolution_block(pm_output: str, apac_report: str | None) -> st
     return _insert_block_before_pm_block(pm_output, fallback)
 
 
-def _ensure_auditor_resolution_block(pm_output: str, auditor_report: str | None) -> str:
-    """Ensure PM output includes AUDITOR_RESOLUTION when the forensic auditor ran.
+# Auditor fallback gating (Tranche 5, Step 7).
+#
+# The original implementation inserted a fallback "Forensic Auditor flagged
+# anomalies not explicitly addressed" block for any non-empty, non-
+# INSUFFICIENT_DATA auditor output — which was misleading on clean audits.
+#
+# The corrected gating runs negative phrases FIRST so substring-style
+# positive tokens (e.g. "RED FLAG") don't trip on negations like
+# "no red flags." Positive detection then requires evidence of a NAMED
+# forensic check from the auditor's framework (Paper Profit, Zombie Ratio,
+# Trash Bin, …) rather than generic words.
 
-    Skipped when the auditor output is empty or carries the INSUFFICIENT_DATA
-    sentinel (no anomalies to reconcile).
+_AUDITOR_NEGATIVE_PHRASES: tuple[str, ...] = (
+    "NO ANOMAL",
+    "NO MATERIAL ANOMAL",
+    "NO MATERIAL CONCERN",
+    "NO RED FLAG",
+    "NO CONCERNS DETECTED",
+    "NO ISSUES DETECTED",
+    "ANOMALY_COUNT: 0",
+    "ANOMALIES: 0",
+    "ANOMALIES: NONE",
+    "STATUS=INSUFFICIENT_DATA",
+    "STATUS: INSUFFICIENT_DATA",
+    "INSUFFICIENT DATA",
+    "AUDITOR_VERDICT: CLEAN",
+    "AUDIT VERDICT: CLEAN",
+)
+
+_AUDITOR_POSITIVE_TOKENS: tuple[str, ...] = (
+    "PAPER PROFIT",
+    "BALLOONING DSO",
+    "ZOMBIE RATIO",
+    "INVENTORY HOARDING",
+    "ACQUISITION HANGOVER",
+    "STRETCHING PAYABLES",
+    "TRASH BIN",
+    "GHOST CASH",
+    "ACCRUAL RATIO",
+    "FORENSIC FLAG",
+)
+
+
+def _auditor_has_material_concern(auditor_report: str | None) -> bool:
+    """True only when the auditor named at least one specific forensic anomaly.
+
+    Conservative by design: a non-empty report that says "no red flags" /
+    "clean" / "INSUFFICIENT_DATA" returns False. Only fires when we can name
+    the specific forensic check from the auditor framework that flagged.
     """
     if not auditor_report:
-        return pm_output
+        return False
     stripped = auditor_report.strip()
     if not stripped:
-        return pm_output
-    if "STATUS=INSUFFICIENT_DATA" in stripped or "INSUFFICIENT_DATA" in stripped[:200]:
+        return False
+    upper = stripped.upper()
+    if any(phrase in upper for phrase in _AUDITOR_NEGATIVE_PHRASES):
+        return False
+    return any(token in upper for token in _AUDITOR_POSITIVE_TOKENS)
+
+
+def _ensure_auditor_resolution_block(pm_output: str, auditor_report: str | None) -> str:
+    """Ensure PM output includes AUDITOR_RESOLUTION when the auditor named anomalies.
+
+    Refined in Tranche 5, Step 7: fallback fires only when the auditor named
+    at least one specific forensic check (Paper Profit, Zombie Ratio, etc.),
+    never on clean output or sentinel-coded INSUFFICIENT_DATA. PM-emitted
+    blocks are left alone.
+    """
+    if not _auditor_has_material_concern(auditor_report):
         return pm_output
     if "AUDITOR_RESOLUTION:" in pm_output:
         return pm_output
@@ -611,10 +669,12 @@ NEUTRAL ANALYST (Balanced):
             try:
                 scenarios = extract_valuation_scenarios(valuation_params, eps_ttm)
             except Exception as exc:  # pragma: no cover — defense-in-depth
+                from src.error_safety import summarize_exception
+
                 logger.warning(
                     "pm_scenario_extraction_failed",
                     ticker=ticker,
-                    error=str(exc),
+                    **summarize_exception(exc, operation="pm_scenario_extraction"),
                 )
                 scenarios = None
         if scenarios is not None:

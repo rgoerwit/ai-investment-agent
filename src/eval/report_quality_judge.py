@@ -57,17 +57,31 @@ def _has_memo(markdown: str) -> bool:
     return "## Investment Memo" in markdown[:4000]
 
 
+_VARIANT_PLACEHOLDER_FRAGMENT = "Not explicitly stated"
+
+
 def _has_variant_view(markdown: str, saved: dict | None) -> bool:
-    if "**Variant view.**" in markdown[:4000]:
+    """Counts a variant view only when it carries real content.
+
+    Pre-Step-8 the memo always rendered ``**Variant view.** Not explicitly
+    stated.`` — meaning the marker alone was effectively a free quality point.
+    The corrected gate requires either substantive memo content (marker
+    present AND placeholder fragment absent in the memo head) or an actual
+    ``CONSENSUS_VIEW:`` / ``VARIANT_VIEW:`` / ``NO VARIANT`` declaration in
+    the saved investment plan.
+    """
+    head = markdown[:4000]
+    if "**Variant view.**" in head and _VARIANT_PLACEHOLDER_FRAGMENT not in head:
         return True
-    # Saved-JSON fallback: VARIANT_VIEW emitted by Research Manager.
     if saved:
-        plan = (
-            saved.get("investment_analysis", {}).get("investment_plan")
-            or saved.get("investment_plan")
-            or ""
-        )
-        if plan and ("VARIANT_VIEW:" in plan or "CONSENSUS_VIEW:" in plan):
+        from src.reporting.state_access import get_investment_plan
+
+        plan = get_investment_plan(saved)
+        if plan and (
+            "VARIANT_VIEW:" in plan
+            or "CONSENSUS_VIEW:" in plan
+            or "NO VARIANT" in plan.upper()
+        ):
             return True
     return False
 
@@ -171,8 +185,12 @@ def score_saved_analysis(json_path: Path) -> ReportQualityScore | None:
     try:
         saved = json.loads(json_path.read_text(encoding="utf-8"))
     except Exception as exc:
+        from src.error_safety import summarize_exception
+
         logger.warning(
-            "quality_judge_json_read_failed", path=str(json_path), error=str(exc)
+            "quality_judge_json_read_failed",
+            path=str(json_path),
+            **summarize_exception(exc, operation="quality_judge_load_json"),
         )
         return None
 

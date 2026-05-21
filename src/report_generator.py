@@ -187,10 +187,14 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
                     eps_ttm = resolve_eps_ttm(fundamentals_report)
                     scenarios = extract_valuation_scenarios(valuation_params, eps_ttm)
                 except Exception as exc:  # pragma: no cover — defense-in-depth
+                    from src.error_safety import summarize_exception
+
                     logger.warning(
                         "report_chart_scenario_extraction_failed",
                         ticker=self.ticker,
-                        error=str(exc),
+                        **summarize_exception(
+                            exc, operation="report_chart_scenario_extraction"
+                        ),
                     )
                     scenarios = None
 

@@ -321,10 +321,12 @@ def _generate_football_field(
             eps_ttm = resolve_eps_ttm(fundamentals_raw)
             scenarios = extract_valuation_scenarios(valuation_params, eps_ttm)
         except Exception as exc:  # pragma: no cover — defense-in-depth
+            from src.error_safety import summarize_exception
+
             logger.warning(
                 "chart_scenario_extraction_failed",
                 ticker=ticker,
-                error=str(exc),
+                **summarize_exception(exc, operation="chart_scenario_extraction"),
             )
             scenarios = None
 
