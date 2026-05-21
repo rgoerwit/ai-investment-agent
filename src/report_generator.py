@@ -835,6 +835,23 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
             report_parts.append("\n## Verification Caveats\n\n")
             report_parts.append(f"{verification_caveat}\n\n---\n")
 
+        # Investment Memo — memo-first restructure (above charts and appendix).
+        # The memo aggregates verdict, thesis, key numbers, top risks, kill criteria,
+        # and confidence into a tight scannable header so readers don't have to read
+        # the full agent transcript to see the call. Falls back to a placeholder
+        # block if PM output is unavailable.
+        try:
+            from src.reporting.memo import render_memo_for_state
+
+            memo_state = dict(result)
+            if self.valuation_context and "valuation_context" not in memo_state:
+                memo_state["valuation_context"] = self.valuation_context
+            report_parts.append("\n")
+            report_parts.append(render_memo_for_state(memo_state))
+        except Exception:  # pragma: no cover — defense-in-depth
+            # Memo rendering should never block report publication.
+            pass
+
         # Red Flag Pre-Screening (if applicable)
         red_flags = result.get("red_flags", [])
         pre_screening_result = result.get("pre_screening_result", "PASS")

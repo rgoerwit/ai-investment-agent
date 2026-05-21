@@ -565,3 +565,48 @@ def _extract_sector_country(raw_data: str) -> tuple:
         logger.debug("sector_country_extract_failed", error=str(exc))
 
     return sector, country
+
+
+_KILL_CRITERIA_BLOCK = re.compile(
+    r"### --- START KILL_CRITERIA ---\s*(.+?)\s*### --- END KILL_CRITERIA ---",
+    re.DOTALL,
+)
+_KILL_CRITERIA_TRIGGER = re.compile(r"TRIGGER_\d+\s*:\s*(.+)")
+
+
+def extract_kill_criteria(bear_text: str | None) -> list[str]:
+    """Pull TRIGGER_N entries from the fenced KILL_CRITERIA block emitted by Bear Researcher.
+
+    Returns at most 3 trimmed triggers. Returns an empty list if the block is
+    missing, malformed, or contains no usable lines.
+    """
+    if not bear_text:
+        return []
+    match = _KILL_CRITERIA_BLOCK.search(bear_text)
+    if not match:
+        return []
+    triggers: list[str] = []
+    for line in match.group(1).splitlines():
+        m = _KILL_CRITERIA_TRIGGER.search(line)
+        if m:
+            value = m.group(1).strip()
+            if value:
+                triggers.append(value)
+    return triggers[:3]
+
+
+def get_bear_history(source: dict | Any) -> str:
+    """Return bear_history from either runtime AgentState or saved analysis JSON.
+
+    Runtime state stores it at `investment_debate_state.bear_history`; saved
+    JSON stores it at `investment_analysis.investment_debate.bear_history`.
+    """
+    if not isinstance(source, dict):
+        return ""
+    runtime = (source.get("investment_debate_state") or {}).get("bear_history")
+    if runtime:
+        return str(runtime)
+    saved = (
+        (source.get("investment_analysis") or {}).get("investment_debate") or {}
+    ).get("bear_history")
+    return str(saved) if saved else ""

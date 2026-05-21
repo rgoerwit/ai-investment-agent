@@ -489,6 +489,17 @@ NEUTRAL ANALYST (Balanced):
             f"{support.summarize_for_pm(apac, 'apac', 1800) if apac else 'N/A'}"
         )
 
+        kill_criteria = support.extract_kill_criteria(support.get_bear_history(state))
+        if kill_criteria:
+            kill_lines = "\n".join(f"- {trigger}" for trigger in kill_criteria)
+            kill_criteria_section = (
+                "\n\nBEAR_KILL_CRITERIA (measurable triggers for immediate SELL; "
+                "surface these in the investment memo, not PM_BLOCK):\n"
+                f"{kill_lines}"
+            )
+        else:
+            kill_criteria_section = ""
+
         red_flag_section = (
             "\n\nRED-FLAG PRE-SCREENING:\n"
             f"Pre-Screening Result: {pre_screening_result}"
@@ -520,7 +531,7 @@ VALUE TRAP ANALYSIS:
 {support.extract_value_trap_verdict(value_trap)}{support.summarize_for_pm(value_trap, "value_trap", 2500) if value_trap else "N/A"}{red_flag_section}
 
 RESEARCH MANAGER RECOMMENDATION:
-{support.summarize_for_pm(inv_plan, "research", 3000) if inv_plan else "N/A"}{apac_section}{consultant_section}
+{support.summarize_for_pm(inv_plan, "research", 3000) if inv_plan else "N/A"}{apac_section}{consultant_section}{kill_criteria_section}
 
 TRADER PROPOSAL:
 {support.summarize_for_pm(trader, "trader", 2000) if trader else "N/A"}
