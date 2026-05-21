@@ -294,7 +294,11 @@ def _generate_football_field(
 ) -> Path | None:
     """Generate football field chart with PM-adjusted targets."""
     from src.charts.base import FootballFieldData
-    from src.charts.extractors.valuation import calculate_valuation_targets
+    from src.charts.extractors.valuation import (
+        calculate_valuation_targets,
+        extract_valuation_scenarios,
+        resolve_eps_ttm,
+    )
     from src.charts.generators.football_field import generate_football_field
 
     # Check minimum data requirements
@@ -305,6 +309,24 @@ def _generate_football_field(
     # Extract valuation targets from Valuation Calculator
     valuation_params = _normalize_string(state.get("valuation_params", ""))
     targets = calculate_valuation_targets(valuation_params)
+
+    # Parse bear/base/bull scenarios for chart overlay. The Python computer
+    # needs EPS_TTM — derived from price/PE when the raw field is absent —
+    # and returns None on any data-sufficiency or sanity-check failure, in
+    # which case the chart renders identically to the legacy single-range view.
+    fundamentals_raw = _normalize_string(state.get("fundamentals_report", ""))
+    scenarios = None
+    if valuation_params and fundamentals_raw:
+        try:
+            eps_ttm = resolve_eps_ttm(fundamentals_raw)
+            scenarios = extract_valuation_scenarios(valuation_params, eps_ttm)
+        except Exception as exc:  # pragma: no cover — defense-in-depth
+            logger.warning(
+                "chart_scenario_extraction_failed",
+                ticker=ticker,
+                error=str(exc),
+            )
+            scenarios = None
 
     # Apply PM's valuation discount
     our_target_low = targets.low
@@ -370,6 +392,7 @@ def _generate_football_field(
         target_confidence=targets.confidence,
         quality_warnings=quality_warnings if quality_warnings else None,
         footnote=" | ".join(footnote_parts) if footnote_parts else None,
+        scenarios=scenarios,
     )
 
     return generate_football_field(football_data, chart_config)

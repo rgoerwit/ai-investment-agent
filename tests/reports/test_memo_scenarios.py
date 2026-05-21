@@ -88,9 +88,14 @@ def test_scenario_summary_none_when_block_missing() -> None:
     assert format_scenario_summary(state) is None
 
 
-def test_scenario_summary_none_when_eps_missing() -> None:
-    """No EPS_TTM in DATA_BLOCK → caller falls back to legacy single-range."""
-    fundamentals_no_eps = (
+def test_scenario_summary_derives_eps_when_field_absent() -> None:
+    """Tier 1 / Step 3 update: when EPS_TTM is absent but CURRENT_PRICE and
+    PE_RATIO_TTM are present, the resolver derives EPS so scenarios still fire.
+
+    (Pre-Tranche-5 this case fell back to legacy single-range — that was the
+    bug, since the vast majority of real DATA_BLOCKs don't carry EPS_TTM.)
+    """
+    fundamentals_no_eps_field = (
         "### --- START DATA_BLOCK ---\n"
         "SECTOR: Industrials\n"
         "PE_RATIO_TTM: 12.0\n"
@@ -98,7 +103,23 @@ def test_scenario_summary_none_when_eps_missing() -> None:
         "### --- END DATA_BLOCK ---\n"
     )
     state = {
-        "fundamentals_report": fundamentals_no_eps,
+        "fundamentals_report": fundamentals_no_eps_field,
+        "valuation_params": _VALUATION_PARAMS,
+    }
+    out = format_scenario_summary(state)
+    assert out is not None
+    assert "Bear" in out and "Base" in out and "Bull" in out
+
+
+def test_scenario_summary_none_when_eps_unresolvable() -> None:
+    """Without EPS_TTM AND without (CURRENT_PRICE + PE_RATIO_TTM) → fallback."""
+    fundamentals_no_inputs = (
+        "### --- START DATA_BLOCK ---\n"
+        "SECTOR: Industrials\n"
+        "### --- END DATA_BLOCK ---\n"
+    )
+    state = {
+        "fundamentals_report": fundamentals_no_inputs,
         "valuation_params": _VALUATION_PARAMS,
     }
     assert format_scenario_summary(state) is None

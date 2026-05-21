@@ -593,6 +593,46 @@ NEUTRAL ANALYST (Balanced):
         else:
             kill_criteria_section = ""
 
+        # Scenario valuation section — only emitted when the Valuation
+        # Calculator produced a parseable VALUATION_SCENARIOS block AND the
+        # fundamentals provide enough data to derive EPS_TTM. The v9.7 PM
+        # prompt directs PM to anchor stop-loss to BEAR_IV and reference
+        # WEIGHTED_IV; that hint is only useful if PM actually sees the
+        # values, which is exactly what this section provides.
+        from src.charts.extractors.valuation import (
+            extract_valuation_scenarios,
+            resolve_eps_ttm,
+        )
+
+        valuation_params = get_valid_artifact_content(state, "valuation_params")
+        scenarios = None
+        if valuation_params and fundamentals:
+            eps_ttm = resolve_eps_ttm(fundamentals)
+            try:
+                scenarios = extract_valuation_scenarios(valuation_params, eps_ttm)
+            except Exception as exc:  # pragma: no cover — defense-in-depth
+                logger.warning(
+                    "pm_scenario_extraction_failed",
+                    ticker=ticker,
+                    error=str(exc),
+                )
+                scenarios = None
+        if scenarios is not None:
+            valuation_section = (
+                "\n\nVALUATION SCENARIOS (Python-computed IVs from "
+                f"{scenarios.methodology}; sufficiency {scenarios.data_sufficiency}; "
+                "anchor stop-loss to BEAR_IV, reference WEIGHTED_IV in rationale):\n"
+                f"- BEAR_IV: {scenarios.bear_iv} "
+                f"({scenarios.bear.probability:.0f}%) — {scenarios.bear.drivers}\n"
+                f"- BASE_IV: {scenarios.base_iv} "
+                f"({scenarios.base.probability:.0f}%) — {scenarios.base.drivers}\n"
+                f"- BULL_IV: {scenarios.bull_iv} "
+                f"({scenarios.bull.probability:.0f}%) — {scenarios.bull.drivers}\n"
+                f"- WEIGHTED_IV: {scenarios.weighted_iv}"
+            )
+        else:
+            valuation_section = ""
+
         red_flag_section = (
             "\n\nRED-FLAG PRE-SCREENING:\n"
             f"Pre-Screening Result: {pre_screening_result}"
@@ -624,7 +664,7 @@ VALUE TRAP ANALYSIS:
 {support.extract_value_trap_verdict(value_trap)}{support.summarize_for_pm(value_trap, "value_trap", 2500) if value_trap else "N/A"}{red_flag_section}
 
 RESEARCH MANAGER RECOMMENDATION:
-{support.summarize_for_pm(inv_plan, "research", 3000) if inv_plan else "N/A"}{apac_section}{consultant_section}{kill_criteria_section}
+{support.summarize_for_pm(inv_plan, "research", 3000) if inv_plan else "N/A"}{apac_section}{consultant_section}{kill_criteria_section}{valuation_section}
 
 TRADER PROPOSAL:
 {support.summarize_for_pm(trader, "trader", 2000) if trader else "N/A"}

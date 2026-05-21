@@ -5,6 +5,41 @@ Base classes and data structures for chart generation.
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Protocol, runtime_checkable
+
+
+@runtime_checkable
+class ScenarioAssumptionLike(Protocol):
+    """Per-scenario row contract required by the football-field overlay.
+
+    Structural — both ``ValuationCalculator.ScenarioAssumption`` (the canonical
+    dataclass in ``src.charts.extractors.valuation``) and any test double with
+    a matching attribute satisfy it.
+    """
+
+    probability: float
+    drivers: str
+
+
+@runtime_checkable
+class ValuationScenariosLike(Protocol):
+    """Scenario container contract used by the chart layer.
+
+    Replaces the prior ``scenarios: object | None`` field on
+    :class:`FootballFieldData` with an explicit typed boundary while keeping
+    the structural-typing flexibility that lets fixtures and the production
+    dataclass both qualify.
+    """
+
+    methodology: str
+    data_sufficiency: str
+    bear: ScenarioAssumptionLike
+    base: ScenarioAssumptionLike
+    bull: ScenarioAssumptionLike
+    bear_iv: float
+    base_iv: float
+    bull_iv: float
+    weighted_iv: float
 
 
 class ChartFormat(Enum):
@@ -114,10 +149,9 @@ class FootballFieldData:
     # Optional scenario valuation (bear/base/bull IVs with weighted mean).
     # When populated, the renderer overlays four markers above the existing
     # bars; otherwise the chart renders identically to the legacy single-range
-    # view. Typed as `object` to avoid a circular import — the renderer treats
-    # it as a duck-typed `ValuationScenarios` with bear_iv/base_iv/bull_iv/
-    # weighted_iv attributes and bear/base/bull.probability fields.
-    scenarios: object | None = None
+    # view. Typed as a Protocol so the boundary is explicit but still permits
+    # test doubles (SimpleNamespace fixtures) — see :class:`ValuationScenariosLike`.
+    scenarios: ValuationScenariosLike | None = None
 
     def has_minimum_data(self) -> bool:
         """Check if we have enough data to generate chart.

@@ -307,6 +307,45 @@ def extract_valuation_targets(research_manager_report: str) -> ValuationTargets:
 # ---------------------------------------------------------------------------
 
 
+from src.data_block_utils import extract_data_block_field as _extract_data_block_field
+
+
+def _try_float(raw: str | None) -> float | None:
+    if not raw:
+        return None
+    try:
+        return float(str(raw).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def resolve_eps_ttm(fundamentals: str | None) -> float | None:
+    """Return a usable EPS_TTM, deriving it when the raw field is absent.
+
+    Resolution order:
+
+    1. Direct ``EPS_TTM`` from the DATA_BLOCK.
+    2. Direct ``TRAILING_EPS`` (legacy alias used by some upstream sources).
+    3. Derived ``CURRENT_PRICE / PE_RATIO_TTM`` when both are valid and positive.
+
+    Returns ``None`` when no path produces a positive number. Callers should
+    fall back to the legacy single-range valuation (the scenarios block is
+    optional by design — see ``VALUATION_SCENARIOS`` ``DATA_SUFFICIENCY: LOW``).
+    """
+    if not fundamentals:
+        return None
+    direct = _try_float(
+        _extract_data_block_field(fundamentals, "EPS_TTM")
+    ) or _try_float(_extract_data_block_field(fundamentals, "TRAILING_EPS"))
+    if direct and direct > 0:
+        return direct
+    price = _try_float(_extract_data_block_field(fundamentals, "CURRENT_PRICE"))
+    pe = _try_float(_extract_data_block_field(fundamentals, "PE_RATIO_TTM"))
+    if price and pe and price > 0 and pe > 0:
+        return round(price / pe, 4)
+    return None
+
+
 @dataclass
 class ScenarioAssumption:
     """One bear/base/bull scenario row emitted by the Valuation Calculator."""

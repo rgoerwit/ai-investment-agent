@@ -157,7 +157,11 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
             from src.charts.extractors.data_block import (
                 extract_chart_data_from_data_block,
             )
-            from src.charts.extractors.valuation import calculate_valuation_targets
+            from src.charts.extractors.valuation import (
+                calculate_valuation_targets,
+                extract_valuation_scenarios,
+                resolve_eps_ttm,
+            )
             from src.charts.generators.football_field import generate_football_field
             from src.config import config
 
@@ -173,6 +177,22 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
                 result.get("valuation_params", "")
             )
             targets = calculate_valuation_targets(valuation_params)
+
+            # Parse VALUATION_SCENARIOS for chart overlay. Returns None on any
+            # data-sufficiency or sanity check failure → chart falls back to
+            # the legacy single-range bars.
+            scenarios = None
+            if valuation_params and fundamentals_report:
+                try:
+                    eps_ttm = resolve_eps_ttm(fundamentals_report)
+                    scenarios = extract_valuation_scenarios(valuation_params, eps_ttm)
+                except Exception as exc:  # pragma: no cover — defense-in-depth
+                    logger.warning(
+                        "report_chart_scenario_extraction_failed",
+                        ticker=self.ticker,
+                        error=str(exc),
+                    )
+                    scenarios = None
 
             # Check if we have minimum data
             if not chart_data.current_price or not chart_data.fifty_two_week_high:
@@ -220,6 +240,7 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
                 footnote="Targets based on P/E normalization"
                 if targets.methodology
                 else None,
+                scenarios=scenarios,
             )
 
             # Store valuation context for article writer (D1 implementation)

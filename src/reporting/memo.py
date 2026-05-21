@@ -25,12 +25,18 @@ from dataclasses import dataclass, field
 import structlog
 
 from src.agents.support import extract_kill_criteria, get_bear_history
-from src.charts.extractors.valuation import extract_valuation_scenarios
+from src.charts.extractors.valuation import extract_valuation_scenarios, resolve_eps_ttm
 from src.data_block_utils import extract_data_block_field
 from src.reporting.source_confidence import (
     SourceRow,
     build_source_confidence_rows,
     render_source_confidence_markdown,
+)
+from src.reporting.state_access import (
+    get_fundamentals_report,
+    get_investment_plan,
+    get_pm_output,
+    get_valuation_params,
 )
 
 logger = structlog.get_logger(__name__)
@@ -111,14 +117,17 @@ def extract_pm_thesis(pm_text: str, max_words: int = 30) -> str:
     return sentence.strip()
 
 
-def extract_variant_view(_state: dict) -> str:
-    """Placeholder until Research Manager emits VARIANT_PERCEPTION (Step 7).
+def extract_variant_view(state: dict) -> str:
+    """Pull `VARIANT_VIEW:` / `CONSENSUS_VIEW:` from the Research Manager plan.
 
-    Looks for a `CONSENSUS_VIEW:` / `VARIANT_VIEW:` pair in the investment plan
-    in case the prompt change has already shipped; otherwise returns the
-    default placeholder.
+    Reads from either the runtime state (top-level ``investment_plan``) or the
+    saved JSON shape (``investment_analysis.investment_plan``). Returns the
+    placeholder string ``"Not explicitly stated."`` only when no variant
+    content is found — the memo renderer omits the line entirely on that
+    placeholder so the quality judge can't false-positive on it (Tier 2,
+    Step 8).
     """
-    plan = _state.get("investment_plan") or ""
+    plan = get_investment_plan(state)
     if not plan:
         return "Not explicitly stated."
     variant = re.search(
@@ -137,31 +146,41 @@ def extract_variant_view(_state: dict) -> str:
     return "Not explicitly stated."
 
 
-_KEY_FIELDS: tuple[tuple[str, str], ...] = (
-    ("P/E (TTM)", "PE_RATIO_TTM"),
-    ("PEG", "PEG_RATIO"),
-    ("ROIC", "ROIC_PERCENT"),
-    ("FCF yield", "FCF_YIELD_PERCENT"),
-    ("Revenue growth (TTM)", "REVENUE_GROWTH_TTM"),
-    ("Net debt / EBITDA", "NET_DEBT_TO_EBITDA"),
-    ("D/E", "DEBT_TO_EQUITY"),
-    ("Analyst coverage (EN)", "ANALYST_COVERAGE_ENGLISH"),
+# Each row carries one or more DATA_BLOCK field names. Real DATA_BLOCKs in the
+# wild use `DE_RATIO` and `NET_DEBT_EBITDA`; the longer `DEBT_TO_EQUITY` /
+# `NET_DEBT_TO_EBITDA` variants are kept as fallbacks so synthetic fixtures
+# and any legacy emitters continue to populate the row.
+_KEY_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("P/E (TTM)", ("PE_RATIO_TTM",)),
+    ("PEG", ("PEG_RATIO",)),
+    ("ROIC", ("ROIC_PERCENT",)),
+    ("FCF yield", ("FCF_YIELD_PERCENT",)),
+    ("Revenue growth (TTM)", ("REVENUE_GROWTH_TTM",)),
+    ("Net debt / EBITDA", ("NET_DEBT_EBITDA", "NET_DEBT_TO_EBITDA")),
+    ("D/E", ("DE_RATIO", "DEBT_TO_EQUITY")),
+    ("Analyst coverage (EN)", ("ANALYST_COVERAGE_ENGLISH",)),
 )
 
 
 def extract_key_metrics(fundamentals: str, limit: int = 6) -> list[str]:
-    """Pull up to `limit` non-empty key metrics from the fundamentals DATA_BLOCK."""
+    """Pull up to `limit` non-empty key metrics from the fundamentals DATA_BLOCK.
+
+    For each row, the first matching key wins — so legacy field names act as
+    fallbacks when the canonical name (used in recent DATA_BLOCKs) is missing.
+    """
     if not fundamentals:
         return []
     rows: list[str] = []
-    for label, key in _KEY_FIELDS:
-        value = extract_data_block_field(fundamentals, key)
-        if (
-            value
-            and value.strip()
-            and value.strip().upper() not in {"N/A", "NA", "NONE"}
-        ):
-            rows.append(f"{label}: {value.strip()}")
+    for label, keys in _KEY_FIELDS:
+        for key in keys:
+            value = extract_data_block_field(fundamentals, key)
+            if (
+                value
+                and value.strip()
+                and value.strip().upper() not in {"N/A", "NA", "NONE"}
+            ):
+                rows.append(f"{label}: {value.strip()}")
+                break
         if len(rows) >= limit:
             break
     return rows
@@ -190,24 +209,12 @@ def format_scenario_summary(state: dict) -> str | None:
     and a weighted IV in the Valuation slot; otherwise it carries the legacy
     target range.
     """
-    valuation_params = (
-        state.get("valuation_params")
-        or (state.get("reports") or {}).get("valuation_params")
-        or ""
-    )
+    valuation_params = get_valuation_params(state)
     if not valuation_params:
         return None
 
-    fundamentals = (
-        state.get("fundamentals_report")
-        or (state.get("reports") or {}).get("fundamentals_report")
-        or ""
-    )
-    eps_raw = extract_data_block_field(fundamentals, "EPS_TTM")
-    try:
-        eps_ttm = float(eps_raw.replace(",", "")) if eps_raw else None
-    except (AttributeError, ValueError):
-        eps_ttm = None
+    fundamentals = get_fundamentals_report(state)
+    eps_ttm = resolve_eps_ttm(fundamentals)
 
     scenarios = extract_valuation_scenarios(valuation_params, eps_ttm)
     if scenarios is None:
@@ -302,18 +309,11 @@ def build_memo(state: dict) -> InvestmentMemo:
     """Assemble the InvestmentMemo from the analysis result dict.
 
     Accepts either the live AgentState dict (during graph execution) or the
-    saved JSON shape (for retrospective rendering).
+    saved JSON shape (for retrospective rendering). All cross-shape lookups
+    live in :mod:`src.reporting.state_access`.
     """
-    pm = (
-        state.get("final_trade_decision")
-        or (state.get("reports") or {}).get("portfolio_manager")
-        or ""
-    )
-    fundamentals = (
-        state.get("fundamentals_report")
-        or (state.get("reports") or {}).get("fundamentals_report")
-        or ""
-    )
+    pm = get_pm_output(state)
+    fundamentals = get_fundamentals_report(state)
     bear_text = get_bear_history(state)
     red_flags = state.get("red_flags") or []
 
