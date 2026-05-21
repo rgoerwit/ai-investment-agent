@@ -59,6 +59,134 @@ def _is_target_reasonable(
     return True
 
 
+def _overlay_scenarios(
+    ax,
+    data: FootballFieldData,
+    fmt,
+    text_color: str,
+) -> float | None:
+    """Plot bear/base/bull IV markers + weighted-IV diamond above the existing bars.
+
+    Returns the y-position used for the markers so the caller can extend the
+    axis upper limit, or ``None`` when no scenarios are attached (legacy
+    single-range view).
+
+    The scenarios object is treated as a duck-typed
+    `src.charts.extractors.valuation.ValuationScenarios` — kept as
+    ``object | None`` on `FootballFieldData` to avoid a circular import.
+    """
+    scenarios = data.scenarios
+    if scenarios is None:
+        return None
+
+    try:
+        bear_iv = float(scenarios.bear_iv)
+        base_iv = float(scenarios.base_iv)
+        bull_iv = float(scenarios.bull_iv)
+        weighted_iv = float(scenarios.weighted_iv)
+        bear_prob = float(scenarios.bear.probability)
+        base_prob = float(scenarios.base.probability)
+        bull_prob = float(scenarios.bull.probability)
+    except (AttributeError, TypeError, ValueError) as exc:
+        logger.warning(
+            "Scenario overlay skipped: malformed scenarios object",
+            error=str(exc),
+        )
+        return None
+
+    # Reject scenarios with non-positive or non-finite values defensively.
+    values = (bear_iv, base_iv, bull_iv, weighted_iv)
+    if not all(isinstance(v, float) and v > 0 for v in values):
+        logger.warning(
+            "Scenario overlay skipped: non-positive IV detected", values=values
+        )
+        return None
+
+    # Place the marker row just above whatever the topmost bar/warning row is.
+    # Caller already extends `top_limit` to accommodate this.
+    scenario_y = len(_collect_visible_rows(data)) + 0.1
+
+    # Plot bear / base / bull dots and weighted diamond at scenario_y.
+    ax.scatter(
+        [bear_iv],
+        [scenario_y],
+        marker="o",
+        color="#E74C3C",  # red
+        edgecolors="black",
+        s=120,
+        zorder=15,
+        label=f"Bear IV {fmt(bear_iv)} ({bear_prob:.0f}%)",
+    )
+    ax.scatter(
+        [base_iv],
+        [scenario_y],
+        marker="o",
+        color="#4A90D9",  # blue
+        edgecolors="black",
+        s=120,
+        zorder=15,
+        label=f"Base IV {fmt(base_iv)} ({base_prob:.0f}%)",
+    )
+    ax.scatter(
+        [bull_iv],
+        [scenario_y],
+        marker="o",
+        color="#2ECC71",  # green
+        edgecolors="black",
+        s=120,
+        zorder=15,
+        label=f"Bull IV {fmt(bull_iv)} ({bull_prob:.0f}%)",
+    )
+    ax.scatter(
+        [weighted_iv],
+        [scenario_y],
+        marker="D",
+        color="black",
+        edgecolors="white",
+        s=110,
+        zorder=16,
+        label=f"Weighted IV {fmt(weighted_iv)}",
+    )
+
+    # Subtle row label on the left so readers can tell what the markers mean
+    # even before scanning the legend.
+    ax.text(
+        ax.get_xlim()[0] if ax.get_xlim()[0] > 0 else min(values) * 0.9,
+        scenario_y,
+        "Scenarios",
+        ha="right",
+        va="center",
+        fontsize=8,
+        color=text_color,
+        style="italic",
+    )
+
+    return scenario_y
+
+
+def _collect_visible_rows(data: FootballFieldData) -> list[str]:
+    """Approximate the number of bar rows the renderer will draw.
+
+    Matches the order in `generate_football_field`. Kept in sync with the
+    bar-construction block above; only used by the scenario overlay to pick a
+    y-position above the topmost bar.
+    """
+    rows = ["52w"]
+    if data.has_external_targets():
+        if _is_target_reasonable(
+            data.external_target_low, data.current_price
+        ) and _is_target_reasonable(data.external_target_high, data.current_price):
+            rows.append("ext")
+    if data.has_our_targets():
+        if _is_target_reasonable(
+            data.our_target_low, data.current_price
+        ) and _is_target_reasonable(data.our_target_high, data.current_price):
+            rows.append("our")
+    elif data.quality_warnings:
+        rows.append("suspended")
+    return rows
+
+
 def generate_football_field(
     data: FootballFieldData,
     config: ChartConfig | None = None,
@@ -265,6 +393,11 @@ def generate_football_field(
             zorder=20,  # Ensure on top
         )
 
+    # Scenario valuation overlay (bear/base/bull markers + weighted diamond).
+    # Renders only when `data.scenarios` is populated; degrades silently to
+    # the legacy bar-only view otherwise.
+    scenario_y = _overlay_scenarios(ax, data, fmt, text_color)
+
     # Methodology Footnote
     if data.footnote:
         fig.text(
@@ -327,6 +460,11 @@ def generate_football_field(
         all_values.append(data.moving_avg_50)
     if data.moving_avg_200:
         all_values.append(data.moving_avg_200)
+    if data.scenarios is not None:
+        for attr in ("bear_iv", "base_iv", "bull_iv", "weighted_iv"):
+            value = getattr(data.scenarios, attr, None)
+            if isinstance(value, int | float) and value > 0:
+                all_values.append(float(value))
 
     min_val, max_val = min(all_values), max(all_values)
     padding = (max_val - min_val) * 0.25  # 25% padding for labels
@@ -341,6 +479,9 @@ def generate_football_field(
     top_limit = len(bars) - 0.5
     if data.quality_warnings:
         top_limit += 1.0
+    if scenario_y is not None:
+        # Make room for the scenario markers row and its label.
+        top_limit = max(top_limit, scenario_y + 0.8)
 
     ax.set_ylim(-1.0, top_limit)
 

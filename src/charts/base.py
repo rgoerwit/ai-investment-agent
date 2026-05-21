@@ -111,6 +111,14 @@ class FootballFieldData:
     # Methodology footnote
     footnote: str | None = None
 
+    # Optional scenario valuation (bear/base/bull IVs with weighted mean).
+    # When populated, the renderer overlays four markers above the existing
+    # bars; otherwise the chart renders identically to the legacy single-range
+    # view. Typed as `object` to avoid a circular import — the renderer treats
+    # it as a duck-typed `ValuationScenarios` with bear_iv/base_iv/bull_iv/
+    # weighted_iv attributes and bear/base/bull.probability fields.
+    scenarios: object | None = None
+
     def has_minimum_data(self) -> bool:
         """Check if we have enough data to generate chart.
 
