@@ -220,7 +220,16 @@ def generate_football_field(
     # Set Seaborn style with white grid
     sns.set_style("whitegrid")
 
-    fig, ax = plt.subplots(figsize=(config.width_inches, config.height_inches))
+    # ``layout="constrained"`` is matplotlib's recommended replacement for
+    # ``tight_layout()`` when the figure carries an outside-axes legend or
+    # other artists that can clip with the legacy layout engine. Combined
+    # with the ``bbox_inches="tight"`` save kwarg below, this prevents the
+    # six-row legend (52w / external / our + bear / base / bull / weighted)
+    # from clipping on long ticker / company names.
+    fig, ax = plt.subplots(
+        figsize=(config.width_inches, config.height_inches),
+        layout="constrained",
+    )
 
     # Set colors based on transparency to ensure visibility on both dark/light themes
     if config.transparent:
@@ -485,8 +494,8 @@ def generate_football_field(
 
     ax.set_ylim(-1.0, top_limit)
 
-    # Use OO API for thread-safety (avoid plt global state)
-    fig.tight_layout()
+    # No tight_layout() call — superseded by ``layout="constrained"`` above.
+    # Calling both is unsupported by matplotlib and emits a UserWarning.
 
     # Generate filename - use config.filename_stem if provided, else ticker_date
     if config.filename_stem:

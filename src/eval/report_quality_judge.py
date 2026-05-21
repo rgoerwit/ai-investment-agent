@@ -174,13 +174,60 @@ def score_report(markdown: str, saved: dict | None = None) -> ReportQualityScore
     return score
 
 
-def score_saved_analysis(json_path: Path) -> ReportQualityScore | None:
+def _find_markdown_for_json(json_path: Path, markdown_dir: Path | None) -> str:
+    """Locate a rendered markdown report for the given analysis JSON.
+
+    Resolution order:
+
+    1. Sibling-by-stem in the JSON's directory (``X_analysis.json`` →
+       ``X.md``) — covers the case where someone re-renders into ``results/``.
+    2. Operator-supplied ``markdown_dir`` (typically ``scratch/``) — matches
+       the pipeline's actual rendered-report convention
+       ``README-<TICKER_DASHED>-<DATE>.md``.
+
+    Returns ``""`` when no markdown sibling can be located.
+    """
+    sibling = json_path.with_name(json_path.stem.replace("_analysis", "") + ".md")
+    if sibling.exists():
+        try:
+            return sibling.read_text(encoding="utf-8")
+        except Exception:  # pragma: no cover — best-effort
+            return ""
+
+    if markdown_dir is None or not markdown_dir.exists():
+        return ""
+
+    # Pipeline renders to scratch/README-<ticker-with-dots-as-dashes>-<DATE>.md.
+    # Stem looks like "3306.HK_20260518_204009" → ticker is "3306.HK".
+    stem_parts = json_path.stem.split("_")
+    if not stem_parts:
+        return ""
+    ticker = stem_parts[0]
+    ticker_dashed = ticker.replace(".", "-").replace("_", "-")
+    for candidate in markdown_dir.glob(f"README-{ticker_dashed}-*.md"):
+        try:
+            return candidate.read_text(encoding="utf-8")
+        except Exception:  # pragma: no cover — best-effort
+            continue
+    return ""
+
+
+def score_saved_analysis(
+    json_path: Path,
+    markdown_dir: Path | None = None,
+) -> ReportQualityScore | None:
     """Load a saved analysis JSON and score whatever markdown it surfaces.
 
-    If the JSON does not embed a rendered markdown report (current shape),
-    the judge falls back to scoring the appended report under the matching
-    ``results/<TICKER>_<TIMESTAMP>.md`` if one exists; otherwise it scores
-    against an empty string and uses saved-JSON fallbacks for each feature.
+    Behavior:
+
+    - If a sibling ``.md`` exists, score that markdown against the JSON.
+    - Else if ``markdown_dir`` is supplied (typically ``scratch/``), look for
+      the pipeline's ``README-<TICKER>-<DATE>.md`` and score that.
+    - Else score with empty markdown and use saved-JSON feature fallbacks.
+
+    A score with zero features detected AND no rendered markdown found is
+    bucketed as ``LEGACY`` rather than ``FAIL`` — those are pre-Tranche-1
+    artifacts that predate the features, not regressed reports.
     """
     try:
         saved = json.loads(json_path.read_text(encoding="utf-8"))
@@ -194,20 +241,26 @@ def score_saved_analysis(json_path: Path) -> ReportQualityScore | None:
         )
         return None
 
-    markdown = ""
-    # Look for a sibling markdown report with the same stem.
-    md_candidate = json_path.with_name(json_path.stem.replace("_analysis", "") + ".md")
-    if md_candidate.exists():
-        try:
-            markdown = md_candidate.read_text(encoding="utf-8")
-        except Exception:  # pragma: no cover — best-effort
-            markdown = ""
-    return score_report(markdown, saved)
+    markdown = _find_markdown_for_json(json_path, markdown_dir)
+    score = score_report(markdown, saved)
+    # Legacy-artifact heuristic: no markdown AND no features → not "FAIL,"
+    # just predates the features. Keeps the corpus-wide aggregate honest.
+    if not markdown and score.features_present == 0:
+        score.overall = "LEGACY"
+        score.notes.append(
+            "Legacy artifact: no rendered markdown found and no feature fields in JSON"
+        )
+    return score
 
 
-def aggregate(paths: Iterable[Path]) -> dict:
-    """Aggregate scores across a set of saved analysis JSONs."""
-    grades = {"A": 0, "B": 0, "C": 0, "FAIL": 0}
+def aggregate(paths: Iterable[Path], markdown_dir: Path | None = None) -> dict:
+    """Aggregate scores across a set of saved analysis JSONs.
+
+    ``markdown_dir`` is forwarded to :func:`score_saved_analysis` so the
+    pipeline's ``scratch/`` rendered reports can be paired with the JSONs in
+    ``results/``.
+    """
+    grades = {"A": 0, "B": 0, "C": 0, "FAIL": 0, "LEGACY": 0}
     feature_totals = {
         "has_memo": 0,
         "has_variant_view": 0,
@@ -220,7 +273,7 @@ def aggregate(paths: Iterable[Path]) -> dict:
     scored = 0
     rows: list[dict] = []
     for path in paths:
-        score = score_saved_analysis(path)
+        score = score_saved_analysis(path, markdown_dir=markdown_dir)
         if score is None:
             continue
         scored += 1
@@ -268,10 +321,20 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Emit aggregate as JSON instead of the human-readable summary.",
     )
+    parser.add_argument(
+        "--markdown-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory containing rendered markdown reports "
+            "(pipeline default: scratch/README-<TICKER>-<DATE>.md). "
+            "Without this flag, only sibling .md files next to the JSON are scored."
+        ),
+    )
     args = parser.parse_args(argv)
 
     targets = _iter_targets(args)
-    summary = aggregate(targets)
+    summary = aggregate(targets, markdown_dir=args.markdown_dir)
 
     if args.json:
         json.dump(summary, sys.stdout, indent=2, default=str)
@@ -285,7 +348,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Scored {count} report(s).")
     print(
         "  Grades:",
-        ", ".join(f"{g}={summary['grades'][g]}" for g in ("A", "B", "C", "FAIL")),
+        ", ".join(
+            f"{g}={summary['grades'][g]}" for g in ("A", "B", "C", "FAIL", "LEGACY")
+        ),
     )
     print("  Feature presence (count / pct):")
     for feature, total in summary["feature_totals"].items():
