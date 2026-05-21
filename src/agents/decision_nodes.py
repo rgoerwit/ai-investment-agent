@@ -146,6 +146,99 @@ def _ensure_consultant_resolution_block(
     return f"{pm_output.rstrip()}\n\n{resolution_block}\n"
 
 
+_APAC_SILENCE_SENTINELS = {
+    "NO_MATERIAL_APAC_CONNECTION",
+    "APAC_SPECIALIST_UNAVAILABLE",
+}
+
+
+def _requires_apac_resolution(apac_report: str | None) -> bool:
+    """True iff APAC produced non-silent, non-error output that PM should reconcile."""
+    if not apac_report:
+        return False
+    stripped = apac_report.strip()
+    if not stripped:
+        return False
+    return stripped not in _APAC_SILENCE_SENTINELS
+
+
+def _extract_apac_verdict_line(apac_report: str) -> str:
+    """Pull a one-line summary of the APAC specialist's verdict, if available."""
+    if not apac_report:
+        return ""
+    match = re.search(
+        r"\*\*VERDICT FOR CONSULTANT AND PM\*\*\s*:\s*(.+)",
+        apac_report,
+    )
+    if match:
+        # Take only the first line of the verdict sentence.
+        line = match.group(1).splitlines()[0].strip()
+        # Cap absurdly long values defensively.
+        return line[:400]
+    for tag in ("OVERRIDE", "CAUTION", "SUPPORT"):
+        if tag in apac_report:
+            return f"APAC specialist verdict {tag} (verdict line not extractable)."
+    return ""
+
+
+def _insert_block_before_pm_block(pm_output: str, block_text: str) -> str:
+    """Insert a resolution block immediately above PM_BLOCK (or at tail if absent)."""
+    pm_block_marker = "### --- START PM_BLOCK ---"
+    if pm_block_marker in pm_output:
+        return pm_output.replace(
+            pm_block_marker, f"{block_text.rstrip()}\n\n{pm_block_marker}", 1
+        )
+    return f"{pm_output.rstrip()}\n\n{block_text.rstrip()}\n"
+
+
+def _ensure_apac_resolution_block(pm_output: str, apac_report: str | None) -> str:
+    """Ensure PM output includes APAC_RESOLUTION when APAC produced non-silent output.
+
+    Mirrors the consultant pattern: pure programmatic fallback insertion, no
+    LLM retry. If PM already emitted an APAC_RESOLUTION block we leave it
+    alone; otherwise we splice in a deterministic placeholder so downstream
+    tooling can rely on the block being present.
+    """
+    if not _requires_apac_resolution(apac_report):
+        return pm_output
+    if "APAC_RESOLUTION:" in pm_output:
+        return pm_output
+    summary = _extract_apac_verdict_line(apac_report or "") or (
+        "APAC specialist output not reconciled in PM rationale."
+    )
+    fallback = (
+        "APAC_RESOLUTION:\n"
+        f"- FINDING: {summary}\n"
+        "- DATA_CHECK: NOT_PROVIDED\n"
+        "- VERDICT: UNVERIFIABLE"
+    )
+    return _insert_block_before_pm_block(pm_output, fallback)
+
+
+def _ensure_auditor_resolution_block(pm_output: str, auditor_report: str | None) -> str:
+    """Ensure PM output includes AUDITOR_RESOLUTION when the forensic auditor ran.
+
+    Skipped when the auditor output is empty or carries the INSUFFICIENT_DATA
+    sentinel (no anomalies to reconcile).
+    """
+    if not auditor_report:
+        return pm_output
+    stripped = auditor_report.strip()
+    if not stripped:
+        return pm_output
+    if "STATUS=INSUFFICIENT_DATA" in stripped or "INSUFFICIENT_DATA" in stripped[:200]:
+        return pm_output
+    if "AUDITOR_RESOLUTION:" in pm_output:
+        return pm_output
+    fallback = (
+        "AUDITOR_RESOLUTION:\n"
+        "- FINDING: Forensic Auditor flagged anomalies not explicitly addressed by PM rationale.\n"
+        "- DATA_CHECK: NOT_PROVIDED\n"
+        "- VERDICT: UNVERIFIABLE"
+    )
+    return _insert_block_before_pm_block(pm_output, fallback)
+
+
 def resolve_pfic_display_status(
     legal_pfic_status: str | None,
     data_block_pfic_risk: str | None,
@@ -555,6 +648,14 @@ RISK TEAM DEBATE:
             content_str = _ensure_consultant_resolution_block(
                 content_str,
                 consultant if consultant else None,
+            )
+            content_str = _ensure_apac_resolution_block(
+                content_str,
+                apac if apac else None,
+            )
+            content_str = _ensure_auditor_resolution_block(
+                content_str,
+                state.get("auditor_report") or None,
             )
 
             from src.utils import detect_truncation

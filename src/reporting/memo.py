@@ -26,6 +26,11 @@ import structlog
 
 from src.agents.support import extract_kill_criteria, get_bear_history
 from src.data_block_utils import extract_data_block_field
+from src.reporting.source_confidence import (
+    SourceRow,
+    build_source_confidence_rows,
+    render_source_confidence_markdown,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -57,6 +62,7 @@ class InvestmentMemo:
     top_risks: list[str] = field(default_factory=list)
     kill_criteria: list[str] = field(default_factory=list)
     confidence: str = "Confidence signals unavailable."
+    source_confidence: list[SourceRow] = field(default_factory=list)
 
 
 def _normalize_verdict(raw: str | None) -> str:
@@ -266,6 +272,7 @@ def build_memo(state: dict) -> InvestmentMemo:
         top_risks=extract_pm_risks(pm, red_flags),
         kill_criteria=extract_kill_criteria(bear_text),
         confidence=summarize_confidence(state),
+        source_confidence=build_source_confidence_rows(state),
     )
 
 
@@ -299,7 +306,14 @@ def render_memo_markdown(memo: InvestmentMemo) -> str:
         parts.extend(f"- {trigger}\n" for trigger in memo.kill_criteria)
         parts.append("\n")
 
-    parts.append(f"**Confidence.** {memo.confidence}\n\n---\n\n")
+    parts.append(f"**Confidence.** {memo.confidence}\n\n")
+
+    if memo.source_confidence:
+        parts.append("**Source confidence.**\n\n")
+        parts.append(render_source_confidence_markdown(memo.source_confidence))
+        parts.append("\n")
+
+    parts.append("---\n\n")
     return "".join(parts)
 
 
