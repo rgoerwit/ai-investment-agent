@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 from src.charts.base import FootballFieldData
 from src.charts.generators.football_field import (
+    _add_scenario_row_label,
     _collect_visible_rows,
     _overlay_scenarios,
 )
@@ -51,13 +52,9 @@ def _mock_ax() -> MagicMock:
     return ax
 
 
-def _fmt(value: float) -> str:
-    return f"${value:,.2f}"
-
-
 def test_overlay_returns_none_when_scenarios_absent() -> None:
     ax = _mock_ax()
-    assert _overlay_scenarios(ax, _data(), _fmt, "black") is None
+    assert _overlay_scenarios(ax, _data()) is None
     ax.scatter.assert_not_called()
 
 
@@ -65,43 +62,38 @@ def test_overlay_returns_none_when_scenarios_malformed() -> None:
     """Missing attributes → scenario overlay silently skipped, no exception."""
     ax = _mock_ax()
     bad = SimpleNamespace(bear_iv=80.0)  # missing base_iv, bull_iv, etc.
-    assert _overlay_scenarios(ax, _data(scenarios=bad), _fmt, "black") is None
+    assert _overlay_scenarios(ax, _data(scenarios=bad)) is None
     ax.scatter.assert_not_called()
 
 
 def test_overlay_returns_none_when_iv_nonpositive() -> None:
     ax = _mock_ax()
     bad = _scenarios(bear_iv=-5.0)
-    assert _overlay_scenarios(ax, _data(scenarios=bad), _fmt, "black") is None
+    assert _overlay_scenarios(ax, _data(scenarios=bad)) is None
     ax.scatter.assert_not_called()
 
 
 def test_overlay_happy_path_plots_four_markers() -> None:
     ax = _mock_ax()
-    y = _overlay_scenarios(ax, _data(scenarios=_scenarios()), _fmt, "black")
+    y = _overlay_scenarios(ax, _data(scenarios=_scenarios()))
     assert y is not None
     # Four scatter calls: bear, base, bull, weighted.
     assert ax.scatter.call_count == 4
 
     labels = [call.kwargs.get("label", "") for call in ax.scatter.call_args_list]
-    assert any("Bear IV" in lbl for lbl in labels)
-    assert any("Base IV" in lbl for lbl in labels)
-    assert any("Bull IV" in lbl for lbl in labels)
-    assert any("Weighted IV" in lbl for lbl in labels)
+    assert labels == ["Bear", "Base", "Bull", "Weighted IV"]
 
 
-def test_overlay_markers_carry_probabilities_in_labels() -> None:
+def test_overlay_uses_compact_labels_without_probabilities() -> None:
     ax = _mock_ax()
-    _overlay_scenarios(ax, _data(scenarios=_scenarios()), _fmt, "black")
+    _overlay_scenarios(ax, _data(scenarios=_scenarios()))
     labels = [call.kwargs.get("label", "") for call in ax.scatter.call_args_list]
-    assert any("(30%)" in lbl for lbl in labels)
-    assert any("(50%)" in lbl for lbl in labels)
-    assert any("(20%)" in lbl for lbl in labels)
+    assert not any("(" in lbl or "$" in lbl for lbl in labels)
 
 
 def test_overlay_markers_placed_at_correct_iv_x_coordinates() -> None:
     ax = _mock_ax()
-    _overlay_scenarios(ax, _data(scenarios=_scenarios()), _fmt, "black")
+    _overlay_scenarios(ax, _data(scenarios=_scenarios()))
     x_values = [call.args[0][0] for call in ax.scatter.call_args_list]
     assert 80.0 in x_values
     assert 120.0 in x_values
@@ -111,7 +103,7 @@ def test_overlay_markers_placed_at_correct_iv_x_coordinates() -> None:
 
 def test_overlay_weighted_marker_is_diamond() -> None:
     ax = _mock_ax()
-    _overlay_scenarios(ax, _data(scenarios=_scenarios()), _fmt, "black")
+    _overlay_scenarios(ax, _data(scenarios=_scenarios()))
     markers = [call.kwargs.get("marker") for call in ax.scatter.call_args_list]
     assert markers.count("D") == 1
     assert markers.count("o") == 3
@@ -127,10 +119,24 @@ def test_overlay_y_position_sits_above_bars() -> None:
         our_target_low=95.0,
         our_target_high=125.0,
     )
-    y = _overlay_scenarios(ax, data, _fmt, "black")
+    y = _overlay_scenarios(ax, data)
     assert y is not None
     visible_row_count = len(_collect_visible_rows(data))
     assert y >= visible_row_count
+
+
+def test_scenario_row_label_uses_final_axis_limit() -> None:
+    ax = _mock_ax()
+    ax.get_xlim.return_value = (40.0, 180.0)
+    _add_scenario_row_label(ax, 3.1, "black")
+    ax.text.assert_called_once()
+    assert ax.text.call_args.args[:3] == (40.0, 3.1, "Scenarios")
+
+
+def test_scenario_row_label_skips_when_no_scenarios() -> None:
+    ax = _mock_ax()
+    _add_scenario_row_label(ax, None, "black")
+    ax.text.assert_not_called()
 
 
 def test_collect_visible_rows_counts_baseline_only() -> None:

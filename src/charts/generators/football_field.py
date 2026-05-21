@@ -62,8 +62,6 @@ def _is_target_reasonable(
 def _overlay_scenarios(
     ax,
     data: FootballFieldData,
-    fmt,
-    text_color: str,
 ) -> float | None:
     """Plot bear/base/bull IV markers + weighted-IV diamond above the existing bars.
 
@@ -71,9 +69,8 @@ def _overlay_scenarios(
     axis upper limit, or ``None`` when no scenarios are attached (legacy
     single-range view).
 
-    The scenarios object is treated as a duck-typed
-    `src.charts.extractors.valuation.ValuationScenarios` — kept as
-    ``object | None`` on `FootballFieldData` to avoid a circular import.
+    The scenarios object follows the ``ValuationScenariosLike`` protocol on
+    ``FootballFieldData`` so tests can use lightweight structural fixtures.
     """
     scenarios = data.scenarios
     if scenarios is None:
@@ -84,13 +81,12 @@ def _overlay_scenarios(
         base_iv = float(scenarios.base_iv)
         bull_iv = float(scenarios.bull_iv)
         weighted_iv = float(scenarios.weighted_iv)
-        bear_prob = float(scenarios.bear.probability)
-        base_prob = float(scenarios.base.probability)
-        bull_prob = float(scenarios.bull.probability)
     except (AttributeError, TypeError, ValueError) as exc:
+        from src.error_safety import summarize_exception
+
         logger.warning(
             "Scenario overlay skipped: malformed scenarios object",
-            error=str(exc),
+            **summarize_exception(exc, operation="football_field_scenario_overlay"),
         )
         return None
 
@@ -115,7 +111,7 @@ def _overlay_scenarios(
         edgecolors="black",
         s=120,
         zorder=15,
-        label=f"Bear IV {fmt(bear_iv)} ({bear_prob:.0f}%)",
+        label="Bear",
     )
     ax.scatter(
         [base_iv],
@@ -125,7 +121,7 @@ def _overlay_scenarios(
         edgecolors="black",
         s=120,
         zorder=15,
-        label=f"Base IV {fmt(base_iv)} ({base_prob:.0f}%)",
+        label="Base",
     )
     ax.scatter(
         [bull_iv],
@@ -135,7 +131,7 @@ def _overlay_scenarios(
         edgecolors="black",
         s=120,
         zorder=15,
-        label=f"Bull IV {fmt(bull_iv)} ({bull_prob:.0f}%)",
+        label="Bull",
     )
     ax.scatter(
         [weighted_iv],
@@ -145,13 +141,19 @@ def _overlay_scenarios(
         edgecolors="white",
         s=110,
         zorder=16,
-        label=f"Weighted IV {fmt(weighted_iv)}",
+        label="Weighted IV",
     )
 
-    # Subtle row label on the left so readers can tell what the markers mean
-    # even before scanning the legend.
+    return scenario_y
+
+
+def _add_scenario_row_label(ax, scenario_y: float | None, text_color: str) -> None:
+    """Add the scenario-row label after final x-limits are known."""
+    if scenario_y is None:
+        return
+    left, _ = ax.get_xlim()
     ax.text(
-        ax.get_xlim()[0] if ax.get_xlim()[0] > 0 else min(values) * 0.9,
+        left,
         scenario_y,
         "Scenarios",
         ha="right",
@@ -160,8 +162,6 @@ def _overlay_scenarios(
         color=text_color,
         style="italic",
     )
-
-    return scenario_y
 
 
 def _collect_visible_rows(data: FootballFieldData) -> list[str]:
@@ -405,7 +405,7 @@ def generate_football_field(
     # Scenario valuation overlay (bear/base/bull markers + weighted diamond).
     # Renders only when `data.scenarios` is populated; degrades silently to
     # the legacy bar-only view otherwise.
-    scenario_y = _overlay_scenarios(ax, data, fmt, text_color)
+    scenario_y = _overlay_scenarios(ax, data)
 
     # Methodology Footnote
     if data.footnote:
@@ -482,6 +482,7 @@ def generate_football_field(
     padding = max(padding, min_padding)
     # Clamp lower bound to 0 to avoid negative prices on chart (penny stocks edge case)
     ax.set_xlim(max(0, min_val - padding), max_val + padding)
+    _add_scenario_row_label(ax, scenario_y, text_color)
 
     # Set y-axis limits with padding below for MA labels (two rows)
     # If warnings exist, add extra space at top for the warning box

@@ -19,43 +19,17 @@ from __future__ import annotations
 import structlog
 
 from src.data_block_utils import extract_data_block_field
+from src.reporting.state_access import (
+    get_apac_regional_report,
+    get_auditor_report,
+    get_consultant_review,
+    get_fundamentals_report,
+)
 
 logger = structlog.get_logger(__name__)
 
 
 SourceRow = tuple[str, str, str]
-
-
-def _fundamentals(state: dict) -> str:
-    return (
-        state.get("fundamentals_report")
-        or (state.get("reports") or {}).get("fundamentals_report")
-        or ""
-    )
-
-
-def _apac_report(state: dict) -> str:
-    return (
-        state.get("apac_regional_report")
-        or (state.get("reports") or {}).get("apac_regional_report")
-        or ""
-    )
-
-
-def _auditor_report(state: dict) -> str:
-    return (
-        state.get("auditor_report")
-        or (state.get("reports") or {}).get("auditor_report")
-        or ""
-    )
-
-
-def _consultant_review(state: dict) -> str:
-    return (
-        state.get("consultant_review")
-        or (state.get("reports") or {}).get("consultant_review")
-        or ""
-    )
 
 
 def _run_summary(state: dict) -> dict:
@@ -65,7 +39,7 @@ def _run_summary(state: dict) -> dict:
 
 def _apac_status(state: dict) -> str | None:
     """Return APAC verdict tag (SUPPORT / CAUTION / OVERRIDE) when discoverable."""
-    apac = _apac_report(state)
+    apac = get_apac_regional_report(state)
     if not apac:
         return None
     if "NO_MATERIAL_APAC_CONNECTION" in apac:
@@ -82,7 +56,7 @@ def build_source_confidence_rows(state: dict) -> list[SourceRow]:
     """Compose the source-confidence rows for the memo."""
     rows: list[SourceRow] = []
 
-    fundamentals = _fundamentals(state)
+    fundamentals = get_fundamentals_report(state)
     ocf_source = (
         (extract_data_block_field(fundamentals, "OPERATING_CASH_FLOW_SOURCE") or "")
         .strip()
@@ -98,7 +72,9 @@ def build_source_confidence_rows(state: dict) -> list[SourceRow]:
         rows.append(("Core financials", "Not available", "LOW"))
 
     summary = _run_summary(state)
-    auditor_ran = bool(summary.get("auditor_completed")) or bool(_auditor_report(state))
+    auditor_ran = bool(summary.get("auditor_completed")) or bool(
+        get_auditor_report(state)
+    )
     auditor_clean = bool(summary.get("auditor_successful"))
     if auditor_clean:
         rows.append(("Forensic check", "Auditor (gpt-5.4-mini)", "HIGH"))
@@ -110,7 +86,7 @@ def build_source_confidence_rows(state: dict) -> list[SourceRow]:
     consultant_ran = (
         bool(summary.get("consultant_completed"))
         or bool(summary.get("consultant_finished"))
-        or bool(_consultant_review(state))
+        or bool(get_consultant_review(state))
     )
     consultant_ok = bool(summary.get("consultant_successful"))
     if consultant_ok:

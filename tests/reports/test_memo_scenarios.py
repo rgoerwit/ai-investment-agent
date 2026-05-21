@@ -7,6 +7,7 @@ import pathlib
 
 from src.reporting.memo import (
     build_memo,
+    extract_legacy_target_range,
     format_scenario_summary,
     render_memo_markdown,
 )
@@ -177,6 +178,14 @@ def test_memo_falls_back_when_scenarios_unparseable() -> None:
     # Legacy single-range string is what we get when scenarios are absent.
     assert "Target range" in memo.valuation
     assert "Bear" not in memo.valuation
+
+
+def test_legacy_target_range_reads_saved_json_fundamentals() -> None:
+    saved = {"reports": {"fundamentals_report": _FUNDAMENTALS}}
+    assert (
+        extract_legacy_target_range(saved)
+        == "Current price 100.00; target range unavailable."
+    )
 
 
 # ---------- PM prompt regression ----------

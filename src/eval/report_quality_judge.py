@@ -107,11 +107,22 @@ _SCENARIO_LINE = re.compile(
 def _has_scenario_valuation(markdown: str, saved: dict | None) -> bool:
     if _SCENARIO_LINE.search(markdown):
         return True
-    if saved:
-        params = (saved.get("reports") or {}).get("valuation_params", "")
-        if params and "VALUATION_SCENARIOS" in params:
-            return True
-    return False
+    if not saved:
+        return False
+
+    from src.charts.extractors.valuation import (
+        extract_valuation_scenarios,
+        resolve_eps_ttm,
+    )
+    from src.reporting.state_access import get_fundamentals_report, get_valuation_params
+
+    params = get_valuation_params(saved)
+    if not params:
+        return False
+    fundamentals = get_fundamentals_report(saved)
+    return (
+        extract_valuation_scenarios(params, resolve_eps_ttm(fundamentals)) is not None
+    )
 
 
 _RESOLUTION_TOKENS = ("CONSULTANT_RESOLUTION", "APAC_RESOLUTION", "AUDITOR_RESOLUTION")

@@ -68,6 +68,35 @@ _BARE_REPORT = (
     "# Some old report without any of the new sections.\n\nLegacy body text only."
 )
 
+_SAVED_FUNDAMENTALS = (
+    "### --- START DATA_BLOCK ---\n"
+    "PE_RATIO_TTM: 10\n"
+    "CURRENT_PRICE: 100\n"
+    "### --- END DATA_BLOCK ---\n"
+)
+
+_VALID_SCENARIOS = (
+    "### --- START VALUATION_SCENARIOS ---\n"
+    "METHODOLOGY: P/E\n"
+    "DATA_SUFFICIENCY: HIGH\n"
+    "BEAR_MULTIPLE: 8\n"
+    "BEAR_GROWTH_PCT: -5\n"
+    "BEAR_MARGIN_DELTA_BPS: -100\n"
+    "BEAR_DRIVERS: Downcycle.\n"
+    "BEAR_PROBABILITY: 30\n"
+    "BASE_MULTIPLE: 12\n"
+    "BASE_GROWTH_PCT: 5\n"
+    "BASE_MARGIN_DELTA_BPS: 0\n"
+    "BASE_DRIVERS: Mid-cycle.\n"
+    "BASE_PROBABILITY: 50\n"
+    "BULL_MULTIPLE: 16\n"
+    "BULL_GROWTH_PCT: 10\n"
+    "BULL_MARGIN_DELTA_BPS: 100\n"
+    "BULL_DRIVERS: Re-rating.\n"
+    "BULL_PROBABILITY: 20\n"
+    "### --- END VALUATION_SCENARIOS ---\n"
+)
+
 
 # ---------- score_report happy / edge / error ----------
 
@@ -160,15 +189,46 @@ def test_saved_json_fallback_picks_up_kill_criteria_from_bear_history() -> None:
     assert score.has_kill_criteria is True
 
 
-def test_saved_json_fallback_picks_up_scenarios_from_valuation_params() -> None:
+def test_saved_json_fallback_picks_up_parseable_scenarios() -> None:
     md = "Bare report."
     saved = {
         "reports": {
-            "valuation_params": "### --- START VALUATION_SCENARIOS ---\nBEAR_MULTIPLE: 8\n### --- END VALUATION_SCENARIOS ---\n"
+            "fundamentals_report": _SAVED_FUNDAMENTALS,
+            "valuation_params": _VALID_SCENARIOS,
         }
     }
     score = score_report(md, saved)
     assert score.has_scenario_valuation is True
+
+
+def test_saved_json_fallback_rejects_malformed_scenarios() -> None:
+    md = "Bare report."
+    saved = {
+        "reports": {
+            "fundamentals_report": _SAVED_FUNDAMENTALS,
+            "valuation_params": (
+                "### --- START VALUATION_SCENARIOS ---\n"
+                "BEAR_MULTIPLE: 8\n"
+                "### --- END VALUATION_SCENARIOS ---\n"
+            ),
+        }
+    }
+    score = score_report(md, saved)
+    assert score.has_scenario_valuation is False
+
+
+def test_saved_json_fallback_rejects_low_sufficiency_scenarios() -> None:
+    md = "Bare report."
+    saved = {
+        "reports": {
+            "fundamentals_report": _SAVED_FUNDAMENTALS,
+            "valuation_params": _VALID_SCENARIOS.replace(
+                "DATA_SUFFICIENCY: HIGH", "DATA_SUFFICIENCY: LOW"
+            ),
+        }
+    }
+    score = score_report(md, saved)
+    assert score.has_scenario_valuation is False
 
 
 # ---------- score_saved_analysis ----------

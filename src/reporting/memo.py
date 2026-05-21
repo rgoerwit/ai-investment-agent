@@ -5,9 +5,9 @@ appendix transcript. Its slots are:
 
 - decision (BUY / HOLD / DO_NOT_INITIATE / SELL / UNAVAILABLE)
 - one-line thesis (≤ ~30 words pulled from PM rationale)
-- variant view (placeholder until Research Manager emits VARIANT_PERCEPTION)
+- variant view (Research Manager VARIANT_PERCEPTION when present)
 - key numbers (4–6 DATA_BLOCK metrics)
-- valuation (single-range string until scenario valuation ships)
+- valuation (scenario IV summary when parseable, else legacy target context)
 - top risks (3–4 named red flags / specific risks)
 - kill criteria (parsed from Bear pre-mortem fenced block)
 - confidence (one sentence summarizing which optional agents ran)
@@ -250,8 +250,8 @@ def extract_legacy_target_range(state: dict) -> str:
             return (
                 f"Target range {match.group(1).strip()} (mid {match.group(2).strip()})."
             )
-    # Try the football-field params from chart_paths context.
-    fundamentals = state.get("fundamentals_report") or ""
+    # Try the DATA_BLOCK current price from either runtime state or saved JSON.
+    fundamentals = get_fundamentals_report(state)
     price = extract_data_block_field(fundamentals, "CURRENT_PRICE")
     if price:
         return f"Current price {price.strip()}; target range unavailable."
