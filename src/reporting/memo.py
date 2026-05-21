@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 import structlog
 
 from src.agents.support import extract_kill_criteria, get_bear_history
+from src.charts.extractors.valuation import extract_valuation_scenarios
 from src.data_block_utils import extract_data_block_field
 from src.reporting.source_confidence import (
     SourceRow,
@@ -166,12 +167,65 @@ def extract_key_metrics(fundamentals: str, limit: int = 6) -> list[str]:
     return rows
 
 
-def format_scenario_summary(_state: dict) -> str | None:
-    """Placeholder until scenario valuation (Step 6) ships.
+_CURRENCY_PATTERN = re.compile(r"([A-Z]{3}|[$€£¥])")
 
-    Returns None so the caller can fall back to the legacy single-range string.
+
+def _detect_currency(fundamentals: str) -> str:
+    """Best-effort currency tag for IV display — falls back to bare numbers."""
+    for field_name in ("REPORTING_CURRENCY", "CURRENCY"):
+        value = extract_data_block_field(fundamentals, field_name)
+        if value:
+            token = value.strip().split()[0] if value.strip() else ""
+            if token and _CURRENCY_PATTERN.fullmatch(token):
+                return token
+    return ""
+
+
+def format_scenario_summary(state: dict) -> str | None:
+    """Return a one-line scenario summary if a valid VALUATION_SCENARIOS block exists.
+
+    Returns ``None`` if scenarios aren't parseable so the memo can fall back to
+    the legacy single-range string. This is the load-bearing seam for Step 6:
+    when this function returns a string, the memo carries bear/base/bull IVs
+    and a weighted IV in the Valuation slot; otherwise it carries the legacy
+    target range.
     """
-    return None
+    valuation_params = (
+        state.get("valuation_params")
+        or (state.get("reports") or {}).get("valuation_params")
+        or ""
+    )
+    if not valuation_params:
+        return None
+
+    fundamentals = (
+        state.get("fundamentals_report")
+        or (state.get("reports") or {}).get("fundamentals_report")
+        or ""
+    )
+    eps_raw = extract_data_block_field(fundamentals, "EPS_TTM")
+    try:
+        eps_ttm = float(eps_raw.replace(",", "")) if eps_raw else None
+    except (AttributeError, ValueError):
+        eps_ttm = None
+
+    scenarios = extract_valuation_scenarios(valuation_params, eps_ttm)
+    if scenarios is None:
+        return None
+
+    ccy = _detect_currency(fundamentals)
+    prefix = f"{ccy} " if ccy else ""
+
+    def _fmt(value: float) -> str:
+        return f"{prefix}{value:,.2f}"
+
+    return (
+        f"Bear {_fmt(scenarios.bear_iv)} ({scenarios.bear.probability:.0f}%) / "
+        f"Base {_fmt(scenarios.base_iv)} ({scenarios.base.probability:.0f}%) / "
+        f"Bull {_fmt(scenarios.bull_iv)} ({scenarios.bull.probability:.0f}%); "
+        f"weighted {_fmt(scenarios.weighted_iv)} "
+        f"({scenarios.methodology}, sufficiency {scenarios.data_sufficiency})."
+    )
 
 
 def extract_legacy_target_range(state: dict) -> str:

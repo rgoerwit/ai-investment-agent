@@ -160,7 +160,9 @@ def test_ensure_auditor_idempotent_when_block_already_present() -> None:
 def test_pm_prompt_requests_new_resolution_blocks() -> None:
     path = pathlib.Path("prompts/portfolio_manager.json")
     data = json.loads(path.read_text(encoding="utf-8"))
-    assert data["version"] == "9.6"
+    assert (
+        data["version"] >= "9.6"
+    )  # Tranche 3 bumps to 9.7; floor is the introducing release.
     msg = data["system_message"]
     assert "APAC_RESOLUTION:" in msg
     assert "AUDITOR_RESOLUTION:" in msg

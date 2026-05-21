@@ -295,3 +295,178 @@ def extract_valuation_targets(research_manager_report: str) -> ValuationTargets:
     VALUATION_PARAMS format (from Valuation Calculator agent).
     """
     return calculate_valuation_targets(research_manager_report)
+
+
+# ---------------------------------------------------------------------------
+# Scenario valuation (Tranche 3, Step 6)
+#
+# Bear / base / bull *assumptions* parsed from the VALUATION_SCENARIOS block;
+# Python computes the intrinsic values. This preserves the long-standing
+# "agent extracts, Python computes" contract — see the prompt at
+# prompts/valuation_calculator.json (v1.3+).
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ScenarioAssumption:
+    """One bear/base/bull scenario row emitted by the Valuation Calculator."""
+
+    multiple: float
+    growth_pct: float
+    margin_delta_bps: float
+    drivers: str
+    probability: float
+
+
+@dataclass
+class ValuationScenarios:
+    """Three-case scenario valuation with Python-computed intrinsic values.
+
+    `weighted_iv` is the probability-weighted mean of the three IVs; by
+    construction it lies in ``[min(bear_iv, base_iv, bull_iv), max(...)]``.
+    """
+
+    methodology: str
+    data_sufficiency: str
+    bear: ScenarioAssumption
+    base: ScenarioAssumption
+    bull: ScenarioAssumption
+    bear_iv: float
+    base_iv: float
+    bull_iv: float
+    weighted_iv: float
+
+
+def _scenario_iv(eps_ttm: float, scenario: ScenarioAssumption) -> float:
+    """Compute one scenario IV from the agent-emitted assumptions.
+
+    IV = EPS_TTM × (1 + growth/100) × multiple × (1 + margin_delta_bps/10000)
+    """
+    growth_factor = 1.0 + scenario.growth_pct / 100.0
+    margin_factor = 1.0 + scenario.margin_delta_bps / 10000.0
+    return round(eps_ttm * growth_factor * scenario.multiple * margin_factor, 2)
+
+
+def _parse_scenario(block: str, label: str) -> ScenarioAssumption | None:
+    """Parse one labeled scenario (BEAR / BASE / BULL) out of the fenced block."""
+
+    def _num(field: str) -> float | None:
+        m = re.search(rf"{label}_{field}:\s*(-?[\d.]+)", block, re.IGNORECASE)
+        if not m:
+            return None
+        try:
+            return float(m.group(1))
+        except ValueError:
+            return None
+
+    multiple = _num("MULTIPLE")
+    growth = _num("GROWTH_PCT")
+    margin = _num("MARGIN_DELTA_BPS")
+    probability = _num("PROBABILITY")
+    drivers_match = re.search(
+        rf"{label}_DRIVERS:\s*(.+?)(?:\n|$)", block, re.IGNORECASE
+    )
+    if multiple is None or growth is None or margin is None or probability is None:
+        return None
+    drivers = drivers_match.group(1).strip() if drivers_match else ""
+    return ScenarioAssumption(
+        multiple=multiple,
+        growth_pct=growth,
+        margin_delta_bps=margin,
+        drivers=drivers,
+        probability=probability,
+    )
+
+
+def extract_valuation_scenarios(
+    valuation_params_report: str,
+    eps_ttm: float | None,
+) -> ValuationScenarios | None:
+    """Parse VALUATION_SCENARIOS and compute IVs in Python.
+
+    Returns ``None`` (caller falls back to legacy single-range output) when
+    any of the following holds:
+
+    - block missing
+    - ``DATA_SUFFICIENCY: LOW`` (agent declined to emit scenarios)
+    - probabilities don't sum to ~100
+    - any scenario row fails to parse
+    - multiples are inverted (``bear_multiple > bull_multiple``) — fabrication signal
+    - ``eps_ttm`` is missing or non-positive
+    """
+    if not valuation_params_report:
+        return None
+    block = extract_last_fenced_block(valuation_params_report, "VALUATION_SCENARIOS")
+    if not block:
+        return None
+
+    suff_match = re.search(r"DATA_SUFFICIENCY:\s*(\w+)", block, re.IGNORECASE)
+    data_sufficiency = suff_match.group(1).upper() if suff_match else "LOW"
+    if data_sufficiency == "LOW":
+        logger.debug("Valuation scenarios suppressed: DATA_SUFFICIENCY=LOW")
+        return None
+
+    if eps_ttm is None or eps_ttm <= 0:
+        logger.debug("Valuation scenarios suppressed: eps_ttm missing or non-positive")
+        return None
+
+    method_match = re.search(r"METHODOLOGY:\s*(.+?)(?:\n|$)", block, re.IGNORECASE)
+    methodology = method_match.group(1).strip() if method_match else "P/E"
+
+    bear = _parse_scenario(block, "BEAR")
+    base = _parse_scenario(block, "BASE")
+    bull = _parse_scenario(block, "BULL")
+    if bear is None or base is None or bull is None:
+        logger.debug("Valuation scenarios: one or more scenario rows failed to parse")
+        return None
+
+    prob_sum = bear.probability + base.probability + bull.probability
+    if abs(prob_sum - 100.0) > 1.0:
+        logger.warning(
+            "Valuation scenarios rejected: probabilities sum to %.1f (expected 100)",
+            prob_sum,
+        )
+        return None
+
+    if bear.multiple > bull.multiple:
+        logger.warning(
+            "Valuation scenarios rejected: bear_multiple (%.2f) > bull_multiple (%.2f)",
+            bear.multiple,
+            bull.multiple,
+        )
+        return None
+
+    bear_iv = _scenario_iv(eps_ttm, bear)
+    base_iv = _scenario_iv(eps_ttm, base)
+    bull_iv = _scenario_iv(eps_ttm, bull)
+
+    if bear_iv > bull_iv:
+        # Possible after applying growth + margin deltas even with ordered multiples.
+        logger.warning(
+            "Valuation scenarios rejected: bear_iv (%.2f) > bull_iv (%.2f) post-compute",
+            bear_iv,
+            bull_iv,
+        )
+        return None
+
+    weighted_iv = round(
+        (
+            bear_iv * bear.probability
+            + base_iv * base.probability
+            + bull_iv * bull.probability
+        )
+        / 100.0,
+        2,
+    )
+
+    return ValuationScenarios(
+        methodology=methodology,
+        data_sufficiency=data_sufficiency,
+        bear=bear,
+        base=base,
+        bull=bull,
+        bear_iv=bear_iv,
+        base_iv=base_iv,
+        bull_iv=bull_iv,
+        weighted_iv=weighted_iv,
+    )
