@@ -54,12 +54,28 @@ def test_validate_cli_args_rejects_quick_with_chart_flags(capsys):
     assert "--transparent has no effect with --quick" in capsys.readouterr().err
 
 
-def test_resolve_article_path_relative_to_output_dir():
+def test_explicit_article_path_is_cwd_relative_even_with_output():
     from src.cli import resolve_article_path
 
-    args = Namespace(article="article.md", output="results/report.md")
+    args = Namespace(article="scratch/article.md", output="scratch/report.md")
 
-    assert resolve_article_path(args, "0005.HK") == Path("results/article.md")
+    assert resolve_article_path(args, "4776.T") == Path("scratch/article.md")
+
+
+def test_bare_article_derives_from_output():
+    from src.cli import resolve_article_path
+
+    args = Namespace(article=True, output="scratch/report.md")
+
+    assert resolve_article_path(args, "4776.T") == Path("scratch/report_article.md")
+
+
+def test_explicit_article_without_suffix_adds_md():
+    from src.cli import resolve_article_path
+
+    args = Namespace(article="scratch/article", output="scratch/report.md")
+
+    assert resolve_article_path(args, "4776.T") == Path("scratch/article.md")
 
 
 def test_resolve_article_path_default_uses_results_dir(monkeypatch, tmp_path):

@@ -284,7 +284,7 @@ class TestArticlePathResolution:
         assert path == Path("/tmp/my_article.md")
 
     def test_resolve_article_path_relative_with_output(self):
-        """Test relative article path resolves to output directory."""
+        """Explicit relative article paths stay relative to cwd."""
         from src.cli import resolve_article_path
 
         args = MagicMock()
@@ -293,7 +293,7 @@ class TestArticlePathResolution:
 
         path = resolve_article_path(args, "AAPL")
 
-        assert path == Path("results/custom.md")
+        assert path == Path("custom.md")
 
     def test_resolve_article_path_relative_no_output(self):
         """Test relative article path stays relative when no --output."""

@@ -9,6 +9,7 @@ UPDATED: Added Football Field chart generation integration.
 """
 
 import logging
+import os
 import re
 import sys
 from datetime import datetime
@@ -46,6 +47,17 @@ def normalize_governance_terms(text: str) -> str:
     for pattern, replacement in _GOVERNANCE_TERM_FIXES:
         text = pattern.sub(replacement, text)
     return text
+
+
+def _markdown_asset_link(asset_path: Path, report_dir: Path | None) -> str:
+    """Return a portable markdown link from a report to an asset path."""
+    if not report_dir:
+        return str(asset_path)
+
+    try:
+        return str(asset_path.resolve().relative_to(report_dir.resolve()))
+    except ValueError:
+        return os.path.relpath(asset_path.resolve(), report_dir.resolve())
 
 
 class QuietModeReporter:
@@ -937,16 +949,7 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         if radar_path:
             report_parts.append("## Thesis Alignment\n\n")
 
-            # Calculate link path
-            if self.report_dir:
-                try:
-                    radar_link = radar_path.resolve().relative_to(
-                        self.report_dir.resolve()
-                    )
-                except ValueError:
-                    radar_link = radar_path.resolve()
-            else:
-                radar_link = f"{radar_path.parent.name}/{radar_path.name}"
+            radar_link = _markdown_asset_link(radar_path, self.report_dir)
 
             report_parts.append(f"![Thesis Alignment Radar]({radar_link})\n\n---\n")
 
@@ -962,21 +965,7 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         if chart_path:
             report_parts.append("## Valuation Chart\n\n")
 
-            # Calculate link path
-            if self.report_dir:
-                try:
-                    # Try to make path relative to report directory
-                    # We resolve both to absolute paths first to be safe
-                    chart_link = chart_path.resolve().relative_to(
-                        self.report_dir.resolve()
-                    )
-                except ValueError:
-                    # If not relative (not a subdir), use absolute path
-                    # This happens if --imagedir is outside --output directory tree
-                    chart_link = chart_path.resolve()
-            else:
-                # Fallback for stdout or undefined report dir (try simple relative)
-                chart_link = f"{chart_path.parent.name}/{chart_path.name}"
+            chart_link = _markdown_asset_link(chart_path, self.report_dir)
 
             report_parts.append(f"![Football Field Chart]({chart_link})\n\n---\n")
 

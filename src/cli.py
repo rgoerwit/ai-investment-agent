@@ -258,9 +258,19 @@ def parse_arguments() -> argparse.Namespace:
     return args
 
 
+def _user_path(raw: str | None) -> Path | None:
+    """Return a user-supplied path without changing its base directory."""
+    return Path(raw) if raw else None
+
+
+def _sibling_path(base: Path, suffix: str) -> Path:
+    """Return a path next to `base` with `suffix` appended to its stem."""
+    return base.parent / f"{base.stem}{suffix}{base.suffix or '.md'}"
+
+
 def resolve_output_paths(args) -> tuple[Path | None, Path]:
     """Determine output file and image directory based on arguments."""
-    output_file = Path(args.output) if args.output else None
+    output_file = _user_path(args.output)
     output_dir = output_file.parent if output_file else Path.cwd()
 
     if args.imagedir:
@@ -285,25 +295,11 @@ def resolve_article_path(args, ticker: str) -> Path | None:
 
     if isinstance(args.article, str):
         article_path = Path(args.article)
-        if not article_path.suffix:
-            article_path = article_path.with_suffix(".md")
-
-        if article_path.is_absolute():
-            return article_path
-
-        if args.output:
-            output_dir = Path(args.output).parent
-            return output_dir / article_path
-
-        return article_path
+        return article_path if article_path.suffix else article_path.with_suffix(".md")
 
     if args.article is True:
         if args.output:
-            output_path = Path(args.output)
-            stem = output_path.stem
-            suffix = output_path.suffix or ".md"
-            article_name = f"{stem}_article{suffix}"
-            return output_path.parent / article_name
+            return _sibling_path(Path(args.output), "_article")
 
         safe_ticker = ticker.replace(".", "_").replace("/", "_")
         return config.results_dir / f"{safe_ticker}_article.md"

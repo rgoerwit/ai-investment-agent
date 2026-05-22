@@ -9,6 +9,7 @@ Generates horizontal bar charts showing valuation ranges:
 - Moving averages as reference lines (if available)
 """
 
+import textwrap
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -407,22 +408,24 @@ def generate_football_field(
     # the legacy bar-only view otherwise.
     scenario_y = _overlay_scenarios(ax, data)
 
-    # Methodology Footnote
-    if data.footnote:
-        fig.text(
-            0.5,
-            0.01,
-            data.footnote,
-            ha="center",
-            fontsize=7,
-            color=text_color,
-            style="italic",
-        )
-
-    # Formatting
+    # Formatting. ``Price`` stays as the bare x-axis label; the methodology
+    # footnote (when present) is placed via ``fig.supxlabel`` so
+    # ``layout="constrained"`` reserves space for it at the BOTTOM of the
+    # figure — below both the x-axis label AND the legend. The previous
+    # ``fig.text(...)`` placement at y=0.01 was opaque to the layout engine
+    # and collided with the legend; folding the footnote into ``xlabel``
+    # then collided with the bbox-anchored legend. ``supxlabel`` is the only
+    # supported attachment point that constrained_layout will stack
+    # correctly under both.
     ax.set_yticks(y_positions)
     ax.set_yticklabels(labels, color=text_color)
     ax.set_xlabel("Price", color=text_color)
+    if data.footnote:
+        # Wrap so long footnotes don't extend past the figure margins and
+        # get clipped by ``bbox_inches="tight"`` at save time. The 90-char
+        # target is a rough fit for the default 10-inch figure at 7pt font.
+        wrapped = textwrap.fill(data.footnote, width=90, break_long_words=False)
+        fig.supxlabel(wrapped, fontsize=7, color=text_color, style="italic")
     ax.set_title(
         f"{data.ticker} Valuation Range ({data.trade_date})", color=title_color
     )
@@ -430,13 +433,20 @@ def generate_football_field(
     # Set tick label colors
     ax.tick_params(axis="both", colors=tick_color)
 
-    # Place legend below chart to avoid any overlap with data
+    # Place legend below chart. Use 4 columns so the legend is at most 2 rows
+    # tall when the scenario overlay contributes 4 additional handles
+    # (Bear / Base / Bull / Weighted IV). Two columns produced a 4-row legend
+    # that ate too much vertical real estate and collided with the footnote.
+    # ``layout="constrained"`` reserves space for ``ax.legend()`` calls, so we
+    # don't need to micro-tune ``bbox_to_anchor``; a small negative y offset
+    # just nudges the legend below the x-axis label.
+    legend_ncol = 4
     if config.transparent:
         # Transparent mode: no background fill, but add border for clarity
         legend = ax.legend(
             loc="upper center",
-            bbox_to_anchor=(0.5, -0.18),
-            ncol=2,  # Two columns for compact horizontal layout
+            bbox_to_anchor=(0.5, -0.12),
+            ncol=legend_ncol,
             fontsize=8,
         )
         # Set facecolor and edgecolor separately on the frame
@@ -449,8 +459,8 @@ def generate_football_field(
     else:
         legend = ax.legend(
             loc="upper center",
-            bbox_to_anchor=(0.5, -0.18),
-            ncol=2,  # Two columns for compact horizontal layout
+            bbox_to_anchor=(0.5, -0.12),
+            ncol=legend_ncol,
             fontsize=8,
             framealpha=0.9,
         )

@@ -329,8 +329,7 @@ async def handle_article_generation(
                     )
 
                 if final_article != draft_article:
-                    with open(article_path, "w") as f:
-                        f.write(final_article)
+                    article_path.write_text(final_article, encoding="utf-8")
                     if not args.quiet and not args.brief:
                         console_obj.print("[green]Article revised and saved.[/green]")
 

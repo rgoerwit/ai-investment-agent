@@ -120,3 +120,49 @@ def test_chart_uses_constrained_layout_not_tight_layout() -> None:
     source = inspect.getsource(ff.generate_football_field)
     assert 'layout="constrained"' in source
     assert "fig.tight_layout()" not in source
+
+
+def test_footnote_uses_supxlabel_not_fig_text() -> None:
+    """Regression guard for the 4776.T legend-overlap bug.
+
+    ``fig.text(...)`` is opaque to ``constrained_layout`` — the legend
+    rendered on top of the footnote. ``fig.supxlabel`` *is* layout-managed
+    and stacks correctly below the legend. Anchor a source-level assertion
+    so a refactor can't silently revert the placement.
+
+    We scan non-comment lines only — comments in the docstring / explanatory
+    notes often reference the legacy path and must not trip the guard.
+    """
+    import inspect
+
+    from src.charts.generators import football_field as ff
+
+    source = inspect.getsource(ff.generate_football_field)
+    code_lines = [
+        line for line in source.splitlines() if not line.lstrip().startswith("#")
+    ]
+    code = "\n".join(code_lines)
+    assert "fig.supxlabel(" in code
+    assert "fig.text(" not in code
+
+
+def test_chart_with_long_footnote_renders_without_clipping(out_dir: Path) -> None:
+    """End-to-end: long footnote + all six legend handles renders cleanly.
+
+    Visual overlap can't be asserted from a PNG without OCR, but we can pin
+    the *invariants*: the image saves, is non-trivial in size, and is within
+    a sane envelope (catches the case where bbox_inches="tight" crops out a
+    multi-line xlabel by reducing the figure height to near zero).
+    """
+    long_footnote = (
+        "P/E normalization: Current PE 16.3 → Sector median PE 25.0 "
+        "(Information Technology) | Risk-adjusted (LOW zone, 100% discount) "
+        "| Consensus: 3 analysts"
+    )
+    data = _data(scenarios=_scenarios(), footnote=long_footnote)
+    path = generate_football_field(data, _config(out_dir))
+    assert path is not None and path.exists()
+    size = path.stat().st_size
+    # Loose envelope: catches both "blank chart" (too small) and "runaway
+    # canvas" (too large) regressions.
+    assert 50_000 < size < 1_500_000, f"unexpected png size {size}"
