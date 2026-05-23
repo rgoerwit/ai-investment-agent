@@ -33,12 +33,17 @@ from src.tooling.inspector import InspectionEnvelope, SourceKind
 
 logger = structlog.get_logger(__name__)
 
+_active_capture_manager: Any = None
 try:
-    from src.eval import get_active_capture_manager as _get_capture_manager
+    from src.eval import get_active_capture_manager as _active_capture_manager
 except ImportError:
+    _active_capture_manager = None
 
-    def _get_capture_manager():
+
+def _get_capture_manager() -> Any:
+    if _active_capture_manager is None:
         return None
+    return _active_capture_manager()
 
 
 def _record_capture_memory_event(payload: dict[str, Any]) -> None:
@@ -85,8 +90,9 @@ class FinancialSituationMemory:
         """
         self.name = name
         self.available = False
-        self.situation_collection = None
-        self.embeddings = None
+        self.situation_collection: Any = None
+        self.chroma_client: Any = None
+        self.embeddings: GoogleGenerativeAIEmbeddings | None = None
         self.embeddings_available = False
         self.chroma_available = False
 
@@ -191,12 +197,13 @@ class FinancialSituationMemory:
             return cls._shared_embeddings
 
         try:
-            embeddings = GoogleGenerativeAIEmbeddings(
-                model=f"models/{cls._EMBEDDING_MODEL}",
-                google_api_key=api_key,
-                task_type="retrieval_document",
-                output_dimensionality=cls._EMBEDDING_DIMENSION,
-            )
+            embedding_kwargs: dict[str, Any] = {
+                "model": f"models/{cls._EMBEDDING_MODEL}",
+                "google_api_key": api_key,
+                "task_type": "retrieval_document",
+                "output_dimensionality": cls._EMBEDDING_DIMENSION,
+            }
+            embeddings = GoogleGenerativeAIEmbeddings(**embedding_kwargs)
             try:
                 test_embedding = embeddings.embed_query("initialization test")
                 if not test_embedding or len(test_embedding) == 0:
@@ -736,10 +743,19 @@ class FinancialSituationMemory:
 
                         if all_docs and "metadatas" in all_docs:
                             for doc_id, metadata in zip(
-                                all_docs["ids"], all_docs["metadatas"], strict=False
+                                all_docs.get("ids") or [],
+                                all_docs.get("metadatas") or [],
+                                strict=False,
                             ):
-                                timestamp = metadata.get("timestamp", "")
-                                if timestamp and timestamp < cutoff_iso:
+                                timestamp = (
+                                    metadata.get("timestamp", "")
+                                    if isinstance(metadata, dict)
+                                    else ""
+                                )
+                                if (
+                                    isinstance(timestamp, str)
+                                    and timestamp < cutoff_iso
+                                ):
                                     ids_to_delete.append(doc_id)
 
                         if ids_to_delete:
@@ -1039,10 +1055,16 @@ def cleanup_all_memories(days: int = 0, ticker: str | None = None) -> dict[str, 
 
                     if all_docs and "metadatas" in all_docs:
                         for doc_id, metadata in zip(
-                            all_docs["ids"], all_docs["metadatas"], strict=False
+                            all_docs.get("ids") or [],
+                            all_docs.get("metadatas") or [],
+                            strict=False,
                         ):
-                            timestamp = metadata.get("timestamp", "")
-                            if timestamp and timestamp < cutoff_iso:
+                            timestamp = (
+                                metadata.get("timestamp", "")
+                                if isinstance(metadata, dict)
+                                else ""
+                            )
+                            if isinstance(timestamp, str) and timestamp < cutoff_iso:
                                 ids_to_delete.append(doc_id)
 
                     if ids_to_delete:
@@ -1207,7 +1229,7 @@ class MacroEventsStore:
 
     def __init__(self) -> None:
         self.available = False
-        self.collection = None
+        self.collection: Any = None
         self._init()
 
     def _init(self) -> None:

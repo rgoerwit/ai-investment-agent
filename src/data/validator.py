@@ -409,7 +409,7 @@ class FineGrainedValidator:
         shares = self._safe_float(data.get("sharesOutstanding"))
         reported_cap = self._safe_float(data.get("marketCap"))
 
-        if not all([price, shares, reported_cap]) or reported_cap == 0:
+        if price is None or shares is None or reported_cap is None or reported_cap == 0:
             result.missing_fields.append("price/shares/marketCap")
             return result
 

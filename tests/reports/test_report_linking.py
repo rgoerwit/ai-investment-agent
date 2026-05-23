@@ -41,11 +41,11 @@ class TestReportLinking:
         assert str(report_dir) not in report  # Ensure no absolute paths
 
     @patch("src.report_generator.QuietModeReporter._generate_chart")
-    def test_absolute_link_fallback(self, mock_generate_chart, tmp_path):
+    def test_relative_link_to_external_chart_dir(self, mock_generate_chart, tmp_path):
         """
         Scenario: Report is in results/report.md
-        Images are in /tmp/charts/chart.png (completely separate tree)
-        Expected Link: Absolute path to /tmp/charts/chart.png
+        Images are in a sibling charts directory
+        Expected Link: ../separate_charts/chart.png
         """
         # Setup filesystem
         report_dir = tmp_path / "results"
@@ -64,10 +64,7 @@ class TestReportLinking:
         result = {"final_trade_decision": "Action: BUY"}
         report = reporter.generate_report(result)
 
-        # Assertions
-        # Should contain the full absolute path since it can't be relative
-        expected_path = str(chart_path.resolve())
-        assert f"({expected_path})" in report
+        assert "![Football Field Chart](../separate_charts/chart.png)" in report
 
     @patch("src.report_generator.QuietModeReporter._generate_chart")
     def test_messy_relative_path_resolution(self, mock_generate_chart, tmp_path):
@@ -92,3 +89,18 @@ class TestReportLinking:
         report = reporter.generate_report(result)
 
         assert "![Football Field Chart](images/chart.png)" in report
+
+    @patch("src.report_generator.QuietModeReporter._generate_chart")
+    def test_stdout_link_uses_given_path_string(self, mock_generate_chart, tmp_path):
+        chart_path = tmp_path / "images" / "chart.png"
+        chart_path.parent.mkdir()
+        mock_generate_chart.return_value = chart_path
+
+        reporter = QuietModeReporter(
+            "AAPL", report_dir=None, image_dir=chart_path.parent
+        )
+
+        result = {"final_trade_decision": "Action: BUY"}
+        report = reporter.generate_report(result)
+
+        assert f"![Football Field Chart]({chart_path})" in report

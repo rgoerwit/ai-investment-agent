@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import structlog
 import yfinance as yf
@@ -162,7 +162,7 @@ async def fetch_fmp_fallback(fetcher: Any, symbol: str) -> dict | None:
             v is not None for k, v in fmp_data.items() if k != "_source"
         ):
             fetcher.stats["sources"]["fmp"] += 1
-            return fmp_data
+            return cast(dict[str, Any], fmp_data)
     except Exception:
         return None
     return None
@@ -176,7 +176,7 @@ async def fetch_eodhd_fallback(fetcher: Any, symbol: str) -> dict | None:
         data = await fetcher.eodhd_fetcher.get_financial_metrics(symbol)
         if data and any(v is not None for k, v in data.items() if k != "_source"):
             fetcher.stats["sources"]["eodhd"] += 1
-            return data
+            return cast(dict[str, Any], data)
         return None
     except Exception as exc:
         logger.warning(
@@ -201,7 +201,7 @@ async def fetch_av_fallback(fetcher: Any, symbol: str) -> dict | None:
             v is not None for k, v in data.items() if not k.startswith("_")
         ):
             fetcher.stats["sources"]["alpha_vantage"] += 1
-            return data
+            return cast(dict[str, Any], data)
         return None
     except Exception as exc:
         logger.warning(

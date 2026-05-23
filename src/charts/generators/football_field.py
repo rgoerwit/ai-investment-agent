@@ -9,6 +9,7 @@ Generates horizontal bar charts showing valuation ranges:
 - Moving averages as reference lines (if available)
 """
 
+import textwrap
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -59,6 +60,134 @@ def _is_target_reasonable(
     return True
 
 
+def _overlay_scenarios(
+    ax,
+    data: FootballFieldData,
+) -> float | None:
+    """Plot bear/base/bull IV markers + weighted-IV diamond above the existing bars.
+
+    Returns the y-position used for the markers so the caller can extend the
+    axis upper limit, or ``None`` when no scenarios are attached (legacy
+    single-range view).
+
+    The scenarios object follows the ``ValuationScenariosLike`` protocol on
+    ``FootballFieldData`` so tests can use lightweight structural fixtures.
+    """
+    scenarios = data.scenarios
+    if scenarios is None:
+        return None
+
+    try:
+        bear_iv = float(scenarios.bear_iv)
+        base_iv = float(scenarios.base_iv)
+        bull_iv = float(scenarios.bull_iv)
+        weighted_iv = float(scenarios.weighted_iv)
+    except (AttributeError, TypeError, ValueError) as exc:
+        from src.error_safety import summarize_exception
+
+        logger.warning(
+            "Scenario overlay skipped: malformed scenarios object",
+            **summarize_exception(exc, operation="football_field_scenario_overlay"),
+        )
+        return None
+
+    # Reject scenarios with non-positive or non-finite values defensively.
+    values = (bear_iv, base_iv, bull_iv, weighted_iv)
+    if not all(isinstance(v, float) and v > 0 for v in values):
+        logger.warning(
+            "Scenario overlay skipped: non-positive IV detected", values=values
+        )
+        return None
+
+    # Place the marker row just above whatever the topmost bar/warning row is.
+    # Caller already extends `top_limit` to accommodate this.
+    scenario_y = len(_collect_visible_rows(data)) + 0.1
+
+    # Plot bear / base / bull dots and weighted diamond at scenario_y.
+    ax.scatter(
+        [bear_iv],
+        [scenario_y],
+        marker="o",
+        color="#E74C3C",  # red
+        edgecolors="black",
+        s=120,
+        zorder=15,
+        label="Bear",
+    )
+    ax.scatter(
+        [base_iv],
+        [scenario_y],
+        marker="o",
+        color="#4A90D9",  # blue
+        edgecolors="black",
+        s=120,
+        zorder=15,
+        label="Base",
+    )
+    ax.scatter(
+        [bull_iv],
+        [scenario_y],
+        marker="o",
+        color="#2ECC71",  # green
+        edgecolors="black",
+        s=120,
+        zorder=15,
+        label="Bull",
+    )
+    ax.scatter(
+        [weighted_iv],
+        [scenario_y],
+        marker="D",
+        color="black",
+        edgecolors="white",
+        s=110,
+        zorder=16,
+        label="Weighted IV",
+    )
+
+    return scenario_y
+
+
+def _add_scenario_row_label(ax, scenario_y: float | None, text_color: str) -> None:
+    """Add the scenario-row label after final x-limits are known."""
+    if scenario_y is None:
+        return
+    left, _ = ax.get_xlim()
+    ax.text(
+        left,
+        scenario_y,
+        "Scenarios",
+        ha="right",
+        va="center",
+        fontsize=8,
+        color=text_color,
+        style="italic",
+    )
+
+
+def _collect_visible_rows(data: FootballFieldData) -> list[str]:
+    """Approximate the number of bar rows the renderer will draw.
+
+    Matches the order in `generate_football_field`. Kept in sync with the
+    bar-construction block above; only used by the scenario overlay to pick a
+    y-position above the topmost bar.
+    """
+    rows = ["52w"]
+    if data.has_external_targets():
+        if _is_target_reasonable(
+            data.external_target_low, data.current_price
+        ) and _is_target_reasonable(data.external_target_high, data.current_price):
+            rows.append("ext")
+    if data.has_our_targets():
+        if _is_target_reasonable(
+            data.our_target_low, data.current_price
+        ) and _is_target_reasonable(data.our_target_high, data.current_price):
+            rows.append("our")
+    elif data.quality_warnings:
+        rows.append("suspended")
+    return rows
+
+
 def generate_football_field(
     data: FootballFieldData,
     config: ChartConfig | None = None,
@@ -92,7 +221,16 @@ def generate_football_field(
     # Set Seaborn style with white grid
     sns.set_style("whitegrid")
 
-    fig, ax = plt.subplots(figsize=(config.width_inches, config.height_inches))
+    # ``layout="constrained"`` is matplotlib's recommended replacement for
+    # ``tight_layout()`` when the figure carries an outside-axes legend or
+    # other artists that can clip with the legacy layout engine. Combined
+    # with the ``bbox_inches="tight"`` save kwarg below, this prevents the
+    # six-row legend (52w / external / our + bear / base / bull / weighted)
+    # from clipping on long ticker / company names.
+    fig, ax = plt.subplots(
+        figsize=(config.width_inches, config.height_inches),
+        layout="constrained",
+    )
 
     # Set colors based on transparency to ensure visibility on both dark/light themes
     if config.transparent:
@@ -131,28 +269,27 @@ def generate_football_field(
             data.external_target_high, data.current_price
         )
         if ext_low_ok and ext_high_ok:
-            bars.append(
-                (
-                    data.external_target_low,
-                    data.external_target_high - data.external_target_low,
-                )
-            )
-            colors.append("#7B68EE")  # Purple
-            labels.append("Analyst Consensus")
+            ext_low = data.external_target_low
+            ext_high = data.external_target_high
+            if ext_low is not None and ext_high is not None:
+                bars.append((ext_low, ext_high - ext_low))
+                colors.append("#7B68EE")  # Purple
+                labels.append("Analyst Consensus")
 
     # Our Target Range (if available and reasonable - LLM math can hallucinate)
     if data.has_our_targets():
         our_low_ok = _is_target_reasonable(data.our_target_low, data.current_price)
         our_high_ok = _is_target_reasonable(data.our_target_high, data.current_price)
         if our_low_ok and our_high_ok:
-            bars.append(
-                (data.our_target_low, data.our_target_high - data.our_target_low)
-            )
-            colors.append("#2ECC71")  # Green
-            label = "Our Target"
-            if data.target_confidence:
-                label += f" ({data.target_confidence})"
-            labels.append(label)
+            our_low = data.our_target_low
+            our_high = data.our_target_high
+            if our_low is not None and our_high is not None:
+                bars.append((our_low, our_high - our_low))
+                colors.append("#2ECC71")  # Green
+                label = "Our Target"
+                if data.target_confidence:
+                    label += f" ({data.target_confidence})"
+                labels.append(label)
     elif data.quality_warnings:
         # If targets are missing due to quality warnings (skipped valuation), show placeholder
         # Use a dummy range centered on current price to place the label
@@ -265,22 +402,29 @@ def generate_football_field(
             zorder=20,  # Ensure on top
         )
 
-    # Methodology Footnote
-    if data.footnote:
-        fig.text(
-            0.5,
-            0.01,
-            data.footnote,
-            ha="center",
-            fontsize=7,
-            color=text_color,
-            style="italic",
-        )
+    # Scenario valuation overlay (bear/base/bull markers + weighted diamond).
+    # Renders only when `data.scenarios` is populated; degrades silently to
+    # the legacy bar-only view otherwise.
+    scenario_y = _overlay_scenarios(ax, data)
 
-    # Formatting
+    # Formatting. ``Price`` stays as the bare x-axis label; the methodology
+    # footnote (when present) is placed via ``fig.supxlabel`` so
+    # ``layout="constrained"`` reserves space for it at the BOTTOM of the
+    # figure — below both the x-axis label AND the legend. The previous
+    # ``fig.text(...)`` placement at y=0.01 was opaque to the layout engine
+    # and collided with the legend; folding the footnote into ``xlabel``
+    # then collided with the bbox-anchored legend. ``supxlabel`` is the only
+    # supported attachment point that constrained_layout will stack
+    # correctly under both.
     ax.set_yticks(y_positions)
     ax.set_yticklabels(labels, color=text_color)
     ax.set_xlabel("Price", color=text_color)
+    if data.footnote:
+        # Wrap so long footnotes don't extend past the figure margins and
+        # get clipped by ``bbox_inches="tight"`` at save time. The 90-char
+        # target is a rough fit for the default 10-inch figure at 7pt font.
+        wrapped = textwrap.fill(data.footnote, width=90, break_long_words=False)
+        fig.supxlabel(wrapped, fontsize=7, color=text_color, style="italic")
     ax.set_title(
         f"{data.ticker} Valuation Range ({data.trade_date})", color=title_color
     )
@@ -288,13 +432,20 @@ def generate_football_field(
     # Set tick label colors
     ax.tick_params(axis="both", colors=tick_color)
 
-    # Place legend below chart to avoid any overlap with data
+    # Place legend below chart. Use 4 columns so the legend is at most 2 rows
+    # tall when the scenario overlay contributes 4 additional handles
+    # (Bear / Base / Bull / Weighted IV). Two columns produced a 4-row legend
+    # that ate too much vertical real estate and collided with the footnote.
+    # ``layout="constrained"`` reserves space for ``ax.legend()`` calls, so we
+    # don't need to micro-tune ``bbox_to_anchor``; a small negative y offset
+    # just nudges the legend below the x-axis label.
+    legend_ncol = 4
     if config.transparent:
         # Transparent mode: no background fill, but add border for clarity
         legend = ax.legend(
             loc="upper center",
-            bbox_to_anchor=(0.5, -0.18),
-            ncol=2,  # Two columns for compact horizontal layout
+            bbox_to_anchor=(0.5, -0.12),
+            ncol=legend_ncol,
             fontsize=8,
         )
         # Set facecolor and edgecolor separately on the frame
@@ -307,8 +458,8 @@ def generate_football_field(
     else:
         legend = ax.legend(
             loc="upper center",
-            bbox_to_anchor=(0.5, -0.18),
-            ncol=2,  # Two columns for compact horizontal layout
+            bbox_to_anchor=(0.5, -0.12),
+            ncol=legend_ncol,
             fontsize=8,
             framealpha=0.9,
         )
@@ -327,6 +478,11 @@ def generate_football_field(
         all_values.append(data.moving_avg_50)
     if data.moving_avg_200:
         all_values.append(data.moving_avg_200)
+    if data.scenarios is not None:
+        for attr in ("bear_iv", "base_iv", "bull_iv", "weighted_iv"):
+            value = getattr(data.scenarios, attr, None)
+            if isinstance(value, int | float) and value > 0:
+                all_values.append(float(value))
 
     min_val, max_val = min(all_values), max(all_values)
     padding = (max_val - min_val) * 0.25  # 25% padding for labels
@@ -335,17 +491,21 @@ def generate_football_field(
     padding = max(padding, min_padding)
     # Clamp lower bound to 0 to avoid negative prices on chart (penny stocks edge case)
     ax.set_xlim(max(0, min_val - padding), max_val + padding)
+    _add_scenario_row_label(ax, scenario_y, text_color)
 
     # Set y-axis limits with padding below for MA labels (two rows)
     # If warnings exist, add extra space at top for the warning box
     top_limit = len(bars) - 0.5
     if data.quality_warnings:
         top_limit += 1.0
+    if scenario_y is not None:
+        # Make room for the scenario markers row and its label.
+        top_limit = max(top_limit, scenario_y + 0.8)
 
     ax.set_ylim(-1.0, top_limit)
 
-    # Use OO API for thread-safety (avoid plt global state)
-    fig.tight_layout()
+    # No tight_layout() call — superseded by ``layout="constrained"`` above.
+    # Calling both is unsupported by matplotlib and emits a UserWarning.
 
     # Generate filename - use config.filename_stem if provided, else ticker_date
     if config.filename_stem:

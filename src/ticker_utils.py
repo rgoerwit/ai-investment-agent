@@ -464,7 +464,8 @@ async def _try_yfinance(ticker: str) -> str | None:
             label=f"yfinance.info:{ticker}",
         )
         if info:
-            return info.get("longName") or info.get("shortName")
+            name = info.get("longName") or info.get("shortName")
+            return name if isinstance(name, str) else None
     except (asyncio.TimeoutError, Exception) as e:
         logger.debug("company_name_yfinance_failed", ticker=ticker, error=str(e))
     return None
@@ -483,7 +484,8 @@ async def _try_yahooquery(ticker: str) -> str | None:
         if isinstance(result, dict) and ticker in result:
             data = result[ticker]
             if isinstance(data, dict):
-                return data.get("longName") or data.get("shortName")
+                name = data.get("longName") or data.get("shortName")
+                return name if isinstance(name, str) else None
     except (asyncio.TimeoutError, Exception) as e:
         logger.debug("company_name_yahooquery_failed", ticker=ticker, error=str(e))
     return None
@@ -524,7 +526,7 @@ async def _try_ibkr(ticker: str) -> str | None:
     try:
         probe = await _get_ibkr_name_service().probe_security(ticker)
         if probe.identity_confidence == "VERIFIED":
-            return probe.company_name
+            return probe.company_name if isinstance(probe.company_name, str) else None
     except Exception as e:
         logger.debug("company_name_ibkr_failed", ticker=ticker, error=str(e))
     return None
@@ -575,7 +577,9 @@ async def resolve_company_name(
         for source_name, resolver in sources:
             try:
                 raw_name = await resolver(lookup_ticker)
-                if _is_valid_company_name(raw_name, lookup_ticker):
+                if isinstance(raw_name, str) and _is_valid_company_name(
+                    raw_name, lookup_ticker
+                ):
                     normalized = normalize_company_name(raw_name)
                     logger.debug(
                         "company_name_resolved",
@@ -614,7 +618,7 @@ async def resolve_company_name(
     if allow_ibkr_probe:
         try:
             raw_name = await _try_ibkr(ticker)
-            if _is_valid_company_name(raw_name, ticker):
+            if isinstance(raw_name, str) and _is_valid_company_name(raw_name, ticker):
                 normalized = normalize_company_name(raw_name)
                 logger.debug(
                     "company_name_resolved",

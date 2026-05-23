@@ -67,7 +67,7 @@ def create_app(
     )
     app.config["MACRO_ALERT_SERVICE"] = MacroAlertService()
     app.config["PREFERENCES_STORE"] = preferences_store
-    app.json.sort_keys = False
+    app.json.sort_keys = False  # type: ignore[attr-defined]
 
     app.register_blueprint(api_bp)
     app.register_blueprint(views_bp)

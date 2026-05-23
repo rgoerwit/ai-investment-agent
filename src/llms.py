@@ -232,8 +232,10 @@ _llm_instance_counter: int = 0
 def _coerce_int_setting(value: Any, default: int) -> int:
     if isinstance(value, bool):
         return default
+    if isinstance(value, int):
+        return value
     if isinstance(value, Real):
-        return int(value)
+        return int(float(value))
     if isinstance(value, str):
         try:
             return int(value.strip())
@@ -291,13 +293,13 @@ def _stamp_budget_metadata(
 ) -> None:
     setattr(llm, intent_attr, budget.intent_tokens)
     setattr(llm, api_attr, budget.api_cap_tokens)
-    llm._configured_reasoning_reserve_tokens = budget.reserve_tokens
+    llm._configured_reasoning_reserve_tokens = budget.reserve_tokens  # type: ignore[attr-defined]
 
     for callback in callbacks or []:
         if hasattr(callback, "output_token_cap"):
-            callback.output_token_cap = budget.intent_tokens
-            callback.api_output_token_cap = budget.api_cap_tokens
-            callback.reasoning_reserve_tokens = budget.reserve_tokens
+            callback.output_token_cap = budget.intent_tokens  # type: ignore[attr-defined]
+            callback.api_output_token_cap = budget.api_cap_tokens  # type: ignore[attr-defined]
+            callback.reasoning_reserve_tokens = budget.reserve_tokens  # type: ignore[attr-defined]
 
 
 class _LazyLLMProxy:
@@ -377,7 +379,7 @@ def create_gemini_model(
         ),
     )
 
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "model": model_name,
         "temperature": temperature,
         "timeout": timeout,
@@ -414,7 +416,7 @@ def create_gemini_model(
         api_attr="_configured_api_output_tokens",
     )
     if thinking_level:
-        llm.thinking_level = thinking_level
+        llm.thinking_level = thinking_level  # type: ignore[attr-defined,assignment]
 
     # Track instance for cleanup
     _llm_instance_counter += 1
@@ -427,8 +429,8 @@ def create_gemini_model(
 def create_quick_thinking_llm(
     temperature: float = 0.3,
     model: str | None = None,
-    timeout: int = None,
-    max_retries: int = None,
+    timeout: int | None = None,
+    max_retries: int | None = None,
     callbacks: list[BaseCallbackHandler] | None = None,
     max_output_tokens: int | None = None,
 ) -> BaseChatModel:
@@ -446,7 +448,7 @@ def create_quick_thinking_llm(
         max_retries if max_retries is not None else config.api_retry_attempts
     )
 
-    thinking_level = None
+    thinking_level: Literal["low", "medium", "high"] | None = None
     if _is_gemini_v3_or_greater(model_name) or _is_gemini_v2_5(model_name):
         thinking_level = "low"
     elif model_name.startswith("gemini-"):
@@ -471,8 +473,8 @@ def create_quick_thinking_llm(
 def create_deep_thinking_llm(
     temperature: float = 0.1,
     model: str | None = None,
-    timeout: int = None,
-    max_retries: int = None,
+    timeout: int | None = None,
+    max_retries: int | None = None,
     callbacks: list[BaseCallbackHandler] | None = None,
     max_output_tokens: int | None = None,
 ) -> BaseChatModel:
@@ -486,7 +488,7 @@ def create_deep_thinking_llm(
         max_retries if max_retries is not None else config.api_retry_attempts
     )
 
-    thinking_level = None
+    thinking_level: Literal["low", "medium", "high"] | None = None
     if _is_gemini_v3_or_greater(model_name) or _is_gemini_v2_5(model_name):
         thinking_level = "high"
 
@@ -875,7 +877,7 @@ def create_writer_llm(
         logger.info("writer_llm_no_thinking", model=model_name, temperature=temperature)
 
     llm = ChatAnthropic(**kwargs)
-    llm._configured_reasoning_reserve_tokens = (
+    llm._configured_reasoning_reserve_tokens = (  # type: ignore[attr-defined]
         kwargs.get("thinking", {}).get("budget_tokens") or 0
         if isinstance(kwargs.get("thinking"), dict)
         else 0

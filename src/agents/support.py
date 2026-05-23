@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from typing import Any
 
 import structlog
@@ -362,8 +363,33 @@ def extract_value_trap_verdict(value_trap_report: str) -> str:
     )
 
 
+# Tranche-1–4 fenced blocks the summarizer must preserve when truncation
+# fires. These carry load-bearing structured data for downstream consumers
+# (PM rationale, memo, quality judge, chart overlay) and are emitted at the
+# tail of long agent outputs — exactly where a naive head-truncate drops them.
+_PRESERVED_FENCED_BLOCKS: tuple[str, ...] = (
+    "KILL_CRITERIA",
+    "VALUATION_SCENARIOS",
+    "VALUATION_PARAMS",
+    "APAC_RESOLUTION",
+    "AUDITOR_RESOLUTION",
+    "CONSULTANT_RESOLUTION",
+)
+# Section-style (not fenced) block that Research Manager v5.3+ emits.
+_VARIANT_PERCEPTION_RE = re.compile(
+    r"###\s*VARIANT PERCEPTION.*?(?=\n##\s|\n###\s[A-Z]|\Z)",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
 def summarize_for_pm(report: str, report_type: str, max_chars: int = 3000) -> str:
-    """Summarize verbose reports while preserving structured blocks."""
+    """Summarize verbose reports while preserving structured blocks.
+
+    Critical blocks (DATA_BLOCK, PM_BLOCK, the Tranche-1–4 fenced blocks, and
+    the VARIANT PERCEPTION section) are always re-appended after truncation,
+    even when they sit at the tail of the report. Blocks already present
+    inside the retained head window are not re-injected.
+    """
     if not report or not isinstance(report, str):
         return report or ""
 
@@ -380,11 +406,21 @@ def summarize_for_pm(report: str, report_type: str, max_chars: int = 3000) -> st
         r"(RECOMMENDATION:.*?)(?=\n\n|\Z)",
         r"(SCORE:\s*\d+.*?)(?=\n\n|\Z)",
     ]
+    # Append the Tranche-1–4 fenced blocks dynamically.
+    block_patterns.extend(
+        rf"(### --- START {name}[^\n]*---.*?### --- END {name} ---)"
+        for name in _PRESERVED_FENCED_BLOCKS
+    )
 
-    blocks_to_preserve = []
+    blocks_to_preserve: list[str] = []
     for pattern in block_patterns:
         matches = re.findall(pattern, report, re.DOTALL | re.IGNORECASE)
         blocks_to_preserve.extend(matches)
+
+    # Variant Perception section (not fenced — anchored on the heading).
+    variant_match = _VARIANT_PERCEPTION_RE.search(report)
+    if variant_match:
+        blocks_to_preserve.append(variant_match.group(0).strip())
 
     preserved = "\n\n".join(blocks_to_preserve)
     remaining_chars = max_chars - len(preserved) - 100
@@ -394,6 +430,13 @@ def summarize_for_pm(report: str, report_type: str, max_chars: int = 3000) -> st
         last_para = first_section.rfind("\n\n")
         if last_para > 200:
             first_section = first_section[:last_para]
+
+        # Dedup: drop preserved blocks already present in the kept head so we
+        # don't emit the same fenced block twice.
+        if blocks_to_preserve:
+            filtered = [b for b in blocks_to_preserve if b.strip() not in first_section]
+            preserved = "\n\n".join(filtered)
+
         if preserved:
             return f"{first_section}\n\n[...summarized...]\n\n{preserved}"
         return first_section + "\n\n[...summarized...]"
@@ -533,7 +576,7 @@ def _is_output_insufficient(content: str, agent_key: str) -> bool:
     return False
 
 
-def _extract_sector_from_state(state: dict) -> str:
+def _extract_sector_from_state(state: Mapping[str, Any]) -> str:
     """Extract sector from the fundamentals DATA_BLOCK for lesson retrieval."""
     fundamentals = state.get("fundamentals_report", "") or ""
     return extract_data_block_field(fundamentals, "SECTOR") or "Unknown"
@@ -565,3 +608,48 @@ def _extract_sector_country(raw_data: str) -> tuple:
         logger.debug("sector_country_extract_failed", error=str(exc))
 
     return sector, country
+
+
+_KILL_CRITERIA_BLOCK = re.compile(
+    r"### --- START KILL_CRITERIA ---\s*(.+?)\s*### --- END KILL_CRITERIA ---",
+    re.DOTALL,
+)
+_KILL_CRITERIA_TRIGGER = re.compile(r"TRIGGER_\d+\s*:\s*(.+)")
+
+
+def extract_kill_criteria(bear_text: str | None) -> list[str]:
+    """Pull TRIGGER_N entries from the fenced KILL_CRITERIA block emitted by Bear Researcher.
+
+    Returns at most 3 trimmed triggers. Returns an empty list if the block is
+    missing, malformed, or contains no usable lines.
+    """
+    if not bear_text:
+        return []
+    match = _KILL_CRITERIA_BLOCK.search(bear_text)
+    if not match:
+        return []
+    triggers: list[str] = []
+    for line in match.group(1).splitlines():
+        m = _KILL_CRITERIA_TRIGGER.search(line)
+        if m:
+            value = m.group(1).strip()
+            if value:
+                triggers.append(value)
+    return triggers[:3]
+
+
+def get_bear_history(source: dict | Any) -> str:
+    """Return bear_history from either runtime AgentState or saved analysis JSON.
+
+    Runtime state stores it at `investment_debate_state.bear_history`; saved
+    JSON stores it at `investment_analysis.investment_debate.bear_history`.
+    """
+    if not isinstance(source, dict):
+        return ""
+    runtime = (source.get("investment_debate_state") or {}).get("bear_history")
+    if runtime:
+        return str(runtime)
+    saved = (
+        (source.get("investment_analysis") or {}).get("investment_debate") or {}
+    ).get("bear_history")
+    return str(saved) if saved else ""

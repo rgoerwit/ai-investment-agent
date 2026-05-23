@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 
 import structlog
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.types import RunnableConfig
 
@@ -143,7 +143,7 @@ def _normalize_structured_output(
         return content
 
     repair_kind = detect_legacy_data_block_shape(content)
-    normalized = normalize_legacy_data_block_report(content)
+    normalized = normalize_legacy_data_block_report(content) or content
     if normalized != content:
         event = (
             "fundamentals_markdown_table_datablock_repaired"
@@ -165,7 +165,7 @@ def _normalize_structured_output(
             original_has_datablock=has_parseable_fenced_block(content, "DATA_BLOCK"),
             repaired_has_datablock=has_parseable_data_block(boundary_normalized),
         )
-    normalized = boundary_normalized
+    normalized = boundary_normalized or normalized
     normalized = _sanitize_fundamentals_output(normalized, raw_data, ticker)
     return normalized
 
@@ -463,7 +463,7 @@ def create_analyst_node(
                 f"{support.get_analysis_context(ticker)}"
                 f"{trusted_context_instructions}"
             )
-            invocation_messages = [
+            invocation_messages: list[BaseMessage] = [
                 SystemMessage(content=core_system_instruction),
             ]
             if extra_context:
@@ -487,7 +487,7 @@ def create_analyst_node(
             )
             response.name = agent_key
 
-            new_state = {
+            new_state: dict[str, Any] = {
                 "sender": agent_key,
                 "messages": [response],
                 "prompts_used": prompts_used,

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import re
 import socket
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from src.data_block_utils import has_parseable_data_block
 from src.error_safety import redact_sensitive_text
@@ -150,6 +151,11 @@ def classify_failure(
         class_name=class_name or type(exc).__module__,
     )
     final_provider = provider or derived_provider
+    normalized_provider: ProviderName = (
+        cast(ProviderName, final_provider)
+        if final_provider in {"google", "openai", "anthropic", "deepseek", "unknown"}
+        else "unknown"
+    )
     host = _extract_host(message) or _extract_host(root_message)
 
     if isinstance(root, socket.gaierror) or any(
@@ -247,9 +253,7 @@ def classify_failure(
 
     return FailureDetails(
         kind=kind,
-        provider=final_provider
-        if final_provider in {"google", "openai", "anthropic"}
-        else "unknown",
+        provider=normalized_provider,
         host=host,
         error_type=type(exc).__name__,
         root_cause_type=type(root).__name__,
@@ -310,7 +314,7 @@ def failure_artifact(
     }
 
 
-def get_artifact_status(state: dict[str, Any], field: str) -> ArtifactStatus:
+def get_artifact_status(state: Mapping[str, Any], field: str) -> ArtifactStatus:
     statuses = state.get("artifact_statuses", {}) or {}
     raw = statuses.get(field)
     if isinstance(raw, dict):
@@ -334,16 +338,16 @@ def get_artifact_status(state: dict[str, Any], field: str) -> ArtifactStatus:
     )
 
 
-def is_artifact_complete(state: dict[str, Any], field: str) -> bool:
+def is_artifact_complete(state: Mapping[str, Any], field: str) -> bool:
     return get_artifact_status(state, field).complete
 
 
-def is_artifact_valid(state: dict[str, Any], field: str) -> bool:
+def is_artifact_valid(state: Mapping[str, Any], field: str) -> bool:
     return get_artifact_status(state, field).ok
 
 
 def get_valid_artifact_content(
-    state: dict[str, Any], field: str, default: str = ""
+    state: Mapping[str, Any], field: str, default: str = ""
 ) -> str:
     status = get_artifact_status(state, field)
     if not status.ok or not status.content:

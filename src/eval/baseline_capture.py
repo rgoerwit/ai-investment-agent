@@ -6,7 +6,7 @@ import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -213,7 +213,7 @@ class BaselineCaptureManager:
 
     def _load_json(self, path: Path) -> dict[str, Any]:
         with open(path, encoding="utf-8") as handle:
-            return json.load(handle)
+            return cast(dict[str, Any], json.load(handle))
 
     def _final_destination(self, *, status: str, trade_date: str) -> Path:
         root = self._accepted_root() if status == "accepted" else self._rejected_root()

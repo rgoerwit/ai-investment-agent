@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import structlog
 import yfinance as yf
@@ -118,8 +118,9 @@ async def _fetch_tavily_gaps_impl(
         metadata={"symbol": symbol, "fields": list(search_results.keys())},
     )
     inspected_text = await get_current_inspection_service().check(envelope)
-    return fetcher.pattern_extractor.extract_from_text(
-        inspected_text, skip_fields=set()
+    return cast(
+        dict[str, Any],
+        fetcher.pattern_extractor.extract_from_text(inspected_text, skip_fields=set()),
     )
 
 

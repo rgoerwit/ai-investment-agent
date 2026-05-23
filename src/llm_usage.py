@@ -23,7 +23,7 @@ def _coerce_optional_int(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, Real):
-        return int(value)
+        return int(float(value))
     if isinstance(value, str):
         try:
             return int(value.strip())

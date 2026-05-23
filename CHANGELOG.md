@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.1] - 2026-05-22
+
+### Added
+
+- **Investment Memo Section** — New memo-first report section with bear `KILL_CRITERIA` parser, APAC verdict rubric defaulting to SUPPORT, source-confidence table, and APAC/Auditor PM fallback resolution blocks.
+- **Valuation Scenarios** — `VALUATION_SCENARIOS` block with Python-computed bear/base/bull intrinsic values and probability-weighted mean, surfaced in the memo and used as a PM stop-loss anchor.
+- **Football-Field Scenario Overlay** — Bear/base/bull/weighted scenario markers on the football-field chart, with compacted labels and a constrained layout to avoid legend/caption overlap.
+- **Research Manager Variant Perception** — Variant-aware perception pass with placeholder-variant filtering.
+- **Report Quality Judge** — New CLI (`src/eval/report_quality_judge.py`) that resolves rendered markdown via `--markdown-dir` and buckets zero-feature legacy artifacts separately from FAIL.
+- **Integration Suite** — 48-test end-to-end suite with fixture builders parameterized across runtime and saved-JSON shapes, exercising all five quality-feature data flows plus strange-input regression guards.
+
+### Changed
+
+- **Saved-State Wiring** — Memo, PM payload, and football-field chart now read saved-JSON shapes, real `DATA_BLOCK` field names, and derived EPS so scenario valuation actually fires in production.
+- **PM Summarizer** — Preserves previously worked-out fenced blocks through summarization; auditor fallback gated on named forensic checks rather than a generic "no red flags" string.
+- **Auditor/Consultant/Valuation Artifacts** — Persisted alongside other artifacts for downstream consumers.
+
+### Fixed
+
+- **Article Path Resolution** — Article path is now resolved relative to the current working directory rather than the directory where `--output` places its file.
+- **Football-Field Layout** — Resolved legend/caption overlap and tightened scenario label rendering.
+- **Saved-State Access** — Fixed valuation and source-access paths when reading from saved JSON.
+- **Overlay Error Sanitization** — New logging routed through `summarize_exception` to avoid leaking raw tracebacks.
+
 ## [3.10.0] - 2026-05-17
 
 ### Added

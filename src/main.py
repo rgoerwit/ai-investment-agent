@@ -16,7 +16,7 @@ from contextlib import nullcontext
 from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from rich.console import Console
@@ -647,7 +647,7 @@ async def run_analysis(
                     result["prompts_used"] = prompts_used
                 result["analysis_validity"] = build_analysis_validity(result)
 
-            return result
+            return cast(dict, result)
 
     except Exception as e:
         from src.async_utils import get_hard_timeout_orphan_snapshot

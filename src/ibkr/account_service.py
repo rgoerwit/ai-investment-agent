@@ -10,6 +10,10 @@ from src.ibkr.models import PortfolioSummary
 from src.ibkr.portfolio import build_portfolio_summary
 
 
+def _account_id(value: object) -> str:
+    return value if isinstance(value, str) else ""
+
+
 @dataclass
 class AccountStatus:
     account_id: str
@@ -83,7 +87,7 @@ class IbkrAccountService:
             self._prompt_for_missing_secret_fn(config)
         client = self._client_cls(config)
         client.connect(brokerage_session=False)
-        acct = account_id or getattr(config, "ibkr_account_id", "")
+        acct = account_id or _account_id(getattr(config, "ibkr_account_id", ""))
         try:
             return client.get_ledger(acct)
         finally:
@@ -106,7 +110,7 @@ class IbkrAccountService:
         if self._prompt_for_missing_secret_fn is not None:
             self._prompt_for_missing_secret_fn(config)
 
-        acct = account_id or getattr(config, "ibkr_account_id", "")
+        acct = account_id or _account_id(getattr(config, "ibkr_account_id", ""))
         client = self._client_cls(config)
         client.connect(brokerage_session=False)
         try:

@@ -13,6 +13,7 @@ https://disclosure2.edinet-fsa.go.jp).
 
 import asyncio
 import re
+from typing import Any
 
 import structlog
 
@@ -145,7 +146,7 @@ class EdinetFetcher(FilingFetcher):
             return
 
         # Method 1: Try to get shareholder data from parsed annual report
-        shareholders = []
+        shareholders: list[dict[str, Any]] = []
         try:
             if hasattr(parsed, "to_dict"):
                 parsed.to_dict()  # validate parseability; data used via attribute access below
@@ -180,7 +181,7 @@ class EdinetFetcher(FilingFetcher):
 
         if shareholders:
             # Deduplicate by name, keep highest percentage
-            seen = {}
+            seen: dict[str, dict[str, Any]] = {}
             for sh in shareholders:
                 name = sh["name"]
                 if name not in seen or sh["percent"] > seen[name]["percent"]:
@@ -205,7 +206,7 @@ class EdinetFetcher(FilingFetcher):
 
     async def _extract_segments(self, parsed, result: FilingResult) -> None:
         """Extract segment breakdown from parsed filing."""
-        segments = []
+        segments: list[dict[str, Any]] = []
 
         try:
             parsed_dict = None
@@ -254,7 +255,7 @@ class EdinetFetcher(FilingFetcher):
 
         if segments:
             # Calculate percentages if we have numeric revenue values
-            total_rev = 0
+            total_rev = 0.0
             for seg in segments:
                 rev_str = str(seg.get("revenue", ""))
                 # Extract numeric value

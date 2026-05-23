@@ -555,7 +555,7 @@ jobs:
           #   an explicit reviewed exception rather than disabling license checks.
           # - Several packages publish mixed/legacy SPDX fragments or scancode refs
           #   despite permissive package metadata.
-          allow-dependencies-licenses: pkg:pypi/aiohappyeyeballs, pkg:pypi/et-xmlfile, pkg:pypi/frozendict, pkg:pypi/lxml, pkg:pypi/parso, pkg:pypi/pycryptodome, pkg:pypi/python-dateutil, pkg:pypi/structlog, pkg:pypi/typing-extensions, pkg:pypi/xlrd
+          allow-dependencies-licenses: pkg:pypi/aiohappyeyeballs, pkg:pypi/et-xmlfile, pkg:pypi/frozendict, pkg:pypi/lxml, pkg:pypi/matplotlib, pkg:pypi/parso, pkg:pypi/pycryptodome, pkg:pypi/python-dateutil, pkg:pypi/structlog, pkg:pypi/typing-extensions, pkg:pypi/xlrd
           # Comment on PR with dependency changes
           comment-summary-in-pr: always
           # GitHub can lag when producing dependency graph snapshots for the PR

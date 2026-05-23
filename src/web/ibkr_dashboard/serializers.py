@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from src.ibkr.dip_watch import DipWatchCandidate, build_dip_watch_candidates
 from src.ibkr.models import (
@@ -320,12 +320,13 @@ def _serialize_action_sections(
             items = [
                 candidate
                 if isinstance(candidate, dict)
-                else _serialize_dip_watch(candidate)
+                else _serialize_dip_watch(cast(DipWatchCandidate, candidate))
                 for candidate in section.items
             ]
         else:
             items = [
-                serialize_item(item, live_orders=live_orders) for item in section.items
+                serialize_item(cast(ReconciliationItem, item), live_orders=live_orders)
+                for item in section.items
             ]
         payload.append(
             {

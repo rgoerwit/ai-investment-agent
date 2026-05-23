@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from typing import Annotated
+from typing import Annotated, Any, cast
 
 import pandas as pd
 import structlog
@@ -49,7 +49,7 @@ async def get_ownership_structure(
     normalized = normalize_ticker(ticker)
     logger.info("ownership_structure_lookup", ticker=normalized)
 
-    result = {
+    result: dict[str, Any] = {
         "ticker": normalized,
         "institutional_holders": [],
         "institutional_holders_status": "PENDING",
@@ -66,8 +66,11 @@ async def get_ownership_structure(
         yf_ticker = yf.Ticker(normalized)
 
         try:
-            inst = await _load_ownership_property(
-                yf_ticker, "institutional_holders", normalized
+            inst = cast(
+                pd.DataFrame | None,
+                await _load_ownership_property(
+                    yf_ticker, "institutional_holders", normalized
+                ),
             )
             if inst is None:
                 result["institutional_holders_status"] = "DATA_UNAVAILABLE"
@@ -92,8 +95,11 @@ async def get_ownership_structure(
             result["data_quality"] = "PARTIAL"
 
         try:
-            insider = await _load_ownership_property(
-                yf_ticker, "insider_transactions", normalized
+            insider = cast(
+                pd.DataFrame | None,
+                await _load_ownership_property(
+                    yf_ticker, "insider_transactions", normalized
+                ),
             )
             if insider is None:
                 result["insider_transactions_status"] = "DATA_UNAVAILABLE"
@@ -134,8 +140,9 @@ async def get_ownership_structure(
             result["data_quality"] = "PARTIAL"
 
         try:
-            major = await _load_ownership_property(
-                yf_ticker, "major_holders", normalized
+            major = cast(
+                pd.DataFrame | None,
+                await _load_ownership_property(yf_ticker, "major_holders", normalized),
             )
             if major is None:
                 result["major_holders_status"] = "DATA_UNAVAILABLE"
@@ -143,7 +150,7 @@ async def get_ownership_structure(
             elif major.empty:
                 result["major_holders_status"] = "EMPTY"
             else:
-                major_dict = {}
+                major_dict: dict[str, float | str] = {}
                 for idx, row in major.iterrows():
                     if len(row) >= 2:
                         key = str(row.iloc[1]) if pd.notna(row.iloc[1]) else str(idx)
@@ -160,10 +167,12 @@ async def get_ownership_structure(
                 result["major_holders"] = major_dict
                 result["major_holders_status"] = "FOUND"
 
-                if result["institutional_holders"]:
+                holders = result.get("institutional_holders")
+                if isinstance(holders, list) and holders:
                     top5_pct = sum(
                         float(holder.get("pctHeld", 0) or 0) * 100
-                        for holder in result["institutional_holders"][:5]
+                        for holder in holders[:5]
+                        if isinstance(holder, dict)
                     )
                     result["ownership_concentration"] = round(top5_pct, 2)
         except Exception as exc:

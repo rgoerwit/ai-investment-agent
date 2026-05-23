@@ -11,6 +11,10 @@ from src.ibkr.portfolio import read_portfolio, read_watchlist
 from src.ibkr.types import ProgressCallback
 
 
+def _account_id(value: object) -> str:
+    return value if isinstance(value, str) else ""
+
+
 @dataclass
 class WatchlistSnapshot:
     tickers: set[str] = field(default_factory=set)
@@ -163,7 +167,7 @@ class IbkrPortfolioDataService:
         cash_buffer_pct: float,
     ) -> list[NormalizedPosition]:
         client, config = self._build_client()
-        acct = account_id or getattr(config, "ibkr_account_id", "")
+        acct = account_id or _account_id(getattr(config, "ibkr_account_id", ""))
         client.connect(brokerage_session=False)
         try:
             positions, _ = self._read_portfolio_fn(client, acct, cash_buffer_pct)
@@ -193,7 +197,7 @@ class IbkrPortfolioDataService:
         client, _config = self._build_client()
         client.connect(brokerage_session=False)
         try:
-            wl_name_hint = watchlist_name if explicitly_requested else ""
+            wl_name_hint = (watchlist_name or "") if explicitly_requested else ""
             result = self._read_watchlist_fn(client, wl_name_hint)
         finally:
             client.close()
@@ -213,7 +217,7 @@ class IbkrPortfolioDataService:
         try:
             return self._get_live_orders(
                 client,
-                account_id or getattr(config, "ibkr_account_id", ""),
+                account_id or _account_id(getattr(config, "ibkr_account_id", "")),
             )
         finally:
             client.close()
@@ -228,7 +232,7 @@ class IbkrPortfolioDataService:
         progress: ProgressCallback | None,
     ) -> PortfolioSnapshot:
         client, config = self._build_client()
-        acct = account_id or getattr(config, "ibkr_account_id", "")
+        acct = account_id or _account_id(getattr(config, "ibkr_account_id", ""))
 
         def emit(message: str) -> None:
             if progress is not None:
@@ -247,7 +251,7 @@ class IbkrPortfolioDataService:
             snapshot.positions = positions
             snapshot.portfolio = portfolio
 
-            wl_name_hint = watchlist_name if explicitly_requested else ""
+            wl_name_hint = (watchlist_name or "") if explicitly_requested else ""
             emit("Loading watchlist from IBKR...")
             wl_result = self._read_watchlist_fn(client, wl_name_hint)
             snapshot.watchlist = self._build_watchlist_snapshot(
@@ -270,7 +274,8 @@ class IbkrPortfolioDataService:
 
     @staticmethod
     def _get_live_orders(client: Any, account_id: str) -> list[dict[str, Any]]:
-        return client.get_live_orders(account_id=account_id)
+        orders = client.get_live_orders(account_id=account_id)
+        return orders if isinstance(orders, list) else []
 
     @staticmethod
     def _build_watchlist_snapshot(

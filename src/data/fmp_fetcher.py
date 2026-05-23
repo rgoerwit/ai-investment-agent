@@ -247,11 +247,17 @@ class FMPFetcher(FinancialFetcher):
             return None
         if data and isinstance(data, list) and len(data) > 0:
             name = data[0].get("companyName")
-            if name:
+            if isinstance(name, str) and name:
                 return name
         return None
 
-    async def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
+    async def get_price_history(
+        self,
+        ticker: str,
+        period: str = "1y",
+        start: str | None = None,
+        end: str | None = None,
+    ) -> pd.DataFrame:
         """
         Returns OHLC DataFrame with standard columns.
         Currently not implemented for FMP to save API calls.

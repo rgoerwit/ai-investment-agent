@@ -142,7 +142,7 @@ async def fetch_reference_content(url: str) -> str:
             source_uri=url,
             metadata={"url": url[:200]},
         )
-        return await get_current_inspection_service().check(envelope)
+        return str(await get_current_inspection_service().check(envelope))
 
     except httpx.TimeoutException:
         logger.warning(

@@ -146,6 +146,157 @@ def _ensure_consultant_resolution_block(
     return f"{pm_output.rstrip()}\n\n{resolution_block}\n"
 
 
+_APAC_SILENCE_SENTINELS = {
+    "NO_MATERIAL_APAC_CONNECTION",
+    "APAC_SPECIALIST_UNAVAILABLE",
+}
+
+
+def _requires_apac_resolution(apac_report: str | None) -> bool:
+    """True iff APAC produced non-silent, non-error output that PM should reconcile."""
+    if not apac_report:
+        return False
+    stripped = apac_report.strip()
+    if not stripped:
+        return False
+    return stripped not in _APAC_SILENCE_SENTINELS
+
+
+def _extract_apac_verdict_line(apac_report: str) -> str:
+    """Pull a one-line summary of the APAC specialist's verdict, if available."""
+    if not apac_report:
+        return ""
+    match = re.search(
+        r"\*\*VERDICT FOR CONSULTANT AND PM\*\*\s*:\s*(.+)",
+        apac_report,
+    )
+    if match:
+        # Take only the first line of the verdict sentence.
+        line = match.group(1).splitlines()[0].strip()
+        # Cap absurdly long values defensively.
+        return line[:400]
+    for tag in ("OVERRIDE", "CAUTION", "SUPPORT"):
+        if tag in apac_report:
+            return f"APAC specialist verdict {tag} (verdict line not extractable)."
+    return ""
+
+
+def _insert_block_before_pm_block(pm_output: str, block_text: str) -> str:
+    """Insert a resolution block immediately above PM_BLOCK (or at tail if absent)."""
+    pm_block_marker = "### --- START PM_BLOCK ---"
+    if pm_block_marker in pm_output:
+        return pm_output.replace(
+            pm_block_marker, f"{block_text.rstrip()}\n\n{pm_block_marker}", 1
+        )
+    return f"{pm_output.rstrip()}\n\n{block_text.rstrip()}\n"
+
+
+def _ensure_apac_resolution_block(pm_output: str, apac_report: str | None) -> str:
+    """Ensure PM output includes APAC_RESOLUTION when APAC produced non-silent output.
+
+    Mirrors the consultant pattern: pure programmatic fallback insertion, no
+    LLM retry. If PM already emitted an APAC_RESOLUTION block we leave it
+    alone; otherwise we splice in a deterministic placeholder so downstream
+    tooling can rely on the block being present.
+    """
+    if not _requires_apac_resolution(apac_report):
+        return pm_output
+    if "APAC_RESOLUTION:" in pm_output:
+        return pm_output
+    summary = _extract_apac_verdict_line(apac_report or "") or (
+        "APAC specialist output not reconciled in PM rationale."
+    )
+    fallback = (
+        "APAC_RESOLUTION:\n"
+        f"- FINDING: {summary}\n"
+        "- DATA_CHECK: NOT_PROVIDED\n"
+        "- VERDICT: UNVERIFIABLE"
+    )
+    return _insert_block_before_pm_block(pm_output, fallback)
+
+
+# Auditor fallback gating (Tranche 5, Step 7).
+#
+# The original implementation inserted a fallback "Forensic Auditor flagged
+# anomalies not explicitly addressed" block for any non-empty, non-
+# INSUFFICIENT_DATA auditor output — which was misleading on clean audits.
+#
+# The corrected gating runs negative phrases FIRST so substring-style
+# positive tokens (e.g. "RED FLAG") don't trip on negations like
+# "no red flags." Positive detection then requires evidence of a NAMED
+# forensic check from the auditor's framework (Paper Profit, Zombie Ratio,
+# Trash Bin, …) rather than generic words.
+
+_AUDITOR_NEGATIVE_PHRASES: tuple[str, ...] = (
+    "NO ANOMAL",
+    "NO MATERIAL ANOMAL",
+    "NO MATERIAL CONCERN",
+    "NO RED FLAG",
+    "NO CONCERNS DETECTED",
+    "NO ISSUES DETECTED",
+    "ANOMALY_COUNT: 0",
+    "ANOMALIES: 0",
+    "ANOMALIES: NONE",
+    "STATUS=INSUFFICIENT_DATA",
+    "STATUS: INSUFFICIENT_DATA",
+    "INSUFFICIENT DATA",
+    "AUDITOR_VERDICT: CLEAN",
+    "AUDIT VERDICT: CLEAN",
+)
+
+_AUDITOR_POSITIVE_TOKENS: tuple[str, ...] = (
+    "PAPER PROFIT",
+    "BALLOONING DSO",
+    "ZOMBIE RATIO",
+    "INVENTORY HOARDING",
+    "ACQUISITION HANGOVER",
+    "STRETCHING PAYABLES",
+    "TRASH BIN",
+    "GHOST CASH",
+    "ACCRUAL RATIO",
+    "FORENSIC FLAG",
+)
+
+
+def _auditor_has_material_concern(auditor_report: str | None) -> bool:
+    """True only when the auditor named at least one specific forensic anomaly.
+
+    Conservative by design: a non-empty report that says "no red flags" /
+    "clean" / "INSUFFICIENT_DATA" returns False. Only fires when we can name
+    the specific forensic check from the auditor framework that flagged.
+    """
+    if not auditor_report:
+        return False
+    stripped = auditor_report.strip()
+    if not stripped:
+        return False
+    upper = stripped.upper()
+    if any(phrase in upper for phrase in _AUDITOR_NEGATIVE_PHRASES):
+        return False
+    return any(token in upper for token in _AUDITOR_POSITIVE_TOKENS)
+
+
+def _ensure_auditor_resolution_block(pm_output: str, auditor_report: str | None) -> str:
+    """Ensure PM output includes AUDITOR_RESOLUTION when the auditor named anomalies.
+
+    Refined in Tranche 5, Step 7: fallback fires only when the auditor named
+    at least one specific forensic check (Paper Profit, Zombie Ratio, etc.),
+    never on clean output or sentinel-coded INSUFFICIENT_DATA. PM-emitted
+    blocks are left alone.
+    """
+    if not _auditor_has_material_concern(auditor_report):
+        return pm_output
+    if "AUDITOR_RESOLUTION:" in pm_output:
+        return pm_output
+    fallback = (
+        "AUDITOR_RESOLUTION:\n"
+        "- FINDING: Forensic Auditor flagged anomalies not explicitly addressed by PM rationale.\n"
+        "- DATA_CHECK: NOT_PROVIDED\n"
+        "- VERDICT: UNVERIFIABLE"
+    )
+    return _insert_block_before_pm_block(pm_output, fallback)
+
+
 def resolve_pfic_display_status(
     legal_pfic_status: str | None,
     data_block_pfic_risk: str | None,
@@ -489,6 +640,59 @@ NEUTRAL ANALYST (Balanced):
             f"{support.summarize_for_pm(apac, 'apac', 1800) if apac else 'N/A'}"
         )
 
+        kill_criteria = support.extract_kill_criteria(support.get_bear_history(state))
+        if kill_criteria:
+            kill_lines = "\n".join(f"- {trigger}" for trigger in kill_criteria)
+            kill_criteria_section = (
+                "\n\nBEAR_KILL_CRITERIA (measurable triggers for immediate SELL; "
+                "surface these in the investment memo, not PM_BLOCK):\n"
+                f"{kill_lines}"
+            )
+        else:
+            kill_criteria_section = ""
+
+        # Scenario valuation section — only emitted when the Valuation
+        # Calculator produced a parseable VALUATION_SCENARIOS block AND the
+        # fundamentals provide enough data to derive EPS_TTM. The v9.7 PM
+        # prompt directs PM to anchor stop-loss to BEAR_IV and reference
+        # WEIGHTED_IV; that hint is only useful if PM actually sees the
+        # values, which is exactly what this section provides.
+        from src.charts.extractors.valuation import (
+            extract_valuation_scenarios,
+            resolve_eps_ttm,
+        )
+
+        valuation_params = get_valid_artifact_content(state, "valuation_params")
+        scenarios = None
+        if valuation_params and fundamentals:
+            eps_ttm = resolve_eps_ttm(fundamentals)
+            try:
+                scenarios = extract_valuation_scenarios(valuation_params, eps_ttm)
+            except Exception as exc:  # pragma: no cover — defense-in-depth
+                from src.error_safety import summarize_exception
+
+                logger.warning(
+                    "pm_scenario_extraction_failed",
+                    ticker=ticker,
+                    **summarize_exception(exc, operation="pm_scenario_extraction"),
+                )
+                scenarios = None
+        if scenarios is not None:
+            valuation_section = (
+                "\n\nVALUATION SCENARIOS (Python-computed IVs from "
+                f"{scenarios.methodology}; sufficiency {scenarios.data_sufficiency}; "
+                "anchor stop-loss to BEAR_IV, reference WEIGHTED_IV in rationale):\n"
+                f"- BEAR_IV: {scenarios.bear_iv} "
+                f"({scenarios.bear.probability:.0f}%) — {scenarios.bear.drivers}\n"
+                f"- BASE_IV: {scenarios.base_iv} "
+                f"({scenarios.base.probability:.0f}%) — {scenarios.base.drivers}\n"
+                f"- BULL_IV: {scenarios.bull_iv} "
+                f"({scenarios.bull.probability:.0f}%) — {scenarios.bull.drivers}\n"
+                f"- WEIGHTED_IV: {scenarios.weighted_iv}"
+            )
+        else:
+            valuation_section = ""
+
         red_flag_section = (
             "\n\nRED-FLAG PRE-SCREENING:\n"
             f"Pre-Screening Result: {pre_screening_result}"
@@ -520,7 +724,7 @@ VALUE TRAP ANALYSIS:
 {support.extract_value_trap_verdict(value_trap)}{support.summarize_for_pm(value_trap, "value_trap", 2500) if value_trap else "N/A"}{red_flag_section}
 
 RESEARCH MANAGER RECOMMENDATION:
-{support.summarize_for_pm(inv_plan, "research", 3000) if inv_plan else "N/A"}{apac_section}{consultant_section}
+{support.summarize_for_pm(inv_plan, "research", 3000) if inv_plan else "N/A"}{apac_section}{consultant_section}{kill_criteria_section}{valuation_section}
 
 TRADER PROPOSAL:
 {support.summarize_for_pm(trader, "trader", 2000) if trader else "N/A"}
@@ -544,6 +748,14 @@ RISK TEAM DEBATE:
             content_str = _ensure_consultant_resolution_block(
                 content_str,
                 consultant if consultant else None,
+            )
+            content_str = _ensure_apac_resolution_block(
+                content_str,
+                apac if apac else None,
+            )
+            content_str = _ensure_auditor_resolution_block(
+                content_str,
+                state.get("auditor_report") or None,
             )
 
             from src.utils import detect_truncation

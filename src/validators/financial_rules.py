@@ -49,7 +49,7 @@ _TRANSIENT_STRENGTH_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 
 def detect_red_flags(
-    metrics: dict[str, float | None],
+    metrics: dict[str, Any],
     ticker: str = "UNKNOWN",
     sector: Sector = Sector.INDUSTRIALS,
     strict_mode: bool = False,

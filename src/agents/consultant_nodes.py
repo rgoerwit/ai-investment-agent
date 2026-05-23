@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -216,7 +217,7 @@ async def _repair_forensic_auditor_output(
         ],
         context="global_forensic_auditor_repair",
     )
-    return message_utils.extract_string_content(response.content)
+    return message_utils.extract_string_content(getattr(response, "content", ""))
 
 
 def _remaining_consultant_budget(deadline: float) -> float:
@@ -252,7 +253,7 @@ async def _invoke_consultant_with_deadline(
     *,
     context: str,
     provider: str,
-    model_name: str,
+    model_name: str | None,
     ticker: str,
     deadline: float,
     total_timeout: float = CONSULTANT_TOTAL_TIMEOUT_SECONDS,
@@ -375,7 +376,9 @@ async def _run_bounded_consultant_loop(
             or not tool_calls
             or iteration == max_tool_iterations
         ):
-            content_str = message_utils.extract_string_content(response.content)
+            content_str = message_utils.extract_string_content(
+                getattr(response, "content", "")
+            )
             break
 
         messages.append(response)
@@ -412,6 +415,10 @@ async def _run_bounded_consultant_loop(
                             f"of {total_timeout:.0f}s for {ticker}"
                         )
                     try:
+
+                        async def _run_tool(args: dict[str, Any], tool=tool_fn) -> Any:
+                            return await tool.ainvoke(args)
+
                         tool_result = await get_current_tool_service().execute(
                             ToolInvocation(
                                 name=tool_call["name"],
@@ -419,7 +426,7 @@ async def _run_bounded_consultant_loop(
                                 source="consultant",
                                 agent_key=agent_key,
                             ),
-                            runner=lambda args, tool=tool_fn: tool.ainvoke(args),
+                            runner=_run_tool,
                         )
                         result = tool_result.value
                     except Exception as tool_err:
@@ -516,7 +523,9 @@ async def _run_bounded_consultant_loop(
                 deadline=deadline,
                 total_timeout=total_timeout,
             )
-            content_str = message_utils.extract_string_content(response.content)
+            content_str = message_utils.extract_string_content(
+                getattr(response, "content", "")
+            )
             break
 
     if not content_str and (tools_by_name or max_tool_iterations > 0):
@@ -530,7 +539,9 @@ async def _run_bounded_consultant_loop(
             deadline=deadline,
             total_timeout=total_timeout,
         )
-        content_str = message_utils.extract_string_content(response.content)
+        content_str = message_utils.extract_string_content(
+            getattr(response, "content", "")
+        )
 
     return ConsultantLoopResult(
         content=content_str,
@@ -813,7 +824,7 @@ Provide your independent consultant review."""
                     message="Consultant review completed with tool failures",
                     retryable=False,
                 )
-                return {
+                tool_error_result: dict[str, Any] = {
                     "consultant_review": content_str,
                     "consultant_tool_failures": tool_failure_count,
                     **(
@@ -825,6 +836,7 @@ Provide your independent consultant review."""
                         "consultant_review": status.as_dict(),
                     },
                 }
+                return tool_error_result
             result = success_artifact(
                 "consultant_review",
                 content_str,
@@ -834,12 +846,15 @@ Provide your independent consultant review."""
                 result["consultant_quick_profile"] = consultant_profile
             return result
         except Exception as exc:
-            logger.error(
-                "consultant_node_error",
-                ticker=ticker,
-                error=str(exc),
-                exc_info=True,
-            )
+            if isinstance(exc, TimeoutError):
+                logger.error("consultant_node_timeout", ticker=ticker, error=str(exc))
+            else:
+                logger.error(
+                    "consultant_node_error",
+                    ticker=ticker,
+                    error=str(exc),
+                    exc_info=True,
+                )
             result = failure_artifact(
                 "consultant_review",
                 exc,
@@ -922,7 +937,7 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
                     or iteration == max_tool_iterations
                 ):
                     response_str = message_utils.extract_string_content(
-                        response.content
+                        getattr(response, "content", "")
                     )
                     break
 
@@ -932,6 +947,12 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
                     tool_call_id = tool_call.get("id", tool_call["name"])
                     if tool_fn:
                         try:
+
+                            async def _run_legal_tool(
+                                args: dict[str, Any], tool=tool_fn
+                            ) -> Any:
+                                return await tool.ainvoke(args)
+
                             tool_result = await get_current_tool_service().execute(
                                 ToolInvocation(
                                     name=tool_call["name"],
@@ -939,7 +960,7 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
                                     source="legal_counsel",
                                     agent_key="legal_counsel",
                                 ),
-                                runner=lambda args, fn=tool_fn: fn.ainvoke(args),
+                                runner=_run_legal_tool,
                             )
                             tool_output = str(tool_result.value)
                         except Exception as tool_err:
@@ -1142,7 +1163,9 @@ Perform a forensic audit using your tools."""
                     or not tool_calls
                     or iteration == max_tool_iterations
                 ):
-                    return message_utils.extract_string_content(response.content)
+                    return message_utils.extract_string_content(
+                        getattr(response, "content", "")
+                    )
 
                 messages.append(response)
                 for tool_call in tool_calls:
@@ -1150,6 +1173,12 @@ Perform a forensic audit using your tools."""
                     tool_call_id = tool_call.get("id", tool_call["name"])
                     if tool_fn:
                         try:
+
+                            async def _run_auditor_tool(
+                                args: dict[str, Any], tool=tool_fn
+                            ) -> Any:
+                                return await tool.ainvoke(args)
+
                             tool_result = await get_current_tool_service().execute(
                                 ToolInvocation(
                                     name=tool_call["name"],
@@ -1157,7 +1186,7 @@ Perform a forensic audit using your tools."""
                                     source="auditor",
                                     agent_key="global_forensic_auditor",
                                 ),
-                                runner=lambda args, fn=tool_fn: fn.ainvoke(args),
+                                runner=_run_auditor_tool,
                             )
                             tool_output = str(tool_result.value)
                         except Exception as tool_err:

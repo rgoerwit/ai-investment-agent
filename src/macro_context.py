@@ -19,7 +19,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from langchain_core.callbacks import BaseCallbackHandler
@@ -153,7 +153,7 @@ def _read_cache(
         ttl_hours=ttl_hours,
     ):
         return None
-    return payload
+    return cast(dict[str, Any], payload)
 
 
 def _write_cache(
@@ -225,7 +225,7 @@ async def _fetch_macro_raw(trade_date: str, region: str) -> str:
     payload = {"trade_date": trade_date}
     if region:
         payload["region"] = region
-    return await get_macroeconomic_news.ainvoke(payload)
+    return str(await get_macroeconomic_news.ainvoke(payload))
 
 
 def _is_thin(raw: str | None) -> bool:

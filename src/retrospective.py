@@ -22,7 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -40,12 +40,18 @@ from src.tooling.inspector import InspectionEnvelope, SourceKind
 
 logger = structlog.get_logger(__name__)
 
+_get_capture_manager: Any
+
 try:
-    from src.eval import get_active_capture_manager as _get_capture_manager
+    from src.eval import get_active_capture_manager
+
+    _get_capture_manager = get_active_capture_manager
 except ImportError:
 
-    def _get_capture_manager():
+    def _fallback_capture_manager() -> None:
         return None
+
+    _get_capture_manager = _fallback_capture_manager
 
 
 def _record_capture_memory_event(payload: dict[str, Any]) -> None:
@@ -303,6 +309,7 @@ def extract_snapshot(
     suffix = get_ticker_suffix(ticker)
 
     resolution = resolve_local_trading_currency(ticker=ticker)
+    currency_source: str
     if resolution.code:
         currency = resolution.code
         currency_source = resolution.source
@@ -519,8 +526,8 @@ def load_past_snapshots(
             )
 
         try:
-            with open(filepath) as f:
-                data = json.load(f)
+            with open(filepath) as handle:
+                data = json.load(handle)
 
             snapshot = data.get("prediction_snapshot")
             if not snapshot:
@@ -853,7 +860,7 @@ def compute_confidence(comparison: dict[str, Any]) -> float:
         mode_factor=round(mode, 2),
         signal=round(signal, 2),
     )
-    return final
+    return float(final)
 
 
 def _prediction_is_directionally_correct(comparison: dict[str, Any]) -> bool:
@@ -929,7 +936,9 @@ FAILURE_MODE: CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_BLEED | OPERATIONAL_MISS | 
         )
         if invoke_config:
             response = await run_with_hard_timeout(
-                llm.ainvoke([HumanMessage(content=prompt)], config=invoke_config),
+                llm.ainvoke(
+                    [HumanMessage(content=prompt)], config=cast(Any, invoke_config)
+                ),
                 timeout=hard_timeout,
                 label=f"llm:retrospective_lesson:{comparison.get('ticker', '?')}",
             )
@@ -1163,7 +1172,7 @@ async def save_rejection_record(
         )
     else:
         logger.warning("rejection_record_storage_failed", ticker=ticker)
-    return stored
+    return bool(stored)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1261,7 +1270,7 @@ async def store_lesson(
             ticker=ticker,
             lesson_type=lesson_type,
         )
-    return stored
+    return bool(stored)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1316,7 +1325,7 @@ async def get_relevant_lessons(
                 "results": results,
             }
         )
-        return results
+        return cast(list[dict[str, Any]], results)
     except Exception as e:
         logger.debug("lesson_query_failed", error=str(e))
         _record_capture_memory_event(
@@ -1507,7 +1516,7 @@ async def format_lessons_for_injection(
             "injected_text": formatted,
         }
     )
-    return formatted
+    return str(formatted)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

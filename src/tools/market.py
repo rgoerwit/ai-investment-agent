@@ -1,7 +1,7 @@
 """Market and fundamentals tool implementations."""
 
 import json
-from typing import Annotated
+from typing import Annotated, cast
 
 import pandas as pd
 from langchain_core.tools import tool
@@ -53,13 +53,15 @@ def extract_from_dataframe(
 
 async def _inspect_financial_text(value: str, source_name: str, *, ticker: str) -> str:
     """Inspect free text from financial APIs before it becomes prompt-visible."""
-    return await get_current_inspection_service().check(
-        InspectionEnvelope(
-            content_text=value,
-            raw_content=value,
-            source_kind=SourceKind.financial_api,
-            source_name=source_name,
-            metadata={"ticker": ticker},
+    return str(
+        await get_current_inspection_service().check(
+            InspectionEnvelope(
+                content_text=value,
+                raw_content=value,
+                source_kind=SourceKind.financial_api,
+                source_name=source_name,
+                metadata={"ticker": ticker},
+            )
         )
     )
 
@@ -124,10 +126,13 @@ async def get_financial_metrics(
             return json.dumps({"error": data.get("error")})
 
         sanitized_data = shared._sanitize_for_json(data)
-        sanitized_data = await _inspect_financial_payload_text(
-            sanitized_data,
-            "yfinance_financial_metrics",
-            ticker=normalized_symbol,
+        sanitized_data = cast(
+            dict,
+            await _inspect_financial_payload_text(
+                sanitized_data,
+                "yfinance_financial_metrics",
+                ticker=normalized_symbol,
+            ),
         )
         return json.dumps(sanitized_data, indent=2)
     except Exception as exc:
@@ -141,8 +146,8 @@ async def get_yfinance_data(
         "Exact ticker with exchange suffix — e.g. '3217.TWO', '7203.T', '0005.HK'."
         " Use exactly as provided; never alter or drop the suffix.",
     ],
-    start_date: str = None,
-    end_date: str = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> str:
     """Get historical stock price data in LOCAL TRADING CURRENCY (not USD)."""
     try:

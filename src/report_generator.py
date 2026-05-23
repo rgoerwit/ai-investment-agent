@@ -9,6 +9,7 @@ UPDATED: Added Football Field chart generation integration.
 """
 
 import logging
+import os
 import re
 import sys
 from datetime import datetime
@@ -46,6 +47,17 @@ def normalize_governance_terms(text: str) -> str:
     for pattern, replacement in _GOVERNANCE_TERM_FIXES:
         text = pattern.sub(replacement, text)
     return text
+
+
+def _markdown_asset_link(asset_path: Path, report_dir: Path | None) -> str:
+    """Return a portable markdown link from a report to an asset path."""
+    if not report_dir:
+        return str(asset_path)
+
+    try:
+        return str(asset_path.resolve().relative_to(report_dir.resolve()))
+    except ValueError:
+        return os.path.relpath(asset_path.resolve(), report_dir.resolve())
 
 
 class QuietModeReporter:
@@ -157,7 +169,11 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
             from src.charts.extractors.data_block import (
                 extract_chart_data_from_data_block,
             )
-            from src.charts.extractors.valuation import calculate_valuation_targets
+            from src.charts.extractors.valuation import (
+                calculate_valuation_targets,
+                extract_valuation_scenarios,
+                resolve_eps_ttm,
+            )
             from src.charts.generators.football_field import generate_football_field
             from src.config import config
 
@@ -173,6 +189,26 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
                 result.get("valuation_params", "")
             )
             targets = calculate_valuation_targets(valuation_params)
+
+            # Parse VALUATION_SCENARIOS for chart overlay. Returns None on any
+            # data-sufficiency or sanity check failure → chart falls back to
+            # the legacy single-range bars.
+            scenarios = None
+            if valuation_params and fundamentals_report:
+                try:
+                    eps_ttm = resolve_eps_ttm(fundamentals_report)
+                    scenarios = extract_valuation_scenarios(valuation_params, eps_ttm)
+                except Exception as exc:  # pragma: no cover — defense-in-depth
+                    from src.error_safety import summarize_exception
+
+                    logger.warning(
+                        "report_chart_scenario_extraction_failed",
+                        ticker=self.ticker,
+                        **summarize_exception(
+                            exc, operation="report_chart_scenario_extraction"
+                        ),
+                    )
+                    scenarios = None
 
             # Check if we have minimum data
             if not chart_data.current_price or not chart_data.fifty_two_week_high:
@@ -206,7 +242,7 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
                 trade_date=self.trade_date,
                 current_price=chart_data.current_price,
                 fifty_two_week_high=chart_data.fifty_two_week_high,
-                fifty_two_week_low=chart_data.fifty_two_week_low,
+                fifty_two_week_low=chart_data.fifty_two_week_low or 0.0,
                 moving_avg_50=chart_data.moving_avg_50,
                 moving_avg_200=chart_data.moving_avg_200,
                 external_target_high=chart_data.external_target_high,
@@ -220,6 +256,7 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
                 footnote="Targets based on P/E normalization"
                 if targets.methodology
                 else None,
+                scenarios=scenarios,
             )
 
             # Store valuation context for article writer (D1 implementation)
@@ -835,6 +872,23 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
             report_parts.append("\n## Verification Caveats\n\n")
             report_parts.append(f"{verification_caveat}\n\n---\n")
 
+        # Investment Memo — memo-first restructure (above charts and appendix).
+        # The memo aggregates verdict, thesis, key numbers, top risks, kill criteria,
+        # and confidence into a tight scannable header so readers don't have to read
+        # the full agent transcript to see the call. Falls back to a placeholder
+        # block if PM output is unavailable.
+        try:
+            from src.reporting.memo import render_memo_for_state
+
+            memo_state = dict(result)
+            if self.valuation_context and "valuation_context" not in memo_state:
+                memo_state["valuation_context"] = self.valuation_context
+            report_parts.append("\n")
+            report_parts.append(render_memo_for_state(memo_state))
+        except Exception:  # pragma: no cover — defense-in-depth
+            # Memo rendering should never block report publication.
+            pass
+
         # Red Flag Pre-Screening (if applicable)
         red_flags = result.get("red_flags", [])
         pre_screening_result = result.get("pre_screening_result", "PASS")
@@ -895,16 +949,7 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         if radar_path:
             report_parts.append("## Thesis Alignment\n\n")
 
-            # Calculate link path
-            if self.report_dir:
-                try:
-                    radar_link = radar_path.resolve().relative_to(
-                        self.report_dir.resolve()
-                    )
-                except ValueError:
-                    radar_link = radar_path.resolve()
-            else:
-                radar_link = f"{radar_path.parent.name}/{radar_path.name}"
+            radar_link = _markdown_asset_link(radar_path, self.report_dir)
 
             report_parts.append(f"![Thesis Alignment Radar]({radar_link})\n\n---\n")
 
@@ -920,21 +965,7 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         if chart_path:
             report_parts.append("## Valuation Chart\n\n")
 
-            # Calculate link path
-            if self.report_dir:
-                try:
-                    # Try to make path relative to report directory
-                    # We resolve both to absolute paths first to be safe
-                    chart_link = chart_path.resolve().relative_to(
-                        self.report_dir.resolve()
-                    )
-                except ValueError:
-                    # If not relative (not a subdir), use absolute path
-                    # This happens if --imagedir is outside --output directory tree
-                    chart_link = chart_path.resolve()
-            else:
-                # Fallback for stdout or undefined report dir (try simple relative)
-                chart_link = f"{chart_path.parent.name}/{chart_path.name}"
+            chart_link = _markdown_asset_link(chart_path, self.report_dir)
 
             report_parts.append(f"![Football Field Chart]({chart_link})\n\n---\n")
 
@@ -1091,7 +1122,7 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
 
         # Repair exact glued block-boundary defects from older artifacts or
         # upstream model-format drift before any header demotion occurs.
-        text = normalize_structured_block_boundaries(text)
+        text = normalize_structured_block_boundaries(text) or text
 
         # Remove agent prefixes if present
         text = re.sub(
@@ -1205,9 +1236,10 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         if not match:
             return text
         block = match.group(1)
-        fields = dict(
-            m.groups() for m in re.finditer(r"^([A-Z_]+):\s*(.*)$", block, re.MULTILINE)
-        )
+        fields: dict[str, str] = {}
+        for field_match in re.finditer(r"^([A-Z_]+):\s*(.*)$", block, re.MULTILINE):
+            key, value = field_match.groups()
+            fields[str(key)] = str(value)
         text = text[: match.start()] + text[match.end() :]
         if fields.get("TRIGGERED", "NO").upper() == "YES":
             headline = fields.get("HEADLINE", "")

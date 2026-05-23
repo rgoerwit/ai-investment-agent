@@ -141,12 +141,14 @@ async def get_official_filings(
         )
     report = result.to_report_string()
     # Inspect official filing text (lighter treatment via SourceKind).
-    return await get_current_inspection_service().check(
-        InspectionEnvelope(
-            content_text=report,
-            raw_content=report,
-            source_kind=SourceKind.official_filing,
-            source_name="official_filings",
-            metadata={"ticker": normalized},
+    return str(
+        await get_current_inspection_service().check(
+            InspectionEnvelope(
+                content_text=report,
+                raw_content=report,
+                source_kind=SourceKind.official_filing,
+                source_name="official_filings",
+                metadata={"ticker": normalized},
+            )
         )
     )

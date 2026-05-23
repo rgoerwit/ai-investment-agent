@@ -7,6 +7,8 @@ Two-tiered session: read-only (portfolio data) vs brokerage (orders).
 
 from __future__ import annotations
 
+from typing import Any
+
 import structlog
 
 from src.ibkr.exceptions import (
@@ -98,7 +100,7 @@ class IbkrClient:
 
     def __init__(self, settings: IbkrSettings | None = None):
         self._settings = settings or IbkrSettings()
-        self._ibind_client = None
+        self._ibind_client: Any = None
         self._throttle = IBKRThrottle(
             rate_per_sec=self._settings.ibkr_rate_limit_per_sec,
         )
@@ -222,9 +224,11 @@ class IbkrClient:
             data = result.data if hasattr(result, "data") else result
             if isinstance(data, list):
                 return [
-                    a.get("id", a.get("accountId", ""))
+                    account_id
                     for a in data
                     if isinstance(a, dict)
+                    for account_id in (a.get("id") or a.get("accountId"),)
+                    if isinstance(account_id, str) and account_id
                 ]
             return (
                 [self._settings.ibkr_account_id]
@@ -536,10 +540,11 @@ class IbkrClient:
         self.initialize_brokerage_session()
         acct = account_id or self._settings.ibkr_account_id
 
-        def _extract(result) -> list[dict]:
+        def _extract(result: Any) -> list[dict[str, Any]]:
             data = result.data if hasattr(result, "data") else result
             if isinstance(data, dict):
-                return data.get("orders", [])
+                orders = data.get("orders", [])
+                return orders if isinstance(orders, list) else []
             return data if isinstance(data, list) else []
 
         try:

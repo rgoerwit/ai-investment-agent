@@ -55,45 +55,45 @@ OUTER_WRAPPED_ALLOWLIST: dict[str, str] = {
     # IBKR services: the ib_async client has its own per-request timeouts and
     # an outer connection-level timeout; sync wrappers are short and CPU-bound
     # rather than blocking on a remote socket read with no library timeout.
-    "src/ibkr/account_service.py:46": "ib_async has its own request timeout",
-    "src/ibkr/account_service.py:49": "ib_async has its own request timeout",
-    "src/ibkr/account_service.py:57": "ib_async has its own request timeout",
-    "src/ibkr/portfolio_data_service.py:72": "ib_async has its own request timeout",
-    "src/ibkr/portfolio_data_service.py:84": "ib_async has its own request timeout",
-    "src/ibkr/portfolio_data_service.py:96": "ib_async has its own request timeout",
-    "src/ibkr/portfolio_data_service.py:107": "ib_async has its own request timeout",
-    "src/ibkr/portfolio_data_service.py:136": "ib_async has its own request timeout",
+    "src/ibkr/account_service.py:50": "ib_async has its own request timeout",
+    "src/ibkr/account_service.py:53": "ib_async has its own request timeout",
+    "src/ibkr/account_service.py:61": "ib_async has its own request timeout",
+    "src/ibkr/portfolio_data_service.py:76": "ib_async has its own request timeout",
+    "src/ibkr/portfolio_data_service.py:88": "ib_async has its own request timeout",
+    "src/ibkr/portfolio_data_service.py:100": "ib_async has its own request timeout",
+    "src/ibkr/portfolio_data_service.py:111": "ib_async has its own request timeout",
+    "src/ibkr/portfolio_data_service.py:140": "ib_async has its own request timeout",
     "src/ibkr/security_data_service.py:76": (
         "ib_async + yfinance probe; wrapped by caller-side bounds"
     ),
     # EDINET fetcher: wrapped by run_with_hard_timeout in
     # FilingRegistry.fetch (src/data/filings/registry.py); all internal
     # to_thread calls inherit the 30s outer timeout.
-    "src/data/filings/edinet_fetcher.py:75": (
+    "src/data/filings/edinet_fetcher.py:76": (
         "wrapped by run_with_hard_timeout in FilingRegistry.fetch"
     ),
-    "src/data/filings/edinet_fetcher.py:90": (
+    "src/data/filings/edinet_fetcher.py:91": (
         "wrapped by run_with_hard_timeout in FilingRegistry.fetch"
     ),
-    "src/data/filings/edinet_fetcher.py:96": (
+    "src/data/filings/edinet_fetcher.py:97": (
         "wrapped by run_with_hard_timeout in FilingRegistry.fetch"
     ),
-    "src/data/filings/edinet_fetcher.py:115": (
+    "src/data/filings/edinet_fetcher.py:116": (
         "wrapped by run_with_hard_timeout in FilingRegistry.fetch"
     ),
-    "src/data/filings/edinet_fetcher.py:157": (
+    "src/data/filings/edinet_fetcher.py:158": (
         "wrapped by run_with_hard_timeout in FilingRegistry.fetch"
     ),
-    "src/data/filings/edinet_fetcher.py:163": (
+    "src/data/filings/edinet_fetcher.py:164": (
         "wrapped by run_with_hard_timeout in FilingRegistry.fetch"
     ),
-    "src/data/filings/edinet_fetcher.py:213": (
+    "src/data/filings/edinet_fetcher.py:214": (
         "wrapped by run_with_hard_timeout in FilingRegistry.fetch"
     ),
-    "src/data/filings/edinet_fetcher.py:236": (
+    "src/data/filings/edinet_fetcher.py:237": (
         "wrapped by run_with_hard_timeout in FilingRegistry.fetch"
     ),
-    "src/data/filings/edinet_fetcher.py:285": (
+    "src/data/filings/edinet_fetcher.py:286": (
         "wrapped by run_with_hard_timeout in FilingRegistry.fetch"
     ),
 }

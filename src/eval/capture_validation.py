@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .capture_contract import get_node_capture_spec
 from .constants import CURRENT_CAPTURE_SCHEMA_VERSION
@@ -27,7 +27,7 @@ class CaptureValidationReport:
 
 def _read_json(path: Path) -> dict[str, Any]:
     with open(path, encoding="utf-8") as handle:
-        return json.load(handle)
+        return cast(dict[str, Any], json.load(handle))
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

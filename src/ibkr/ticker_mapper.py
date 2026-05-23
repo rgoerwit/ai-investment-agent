@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -26,7 +27,7 @@ logger = structlog.get_logger(__name__)
 CACHE_FILE = Path("scratch/conid_map.json")
 CACHE_TTL_SECONDS = 30 * 24 * 3600  # 30 days
 
-_cache: dict | None = None  # Module-level session cache; loaded once per process
+_cache: dict[str, dict[str, Any]] | None = None  # Loaded once per process
 
 
 def _get_cache() -> dict:
@@ -170,7 +171,7 @@ def _yf_search_ticker(symbol: str, exchange: str, currency: str) -> str:
             exchange=exchange,
             yf_ticker=cached or "(none)",
         )
-        return cached  # "" = negative cache (previous search found nothing)
+        return cached if isinstance(cached, str) else ""
 
     try:
         import yfinance as yf
@@ -257,7 +258,7 @@ def yf_to_ibkr_format(yf_ticker: str) -> tuple[str, str]:
     return symbol, ibkr_exchange
 
 
-def resolve_conid(yf_ticker: str, client: object | None = None) -> int | None:
+def resolve_conid(yf_ticker: str, client: Any | None = None) -> int | None:
     """
     Resolve IBKR conid for a yfinance ticker.
 
@@ -280,7 +281,7 @@ def resolve_conid(yf_ticker: str, client: object | None = None) -> int | None:
     if cache_key in cache:
         cached = cache[cache_key]
         conid = cached.get("conid")
-        if conid:
+        if isinstance(conid, int):
             logger.debug("conid_cache_hit", ticker=yf_ticker, conid=conid)
             return conid
 
@@ -326,7 +327,7 @@ def resolve_conid(yf_ticker: str, client: object | None = None) -> int | None:
         _flush_cache()
 
         logger.info("conid_resolved", ticker=yf_ticker, conid=conid, exchange=exchange)
-        return conid
+        return conid if isinstance(conid, int) else None
 
     except IBKRTickerResolutionError:
         raise
@@ -350,7 +351,7 @@ def yf_ticker_from_conid(conid: int) -> str | None:
             and isinstance(entry, dict)
             and entry.get("conid") == conid
         ):
-            return key
+            return key if isinstance(key, str) else None
     return None
 
 

@@ -1,0 +1,170 @@
+"""Tests for the APAC and Auditor fallback resolution-block inserters (Step 4b).
+
+The inserters mirror the existing `_ensure_consultant_resolution_block` pattern:
+pure deterministic string manipulation, no LLM retry.
+"""
+
+from __future__ import annotations
+
+import json
+import pathlib
+
+import pytest
+
+from src.agents.decision_nodes import (
+    _ensure_apac_resolution_block,
+    _ensure_auditor_resolution_block,
+    _extract_apac_verdict_line,
+    _requires_apac_resolution,
+)
+
+_PM_WITH_BLOCK = (
+    "Some PM rationale.\n\n"
+    "### --- START PM_BLOCK ---\n"
+    "VERDICT: BUY\n"
+    "### --- END PM_BLOCK ---\n"
+)
+
+_PM_WITHOUT_BLOCK = "Some PM rationale without a PM_BLOCK fence.\n"
+
+
+# ---------- _requires_apac_resolution ----------
+
+
+@pytest.mark.parametrize(
+    "apac",
+    [None, "", "   ", "NO_MATERIAL_APAC_CONNECTION", "APAC_SPECIALIST_UNAVAILABLE"],
+)
+def test_requires_apac_resolution_false_for_silent_or_empty(apac) -> None:
+    assert _requires_apac_resolution(apac) is False
+
+
+def test_requires_apac_resolution_true_for_actual_audit() -> None:
+    apac = (
+        "### APAC REGIONAL AUDIT: 7203.T\n"
+        "**VERDICT FOR CONSULTANT AND PM**: CAUTION — promoter pledges unresolved.\n"
+    )
+    assert _requires_apac_resolution(apac) is True
+
+
+# ---------- _extract_apac_verdict_line ----------
+
+
+def test_extract_apac_verdict_line_pulls_one_sentence() -> None:
+    apac = (
+        "**VERDICT FOR CONSULTANT AND PM**: CAUTION — controlling shareholder pledges unresolved.\n"
+        "(other content)"
+    )
+    line = _extract_apac_verdict_line(apac)
+    assert "CAUTION" in line
+    assert "controlling shareholder" in line
+
+
+def test_extract_apac_verdict_line_falls_back_to_tag_only() -> None:
+    apac = "free-form APAC text\nVerdict: SUPPORT noted in body\nmore content"
+    line = _extract_apac_verdict_line(apac)
+    assert "SUPPORT" in line
+
+
+def test_extract_apac_verdict_line_empty_when_no_signal() -> None:
+    assert _extract_apac_verdict_line("nothing here") == ""
+    assert _extract_apac_verdict_line("") == ""
+
+
+# ---------- _ensure_apac_resolution_block ----------
+
+
+def test_ensure_apac_inserts_before_pm_block_when_missing() -> None:
+    apac = "**VERDICT FOR CONSULTANT AND PM**: CAUTION — promoter pledges unresolved."
+    out = _ensure_apac_resolution_block(_PM_WITH_BLOCK, apac)
+    assert "APAC_RESOLUTION:" in out
+    apac_pos = out.find("APAC_RESOLUTION:")
+    pm_pos = out.find("### --- START PM_BLOCK ---")
+    assert apac_pos < pm_pos, "APAC block must precede PM_BLOCK"
+    assert "VERDICT: UNVERIFIABLE" in out
+    assert "promoter pledges" in out
+
+
+def test_ensure_apac_appends_at_tail_when_no_pm_block() -> None:
+    apac = "**VERDICT FOR CONSULTANT AND PM**: CAUTION — concern X."
+    out = _ensure_apac_resolution_block(_PM_WITHOUT_BLOCK, apac)
+    assert out.rstrip().endswith("- VERDICT: UNVERIFIABLE")
+    assert "APAC_RESOLUTION:" in out
+
+
+def test_ensure_apac_idempotent_when_pm_already_has_block() -> None:
+    pm_with_apac = (
+        "rationale\n\n"
+        "APAC_RESOLUTION:\n- FINDING: handled by PM\n- VERDICT: REJECTED\n\n"
+        + _PM_WITH_BLOCK
+    )
+    out = _ensure_apac_resolution_block(pm_with_apac, "any non-silent text")
+    assert out == pm_with_apac
+    # Only one APAC_RESOLUTION block in the output.
+    assert out.count("APAC_RESOLUTION:") == 1
+
+
+def test_ensure_apac_skips_when_silent_or_empty() -> None:
+    assert _ensure_apac_resolution_block(_PM_WITH_BLOCK, None) == _PM_WITH_BLOCK
+    assert (
+        _ensure_apac_resolution_block(_PM_WITH_BLOCK, "NO_MATERIAL_APAC_CONNECTION")
+        == _PM_WITH_BLOCK
+    )
+    assert _ensure_apac_resolution_block(_PM_WITH_BLOCK, "   ") == _PM_WITH_BLOCK
+
+
+def test_ensure_apac_uses_generic_summary_when_verdict_unparseable() -> None:
+    apac = "free-form APAC narrative with no verdict tag at all"
+    out = _ensure_apac_resolution_block(_PM_WITH_BLOCK, apac)
+    assert "APAC_RESOLUTION:" in out
+    assert "not reconciled" in out
+
+
+# ---------- _ensure_auditor_resolution_block ----------
+
+
+def test_ensure_auditor_inserts_when_anomalies_present() -> None:
+    auditor = "AUDIT: paper profit ratio 0.12; zombie ratio 1.1; trash bin rising."
+    out = _ensure_auditor_resolution_block(_PM_WITH_BLOCK, auditor)
+    assert "AUDITOR_RESOLUTION:" in out
+    audit_pos = out.find("AUDITOR_RESOLUTION:")
+    pm_pos = out.find("### --- START PM_BLOCK ---")
+    assert audit_pos < pm_pos
+
+
+def test_ensure_auditor_skips_when_empty() -> None:
+    assert _ensure_auditor_resolution_block(_PM_WITH_BLOCK, None) == _PM_WITH_BLOCK
+    assert _ensure_auditor_resolution_block(_PM_WITH_BLOCK, "") == _PM_WITH_BLOCK
+    assert _ensure_auditor_resolution_block(_PM_WITH_BLOCK, "   ") == _PM_WITH_BLOCK
+
+
+def test_ensure_auditor_skips_on_insufficient_data_sentinel() -> None:
+    sentinel = "STATUS=INSUFFICIENT_DATA — auditor could not access primary filings."
+    assert _ensure_auditor_resolution_block(_PM_WITH_BLOCK, sentinel) == _PM_WITH_BLOCK
+
+
+def test_ensure_auditor_idempotent_when_block_already_present() -> None:
+    pm_with_auditor = (
+        "rationale\n\n"
+        "AUDITOR_RESOLUTION:\n- FINDING: handled\n- VERDICT: REJECTED\n\n"
+        + _PM_WITH_BLOCK
+    )
+    out = _ensure_auditor_resolution_block(pm_with_auditor, "AUDIT: anomalies present")
+    assert out == pm_with_auditor
+    assert out.count("AUDITOR_RESOLUTION:") == 1
+
+
+# ---------- prompt regression ----------
+
+
+def test_pm_prompt_requests_new_resolution_blocks() -> None:
+    path = pathlib.Path("prompts/portfolio_manager.json")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert (
+        data["version"] >= "9.6"
+    )  # Tranche 3 bumps to 9.7; floor is the introducing release.
+    msg = data["system_message"]
+    assert "APAC_RESOLUTION:" in msg
+    assert "AUDITOR_RESOLUTION:" in msg
+    # Original consultant resolution must still be intact.
+    assert "CONSULTANT_RESOLUTION:" in msg

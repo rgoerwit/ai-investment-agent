@@ -166,7 +166,7 @@ ibkr_*.*
 # Output files
 outputs/
 results/
-reports/
+/reports/
 evals/captures/
 evals/prompt_checks/
 runtime/ibkr_dashboard/

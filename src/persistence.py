@@ -333,6 +333,11 @@ def save_results_to_file(
             "news_report": result.get("news_report", ""),
             "fundamentals_report": result.get("fundamentals_report", ""),
             "apac_regional_report": result.get("apac_regional_report", ""),
+            # Optional cross-validation artifacts — empty string when the
+            # respective agent did not run or produced nothing.
+            "auditor_report": result.get("auditor_report", ""),
+            "consultant_review": result.get("consultant_review", ""),
+            "valuation_params": result.get("valuation_params", ""),
         },
         "investment_analysis": {
             "investment_debate": {
@@ -602,7 +607,7 @@ async def _maybe_save_rejection_record(
             )
         )
         verdict = (snapshot or {}).get("verdict", "")
-        if verdict and verdict != "BUY":
+        if snapshot is not None and verdict and verdict != "BUY":
             rejection_memory = create_lessons_memory()
             await save_rejection_record(snapshot, rejection_memory)
     except Exception as exc:

@@ -50,7 +50,13 @@ class AlphaVantageFetcher(FinancialFetcher):
 
         return has_key and not_exhausted
 
-    async def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
+    async def get_price_history(
+        self,
+        ticker: str,
+        period: str = "1y",
+        start: str | None = None,
+        end: str | None = None,
+    ) -> pd.DataFrame:
         """
         Fetch historical price data.
         Currently not implemented for Alpha Vantage to save API calls for fundamentals.
@@ -146,7 +152,7 @@ class AlphaVantageFetcher(FinancialFetcher):
             logger.debug("alpha_vantage_request_failed", symbol=symbol, error=str(e))
             return None
 
-    def _parse_overview(self, data: dict) -> dict[str, Any]:
+    def _parse_overview(self, data: dict[str, Any]) -> dict[str, Any] | None:
         """
         Map Alpha Vantage OVERVIEW fields to internal schema.
 
@@ -190,7 +196,7 @@ class AlphaVantageFetcher(FinancialFetcher):
         }
 
         # Tag each field with source for quality tracking
-        tagged_output = {}
+        tagged_output: dict[str, Any] = {}
         for key, value in output.items():
             if value is not None and key != "_source":
                 tagged_output[key] = value

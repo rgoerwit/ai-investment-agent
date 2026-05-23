@@ -24,30 +24,38 @@ from src.runtime_diagnostics import (
 
 logger = structlog.get_logger(__name__)
 
+_get_capture_manager: Any
+_normalize_reasoning_level: Any
+_extract_vendor_reasoning_config: Any
+_extract_token_usage: Any
+_normalize_for_json: Any
+
 try:
-    from src.eval import get_active_capture_manager as _get_capture_manager
+    from src.eval import get_active_capture_manager
     from src.eval.llm_capture_meta import (
-        extract_token_usage as _extract_token_usage,
+        extract_token_usage,
+        extract_vendor_reasoning_config,
+        normalize_reasoning_level,
     )
-    from src.eval.llm_capture_meta import (
-        extract_vendor_reasoning_config as _extract_vendor_reasoning_config,
-    )
-    from src.eval.llm_capture_meta import (
-        normalize_reasoning_level as _normalize_reasoning_level,
-    )
-    from src.eval.serialization import normalize_for_json as _normalize_for_json
+    from src.eval.serialization import normalize_for_json
+
+    _get_capture_manager = get_active_capture_manager
+    _normalize_reasoning_level = normalize_reasoning_level
+    _extract_vendor_reasoning_config = extract_vendor_reasoning_config
+    _extract_token_usage = extract_token_usage
+    _normalize_for_json = normalize_for_json
 except ImportError:
 
-    def _get_capture_manager():
+    def _fallback_capture_manager() -> None:
         return None
 
-    def _normalize_reasoning_level(runnable, model_name):
+    def _fallback_normalize_reasoning_level(runnable: Any, model_name: Any) -> None:
         return None
 
-    def _extract_vendor_reasoning_config(runnable, provider):
+    def _fallback_extract_vendor_reasoning_config(runnable: Any, provider: Any) -> None:
         return None
 
-    def _extract_token_usage(result):
+    def _fallback_extract_token_usage(result: Any) -> dict[str, int | None]:
         return {
             "input_tokens": None,
             "output_tokens": None,
@@ -55,8 +63,14 @@ except ImportError:
             "total_tokens": None,
         }
 
-    def _normalize_for_json(value):
+    def _fallback_normalize_for_json(value: Any) -> Any:
         return value
+
+    _get_capture_manager = _fallback_capture_manager
+    _normalize_reasoning_level = _fallback_normalize_reasoning_level
+    _extract_vendor_reasoning_config = _fallback_extract_vendor_reasoning_config
+    _extract_token_usage = _fallback_extract_token_usage
+    _normalize_for_json = _fallback_normalize_for_json
 
 
 def _detect_provider_partial_response(result: Any) -> str | None:

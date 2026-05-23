@@ -10,7 +10,7 @@ Provides "vague sentiment" signal for ex-US equities through:
 NO paid APIs required beyond existing Tavily.
 """
 
-from typing import Annotated
+from typing import Annotated, Any
 
 import structlog
 from langchain_core.tools import tool
@@ -166,7 +166,7 @@ platforms. Results are directional indicators, not comprehensive sentiment.
 
 """
 
-    sentiment_signals = []
+    sentiment_signals: list[dict[str, Any]] = []
 
     # ===== TIER 1: ACCESSIBLE PLATFORM SEARCHES =====
     output += "\n### Tier 1: Accessible Platform Searches\n\n"

@@ -5,6 +5,61 @@ Base classes and data structures for chart generation.
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Protocol, runtime_checkable
+
+
+@runtime_checkable
+class ScenarioAssumptionLike(Protocol):
+    """Per-scenario row contract required by the football-field overlay.
+
+    Structural — both ``ValuationCalculator.ScenarioAssumption`` (the canonical
+    dataclass in ``src.charts.extractors.valuation``) and any test double with
+    a matching attribute satisfy it.
+    """
+
+    @property
+    def probability(self) -> float: ...
+
+    @property
+    def drivers(self) -> str: ...
+
+
+@runtime_checkable
+class ValuationScenariosLike(Protocol):
+    """Scenario container contract used by the chart layer.
+
+    Replaces the prior ``scenarios: object | None`` field on
+    :class:`FootballFieldData` with an explicit typed boundary while keeping
+    the structural-typing flexibility that lets fixtures and the production
+    dataclass both qualify.
+    """
+
+    @property
+    def methodology(self) -> str: ...
+
+    @property
+    def data_sufficiency(self) -> str: ...
+
+    @property
+    def bear(self) -> ScenarioAssumptionLike: ...
+
+    @property
+    def base(self) -> ScenarioAssumptionLike: ...
+
+    @property
+    def bull(self) -> ScenarioAssumptionLike: ...
+
+    @property
+    def bear_iv(self) -> float: ...
+
+    @property
+    def base_iv(self) -> float: ...
+
+    @property
+    def bull_iv(self) -> float: ...
+
+    @property
+    def weighted_iv(self) -> float: ...
 
 
 class ChartFormat(Enum):
@@ -110,6 +165,13 @@ class FootballFieldData:
 
     # Methodology footnote
     footnote: str | None = None
+
+    # Optional scenario valuation (bear/base/bull IVs with weighted mean).
+    # When populated, the renderer overlays four markers above the existing
+    # bars; otherwise the chart renders identically to the legacy single-range
+    # view. Typed as a Protocol so the boundary is explicit but still permits
+    # test doubles (SimpleNamespace fixtures) — see :class:`ValuationScenariosLike`.
+    scenarios: ValuationScenariosLike | None = None
 
     def has_minimum_data(self) -> bool:
         """Check if we have enough data to generate chart.

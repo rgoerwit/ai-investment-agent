@@ -23,7 +23,7 @@ def filter_messages_by_agent(
     if not messages:
         return []
 
-    tool_msg_agents = []
+    tool_msg_agents: list[Any] = []
     for msg in messages:
         if isinstance(msg, ToolMessage):
             tag = (
@@ -39,7 +39,7 @@ def filter_messages_by_agent(
         tool_message_tags=tool_msg_agents,
     )
 
-    filtered = []
+    filtered: list[BaseMessage] = []
     for msg in messages:
         if isinstance(msg, HumanMessage):
             filtered.append(msg)
@@ -70,7 +70,7 @@ def filter_messages_for_gemini(
     if not messages:
         return []
 
-    filtered = []
+    filtered: list[BaseMessage] = []
     for msg in messages:
         if isinstance(msg, SystemMessage):
             continue

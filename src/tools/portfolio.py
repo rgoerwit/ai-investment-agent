@@ -20,7 +20,7 @@ def _serialize_value(value: Any) -> Any:
     if hasattr(value, "model_dump"):
         return value.model_dump()
     if is_dataclass(value):
-        return _serialize_value(asdict(value))
+        return _serialize_value(asdict(value))  # type: ignore[arg-type]
     if isinstance(value, set):
         return sorted(_serialize_value(item) for item in value)
     if isinstance(value, list):

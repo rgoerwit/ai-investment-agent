@@ -52,7 +52,7 @@ class AnsiColors:
     def disabled(cls) -> "AnsiColors":
         """Return a no-op colors instance for non-terminal output."""
 
-        class NoColors:
+        class NoColors(AnsiColors):
             PASS = GOOD = WARN = NEUTRAL = FAIL = BAD = ""
             BUY = HOLD = SELL = BOLD = RESET = ""
 

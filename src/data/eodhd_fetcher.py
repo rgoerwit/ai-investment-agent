@@ -92,7 +92,8 @@ class EODHDFetcher(FinancialFetcher):
                         except (ValueError, aiohttp.ContentTypeError):
                             return None
                         if isinstance(data, dict):
-                            return data.get("Name")
+                            name = data.get("Name")
+                            return name if isinstance(name, str) else None
                     return None
         except Exception as e:
             logger.debug(
@@ -100,16 +101,20 @@ class EODHDFetcher(FinancialFetcher):
             )
             return None
 
-    async def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
+    async def get_price_history(
+        self,
+        ticker: str,
+        period: str = "1y",
+        start: str | None = None,
+        end: str | None = None,
+    ) -> pd.DataFrame:
         """
         Fetch OHLC data.
         Currently not implemented for EODHD to save API calls.
         """
         return pd.DataFrame()
 
-    async def get_financial_metrics(
-        self, symbol: str
-    ) -> dict[str, float | None] | None:
+    async def get_financial_metrics(self, symbol: str) -> dict[str, Any] | None:
         """
         Fetch fundamentals from EODHD.
         Returns processed dictionary or None if failed.
@@ -263,9 +268,9 @@ class EODHDFetcher(FinancialFetcher):
             logger.debug("eodhd_anchor_check_failed", error=str(e))
             return None
 
-    def _parse_fundamentals(self, data: dict) -> dict[str, float | None]:
+    def _parse_fundamentals(self, data: dict[str, Any]) -> dict[str, Any]:
         """Map EODHD JSON structure to internal schema."""
-        output = {
+        output: dict[str, Any] = {
             "_source": "eodhd",
             # Core Valuation
             "marketCap": None,
