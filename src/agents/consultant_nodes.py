@@ -846,12 +846,15 @@ Provide your independent consultant review."""
                 result["consultant_quick_profile"] = consultant_profile
             return result
         except Exception as exc:
-            logger.error(
-                "consultant_node_error",
-                ticker=ticker,
-                error=str(exc),
-                exc_info=True,
-            )
+            if isinstance(exc, TimeoutError):
+                logger.error("consultant_node_timeout", ticker=ticker, error=str(exc))
+            else:
+                logger.error(
+                    "consultant_node_error",
+                    ticker=ticker,
+                    error=str(exc),
+                    exc_info=True,
+                )
             result = failure_artifact(
                 "consultant_review",
                 exc,
