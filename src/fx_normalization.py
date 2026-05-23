@@ -11,6 +11,7 @@ UPDATED: Dec 2025 - Aligned with modern yfinance patterns
 """
 
 import asyncio
+from typing import Any
 
 import structlog
 
@@ -185,28 +186,32 @@ def get_fx_rate_fallback(from_currency: str, to_currency: str = "USD") -> float 
 
     normalized_currency, scale = normalize_minor_unit_currency(from_currency)
     if scale != 1.0:
-        major_rate = FALLBACK_RATES_TO_USD.get(normalized_currency)
+        major_rate = (
+            FALLBACK_RATES_TO_USD.get(normalized_currency)
+            if normalized_currency is not None
+            else None
+        )
         if major_rate:
-            rate = major_rate * scale
+            scaled_rate = major_rate * scale
             logger.warning(
                 "fx_rate_using_fallback",
                 from_currency=from_currency,
                 to_currency=to_currency,
-                rate=rate,
+                rate=scaled_rate,
                 warning="Fallback rate may be stale - update FALLBACK_RATES_TO_USD quarterly",
             )
-            return rate
+            return scaled_rate
 
-    rate = FALLBACK_RATES_TO_USD.get(from_currency)
-    if rate:
+    fallback_rate = FALLBACK_RATES_TO_USD.get(from_currency)
+    if fallback_rate:
         logger.warning(
             "fx_rate_using_fallback",
             from_currency=from_currency,
             to_currency=to_currency,
-            rate=rate,
+            rate=fallback_rate,
             warning="Fallback rate may be stale - update FALLBACK_RATES_TO_USD quarterly",
         )
-        return rate
+        return fallback_rate
 
     return None
 
@@ -276,7 +281,7 @@ async def get_fx_rate(
 
 async def normalize_to_usd(
     value: float | None, currency: str, metric_name: str = "value"
-) -> tuple[float | None, dict[str, any]]:
+) -> tuple[float | None, dict[str, Any]]:
     """
     Normalize a single value to USD with metadata tracking.
 
@@ -354,8 +359,8 @@ async def normalize_to_usd(
 
 
 async def normalize_financial_dict(
-    data: dict[str, any], currency_field: str = "currency"
-) -> dict[str, any]:
+    data: dict[str, Any], currency_field: str = "currency"
+) -> dict[str, Any]:
     """
     Normalize all currency-dependent fields in a financial data dict.
 
@@ -396,7 +401,8 @@ async def normalize_financial_dict(
         # normalized["_currency_normalized"] = True
         # normalized["pe"] = 12.5 (unchanged)
     """
-    currency = data.get(currency_field, "USD")
+    raw_currency = data.get(currency_field, "USD")
+    currency = raw_currency if isinstance(raw_currency, str) else "USD"
 
     # Strip whitespace from currency code
     if currency:

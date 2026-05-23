@@ -607,7 +607,7 @@ async def _maybe_save_rejection_record(
             )
         )
         verdict = (snapshot or {}).get("verdict", "")
-        if verdict and verdict != "BUY":
+        if snapshot is not None and verdict and verdict != "BUY":
             rejection_memory = create_lessons_memory()
             await save_rejection_record(snapshot, rejection_memory)
     except Exception as exc:

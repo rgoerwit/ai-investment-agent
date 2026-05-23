@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import nh3
 from markdown import markdown
@@ -61,7 +61,7 @@ def load_analysis_json(path: Path) -> dict[str, Any] | None:
     if not path.exists() or path.suffix.lower() != ".json":
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
     except json.JSONDecodeError as exc:
         raise DrilldownLoadError(f"Malformed analysis JSON at {path}") from exc
 
@@ -85,14 +85,15 @@ def find_markdown_artifacts(analysis: AnalysisRecord) -> dict[str, str | None]:
     source_path = Path(analysis.file_path)
     results_dir = source_path.parent
 
-    report_path = (
+    report_path: Path | None = (
         source_path.with_suffix(".md") if source_path.suffix == ".json" else None
     )
     if report_path is not None and not report_path.exists():
         report_path = None
 
-    article_path = results_dir / f"{analysis.ticker}_article.md"
-    if not article_path.exists():
+    candidate_article_path = results_dir / f"{analysis.ticker}_article.md"
+    article_path: Path | None = candidate_article_path
+    if not candidate_article_path.exists():
         article_path = None
 
     return {

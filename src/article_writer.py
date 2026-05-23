@@ -11,7 +11,7 @@ import random
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, cast
 
 import structlog
 from langchain_core.callbacks import BaseCallbackHandler
@@ -248,7 +248,7 @@ class ArticleWriter:
             logger.debug(
                 "Loaded writer prompt config", version=config_data.get("version")
             )
-            return config_data
+            return cast(dict, config_data)
         except json.JSONDecodeError as e:
             logger.error("Failed to parse writer.json", error=str(e))
             return DEFAULT_PROMPT_CONFIG
@@ -392,7 +392,7 @@ class ArticleWriter:
             f"*{safe_ticker_dash}*_radar.*",
         ]
 
-        found_images = []
+        found_images: list[tuple[Path, str, str]] = []
         for pattern in patterns:
             matches = list(self.images_dir.glob(pattern))
             for match in matches:
@@ -432,7 +432,7 @@ class ArticleWriter:
                 except ValueError:
                     # Path is not under cwd (e.g., temp directory in tests)
                     # Fall back to using the images_dir relative path
-                    rel_path = f"images/{img_path.name}"
+                    rel_path = Path("images") / img_path.name
                     url = f"{GITHUB_RAW_BASE}/{rel_path}"
             else:
                 # Use local path
@@ -610,7 +610,7 @@ class ArticleWriter:
                 )
                 response = fallback_llm.invoke(
                     messages,
-                    config=self._invoke_config(workflow="article_fallback"),
+                    config=cast(Any, self._invoke_config(workflow="article_fallback")),
                 )
                 logger.info(
                     "llm_call_success",
@@ -748,10 +748,12 @@ class ArticleWriter:
             "system_message", DEFAULT_PROMPT_CONFIG["system_message"]
         )
         # user_template is nested in metadata for AgentPrompt compatibility
+        default_metadata = cast(dict[str, Any], DEFAULT_PROMPT_CONFIG["metadata"])
         metadata = self.prompt_config.get("metadata", {})
-        user_template = metadata.get(
-            "user_template", DEFAULT_PROMPT_CONFIG["metadata"]["user_template"]
-        )
+        if not isinstance(metadata, dict):
+            metadata = {}
+        user_template = metadata.get("user_template", default_metadata["user_template"])
+        user_template = str(user_template)
 
         # Format user message
         # Use provided valuation_context or default message
@@ -1106,7 +1108,7 @@ class ArticleEditor:
         # Build tool lookup and bind tools to LLM for agentic reference checking
         self._tools_by_name = {t.name: t for t in self.tools}
         if self.llm and self.tools:
-            self.llm_with_tools = self.llm.bind_tools(self.tools)
+            self.llm_with_tools: Any = self.llm.bind_tools(self.tools)
         else:
             self.llm_with_tools = None
 
@@ -1145,7 +1147,7 @@ class ArticleEditor:
 
         try:
             with open(prompt_file) as f:
-                return json.load(f)
+                return cast(dict, json.load(f))
         except json.JSONDecodeError as e:
             logger.error("Failed to parse editor.json", error=str(e))
             return {"system_message": "You are an Editor-in-Chief reviewing articles."}
@@ -1251,6 +1253,10 @@ class ArticleEditor:
                     tool=tool_name,
                     args_preview=str(tool_args)[:100],
                 )
+
+                async def _run_tool(args: dict[str, Any], tool=tool_fn) -> Any:
+                    return await tool.ainvoke(args)
+
                 tool_result = await get_current_tool_service().execute(
                     ToolInvocation(
                         name=tool_name,
@@ -1258,7 +1264,7 @@ class ArticleEditor:
                         source="editor",
                         agent_key="article_editor",
                     ),
-                    runner=lambda args, tool=tool_fn: tool.ainvoke(args),
+                    runner=_run_tool,
                 )
                 content = str(tool_result.value)
 
@@ -1358,7 +1364,9 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
                 for iteration in range(self.MAX_TOOL_ITERATIONS):
                     response = await self.llm_with_tools.ainvoke(
                         messages,
-                        config=self._invoke_config(workflow="editor_tool_review"),
+                        config=cast(
+                            Any, self._invoke_config(workflow="editor_tool_review")
+                        ),
                     )
 
                     tool_calls = getattr(response, "tool_calls", None)
@@ -1418,7 +1426,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
 
         response = await self.llm.ainvoke(
             final_messages,
-            config=self._invoke_config(workflow="editor_final_review"),
+            config=cast(Any, self._invoke_config(workflow="editor_final_review")),
         )
         return self._extract_review_result(response)
 
@@ -1518,7 +1526,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
                 num_errors=len(feedback.get("factual_errors", [])),
             )
 
-            return feedback
+            return cast(dict, feedback)
 
         except json.JSONDecodeError as e:
             logger.warning(
@@ -1572,7 +1580,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
 
         # Session-scoped URL cache: avoids re-fetching the same URLs across
         # review iterations (e.g. paywalled sites that 401 every time).
-        self._url_cache: dict[str, str] = {}
+        self._url_cache = {}
         try:
             while revision_count < self.MAX_REVISIONS:
                 # Review the current draft

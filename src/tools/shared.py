@@ -233,7 +233,7 @@ def _format_val(value: Any, fmt: str = "{:.2f}", default: str = "N/A") -> str:
 
 def _sanitize_for_json(data: dict) -> dict:
     """Sanitize data for JSON encoding."""
-    sanitized = {}
+    sanitized: dict[str, Any] = {}
     for key, value in data.items():
         if isinstance(value, dict):
             sanitized[key] = _sanitize_for_json(value)

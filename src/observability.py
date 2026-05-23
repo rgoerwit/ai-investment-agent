@@ -6,7 +6,7 @@ import threading
 from contextlib import AbstractContextManager, nullcontext
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import structlog
 from langchain_core.callbacks import BaseCallbackHandler
@@ -470,7 +470,9 @@ class LangfuseObservabilityRuntime:
             propagation_ctx.__enter__()
             propagation_entered = True
 
-            callbacks = [CallbackHandler()]
+            callbacks: list[BaseCallbackHandler] = [
+                cast(BaseCallbackHandler, CallbackHandler())
+            ]
             trace_id = client.get_current_trace_id()
             trace_url = client.get_trace_url(trace_id=trace_id) if trace_id else None
 
@@ -664,7 +666,7 @@ def create_deferred_score(
         client = get_client()
         if not _supports(client, "create_score"):
             return
-        client.create_score(
+        cast(Any, client).create_score(
             trace_id=trace_id,
             name=name,
             value=value,

@@ -134,7 +134,7 @@ def generate_radar_chart(
     ax.tick_params(axis="x", pad=32)
 
     # Draw ylabels - positioned at 30 degrees to avoid overlap with top axis
-    ax.set_rlabel_position(30)
+    ax.set_rlabel_position(30)  # type: ignore[attr-defined]
     ax.set_yticks([25, 50, 75])
     ax.set_yticklabels(["25", "50", "75"], color=tick_label_color, size=7)
     ax.set_ylim(0, 100)
@@ -194,7 +194,7 @@ def generate_radar_chart(
     fig.suptitle(title_text, size=10, y=0.98, fontweight="bold", color=title_color)
 
     # Reserve top space for title (0.92 top limit) and bottom for footnotes
-    fig.tight_layout(rect=[0, 0.08, 1, 0.92])
+    fig.tight_layout(rect=[0, 0.08, 1, 0.92])  # type: ignore[arg-type]
 
     # Generate filename - use config.filename_stem if provided, else ticker_date
     if config.filename_stem:

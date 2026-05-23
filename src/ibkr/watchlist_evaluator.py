@@ -14,6 +14,7 @@ from src.ibkr.reconciliation_rules import (
     _resolve_fx,
     check_staleness,
 )
+from src.ibkr.ticker import Ticker
 
 
 def evaluate_watchlist(
@@ -65,7 +66,7 @@ def evaluate_watchlist(
         if analysis is None:
             items.append(
                 ReconciliationItem(
-                    ticker=ticker,
+                    ticker=Ticker.from_yf(ticker),
                     action="REVIEW",
                     reason="Watchlist: no analysis found",
                     urgency="MEDIUM",
@@ -84,7 +85,7 @@ def evaluate_watchlist(
         if is_stale:
             items.append(
                 ReconciliationItem(
-                    ticker=ticker,
+                    ticker=Ticker.from_yf(ticker),
                     action="REVIEW",
                     reason=f"Watchlist: stale analysis ({stale_reason})",
                     urgency="MEDIUM",
@@ -98,7 +99,7 @@ def evaluate_watchlist(
         if verdict_upper in _REJECT_VERDICTS:
             items.append(
                 ReconciliationItem(
-                    ticker=ticker,
+                    ticker=Ticker.from_yf(ticker),
                     action="REMOVE",
                     reason=f"Remove from watchlist — verdict → {analysis.verdict}  ({analysis.analysis_date})",
                     urgency="MEDIUM",
@@ -111,7 +112,7 @@ def evaluate_watchlist(
             if has_portfolio and remaining_cash <= 0:
                 items.append(
                     ReconciliationItem(
-                        ticker=ticker,
+                        ticker=Ticker.from_yf(ticker),
                         action="BUY",
                         reason=f"Watchlist BUY ({analysis.analysis_date}) — no cash available",
                         urgency="MEDIUM",
@@ -163,7 +164,7 @@ def evaluate_watchlist(
                             buy_reason += "  " + "; ".join(conc_warns)
                     items.append(
                         ReconciliationItem(
-                            ticker=ticker,
+                            ticker=Ticker.from_yf(ticker),
                             action="BUY",
                             reason=buy_reason,
                             urgency="MEDIUM",
@@ -178,7 +179,7 @@ def evaluate_watchlist(
         else:
             items.append(
                 ReconciliationItem(
-                    ticker=ticker,
+                    ticker=Ticker.from_yf(ticker),
                     action="HOLD",
                     reason=f"Watchlist: monitoring — verdict {analysis.verdict}  ({analysis.analysis_date})",
                     urgency="LOW",

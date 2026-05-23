@@ -93,13 +93,13 @@ def configure_langsmith_tracing(settings: "Settings") -> None:
         logger.info(f"LangSmith tracing enabled for project: {project_name}")
 
 
-def _parse_env_file() -> dict:
+def _parse_env_file() -> dict[str, str]:
     """Parse .env file to get explicitly set values (ignoring comments and blank lines).
 
     Preserved for backwards compatibility with existing tests.
     """
     env_file = Path(".env")
-    env_values = {}
+    env_values: dict[str, str] = {}
 
     if not env_file.exists():
         return env_values

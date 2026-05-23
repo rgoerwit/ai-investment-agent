@@ -339,10 +339,10 @@ def extract_quarterly_horizons(ticker, symbol: str) -> dict[str, Any]:
                 extracted["freeCashflow_TTM"] = float(ttm_fcf_ocf + ttm_fcf_capex)
                 extracted["_freeCashflow_TTM_source"] = "calculated_from_quarterly"
 
-    mrq_growth = extracted.get("revenueGrowth_MRQ")
-    ttm_growth = extracted.get("revenueGrowth_TTM")
-    if mrq_growth is not None and ttm_growth is not None:
-        delta = mrq_growth - ttm_growth
+    extracted_mrq_growth = _safe_float(extracted.get("revenueGrowth_MRQ"))
+    ttm_growth = _safe_float(extracted.get("revenueGrowth_TTM"))
+    if extracted_mrq_growth is not None and ttm_growth is not None:
+        delta = extracted_mrq_growth - ttm_growth
         if delta > 0.10:
             extracted["growth_trajectory"] = "ACCELERATING"
         elif delta < -0.10:
@@ -596,7 +596,7 @@ def calculate_capital_efficiency_signals(
             )
         if cash is not None and total_assets and total_assets > 0:
             signals["capital_cashToAssets"] = round(cash / total_assets, 4)
-        if capex is not None and d_and_a not in (None, 0):
+        if capex is not None and d_and_a is not None and d_and_a != 0:
             capex_to_da_ratio = abs(capex) / abs(d_and_a)
             signals["capital_capexToDaRatio"] = round(capex_to_da_ratio, 2)
             if capex_to_da_ratio < config.capex_to_da_underinvesting_threshold:

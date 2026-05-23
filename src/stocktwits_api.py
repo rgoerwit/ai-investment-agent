@@ -63,7 +63,7 @@ class StockTwitsAPI:
         bullish = 0
         bearish = 0
 
-        sample_texts = []
+        sample_texts: list[str] = []
 
         for msg in messages:
             # Extract sentiment if tagged by the user

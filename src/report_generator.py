@@ -242,7 +242,7 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
                 trade_date=self.trade_date,
                 current_price=chart_data.current_price,
                 fifty_two_week_high=chart_data.fifty_two_week_high,
-                fifty_two_week_low=chart_data.fifty_two_week_low,
+                fifty_two_week_low=chart_data.fifty_two_week_low or 0.0,
                 moving_avg_50=chart_data.moving_avg_50,
                 moving_avg_200=chart_data.moving_avg_200,
                 external_target_high=chart_data.external_target_high,
@@ -1122,7 +1122,7 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
 
         # Repair exact glued block-boundary defects from older artifacts or
         # upstream model-format drift before any header demotion occurs.
-        text = normalize_structured_block_boundaries(text)
+        text = normalize_structured_block_boundaries(text) or text
 
         # Remove agent prefixes if present
         text = re.sub(
@@ -1236,9 +1236,10 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         if not match:
             return text
         block = match.group(1)
-        fields = dict(
-            m.groups() for m in re.finditer(r"^([A-Z_]+):\s*(.*)$", block, re.MULTILINE)
-        )
+        fields: dict[str, str] = {}
+        for field_match in re.finditer(r"^([A-Z_]+):\s*(.*)$", block, re.MULTILINE):
+            key, value = field_match.groups()
+            fields[str(key)] = str(value)
         text = text[: match.start()] + text[match.end() :]
         if fields.get("TRIGGERED", "NO").upper() == "YES":
             headline = fields.get("HEADLINE", "")

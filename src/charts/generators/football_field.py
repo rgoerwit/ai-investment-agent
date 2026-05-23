@@ -269,28 +269,27 @@ def generate_football_field(
             data.external_target_high, data.current_price
         )
         if ext_low_ok and ext_high_ok:
-            bars.append(
-                (
-                    data.external_target_low,
-                    data.external_target_high - data.external_target_low,
-                )
-            )
-            colors.append("#7B68EE")  # Purple
-            labels.append("Analyst Consensus")
+            ext_low = data.external_target_low
+            ext_high = data.external_target_high
+            if ext_low is not None and ext_high is not None:
+                bars.append((ext_low, ext_high - ext_low))
+                colors.append("#7B68EE")  # Purple
+                labels.append("Analyst Consensus")
 
     # Our Target Range (if available and reasonable - LLM math can hallucinate)
     if data.has_our_targets():
         our_low_ok = _is_target_reasonable(data.our_target_low, data.current_price)
         our_high_ok = _is_target_reasonable(data.our_target_high, data.current_price)
         if our_low_ok and our_high_ok:
-            bars.append(
-                (data.our_target_low, data.our_target_high - data.our_target_low)
-            )
-            colors.append("#2ECC71")  # Green
-            label = "Our Target"
-            if data.target_confidence:
-                label += f" ({data.target_confidence})"
-            labels.append(label)
+            our_low = data.our_target_low
+            our_high = data.our_target_high
+            if our_low is not None and our_high is not None:
+                bars.append((our_low, our_high - our_low))
+                colors.append("#2ECC71")  # Green
+                label = "Our Target"
+                if data.target_confidence:
+                    label += f" ({data.target_confidence})"
+                labels.append(label)
     elif data.quality_warnings:
         # If targets are missing due to quality warnings (skipped valuation), show placeholder
         # Use a dummy range centered on current price to place the label

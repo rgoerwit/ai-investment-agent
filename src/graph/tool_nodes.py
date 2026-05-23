@@ -42,10 +42,15 @@ def create_agent_tool_node(tools: list, agent_key: str):
     tool_names = {tool.name for tool in tools}
     tools_by_name = {tool.name: tool for tool in tools}
 
-    def _tool_name(tc: dict[str, Any]) -> str:
-        return tc.get("name") or tc.get("function", {}).get("name", "")
+    def _tool_name(tc: Any) -> str:
+        if not isinstance(tc, dict):
+            return ""
+        name = tc.get("name") or tc.get("function", {}).get("name", "")
+        return name if isinstance(name, str) else ""
 
-    def _tool_args(tc: dict[str, Any]) -> dict[str, Any]:
+    def _tool_args(tc: Any) -> dict[str, Any]:
+        if not isinstance(tc, dict):
+            return {}
         args = tc.get("args")
         if args is None:
             args = tc.get("function", {}).get("arguments", {})
@@ -97,10 +102,12 @@ def create_agent_tool_node(tools: list, agent_key: str):
         )
         return msg
 
-    async def _execute_one(tc: dict[str, Any]) -> ToolMessage:
+    async def _execute_one(tc: Any) -> ToolMessage:
         tool_name = _tool_name(tc)
         tool_args = _tool_args(tc)
-        tool_id = tc.get("id", tool_name)
+        tool_id = tc.get("id", tool_name) if isinstance(tc, dict) else tool_name
+        if not isinstance(tool_id, str):
+            tool_id = tool_name
         tool_fn = tools_by_name.get(tool_name)
 
         if not tool_fn:
@@ -124,10 +131,14 @@ def create_agent_tool_node(tools: list, agent_key: str):
                 source="toolnode",
                 agent_key=agent_key,
             )
+
+            async def _run_tool(args: dict[str, Any]) -> Any:
+                return await tool_fn.ainvoke(args)
+
             tool_result = await asyncio.wait_for(
                 get_current_tool_service().execute(
                     invocation,
-                    runner=lambda args, tool=tool_fn: tool.ainvoke(args),
+                    runner=_run_tool,
                 ),
                 timeout=_TOOL_CALL_TIMEOUT_SECONDS,
             )

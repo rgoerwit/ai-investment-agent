@@ -1,8 +1,7 @@
 import json
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
-from langgraph.graph import MessagesState
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
@@ -71,7 +70,9 @@ def merge_and_cap_messages(
     x: list[BaseMessage] | None, y: list[BaseMessage] | BaseMessage | None
 ) -> list[BaseMessage]:
     """Merge messages using LangGraph semantics, then cap generic history."""
-    merged = add_messages(x or [], y or [])
+    merged = cast(
+        list[BaseMessage], add_messages(cast(Any, x or []), cast(Any, y or []))
+    )
     if not merged:
         return []
 
@@ -178,7 +179,7 @@ def merge_invest_debate_state(
     if y is None:
         return x
 
-    result = {}
+    result: dict[str, Any] = {}
     all_keys = set(x.keys()) | set(y.keys())
     for key in all_keys:
         x_val = x.get(key, default_state.get(key))
@@ -188,10 +189,10 @@ def merge_invest_debate_state(
         else:
             result[key] = y_val if y_val is not None else x_val
 
-    return result
+    return cast(InvestDebateState, result)
 
 
-class AgentState(MessagesState):
+class AgentState(TypedDict, total=False):
     messages: Annotated[list[BaseMessage], merge_and_cap_messages]
     company_of_interest: str
     company_name: str

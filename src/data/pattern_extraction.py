@@ -114,7 +114,7 @@ class FinancialPatternExtractor:
         self, content: str, skip_fields: set[str] | None = None
     ) -> dict[str, Any]:
         skip_fields = skip_fields or set()
-        extracted = {}
+        extracted: dict[str, Any] = {}
 
         for field, pattern_list in self.patterns.items():
             if field != "forwardPE" and field in skip_fields:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from typing import Any
 
 import structlog
@@ -575,7 +576,7 @@ def _is_output_insufficient(content: str, agent_key: str) -> bool:
     return False
 
 
-def _extract_sector_from_state(state: dict) -> str:
+def _extract_sector_from_state(state: Mapping[str, Any]) -> str:
     """Extract sector from the fundamentals DATA_BLOCK for lesson retrieval."""
     fundamentals = state.get("fundamentals_report", "") or ""
     return extract_data_block_field(fundamentals, "SECTOR") or "Unknown"

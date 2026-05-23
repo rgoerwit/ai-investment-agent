@@ -85,6 +85,7 @@ Avg Daily Turnover (USD): N/A
         # Determine currency and FX rate based on resolution
         suffix = get_ticker_suffix(normalized_symbol)
         res = resolve_local_trading_currency(ticker=normalized_symbol)
+        resolution_source: str
         if res.code:
             currency = res.code
             resolution_source = res.source

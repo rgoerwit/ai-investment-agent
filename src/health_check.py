@@ -36,7 +36,7 @@ logging.getLogger("google.ai").setLevel(logging.WARNING)
 logging.getLogger("chromadb").setLevel(logging.ERROR)
 
 
-def get_package_version(module_name: str, package_name: str = None) -> str:
+def get_package_version(module_name: str, package_name: str | None = None) -> str:
     """Get version of a package."""
     if package_name is None:
         package_name = module_name.replace("_", "-")
@@ -44,7 +44,7 @@ def get_package_version(module_name: str, package_name: str = None) -> str:
     try:
         mod = __import__(module_name)
         if hasattr(mod, "__version__"):
-            return mod.__version__
+            return str(mod.__version__)
         from importlib.metadata import version
 
         return version(package_name)

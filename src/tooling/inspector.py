@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, cast, runtime_checkable
 
 import structlog
 
@@ -107,14 +107,14 @@ class CompositeInspector:
             return_exceptions=True,
         )
         decisions: list[InspectionDecision] = []
-        errors: list[tuple[str, Exception]] = []
+        errors: list[tuple[str, BaseException]] = []
         for inspector, result in zip(
             self._inspectors, inspection_results, strict=False
         ):
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 errors.append((type(inspector).__name__, result))
             else:
-                decisions.append(result)
+                decisions.append(cast(InspectionDecision, result))
 
         for inspector_name, exc in errors:
             logger.warning(

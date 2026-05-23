@@ -25,7 +25,7 @@ async def get_news(
         " '7203.T' (Japan), '0005.HK' (HK), '2330.TW' (Taiwan TWSE)."
         " Use exactly as provided; never alter or drop the suffix.",
     ],
-    search_query: Annotated[str, "Specific query"] = None,
+    search_query: Annotated[str | None, "Specific query"] = None,
 ) -> str:
     """
     Get recent news using Tavily with ENHANCED multi-query strategy.
@@ -150,7 +150,7 @@ async def get_social_media_sentiment(ticker: str) -> str:
 
         return summary
     except Exception as exc:
-        summary = summarize_exception(
+        error_summary = summarize_exception(
             exc,
             operation="get_social_media_sentiment",
             provider="unknown",
@@ -158,12 +158,12 @@ async def get_social_media_sentiment(ticker: str) -> str:
         logger.warning(
             "social_media_sentiment_failed",
             ticker=ticker,
-            **summary,
+            **error_summary,
         )
         return format_error_message(
             operation="get_social_media_sentiment",
-            error_type=summary["error_type"],
-            message_preview=summary["message_preview"],
+            error_type=error_summary["error_type"],
+            message_preview=error_summary["message_preview"],
         )
 
 

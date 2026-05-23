@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
+from typing import Literal
 
 from src.config import config
 from src.error_safety import format_error_message, summarize_exception
@@ -130,7 +131,7 @@ def _run_job(
             )
 
     if failed == 0:
-        status = "completed"
+        status: Literal["completed", "partial", "failed"] = "completed"
     elif succeeded == 0:
         status = "failed"
     else:

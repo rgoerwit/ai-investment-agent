@@ -17,8 +17,11 @@ class ScenarioAssumptionLike(Protocol):
     a matching attribute satisfy it.
     """
 
-    probability: float
-    drivers: str
+    @property
+    def probability(self) -> float: ...
+
+    @property
+    def drivers(self) -> str: ...
 
 
 @runtime_checkable
@@ -31,15 +34,32 @@ class ValuationScenariosLike(Protocol):
     dataclass both qualify.
     """
 
-    methodology: str
-    data_sufficiency: str
-    bear: ScenarioAssumptionLike
-    base: ScenarioAssumptionLike
-    bull: ScenarioAssumptionLike
-    bear_iv: float
-    base_iv: float
-    bull_iv: float
-    weighted_iv: float
+    @property
+    def methodology(self) -> str: ...
+
+    @property
+    def data_sufficiency(self) -> str: ...
+
+    @property
+    def bear(self) -> ScenarioAssumptionLike: ...
+
+    @property
+    def base(self) -> ScenarioAssumptionLike: ...
+
+    @property
+    def bull(self) -> ScenarioAssumptionLike: ...
+
+    @property
+    def bear_iv(self) -> float: ...
+
+    @property
+    def base_iv(self) -> float: ...
+
+    @property
+    def bull_iv(self) -> float: ...
+
+    @property
+    def weighted_iv(self) -> float: ...
 
 
 class ChartFormat(Enum):

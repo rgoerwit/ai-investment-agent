@@ -291,7 +291,7 @@ def detect_capital_efficiency_flags(
 
     metrics = extract_capital_efficiency_signals(fundamentals_report)
     base_metrics = extract_metrics(fundamentals_report)
-    value_trap_metrics = extract_value_trap_score(value_trap_report)
+    value_trap_metrics = extract_value_trap_score(value_trap_report or "")
     if not metrics:
         return flags
 

@@ -38,7 +38,7 @@ from collections import namedtuple
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 import structlog
@@ -381,11 +381,11 @@ class DataQuality:
     """Track data quality and sources."""
 
     basics_ok: bool = False
-    basics_missing: list[str] = None
+    basics_missing: list[str] | None = None
     coverage_pct: float = 0.0
-    sources_used: list[str] = None
+    sources_used: list[str] | None = None
     gaps_filled: int = 0
-    suspicious_fields: list[str] = None
+    suspicious_fields: list[str] | None = None
 
     def __post_init__(self):
         if self.basics_missing is None:
@@ -435,8 +435,8 @@ class SmartMarketDataFetcher(FinancialFetcher):
 
     def __init__(self):
         configure_yfinance_defaults()
-        self.fx_cache = {}
-        self.fx_cache_expiry_time = {}
+        self.fx_cache: dict[str, float] = {}
+        self.fx_cache_expiry_time: dict[str, datetime] = {}
         self._mnemonic_cache: dict[str, str] = self._load_mnemonic_cache()
         self._metrics_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._metrics_inflight: dict[str, asyncio.Task[dict[str, Any]]] = {}
@@ -458,7 +458,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
             TavilyClient(api_key=api_key) if TAVILY_LIB_AVAILABLE and api_key else None
         )
 
-        self.stats = {
+        self.stats: dict[str, Any] = {
             "fetches": 0,
             "basics_ok": 0,
             "basics_failed": 0,
@@ -589,7 +589,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         expiry_time = self.fx_cache_expiry_time.get(cache_key)
 
         if expiry_time and now < expiry_time:
-            return self.fx_cache.get(cache_key, 1.0)
+            return float(self.fx_cache.get(cache_key, 1.0))
 
         try:
             pair_symbol = f"{from_curr}{to_curr}=X"
@@ -833,7 +833,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         raw_currency = info.get("currency")
         financial_currency = info.get("financialCurrency")
 
-        if not all([price, shares, market_cap]) or market_cap == 0:
+        if price is None or shares is None or market_cap is None or market_cap == 0:
             return info
 
         corrected_price, major_currency, scale = normalize_minor_unit_amount(
@@ -1290,7 +1290,11 @@ class SmartMarketDataFetcher(FinancialFetcher):
             )
             quotes = result.get("quotes", []) if isinstance(result, dict) else []
             for q in quotes:
+                if not isinstance(q, dict):
+                    continue
                 sym = q.get("symbol", "")
+                if not isinstance(sym, str):
+                    continue
                 # Accept only results on the same exchange whose base is all-digits
                 if (
                     sym.endswith(suffix)
@@ -1794,7 +1798,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
 
     def get_stats(self) -> dict[str, Any]:
         """Get comprehensive statistics on fetcher performance."""
-        return self.stats.copy()
+        return cast(dict[str, Any], self.stats.copy())
 
     def clear_fx_cache(self):
         """Clear FX rate cache."""

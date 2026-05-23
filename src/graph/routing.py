@@ -51,7 +51,7 @@ def should_continue_analyst(
         messages and hasattr(messages[-1], "tool_calls") and messages[-1].tool_calls
     )
 
-    result = "tools" if has_tool_calls else "continue"
+    result: Literal["tools", "continue"] = "tools" if has_tool_calls else "continue"
 
     logger.debug(
         "analyst_routing", sender=sender, has_tool_calls=has_tool_calls, result=result

@@ -17,6 +17,7 @@ from src.ibkr.reconciliation_rules import (
     _resolve_fx,
     check_staleness,
 )
+from src.ibkr.ticker import Ticker
 
 if TYPE_CHECKING:
     from src.ibkr.reconciler import ReconciliationDiagnostics
@@ -103,7 +104,7 @@ def find_opportunities(
 
         items.append(
             ReconciliationItem(
-                ticker=ticker,
+                ticker=Ticker.from_yf(ticker),
                 action="BUY",
                 reason=buy_reason,
                 urgency="MEDIUM",

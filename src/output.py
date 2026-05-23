@@ -440,7 +440,7 @@ def _emit_start_banner(
             ticker=args.ticker,
             output_path=str(output_targets.output_file),
         )
-    return welcome_banner
+    return str(welcome_banner)
 
 
 def _render_primary_output(
