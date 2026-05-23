@@ -30,6 +30,8 @@ STRUCTLOG_CONVERTED = {
     "src/llms.py",
     "src/report_generator.py",
     "src/health_check.py",
+    "src/token_tracker.py",
+    "src/charts/chart_node.py",
 }
 
 

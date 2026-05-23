@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import datetime
@@ -410,13 +409,12 @@ def _load_company_name_for_output(
 
 async def _load_company_name_for_output_async(ticker: str) -> str | None:
     """Async wrapper for output paths running inside the main event loop."""
-    from src.async_utils import run_with_hard_timeout
+    from src.blocking_io import OUTPUT_COMPANY_NAME_POLICY, run_blocking_call
 
     try:
-        return await run_with_hard_timeout(
-            asyncio.to_thread(_load_company_name_for_output, ticker),
-            timeout=6.0,
-            label=f"output_company_name:{ticker}",
+        return await run_blocking_call(
+            OUTPUT_COMPANY_NAME_POLICY.with_label(f"output_company_name:{ticker}"),
+            lambda: _load_company_name_for_output(ticker),
         )
     except TimeoutError:
         return None

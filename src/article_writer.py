@@ -19,6 +19,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, Field
 
 from src.config import config
+from src.error_safety import summarize_exception
 from src.llms import create_deep_thinking_llm, create_writer_llm
 from src.runtime_diagnostics import classify_failure, get_model_name, infer_provider
 from src.runtime_services import get_current_tool_service
@@ -250,7 +251,10 @@ class ArticleWriter:
             )
             return cast(dict, config_data)
         except json.JSONDecodeError as e:
-            logger.error("Failed to parse writer.json", error=str(e))
+            logger.error(
+                "writer_config_parse_failed",
+                **summarize_exception(e, operation="article_writer:parse_config"),
+            )
             return DEFAULT_PROMPT_CONFIG
 
     def _create_llm(self):
@@ -801,7 +805,11 @@ class ArticleWriter:
             return article
 
         except Exception as e:
-            logger.error("Failed to generate article", ticker=ticker, error=str(e))
+            logger.error(
+                "article_generation_failed",
+                ticker=ticker,
+                **summarize_exception(e, operation="article_writer:generate"),
+            )
             raise
 
     def revise(
@@ -902,7 +910,11 @@ class ArticleWriter:
             return article
 
         except Exception as e:
-            logger.error("Failed to revise article", ticker=ticker, error=str(e))
+            logger.error(
+                "article_revision_failed",
+                ticker=ticker,
+                **summarize_exception(e, operation="article_writer:revise"),
+            )
             raise
 
 
@@ -1149,7 +1161,10 @@ class ArticleEditor:
             with open(prompt_file) as f:
                 return cast(dict, json.load(f))
         except json.JSONDecodeError as e:
-            logger.error("Failed to parse editor.json", error=str(e))
+            logger.error(
+                "editor_config_parse_failed",
+                **summarize_exception(e, operation="article_editor:parse_config"),
+            )
             return {"system_message": "You are an Editor-in-Chief reviewing articles."}
 
     def is_available(self) -> bool:
@@ -1391,7 +1406,10 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
             return await self._invoke_final_review(messages)
 
         except Exception as e:
-            logger.error("Editor review failed", error=str(e))
+            logger.error(
+                "editor_review_failed",
+                **summarize_exception(e, operation="article_editor:review"),
+            )
             # On error, approve to avoid blocking
             return {
                 "verdict": "APPROVED",

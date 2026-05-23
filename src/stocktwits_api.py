@@ -54,7 +54,13 @@ class StockTwitsAPI:
                     return self._process_messages(messages, clean_ticker)
 
             except Exception as e:
-                logger.error("stocktwits_fetch_failed", ticker=ticker, error=str(e))
+                from src.error_safety import summarize_exception
+
+                logger.error(
+                    "stocktwits_fetch_failed",
+                    ticker=ticker,
+                    **summarize_exception(e, operation="stocktwits_fetch"),
+                )
                 return {"error": str(e)}
 
     def _process_messages(self, messages: list[dict], ticker: str) -> dict[str, Any]:

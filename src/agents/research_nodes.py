@@ -8,6 +8,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.types import RunnableConfig
 
 from src.config import config as settings_config
+from src.error_safety import summarize_exception
 from src.runtime_diagnostics import failure_artifact, success_artifact
 from src.tooling.text_boundary import format_untrusted_block
 
@@ -163,7 +164,11 @@ Now provide your Round 2 rebuttal, addressing the opponent's key points."""
                 else:
                     logger.info("memory_no_exact_match", ticker=ticker)
             except Exception as exc:
-                logger.error("memory_retrieval_failed", ticker=ticker, error=str(exc))
+                logger.error(
+                    "memory_retrieval_failed",
+                    ticker=ticker,
+                    **summarize_exception(exc, operation="memory_retrieval"),
+                )
 
         lessons_text = ""
         if settings_config.enable_memory:

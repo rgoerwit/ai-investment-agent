@@ -23,11 +23,61 @@ def _safe_float(value: Any) -> float | None:
     return numeric if pd.notna(numeric) else None
 
 
+STATEMENT_ROW_ALIASES: dict[str, tuple[str, ...]] = {
+    "total_revenue": ("Total Revenue", "Operating Revenue", "Revenue"),
+    "gross_profit": ("Gross Profit",),
+    "operating_income": ("Operating Income", "Operating Income Loss"),
+    "net_income": ("Net Income", "Net Income Common Stockholders"),
+    "operating_cash_flow": (
+        "Operating Cash Flow",
+        "Cash Flow From Continuing Operating Activities",
+    ),
+    "capital_expenditure": ("Capital Expenditure", "Capital Expenditures"),
+    "current_assets": ("Current Assets", "Total Current Assets"),
+    "current_liabilities": ("Current Liabilities", "Total Current Liabilities"),
+    "total_debt": ("Total Debt",),
+    "long_term_debt": ("Long Term Debt", "Long Term Debt And Capital Lease Obligation"),
+    "current_debt": ("Current Debt", "Current Debt And Capital Lease Obligation"),
+    "stockholders_equity": ("Stockholders Equity", "Total Stockholder Equity"),
+    "total_assets": ("Total Assets",),
+    "cash_only": ("Cash And Cash Equivalents", "Cash"),
+    "cash_and_short_term_investments": ("Cash And Short Term Investments",),
+    "short_term_investments": ("Short Term Investments",),
+}
+
+
+def statement_value(df: pd.DataFrame, key: str, col: int = 0) -> float | None:
+    if df.empty or key not in STATEMENT_ROW_ALIASES or len(df.columns) <= col:
+        return None
+    for label in STATEMENT_ROW_ALIASES[key]:
+        if label in df.index:
+            return _safe_float(df.loc[label].iloc[col])
+    return None
+
+
+def _log_statement_field_extraction_failed(
+    symbol: str, key: str, exc: Exception
+) -> None:
+    logger.debug(
+        "statement_field_extraction_failed",
+        symbol=symbol,
+        key=key,
+        **summarize_exception(
+            exc,
+            operation="extracting financial statement field",
+            provider="unknown",
+        ),
+    )
+
+
 def extract_from_financial_statements(
     fetcher: Any, ticker, symbol: str
 ) -> dict[str, Any]:
     """Extract high-value metrics from yfinance statements and enrich with derived signals."""
     extracted: dict[str, Any] = {}
+    financials = pd.DataFrame()
+    cashflow = pd.DataFrame()
+    balance_sheet = pd.DataFrame()
     try:
         financials = ticker.financials
         cashflow = ticker.cashflow
@@ -38,150 +88,119 @@ def extract_from_financial_statements(
         fetcher.stats["sources"]["statements"] += 1
 
         if not financials.empty:
-            if "Total Revenue" in financials.index and len(financials.columns) >= 2:
+            if len(financials.columns) >= 2:
                 try:
-                    revenue_series = financials.loc["Total Revenue"]
-                    current = float(revenue_series.iloc[0])
-                    previous = float(revenue_series.iloc[1])
-                    if previous and previous != 0:
+                    current = statement_value(financials, "total_revenue", col=0)
+                    previous = statement_value(financials, "total_revenue", col=1)
+                    if current is not None and previous:
                         growth = (current - previous) / previous
                         if -0.5 < growth < 5.0:
                             extracted["revenueGrowth"] = growth
                             extracted["_revenueGrowth_source"] = (
                                 "calculated_from_statements"
                             )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _log_statement_field_extraction_failed(
+                        symbol, "revenue_growth", exc
+                    )
 
             try:
-                if (
-                    "Gross Profit" in financials.index
-                    and "Total Revenue" in financials.index
-                ):
-                    gross_profit = float(financials.loc["Gross Profit"].iloc[0])
-                    revenue = float(financials.loc["Total Revenue"].iloc[0])
-                    if revenue:
+                revenue = statement_value(financials, "total_revenue")
+                if revenue:
+                    gross_profit = statement_value(financials, "gross_profit")
+                    if gross_profit is not None:
                         extracted["grossMargins"] = gross_profit / revenue
                         extracted["_grossMargins_source"] = "calculated_from_statements"
-                if (
-                    "Operating Income" in financials.index
-                    and "Total Revenue" in financials.index
-                ):
-                    op_income = float(financials.loc["Operating Income"].iloc[0])
-                    revenue = float(financials.loc["Total Revenue"].iloc[0])
-                    if revenue:
+
+                    op_income = statement_value(financials, "operating_income")
+                    if op_income is not None:
                         extracted["operatingMargins"] = op_income / revenue
                         extracted["_operatingMargins_source"] = (
                             "calculated_from_statements"
                         )
-                if (
-                    "Net Income" in financials.index
-                    and "Total Revenue" in financials.index
-                ):
-                    net_income = float(financials.loc["Net Income"].iloc[0])
-                    revenue = float(financials.loc["Total Revenue"].iloc[0])
-                    if revenue:
+
+                    net_income = statement_value(financials, "net_income")
+                    if net_income is not None:
                         extracted["profitMargins"] = net_income / revenue
                         extracted["_profitMargins_source"] = (
                             "calculated_from_statements"
                         )
-            except Exception:
-                pass
+            except Exception as exc:
+                _log_statement_field_extraction_failed(symbol, "margins", exc)
 
         if not cashflow.empty:
-            if "Operating Cash Flow" in cashflow.index:
-                try:
-                    ocf = float(cashflow.loc["Operating Cash Flow"].iloc[0])
+            try:
+                ocf = statement_value(cashflow, "operating_cash_flow")
+                if ocf is not None:
                     extracted["operatingCashflow"] = ocf
                     extracted["_operatingCashflow_source"] = "extracted_from_statements"
-                except Exception:
-                    pass
-            try:
-                if (
-                    "Operating Cash Flow" in cashflow.index
-                    and "Capital Expenditure" in cashflow.index
-                ):
-                    ocf = float(cashflow.loc["Operating Cash Flow"].iloc[0])
-                    capex = float(cashflow.loc["Capital Expenditure"].iloc[0])
+                capex = statement_value(cashflow, "capital_expenditure")
+                if ocf is not None and capex is not None:
                     extracted["freeCashflow"] = ocf + capex
                     extracted["_freeCashflow_source"] = "calculated_from_statements"
-            except Exception:
-                pass
+            except Exception as exc:
+                _log_statement_field_extraction_failed(symbol, "cashflow", exc)
 
         if not balance_sheet.empty:
-            extracted["_statements_date"] = balance_sheet.columns[0].strftime(
-                "%Y-%m-%d"
+            statement_date = balance_sheet.columns[0]
+            extracted["_statements_date"] = (
+                statement_date.strftime("%Y-%m-%d")
+                if hasattr(statement_date, "strftime")
+                else str(statement_date)
             )
             try:
-                if (
-                    "Current Assets" in balance_sheet.index
-                    and "Current Liabilities" in balance_sheet.index
-                ):
-                    current_assets = float(balance_sheet.loc["Current Assets"].iloc[0])
-                    current_liabilities = float(
-                        balance_sheet.loc["Current Liabilities"].iloc[0]
-                    )
-                    if current_liabilities:
-                        extracted["currentRatio"] = current_assets / current_liabilities
-                        extracted["_currentRatio_source"] = "calculated_from_statements"
-            except Exception:
-                pass
+                current_assets = statement_value(balance_sheet, "current_assets")
+                current_liabilities = statement_value(
+                    balance_sheet, "current_liabilities"
+                )
+                if current_assets is not None and current_liabilities:
+                    extracted["currentRatio"] = current_assets / current_liabilities
+                    extracted["_currentRatio_source"] = "calculated_from_statements"
+            except Exception as exc:
+                _log_statement_field_extraction_failed(symbol, "current_ratio", exc)
 
             try:
-                debt = None
-                equity = None
-                if "Total Debt" in balance_sheet.index:
-                    debt = float(balance_sheet.loc["Total Debt"].iloc[0])
-                elif "Long Term Debt" in balance_sheet.index:
-                    long_term = float(balance_sheet.loc["Long Term Debt"].iloc[0])
-                    short_term = (
-                        float(balance_sheet.loc["Current Debt"].iloc[0])
-                        if "Current Debt" in balance_sheet.index
-                        else 0
-                    )
-                    debt = long_term + short_term
-
-                if "Stockholders Equity" in balance_sheet.index:
-                    equity = float(balance_sheet.loc["Stockholders Equity"].iloc[0])
-                elif "Total Stockholder Equity" in balance_sheet.index:
-                    equity = float(
-                        balance_sheet.loc["Total Stockholder Equity"].iloc[0]
-                    )
+                debt = statement_value(balance_sheet, "total_debt")
+                if debt is None:
+                    long_term = statement_value(balance_sheet, "long_term_debt")
+                    short_term = statement_value(balance_sheet, "current_debt") or 0
+                    debt = None if long_term is None else long_term + short_term
+                equity = statement_value(balance_sheet, "stockholders_equity")
 
                 if debt is not None and equity is not None and equity != 0:
                     extracted["debtToEquity"] = debt / equity
                     extracted["_debtToEquity_source"] = "calculated_from_statements"
-            except Exception:
-                pass
+            except Exception as exc:
+                _log_statement_field_extraction_failed(symbol, "debt_to_equity", exc)
 
             try:
-                if "Total Assets" in balance_sheet.index:
-                    extracted["totalAssets"] = float(
-                        balance_sheet.loc["Total Assets"].iloc[0]
-                    )
+                total_assets = statement_value(balance_sheet, "total_assets")
+                if total_assets is not None:
+                    extracted["totalAssets"] = total_assets
                     extracted["_totalAssets_source"] = "calculated_from_statements"
 
-                liquid = None
-                for cash_row in [
-                    "Cash And Cash Equivalents",
-                    "Cash",
-                    "Cash And Short Term Investments",
-                ]:
-                    if cash_row in balance_sheet.index:
-                        liquid = float(balance_sheet.loc[cash_row].iloc[0])
-                        break
+                liquid = statement_value(balance_sheet, "cash_only")
                 if liquid is not None:
                     sti = (
-                        float(balance_sheet.loc["Short Term Investments"].iloc[0])
-                        if "Short Term Investments" in balance_sheet.index
-                        else 0.0
+                        statement_value(balance_sheet, "short_term_investments") or 0.0
                     )
                     extracted["cashAndShortTermInvestments"] = liquid + sti
                     extracted["_cashAndShortTermInvestments_source"] = (
                         "calculated_from_statements"
                     )
-            except Exception:
-                pass
+                else:
+                    bundled_liquid = statement_value(
+                        balance_sheet, "cash_and_short_term_investments"
+                    )
+                    if bundled_liquid is not None:
+                        extracted["cashAndShortTermInvestments"] = bundled_liquid
+                        extracted["_cashAndShortTermInvestments_source"] = (
+                            "extracted_from_statements"
+                        )
+            except Exception as exc:
+                _log_statement_field_extraction_failed(
+                    symbol, "balance_sheet_assets", exc
+                )
     except Exception as exc:
         logger.debug(
             "statement_extraction_failed",

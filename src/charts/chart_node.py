@@ -243,7 +243,12 @@ def create_chart_generator_node(
             return {"chart_paths": chart_paths}
 
         except Exception as e:
-            logger.error(f"Chart generation failed: {e}", exc_info=True)
+            from src.error_safety import summarize_exception
+
+            logger.warning(
+                "chart_generation_failed",
+                **summarize_exception(e, operation="chart_generation"),
+            )
             return {"chart_paths": {}}
 
     return chart_generator_node

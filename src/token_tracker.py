@@ -480,23 +480,19 @@ class TokenTracker:
         stats = self.get_total_stats()
         top_spenders = self.get_top_spenders()
 
-        logger.info("TOKEN USAGE SUMMARY")
-        logger.info(f"Session Start: {stats['session_start']}")
-        logger.info(f"Total LLM Calls: {stats['total_calls']}")
-        logger.info(f"Failed LLM Attempts: {stats['failed_attempts']}")
-        logger.info(f"Total Agents: {stats['total_agents']}")
-        logger.info(f"Total Prompt Tokens: {stats['total_prompt_tokens']:,}")
-        logger.info(f"Total Completion Tokens: {stats['total_completion_tokens']:,}")
-        logger.info(f"Total Tokens: {stats['total_tokens']:,}")
-        logger.info(f"Projected Cost (Paid Tier): ${stats['total_cost_usd']:.4f} USD")
         logger.info(
-            "  (Note: Actual cost = $0 if using free tier without billing enabled)"
+            "token_usage_summary",
+            session_start=stats["session_start"],
+            total_calls=stats["total_calls"],
+            failed_attempts=stats["failed_attempts"],
+            total_agents=stats["total_agents"],
+            total_prompt_tokens=stats["total_prompt_tokens"],
+            total_completion_tokens=stats["total_completion_tokens"],
+            total_tokens=stats["total_tokens"],
+            total_cost_usd=round(stats["total_cost_usd"], 4),
+            failed_by_provider=stats.get("failed_by_provider") or None,
+            failed_by_kind=stats.get("failed_by_kind") or None,
         )
-
-        if stats["failed_by_provider"]:
-            logger.info(f"Failed by Provider: {stats['failed_by_provider']}")
-        if stats["failed_by_kind"]:
-            logger.info(f"Failed by Kind: {stats['failed_by_kind']}")
 
         logger.info(
             "analysis_cost_summary",
@@ -515,15 +511,18 @@ class TokenTracker:
             key=lambda x: (-x[1]["cost_usd"], -x[1]["total_tokens"], x[0]),
         )
 
-        logger.debug("Per-Agent Breakdown:")
+        logger.debug(
+            "token_usage_agent_breakdown_start", agent_count=len(sorted_agents)
+        )
         for agent_name, agent_stats in sorted_agents:
             logger.debug(
-                f"\n{agent_name}:\n"
-                f"  Calls: {agent_stats['calls']}\n"
-                f"  Prompt Tokens: {agent_stats['prompt_tokens']:,}\n"
-                f"  Completion Tokens: {agent_stats['completion_tokens']:,}\n"
-                f"  Total Tokens: {agent_stats['total_tokens']:,}\n"
-                f"  Cost: ${agent_stats['cost_usd']:.4f}"
+                "token_usage_agent_breakdown",
+                agent=agent_name,
+                calls=agent_stats["calls"],
+                prompt_tokens=agent_stats["prompt_tokens"],
+                completion_tokens=agent_stats["completion_tokens"],
+                total_tokens=agent_stats["total_tokens"],
+                cost_usd=round(agent_stats["cost_usd"], 4),
             )
 
 
