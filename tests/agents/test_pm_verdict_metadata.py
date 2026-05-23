@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.agents.structured_outputs import (
+from src.agents.pm_verdict_metadata import (
     PMVerdictMetadata,
     pm_verdict_metadata_from_text,
 )

@@ -21,6 +21,7 @@ from src.data_block_utils import (
     normalize_structured_block_boundaries,
 )
 from src.error_safety import summarize_exception
+from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import failure_artifact, success_artifact
 from src.tooling.text_boundary import format_untrusted_block
 
@@ -551,7 +552,9 @@ def create_analyst_node(
                             provider=support.infer_provider_name(retry_llm),
                             model_name=support.get_model_name(retry_llm),
                             overall_timeout_seconds=float(
-                                settings_config.llm_call_hard_timeout_seconds
+                                get_runtime_config(
+                                    settings_config
+                                ).llm_call_hard_timeout_seconds
                             ),
                         )
                     )

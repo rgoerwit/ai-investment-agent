@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from src.config import config
 from src.error_safety import summarize_exception
 from src.llms import create_deep_thinking_llm, create_writer_llm
+from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import classify_failure, get_model_name, infer_provider
 from src.runtime_services import get_current_tool_service
 from src.tavily_utils import search_tavily_sync_inspected
@@ -281,7 +282,7 @@ class ArticleWriter:
         return create_writer_llm(
             temperature=temperature,
             timeout=config.api_timeout,
-            max_retries=config.api_retry_attempts,
+            max_retries=get_runtime_config(config).api_retry_attempts,
             callbacks=[
                 TokenTrackingCallback("Article Writer", get_tracker()),
                 *self._callbacks,

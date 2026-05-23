@@ -25,6 +25,7 @@ from langchain_google_genai import (
 import src.config as config_module
 from src.config import config
 from src.llm_budgets import GenerationBudget, get_generation_budget
+from src.runtime_config import get_runtime_config
 from src.runtime_services import get_current_provider_runtime
 
 logger = structlog.get_logger(__name__)
@@ -116,7 +117,11 @@ def _create_rate_limiter_from_rpm(rpm: int) -> InMemoryRateLimiter:
 
 
 def create_process_rate_limiter(rpm: int | None = None) -> InMemoryRateLimiter:
-    """Create an owned rate limiter for a long-lived process/runtime."""
+    """Create an owned rate limiter for a long-lived process/runtime.
+
+    Bare calls intentionally use base config. CLI-scoped runs pass an explicit
+    rpm from ``RuntimeConfig`` through ``ProviderRuntime``.
+    """
     effective_rpm = rpm if rpm is not None else config_module.config.gemini_rpm_limit
     return _create_rate_limiter_from_rpm(effective_rpm)
 
@@ -188,6 +193,8 @@ class _LazyRateLimiterProxy(BaseRateLimiter):
 
 
 GLOBAL_RATE_LIMITER = _LazyRateLimiterProxy(
+    # Legacy fallback for unscoped callers; CLI-scoped runs bind a
+    # ProviderRuntime with an explicit rate limiter built from RuntimeConfig.
     lambda: _create_rate_limiter_from_rpm(config_module.config.gemini_rpm_limit)
 )
 
@@ -438,14 +445,15 @@ def create_quick_thinking_llm(
     Create a quick thinking LLM.
     If the QUICK_MODEL is Gemini 3+ or Gemini 2.5, this will set low reasoning.
     """
-    model_name = model or config.quick_think_llm
+    runtime_config = get_runtime_config(config)
+    model_name = model or runtime_config.quick_think_llm
     final_timeout = (
         timeout
         if timeout is not None
         else min(config.api_timeout, config.quick_llm_api_timeout_seconds)
     )
     final_retries = (
-        max_retries if max_retries is not None else config.api_retry_attempts
+        max_retries if max_retries is not None else runtime_config.api_retry_attempts
     )
 
     thinking_level: Literal["low", "medium", "high"] | None = None
@@ -482,10 +490,11 @@ def create_deep_thinking_llm(
     Create a deep thinking LLM.
     If the DEEP_MODEL is Gemini 3+ or Gemini 2.5, this will set high reasoning.
     """
-    model_name = model or config.deep_think_llm
+    runtime_config = get_runtime_config(config)
+    model_name = model or runtime_config.deep_think_llm
     final_timeout = timeout if timeout is not None else config.api_timeout
     final_retries = (
-        max_retries if max_retries is not None else config.api_retry_attempts
+        max_retries if max_retries is not None else runtime_config.api_retry_attempts
     )
 
     thinking_level: Literal["low", "medium", "high"] | None = None

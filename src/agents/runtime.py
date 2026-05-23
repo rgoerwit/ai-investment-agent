@@ -17,6 +17,7 @@ from src.async_utils import run_with_hard_timeout
 from src.config import config as settings_config
 from src.error_safety import summarize_exception
 from src.llm_usage import extract_token_usage_breakdown
+from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import (
     classify_failure,
     get_class_name,
@@ -256,14 +257,13 @@ async def invoke_with_rate_limit_handling(
             overall_timeout_seconds=overall_timeout_seconds,
         )
 
-    if getattr(settings_config, "quick_mode_active", False):
+    runtime_config = get_runtime_config(settings_config)
+    if runtime_config.quick_mode_active:
         hard_timeout = float(
             getattr(settings_config, "quick_llm_call_hard_timeout_seconds", 60.0)
         )
     else:
-        hard_timeout = float(
-            getattr(settings_config, "llm_call_hard_timeout_seconds", 120.0)
-        )
+        hard_timeout = float(runtime_config.llm_call_hard_timeout_seconds)
     deadline = (
         time.monotonic() + float(overall_timeout_seconds)
         if overall_timeout_seconds is not None

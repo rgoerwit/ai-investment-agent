@@ -16,6 +16,8 @@ from pathlib import Path
 
 import structlog
 
+from src.runtime_config import get_runtime_config
+
 # Add the repository root to Python path
 repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(repo_root))
@@ -151,10 +153,14 @@ async def check_llm_connectivity() -> bool:
 
         from src.config import config
 
-        logger.info("testing_llm_connectivity", model=config.quick_think_llm)
+        runtime_config = get_runtime_config(config)
+        logger.info("testing_llm_connectivity", model=runtime_config.quick_think_llm)
 
         llm = ChatGoogleGenerativeAI(
-            model=config.quick_think_llm, temperature=0, timeout=10, max_retries=1
+            model=runtime_config.quick_think_llm,
+            temperature=0,
+            timeout=10,
+            max_retries=1,
         )
 
         response = await asyncio.wait_for(

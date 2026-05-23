@@ -13,7 +13,7 @@ from src.agents.pm_inputs import (
     RISK_DEBATE_FIELD,
     risk_debate_present,
 )
-from src.agents.structured_outputs import pm_verdict_metadata_from_text
+from src.agents.pm_verdict_metadata import pm_verdict_metadata_from_text
 from src.charts.extractors.pm_block import extract_verdict_from_text
 from src.data_block_utils import has_parseable_data_block
 from src.error_safety import summarize_exception

@@ -15,6 +15,7 @@ from src.agents.pm_inputs import (
     risk_debate_content,
 )
 from src.config import config
+from src.runtime_config import get_runtime_config
 from src.sector_normalization import normalize_sector_label
 
 logger = structlog.get_logger(__name__)
@@ -208,11 +209,12 @@ def build_run_summary(
     auditor_finished = bool(auditor_status.get("complete"))
     apac_finished = bool(apac_status.get("complete"))
     providers_used = _collect_used_providers()
+    runtime_config = get_runtime_config(config)
 
     summary = {
         "quick_mode": quick_mode,
-        "quick_model": config.quick_think_llm,
-        "deep_model": config.deep_think_llm,
+        "quick_model": runtime_config.quick_think_llm,
+        "deep_model": runtime_config.deep_think_llm,
         "provider_preflight": provider_preflight or {},
         "pre_screening_result": result.get("pre_screening_result", ""),
         "debate_rounds": result.get("investment_debate_state", {}).get("count", 0),
@@ -366,7 +368,8 @@ def save_results_to_file(
             custom_prompts_loaded.append(json_file.stem)
 
     memory_stats = {}
-    if config.enable_memory:
+    runtime_config = get_runtime_config(config)
+    if runtime_config.enable_memory:
         try:
             memory_stats = get_ticker_memory_stats(ticker)
         except Exception as exc:
@@ -386,9 +389,9 @@ def save_results_to_file(
             "timestamp": timestamp,
             "analysis_date": datetime.now().isoformat(),
             "environment": config.environment,
-            "quick_model": config.quick_think_llm,
-            "deep_model": config.deep_think_llm,
-            "memory_enabled": config.enable_memory,
+            "quick_model": runtime_config.quick_think_llm,
+            "deep_model": runtime_config.deep_think_llm,
+            "memory_enabled": runtime_config.enable_memory,
             "online_tools_enabled": config.online_tools,
             "llm_provider": (
                 (result.get("run_summary", {}) or {}).get("llm_provider")
@@ -667,7 +670,7 @@ async def _maybe_save_rejection_record(
 ) -> None:
     """Persist non-BUY verdicts as retrospective rejection records.
 
-    Honors ``--no-memory`` (``config.enable_memory == False``) — the
+    Honors ``--no-memory`` (runtime config ``enable_memory == False``) — the
     rejection record lives in the same global ``lessons_learned`` ChromaDB
     collection as full retrospective lessons, and skipping memory should
     skip *all* writes to it. The retrospective comparison itself is gated
@@ -675,7 +678,7 @@ async def _maybe_save_rejection_record(
     """
     from src.error_safety import summarize_exception
 
-    if not config.enable_memory:
+    if not get_runtime_config(config).enable_memory:
         logger_obj.debug(
             "rejection_record_save_skipped_no_memory",
             ticker=getattr(args, "ticker", None),

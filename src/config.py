@@ -647,8 +647,7 @@ class Settings(BaseSettings):
             "process shutdown; on timeout the process forces os._exit()."
         ),
     )
-    # Set by _apply_runtime_overrides when --quick is passed; allows
-    # invoke_with_rate_limit_handling to pick the tighter quick timeout.
+    # Base default; CLI runs use src.runtime_config for run-scoped overrides.
     quick_mode_active: bool = Field(
         default=False,
         validation_alias="QUICK_MODE_ACTIVE",
@@ -938,7 +937,7 @@ class Settings(BaseSettings):
         extra="ignore",
         # Case-insensitive env var matching
         case_sensitive=False,
-        # Allow mutation for CLI arg overrides (main.py sets quick_think_llm, etc.)
+        # Some runtime paths still set non-override operational fields in process.
         frozen=False,
         # Use validation_alias for env var names
         populate_by_name=True,
