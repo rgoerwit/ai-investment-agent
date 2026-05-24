@@ -1750,6 +1750,86 @@ class TestExchangeScrapeIntegration:
 
 
 # ============================================================
+# TestExchangeMetricCanary — one known-liquid ticker per exchange
+# ============================================================
+# Catches the class of bug where scraping succeeds but yfinance returns
+# null for a field the screener gates on (e.g., trailingPE=None for KRX).
+# A scrape integration test won't see this; only a live metric fetch does.
+# ============================================================
+
+# One liquid, well-known ticker per enabled exchange. If yfinance can't
+# return basic financials for these blue-chip names, something is wrong
+# at the data-source layer — not in legitimate filter rejection territory.
+_EXCHANGE_CANARIES: dict[str, str] = {
+    ".T": "7203.T",  # Toyota (Japan TSE)
+    ".HK": "0005.HK",  # HSBC (Hong Kong)
+    ".TW": "2330.TW",  # TSMC (Taiwan)
+    ".KS": "005930.KS",  # Samsung Electronics (KOSPI)
+    ".KQ": "247540.KQ",  # EcoPro BM (KOSDAQ)
+    ".L": "HSBA.L",  # HSBC Holdings (LSE)
+    ".DE": "SAP.DE",  # SAP (XETRA)
+    ".SW": "NESN.SW",  # Nestlé (SIX Swiss)
+    ".AX": "BHP.AX",  # BHP (ASX)
+    ".SI": "D05.SI",  # DBS Group (SGX)
+    ".TO": "RY.TO",  # Royal Bank of Canada (TSX)
+}
+
+
+@pytest.mark.integration
+@pytest.mark.slow
+class TestExchangeMetricCanary:
+    """Catches yfinance-data-vacuum bugs the scrape test can't see.
+
+    Backstory: 2026-05-23 — Korea was enabled in config and scraped 2624
+    rows successfully, but yfinance returns ``trailingPE=None`` for every
+    KRX listing, so the screener's missing-P/E gate rejected 100% of them.
+    The scrape-only integration test was green; this test, had it existed,
+    would have caught it at commit time.
+
+    Asserts that for one well-known liquid ticker per exchange, yfinance
+    returns enough data that ``_process_row`` produces a populated P/E
+    (raw or computed via the marketCap/netIncomeToCommon fallback).
+    """
+
+    @pytest.mark.parametrize(
+        ("suffix", "ticker"),
+        list(_EXCHANGE_CANARIES.items()),
+        ids=list(_EXCHANGE_CANARIES),
+    )
+    def test_canary_has_screenable_pe(self, suffix, ticker):
+        import requests as _req
+
+        row = {
+            "YF_Ticker": ticker,
+            "Ticker_Raw": ticker.split(".")[0],
+            "Country": "Canary",
+            "Exchange": f"Canary{suffix}",
+        }
+        try:
+            fx_rates = find_gems._fetch_fx_rates()
+            result = find_gems._process_row(
+                row,
+                fx_rates=fx_rates,
+                min_mcap=50_000_000,
+                min_volume=100_000,
+                debug=False,
+            )
+        except _req.exceptions.RequestException as exc:
+            pytest.skip(f"{ticker}: yfinance unreachable: {exc}")
+
+        if result is None:
+            pytest.fail(
+                f"{ticker}: _process_row returned None — yfinance may have lost "
+                f"data for this name, or {suffix} is fundamentally broken upstream"
+            )
+        assert result.get("P/E") is not None, (
+            f"{ticker}: P/E missing after _process_row (trailingPE null AND "
+            f"marketCap/netIncomeToCommon fallback failed). Every {suffix} "
+            f"listing will be silently rejected at the missing-P/E gate."
+        )
+
+
+# ============================================================
 # TestHandleScrapeHtmlPagination — unit tests (no network)
 # ============================================================
 def _make_html_table(symbols, col="Symbol"):

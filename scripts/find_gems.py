@@ -718,7 +718,25 @@ def _process_row(row, *, fx_rates=None, min_mcap=None, min_volume=None, debug=Fa
 
             # --- Populate standard fields ---
             row["Company_YF"] = info.get("longName") or info.get("shortName")
-            row["P/E"] = info.get("trailingPE")
+            # yfinance's `trailingPE` is None for many ex-US listings (notably KRX
+            # — Samsung, SK Hynix, etc. — because Yahoo's EPS feed for Korea is
+            # incomplete). Fall back to marketCap / netIncomeToCommon when both
+            # are present and earnings are positive. Logged so audits can spot
+            # how often the fallback fires.
+            pe = info.get("trailingPE")
+            if (
+                pe is None
+                and market_cap
+                and (net_income := info.get("netIncomeToCommon"))
+            ):
+                if net_income > 0:
+                    pe = market_cap / net_income
+                    print(
+                        f"[INFO] {yf_symbol}: trailingPE missing — computed "
+                        f"P/E={pe:.2f} from marketCap/netIncome",
+                        file=sys.stderr,
+                    )
+            row["P/E"] = pe
             row["Forward_PE"] = info.get("forwardPE")
             row["ROE"] = info.get("returnOnEquity")
             row["ROA"] = info.get("returnOnAssets")
@@ -1106,6 +1124,16 @@ def _passes_revenue_history(row, *, min_revenue_years, ticker, debug=False):
     return True
 
 
+def _reject(row, reason: str) -> bool:
+    """Tag row with a reject reason category and return False.
+
+    Categories drive the per-exchange aggregate at end of run, so an audit
+    can spot "0/N passed because all rejected for <reason>" without --debug.
+    """
+    row["_reject_reason"] = reason
+    return False
+
+
 def _passes_filters(row, *, criteria: ScreenCriteria, debug=False):
     """Apply hard financial filters to an enriched row."""
     if not row:
@@ -1116,7 +1144,7 @@ def _passes_filters(row, *, criteria: ScreenCriteria, debug=False):
     if pe is None:
         if debug:
             print(f"[SKIP] {ticker}: Missing P/E", file=sys.stderr)
-        return False
+        return _reject(row, "missing_pe")
 
     if pe > criteria.max_pe_contextual:
         if debug:
@@ -1124,7 +1152,7 @@ def _passes_filters(row, *, criteria: ScreenCriteria, debug=False):
                 f"[SKIP] {ticker}: P/E {pe} > contextual max {criteria.max_pe_contextual}",
                 file=sys.stderr,
             )
-        return False
+        return _reject(row, "pe_too_high")
 
     profitability_ok, roe, roa = _has_required_profitability(
         row, min_roe=criteria.min_roe, min_roa=criteria.min_roa
@@ -1135,23 +1163,23 @@ def _passes_filters(row, *, criteria: ScreenCriteria, debug=False):
                 f"[SKIP] {ticker}: Low Profit (ROE={roe}, ROA={roa})",
                 file=sys.stderr,
             )
-        return False
+        return _reject(row, "low_profitability")
 
     leverage_ok, de = _has_acceptable_leverage(
         row, max_de=criteria.max_de, ticker=ticker, debug=debug
     )
     if not leverage_ok:
-        return False
+        return _reject(row, "high_leverage")
 
     if not _within_coverage_limit(
         row, max_coverage=criteria.max_coverage, ticker=ticker, debug=debug
     ):
-        return False
+        return _reject(row, "high_analyst_coverage")
 
     if not _passes_ocf_gate(
         row, ticker=ticker, ocf_waiver=criteria.ocf_waiver, debug=debug
     ):
-        return False
+        return _reject(row, "ocf_gate")
 
     if not _has_required_earnings_quality(
         row,
@@ -1159,7 +1187,7 @@ def _passes_filters(row, *, criteria: ScreenCriteria, debug=False):
         ticker=ticker,
         debug=debug,
     ):
-        return False
+        return _reject(row, "earnings_quality")
 
     if not _passes_revenue_history(
         row,
@@ -1167,7 +1195,7 @@ def _passes_filters(row, *, criteria: ScreenCriteria, debug=False):
         ticker=ticker,
         debug=debug,
     ):
-        return False
+        return _reject(row, "revenue_history")
 
     if criteria.uses_contextual_valuation(pe):
         contextual_profitability_ok, _, _ = _has_required_profitability(
@@ -1181,7 +1209,7 @@ def _passes_filters(row, *, criteria: ScreenCriteria, debug=False):
                     f"[SKIP] {ticker}: P/E {pe} requires stronger profitability",
                     file=sys.stderr,
                 )
-            return False
+            return _reject(row, "contextual_profitability")
 
         contextual_leverage_ok, _ = _has_acceptable_leverage(
             row,
@@ -1190,7 +1218,7 @@ def _passes_filters(row, *, criteria: ScreenCriteria, debug=False):
             debug=debug,
         )
         if not contextual_leverage_ok:
-            return False
+            return _reject(row, "contextual_leverage")
 
         if not _within_coverage_limit(
             row,
@@ -1198,7 +1226,7 @@ def _passes_filters(row, *, criteria: ScreenCriteria, debug=False):
             ticker=ticker,
             debug=debug,
         ):
-            return False
+            return _reject(row, "contextual_coverage")
 
         if not _has_required_earnings_quality(
             row,
@@ -1206,7 +1234,7 @@ def _passes_filters(row, *, criteria: ScreenCriteria, debug=False):
             ticker=ticker,
             debug=debug,
         ):
-            return False
+            return _reject(row, "contextual_earnings_quality")
 
     if debug:
         print(f"[KEEP] {ticker}: P/E={pe}, D/E={de}%, ROE={roe}", file=sys.stderr)
@@ -1315,7 +1343,38 @@ def fetch_and_filter(
         file=sys.stderr,
     )
 
+    _log_per_exchange_pass_rates(enriched_df, passing_df)
+
     return passing_df, enriched_df
+
+
+def _log_per_exchange_pass_rates(enriched_df, passing_df) -> None:
+    """Per-exchange pass-rate summary so an audit can spot 0% exchanges.
+
+    Always-on (not gated by --debug). A 0% pass rate on an enabled exchange
+    is almost always a data-source bug (missing field upstream, vendor feed
+    broken) rather than legitimate filter behavior — surface it loudly.
+    """
+    if enriched_df is None or enriched_df.empty or "Exchange" not in enriched_df:
+        return
+
+    passing_set: set[str] = (
+        set(passing_df["YF_Ticker"].dropna())
+        if passing_df is not None and not passing_df.empty
+        else set()
+    )
+
+    print("\nPass-rate by exchange (enriched → kept):", file=sys.stderr)
+    for exchange, group in enriched_df.groupby("Exchange"):
+        n_enriched = len(group)
+        n_passed = sum(1 for t in group["YF_Ticker"] if t in passing_set)
+        pct = 100.0 * n_passed / n_enriched if n_enriched else 0.0
+        line = f"  {exchange[:42]:<42} {n_passed:>5}/{n_enriched:<5} ({pct:>5.1f}%)"
+        if n_enriched >= 20 and n_passed == 0 and "_reject_reason" in group:
+            reasons = group["_reject_reason"].dropna().value_counts().head(2)
+            top = ", ".join(f"{r}={n}" for r, n in reasons.items())
+            line += f"  ⚠ all rejected — top: {top}"
+        print(line, file=sys.stderr)
 
 
 # ============================================================
