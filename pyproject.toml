@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "multi-agent-trading-system"
 version = "3.1.0"
-description = "A sophisticated multi-agent trading analysis system using LangGraph 1.x and Gemini 3"
+description = "A multi-agent international equity research system using LangGraph"
 authors = ["Trading System Team <team@example.com>"]
 readme = "README.md"
 packages = [{include = "src"}]

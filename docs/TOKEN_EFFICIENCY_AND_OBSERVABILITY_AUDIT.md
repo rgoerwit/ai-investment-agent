@@ -2,6 +2,11 @@
 
 *Audited: 2026-04-12. Live analysis run was in progress during audit (no --trace-langfuse).*
 
+Status note, 2026-05-24: this is now a historical audit. The
+token-efficiency findings are still useful hypotheses. The Langfuse section is
+not a current-state inventory; use `README.md`, `docs/RUNTIME_MODEL.md`, and
+the live `src/observability.py` code for current observability behavior.
+
 ---
 
 ## Part 1: Token Efficiency
@@ -122,15 +127,15 @@ A quick primer:
 | Component | Status | Notes |
 |---|---|---|
 | Basic setup & config | Working | `src/config.py:557-594`, `src/observability.py` |
-| CLI flag `--trace-langfuse` | Working | `src/main.py:269-275` |
-| Graph-level callback injection | Working | `src/main.py:1376-1419`, injected into `graph.ainvoke()` |
+| CLI flag `--enable-langfuse` | Working | Public flag. `--trace-langfuse` remains a hidden compatibility alias. |
+| Graph-level callback injection | Working | Managed through `src.observability.py` and active runtime context. |
 | Graph node tracing | Working | All nodes produce traces via LangGraph integration |
 | LLM call tracing | Implicit | CallbackHandler receives calls through graph; no explicit per-call spans |
-| Tool execution spans | **Missing** | `src/tooling/runtime.py` — no Langfuse spans |
+| Tool execution observations | Working | `src/tooling/runtime.py` records explicit observations through the observability seam. |
 | Token usage → Langfuse | **Missing** | Tracked locally in `token_tracker.py`, never forwarded |
 | Article writer tracing | **Missing** | `src/article_writer.py` calls `llm.invoke()` post-graph, no callbacks |
-| PM verdict as score | **Missing** | `langfuse.score()` never called anywhere |
-| Explicit root trace | **Missing** | Relying on LangGraph's implicit span; UI hierarchy may be fragmented |
+| PM verdict / run scores | Partially implemented | See `src.observability.py`; verify the exact score set before extending. |
+| Explicit root trace | Working | Workflow entrypoints create root trace contexts when Langfuse is enabled. |
 | Eval/baseline integration | **Missing** | `evals/captures/schema_v3/` is entirely separate, no shared trace IDs |
 | Error handling | Working | Graceful degradation — Langfuse failure never crashes analysis |
 
@@ -214,7 +219,7 @@ There is no `langfuse.trace()` call wrapping the full run. The hierarchy in the 
 ## Enabling Langfuse on a run
 
 ```bash
-poetry run python -m src.main --ticker 0005.HK --trace-langfuse --output results/0005.HK.md
+poetry run python -m src.main --ticker 0005.HK --enable-langfuse --output results/0005.HK.md
 ```
 
 Required env vars in `.env`:

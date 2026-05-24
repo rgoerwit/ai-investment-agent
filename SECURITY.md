@@ -1,411 +1,289 @@
 # Security Policy
 
+This is a local research system that uses LLMs, market-data APIs, web search,
+cached memory, saved analysis files, and optional broker/account context. That
+is a lot of surface area for a personal tool. Treat it accordingly.
+
+The short version:
+
+- keep secrets out of git
+- assume external text can be hostile
+- assume market data can be stale or wrong
+- do not expose local runtime services to the public internet
+- verify important investment facts outside the system
+
 ## Supported Versions
 
-We provide security updates for the following versions:
+| Version | Supported | Notes |
+| --- | --- | --- |
+| `main` | Yes | Active development. Use the latest commit. |
 
-| Version | Supported          | Notes |
-| ------- | ------------------ | ----- |
-| main (latest) | :white_check_mark: | Active development - recommended |
-
-**Note:** This project is in active development. Use the latest commit from `main`
-and monitoring releases.
-
----
+This project does not maintain long-lived release branches.
 
 ## Reporting a Vulnerability
 
-We take security seriously. If you discover a security vulnerability, please report it responsibly.
+Use GitHub Security Advisories if possible:
 
-### Preferred Method: Private Security Advisory
+1. Open the repository's Security tab.
+2. Choose "Report a vulnerability".
+3. Include a clear description, reproduction steps, impact, affected commit or
+   branch, and any suggested fix.
 
-1. Go to [Security Advisories](https://github.com/rgoerwit/ai-investment-agent/security/advisories)
-2. Click "Report a vulnerability"
-3. Provide detailed information about the issue
-4. We aim to respond within 48-72 hours
+If GitHub advisories are not workable, open a public issue asking for secure
+contact information. Do not put exploit details, secrets, or account-specific
+data in a public issue.
 
-### Alternative: Email Disclosure
+Expected response:
 
-If you prefer email or cannot use GitHub Security Advisories:
-- **Contact:** Open an issue requesting secure contact information
-- **PGP Key:** Available on request
+- initial response within 72 hours
+- status update within 7 days
+- fix timing depends on severity
 
-**Please DO NOT:**
-- Report security vulnerabilities through public GitHub issues
-- Disclose vulnerabilities publicly before we've addressed them
-- Exploit vulnerabilities for malicious purposes
+## Secrets
 
-### What to Include in Reports
+The normal local setup reads credentials from `.env`. The example file is
+[`.env.example`](.env.example).
 
-- **Description:** Clear explanation of the vulnerability
-- **Reproduction Steps:** How to reproduce the issue
-- **Impact Assessment:** Potential consequences (data exposure, code execution, etc.)
-- **Affected Versions:** Which versions/commits are vulnerable
-- **Suggested Fix:** If you have one (optional)
-- **Your Contact Info:** For follow-up questions
-
----
-
-## Response Timeline
-
-- **Initial Response:** Within 72 hours
-- **Status Update:** Within 7 days
-- **Fix Timeline:** Depends on severity
-  - **Critical:** 7 days (API key exposure, remote code execution)
-  - **High:** 14 days (authentication bypass, data leakage)
-  - **Medium:** 30 days (denial of service, information disclosure)
-  - **Low:** Next release cycle (minor issues)
-
----
-
-## Security Considerations for Users
-
-### 1. API Key Security ⚠️ **CRITICAL**
-
-This application requires multiple API keys stored in a `.env` file. **Protecting these keys is YOUR responsibility.**
-
-#### Required API Keys:
+Required for the main analysis path:
 
 ```bash
-# .env file structure
-GOOGLE_API_KEY=AIza...            # Google Gemini (required)
-FINNHUB_API_KEY=...               # Market data (required)
-TAVILY_API_KEY=tvly-...           # Web search (required)
-
-# Optional but recommended
-EODHD_API_KEY=...                 # High-quality international data
-FMP_API_KEY=...                   # Financial Modeling Prep fallback
-OPENAI_API_KEY=sk-...             # External consultant validation
-LANGSMITH_API_KEY=lsv2_pt_...     # LangChain tracing/debugging
+GOOGLE_API_KEY=...
+FINNHUB_API_KEY=...
+TAVILY_API_KEY=...
 ```
 
-#### API Key Best Practices:
+Common optional keys:
 
-✅ **DO:**
-- Keep `.env` file local (already in `.gitignore`)
-- Use environment variables in production/CI
-- Rotate API keys periodically
-- Use API keys with minimum required permissions
-- Monitor API usage dashboards for unauthorized activity
-- Revoke keys immediately if compromised
-
-❌ **DO NOT:**
-- Commit `.env` file to version control
-- Share API keys in public forums/chat/screenshots
-- Use production keys for development/testing
-- Store keys in application logs or error messages
-- Use root/admin API keys (create restricted keys)
-
-#### Key Compromise Response:
-
-If you suspect API key compromise:
-1. **Immediately revoke** the compromised key at the provider
-2. **Generate a new key** with fresh credentials
-3. **Review API usage logs** for unauthorized activity
-4. **Check for data exfiltration** (unusual queries, high volume)
-5. **Report to the provider** if fraudulent usage occurred
-
-### 2. Data Privacy & Storage
-
-#### Local Data Storage:
-
-This application stores data **entirely on your local machine**:
-
-- **ChromaDB vectors:** `chroma_db/` (agent memory, embeddings)
-- **Analysis results:** `results/` (markdown reports)
-- **Data cache:** `data_cache/` (temporary API responses)
-- **Logs:** `stderr` output (structured logs, no secrets)
-
-**No external data transmission** except:
-- API calls to fetch financial data (ticker symbols visible to providers)
-- LangSmith tracing (if explicitly enabled via `LANGSMITH_API_KEY`)
-
-#### Privacy Recommendations:
-
-- **Sensitive portfolios:** Do not share analysis results containing proprietary holdings
-- **Confidential research:** Keep `results/` and `scratch/` directory private (not in git)
-- **Ticker privacy:** Be aware API providers log requested ticker symbols
-- **Audit trail:** Review `.gitignore` to ensure no sensitive data is committed
-
-#### Data Deletion:
-
-To completely remove analysis data:
 ```bash
-rm -rf chroma_db/       # Delete all agent memories
-rm -rf data_cache/      # Delete cached API responses
-rm -rf results/         # Delete analysis reports
+EODHD_API_KEY=...
+FMP_API_KEY=...
+OPENAI_API_KEY=...
+LANGFUSE_PUBLIC_KEY=...
+LANGFUSE_SECRET_KEY=...
+LANGSMITH_API_KEY=...
+EDINET_API_KEY=...
+MCP server keys such as FMP_API_KEY or TWELVE_DATA_API_KEY
 ```
 
-### 3. Financial Data Disclaimer ⚠️ **IMPORTANT**
+Do not commit `.env`, local MCP registries, IBKR credentials, private keys,
+analysis outputs containing holdings, or copied terminal logs with secrets.
 
-This software is for **research and educational purposes ONLY**.
+If a key leaks:
 
-#### Critical Warnings:
+1. Revoke it at the provider.
+2. Create a new key.
+3. Review provider usage logs.
+4. Check the repo and shell history for accidental copies.
 
-❌ **NOT financial advice** - Do not treat AI-generated analysis as professional investment recommendations
-❌ **NOT suitable for automated trading** - Requires human review and verification
-❌ **NOT guaranteed accurate** - AI can hallucinate data, misinterpret news, or make calculation errors
-❌ **NOT real-time** - Free API data may be delayed 15+ minutes
-❌ **NOT comprehensive** - Free APIs have coverage gaps for international stocks
+## Local Data
 
-#### AI/LLM-Specific Risks:
+The system writes useful local state. Some of it may be sensitive.
 
-- **Hallucination:** LLMs can fabricate financial metrics, news events, or reasoning
-- **Recency Bias:** Training data cutoffs mean LLMs lack knowledge of very recent events
-- **Confirmation Bias:** Multi-agent debate helps but doesn't eliminate bias
-- **Context Confusion:** Ticker-specific memory isolation does not eliminate cross-contamination
-- **Prompt Injection:** Malicious news articles or company filings could influence analysis
+Important paths:
 
-#### Your Responsibilities:
+- `results/` - saved reports, analysis JSON, charts, macro-context cache
+- `scratch/` - screening lists, quick-screen outputs, pipeline intermediates
+- `chroma_db/` - local vector memory
+- `data_cache/` - provider/cache data
+- `runtime/` - dashboard job DB, MCP usage DB, settings
+- `.results.latest_analyses_index.json` and lock files - latest-analysis cache
+- `config/mcp_servers.json` - local MCP registry, intentionally not committed
 
-✅ **Always verify** critical facts with authoritative sources (SEC filings, Bloomberg, company IR)
-✅ **Cross-check metrics** using multiple data providers
-✅ **Review reasoning** - don't blindly accept BUY/SELL recommendations
-✅ **Understand limitations** - this tool generates research ideas, not final decisions
-✅ **Comply with regulations** - consult tax/legal advisors for cross-border investing
+The system also sends data outward when you use provider features:
 
-### 4. Third-Party Dependency Vulnerabilities
+- ticker symbols and queries to market-data providers
+- web/search queries to Tavily or similar services
+- prompt and output content to LLM providers
+- optional traces to Langfuse or LangSmith
+- optional MCP requests to configured MCP servers
+- optional IBKR requests when broker workflows are enabled
 
-#### Known High-Risk Dependencies:
+Do not treat ticker interest, watchlists, holdings, or generated analysis as
+private once you send them to a third-party API.
 
-**ChromaDB (~61 vulnerabilities as of Dec 2024):**
-- **Risk:** Vector database with known security issues
-- **Mitigation:**
-  - Runs locally with no network exposure
-  - Isolated in virtual environment (`poetry` sandboxing)
-  - No public internet access to ChromaDB port
-  - We monitor for updates and apply patches
-- **Status:** Benefits outweigh for local-only use, but BE CAREFUL!
-
-**Other Dependencies:**
-- **LangChain/LangGraph:** Actively maintained, security patches applied
-- **Google/OpenAI SDKs:** Official SDKs, vendor-maintained
-- **Financial data libraries:** Free APIs have limited security guarantees
-
-#### Mitigation Strategies:
+To remove local state:
 
 ```bash
-# Keep dependencies updated
-poetry update
+rm -rf chroma_db/
+rm -rf data_cache/
+rm -rf results/
+rm -rf scratch/
+rm -rf runtime/
+rm -f .results.latest_analyses_index.json .results.latest_analyses_index.lock
+```
 
-# Review security advisories
+Do that only when you mean it. These paths are not just disposable logs.
+
+## Untrusted Content
+
+The agents read external text: news, search results, filings, social content,
+financial API free-text fields, MCP output, cached macro context, and retrieved
+memory. Any of that text can contain prompt-injection attempts.
+
+The current codebase has an optional untrusted-content inspection layer. It can
+inspect web/search output, memory writes, selected financial API fields, cached
+context, MCP tool output, and other prompt-visible material.
+
+Recommended first-run posture:
+
+```bash
+UNTRUSTED_CONTENT_INSPECTION_ENABLED=true
+UNTRUSTED_CONTENT_BACKEND=python
+UNTRUSTED_CONTENT_INSPECTION_MODE=warn
+UNTRUSTED_CONTENT_FAIL_POLICY=fail_open
+```
+
+Start with `warn`. Read the logs. Move to stricter modes only after you
+understand the false positives for your workflow.
+
+Run the adversarial/security tests before changing inspection, tool execution,
+memory ingress, or prompt-visible external content:
+
+```bash
+make security-tests
+```
+
+## AI Security Coverage
+
+This repo is not a security product, but it deliberately addresses the main
+application-layer risks in the
+[OWASP Top 10 for LLM Applications 2025](https://genai.owasp.org/resource/owasp-top-10-for-llm-applications-2025/).
+The short map:
+
+- **Prompt injection**: optional ingress inspection, tool-output inspection,
+  adversarial tests, and clear trust boundaries around external text.
+- **Sensitive information disclosure**: `.env`-based secrets, ignored local MCP
+  registries, sanitized logs/errors, and warnings around broker/account data.
+- **Supply chain**: Poetry-managed dependencies, lockfile-based installs, and
+  local checks with pytest, ruff, Gitleaks/Trivy config, and pre-commit hooks.
+- **Data and model poisoning**: inspected memory writes, source-aware handling
+  for cached/replayed context, and adversarial corpus tests for memory paths.
+- **Improper output handling**: reports are research artifacts; deterministic
+  validators, artifact-status metadata, and PM fast-fail paths keep some
+  malformed or high-risk outputs from being treated as normal recommendations.
+- **Excessive agency**: broker workflows are advisory, dashboard trading is
+  read-only, MCP is disabled by default, and consultant MCP access is scoped and
+  budgeted.
+- **System prompt leakage**: prompts are not treated as secrets; logs and docs
+  should still avoid exposing provider keys, local account details, and private
+  operator context.
+- **Vector and embedding weaknesses**: Chroma-backed memory is local,
+  ticker-scoped where practical, and treated as untrusted when replayed into
+  prompts.
+- **Misinformation**: multi-agent disagreement, consultant/auditor paths,
+  deterministic financial checks, caveats, and primary-source verification
+  guidance all exist because confident prose is not proof.
+- **Unbounded consumption**: quick mode, optional-agent switches, provider
+  timeouts, MCP budgets, cached macro context, and cost/token reporting limit
+  runaway local runs.
+
+Other practical risks matter too: local files can contain holdings, provider
+queries reveal interest, traces may contain prompt/output content, and a local
+dashboard is still a data exposure if you bind it carelessly.
+
+## Broker and Dashboard Workflows
+
+The IBKR and dashboard paths are operator tools. Keep them local.
+
+- The Flask dashboard is intended for local use, usually
+  `http://127.0.0.1:5050`.
+- Do not expose it directly to the internet.
+- The dashboard is read-only for trading, but it can still reveal holdings,
+  watchlists, cash state, order context, and recommendation history.
+- `scripts/portfolio_manager.py` and `src/ibkr/` consume saved analysis JSONs
+  and optional live broker context. Treat their outputs as sensitive.
+- Queued dashboard refresh jobs live under `runtime/ibkr_dashboard/`.
+
+Order execution is currently disabled; the system is advisory. That does not
+make the data harmless.
+
+## MCP
+
+MCP support is disabled by default. When enabled, consultant MCP access is meant
+to be narrow and vendor-specific, not a general-purpose tool tunnel.
+
+Use `config/mcp_servers.example.json` as the template and keep the real
+`config/mcp_servers.json` local. Give each server a narrow allowlist and a
+reasonable per-run and daily budget. MCP output is external content and should
+be inspected before it is shown to an LLM.
+
+Use the smoke test when debugging MCP:
+
+```bash
+poetry run python scripts/mcp_smoke.py
+```
+
+## Financial and LLM Risks
+
+This project is for research. It is not financial advice and it is not an
+automated trading system.
+
+Specific failure modes to expect:
+
+- LLMs can hallucinate facts, citations, numbers, and causal explanations.
+- Free or low-cost data providers can return stale, incomplete, or corrupt data.
+- International coverage is uneven.
+- Ticker symbols and currency units are easy to mishandle.
+- Multi-agent debate reduces some bias, but it does not eliminate bias.
+- Prompt injection can still slip through.
+- Saved memory can preserve bad conclusions if bad content gets in.
+
+Verify important claims against primary sources: filings, exchange pages,
+company investor-relations material, and broker/platform data. Use the generated
+analysis as a disciplined first pass, not as an authority.
+
+## Dependencies and Local Runtime
+
+Use Poetry and keep dependencies current:
+
+```bash
+poetry install
 poetry show --outdated
-
-# Check for known vulnerabilities
-# (Consider adding: pip install safety && safety check)
 ```
 
-**OpenSSF Scorecard Results:** See latest scan at repository homepage for dependency health scores.
-
-### 5. External API Security Risks
-
-#### Data Provider Risks:
-
-- **Request Logging:** API providers may log ticker symbols, timestamps, source IPs
-- **Rate Limiting:** Aggressive usage can trigger account suspension
-- **Data Integrity:** Free APIs may return stale, incomplete, or incorrect data
-- **Service Outages:** Providers can go offline, change pricing, or deprecate endpoints
-- **Terms of Service:** Ensure your usage complies with provider ToS (especially for commercial use)
-
-#### API-Specific Considerations:
-
-| Provider | Risk Level | Notes |
-|----------|-----------|-------|
-| Google Gemini | Low-Medium | Requests logged by Google, subject to usage policies |
-| OpenAI (optional) | Low-Medium | Similar logging, rate limits, content policy |
-| yfinance | Low | Unofficial Yahoo Finance scraper, no ToS guarantee |
-| EODHD/FMP | Low | Paid APIs with SLAs, better reliability |
-| Tavily | Medium | Web search may return malicious/misleading content |
-| StockTwits | Medium | Social media API, content moderation varies |
-
-### 6. Running Untrusted Code & LLM Output
-
-#### AI-Generated Content Risks:
-
-⚠️ This application executes reasoning from large language models. While we use structured prompts and validation:
-
-- **Unexpected patterns:** LLMs can generate surprising or malicious-looking text
-- **Data parsing errors:** Malformed output could cause application crashes
-- **Prompt injection:** Malicious news articles could manipulate LLM reasoning
-- **Tool misuse:** LLMs decide which tools to call (validated but not foolproof)
-
-#### Protection Mechanisms:
-
-✅ **Structured output formats:** Agents must follow strict markdown templates
-✅ **Input validation:** Ticker symbols sanitized in `ticker_utils.py`
-✅ **Output sanitization:** Markdown escaping prevents code injection in reports
-✅ **No code execution:** Analysis results are text reports, not executable code
-✅ **Tool whitelisting:** Only approved functions callable by agents
-
-#### User Precautions:
-
-- Review analysis results before acting on recommendations
-- Be skeptical of extreme/sensational claims in agent reasoning
-- Verify financial metrics against primary sources
-- Report suspicious LLM behavior (hallucinations, biases, errors)
-
----
-
-## Secure Development Practices
-
-### For Contributors:
-
-#### Pre-Commit Security Checks:
+Security-relevant local checks:
 
 ```bash
-# Run full quality suite before committing
-poetry run ruff check src/          # Linting (security rules enabled)
-poetry run black --check src/       # Formatting
-poetry run mypy src/                # Type checking (catches type confusion)
-poetry run pytest tests/ -v         # Security-critical test coverage
-git diff --check                    # Detect merge conflicts
+make security-tests
+poetry run pytest tests/ -v
+poetry run ruff check src/ tests/
+git diff --check
 ```
 
-#### Code Review Checklist:
+The repo also includes Gitleaks/Trivy-related configuration and pre-commit
+hooks, but local configuration varies. Do not assume a scanner has saved you.
 
-- [ ] No hardcoded API keys, passwords, or secrets
-- [ ] Input validation for user-provided data (tickers, file paths)
-- [ ] Output sanitization for LLM-generated content
-- [ ] Dependency updates reviewed for breaking changes
-- [ ] Tests cover security-critical code paths
-- [ ] No use of `eval()`, `exec()`, or dynamic imports
-- [ ] File operations use safe paths (no directory traversal)
+## Contributor Checklist
 
-#### Security Guidelines:
+Before sending a security-sensitive change, check:
 
-1. **Input Validation:** Always validate ticker symbols, API responses, user inputs
-2. **Secrets Management:** Never hardcode credentials - use environment variables
-3. **Dependency Hygiene:** Pin versions in `poetry.lock`, review updates carefully
-4. **Error Handling:** Don't leak sensitive info in error messages or logs
-5. **Least Privilege:** Use minimal API permissions, restricted file paths
-6. **Defense in Depth:** Multiple validation layers (prompts + code + tests)
-
----
-
-## Disclosure Policy
-
-When a security vulnerability is reported:
-
-1. **Acknowledgment:** Receipt confirmed within 48-72 hours
-2. **Triage:** Severity assessment and validation (timeline varies)
-3. **Fix Development:** Patch created in private branch
-4. **Testing:** Security fix verified with tests
-5. **Coordinated Disclosure:** Public disclosure coordinated with reporter
-6. **Credit:** Reporter credited in release notes (unless anonymity requested)
-7. **Advisory:** GitHub Security Advisory published with CVE (if applicable)
-
-### Severity Classification:
-
-| Level | Examples | Response Time |
-|-------|----------|---------------|
-| **Critical** | API key exposure, remote code execution, data exfiltration | 7 days |
-| **High** | Authentication bypass, privilege escalation, significant data leak | 14 days |
-| **Medium** | Denial of service, information disclosure, minor data leak | 30 days |
-| **Low** | Configuration issues, minor bugs with security implications | Next release |
-
----
+- no secrets, tokens, private keys, or local account IDs are committed
+- logs and errors do not expose raw secrets, raw provider payloads, or sensitive paths
+- new external-content paths use the tool execution or inspection seams
+- tests cover blocked, warned, sanitized, and failure cases where relevant
+- broker/dashboard changes do not expose live account context accidentally
+- file writes stay inside intended local paths
+- public docs do not imply the tool is safe for automated trading
 
 ## Out of Scope
 
-The following are **NOT considered security vulnerabilities**:
+These are real risks, but they are not usually project security bugs:
 
-❌ Issues in third-party APIs (yfinance, FMP, EODHD, Tavily)
-❌ Rate limiting or API quota exhaustion
-❌ Market data inaccuracies or delays
-❌ Investment losses (this is a research tool, not financial advice)
-❌ Performance issues or high token costs
-❌ LLM hallucinations (expected behavior - user must verify)
-❌ Social engineering attacks (user responsibility to protect API keys)
-❌ Browser/OS vulnerabilities (use updated systems)
+- bad or delayed market data from third-party providers
+- provider quota exhaustion
+- investment losses
+- model hallucinations that do not bypass a security boundary
+- provider outages or pricing changes
+- social engineering of the local operator
+- vulnerabilities in your OS, browser, broker account, or API provider account
 
----
+## License and Disclaimer
 
-## Security Features
+MIT license. See [LICENSE](LICENSE).
 
-### Current Protections:
+This policy is not a bug bounty program, a professional security audit, or a
+promise of perfect security. Use the project with the same caution you would
+use for any local tool that handles credentials, external content, and financial
+research.
 
-✅ **API Key Isolation:** `.env` file (gitignored) for credentials
-✅ **Input Validation:** Ticker sanitization in `ticker_utils.py`
-✅ **Output Sanitization:** Markdown escaping, no code execution in reports
-✅ **Rate Limiting:** Built-in API rate limit handling
-✅ **Memory Isolation:** Ticker-specific ChromaDB collections
-✅ **Error Handling:** Graceful degradation when APIs fail
-✅ **Logging:** Structured logs to stderr (no secrets)
-✅ **Virtual Environment:** Poetry isolation from system Python
-✅ **GitLeaks:** Secret scanning in CI/CD (when configured)
-✅ **Dependabot:** Automated dependency updates (GitHub)
-
-### Security Tooling:
-
-Enabled in repository:
-- **GitLeaks:** Pre-commit hook scans for secrets
-- **Trivy:** Docker/dependency vulnerability scanning
-- **Dependabot:** Automated security update PRs
-- **Branch Protection:** Required checks before merge (when configured)
-
-### Roadmap (Future Enhancements):
-
-- [ ] **SAST:** CodeQL static analysis in GitHub Actions
-- [ ] **Secrets Scanning:** GitHub Advanced Security
-- [ ] **Vulnerability Scanning:** Integrate `safety` or `pip-audit`
-- [ ] **API Key Rotation:** Automated rotation reminders
-- [ ] **Audit Logging:** Track sensitive operations (ticker analyses, API calls)
-- [ ] **Sandboxing:** Docker-based isolation for production deployments
-- [ ] **MFA for Deployment:** Require 2FA for release/publish
-
----
-
-## Resources
-
-### Security Best Practices:
-
-- [OWASP Top 10](https://owasp.org/www-project-top-ten/)
-- [OpenSSF Best Practices](https://bestpractices.coreinfrastructure.org/)
-- [Python Security Warnings](https://python.readthedocs.io/en/stable/library/security_warnings.html)
-- [LangChain Security Guidelines](https://python.langchain.com/docs/security)
-- [NIST Cybersecurity Framework](https://www.nist.gov/cyberframework)
-
-### AI/LLM Security:
-
-- [OWASP Top 10 for LLM Applications](https://owasp.org/www-project-top-10-for-large-language-model-applications/)
-- [Google Responsible AI Practices](https://ai.google/responsibility/responsible-ai-practices/)
-- [OpenAI API Security Best Practices](https://platform.openai.com/docs/guides/safety-best-practices)
-
-### Financial Data Security:
-
-- [SEC Cybersecurity Guidance](https://www.sec.gov/cybersecurity)
-- [FINRA Technology & Cybersecurity](https://www.finra.org/rules-guidance/key-topics/cybersecurity)
-
----
-
-## Acknowledgments
-
-We appreciate responsible security researchers who help make this project safer. Contributors who report valid vulnerabilities will be credited in:
-
-- This SECURITY.md file (Hall of Fame section - to be added)
-- Release notes for security fixes
-- GitHub Security Advisories
-
-### Hall of Fame:
-
-*No security vulnerabilities reported yet. Be the first!*
-
----
-
-## License & Disclaimer
-
-**License:** MIT - See [LICENSE](LICENSE) for full terms.
-
-**Security Disclaimer:** This security policy does not constitute:
-- A bug bounty program (no financial rewards)
-- A guarantee of perfect security (no software is 100% secure)
-- Legal liability for damages (use at your own risk)
-- Professional security audit (community-driven best effort)
-
-**Use at Your Own Risk:** This project is provided "AS IS" without warranty. Users assume all risks associated with financial analysis, data accuracy, and investment decisions.
-
----
-
-**Last Updated:** December 14, 2024
-**Policy Version:** 2.0
-**Changes from v1.0:** Added comprehensive API key security, AI/LLM risks, dependency vulnerabilities, financial disclaimer, and expanded best practices.
+Last updated: 2026-05-24

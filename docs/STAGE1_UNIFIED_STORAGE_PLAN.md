@@ -538,7 +538,7 @@ If fallback scan is used, pass `progress` through exactly.
 
 Update:
 
-- `tests/ibkr/test_reconciler.py`
+- `tests/ibkr/test_reconciler_orchestration.py`
 
 Cover:
 
@@ -689,7 +689,7 @@ Run at minimum:
 - `tests/storage/test_refresh_jobs.py`
 - `tests/storage/test_migration.py`
 - `tests/ibkr/test_analysis_io.py`
-- `tests/ibkr/test_reconciler.py`
+- `tests/ibkr/test_reconciler_orchestration.py`
 - `tests/web/test_job_store.py`
 - `tests/web/test_worker.py`
 - `tests/test_main_cli.py`
