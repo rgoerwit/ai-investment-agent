@@ -937,177 +937,6 @@ class TestBaselineCaptureCliHelpers:
         assert logging.getLogger("httpcore").level == logging.DEBUG
 
 
-class TestRuntimeOverrides:
-    def test_apply_runtime_overrides_updates_config(self, monkeypatch):
-        from src.main import _apply_runtime_overrides, config
-
-        monkeypatch.setattr(config, "quick_think_llm", "old-quick")
-        monkeypatch.setattr(config, "deep_think_llm", "old-deep")
-        monkeypatch.setattr(config, "enable_memory", True)
-        monkeypatch.setattr(config, "langfuse_enabled", False)
-
-        args = SimpleNamespace(
-            quick_model="new-quick",
-            deep_model="new-deep",
-            no_memory=True,
-            enable_langfuse=False,
-            trace_langfuse=True,
-        )
-
-        restore = _apply_runtime_overrides(args)
-
-        assert config.quick_think_llm == "new-quick"
-        assert config.deep_think_llm == "new-deep"
-        assert config.enable_memory is False
-        assert config.langfuse_enabled is True
-
-        # The restore callable reverts every overridden field. monkeypatch
-        # would also restore on test teardown, but the production caller
-        # (`main()`) relies on this restore to be present so that
-        # in-process callers running multiple analyses don't inherit one
-        # run's CLI flags through the global config singleton.
-        restore()
-        assert config.quick_think_llm == "old-quick"
-        assert config.deep_think_llm == "old-deep"
-        assert config.enable_memory is True
-        assert config.langfuse_enabled is False
-
-    def test_apply_runtime_overrides_restore_is_idempotent(self, monkeypatch):
-        """Calling restore twice must be safe (production `finally` blocks
-        sometimes fire under unusual unwinding paths)."""
-        from src.main import _apply_runtime_overrides, config
-
-        monkeypatch.setattr(config, "enable_memory", True)
-        args = SimpleNamespace(
-            quick_model=None,
-            deep_model=None,
-            no_memory=True,
-            enable_langfuse=False,
-            trace_langfuse=False,
-        )
-        restore = _apply_runtime_overrides(args)
-        assert config.enable_memory is False
-        restore()
-        assert config.enable_memory is True
-        restore()  # second call must be a no-op
-        assert config.enable_memory is True
-
-    def test_enable_langfuse_flag_updates_config(self, monkeypatch):
-        from src.main import _apply_runtime_overrides, config
-
-        monkeypatch.setattr(config, "langfuse_enabled", False)
-        args = SimpleNamespace(
-            quick_model=None,
-            deep_model=None,
-            no_memory=False,
-            enable_langfuse=True,
-            trace_langfuse=False,
-        )
-
-        _apply_runtime_overrides(args)
-
-        assert config.langfuse_enabled is True
-
-    def _quick_args(self) -> SimpleNamespace:
-        return SimpleNamespace(
-            quick=True,
-            quick_model=None,
-            deep_model=None,
-            no_memory=False,
-            enable_langfuse=False,
-            trace_langfuse=False,
-            ticker="TEST",
-        )
-
-    def test_quick_clamps_timeouts_retries_and_rpm(self, monkeypatch):
-        """P0-3: --quick auto-clamps the three knobs that historically leaked
-        from full-mode env values into screening runs."""
-        from src.main import _apply_runtime_overrides, config
-
-        monkeypatch.setattr(config, "api_retry_attempts", 3)
-        monkeypatch.setattr(config, "gemini_rpm_limit", 1000)
-        monkeypatch.setattr(config, "llm_call_hard_timeout_seconds", 600.0)
-
-        restore = _apply_runtime_overrides(self._quick_args())
-
-        assert config.api_retry_attempts == 2
-        assert config.gemini_rpm_limit == 360
-        assert config.llm_call_hard_timeout_seconds == 120.0
-        assert config.quick_mode_active is True
-
-        restore()
-        assert config.api_retry_attempts == 3
-        assert config.gemini_rpm_limit == 1000
-        assert config.llm_call_hard_timeout_seconds == 600.0
-        assert config.quick_mode_active is False
-
-    def test_quick_does_not_raise_existing_values(self, monkeypatch):
-        """If the env is already tighter than the clamp ceiling, the clamp
-        leaves the value alone."""
-        from src.main import _apply_runtime_overrides, config
-
-        monkeypatch.setattr(config, "api_retry_attempts", 1)
-        monkeypatch.setattr(config, "gemini_rpm_limit", 60)
-        monkeypatch.setattr(config, "llm_call_hard_timeout_seconds", 45.0)
-
-        restore = _apply_runtime_overrides(self._quick_args())
-        try:
-            assert config.api_retry_attempts == 1
-            assert config.gemini_rpm_limit == 60
-            assert config.llm_call_hard_timeout_seconds == 45.0
-        finally:
-            # Must restore — otherwise `config.quick_mode_active=True` leaks
-            # to every subsequent test in the process, which then sees the
-            # 60s quick-mode hard timeout instead of the normal 120s default.
-            restore()
-
-    def test_quick_clamp_is_idempotent(self, monkeypatch):
-        """Calling the override twice (e.g., in-process orchestrator) must not
-        stack saves or leak after restore."""
-        from src.main import _apply_runtime_overrides, config
-
-        monkeypatch.setattr(config, "api_retry_attempts", 5)
-        monkeypatch.setattr(config, "gemini_rpm_limit", 800)
-        monkeypatch.setattr(config, "llm_call_hard_timeout_seconds", 600.0)
-
-        restore1 = _apply_runtime_overrides(self._quick_args())
-        restore2 = _apply_runtime_overrides(self._quick_args())
-
-        assert config.api_retry_attempts == 2
-        assert config.gemini_rpm_limit == 360
-        assert config.llm_call_hard_timeout_seconds == 120.0
-
-        restore2()
-        restore1()
-
-        assert config.api_retry_attempts == 5
-        assert config.gemini_rpm_limit == 800
-        assert config.llm_call_hard_timeout_seconds == 600.0
-
-    def test_no_quick_does_not_clamp(self, monkeypatch):
-        """Without --quick, the knobs are untouched even if they exceed the
-        quick-mode ceilings."""
-        from src.main import _apply_runtime_overrides, config
-
-        monkeypatch.setattr(config, "api_retry_attempts", 3)
-        monkeypatch.setattr(config, "gemini_rpm_limit", 1000)
-        monkeypatch.setattr(config, "llm_call_hard_timeout_seconds", 600.0)
-
-        args = SimpleNamespace(
-            quick=False,
-            quick_model=None,
-            deep_model=None,
-            no_memory=False,
-            enable_langfuse=False,
-            trace_langfuse=False,
-        )
-        _apply_runtime_overrides(args)
-
-        assert config.api_retry_attempts == 3
-        assert config.gemini_rpm_limit == 1000
-        assert config.llm_call_hard_timeout_seconds == 600.0
-
-
 class TestValidateCliArgs:
     def test_quick_with_svg_exits_2(self, capsys):
         from src.cli import _validate_cli_args
@@ -1227,9 +1056,6 @@ class TestMainOrchestration:
             return 0
 
         monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
-        monkeypatch.setattr(
-            "src.main._apply_runtime_overrides", lambda passed_args: (lambda: None)
-        )
         monkeypatch.setattr("src.main.cli._validate_cli_args", lambda passed_args: None)
         monkeypatch.setattr(
             "src.main.cli._resolve_output_targets",
@@ -1270,10 +1096,6 @@ class TestMainOrchestration:
             return value
 
         monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
-        monkeypatch.setattr(
-            "src.main._apply_runtime_overrides",
-            lambda passed_args: call_order.append("apply"),
-        )
         monkeypatch.setattr(
             "src.main.cli._validate_cli_args",
             lambda passed_args: call_order.append("validate"),
@@ -1344,7 +1166,6 @@ class TestMainOrchestration:
 
         assert asyncio.run(main()) == 0
         assert call_order == [
-            "apply",
             "validate",
             "setup",
             "retrospective",
@@ -1364,9 +1185,6 @@ class TestMainOrchestration:
         args = SimpleNamespace(retrospective_only=False)
 
         monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
-        monkeypatch.setattr(
-            "src.main._apply_runtime_overrides", lambda passed_args: (lambda: None)
-        )
         monkeypatch.setattr(
             "src.main.cli._validate_cli_args",
             lambda passed_args: (_ for _ in ()).throw(SystemExit(2)),
@@ -1395,9 +1213,6 @@ class TestMainOrchestration:
         )
 
         monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
-        monkeypatch.setattr(
-            "src.main._apply_runtime_overrides", lambda passed_args: (lambda: None)
-        )
         monkeypatch.setattr("src.main.cli._validate_cli_args", lambda passed_args: None)
         monkeypatch.setattr(
             "src.main.cli._resolve_output_targets",
@@ -1458,9 +1273,6 @@ class TestMainOrchestration:
 
         monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
         monkeypatch.setattr("src.main.config.results_dir", original_results_dir)
-        monkeypatch.setattr(
-            "src.main._apply_runtime_overrides", lambda passed_args: (lambda: None)
-        )
         monkeypatch.setattr("src.main.cli._validate_cli_args", lambda passed_args: None)
         monkeypatch.setattr(
             "src.main.cli._resolve_output_targets",
@@ -1536,9 +1348,6 @@ class TestMainOrchestration:
 
         monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
         monkeypatch.setattr("src.main.config.results_dir", original_results_dir)
-        monkeypatch.setattr(
-            "src.main._apply_runtime_overrides", lambda passed_args: (lambda: None)
-        )
         monkeypatch.setattr("src.main.cli._validate_cli_args", lambda passed_args: None)
         monkeypatch.setattr(
             "src.main.cli._resolve_output_targets",
@@ -1598,9 +1407,6 @@ class TestMainOrchestration:
 
         monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
         monkeypatch.setattr("src.main.config.results_dir", Path("results"))
-        monkeypatch.setattr(
-            "src.main._apply_runtime_overrides", lambda passed_args: (lambda: None)
-        )
         monkeypatch.setattr("src.main.cli._validate_cli_args", lambda passed_args: None)
         monkeypatch.setattr(
             "src.main.cli._resolve_output_targets",

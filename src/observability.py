@@ -13,6 +13,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 
 import src.config as config_module
 from src.error_safety import safe_metadata, safe_trace_input, summarize_exception
+from src.runtime_config import get_runtime_config
 
 if TYPE_CHECKING:
     from src.config import Settings
@@ -52,6 +53,10 @@ def _langfuse_keys_present(settings: Settings) -> bool:
     return bool(
         settings.get_langfuse_public_key() and settings.get_langfuse_secret_key()
     )
+
+
+def _runtime_langfuse_enabled(settings: Settings) -> bool:
+    return get_runtime_config(settings).langfuse_enabled
 
 
 def _sanitize_trace_metadata(metadata: dict[str, Any]) -> dict[str, str]:
@@ -578,7 +583,7 @@ class LangfuseObservabilityRuntime:
 def get_observability_runtime(settings: Settings | None = None) -> ObservabilityRuntime:
     """Return the enabled observability runtime or a no-op runtime."""
     settings = settings or _current_settings()
-    if not settings.langfuse_enabled:
+    if not _runtime_langfuse_enabled(settings):
         return NoopObservabilityRuntime()
     if not _langfuse_keys_present(settings):
         logger.warning(
@@ -620,7 +625,7 @@ def start_tool_observation(
     """
     active = get_current_trace_context()
     settings = _current_settings()
-    if not active or not active.enabled or not settings.langfuse_enabled:
+    if not active or not active.enabled or not _runtime_langfuse_enabled(settings):
         return nullcontext()
 
     try:
@@ -658,7 +663,7 @@ def create_deferred_score(
 ) -> None:
     """Create a score against a previously recorded trace."""
     settings = _current_settings()
-    if not settings.langfuse_enabled or not _langfuse_keys_present(settings):
+    if not _runtime_langfuse_enabled(settings) or not _langfuse_keys_present(settings):
         return
     try:
         from langfuse import get_client
@@ -694,7 +699,7 @@ def flush_traces(timeout_seconds: float = _DEFAULT_FLUSH_TIMEOUT_SECONDS) -> Non
     Bound that wait so CLI failure/exit paths are not hostage to exporter state.
     """
     settings = _current_settings()
-    if not settings.langfuse_enabled or not _langfuse_keys_present(settings):
+    if not _runtime_langfuse_enabled(settings) or not _langfuse_keys_present(settings):
         return
 
     try:

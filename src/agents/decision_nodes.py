@@ -8,7 +8,15 @@ import structlog
 from langchain_core.messages import HumanMessage
 from langgraph.types import RunnableConfig
 
+from src.agents.pm_inputs import (
+    DIRECT_PM_INPUT_FIELDS,
+    RISK_DEBATE_FIELD,
+    risk_debate_present,
+)
+from src.agents.pm_verdict_metadata import pm_verdict_metadata_from_text
+from src.charts.extractors.pm_block import extract_verdict_from_text
 from src.data_block_utils import has_parseable_data_block
+from src.error_safety import summarize_exception
 from src.runtime_diagnostics import (
     failure_artifact,
     get_artifact_status,
@@ -28,6 +36,25 @@ from .output_validation import (
 from .state import AgentState
 
 logger = structlog.get_logger(__name__)
+
+
+def _present_pm_inputs(state: AgentState) -> tuple[list[str], list[str]]:
+    """Return (present, missing) lists of direct PM inputs by validity.
+
+    Uses get_valid_artifact_content so failure-artifact stubs and "N/A"
+    fallbacks count as missing, not present.
+    """
+    present: list[str] = []
+    missing: list[str] = []
+    for field in DIRECT_PM_INPUT_FIELDS:
+        bucket = present if get_valid_artifact_content(state, field) else missing
+        bucket.append(field)
+    if risk_debate_present(state):
+        present.append(RISK_DEBATE_FIELD)
+    else:
+        missing.append(RISK_DEBATE_FIELD)
+    return present, missing
+
 
 _STRICT_PM_ADDENDUM = """
 ---
@@ -669,8 +696,6 @@ NEUTRAL ANALYST (Balanced):
             try:
                 scenarios = extract_valuation_scenarios(valuation_params, eps_ttm)
             except Exception as exc:  # pragma: no cover — defense-in-depth
-                from src.error_safety import summarize_exception
-
                 logger.warning(
                     "pm_scenario_extraction_failed",
                     ticker=ticker,
@@ -791,6 +816,17 @@ RISK TEAM DEBATE:
                     ticker=ticker,
                     missing_sections=validation["missing"],
                 )
+                present_inputs, missing_inputs = _present_pm_inputs(state)
+                logger.info(
+                    "final_verdict_formed",
+                    ticker=ticker,
+                    verdict="PARSE_FAILURE",
+                    pre_screening_result=state.get("pre_screening_result"),
+                    direct_pm_inputs_present=present_inputs,
+                    direct_pm_inputs_missing=missing_inputs,
+                    missing_sections=validation["missing"],
+                    strict_mode=strict_mode,
+                )
                 return failure_artifact(
                     "final_trade_decision",
                     "Portfolio Manager output missing required structure",
@@ -798,13 +834,32 @@ RISK TEAM DEBATE:
                     fallback_content=content_str,
                 )
 
+            present_inputs, missing_inputs = _present_pm_inputs(state)
+            pm_metadata = pm_verdict_metadata_from_text(content_str)
+            logger.info(
+                "final_verdict_formed",
+                ticker=ticker,
+                verdict=extract_verdict_from_text(content_str) or "UNPARSEABLE",
+                pm_verdict_metadata=pm_metadata.model_dump(exclude_none=True),
+                pre_screening_result=state.get("pre_screening_result"),
+                direct_pm_inputs_present=present_inputs,
+                direct_pm_inputs_missing=missing_inputs,
+                debate_rounds=(state.get("investment_debate_state") or {}).get(
+                    "count", 0
+                ),
+                strict_mode=strict_mode,
+            )
             return success_artifact(
                 "final_trade_decision",
                 cap_state_value(content_str, "final_trade_decision"),
                 provider=support.infer_provider_name(llm),
             )
         except Exception as exc:
-            logger.error("pm_error", error=str(exc))
+            logger.error(
+                "pm_error",
+                ticker=ticker,
+                **summarize_exception(exc, operation="portfolio_manager"),
+            )
             return failure_artifact(
                 "final_trade_decision",
                 exc,

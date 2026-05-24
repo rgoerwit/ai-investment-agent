@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import datetime
@@ -18,6 +17,7 @@ from rich.table import Table
 from src.cli import OutputTargets, resolve_article_path
 from src.config import config
 from src.report_generator import QuietModeReporter
+from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import is_publishable_analysis
 
 logger = structlog.get_logger(__name__)
@@ -36,15 +36,16 @@ def _cost_suffix() -> str:
 
 def get_welcome_banner(ticker: str, quick_mode: bool) -> str:
     """Generate welcome banner string with configuration."""
+    runtime_config = get_runtime_config(config)
     banner = []
     banner.append("# Multi-Agent Investment Analysis System")
     banner.append("")
     banner.append(f"**Ticker:** {ticker.upper()}  ")
     banner.append(f"**Analysis Mode:** {'Quick' if quick_mode else 'Deep'}  ")
-    banner.append(f"**Quick Model:** {config.quick_think_llm}  ")
-    banner.append(f"**Deep Model:** {config.deep_think_llm}  ")
+    banner.append(f"**Quick Model:** {runtime_config.quick_think_llm}  ")
+    banner.append(f"**Deep Model:** {runtime_config.deep_think_llm}  ")
     banner.append(
-        f"**Memory System:** {'Enabled' if config.enable_memory else 'Disabled'}  "
+        f"**Memory System:** {'Enabled' if runtime_config.enable_memory else 'Disabled'}  "
     )
     banner.append(
         f"**LangSmith Tracing:** "
@@ -52,7 +53,7 @@ def get_welcome_banner(ticker: str, quick_mode: bool) -> str:
     )
     banner.append(
         f"**Langfuse Tracing:** "
-        f"{'Enabled' if config.langfuse_enabled else 'Disabled'}  "
+        f"{'Enabled' if runtime_config.langfuse_enabled else 'Disabled'}  "
     )
     banner.append("")
     return "\n".join(banner)
@@ -70,7 +71,7 @@ def display_memory_statistics(
     logger_obj=logger,
 ) -> None:
     """Display memory statistics for the current ticker."""
-    if not config.enable_memory:
+    if not get_runtime_config(config).enable_memory:
         return
 
     try:
@@ -410,13 +411,12 @@ def _load_company_name_for_output(
 
 async def _load_company_name_for_output_async(ticker: str) -> str | None:
     """Async wrapper for output paths running inside the main event loop."""
-    from src.async_utils import run_with_hard_timeout
+    from src.blocking_io import OUTPUT_COMPANY_NAME_POLICY, run_blocking_call
 
     try:
-        return await run_with_hard_timeout(
-            asyncio.to_thread(_load_company_name_for_output, ticker),
-            timeout=6.0,
-            label=f"output_company_name:{ticker}",
+        return await run_blocking_call(
+            OUTPUT_COMPANY_NAME_POLICY.with_label(f"output_company_name:{ticker}"),
+            lambda: _load_company_name_for_output(ticker),
         )
     except TimeoutError:
         return None

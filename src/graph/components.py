@@ -23,6 +23,7 @@ from src.agents import (
 from src.charts.chart_node import create_chart_generator_node
 from src.config import config
 from src.llm_budgets import get_agent_output_budget
+from src.runtime_config import get_runtime_config
 from src.token_tracker import TokenTrackingCallback, get_tracker
 from src.tools.registry import toolkit
 
@@ -141,6 +142,7 @@ def build_graph_components(
     image_dir: Path | None,
     skip_charts: bool,
 ) -> GraphComponents:
+    runtime_config = get_runtime_config(config)
     """Build graph memories, LLMs, nodes, and agent-specific tool nodes."""
     if ticker and enable_memory:
         if cleanup_previous:
@@ -250,7 +252,7 @@ def build_graph_components(
 
     retry_llm = None
     allow_retry = False
-    if not quick_mode and is_gemini_v3_or_greater(config.quick_think_llm):
+    if not quick_mode and is_gemini_v3_or_greater(runtime_config.quick_think_llm):
         retry_llm = create_deep_thinking_llm(
             callbacks=tracked_callbacks("Retry Agent (Deep)"),
         )
@@ -368,8 +370,8 @@ def build_graph_components(
     logger.debug(
         "graph_llm_plan",
         quick_mode=quick_mode,
-        quick_model_name=config.quick_think_llm,
-        deep_model_name=config.deep_think_llm,
+        quick_model_name=runtime_config.quick_think_llm,
+        deep_model_name=runtime_config.deep_think_llm,
         retry_llm_enabled=allow_retry,
         consultant_enabled=consultant_enabled,
         auditor_enabled=auditor_enabled,

@@ -14,6 +14,7 @@ from typing import Any
 import structlog
 
 from src.config import config
+from src.runtime_config import get_runtime_config
 
 logger = structlog.get_logger(__name__)
 
@@ -3095,8 +3096,9 @@ PM downgrades BUY when triggered. Other issues: flag normally.
         return loaded_count
 
     def _langfuse_prompt_enabled(self) -> bool:
+        runtime_config = get_runtime_config(config)
         return bool(
-            config.langfuse_enabled
+            runtime_config.langfuse_enabled
             and config.langfuse_prompt_fetch_enabled
             and config.get_langfuse_public_key()
             and config.get_langfuse_secret_key()

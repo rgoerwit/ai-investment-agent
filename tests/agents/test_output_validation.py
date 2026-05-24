@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from src.agents.consultant_nodes import _canonicalize_forensic_auditor_output
+from src.agents.forensic_repair import canonicalize_forensic_auditor_output
 from src.agents.output_validation import (
     extract_completion_tokens,
     get_configured_output_cap,
@@ -158,7 +158,7 @@ def test_auditor_validation_accepts_canonicalized_skt_style_fallback():
 
     validation = validate_required_output(
         "global_forensic_auditor",
-        _canonicalize_forensic_auditor_output(content),
+        canonicalize_forensic_auditor_output(content),
     )
 
     assert validation["ok"] is True
@@ -172,7 +172,7 @@ def test_auditor_validation_accepts_canonicalized_inline_stub():
 
     validation = validate_required_output(
         "global_forensic_auditor",
-        _canonicalize_forensic_auditor_output(content),
+        canonicalize_forensic_auditor_output(content),
     )
 
     assert validation["ok"] is True
@@ -183,7 +183,7 @@ def test_auditor_validation_rejects_prose_only_output():
 
     validation = validate_required_output(
         "global_forensic_auditor",
-        _canonicalize_forensic_auditor_output(content),
+        canonicalize_forensic_auditor_output(content),
     )
 
     assert validation["ok"] is False

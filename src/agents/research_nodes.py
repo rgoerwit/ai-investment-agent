@@ -8,6 +8,8 @@ from langchain_core.messages import HumanMessage
 from langgraph.types import RunnableConfig
 
 from src.config import config as settings_config
+from src.error_safety import summarize_exception
+from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import failure_artifact, success_artifact
 from src.tooling.text_boundary import format_untrusted_block
 
@@ -146,9 +148,10 @@ Now provide your Round 2 rebuttal, addressing the opponent's key points."""
         ticker = state.get("company_of_interest", "UNKNOWN")
         company_name = state.get("company_name", ticker)
         company_resolved = state.get("company_name_resolved", True)
+        runtime_config = get_runtime_config(settings_config)
 
         past_insights = ""
-        if memory and settings_config.enable_memory:
+        if memory and runtime_config.enable_memory:
             try:
                 relevant = await memory.query_similar_situations(
                     f"risks and upside for {ticker}",
@@ -163,10 +166,14 @@ Now provide your Round 2 rebuttal, addressing the opponent's key points."""
                 else:
                     logger.info("memory_no_exact_match", ticker=ticker)
             except Exception as exc:
-                logger.error("memory_retrieval_failed", ticker=ticker, error=str(exc))
+                logger.error(
+                    "memory_retrieval_failed",
+                    ticker=ticker,
+                    **summarize_exception(exc, operation="memory_retrieval"),
+                )
 
         lessons_text = ""
-        if settings_config.enable_memory:
+        if runtime_config.enable_memory:
             try:
                 from src.retrospective import (
                     create_lessons_memory,

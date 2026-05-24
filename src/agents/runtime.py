@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
+from contextlib import contextmanager
 from typing import Any
 
 import structlog
@@ -14,7 +15,9 @@ from src.agents.network_breaker import (
 )
 from src.async_utils import run_with_hard_timeout
 from src.config import config as settings_config
+from src.error_safety import summarize_exception
 from src.llm_usage import extract_token_usage_breakdown
+from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import (
     classify_failure,
     get_class_name,
@@ -23,6 +26,29 @@ from src.runtime_diagnostics import (
 )
 
 logger = structlog.get_logger(__name__)
+
+
+@contextmanager
+def _accounting_hook(label: str):
+    """Wrap an accounting/observability side-effect so its failures never bubble.
+
+    Accounting paths (capture manager, token tracker) can touch provider error
+    strings that include URLs or partial payloads — even at DEBUG level we
+    route through summarize_exception() instead of raw str(exc) so that
+    redaction and structured fields apply uniformly.
+
+    Uses ``except Exception`` (not ``BaseException``) so KeyboardInterrupt
+    and SystemExit propagate normally.
+    """
+    try:
+        yield
+    except Exception as exc:
+        logger.debug(
+            "accounting_hook_failed",
+            hook=label,
+            **summarize_exception(exc, operation=f"accounting:{label}"),
+        )
+
 
 _get_capture_manager: Any
 _normalize_reasoning_level: Any
@@ -231,14 +257,13 @@ async def invoke_with_rate_limit_handling(
             overall_timeout_seconds=overall_timeout_seconds,
         )
 
-    if getattr(settings_config, "quick_mode_active", False):
+    runtime_config = get_runtime_config(settings_config)
+    if runtime_config.quick_mode_active:
         hard_timeout = float(
             getattr(settings_config, "quick_llm_call_hard_timeout_seconds", 60.0)
         )
     else:
-        hard_timeout = float(
-            getattr(settings_config, "llm_call_hard_timeout_seconds", 120.0)
-        )
+        hard_timeout = float(runtime_config.llm_call_hard_timeout_seconds)
     deadline = (
         time.monotonic() + float(overall_timeout_seconds)
         if overall_timeout_seconds is not None
@@ -303,7 +328,7 @@ async def invoke_with_rate_limit_handling(
                     f"(context={context}, provider={resolved_provider}, "
                     f"model={resolved_model})"
                 )
-            try:
+            with _accounting_hook("capture_manager_success"):
                 capture_manager = _get_capture_manager()
                 if capture_manager is not None:
                     token_usage = _extract_token_usage(result)
@@ -333,9 +358,7 @@ async def invoke_with_rate_limit_handling(
                             "response": _normalize_for_json(result),
                         }
                     )
-            except Exception as _acct_exc:
-                logger.debug("accounting_hook_failed", error=str(_acct_exc))
-            try:
+            with _accounting_hook("token_tracker_success"):
                 from src.token_tracker import get_tracker
 
                 usage = extract_token_usage_breakdown(result)
@@ -350,8 +373,6 @@ async def invoke_with_rate_limit_handling(
                     completion_tokens=usage.total_output_tokens,
                     total_tokens=usage.total_tokens,
                 )
-            except Exception as _acct_exc:
-                logger.debug("accounting_hook_failed", error=str(_acct_exc))
             if not quiet_mode:
                 logger.info(
                     "llm_call_success",
@@ -368,7 +389,7 @@ async def invoke_with_rate_limit_handling(
             # surface the short-circuit, then propagate without sleeping
             # or retrying — the whole point is to skip the wait.
             elapsed_seconds = time.monotonic() - attempt_started
-            try:
+            with _accounting_hook("token_tracker_circuit_open"):
                 from src.token_tracker import get_tracker
 
                 get_tracker().record_call_attempt(
@@ -382,8 +403,6 @@ async def invoke_with_rate_limit_handling(
                     failure_origin="circuit_breaker",
                     retryable=False,
                 )
-            except Exception as _acct_exc:
-                logger.debug("accounting_hook_failed", error=str(_acct_exc))
             logger.warning(
                 "llm_call_circuit_open",
                 context=context,
@@ -400,7 +419,7 @@ async def invoke_with_rate_limit_handling(
             # paths in analyst/researcher nodes already handle this
             # exception the same way they handle a final llm_call_failed.
             elapsed_seconds = time.monotonic() - attempt_started
-            try:
+            with _accounting_hook("token_tracker_network_breaker_open"):
                 from src.token_tracker import get_tracker
 
                 get_tracker().record_call_attempt(
@@ -414,8 +433,6 @@ async def invoke_with_rate_limit_handling(
                     failure_origin="network_breaker",
                     retryable=False,
                 )
-            except Exception as _acct_exc:
-                logger.debug("accounting_hook_failed", error=str(_acct_exc))
             logger.warning(
                 "llm_call_network_breaker_open",
                 context=context,
@@ -443,7 +460,7 @@ async def invoke_with_rate_limit_handling(
                 )
             if network_breaker is not None:
                 network_breaker.record_outcome(ok=False, failure_kind=details.kind)
-            try:
+            with _accounting_hook("capture_manager_failure"):
                 capture_manager = _get_capture_manager()
                 if capture_manager is not None:
                     capture_manager.record_llm_call(
@@ -473,9 +490,7 @@ async def invoke_with_rate_limit_handling(
                             "error_message": details.message,
                         }
                     )
-            except Exception as _acct_exc:
-                logger.debug("accounting_hook_failed", error=str(_acct_exc))
-            try:
+            with _accounting_hook("token_tracker_failure"):
                 from src.token_tracker import get_tracker
 
                 failure_origin = (
@@ -492,8 +507,6 @@ async def invoke_with_rate_limit_handling(
                     failure_origin=failure_origin,
                     retryable=details.retryable,
                 )
-            except Exception as _acct_exc:
-                logger.debug("accounting_hook_failed", error=str(_acct_exc))
 
             is_rate_limit = details.kind in {"rate_limit", "quota_error"}
             is_transient = details.kind in {

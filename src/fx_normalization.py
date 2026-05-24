@@ -15,7 +15,7 @@ from typing import Any
 
 import structlog
 
-from src.async_utils import run_with_hard_timeout
+from src.blocking_io import FX_RATE_POLICY, run_blocking_call
 
 logger = structlog.get_logger(__name__)
 
@@ -81,10 +81,9 @@ async def get_fx_rate_yfinance(
             info = ticker.info
             return info.get("regularMarketPrice") or info.get("previousClose")
 
-        rate = await run_with_hard_timeout(
-            asyncio.to_thread(_fetch_rate),
-            timeout=3.0,  # Quick timeout - we have fallbacks
-            label=f"fx_rate:{fx_ticker}",
+        rate = await run_blocking_call(
+            FX_RATE_POLICY.with_label(f"fx_rate:{fx_ticker}"),
+            _fetch_rate,
         )
 
         if rate and rate > 0:

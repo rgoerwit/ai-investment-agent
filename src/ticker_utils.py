@@ -10,7 +10,11 @@ from dataclasses import dataclass
 
 import structlog
 
-from src.async_utils import run_with_hard_timeout
+from src.blocking_io import (
+    YAHOOQUERY_QUOTE_TYPE_POLICY,
+    YFINANCE_INFO_POLICY,
+    run_blocking_call,
+)
 from src.exchange_metadata import (
     EXCHANGES_BY_SUFFIX,
     IBKR_TO_YFINANCE,
@@ -458,10 +462,9 @@ async def _try_yfinance(ticker: str) -> str | None:
     try:
         import yfinance as yf
 
-        info = await run_with_hard_timeout(
-            asyncio.to_thread(lambda: yf.Ticker(ticker).info),
-            timeout=5,
-            label=f"yfinance.info:{ticker}",
+        info = await run_blocking_call(
+            YFINANCE_INFO_POLICY.with_label(f"yfinance.info:{ticker}"),
+            lambda: yf.Ticker(ticker).info,
         )
         if info:
             name = info.get("longName") or info.get("shortName")
@@ -476,10 +479,9 @@ async def _try_yahooquery(ticker: str) -> str | None:
     try:
         from yahooquery import Ticker as YQTicker
 
-        result = await run_with_hard_timeout(
-            asyncio.to_thread(lambda: YQTicker(ticker).quote_type),
-            timeout=5,
-            label=f"yahooquery.quote_type:{ticker}",
+        result = await run_blocking_call(
+            YAHOOQUERY_QUOTE_TYPE_POLICY.with_label(f"yahooquery.quote_type:{ticker}"),
+            lambda: YQTicker(ticker).quote_type,
         )
         if isinstance(result, dict) and ticker in result:
             data = result[ticker]

@@ -33,6 +33,7 @@ from src.data_block_utils import (
     extract_data_block_number,
 )
 from src.exchange_metadata import SUFFIX_TO_CURRENCY_CODE
+from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import classify_failure
 from src.runtime_services import get_current_inspection_service
 from src.ticker_policy import get_ticker_suffix
@@ -399,8 +400,8 @@ def extract_snapshot(
         # Metadata (from existing save_data structure)
         "ticker": ticker,
         "analysis_date": datetime.now().strftime("%Y-%m-%d"),
-        "deep_model": config.deep_think_llm,
-        "quick_model": config.quick_think_llm,
+        "deep_model": get_runtime_config(config).deep_think_llm,
+        "quick_model": get_runtime_config(config).quick_think_llm,
         "is_quick_mode": is_quick_mode,
         # `is_strict_mode` records whether `--strict` was active during
         # analysis. Strict gates reject some valid candidates (REIT, PFIC,
@@ -932,7 +933,7 @@ FAILURE_MODE: CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_BLEED | OPERATIONAL_MISS | 
         from src.config import config as settings_config
 
         hard_timeout = float(
-            getattr(settings_config, "llm_call_hard_timeout_seconds", 600.0)
+            get_runtime_config(settings_config).llm_call_hard_timeout_seconds
         )
         if invoke_config:
             response = await run_with_hard_timeout(
@@ -1138,7 +1139,11 @@ async def save_rejection_record(
     confidence_weight = 0.3 if is_quick_mode else 0.5
     if is_strict_mode:
         confidence_weight *= 0.7
-    deep_model = snapshot.get("deep_model") or config.deep_think_llm or "unknown"
+    deep_model = (
+        snapshot.get("deep_model")
+        or get_runtime_config(config).deep_think_llm
+        or "unknown"
+    )
 
     metadata = {
         "ticker": ticker,

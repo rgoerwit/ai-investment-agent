@@ -9,10 +9,100 @@ from typing import Any
 
 import structlog
 
+from src.agents.pm_inputs import (
+    DIRECT_PM_INPUTS,
+    RISK_DEBATE_FIELD,
+    risk_debate_content,
+)
 from src.config import config
+from src.runtime_config import get_runtime_config
 from src.sector_normalization import normalize_sector_label
 
 logger = structlog.get_logger(__name__)
+
+
+# Maps each saved-JSON artifact field to its originating graph agent and the
+# TokenTrackingCallback display name(s) used in src/graph/components.py.
+# A single artifact can have multiple contributing token-agents (e.g.,
+# investment_plan is synthesized from research_manager but pulls work done by
+# bull/bear researchers; risk_debate_state aggregates three risk analysts).
+# The Stage 1 AST drift test (tests/test_agent_attribution.py) verifies
+# every name listed here appears at a tracked_callbacks(...) call site.
+_ARTIFACT_AGENT_MAP: list[tuple[str, str, tuple[str, ...]]] = [
+    ("market_report", "market_analyst", ("Market Analyst",)),
+    ("sentiment_report", "sentiment_analyst", ("Sentiment Analyst",)),
+    ("news_report", "news_analyst", ("News Analyst",)),
+    ("raw_fundamentals_data", "junior_fundamentals", ("Junior Fundamentals Analyst",)),
+    (
+        "foreign_language_report",
+        "foreign_language_analyst",
+        ("Foreign Language Analyst",),
+    ),
+    ("legal_report", "legal_counsel", ("Legal Counsel",)),
+    ("fundamentals_report", "senior_fundamentals", ("Fundamentals Analyst",)),
+    ("value_trap_report", "value_trap_detector", ("Value Trap Detector",)),
+    ("auditor_report", "global_forensic_auditor", ("Global Forensic Auditor",)),
+    ("apac_regional_report", "apac_regional_specialist", ("APAC Regional Specialist",)),
+    (
+        "investment_plan",
+        "research_manager",
+        ("Research Manager", "Bull Researcher", "Bear Researcher"),
+    ),
+    ("valuation_params", "valuation_calculator", ("Valuation Calculator",)),
+    ("consultant_review", "consultant", ("Consultant",)),
+    ("trader_investment_plan", "trader", ("Trader",)),
+    (
+        "risk_debate_state",
+        "risk_analysts",
+        ("Risky Analyst", "Safe Analyst", "Neutral Analyst"),
+    ),
+    ("final_trade_decision", "portfolio_manager", ("Portfolio Manager",)),
+]
+
+
+def _aggregate_token_usage(token_agents: dict, names: tuple[str, ...]) -> dict | None:
+    rows = [token_agents[n] for n in names if n in token_agents]
+    if not rows:
+        return None
+    return {
+        "calls": sum(int(r.get("calls", 0) or 0) for r in rows),
+        "prompt_tokens": sum(int(r.get("prompt_tokens", 0) or 0) for r in rows),
+        "completion_tokens": sum(int(r.get("completion_tokens", 0) or 0) for r in rows),
+        "total_tokens": sum(int(r.get("total_tokens", 0) or 0) for r in rows),
+        "cost_usd": round(sum(float(r.get("cost_usd", 0.0) or 0.0) for r in rows), 6),
+        "contributors": list(names),
+    }
+
+
+def _build_agent_attribution(result: dict, token_agents: dict) -> dict:
+    """Build per-artifact attribution: agent, validity, char count, token usage.
+
+    Validity is taken from the project's artifact_statuses pipeline via
+    get_valid_artifact_content() — failure-artifact stubs and "N/A" content
+    do not count as a contributing input. The synthetic risk_debate_state
+    field has no artifact_status entry, so it uses a non-empty heuristic.
+    """
+    from src.runtime_diagnostics import get_valid_artifact_content
+
+    artifacts: dict[str, dict[str, Any]] = {}
+    for field, agent_slug, token_names in _ARTIFACT_AGENT_MAP:
+        if field == RISK_DEBATE_FIELD:
+            content = risk_debate_content(result)
+            valid = bool(content)
+        else:
+            content = get_valid_artifact_content(result, field) or ""
+            valid = bool(content)
+
+        artifacts[field] = {
+            "agent": agent_slug,
+            "token_agents": list(token_names),
+            "artifact_field": field,
+            "present": valid,
+            "char_count": len(content) if isinstance(content, str) else 0,
+            "token_usage": _aggregate_token_usage(token_agents, token_names),
+            "direct_pm_input": field in DIRECT_PM_INPUTS,
+        }
+    return artifacts
 
 
 def _build_quick_consultant_summary(
@@ -119,11 +209,12 @@ def build_run_summary(
     auditor_finished = bool(auditor_status.get("complete"))
     apac_finished = bool(apac_status.get("complete"))
     providers_used = _collect_used_providers()
+    runtime_config = get_runtime_config(config)
 
     summary = {
         "quick_mode": quick_mode,
-        "quick_model": config.quick_think_llm,
-        "deep_model": config.deep_think_llm,
+        "quick_model": runtime_config.quick_think_llm,
+        "deep_model": runtime_config.deep_think_llm,
         "provider_preflight": provider_preflight or {},
         "pre_screening_result": result.get("pre_screening_result", ""),
         "debate_rounds": result.get("investment_debate_state", {}).get("count", 0),
@@ -277,7 +368,8 @@ def save_results_to_file(
             custom_prompts_loaded.append(json_file.stem)
 
     memory_stats = {}
-    if config.enable_memory:
+    runtime_config = get_runtime_config(config)
+    if runtime_config.enable_memory:
         try:
             memory_stats = get_ticker_memory_stats(ticker)
         except Exception as exc:
@@ -297,9 +389,9 @@ def save_results_to_file(
             "timestamp": timestamp,
             "analysis_date": datetime.now().isoformat(),
             "environment": config.environment,
-            "quick_model": config.quick_think_llm,
-            "deep_model": config.deep_think_llm,
-            "memory_enabled": config.enable_memory,
+            "quick_model": runtime_config.quick_think_llm,
+            "deep_model": runtime_config.deep_think_llm,
+            "memory_enabled": runtime_config.enable_memory,
             "online_tools_enabled": config.online_tools,
             "llm_provider": (
                 (result.get("run_summary", {}) or {}).get("llm_provider")
@@ -376,6 +468,9 @@ def save_results_to_file(
         "run_summary": result.get("run_summary", {}),
         "analysis_validity": result.get("analysis_validity", {}),
         "artifact_statuses": result.get("artifact_statuses", {}),
+        "agent_attribution": _build_agent_attribution(
+            result, (token_stats or {}).get("agents", {}) or {}
+        ),
     }
 
     run_summary = save_data.get("run_summary", {}) or {}
@@ -575,7 +670,7 @@ async def _maybe_save_rejection_record(
 ) -> None:
     """Persist non-BUY verdicts as retrospective rejection records.
 
-    Honors ``--no-memory`` (``config.enable_memory == False``) — the
+    Honors ``--no-memory`` (runtime config ``enable_memory == False``) — the
     rejection record lives in the same global ``lessons_learned`` ChromaDB
     collection as full retrospective lessons, and skipping memory should
     skip *all* writes to it. The retrospective comparison itself is gated
@@ -583,7 +678,7 @@ async def _maybe_save_rejection_record(
     """
     from src.error_safety import summarize_exception
 
-    if not config.enable_memory:
+    if not get_runtime_config(config).enable_memory:
         logger_obj.debug(
             "rejection_record_save_skipped_no_memory",
             ticker=getattr(args, "ticker", None),

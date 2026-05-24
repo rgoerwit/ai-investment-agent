@@ -14,10 +14,10 @@ from langgraph.types import RunnableConfig
 
 from src.agents import create_consultant_node
 from src.agents.consultant_nodes import (
-    _canonicalize_forensic_auditor_output,
     _create_openai_responses_fallback_llm,
     _select_quick_consultant_profile,
 )
+from src.agents.forensic_repair import canonicalize_forensic_auditor_output
 from src.report_generator import QuietModeReporter
 
 
@@ -31,7 +31,7 @@ class TestDataFormatEdgeCases:
             "**Verdict:** Unable to complete forensic audit.\n"
         )
 
-        normalized = _canonicalize_forensic_auditor_output(content)
+        normalized = canonicalize_forensic_auditor_output(content)
 
         assert "VERDICT: Unable to complete forensic audit." in normalized
         assert "**Verdict:**" not in normalized
@@ -45,7 +45,7 @@ class TestDataFormatEdgeCases:
             "META: N/A\n"
         )
 
-        normalized = _canonicalize_forensic_auditor_output(content)
+        normalized = canonicalize_forensic_auditor_output(content)
 
         assert "STATUS: INSUFFICIENT_DATA" in normalized
         assert (
@@ -59,7 +59,7 @@ class TestDataFormatEdgeCases:
             "REASON=STALE_DATA, REPORT_DATE=2025-06-30, AGE=9 months"
         )
 
-        normalized = _canonicalize_forensic_auditor_output(content)
+        normalized = canonicalize_forensic_auditor_output(content)
 
         assert "FORENSIC_DATA_BLOCK:" in normalized
         assert "STATUS: INSUFFICIENT_DATA" in normalized
@@ -73,7 +73,7 @@ class TestDataFormatEdgeCases:
             "META: CONTEXT_LIMIT_EXCEEDED\n"
         )
 
-        normalized = _canonicalize_forensic_auditor_output(content)
+        normalized = canonicalize_forensic_auditor_output(content)
 
         assert "FORENSIC_DATA_BLOCK:" in normalized
         assert "STATUS: UNAVAILABLE" in normalized

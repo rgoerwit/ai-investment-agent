@@ -20,6 +20,8 @@ from src.data_block_utils import (
     normalize_legacy_data_block_report,
     normalize_structured_block_boundaries,
 )
+from src.error_safety import summarize_exception
+from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import failure_artifact, success_artifact
 from src.tooling.text_boundary import format_untrusted_block
 
@@ -550,7 +552,9 @@ def create_analyst_node(
                             provider=support.infer_provider_name(retry_llm),
                             model_name=support.get_model_name(retry_llm),
                             overall_timeout_seconds=float(
-                                settings_config.llm_call_hard_timeout_seconds
+                                get_runtime_config(
+                                    settings_config
+                                ).llm_call_hard_timeout_seconds
                             ),
                         )
                     )
@@ -748,7 +752,11 @@ Extract valuation parameters and output in the required format."""
                 provider=support.infer_provider_name(llm),
             )
         except Exception as exc:
-            logger.error("valuation_calculator_error", ticker=ticker, error=str(exc))
+            logger.error(
+                "valuation_calculator_error",
+                ticker=ticker,
+                **summarize_exception(exc, operation="valuation_calculator"),
+            )
             return failure_artifact(
                 "valuation_params",
                 exc,

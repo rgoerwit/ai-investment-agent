@@ -11,7 +11,6 @@ import os
 import socket
 import sys
 import uuid
-from collections.abc import Callable
 from contextlib import nullcontext
 from datetime import datetime
 from functools import partial
@@ -36,6 +35,12 @@ from src.eval import (
     BaselinePreflightResult,
     reset_active_capture_manager,
     set_active_capture_manager,
+)
+from src.runtime_config import (
+    bind_runtime_config,
+    build_runtime_config,
+    get_runtime_config,
+    quick_runtime_clamp_changes,
 )
 from src.runtime_diagnostics import build_analysis_validity
 from src.runtime_init import initialize_runtime_environment
@@ -185,12 +190,13 @@ def _resolve_langfuse_session_id(default_session_id: str) -> str:
 
 def _build_analysis_trace_tags(quick_mode: bool) -> list[str]:
     """Return stable tags for an analysis trace."""
+    runtime_config = get_runtime_config(config)
     return [
         "analysis",
         "quick" if quick_mode else "full",
-        f"quick-model:{config.quick_think_llm}",
-        f"deep-model:{config.deep_think_llm}",
-        f"memory:{'on' if config.enable_memory else 'off'}",
+        f"quick-model:{runtime_config.quick_think_llm}",
+        f"deep-model:{runtime_config.deep_think_llm}",
+        f"memory:{'on' if runtime_config.enable_memory else 'off'}",
         f"consultant:{'on' if config.enable_consultant else 'off'}",
         f"auditor:{'on' if bool(config.auditor_model) else 'off'}",
     ]
@@ -203,14 +209,15 @@ def _build_analysis_trace_metadata(
     quick_mode: bool,
 ) -> dict[str, Any]:
     """Return the stable metadata attached to an analysis trace."""
+    runtime_config = get_runtime_config(config)
     return {
         "ticker": ticker,
         "session_id": session_id,
         "environment": config.environment,
         "run_mode": "quick" if quick_mode else "full",
         "quick_mode": quick_mode,
-        "deep_model": config.deep_think_llm,
-        "quick_model": config.quick_think_llm,
+        "deep_model": runtime_config.deep_think_llm,
+        "quick_model": runtime_config.quick_think_llm,
         "prompt_source": (
             "langfuse" if config.langfuse_prompt_fetch_enabled else "local"
         ),
@@ -469,18 +476,19 @@ async def run_analysis(
                         ticker=ticker,
                         quick=quick_mode,
                         strict=strict_mode,
-                        no_memory=not config.enable_memory,
+                        no_memory=not get_runtime_config(config).enable_memory,
                         capture_baseline=True,
                     ),
                     session_id=session_id,
                 )
 
+            runtime_config = get_runtime_config(config)
             graph = create_trading_graph(
                 ticker=ticker,  # BUG FIX #1: Pass ticker for isolation
                 cleanup_previous=True,  # BUG FIX #1: Cleanup to prevent contamination
                 max_debate_rounds=1 if quick_mode else 2,
                 max_risk_discuss_rounds=1,
-                enable_memory=config.enable_memory,
+                enable_memory=runtime_config.enable_memory,
                 recursion_limit=100,
                 quick_mode=quick_mode,  # Pass quick_mode for consultant LLM selection
                 strict_mode=strict_mode,  # Pass strict_mode for quality gates
@@ -553,7 +561,7 @@ async def run_analysis(
                 ticker=ticker,
                 trade_date=real_date,
                 quick_mode=quick_mode,
-                enable_memory=config.enable_memory,
+                enable_memory=runtime_config.enable_memory,
                 max_debate_rounds=1 if quick_mode else 2,
                 max_risk_rounds=1,
                 macro_context_report=macro_context_report,
@@ -697,82 +705,6 @@ def _enable_quiet_runtime_if_needed(args: argparse.Namespace) -> None:
     config.quiet_mode = True
 
 
-def _apply_runtime_overrides(args: argparse.Namespace) -> Callable[[], None]:
-    """Apply per-run CLI overrides to the config singleton.
-
-    Returns a callable that restores every overridden field to its
-    pre-override value. The caller is expected to invoke it in a
-    ``try/finally`` so a single process running multiple analyses (e.g.
-    `scripts/portfolio_manager.py` calling `run_analysis` repeatedly) does
-    NOT inherit the previous run's CLI flags via the global config
-    singleton.
-
-    The mutation-with-no-restore pattern was the source of cross-test
-    leakage in `tests/test_main_cli.py::TestRuntimeOverrides`; the same
-    fragility would affect any future in-process orchestrator that
-    wraps multiple invocations. Making the override reversible eliminates
-    the production smell at the source.
-    """
-    saved: dict[str, Any] = {}
-
-    def _save(field: str) -> None:
-        if field not in saved:
-            saved[field] = getattr(config, field)
-
-    def _clamp(field: str, ceiling: int | float) -> tuple[Any, Any] | None:
-        """Set ``config.<field>`` to ``min(current, ceiling)``, recording the
-        original for restore. Returns ``(before, after)`` when a change was
-        applied, ``None`` otherwise."""
-        before = getattr(config, field)
-        after = min(before, ceiling)
-        if after < before:
-            _save(field)
-            setattr(config, field, after)
-            return before, after
-        return None
-
-    if getattr(args, "quick", False):
-        _save("quick_mode_active")
-        config.quick_mode_active = True
-        clamps: dict[str, dict[str, Any]] = {}
-        for field, ceiling in (
-            ("api_retry_attempts", 2),
-            ("gemini_rpm_limit", 360),
-            ("llm_call_hard_timeout_seconds", 120.0),
-        ):
-            outcome = _clamp(field, ceiling)
-            if outcome is not None:
-                before, after = outcome
-                clamps[field] = {"from": before, "to": after}
-        if clamps:
-            logger.info(
-                "quick_timeout_config_overridden",
-                ticker=getattr(args, "ticker", None),
-                clamped=clamps,
-            )
-    if args.quick_model:
-        _save("quick_think_llm")
-        config.quick_think_llm = args.quick_model
-    if args.deep_model:
-        _save("deep_think_llm")
-        config.deep_think_llm = args.deep_model
-    if args.no_memory:
-        _save("enable_memory")
-        config.enable_memory = False
-    if getattr(args, "enable_langfuse", False) or getattr(
-        args, "trace_langfuse", False
-    ):
-        _save("langfuse_enabled")
-        config.langfuse_enabled = True
-
-    def _restore() -> None:
-        for field, value in saved.items():
-            setattr(config, field, value)
-        saved.clear()
-
-    return _restore
-
-
 def _setup_runtime(
     args: argparse.Namespace, output_targets: cli.OutputTargets
 ) -> tuple[dict[str, dict[str, str]], Any]:
@@ -820,10 +752,21 @@ def _setup_runtime(
             )
         raise SystemExit(1) from exc
 
+    runtime_config = get_runtime_config(config)
+
     # Content inspection is configured independently of logging verbosity.
     try:
+        from src.llms import create_process_rate_limiter
+        from src.runtime_services import build_provider_runtime
+
+        provider_runtime = build_provider_runtime(
+            rate_limiter=create_process_rate_limiter(
+                rpm=runtime_config.gemini_rpm_limit
+            )
+        )
         runtime_services = build_runtime_services_from_config(
             enable_tool_audit=enable_tool_audit,
+            provider_runtime=provider_runtime,
         )
     except ValueError as exc:
         message = _safe_cli_error_message("building runtime services", exc)
@@ -1315,7 +1258,15 @@ async def run_with_args(
     # `kill -USR1 <pid>` will dump every pending asyncio task with stack so
     # operators can diagnose hangs without restarting the process.
     _uninstall_dump_handler = install_pending_task_dump_handler()
-    _restore_runtime_overrides = _apply_runtime_overrides(args)
+    runtime_config = build_runtime_config(args, config)
+    clamps = quick_runtime_clamp_changes(args, config, runtime_config)
+    if clamps:
+        logger.info(
+            "quick_timeout_config_overridden",
+            ticker=getattr(args, "ticker", None),
+            clamped=clamps,
+        )
+    _restore_runtime_config = bind_runtime_config(runtime_config)
     try:
         cli._validate_cli_args(args)
         output_targets = cli._resolve_output_targets(args)
@@ -1550,12 +1501,8 @@ async def run_with_args(
             _uninstall_dump_handler()
         except Exception:
             pass
-        # Restore the global config singleton to its pre-override state so
-        # that follow-on in-process callers (e.g. portfolio_manager.py
-        # batching analyses, future orchestrators) see fresh defaults
-        # rather than this run's CLI flags.
         try:
-            _restore_runtime_overrides()
+            _restore_runtime_config()
         except Exception:
             pass
         if forced_exit_code is not None:

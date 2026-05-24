@@ -35,9 +35,6 @@ def _patch_main_success_path(monkeypatch, args):
     from src.cli import OutputTargets
 
     monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
-    monkeypatch.setattr(
-        "src.main._apply_runtime_overrides", lambda passed_args: (lambda: None)
-    )
     monkeypatch.setattr("src.main.cli._validate_cli_args", lambda passed_args: None)
     monkeypatch.setattr(
         "src.main.cli._resolve_output_targets",
