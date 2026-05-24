@@ -935,9 +935,26 @@ class TestGenerateYfTicker:
         config = self._static_config(".L")
         assert find_gems._generate_yf_ticker(row, config) == "JD.L"
 
+    def test_trailing_dot_stripped_before_suffix(self):
+        """LSE SETS file emits mnemonics like 'NG.' → should produce 'NG.L'."""
+        row = self._row("NG.")
+        config = self._static_config(".L")
+        assert find_gems._generate_yf_ticker(row, config) == "NG.L"
+
+    def test_stacked_trailing_status_markers_stripped_before_suffix(self):
+        row = self._row("NG.-")
+        config = self._static_config(".L")
+        assert find_gems._generate_yf_ticker(row, config) == "NG.L"
+
     def test_trailing_dash_only_becomes_none(self):
         """A raw ticker that is nothing but a dash should return None."""
         row = self._row("-")
+        config = self._static_config(".L")
+        assert find_gems._generate_yf_ticker(row, config) is None
+
+    def test_trailing_dot_only_becomes_none(self):
+        """A raw ticker that is nothing but a dot should return None."""
+        row = self._row(".")
         config = self._static_config(".L")
         assert find_gems._generate_yf_ticker(row, config) is None
 
@@ -998,10 +1015,15 @@ class TestNormalizeTicker:
 
     def test_multi_dot_becomes_dash(self):
         assert to_yfinance("A.B.TO") == "A-B.TO"
+        assert to_yfinance("NIL.B.ST") == "NIL-B.ST"
 
     def test_single_char_suffix_becomes_dash(self):
         # e.g., "BRK.B" -> "BRK-B" (single char, not exchange suffix)
         assert to_yfinance("BRK.B") == "BRK-B"
+
+    def test_known_single_character_exchange_suffixes_stay_dotted(self):
+        assert to_yfinance("NG.L") == "NG.L"
+        assert to_yfinance("7203.T") == "7203.T"
 
     def test_non_string_converted(self):
         # find_gems._process_row always calls str() before to_yfinance; mirror that here.

@@ -138,6 +138,8 @@ class TickerCorrector:
         if ticker in REUTERS_CORRECTIONS:
             symbol, suffix, name = REUTERS_CORRECTIONS[ticker]
             corrected = f"{symbol}.{suffix}"
+            if corrected == ticker:
+                return corrected, False, name
 
             logger.info(
                 "ticker_corrected",

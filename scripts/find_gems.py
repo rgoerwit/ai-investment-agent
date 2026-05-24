@@ -380,10 +380,10 @@ def _generate_yf_ticker(row, config):
         # No market match → drop rather than emit unsuffixed ticker (guaranteed 404)
         return None
 
-    # Strip trailing dashes from raw mnemonics before appending suffix.
+    # Strip trailing status markers from raw mnemonics before appending suffix.
     # Some exchange files (e.g. LSE SETS) tag special-status securities with a
-    # trailing dash (e.g. "JD-", "RM-"). Yahoo Finance uses the plain ticker.
-    raw = raw.rstrip("-")
+    # trailing dash/dot (e.g. "JD-", "NG."). Yahoo Finance uses the plain ticker.
+    raw = raw.rstrip("-.")
     if not raw:
         return None
 
