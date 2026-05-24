@@ -20,6 +20,30 @@ from src.exchange_metadata import (
     YFINANCE_TO_IBKR,
 )
 
+_NUMERIC_SYMBOL_WIDTH_BY_SUFFIX: dict[str, int] = {
+    ".HK": 4,
+    ".KS": 6,
+    ".KQ": 6,
+}
+
+
+def _pad_numeric_symbol_for_suffix(symbol: str, suffix: str) -> str:
+    """Return the exchange-canonical numeric symbol, leaving mixed codes intact."""
+    cleaned = symbol.strip()
+    width = _NUMERIC_SYMBOL_WIDTH_BY_SUFFIX.get(suffix)
+    # Some exchange instruments are not pure numeric; never pad those.
+    if width and cleaned.isdigit():
+        return cleaned.zfill(width)
+    return cleaned
+
+
+def _strip_storage_padding_for_suffix(symbol: str, suffix: str) -> str:
+    """Store exchange symbols in the IBKR form where leading zeros are stripped."""
+    cleaned = symbol.strip()
+    if suffix in _NUMERIC_SYMBOL_WIDTH_BY_SUFFIX and cleaned.isdigit():
+        return cleaned.lstrip("0") or "0"
+    return cleaned
+
 
 def _build_currency_to_suffix() -> dict[str, str]:
     """Build the IBKR currency fallback map from canonical exchange facts."""
@@ -37,12 +61,27 @@ def _build_currency_to_suffix() -> dict[str, str]:
     return {
         **derived,
         "TWD": ".TW",
+        "KRW": ".KS",
         "GBP": ".L",
         "GBX": ".L",
     }
 
 
 _CURRENCY_TO_SUFFIX: dict[str, str] = _build_currency_to_suffix()
+
+
+def _suffix_for_exchange_currency(exchange: str, currency: str) -> str:
+    """Resolve yfinance suffix from exact exchange first, then currency fallback."""
+    sfx = IBKR_TO_YFINANCE.get(exchange)
+    if sfx is not None:
+        if sfx == "" and exchange in ("", "SMART") and currency not in ("", "USD"):
+            # IBKR contract-info endpoints can report SMART for non-US watchlist
+            # contracts; keep this aligned with ibkr_symbol_to_yf() fallback behavior.
+            return _CURRENCY_TO_SUFFIX.get(currency, "")
+        return sfx
+    if currency:
+        return _CURRENCY_TO_SUFFIX.get(currency, "")
+    return ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,31 +115,22 @@ class Ticker:
            currencies when the exchange code is unknown.
         3. "" — US/ADR or genuinely unresolvable.
         """
-        sfx = IBKR_TO_YFINANCE.get(self.exchange)
-        if sfx is not None:
-            # Explicit entry: "" means US (no suffix), non-empty means the exchange.
-            return sfx
-        # Exchange not in static map → try currency fallback
-        if self.currency:
-            return _CURRENCY_TO_SUFFIX.get(self.currency.upper(), "")
-        return ""
+        return _suffix_for_exchange_currency(self.exchange, self.currency.upper())
 
     @property
     def yf(self) -> str:
         """Return yfinance-format ticker string.
 
         HK stocks are zero-padded to 4 digits ("0005.HK").
+        Korean stocks are zero-padded to 6 digits ("005930.KS").
         US/ADR stocks have no suffix ("AAPL").
         """
         sfx = self.suffix
-        if sfx == ".HK":
-            bare = self.symbol.lstrip("0") or "0"
-            return f"{bare.zfill(4)}.HK"
-        return f"{self.symbol}{sfx}"
+        return f"{_pad_numeric_symbol_for_suffix(self.symbol, sfx)}{sfx}"
 
     @property
     def ibkr(self) -> str:
-        """Return IBKR bare symbol (no suffix, no zero-padding)."""
+        """Return IBKR bare symbol, zero-stripped for HK/Korea numeric listings."""
         return self.symbol
 
     @property
@@ -136,8 +166,9 @@ class Ticker:
 
         Args:
             symbol:   IBKR bare symbol (e.g. "5", "7203", "ASML").
-                      Pre-padded HK symbols (e.g. "0005") have leading zeros
-                      stripped → stored as "5"; .yf re-applies zero-padding.
+                      Pre-padded numeric symbols for HK/Korea (e.g. "0005",
+                      "005930") have leading zeros stripped; .yf re-applies
+                      exchange-canonical zero-padding.
             exchange: IBKR exchange code (e.g. "SEHK", "TSE", "LSE", "SMART").
                       Normalised to upper-case.
             currency: ISO currency code (e.g. "HKD", "JPY", "GBP").
@@ -148,13 +179,10 @@ class Ticker:
         exch = exchange.strip().upper() if exchange else ""
         ccy = currency.strip().upper() if currency else ""
 
-        # Determine if this is an HK stock so we can strip zero-padding.
-        # IBKR can occasionally send "0005" instead of "5" for SEHK positions.
-        sfx = IBKR_TO_YFINANCE.get(exch)
-        if sfx is None and ccy:
-            sfx = _CURRENCY_TO_SUFFIX.get(ccy, "")
-        if sfx == ".HK":
-            sym = sym.lstrip("0") or "0"
+        # IBKR can occasionally send pre-padded numeric symbols; store the
+        # bare form and let .yf re-apply exchange-canonical padding.
+        sfx = _suffix_for_exchange_currency(exch, ccy)
+        sym = _strip_storage_padding_for_suffix(sym, sfx)
 
         return cls(symbol=sym, exchange=exch, currency=ccy)
 
@@ -162,9 +190,10 @@ class Ticker:
     def from_yf(cls, yf_str: str, currency: str = "") -> Ticker:
         """Parse a yfinance-format ticker string into a Ticker.
 
-        Strips HK zero-padding from the symbol component so that the stored
-        symbol is always the bare IBKR form (e.g. "0005.HK" → symbol="5").
-        Round-trips correctly: Ticker.from_yf("0005.HK").yf == "0005.HK".
+        Strips exchange-specific numeric zero-padding from the symbol component
+        so that the stored symbol is the bare IBKR form (e.g. "0005.HK" →
+        symbol="5"). Round-trips correctly: Ticker.from_yf("0005.HK").yf ==
+        "0005.HK".
 
         Args:
             yf_str:   yfinance ticker (e.g. "7203.T", "0005.HK", "AAPL").
@@ -176,8 +205,7 @@ class Ticker:
             sym_part, sfx_part = yf_str.rsplit(".", 1)
             suffix = f".{sfx_part}"
             ibkr_exchange = YFINANCE_TO_IBKR.get(suffix, "SMART")
-            # Strip HK zero-padding: "0005" → "5" (re-applied by .yf)
-            symbol = (sym_part.lstrip("0") or "0") if suffix == ".HK" else sym_part
+            symbol = _strip_storage_padding_for_suffix(sym_part, suffix)
         else:
             symbol = yf_str
             ibkr_exchange = "SMART"

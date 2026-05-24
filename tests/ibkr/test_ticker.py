@@ -62,6 +62,30 @@ class TestTickerFromIbkr:
         assert t.symbol == "5"
         assert t.yf == "0005.HK"
 
+    # Korea zero-padding edge cases
+
+    def test_krx_short_numeric_padded_to_6(self):
+        t = Ticker.from_ibkr("5930", "KRX", "KRW")
+        assert t.symbol == "5930"
+        assert t.suffix == ".KS"
+        assert t.yf == "005930.KS"
+
+    def test_krx_pre_padded_input_stripped(self):
+        t = Ticker.from_ibkr("005930", "KRX", "KRW")
+        assert t.symbol == "5930"
+        assert t.yf == "005930.KS"
+
+    def test_kosdaq_short_numeric_padded_to_6(self):
+        t = Ticker.from_ibkr("35420", "KOSDAQ", "KRW")
+        assert t.symbol == "35420"
+        assert t.suffix == ".KQ"
+        assert t.yf == "035420.KQ"
+
+    def test_korea_mixed_symbol_not_padded(self):
+        t = Ticker.from_ibkr("ABC123", "KRX", "KRW")
+        assert t.symbol == "ABC123"
+        assert t.yf == "ABC123.KS"
+
     # Currency fallback (when exchange is unknown/SMART)
 
     def test_currency_fallback_hkd(self):
@@ -97,6 +121,11 @@ class TestTickerFromIbkr:
         t = Ticker.from_ibkr("MEGP", "MESDAQ", "MYR")
         assert t.suffix == ".KL"
 
+    def test_currency_fallback_krw_defaults_to_ks(self):
+        t = Ticker.from_ibkr("5930", "", "KRW")
+        assert t.suffix == ".KS"
+        assert t.yf == "005930.KS"
+
     # Exchange priority over conflicting currency
 
     def test_exchange_wins_over_currency(self):
@@ -105,6 +134,11 @@ class TestTickerFromIbkr:
         assert t.suffix == ".HK"
         assert t.yf == "0005.HK"
 
+    def test_kosdaq_exchange_wins_over_krw_fallback(self):
+        t = Ticker.from_ibkr("35420", "KOSDAQ", "KRW")
+        assert t.suffix == ".KQ"
+        assert t.yf == "035420.KQ"
+
     # US / bare result
 
     def test_smart_gives_no_suffix(self):
@@ -112,6 +146,11 @@ class TestTickerFromIbkr:
         assert t.suffix == ""
         assert t.yf == "AAPL"
         assert not t.has_suffix
+
+    def test_smart_non_usd_currency_falls_back(self):
+        t = Ticker.from_ibkr("5", "SMART", "HKD")
+        assert t.suffix == ".HK"
+        assert t.yf == "0005.HK"
 
     def test_nasdaq_gives_no_suffix(self):
         t = Ticker.from_ibkr("MSFT", "NASDAQ", "USD")
@@ -186,6 +225,23 @@ class TestTickerFromYf:
         t = Ticker.from_yf("0001.HK")
         assert t.symbol == "1"
         assert t.yf == "0001.HK"
+
+    def test_krx_round_trip(self):
+        t = Ticker.from_yf("005930.KS")
+        assert t.symbol == "5930"
+        assert t.exchange == "KRX"
+        assert t.yf == "005930.KS"
+
+    def test_krx_short_yf_normalizes(self):
+        t = Ticker.from_yf("5930.KS")
+        assert t.symbol == "5930"
+        assert t.yf == "005930.KS"
+
+    def test_kosdaq_round_trip(self):
+        t = Ticker.from_yf("035420.KQ")
+        assert t.symbol == "35420"
+        assert t.exchange == "KOSDAQ"
+        assert t.yf == "035420.KQ"
 
     def test_currency_kwarg_preserved(self):
         t = Ticker.from_yf("7203.T", currency="JPY")

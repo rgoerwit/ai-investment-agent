@@ -467,19 +467,58 @@ class TestScrapeExchanges:
         assert len(result) == 1
         assert result.iloc[0]["YF_Ticker"] == "0001.HK"
 
+    def test_korea_clean_rule_pads_numeric_symbols_to_six_digits(self):
+        ex = self._make_exchange("South Korea", "KOSPI", suffix=".KS")
+        ex["params"]["clean_rule"] = "pad_6_digits"
+        config = self._make_config(ex)
+
+        df = pd.DataFrame(
+            {
+                "Code": ["5930", "000660", "ABC123"],
+                "Name": ["Samsung", "SK Hynix", "Mixed Code"],
+            }
+        )
+        mock_handler = MagicMock(return_value=df)
+
+        with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
+            with patch.object(find_gems, "_check_deps"):
+                with patch("find_gems.time.sleep"):
+                    result = find_gems.scrape_exchanges(config, exclude_us=True)
+
+        assert result["YF_Ticker"].tolist() == [
+            "005930.KS",
+            "000660.KS",
+            "ABC123.KS",
+        ]
+
+    def test_kosdaq_enabled_exchange_outputs_kq_suffix(self):
+        ex = self._make_exchange("South Korea", "KOSDAQ", suffix=".KQ")
+        ex["params"]["clean_rule"] = "pad_6_digits"
+        config = self._make_config(ex)
+
+        df = pd.DataFrame({"Code": ["35420"], "Name": ["Naver"]})
+        mock_handler = MagicMock(return_value=df)
+
+        with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
+            with patch.object(find_gems, "_check_deps"):
+                with patch("find_gems.time.sleep"):
+                    result = find_gems.scrape_exchanges(config, exclude_us=True)
+
+        assert result.iloc[0]["YF_Ticker"] == "035420.KQ"
+
     def test_disabled_exchange_skipped(self):
         """Exchanges with enabled:false should be skipped entirely."""
         ex_enabled = self._make_exchange("Japan", "TSE")
-        ex_disabled = self._make_exchange("South Korea", "KOSPI", suffix=".KS")
+        ex_disabled = self._make_exchange("Atlantis", "ATX", suffix=".AT")
         ex_disabled["enabled"] = False
         config = self._make_config(ex_enabled, ex_disabled)
 
         jp_df = pd.DataFrame({"Code": ["7203"], "Name": ["Toyota"]})
-        kr_df = pd.DataFrame({"Code": ["005930"], "Name": ["Samsung"]})
+        at_df = pd.DataFrame({"Code": ["AT1"], "Name": ["Atlantis Corp"]})
 
         def side_effect(cfg, session):
-            if "KOSPI" in cfg["exchange_name"]:
-                return kr_df
+            if "ATX" in cfg["exchange_name"]:
+                return at_df
             return jp_df
 
         mock_handler = MagicMock(side_effect=side_effect)
@@ -491,7 +530,7 @@ class TestScrapeExchanges:
 
         assert len(result) == 1
         assert result.iloc[0]["YF_Ticker"] == "7203.T"
-        # Handler should only be called once (Korea skipped)
+        # Handler should only be called once (disabled exchange skipped)
         assert mock_handler.call_count == 1
 
     def test_filter_empty_result_skipped(self):
@@ -1762,6 +1801,26 @@ class TestHandleScrapeHtmlPagination:
 
         assert len(df) == 1000
         assert session.get.call_count == 3  # page 1, page 2, page 3 (stops)
+
+    def test_custom_page_param_used_for_pagination(self):
+        """Some sources use ?page=N rather than the default ?p=N pagination."""
+        base = self.BASE_CONFIG["source_url"]
+        page1_syms = [f"A{i}" for i in range(500)]
+        page2_syms = [f"B{i}" for i in range(300)]
+        pages = {
+            base: _make_html_table(page1_syms),
+            f"{base}?page=2": _make_html_table(page2_syms),
+        }
+        session = _make_mock_session(pages)
+        config = self._config(max_pages=5)
+        config["params"]["page_param"] = "page"
+
+        df = find_gems._handle_scrape_html(config, session)
+
+        assert len(df) == 800
+        fetched_urls = [call.args[0] for call in session.get.call_args_list]
+        assert f"{base}?page=2" in fetched_urls
+        assert f"{base}?p=2" not in fetched_urls
 
     def test_partial_last_page_stops_early(self):
         """When page N has fewer rows than page 1, it's the last page and is still collected."""

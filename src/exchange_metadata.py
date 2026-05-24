@@ -72,6 +72,7 @@ IBKR_EXCHANGE_ALIASES: dict[str, str] = {
     "IBIS2": ".DE",
     "FWB2": ".F",
     "EBS": ".SW",
+    "KSE": ".KS",  # Candidate KRX/KOSDAQ family alias; verify with live metadata.
     "SIBE": ".MC",
     "ENEXT.BE": ".BR",
     "LSEETF": ".L",

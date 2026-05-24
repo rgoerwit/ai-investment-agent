@@ -82,7 +82,10 @@ class TestIbkrRoundTrip:
             ("2330", "TWSE", "2330.TW"),
             ("7203", "TSE", "7203.T"),
             ("5", "SEHK", "0005.HK"),
-            ("5934", "KRX", "5934.KS"),
+            ("5934", "KRX", "005934.KS"),
+            ("005930", "KRX", "005930.KS"),
+            ("5930", "KSE", "005930.KS"),
+            ("35420", "KOSDAQ", "035420.KQ"),
             ("SAP", "IBIS2", "SAP.DE"),
             ("ANDR", "VSE", "ANDR.VI"),
         ],
@@ -92,6 +95,12 @@ class TestIbkrRoundTrip:
 
         ticker = Ticker.from_ibkr(symbol=symbol, exchange=exchange)
         assert ticker.yf == expected_yf
+
+    def test_krw_currency_fallback_defaults_to_ks(self):
+        from src.ibkr.ticker import Ticker
+
+        ticker = Ticker.from_ibkr(symbol="5930", exchange="", currency="KRW")
+        assert ticker.yf == "005930.KS"
 
 
 class TestRetrospectiveMapCoverage:

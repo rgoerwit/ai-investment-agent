@@ -100,6 +100,11 @@ SCRAPE_COLUMNS = [
     "Listing_Code",
 ]
 
+PAD_CLEAN_RULE_WIDTHS = {
+    "pad_4_digits": 4,
+    "pad_6_digits": 6,
+}
+
 ENRICHED_COLUMNS = [
     "YF_Ticker",
     "Company_YF",
@@ -358,11 +363,11 @@ def _generate_yf_ticker(row, config):
     raw = str(row["Ticker_Raw"]).strip()
     suffix = config["yahoo_suffix"]
 
-    if config.get("params", {}).get("clean_rule") == "pad_4_digits":
-        try:
-            raw = raw.split(".")[0].zfill(4)
-        except Exception:
-            pass
+    pad_width = PAD_CLEAN_RULE_WIDTHS.get(config.get("params", {}).get("clean_rule"))
+    if pad_width:
+        raw_base = raw.split(".")[0]
+        if raw_base.isdigit():
+            raw = raw_base.zfill(pad_width)
 
     if suffix == "dynamic":
         suffix_map = config["params"].get("suffix_map", {})
@@ -437,6 +442,7 @@ def _handle_scrape_html(config, session):
     params = config["params"]
     base_url = config["source_url"]
     max_pages = params.get("paginate_max_pages", 1)
+    page_param = params.get("page_param", "p")
     idx = params.get("table_index", 0)
     target_col = params.get("ticker_col")
 
@@ -444,7 +450,7 @@ def _handle_scrape_html(config, session):
     first_page_len = None
 
     for page_num in range(1, max_pages + 1):
-        url = base_url if page_num == 1 else f"{base_url}?p={page_num}"
+        url = base_url if page_num == 1 else f"{base_url}?{page_param}={page_num}"
         try:
             response = session.get(url)
             response.raise_for_status()

@@ -50,6 +50,18 @@ class TestIbkrSymbolToYf:
     def test_korea(self):
         assert ibkr_symbol_to_yf("005930", "KRX") == "005930.KS"
 
+    def test_korea_short_numeric_zero_padding(self):
+        assert ibkr_symbol_to_yf("5930", "KRX", "KRW") == "005930.KS"
+
+    def test_korea_kse_alias_zero_padding(self):
+        assert ibkr_symbol_to_yf("5930", "KSE", "KRW") == "005930.KS"
+
+    def test_kosdaq_short_numeric_zero_padding(self):
+        assert ibkr_symbol_to_yf("35420", "KOSDAQ", "KRW") == "035420.KQ"
+
+    def test_korea_mixed_symbol_not_padded(self):
+        assert ibkr_symbol_to_yf("ABC123", "KRX", "KRW") == "ABC123.KS"
+
     def test_taiwan(self):
         assert ibkr_symbol_to_yf("2330", "TWSE") == "2330.TW"
 
@@ -107,6 +119,12 @@ class TestIbkrSymbolToYf:
     def test_currency_fallback_myr_scientx(self):
         # Another MYR stock; exchange absent
         assert ibkr_symbol_to_yf("SCIENTX", "", "MYR") == "SCIENTX.KL"
+
+    def test_currency_fallback_krw_defaults_to_ks(self):
+        assert ibkr_symbol_to_yf("5930", "", "KRW") == "005930.KS"
+
+    def test_exact_kosdaq_exchange_wins_over_krw_fallback(self):
+        assert ibkr_symbol_to_yf("35420", "KOSDAQ", "KRW") == "035420.KQ"
 
     def test_madrid_sibe_exchange(self):
         # SIBE is IBKR's code for Bolsa Madrid electronic order book
@@ -228,6 +246,16 @@ class TestYfToIbkrFormat:
     def test_london(self):
         symbol, exchange = yf_to_ibkr_format("HSBA.L")
         assert exchange == "LSE"
+
+    def test_korea_ks(self):
+        symbol, exchange = yf_to_ibkr_format("005930.KS")
+        assert symbol == "005930"
+        assert exchange == "KRX"
+
+    def test_korea_kq(self):
+        symbol, exchange = yf_to_ibkr_format("035420.KQ")
+        assert symbol == "035420"
+        assert exchange == "KOSDAQ"
 
 
 class TestResolveConid:
