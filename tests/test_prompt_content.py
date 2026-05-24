@@ -224,3 +224,39 @@ class TestForeignLanguageOrderBook:
         msg = prompt.system_message
         assert "Recent Ownership Changes" in msg
         assert "Insider/Director Dealings" in msg
+
+
+class TestKoreanPromptAnchors:
+    """Guard Korean accounting, disclosure, and governance prompt anchors."""
+
+    def test_foreign_language_prompt_has_korean_disclosure_and_fcf_terms(self):
+        prompt = get_prompt("foreign_language_analyst")
+        msg = prompt.system_message
+        for term in [
+            "DART",
+            "사업보고서",
+            "기업가치 제고 계획",
+            "영업활동현금흐름",
+            "잉여현금흐름",
+        ]:
+            assert term in msg
+
+    def test_auditor_prompt_has_korean_audit_opinion_terms(self):
+        prompt = get_prompt("global_forensic_auditor")
+        msg = prompt.system_message
+        for term in ["적정의견", "한정의견", "부적정의견", "의견거절"]:
+            assert term in msg
+
+    def test_auditor_prompt_has_korean_accounting_risk_terms(self):
+        prompt = get_prompt("global_forensic_auditor")
+        msg = prompt.system_message
+        for term in ["분식회계", "대손충당금", "특수관계자 거래"]:
+            assert term in msg
+
+    def test_apac_and_value_trap_prompts_have_korean_market_terms(self):
+        apac = get_prompt("apac_regional_specialist")
+        value_trap = get_prompt("value_trap_detector")
+        assert "코리아 디스카운트" in apac.system_message
+        assert "밸류업" in apac.system_message
+        assert "자사주 소각" in apac.system_message
+        assert "기업지배구조보고서" in value_trap.system_message

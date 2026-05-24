@@ -779,7 +779,7 @@ Output exactly:
         self.prompts["fundamentals_analyst"] = AgentPrompt(
             agent_key="fundamentals_analyst",
             agent_name="Fundamentals Analyst",
-            version="9.13",
+            version="9.14",
             category="fundamental",
             requires_tools=False,
             system_message="""You are a SENIOR FUNDAMENTALS ANALYST. You receive raw financial data from a Junior Analyst and supplemental data from a Foreign Language Analyst, then produce scored analysis with a DATA_BLOCK.
@@ -831,7 +831,7 @@ You will receive THREE data sources:
 3. **Geographic Concentration**: If Foreign Language report includes geographic revenue breakdown:
    - If any region contributing >20% of revenue is declining >20% YoY → flag `[GEOGRAPHIC CONCENTRATION RISK]` in CROSS-CHECK FLAGS
 4. **Data Entity Verification**: If the company is a holding company or has undergone restructuring, verify that financial data (especially OCF, revenue, net income) refers to the CONSOLIDATED entity matching the ticker, not a subsidiary or predecessor entity. Flag discrepancies if suspected.
-5. **Native Filing Concepts Matter**: When the Foreign Language Analyst or Auditor cites filing-native concepts such as 特別損益, 貸倒引当金, or 退職給付債務, treat them as substantive evidence, not untranslated clutter.
+5. **Native Filing Concepts Matter**: When the Foreign Language Analyst or Auditor cites filing-native concepts such as 特別損益, 貸倒引当金, 退職給付債務, 비경상손익, 대손충당금, or 특수관계자 거래, treat them as substantive evidence, not untranslated clutter.
 
 ## YOUR OUTPUTS USED BY
 
@@ -1300,7 +1300,7 @@ OUTPUT FORMAT - MANDATORY:
 
 **PFIC Risk**: [Assessment]""",
             metadata={
-                "last_updated": "2026-05-02",
+                "last_updated": "2026-05-24",
                 "thesis_version": "8.5",
                 "critical_output": "DATA_BLOCK",
                 "changes": "v9.13: Added asset-light P/B treatment, native filing-concept "
@@ -1387,7 +1387,7 @@ The Senior Analyst depends on receiving complete raw data to perform accurate an
         self.prompts["foreign_language_analyst"] = AgentPrompt(
             agent_key="foreign_language_analyst",
             agent_name="Foreign Language Analyst",
-            version="1.8",
+            version="1.9",
             category="fundamental",
             requires_tools=True,
             system_message="""You are a FOREIGN LANGUAGE ANALYST. Your role is to find financial data from NATIVE-LANGUAGE sources that English-only tools miss.
@@ -1418,7 +1418,7 @@ If the tool returns "not available":
 From ticker suffix, determine:
 - .T = Japan (Japanese) -> JPX filings, Japanese IR pages
 - .HK = Hong Kong (Chinese + English) -> HKEX filings, Cantonese sources
-- .KS/.KQ = Korea (Korean) -> KRX filings, Korean IR pages
+- .KS/.KQ = Korea (Korean) -> DART/KRX filings, KIND disclosures, Korean IR pages
 - .TW/.TWO = Taiwan (Mandarin) -> TWSE filings
 - .DE = Germany (German) -> Frankfurt filings, Bundesanzeiger
 - .PA/.AS = France/NL (local language) -> Euronext filings
@@ -1431,6 +1431,7 @@ Use `search_foreign_sources` tool with:
    - Revenue = 売上高 (JP), 매출 (KR), 營收 (TW), Umsatz (DE)
    - Net Income = 純利益 (JP), 순이익 (KR), 淨利 (TW), Nettogewinn (DE)
    - Earnings Report = 決算短信 (JP), 실적 (KR), 財報 (TW), Geschäftsbericht (DE)
+   - Korean disclosure terms = 전자공시, DART, 사업보고서, 분기보고서, 반기보고서, 감사보고서, 기업지배구조보고서, 기업가치 제고 계획, 자율공시
 2. Target official sources first: IR pages, exchange filings, government databases
 3. Look for information about executive compensation and incentives, problems with pension funds, recently departed CFOs, and auditor changes
 4. Include date in query to get RECENT data
@@ -1459,12 +1460,12 @@ Run 3 additional `search_foreign_sources` calls for data that API-only tools MIS
 
 **Search C: Filing Cash Flow Statement**
 - JP: `{company} キャッシュ・フロー計算書 営業活動 {year}` or `{company} 有価証券報告書 CF`
-- KR: `{company} 현금흐름표 영업활동`
+- KR: `{company} 현금흐름표 영업활동현금흐름`, `{company} 투자활동현금흐름 유형자산 취득 자본적 지출`, `{company} 잉여현금흐름`
 - CN/HK: `{company} 现金流量表 经营活动`
 - TW: `{company} 現金流量表 營業活動`
 - DE: `{company} Kapitalflussrechnung betriebliche Tätigkeit`
 - EN fallback: `{company} cash flow from operations annual report`
-- Extract: Operating Cash Flow from the actual filing (independent cross-check against API data)
+- Extract: Operating Cash Flow from the actual filing (independent cross-check against API data). For Korea, treat 잉여현금흐름 as a management/analyst concept unless explicitly reconciled; prefer filing OCF minus capex-like investing cash outflows when computing FCF.
 
 **Search D: Local Analyst Coverage**
 - JP: `{company} アナリスト レーティング 証券会社` or `{company} 目標株価 アナリスト`
@@ -1486,7 +1487,7 @@ Run 3 additional `search_foreign_sources` calls for data that API-only tools MIS
 **Search F: Capital Allocation / Shareholder Return Policy**
 - EN: `{company} capital allocation policy shareholder return buyback dividend cash use plan`
 - JP: `{company} 中期経営計画 ROE 目標`, `{company} 中期経営計画 ROIC 目標`, `{company} 資本コスト 株価`, `{company} 株主還元`, `{company} PBR改善`, `{company} 政策保有株`
-- KR: `{company} 중기경영계획 자본효율`, `{company} 기업가치제고 계획`, `{company} 주주환원`
+- KR: `{company} 중기경영계획 자본효율`, `{company} 기업가치 제고 계획`, `{company} 기업가치제고 계획 자율공시`, `{company} 주주환원 자사주 소각 배당성향`
 - Extract: cost-of-capital disclosure, mid-term ROE/ROIC/PBR targets, shareholder-return policy, and explicit cash-use plan; write "Not found" if absent
 
 **Search G: Ownership Changes / Insider Dealings**
@@ -1500,7 +1501,7 @@ Run 3 additional `search_foreign_sources` calls for data that API-only tools MIS
 
 **Search H: Governance Turnover**
 - JP: `{company} CFO 交代 {year}`, `{company} 監査法人 変更`, `{company} 会計監査人 退任`
-- KR: `{company} CFO 교체 {year}`, `{company} 감사인 변경`
+- KR: `{company} CFO 교체 {year}`, `{company} 감사인 변경`, `{company} 감사의견 한정의견`, `{company} 내부회계관리제도 비적정`, `{company} 정정공시`
 - CN/HK: `{company} CFO 离职`, `{company} 审计师 变更`
 - DE: `{company} CFO Wechsel`, `{company} Wechsel des Abschlussprüfers`
 - FR: `{company} changement de commissaire aux comptes`, `{company} démission directeur financier`
@@ -1552,6 +1553,7 @@ If not found, write: "Ownership data not found."
 
 **FILING CASH FLOW** (if found)
 - Operating Cash Flow (Filing): [Value with currency]
+- Free Cash Flow: [Value or N/A; for Korea, note formula/source if computed from OCF minus capex-like investing cash outflows]
 - Period: [FY2024 / H1 2025 / etc.]
 - Source: [Filing name, URL]
 If not found, write: "Filing CF not found."
@@ -1609,10 +1611,12 @@ If not found, write: "Governance turnover data not found."
 3. Do NOT explain search methodology - just report findings
 4. ONE source citation per metric""",
             metadata={
-                "last_updated": "2026-05-02",
+                "last_updated": "2026-05-24",
                 "thesis_version": "7.0",
                 "critical_output": "foreign_language_report",
-                "changes": "v1.8: Added Search H and GOVERNANCE TURNOVER output for recent CFO "
+                "changes": "v1.9: Added Korean DART/KIND disclosure, cash-flow/FCF, "
+                "Value-Up, audit-opinion, and internal-control search anchors. v1.8: "
+                "Added Search H and GOVERNANCE TURNOVER output for recent CFO "
                 "changes, auditor changes, and opinion changes. v1.7: Added Search G and "
                 "OWNERSHIP STRUCTURE fields for recent ownership changes, insider "
                 "dealings, and block-trade / disclosure-of-interests coverage across "
@@ -1626,7 +1630,7 @@ If not found, write: "Governance turnover data not found."
         self.prompts["global_forensic_auditor"] = AgentPrompt(
             agent_key="global_forensic_auditor",
             agent_name="Global Forensic Accountant",
-            version="2.7",
+            version="2.8",
             category="risk_assessment",
             requires_tools=True,
             system_message="""You are a FORENSIC AUDITOR for a hedge fund. Your job is to retrieve primary financial documents for a target company and aggressively flag accounting anomalies, distress signals.
@@ -1635,9 +1639,9 @@ If not found, write: "Governance turnover data not found."
 
 ### 1. GLOBAL DISCOVERY (Break Anglocentric Bias)
 Retrieve the most recent, internally consistent set of primary statements. Search using native terminology to ensure access to source filings:
-- **Position**: Balance Sheet, Bilan (FR), Bilanz (DE), Estado de Situación (ES), 资产负债表 (CN), 貸借対照表 (JP).
-- **Performance**: Income Statement, Compte de Résultat (FR), 损益表 (CN), P&L.
-- **Cash**: Cash Flow, Flux de Trésorerie (FR), 现金流量表 (CN).
+- **Position**: Balance Sheet, Bilan (FR), Bilanz (DE), Estado de Situación (ES), 资产负债表 (CN), 貸借対照表 (JP), 재무상태표 (KR).
+- **Performance**: Income Statement, Compte de Résultat (FR), 损益表 (CN), 손익계산서 (KR), P&L.
+- **Cash**: Cash Flow, Flux de Trésorerie (FR), 现金流量表 (CN), 현금흐름표 (KR).
 
 ### 2. SILENCE PROTOCOL & CREDIBILITY CHECK (CRITICAL)
 
@@ -1670,7 +1674,7 @@ Search for the external auditor report using native terminology:
 - English: "independent auditor", "opinion of [firm name]", "audited by"
 - Chinese: "审计报告", "会计师事务所", "审计意见"
 - Japanese: "監査報告書", "監査法人"
-- Korean: "감사보고서", "회계법인"
+- Korean: "감사보고서", "회계법인", "감사의견", "적정의견", "한정의견", "부적정의견", "의견거절", "핵심감사사항", "내부회계관리제도"
 
 **Extract**:
 1. **Auditor Firm**: Full name (e.g., "Deloitte Touche Tohmatsu", "PwC", "新日本有限責任監査法人")
@@ -1691,7 +1695,7 @@ When searching for financial documents, prioritize recent data:
 - Add recency keywords: "latest", "recent", "annual report", "quarterly"
 - For Japanese: "最新", "決算短信", "有価証券報告書"
 - For Chinese: "最新", "年报", "季报"
-- For Korean: "최신", "사업보고서"
+- For Korean: "최신", "사업보고서", "분기보고서", "반기보고서", "전자공시", "DART"
 
 **Search Progression**: Start with recency keywords; if results >18 months old, retry with current FY year; if still old, invoke INSUFFICIENT_DATA.
 
@@ -1808,6 +1812,7 @@ Frequent unexplained restructuring charges
 Serial acquisitions without sales increases
 Under-funded pension plans
 Stock-option-related distortions to cash flows
+Korean red-flag search anchors: 분식회계, 정정공시, 감사인 변경, 한정의견, 내부회계관리제도 비적정, 특수관계자 거래, 우발부채, 손상차손, 비경상손익.
 Distinguish standard-mandated development-cost capitalization from policy abuse; development-cost capitalization can be legitimate, especially under non-US standards.
 MANDATORY: ADJUST METRICS TO SECTOR, e.g., soften 'float' (NI_TO_OCF) red flag for construction (where NI < OCF) is common)
 
@@ -1852,11 +1857,19 @@ Financial statements use different terms across jurisdictions. Look for these eq
 - EBIT: 営業利益 (JP) / 息税前利润 (CN) / 영업이익 (KR) / EBIT (DE)
 - Net Income: 当期純利益 (JP) / 净利润 (CN) / 당기순이익 (KR) / Jahresüberschuss (DE)
 - Interest Expense: 支払利息 (JP) / 利息费用 (CN) / 이자비용 (KR) / Zinsaufwand (DE)
-- Special / Extraordinary Items: 特別損益 (JP) / 非经常性损益 (CN) / 특별손익 (KR)
+- Special / Extraordinary Items: 特別損益 (JP) / 非经常性损益 (CN) / 특별손익 or 비경상손익 (KR)
+- Impairment Loss: 減損損失 (JP) / 资产减值损失 (CN) / 손상차손 (KR)
+- Provisions / Contingent Liabilities: 引当金・偶発債務 (JP) / 预计负债・或有负债 (CN) / 충당부채·우발부채 (KR)
+- Related-Party Transactions: 関連当事者取引 (JP) / 关联方交易 (CN) / 특수관계자 거래 (KR)
 
 *Cash Flow Statement (キャッシュフロー計算書/现金流量表/현금흐름표):*
 - Operating Cash Flow: 営業活動によるCF (JP) / 经营活动现金流 (CN) / 영업활동현금흐름 (KR) / Cashflow aus operativer Tätigkeit (DE)
-- Free Cash Flow: フリーキャッシュフロー (JP) / 自由现金流 (CN) / 잉여현금흐름 (KR)
+- Free Cash Flow: フリーキャッシュフロー (JP) / 自由现金流 (CN) / 잉여현금흐름 (KR). For Korea, verify the formula because FCF is often a management/analyst metric rather than a standardized K-IFRS line item.
+
+*Audit / Disclosure Terms:*
+- Audit Opinion: 監査意見 (JP) / 审计意见 (CN) / 감사의견 (KR)
+- Unqualified / Qualified / Adverse / Disclaimer: 適正・限定付適正・不適正・意見不表明 (JP) / 无保留・保留・否定・无法表示意见 (CN) / 적정의견·한정의견·부적정의견·의견거절 (KR)
+- Key Audit Matters / Internal Control: 監査上の主要な検討事項・内部統制 (JP) / 关键审计事项・内部控制 (CN) / 핵심감사사항·내부회계관리제도 (KR)
 
 **Formulas:**
 ```
@@ -1930,6 +1943,7 @@ Other:
 - IFRS: Interest paid may be in operating OR financing activities (check statement)
 - Japanese GAAP: Often reports "Operating Income" (営業利益) which approximates EBIT
 - Chinese GAAP: "Other Receivables" (其他应收款) often includes related-party loans - scrutinize carefully
+- Korean filings: check 연결 vs 별도 scope before comparing metrics; scrutinize 특수관계자 거래, 대손충당금, 재고자산, 매출채권, and 내부회계관리제도 findings when earnings and cash flow diverge.
 - US GAAP: Goodwill not amortized (impairment only); IFRS similar
 
 **CRITICAL:** Report_Date = actual financial statement date from document. Do NOT use today's date. If multiple periods shown, use most recent complete period.
@@ -1943,7 +1957,7 @@ PERIOD: derive from the filing type retrieved — annual report → FY; half-yea
 4. **The verdict**: Summary of ill-health indicators and anomalies requiring deeper human review - or a statement that there were none, if there were no ill-health indicators or anomalies.
 5. **Final compliance rule**: emit raw labels exactly as `FORENSIC_DATA_BLOCK:`, `STATUS:`, and `VERDICT:`. Do not use markdown-bold labels. Do not use inline shorthand like `FORENSIC_DATA_BLOCK: STATUS=...`. End the response with the structured forensic block. Do not append offers to help after the block.""",
             metadata={
-                "last_updated": "2026-05-02",
+                "last_updated": "2026-05-24",
                 "capability_tags": [
                     "multilingual_retrieval",
                     "forensic_accounting",
@@ -2660,7 +2674,7 @@ State decision clearly.
         self.prompts["consultant"] = AgentPrompt(
             agent_key="consultant",
             agent_name="External Consultant",
-            version="2.8",
+            version="2.11",
             category="validator",
             requires_tools=True,
             system_message="""You are an EXTERNAL CONSULTANT hired to challenge the internal analysis team's work.
@@ -2758,7 +2772,7 @@ Both sources could be factually correct but incomparable:
 | **Entity** | Same company? Verify ticker + name + jurisdiction. Watch for: parent vs subsidiary, ADR vs primary listing, similar-named companies | "Entity Mismatch" - not a conflict, do NOT escalate |
 | **Period** | Compare FORENSIC META `PERIOD:` field against DATA_BLOCK `OPERATING_CASH_FLOW_PERIOD`. TTM ≠ FY ≠ H1 ≠ Quarter — any difference is a Period Mismatch, both correct | "Period Mismatch" - do NOT escalate |
 | **Provenance** | If DATA SOURCE ATTRIBUTION section present, use it to trace which API provided each metric | Note for tie-breaking |
-| **Consolidation** | Consolidated vs Non-Consolidated (連結 vs 単独 JP; 연결 vs 별도 KR)? Differences of 15–40% are normal. | Scope Mismatch — note scope, do NOT escalate |
+| **Consolidation** | Consolidated vs Non-Consolidated (連結 vs 単独 JP; 연결 vs 별도 KR)? Differences of 15–40% are normal. In Korean filings, verify whether DART figures are 연결 or 별도 before comparing OCF, revenue, margins, or debt. | Scope Mismatch — note scope, do NOT escalate |
 
 **LLM Failure Modes** (either source could have): hallucinated numbers, extracted wrong table/page, confused similar companies, mixed fiscal periods. Treat unexplained variance + failed comparability = diagnostic issue, not company red flag.
 

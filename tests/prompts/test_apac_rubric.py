@@ -14,13 +14,13 @@ def _load() -> dict:
 
 def test_apac_prompt_version_bumped() -> None:
     data = _load()
-    assert data["version"] == "1.1"
+    assert data["version"] == "1.2"
 
 
 def test_apac_prompt_metadata_updated() -> None:
     md = _load()["metadata"]
-    assert md["last_updated"] == "2026-05-20"
-    assert "v1.1" in md["changes"]
+    assert md["last_updated"] == "2026-05-24"
+    assert "v1.2" in md["changes"]
 
 
 def test_apac_prompt_verdict_rubric_present() -> None:
