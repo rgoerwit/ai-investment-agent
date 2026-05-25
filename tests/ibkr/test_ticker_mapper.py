@@ -257,6 +257,21 @@ class TestYfToIbkrFormat:
         assert symbol == "035420"
         assert exchange == "KOSDAQ"
 
+    def test_korea_ks_short_yf_normalizes_to_fixed_width_ibkr_symbol(self):
+        symbol, exchange = yf_to_ibkr_format("5930.KS")
+        assert symbol == "005930"
+        assert exchange == "KRX"
+
+    def test_korea_ks_five_digit_yf_normalizes_to_fixed_width_ibkr_symbol(self):
+        symbol, exchange = yf_to_ibkr_format("10130.KS")
+        assert symbol == "010130"
+        assert exchange == "KRX"
+
+    def test_korea_mixed_symbol_not_zero_stripped(self):
+        symbol, exchange = yf_to_ibkr_format("ABC123.KS")
+        assert symbol == "ABC123"
+        assert exchange == "KRX"
+
 
 class TestResolveConid:
     """Test conid resolution with cache and API mocking."""
@@ -314,6 +329,45 @@ class TestResolveConid:
         }
         result = resolve_conid("ASML.AS", client=mock_client)
         assert result == 222  # AEB match preferred over SMART
+
+    @patch("src.ibkr.ticker_mapper._save_cache")
+    @patch("src.ibkr.ticker_mapper._load_cache", return_value={})
+    def test_korean_yf_ticker_queries_fixed_width_ibkr_symbol(
+        self, mock_load, mock_save
+    ):
+        mock_client = MagicMock()
+        mock_client.stock_conid_by_symbol.return_value = {
+            "005930": [
+                {"conid": 111, "exchange": "KOSDAQ"},
+                {"conid": 222, "exchange": "KRX"},
+            ]
+        }
+
+        result = resolve_conid("005930.KS", client=mock_client)
+
+        assert result == 222
+        mock_client.stock_conid_by_symbol.assert_called_once_with(
+            "005930", default_filtering=False
+        )
+        mock_save.assert_called_once()
+
+    @patch("src.ibkr.ticker_mapper._save_cache")
+    @patch("src.ibkr.ticker_mapper._load_cache", return_value={})
+    def test_korean_five_digit_yf_ticker_queries_fixed_width_ibkr_symbol(
+        self, mock_load, mock_save
+    ):
+        mock_client = MagicMock()
+        mock_client.stock_conid_by_symbol.return_value = {
+            "010130": [{"conid": 333, "exchange": "KRX"}]
+        }
+
+        result = resolve_conid("10130.KS", client=mock_client)
+
+        assert result == 333
+        mock_client.stock_conid_by_symbol.assert_called_once_with(
+            "010130", default_filtering=False
+        )
+        mock_save.assert_called_once()
 
 
 class TestResolveYfTickerFromPosition:

@@ -38,10 +38,12 @@ def _pad_numeric_symbol_for_suffix(symbol: str, suffix: str) -> str:
 
 
 def _strip_storage_padding_for_suffix(symbol: str, suffix: str) -> str:
-    """Store exchange symbols in the IBKR form where leading zeros are stripped."""
+    """Return the display/lookup symbol used inside the IBKR layer."""
     cleaned = symbol.strip()
-    if suffix in _NUMERIC_SYMBOL_WIDTH_BY_SUFFIX and cleaned.isdigit():
+    if suffix == ".HK" and cleaned.isdigit():
         return cleaned.lstrip("0") or "0"
+    if suffix in {".KS", ".KQ"}:
+        return _pad_numeric_symbol_for_suffix(cleaned, suffix)
     return cleaned
 
 
@@ -89,7 +91,7 @@ class Ticker:
     """Immutable value object representing an equity ticker.
 
     Carries the three fields that unambiguously identify an IBKR position:
-      symbol   — IBKR bare symbol (e.g. "7203", "MEGP", "5") — never zero-padded
+      symbol   — IBKR symbol (e.g. "7203", "MEGP", "5", "005930")
       exchange — IBKR exchange code (e.g. "TSE", "LSE", "SEHK", "SMART", "")
       currency — ISO currency code (e.g. "JPY", "GBX", "HKD", "") — optional fallback
 
@@ -98,7 +100,7 @@ class Ticker:
     this class — that is the caller's responsibility.
     """
 
-    symbol: str  # IBKR bare symbol — no exchange suffix, not zero-padded
+    symbol: str  # IBKR symbol — no exchange suffix
     exchange: str  # IBKR exchange code (upper-case)
     currency: str  # ISO currency code (upper-case) — used only as suffix fallback
 
@@ -130,7 +132,7 @@ class Ticker:
 
     @property
     def ibkr(self) -> str:
-        """Return IBKR bare symbol, zero-stripped for HK/Korea numeric listings."""
+        """Return the IBKR symbol used for display and lookup."""
         return self.symbol
 
     @property
@@ -190,10 +192,10 @@ class Ticker:
     def from_yf(cls, yf_str: str, currency: str = "") -> Ticker:
         """Parse a yfinance-format ticker string into a Ticker.
 
-        Strips exchange-specific numeric zero-padding from the symbol component
-        so that the stored symbol is the bare IBKR form (e.g. "0005.HK" →
-        symbol="5"). Round-trips correctly: Ticker.from_yf("0005.HK").yf ==
-        "0005.HK".
+        Normalizes exchange-specific numeric symbols for IBKR display/lookup.
+        HK uses the bare symbol ("0005.HK" → "5"); Korea uses fixed-width symbols
+        ("5930.KS" → "005930"). Round-trips correctly:
+        Ticker.from_yf("0005.HK").yf == "0005.HK".
 
         Args:
             yf_str:   yfinance ticker (e.g. "7203.T", "0005.HK", "AAPL").

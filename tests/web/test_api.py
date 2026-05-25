@@ -201,6 +201,45 @@ def test_create_refresh_job_enqueues_ticker_list(client):
     assert jobs[0]["scope"] == "ticker_list"
 
 
+def test_create_refresh_job_normalizes_korean_ticker_list(client):
+    response = client.post(
+        "/api/refresh/jobs",
+        json={
+            "scope": "ticker_list",
+            "tickers": [
+                "5930.KS",
+                "35420.KQ",
+                "5930:KRX",
+                "005930.KS",
+                "10130.KS",
+                "001060.KS",
+            ],
+        },
+    )
+
+    assert response.status_code == 202
+    payload = response.get_json()
+    assert payload["tickers"] == ["005930.KS", "035420.KQ", "010130.KS", "001060.KS"]
+    job = client.get(f"/api/refresh/jobs/{payload['job_id']}").get_json()
+    assert [row["ticker"] for row in job["tickers"]] == [
+        "001060.KS",
+        "005930.KS",
+        "010130.KS",
+        "035420.KQ",
+    ]
+
+
+def test_create_refresh_job_preserves_unknown_suffix(client):
+    response = client.post(
+        "/api/refresh/jobs",
+        json={"scope": "ticker_list", "tickers": [" FOO.XX "]},
+    )
+
+    assert response.status_code == 202
+    payload = response.get_json()
+    assert payload["tickers"] == ["FOO.XX"]
+
+
 def test_create_refresh_job_requires_snapshot_for_scope(tmp_path: Path):
     client, _snapshot_service = _make_client(
         tmp_path,

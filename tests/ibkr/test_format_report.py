@@ -1616,6 +1616,14 @@ class TestIbkrDisplaySymbol:
         holds_block = report.split("HOLDS")[1] if "HOLDS" in report else report
         assert "5     " in holds_block or "5  " in holds_block  # IBKR symbol
 
+    def test_holds_section_korean_symbol_keeps_fixed_width(self):
+        """Korean positions display IBKR fixed-width symbol, not stripped base."""
+        item = self._held_hold("010130.KS", "010130")
+        report = format_report([item], _make_portfolio())
+        holds_block = report.split("HOLDS")[1] if "HOLDS" in report else report
+        assert "010130" in holds_block
+        assert "10130" not in holds_block.split("010130", 1)[0]
+
     def test_reviews_run_cmd_uses_yf_ticker(self):
         """REVIEWS run command must use yf ticker (with exchange suffix) for --ticker arg."""
         item = self._held_review("7203.T", "7203")

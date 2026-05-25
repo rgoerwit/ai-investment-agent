@@ -163,7 +163,7 @@ class TickerFormatter:
         _parts = ticker.split(".")
         if len(_parts) > 2 and canonical_suffix_for_token(_parts[-1]):
             _rejoined = "-".join(_parts[:-1]) + "." + _parts[-1]
-            logger.info(
+            logger.debug(
                 "multi_dot_ticker_normalised", original=ticker, normalised=_rejoined
             )
             ticker = _rejoined

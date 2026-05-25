@@ -21,6 +21,7 @@ from src.ibkr.exceptions import IBKRTickerResolutionError
 from src.ibkr.order_builder import parse_price
 from src.ibkr.ticker import (  # noqa: F401 — _CURRENCY_TO_SUFFIX re-exported for compat
     _CURRENCY_TO_SUFFIX,
+    Ticker,
     _pad_numeric_symbol_for_suffix,
 )
 from src.ticker_utils import TickerFormatter
@@ -75,6 +76,7 @@ def _save_cache(cache: dict) -> None:
 
 # Venues that should be excluded from yfinance.Search fallback results
 _OTC_VENUES: frozenset[str] = frozenset({"PNK", "OTC", "PINX", "GREY"})
+_PADDED_NUMERIC_SUFFIXES: frozenset[str] = frozenset({".HK", ".KS", ".KQ"})
 
 
 def ibkr_symbol_to_yf(symbol: str, exchange: str, currency: str = "") -> str:
@@ -257,8 +259,17 @@ def yf_to_ibkr_format(yf_ticker: str) -> tuple[str, str]:
     Returns:
         Tuple of (symbol, ibkr_exchange_code)
     """
+    normalized_yf, _ = TickerFormatter.normalize_ticker(
+        yf_ticker, target_format="yfinance"
+    )
+    suffix = ""
+    if "." in normalized_yf:
+        suffix = "." + normalized_yf.rsplit(".", 1)[1].upper()
+    if suffix in _PADDED_NUMERIC_SUFFIXES:
+        normalized_yf = Ticker.from_yf(normalized_yf).yf
+
     normalized, metadata = TickerFormatter.normalize_ticker(
-        yf_ticker, target_format="ibkr"
+        normalized_yf, target_format="ibkr"
     )
     symbol = metadata.get("symbol", yf_ticker.split(".")[0])
     ibkr_exchange = metadata.get("ibkr_exchange", "SMART")

@@ -19,6 +19,7 @@ import argparse
 import io
 import json
 import logging
+import math
 import multiprocessing as mp
 import random
 import sys
@@ -718,22 +719,13 @@ def _process_row(row, *, fx_rates=None, min_mcap=None, min_volume=None, debug=Fa
 
             # --- Populate standard fields ---
             row["Company_YF"] = info.get("longName") or info.get("shortName")
-            # yfinance's `trailingPE` is None for many ex-US listings (notably KRX
-            # — Samsung, SK Hynix, etc. — because Yahoo's EPS feed for Korea is
-            # incomplete). Fall back to marketCap / netIncomeToCommon when both
-            # are present and earnings are positive. Logged so audits can spot
-            # how often the fallback fires.
             pe = info.get("trailingPE")
-            if (
-                pe is None
-                and market_cap
-                and (net_income := info.get("netIncomeToCommon"))
-            ):
-                if net_income > 0:
-                    pe = market_cap / net_income
+            if pe is None:
+                pe = _compute_market_cap_income_pe(info)
+                if pe is not None and debug:
                     print(
-                        f"[INFO] {yf_symbol}: trailingPE missing — computed "
-                        f"P/E={pe:.2f} from marketCap/netIncome",
+                        f"[DEBUG] {yf_symbol}: trailingPE missing — computed "
+                        f"P/E={pe:.2f} from marketCap/netIncomeToCommon",
                         file=sys.stderr,
                     )
             row["P/E"] = pe
@@ -991,6 +983,22 @@ def _safe_float(val):
         return float(val)
     except (ValueError, TypeError):
         return None
+
+
+def _positive_finite_float(val):
+    num = _safe_float(val)
+    if num is None or not math.isfinite(num) or num <= 0:
+        return None
+    return num
+
+
+def _compute_market_cap_income_pe(info):
+    """Approximate trailing P/E from Yahoo market cap and net income fields."""
+    market_cap = _positive_finite_float(info.get("marketCap"))
+    net_income = _positive_finite_float(info.get("netIncomeToCommon"))
+    if market_cap is None or net_income is None:
+        return None
+    return market_cap / net_income
 
 
 def _has_required_profitability(row, *, min_roe, min_roa):

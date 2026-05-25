@@ -2,6 +2,7 @@
 
 import contextlib
 import json
+import math
 import signal
 import sys
 from pathlib import Path
@@ -474,8 +475,14 @@ class TestScrapeExchanges:
 
         df = pd.DataFrame(
             {
-                "Code": ["5930", "000660", "ABC123"],
-                "Name": ["Samsung", "SK Hynix", "Mixed Code"],
+                "Code": ["5930", "000660", "10130", "001060", "ABC123"],
+                "Name": [
+                    "Samsung",
+                    "SK Hynix",
+                    "Korea Zinc",
+                    "JW Pharmaceutical",
+                    "Mixed Code",
+                ],
             }
         )
         mock_handler = MagicMock(return_value=df)
@@ -488,6 +495,8 @@ class TestScrapeExchanges:
         assert result["YF_Ticker"].tolist() == [
             "005930.KS",
             "000660.KS",
+            "010130.KS",
+            "001060.KS",
             "ABC123.KS",
         ]
 
@@ -1214,6 +1223,85 @@ class TestQuoteTypeGuard:
                 result = find_gems._process_row(row)
 
         assert result is None
+
+
+# ============================================================
+# TestTrailingPeFallback — marketCap / netIncomeToCommon proxy
+# ============================================================
+class TestTrailingPeFallback:
+    """Fallback P/E calculation for markets where Yahoo omits trailingPE."""
+
+    @staticmethod
+    def _make_info(**overrides):
+        base = {
+            "regularMarketPrice": 100,
+            "currentPrice": 100,
+            "trailingPE": None,
+            "netIncomeToCommon": 50_000_000,
+            "marketCap": 1_000_000_000,
+            "returnOnEquity": 0.15,
+            "returnOnAssets": 0.08,
+            "debtToEquity": 50,
+            "operatingCashflow": 1_000_000,
+            "currency": "USD",
+            "quoteType": "EQUITY",
+        }
+        base.update(overrides)
+        return base
+
+    def test_compute_market_cap_income_pe_from_positive_inputs(self):
+        assert find_gems._compute_market_cap_income_pe(self._make_info()) == 20.0
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"marketCap": None},
+            {"marketCap": 0},
+            {"marketCap": -1},
+            {"marketCap": "not-a-number"},
+            {"marketCap": math.inf},
+            {"marketCap": math.nan},
+            {"netIncomeToCommon": None},
+            {"netIncomeToCommon": 0},
+            {"netIncomeToCommon": -1},
+            {"netIncomeToCommon": "not-a-number"},
+            {"netIncomeToCommon": math.inf},
+            {"netIncomeToCommon": math.nan},
+        ],
+    )
+    def test_compute_market_cap_income_pe_rejects_invalid_inputs(self, overrides):
+        assert (
+            find_gems._compute_market_cap_income_pe(self._make_info(**overrides))
+            is None
+        )
+
+    def test_process_row_uses_fallback_without_default_stderr_noise(self, capsys):
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info()
+        mock_ticker.income_stmt = pd.DataFrame()
+        row = {"YF_Ticker": "7203.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(row)
+
+        assert result["P/E"] == 20.0
+        assert "trailingPE missing" not in capsys.readouterr().err
+
+    def test_process_row_logs_fallback_only_in_debug(self, capsys):
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info()
+        mock_ticker.income_stmt = pd.DataFrame()
+        row = {"YF_Ticker": "7203.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(row, debug=True)
+
+        assert result["P/E"] == 20.0
+        stderr = capsys.readouterr().err
+        assert "[DEBUG] 7203.T: trailingPE missing" in stderr
+        assert "marketCap/netIncomeToCommon" in stderr
 
 
 # ============================================================

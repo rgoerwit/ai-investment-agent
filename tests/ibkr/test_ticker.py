@@ -66,18 +66,28 @@ class TestTickerFromIbkr:
 
     def test_krx_short_numeric_padded_to_6(self):
         t = Ticker.from_ibkr("5930", "KRX", "KRW")
-        assert t.symbol == "5930"
+        assert t.symbol == "005930"
         assert t.suffix == ".KS"
         assert t.yf == "005930.KS"
 
-    def test_krx_pre_padded_input_stripped(self):
+    def test_krx_pre_padded_input_preserved(self):
         t = Ticker.from_ibkr("005930", "KRX", "KRW")
-        assert t.symbol == "5930"
+        assert t.symbol == "005930"
         assert t.yf == "005930.KS"
+
+    def test_krx_five_digit_numeric_padded_to_6(self):
+        t = Ticker.from_ibkr("10130", "KRX", "KRW")
+        assert t.symbol == "010130"
+        assert t.yf == "010130.KS"
+
+    def test_krx_padded_five_digit_input_preserved(self):
+        t = Ticker.from_ibkr("001060", "KRX", "KRW")
+        assert t.symbol == "001060"
+        assert t.yf == "001060.KS"
 
     def test_kosdaq_short_numeric_padded_to_6(self):
         t = Ticker.from_ibkr("35420", "KOSDAQ", "KRW")
-        assert t.symbol == "35420"
+        assert t.symbol == "035420"
         assert t.suffix == ".KQ"
         assert t.yf == "035420.KQ"
 
@@ -228,18 +238,23 @@ class TestTickerFromYf:
 
     def test_krx_round_trip(self):
         t = Ticker.from_yf("005930.KS")
-        assert t.symbol == "5930"
+        assert t.symbol == "005930"
         assert t.exchange == "KRX"
         assert t.yf == "005930.KS"
 
     def test_krx_short_yf_normalizes(self):
         t = Ticker.from_yf("5930.KS")
-        assert t.symbol == "5930"
+        assert t.symbol == "005930"
         assert t.yf == "005930.KS"
+
+    def test_krx_five_digit_yf_normalizes(self):
+        t = Ticker.from_yf("10130.KS")
+        assert t.symbol == "010130"
+        assert t.yf == "010130.KS"
 
     def test_kosdaq_round_trip(self):
         t = Ticker.from_yf("035420.KQ")
-        assert t.symbol == "35420"
+        assert t.symbol == "035420"
         assert t.exchange == "KOSDAQ"
         assert t.yf == "035420.KQ"
 
