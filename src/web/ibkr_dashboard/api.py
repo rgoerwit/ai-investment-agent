@@ -7,7 +7,6 @@ from typing import Any
 from flask import Blueprint, current_app, jsonify, request
 
 from src.error_safety import format_error_message, summarize_exception
-from src.ibkr.ticker import Ticker
 from src.ticker_utils import to_yfinance
 from src.web.ibkr_dashboard.drilldown_service import (
     DrilldownLoadError,
@@ -23,8 +22,6 @@ from src.web.ibkr_dashboard.serializers import (
 )
 
 api_bp = Blueprint("ibkr_dashboard_api", __name__, url_prefix="/api")
-
-_PADDED_NUMERIC_REFRESH_SUFFIXES = frozenset({".HK", ".KS", ".KQ"})
 
 
 def _snapshot_service():
@@ -382,11 +379,4 @@ def _normalize_refresh_ticker(raw_ticker: Any) -> str:
     ticker = str(raw_ticker).strip()
     if not ticker:
         return ""
-
-    yf_ticker = to_yfinance(ticker)
-    suffix = ""
-    if "." in yf_ticker:
-        suffix = "." + yf_ticker.rsplit(".", 1)[1].upper()
-    if suffix in _PADDED_NUMERIC_REFRESH_SUFFIXES:
-        return Ticker.from_yf(yf_ticker).yf
-    return yf_ticker
+    return to_yfinance(ticker)

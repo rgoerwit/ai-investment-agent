@@ -18,33 +18,19 @@ from src.exchange_metadata import (
     IBKR_TO_YFINANCE,
     SUFFIX_TO_CURRENCY_CODE,
     YFINANCE_TO_IBKR,
+    format_ibkr_symbol,
+    format_yahoo_symbol,
 )
-
-_NUMERIC_SYMBOL_WIDTH_BY_SUFFIX: dict[str, int] = {
-    ".HK": 4,
-    ".KS": 6,
-    ".KQ": 6,
-}
 
 
 def _pad_numeric_symbol_for_suffix(symbol: str, suffix: str) -> str:
     """Return the exchange-canonical numeric symbol, leaving mixed codes intact."""
-    cleaned = symbol.strip()
-    width = _NUMERIC_SYMBOL_WIDTH_BY_SUFFIX.get(suffix)
-    # Some exchange instruments are not pure numeric; never pad those.
-    if width and cleaned.isdigit():
-        return cleaned.zfill(width)
-    return cleaned
+    return format_yahoo_symbol(symbol, suffix)
 
 
 def _strip_storage_padding_for_suffix(symbol: str, suffix: str) -> str:
     """Return the display/lookup symbol used inside the IBKR layer."""
-    cleaned = symbol.strip()
-    if suffix == ".HK" and cleaned.isdigit():
-        return cleaned.lstrip("0") or "0"
-    if suffix in {".KS", ".KQ"}:
-        return _pad_numeric_symbol_for_suffix(cleaned, suffix)
-    return cleaned
+    return format_ibkr_symbol(symbol, suffix)
 
 
 def _build_currency_to_suffix() -> dict[str, str]:
@@ -168,9 +154,8 @@ class Ticker:
 
         Args:
             symbol:   IBKR bare symbol (e.g. "5", "7203", "ASML").
-                      Pre-padded numeric symbols for HK/Korea (e.g. "0005",
-                      "005930") have leading zeros stripped; .yf re-applies
-                      exchange-canonical zero-padding.
+                      Exchange-canonical numeric symbols are normalized for
+                      storage/display (HK strips; Korea remains fixed-width).
             exchange: IBKR exchange code (e.g. "SEHK", "TSE", "LSE", "SMART").
                       Normalised to upper-case.
             currency: ISO currency code (e.g. "HKD", "JPY", "GBP").
@@ -181,8 +166,7 @@ class Ticker:
         exch = exchange.strip().upper() if exchange else ""
         ccy = currency.strip().upper() if currency else ""
 
-        # IBKR can occasionally send pre-padded numeric symbols; store the
-        # bare form and let .yf re-apply exchange-canonical padding.
+        # Normalize the raw IBKR symbol to the exchange's display/lookup form.
         sfx = _suffix_for_exchange_currency(exch, ccy)
         sym = _strip_storage_padding_for_suffix(sym, sfx)
 

@@ -209,6 +209,7 @@ def test_create_refresh_job_normalizes_korean_ticker_list(client):
             "tickers": [
                 "5930.KS",
                 "35420.KQ",
+                "5.HK",
                 "5930:KRX",
                 "005930.KS",
                 "10130.KS",
@@ -219,9 +220,16 @@ def test_create_refresh_job_normalizes_korean_ticker_list(client):
 
     assert response.status_code == 202
     payload = response.get_json()
-    assert payload["tickers"] == ["005930.KS", "035420.KQ", "010130.KS", "001060.KS"]
+    assert payload["tickers"] == [
+        "005930.KS",
+        "035420.KQ",
+        "0005.HK",
+        "010130.KS",
+        "001060.KS",
+    ]
     job = client.get(f"/api/refresh/jobs/{payload['job_id']}").get_json()
     assert [row["ticker"] for row in job["tickers"]] == [
+        "0005.HK",
         "001060.KS",
         "005930.KS",
         "010130.KS",

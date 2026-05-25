@@ -20,6 +20,8 @@ from src.exchange_metadata import (
     IBKR_TO_YFINANCE,
     canonical_suffix_for_reuters_exchange,
     canonical_suffix_for_token,
+    format_ibkr_symbol,
+    format_yahoo_symbol,
 )
 
 logger = structlog.get_logger(__name__)
@@ -127,6 +129,12 @@ class TickerFormatter:
         "ibkr": re.compile(r"^([A-Z0-9]+):([A-Z]+)$"),
     }
 
+    @staticmethod
+    def _format_symbol_for_target(symbol: str, suffix: str, target_format: str) -> str:
+        if target_format == "ibkr":
+            return format_ibkr_symbol(symbol, suffix)
+        return format_yahoo_symbol(symbol, suffix)
+
     @classmethod
     def normalize_ticker(
         cls, ticker: str, target_format: str = "yfinance"
@@ -184,16 +192,19 @@ class TickerFormatter:
 
             if canonical_suffix:
                 exchange_info = EXCHANGES_BY_SUFFIX[canonical_suffix]
+                formatted_symbol = cls._format_symbol_for_target(
+                    symbol, exchange_info.yf_suffix, target_format
+                )
                 if target_format == "yfinance":
-                    normalized = f"{symbol}{exchange_info.yf_suffix}"
+                    normalized = f"{formatted_symbol}{exchange_info.yf_suffix}"
                 elif target_format == "ibkr":
-                    normalized = f"{symbol}:{exchange_info.ibkr_code}"
+                    normalized = f"{formatted_symbol}:{exchange_info.ibkr_code}"
                 else:
                     normalized = ticker
 
                 metadata = {
                     "original": original_ticker,
-                    "symbol": symbol,
+                    "symbol": formatted_symbol,
                     "exchange_suffix": exchange_info.yf_suffix,
                     "exchange_name": exchange_info.exchange_name,
                     "country": exchange_info.country,
@@ -210,17 +221,20 @@ class TickerFormatter:
             canonical_suffix = canonical_suffix_for_token(suffix)
             if canonical_suffix:
                 exchange_info = EXCHANGES_BY_SUFFIX[canonical_suffix]
+                formatted_symbol = cls._format_symbol_for_target(
+                    symbol, exchange_info.yf_suffix, target_format
+                )
 
                 if target_format == "yfinance":
-                    normalized = f"{symbol}{exchange_info.yf_suffix}"
+                    normalized = f"{formatted_symbol}{exchange_info.yf_suffix}"
                 elif target_format == "ibkr":
-                    normalized = f"{symbol}:{exchange_info.ibkr_code}"
+                    normalized = f"{formatted_symbol}:{exchange_info.ibkr_code}"
                 else:
                     normalized = ticker
 
                 metadata = {
                     "original": original_ticker,
-                    "symbol": symbol,
+                    "symbol": formatted_symbol,
                     "exchange_suffix": exchange_info.yf_suffix,
                     "exchange_name": exchange_info.exchange_name,
                     "country": exchange_info.country,
@@ -299,14 +313,17 @@ class TickerFormatter:
         suffix = IBKR_TO_YFINANCE.get(exchange)
         if suffix:
             info = EXCHANGES_BY_SUFFIX[suffix]
+            formatted_symbol = cls._format_symbol_for_target(
+                symbol, info.yf_suffix, target_format
+            )
             if target_format == "yfinance":
-                normalized = f"{symbol}{info.yf_suffix}"
+                normalized = f"{formatted_symbol}{info.yf_suffix}"
             else:
-                normalized = f"{symbol}:{exchange}"
+                normalized = f"{formatted_symbol}:{exchange}"
 
             metadata = {
                 "original": original_ticker,
-                "symbol": symbol,
+                "symbol": formatted_symbol,
                 "exchange_suffix": info.yf_suffix,
                 "exchange_name": info.exchange_name,
                 "country": info.country,

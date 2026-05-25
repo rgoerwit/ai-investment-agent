@@ -6,6 +6,8 @@ callers do not quietly drift into exchange-unsafe assumptions.
 
 from __future__ import annotations
 
+from src.exchange_metadata import format_yahoo_symbol
+
 CHINA_SUFFIXES = frozenset({".HK", ".SS", ".SZ"})
 KOREA_SUFFIXES = frozenset({".KS", ".KQ"})
 TAIWAN_SUFFIXES = frozenset({".TW", ".TWO"})
@@ -48,11 +50,7 @@ def allows_search_resolution(ticker: str) -> bool:
 
 def normalize_exchange_specific_base(base: str, suffix: str) -> str:
     """Normalize a base symbol only where exchange rules are well-defined."""
-    normalized_base = base.strip().upper()
-    normalized_suffix = suffix.strip().upper()
-    if normalized_suffix == ".HK" and normalized_base.isdigit():
-        return normalized_base.zfill(4)
-    return normalized_base
+    return format_yahoo_symbol(base, suffix)
 
 
 def same_exchange(ticker_a: str, ticker_b: str) -> bool:

@@ -227,7 +227,7 @@ class TestYfToIbkrFormat:
     def test_hong_kong(self):
         symbol, exchange = yf_to_ibkr_format("0005.HK")
         assert exchange == "SEHK"
-        assert symbol == "0005"
+        assert symbol == "5"
 
     def test_tokyo(self):
         symbol, exchange = yf_to_ibkr_format("7203.T")
