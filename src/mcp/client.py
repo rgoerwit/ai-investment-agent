@@ -7,11 +7,11 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
-
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult, ListToolsResult
+
 from src.mcp.auth import MCPResolvedServer, resolve_auth
 from src.mcp.budget import BudgetTracker
 from src.mcp.catalog import ToolCatalog, ToolDescriptor

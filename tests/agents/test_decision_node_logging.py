@@ -27,6 +27,10 @@ def test_present_pm_inputs_partitions_by_validity() -> None:
             "value_trap_report": {"complete": True, "ok": False, "content": "stub"},
         },
         "risk_debate_state": {"current_risky_response": "r"},
+        "entity_governance_card": {
+            "ticker": "009970.KS",
+            "canonical_name": "Youngone Holdings Co., Ltd.",
+        },
     }
     present, missing = _present_pm_inputs(state)
     assert "market_report" in present
@@ -35,6 +39,7 @@ def test_present_pm_inputs_partitions_by_validity() -> None:
     # value_trap_report is marked not-ok -> should be missing despite content
     assert "value_trap_report" in missing
     assert "risk_debate_state" in present
+    assert "entity_governance_card" in present
     # Every direct PM input field is accounted for somewhere
     assert set(present + missing) >= set(DIRECT_PM_INPUT_FIELDS) | {"risk_debate_state"}
 

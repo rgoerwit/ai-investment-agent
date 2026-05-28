@@ -9,9 +9,12 @@ from typing import Any
 
 import structlog
 
+from src.agents.output_limits import cap_state_value
 from src.agents.pm_inputs import (
     DIRECT_PM_INPUTS,
+    GOVERNANCE_CARD_FIELD,
     RISK_DEBATE_FIELD,
+    governance_card_present,
     risk_debate_content,
 )
 from src.config import config
@@ -19,6 +22,8 @@ from src.runtime_config import get_runtime_config
 from src.sector_normalization import normalize_sector_label
 
 logger = structlog.get_logger(__name__)
+
+_SOURCE_ARTIFACT_MAX_CHARS = 50_000
 
 
 # Maps each saved-JSON artifact field to its originating graph agent and the
@@ -41,6 +46,7 @@ _ARTIFACT_AGENT_MAP: list[tuple[str, str, tuple[str, ...]]] = [
     ("legal_report", "legal_counsel", ("Legal Counsel",)),
     ("fundamentals_report", "senior_fundamentals", ("Fundamentals Analyst",)),
     ("value_trap_report", "value_trap_detector", ("Value Trap Detector",)),
+    (GOVERNANCE_CARD_FIELD, "financial_health_validator", ()),
     ("auditor_report", "global_forensic_auditor", ("Global Forensic Auditor",)),
     ("apac_regional_report", "apac_regional_specialist", ("APAC Regional Specialist",)),
     (
@@ -74,6 +80,15 @@ def _aggregate_token_usage(token_agents: dict, names: tuple[str, ...]) -> dict |
     }
 
 
+def _persisted_source_artifact(value: Any, field: str) -> str:
+    text = value if isinstance(value, str) else ""
+    return cap_state_value(
+        text,
+        f"persistence:{field}",
+        max_chars=_SOURCE_ARTIFACT_MAX_CHARS,
+    )
+
+
 def _build_agent_attribution(result: dict, token_agents: dict) -> dict:
     """Build per-artifact attribution: agent, validity, char count, token usage.
 
@@ -89,6 +104,9 @@ def _build_agent_attribution(result: dict, token_agents: dict) -> dict:
         if field == RISK_DEBATE_FIELD:
             content = risk_debate_content(result)
             valid = bool(content)
+        elif field == GOVERNANCE_CARD_FIELD:
+            valid = governance_card_present(result)
+            content = "<entity_governance_card>" if valid else ""
         else:
             content = get_valid_artifact_content(result, field) or ""
             valid = bool(content)
@@ -386,6 +404,8 @@ def save_results_to_file(
     save_data = {
         "metadata": {
             "ticker": ticker,
+            "company_name": result.get("company_name"),
+            "company_name_resolved": bool(result.get("company_name_resolved", False)),
             "timestamp": timestamp,
             "analysis_date": datetime.now().isoformat(),
             "environment": config.environment,
@@ -419,6 +439,25 @@ def save_results_to_file(
             ),
         },
         "memory_statistics": memory_stats,
+        "entity_governance_card": result.get("entity_governance_card") or None,
+        "source_artifacts": {
+            "raw_fundamentals_data": _persisted_source_artifact(
+                result.get("raw_fundamentals_data"),
+                "raw_fundamentals_data",
+            ),
+            "foreign_language_report": _persisted_source_artifact(
+                result.get("foreign_language_report"),
+                "foreign_language_report",
+            ),
+            "legal_report": _persisted_source_artifact(
+                result.get("legal_report"),
+                "legal_report",
+            ),
+            "value_trap_report": _persisted_source_artifact(
+                result.get("value_trap_report"),
+                "value_trap_report",
+            ),
+        },
         "reports": {
             "market_report": result.get("market_report", ""),
             "sentiment_report": result.get("sentiment_report", ""),

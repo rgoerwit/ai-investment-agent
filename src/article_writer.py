@@ -718,6 +718,7 @@ class ArticleWriter:
         trade_date: str,
         output_path: Path | None = None,
         valuation_context: str | None = None,
+        governance_card: dict[str, Any] | None = None,
     ) -> str:
         """
         Generate an article from the analysis report.
@@ -780,6 +781,38 @@ class ArticleWriter:
                 f"{fact_check_context}"
             )
 
+        # Prepend entity governance card so the writer never collapses identity
+        # back to a short-form name and discloses non-standard structures.
+        if isinstance(governance_card, dict) and governance_card.get("ticker"):
+            from src.validators.entity_governance_card import (
+                card_from_dict,
+                card_to_prompt_block,
+                requires_structure_disclosure,
+            )
+
+            card_obj = card_from_dict(governance_card)
+            if card_obj:
+                card_block = card_to_prompt_block(card_obj)
+                disclosure_directive = ""
+                if requires_structure_disclosure(card_obj):
+                    related = (
+                        "; ".join(
+                            f"{e.get('ticker','?')} ({e.get('relationship','?')})"
+                            for e in card_obj.related_listed
+                        )
+                        or "operating subsidiaries"
+                    )
+                    disclosure_directive = (
+                        "\n\nMANDATORY OPENING DISCLOSURE: The first body paragraph "
+                        f"after the headline must disclose that {ticker} ({card_obj.canonical_name}) "
+                        f"is a {card_obj.entity_role.replace('_', ' ').lower()}, and identify the "
+                        f"related entity(s): {related}. Do not refer to this ticker by an "
+                        "operating-subsidiary name. Do not skip this disclosure."
+                    )
+                user_message = (
+                    f"{card_block}{disclosure_directive}\n\n---\n\n{user_message}"
+                )
+
         # Generate article
         messages = [
             SystemMessage(content=system_message),
@@ -819,6 +852,7 @@ class ArticleWriter:
         editor_feedback: dict,
         ticker: str,
         company_name: str,
+        governance_context: str | None = None,
     ) -> str:
         """
         Revise an article based on Editor-in-Chief feedback.
@@ -883,6 +917,12 @@ class ArticleWriter:
             style_issues=json_module.dumps(style_issues),
             chart_list=chart_list,
         )
+        if governance_context:
+            revision_prompt = (
+                f"{governance_context}\n\n---\n\n"
+                "PRESERVE AND APPLY THE ENTITY GOVERNANCE CARD ABOVE WHEN REVISING.\n\n"
+                f"{revision_prompt}"
+            )
 
         # Get system message
         system_message = self.prompt_config.get(
@@ -1178,6 +1218,7 @@ class ArticleEditor:
         pm_block: str | None = None,
         valuation_params: str | None = None,
         voice_samples: str | None = None,
+        governance_context: str | None = None,
     ) -> str:
         """
         Assemble fact-check context for the editor.
@@ -1201,6 +1242,9 @@ class ArticleEditor:
 
         if valuation_params:
             context_parts.append(f"=== VALUATION PARAMETERS ===\n{valuation_params}")
+
+        if governance_context:
+            context_parts.append(governance_context)
 
         if voice_samples:
             # Truncate voice samples to control token usage
@@ -1565,6 +1609,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
         pm_block: str | None = None,
         valuation_params: str | None = None,
         voice_samples: str | None = None,
+        governance_card: dict[str, Any] | None = None,
     ) -> tuple[str, dict]:
         """
         Run the full editorial loop: review -> revise -> review.
@@ -1586,12 +1631,21 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
             logger.info("Editor not available, returning original draft")
             return article_draft, {"verdict": "APPROVED", "skipped": True}
 
+        governance_context = ""
+        if isinstance(governance_card, dict):
+            from src.validators.entity_governance_card import (
+                card_to_prompt_block_from_dict,
+            )
+
+            governance_context = card_to_prompt_block_from_dict(governance_card)
+
         # Build fact-check context
         fact_check_context = self.build_fact_check_context(
             data_block=data_block,
             pm_block=pm_block,
             valuation_params=valuation_params,
             voice_samples=voice_samples,
+            governance_context=governance_context,
         )
 
         current_draft = article_draft
@@ -1632,6 +1686,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
                     editor_feedback=feedback,
                     ticker=ticker,
                     company_name=company_name,
+                    governance_context=governance_context,
                 )
 
             # Max revisions reached, do final review

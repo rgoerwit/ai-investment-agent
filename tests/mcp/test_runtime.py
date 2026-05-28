@@ -4,8 +4,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
-
 from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
+
 from src.mcp.catalog import ToolDescriptor
 from src.mcp.client import MCPRuntime
 from src.mcp.config import MCPServerSpec

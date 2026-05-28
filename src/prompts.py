@@ -825,7 +825,8 @@ You will receive THREE data sources:
    - If Foreign Language report includes a SEGMENT BREAKDOWN table, use it to populate SEGMENT_COUNT, SEGMENT_DOMINANT, and SEGMENT_FLAG fields in DATA_BLOCK
    - Set SEGMENT_FLAG: DETERIORATING (+ flag `[SEGMENT DETERIORATION]` in CROSS-CHECK FLAGS) if any segment >20% of revenue shows operating profit declining >20% YoY; STABLE if all stable/growing; N/A if no data
 2. **Ownership Structure**: If the data mentions a parent company, major shareholder (>20%), or partially-owned subsidiary, note this.
-   - If Foreign Language report includes an OWNERSHIP STRUCTURE section, use it to populate PARENT_COMPANY field in DATA_BLOCK
+   - Use the Foreign Language report's Parent Company field to populate PARENT_COMPANY only when it identifies a legal/corporate parent of the listed issuer. Do not put founder families, private investment vehicles, treasury-share blocks, or major shareholders in PARENT_COMPANY; preserve those in CROSS-CHECK FLAGS or narrative as controlling-shareholder evidence.
+   - Always emit LISTING_ROLE, RELATED_LISTED_TICKERS, METRIC_SCOPE_PAYOUT, and METRIC_SCOPE_OCF in DATA_BLOCK. Use UNKNOWN when the role, related ticker, or metric scope cannot be established from the inputs; do not omit the field.
    - If parent company holds >40% → note "Controlled subsidiary — minority shareholders have limited influence" in CROSS-CHECK FLAGS
    - If a key subsidiary is not 100% owned by the listed entity, state the ownership percentage — this affects how much of that subsidiary's earnings accrue to shareholders
 3. **Geographic Concentration**: If Foreign Language report includes geographic revenue breakdown:
@@ -855,6 +856,7 @@ You will receive THREE data sources:
 **Leverage (2 pts)**:
 - D/E <0.8: 1 pt (Sector exceptions apply - see below)
   Net-cash exception: if D/E > threshold but NetDebt/EBITDA < 0, award full D/E point — D/E is inflated by operational liabilities (customer advances, deferred revenue, billings in excess), not financial debt.
+  Holding-company correction: for LISTING_ROLE PURE_HOLDCO/INTERMEDIATE_HOLDCO, if Junior's D/E exceeds 2.0 and Foreign/filing data shows financial-debt-only D/E below 1.0, emit the filing/financial-debt value in DE_RATIO and flag the discrepancy. Do not emit Junior's raw D/E when it conflates operating liabilities with financial debt.
 - NetDebt/EBITDA <2: 1 pt (If N/A, remove from denominator; always annualize — H1 filing ×2, single quarter ×4; do NOT use partial-period EBITDA raw)
 
 **Liquidity (2 pts)**:
@@ -899,6 +901,7 @@ Report all growth rates as percentage values (e.g., 18.5%, -5.2%), NOT as decima
 **Expansion (2 pts)**:
 - Global/BRICS expansion documented: 1 pt
 - R&D/capex initiatives documented OR REVENUE_BACKLOG_COVERAGE ≥1.0× trailing revenue: 1 pt
+- Shareholder-return or Value-Up plans are capital allocation/catalyst evidence, not R&D/capex growth credit unless separate operating expansion, R&D, backlog, or capex evidence exists.
 
 ---
 
@@ -1196,6 +1199,10 @@ SEGMENT_FLAG: [DETERIORATING / STABLE / N/A]
 REVENUE_BACKLOG: [Value+currency] or N/A
 REVENUE_BACKLOG_COVERAGE: [X.X yrs] or N/A
 PARENT_COMPANY: [Name] ([X]%) or NONE or N/A
+LISTING_ROLE: [STANDALONE / PURE_HOLDCO / INTERMEDIATE_HOLDCO / LISTED_SUBSIDIARY / UNKNOWN]
+RELATED_LISTED_TICKERS: [<ticker>:<relationship>:<pct>; ...] or NONE or UNKNOWN
+METRIC_SCOPE_PAYOUT: [CONSOLIDATED / SEPARATE / UNKNOWN]
+METRIC_SCOPE_OCF: [CONSOLIDATED / SEPARATE / UNKNOWN]
 VIE_STRUCTURE: [YES / NO / N/A]
 CMIC_STATUS: [FLAGGED / CLEAR / N/A]
 JURISDICTION: [Country.Exchange] (e.g., Japan.TSE, HongKong.HKEX, Taiwan.TWSE, Taiwan.TPEx, Korea.KRX, China.SSE)
@@ -1545,11 +1552,15 @@ Max 5 segments. If not found, write: "Segment data not found."
 **OWNERSHIP STRUCTURE** (if found)
 - Controlling Shareholder: [Name] ([X]%)
 - Parent Company: [Name] or NONE
+  Parent Company means a legal/corporate parent that owns or controls the listed issuer as a subsidiary. Do not put founder families, private investment vehicles, treasury-share blocks, or major shareholders here; put those under Controlling Shareholder. If the listed ticker is the top listed holdco, write Parent Company: NONE.
 - Relationship: [subsidiary / equity method / independent]
+- ENTITY_ROLE_OBSERVED: [STANDALONE / PURE_HOLDCO / INTERMEDIATE_HOLDCO / LISTED_SUBSIDIARY / UNKNOWN]
+  (REQUIRED — emit UNKNOWN when native sources do not clearly establish role; silence is not allowed.)
+- Related Listed Tickers: [<ticker>:<relationship>:<pct>; ...] or NONE or UNKNOWN
 - Recent Ownership Changes: [details with date/size] or NONE
 - Insider/Director Dealings: [details with date/size] or NONE
 Source: [URL]
-If not found, write: "Ownership data not found."
+If not found, write: "Ownership data not found." (Still emit ENTITY_ROLE_OBSERVED as UNKNOWN.)
 
 **FILING CASH FLOW** (if found)
 - Operating Cash Flow (Filing): [Value with currency]
@@ -2573,6 +2584,7 @@ You MUST look for the `DATA_BLOCK` section in the Fundamentals Analyst report.
 The user needs the complete data table filled out regardless of your final decision.
 
 **If DATA_BLOCK is missing entirely**: ONLY THEN mark items as [DATA MISSING] and default to HOLD.
+Entity Governance Card metric scope is Senior-derived; if APAC or Consultant cites local filing scope conflict, reconcile it as a real dispute rather than automatically rejecting it.
 
 ### STEP 1: VALIDATE THESIS (HIERARCHICAL DECISION LOGIC)
 

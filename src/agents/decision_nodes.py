@@ -11,6 +11,7 @@ from langgraph.types import RunnableConfig
 from src.agents.pm_inputs import (
     DIRECT_PM_INPUT_FIELDS,
     RISK_DEBATE_FIELD,
+    pm_input_present,
     risk_debate_present,
 )
 from src.agents.pm_verdict_metadata import pm_verdict_metadata_from_text
@@ -26,6 +27,7 @@ from src.runtime_diagnostics import (
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .governance_prompt import governance_block, governance_card
 from .output_limits import cap_state_value
 from .output_validation import (
     log_output_diagnostics,
@@ -47,7 +49,8 @@ def _present_pm_inputs(state: AgentState) -> tuple[list[str], list[str]]:
     present: list[str] = []
     missing: list[str] = []
     for field in DIRECT_PM_INPUT_FIELDS:
-        bucket = present if get_valid_artifact_content(state, field) else missing
+        valid = pm_input_present(state, field)
+        bucket = present if valid else missing
         bucket.append(field)
     if risk_debate_present(state):
         present.append(RISK_DEBATE_FIELD)
@@ -383,6 +386,7 @@ def create_trader_node(llm, memory: Any | None) -> Callable:
         valuation_section = (
             f"\n\nVALUATION PARAMETERS:\n{valuation}" if valuation else ""
         )
+        governance_section = governance_block(state, with_label=True)
 
         market_report = state.get("market_report", "N/A")
         sentiment_report = state.get("sentiment_report", "N/A")
@@ -402,7 +406,7 @@ FUNDAMENTALS ANALYST REPORT:
 {support.summarize_for_pm(fundamentals_report, "fundamentals", 6000) if fundamentals_report != "N/A" else "N/A"}
 
 RESEARCH MANAGER PLAN:
-{support.summarize_for_pm(investment_plan, "research", 3500) if investment_plan != "N/A" else "N/A"}{apac_section}{consultant_section}{valuation_section}"""
+{support.summarize_for_pm(investment_plan, "research", 3500) if investment_plan != "N/A" else "N/A"}{apac_section}{consultant_section}{valuation_section}{governance_section}"""
         prompt = f"{agent_prompt.system_message}\n\n{all_input}\n\nCreate Trading Plan."
 
         try:
@@ -475,10 +479,11 @@ def create_risk_debater_node(llm, agent_key: str) -> Callable:
             "\n\nEXTERNAL CONSULTANT REVIEW (Cross-Validation):\n"
             f"{consultant if consultant else 'N/A (consultant disabled or unavailable)'}"
         )
+        governance_section = governance_block(state, with_label=True)
 
         prompt = (
             f"{agent_prompt.system_message}\n\nTRADER PLAN: "
-            f"{state.get('trader_investment_plan')}{consultant_section}\n\n"
+            f"{state.get('trader_investment_plan')}{consultant_section}{governance_section}\n\n"
             "Provide risk assessment."
         )
         try:
@@ -759,7 +764,30 @@ RISK TEAM DEBATE:
         pm_system_msg = agent_prompt.system_message
         if strict_mode:
             pm_system_msg += _STRICT_PM_ADDENDUM
-        prompt = f"{pm_system_msg}\n\n{all_context}\n\nMake Portfolio Manager Verdict."
+
+        vehicle_directive = ""
+
+        card_obj = governance_card(state)
+        if card_obj:
+            # PM-specific rule: when entity is non-standard AND a related
+            # listed ticker exists, the verdict must address vehicle choice.
+            if (
+                card_obj.entity_role
+                in {"PURE_HOLDCO", "INTERMEDIATE_HOLDCO", "LISTED_SUBSIDIARY"}
+                and card_obj.related_listed
+            ):
+                vehicle_directive = (
+                    "\n\nVEHICLE-CHOICE DIRECTIVE: This ticker is a non-standard "
+                    "vehicle and a related listed ticker is known. Your verdict "
+                    "must explicitly state whether this vehicle (versus its related "
+                    "listed counterpart) is the correct one for the investment "
+                    "thesis, and quote the basis for that choice."
+                )
+
+        prompt = (
+            f"{pm_system_msg}{governance_block(state)}{vehicle_directive}\n\n"
+            f"{all_context}\n\nMake Portfolio Manager Verdict."
+        )
 
         try:
             response = await agent_runtime.invoke_with_rate_limit_handling(
@@ -901,6 +929,10 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
         state: AgentState, config: RunnableConfig
     ) -> dict[str, Any]:
         from src.config import config as settings_config
+        from src.validators.entity_governance_card import (
+            build_card,
+            extract_merged_subset_from_raw,
+        )
         from src.validators.red_flag_detector import RedFlagDetector
 
         ticker = state.get("company_of_interest", "UNKNOWN")
@@ -966,8 +998,35 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
                     adjusted_health_score=metrics.get("adjusted_health_score"),
                 )
 
+            card_payload = None
+            entity_role = metrics.get("listing_role")
+            try:
+                merged_subset = extract_merged_subset_from_raw(
+                    state.get("raw_fundamentals_data", "")
+                )
+                card = build_card(
+                    ticker=ticker,
+                    company_name=company_name,
+                    merged_data=merged_subset,
+                    senior_metrics=metrics,
+                    fla_report=state.get("foreign_language_report", "") or "",
+                    value_trap_report=state.get("value_trap_report", "") or "",
+                )
+                card_payload = card.to_dict()
+                entity_role = card.entity_role
+            except Exception as card_exc:
+                logger.warning(
+                    "governance_card_build_failed",
+                    ticker=ticker,
+                    **summarize_exception(card_exc, operation="entity_governance_card"),
+                )
+
             red_flags, pre_screening_result = RedFlagDetector.detect_red_flags(
-                metrics, ticker, sector, strict_mode=strict_mode
+                metrics,
+                ticker,
+                sector,
+                strict_mode=strict_mode,
+                entity_role=str(entity_role) if entity_role else None,
             )
 
             legal_report = state.get("legal_report", "")
@@ -1065,16 +1124,18 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
             elif not quiet_mode:
                 logger.info("pre_screening_passed", ticker=ticker)
 
-            return {
+            result = {
                 "red_flags": red_flags,
                 "pre_screening_result": pre_screening_result,
             }
+            if card_payload is not None:
+                result["entity_governance_card"] = card_payload
+            return result
         except Exception as exc:
             logger.error(
                 "validator_crashed",
                 ticker=ticker,
-                error=str(exc),
-                message="Validator failed - defaulting to PASS to avoid blocking graph",
+                **summarize_exception(exc, operation="financial_health_validator"),
             )
             return {"red_flags": [], "pre_screening_result": "PASS"}
 

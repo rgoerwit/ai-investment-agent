@@ -433,7 +433,10 @@ async def run_analysis(
             )
 
             name_result = await resolve_company_name(ticker)
-            company_name = name_result.name
+            # Use canonical (un-normalized) name for state and prompts; the normalized
+            # form drops legal suffixes like "Holdings" which collapses holdco/opco identity.
+            # `normalize_company_name()` remains the right call for building search queries.
+            company_name = name_result.preferred_display_name
 
             if not name_result.is_resolved:
                 logger.warning(

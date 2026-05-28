@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
+
+GOVERNANCE_CARD_FIELD = "entity_governance_card"
 
 DIRECT_PM_INPUT_FIELDS: tuple[str, ...] = (
     "market_report",
@@ -16,6 +18,7 @@ DIRECT_PM_INPUT_FIELDS: tuple[str, ...] = (
     "legal_report",
     "valuation_params",
     "trader_investment_plan",
+    GOVERNANCE_CARD_FIELD,
 )
 
 RISK_DEBATE_FIELD = "risk_debate_state"
@@ -44,3 +47,25 @@ def risk_debate_content(state: Mapping[str, Any]) -> str:
 
 def risk_debate_present(state: Mapping[str, Any]) -> bool:
     return bool(risk_debate_content(state))
+
+
+def governance_card_present(state: Mapping[str, Any]) -> bool:
+    card = state.get(GOVERNANCE_CARD_FIELD)
+    return isinstance(card, Mapping) and bool(card.get("ticker"))
+
+
+PM_INPUT_PRESENCE: dict[str, Callable[[Mapping[str, Any]], bool]] = {
+    GOVERNANCE_CARD_FIELD: governance_card_present,
+}
+
+
+def pm_input_present(state: Mapping[str, Any], field: str) -> bool:
+    """Return whether a direct PM input is usable."""
+
+    predicate = PM_INPUT_PRESENCE.get(field)
+    if predicate:
+        return predicate(state)
+
+    from src.runtime_diagnostics import get_valid_artifact_content
+
+    return bool(get_valid_artifact_content(state, field))

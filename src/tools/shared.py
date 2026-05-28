@@ -184,15 +184,29 @@ async def fetch_with_timeout(coroutine, timeout_seconds=10, error_msg="Timeout")
 
 
 async def extract_company_name_async(ticker_or_obj) -> str:
-    """Resolve company name through the shared multi-source resolver."""
+    """Resolve the search-friendly company name through the shared resolver.
+
+    Tool search queries intentionally use the normalized name with legal suffixes
+    stripped. Runtime state/output should use CompanyNameResult.canonical_name.
+    """
     if not isinstance(ticker_or_obj, str):
         info = getattr(ticker_or_obj, "info", None)
         if isinstance(info, dict):
-            from src.ticker_utils import normalize_company_name
+            from src.ticker_utils import (
+                _is_valid_company_name,
+                normalize_company_name,
+            )
 
             candidate = info.get("longName") or info.get("shortName")
-            if isinstance(candidate, str) and candidate.strip():
+            obj_ticker = getattr(ticker_or_obj, "ticker", "") or ""
+            if (
+                isinstance(candidate, str)
+                and candidate.strip()
+                and _is_valid_company_name(candidate.strip(), obj_ticker)
+            ):
                 return normalize_company_name(candidate.strip())
+            # Object-path candidate rejected (CSV identifier blob, ticker echo,
+            # empty); fall through to the string resolver below.
 
     ticker_str = (
         ticker_or_obj

@@ -225,3 +225,4 @@ class AgentState(TypedDict, total=False):
     pre_screening_result: Annotated[str, take_last]
     chart_paths: Annotated[dict[str, str], take_last]
     macro_context_injected_into_news: Annotated[bool, take_last]
+    entity_governance_card: Annotated[dict[str, Any], take_last]

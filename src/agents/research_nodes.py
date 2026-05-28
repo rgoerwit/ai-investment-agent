@@ -15,6 +15,7 @@ from src.tooling.text_boundary import format_untrusted_block
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .governance_prompt import governance_block
 from .output_limits import cap_state_value
 from .output_validation import (
     log_output_diagnostics,
@@ -31,6 +32,7 @@ _ROUND1_REPORT_BUDGETS = {
     "sentiment": 1200,
     "news": 1800,
     "fundamentals": 4000,
+    "foreign_language": 1200,
 }
 
 _ROUND2_ANCHOR_BUDGETS = {
@@ -38,6 +40,8 @@ _ROUND2_ANCHOR_BUDGETS = {
     "sentiment": 250,
     "news": 500,
     "fundamentals": 1200,
+    # foreign_language intentionally omitted — anchors only. Senior's
+    # DATA_BLOCK already carries the structured FLA fields by round 2.
 }
 
 _STRICT_RM_ADDENDUM = """
@@ -75,18 +79,23 @@ def _build_research_report_bundle(state: AgentState, budgets: dict[str, int]) ->
     sentiment_report = state.get("sentiment_report", "N/A")
     news_report = state.get("news_report", "N/A")
     fundamentals_report = state.get("fundamentals_report", "N/A")
+    foreign_language_report = state.get("foreign_language_report", "N/A")
 
-    return f"""MARKET ANALYST REPORT:
-{_summarize_report(market_report, "market", budgets["market"])}
-
-SENTIMENT ANALYST REPORT:
-{_summarize_report(sentiment_report, "sentiment", budgets["sentiment"])}
-
-NEWS ANALYST REPORT:
-{_summarize_report(news_report, "news", budgets["news"])}
-
-FUNDAMENTALS ANALYST REPORT:
-{_summarize_report(fundamentals_report, "fundamentals", budgets["fundamentals"])}"""
+    parts = [
+        f"MARKET ANALYST REPORT:\n{_summarize_report(market_report, 'market', budgets['market'])}",
+        f"SENTIMENT ANALYST REPORT:\n{_summarize_report(sentiment_report, 'sentiment', budgets['sentiment'])}",
+        f"NEWS ANALYST REPORT:\n{_summarize_report(news_report, 'news', budgets['news'])}",
+        f"FUNDAMENTALS ANALYST REPORT:\n{_summarize_report(fundamentals_report, 'fundamentals', budgets['fundamentals'])}",
+    ]
+    if "foreign_language" in budgets and foreign_language_report != "N/A":
+        # FLA carries absence-of-evidence signals (e.g., "no Value-Up disclosure
+        # in DART") that Senior's DATA_BLOCK compresses out. Bull/Bear and RM
+        # need this directly to avoid amplifying fabricated catalysts.
+        parts.append(
+            "FOREIGN LANGUAGE / LOCAL FILINGS:\n"
+            f"{_summarize_report(foreign_language_report, 'foreign_language', budgets['foreign_language'])}"
+        )
+    return "\n\n".join(parts)
 
 
 def create_researcher_node(
@@ -211,11 +220,12 @@ Now provide your Round 2 rebuttal, addressing the opponent's key points."""
         unresolved_warning = (
             "" if company_resolved else f"\n{support._UNRESOLVED_NAME_WARNING}"
         )
+
         negative_constraint = f"""
 CRITICAL INSTRUCTION:
 You are analyzing **{ticker} ({company_name})**.{unresolved_warning}
 If the provided context or memory contains information about a different company, you MUST IGNORE IT.
-Only use data explicitly related to {ticker} ({company_name}).
+Only use data explicitly related to {ticker} ({company_name}).{governance_block(state)}
 """
 
         context_block = ""
@@ -332,13 +342,23 @@ def create_research_manager_node(
         sentiment_report = state.get("sentiment_report", "N/A")
         news_report = state.get("news_report", "N/A")
         fundamentals_report = state.get("fundamentals_report", "N/A")
+        foreign_language_report = state.get("foreign_language_report", "N/A")
         bull_history = debate.get("bull_history", "N/A")
         bear_history = debate.get("bear_history", "N/A")
-        all_reports = f"""MARKET ANALYST REPORT:\n{support.summarize_for_pm(market_report, "market", 1800) if market_report != "N/A" else "N/A"}\n\nSENTIMENT ANALYST REPORT:\n{support.summarize_for_pm(sentiment_report, "sentiment", 1200) if sentiment_report != "N/A" else "N/A"}\n\nNEWS ANALYST REPORT:\n{support.summarize_for_pm(news_report, "news", 1800) if news_report != "N/A" else "N/A"}\n\nFUNDAMENTALS ANALYST REPORT:\n{support.summarize_for_pm(fundamentals_report, "fundamentals", 4000) if fundamentals_report != "N/A" else "N/A"}{attribution_note}\n\nVALUE TRAP ANALYSIS:\n{support.summarize_for_pm(value_trap, "value_trap", 2200) if value_trap != "N/A" else "N/A"}\n\nBULL RESEARCHER:\n{support.summarize_for_pm(bull_history, "research", 2500) if bull_history != "N/A" else "N/A"}\n\nBEAR RESEARCHER:\n{support.summarize_for_pm(bear_history, "research", 2500) if bear_history != "N/A" else "N/A"}"""
+        # FLA carries absence-of-evidence signals (e.g., "no Value-Up disclosure
+        # in DART") that Senior's DATA_BLOCK compresses out. RM needs this
+        # directly so unsupported catalysts can be downgraded at synthesis time.
+        foreign_language_block = (
+            f"\n\nFOREIGN LANGUAGE / LOCAL FILINGS:\n{support.summarize_for_pm(foreign_language_report, 'foreign_language', 1200)}"
+            if foreign_language_report != "N/A"
+            else ""
+        )
+        all_reports = f"""MARKET ANALYST REPORT:\n{support.summarize_for_pm(market_report, "market", 1800) if market_report != "N/A" else "N/A"}\n\nSENTIMENT ANALYST REPORT:\n{support.summarize_for_pm(sentiment_report, "sentiment", 1200) if sentiment_report != "N/A" else "N/A"}\n\nNEWS ANALYST REPORT:\n{support.summarize_for_pm(news_report, "news", 1800) if news_report != "N/A" else "N/A"}\n\nFUNDAMENTALS ANALYST REPORT:\n{support.summarize_for_pm(fundamentals_report, "fundamentals", 4000) if fundamentals_report != "N/A" else "N/A"}{attribution_note}{foreign_language_block}\n\nVALUE TRAP ANALYSIS:\n{support.summarize_for_pm(value_trap, "value_trap", 2200) if value_trap != "N/A" else "N/A"}\n\nBULL RESEARCHER:\n{support.summarize_for_pm(bull_history, "research", 2500) if bull_history != "N/A" else "N/A"}\n\nBEAR RESEARCHER:\n{support.summarize_for_pm(bear_history, "research", 2500) if bear_history != "N/A" else "N/A"}"""
         system_msg = agent_prompt.system_message
         if strict_mode:
             system_msg += _STRICT_RM_ADDENDUM
-        prompt = f"{system_msg}\n\n{all_reports}\n\nProvide Investment Plan."
+
+        prompt = f"{system_msg}{governance_block(state)}\n\n{all_reports}\n\nProvide Investment Plan."
 
         try:
             response = await agent_runtime.invoke_with_rate_limit_handling(

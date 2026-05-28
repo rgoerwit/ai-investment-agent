@@ -73,6 +73,58 @@ class TestCompanyNameExtraction:
             "BEER" not in company_name.upper()
         ), f"Should not contain BEER, got: {company_name}"
 
+    @pytest.mark.asyncio
+    async def test_extract_company_name_object_path_rejects_identifier_csv(
+        self, monkeypatch
+    ):
+        """206640.KS regression: Yahoo can return an identifier CSV ('206640.KS,0P000155DR,176967')
+        as the longName. The object-path must reject it and fall through to the
+        resolver, otherwise the gibberish poisons every downstream search query."""
+        ticker_obj = Mock()
+        ticker_obj.ticker = "206640.KS"
+        ticker_obj.info = {
+            "longName": "206640.KS,0P000155DR,176967",
+            "shortName": "206640.KS,0P000155DR,176967",
+        }
+
+        # Force the resolver fallback to a known sentinel so we can prove we
+        # didn't return the bad object-path value.
+        from src.ticker_utils import CompanyNameResult
+
+        async def fake_resolve(_t):
+            return CompanyNameResult(
+                name="Boditech Med", source="stub", is_resolved=True
+            )
+
+        monkeypatch.setattr("src.ticker_utils.resolve_company_name", fake_resolve)
+
+        company_name = await extract_company_name_async(ticker_obj)
+
+        assert "0P000155DR" not in company_name
+        assert "," not in company_name
+        assert company_name == "Boditech Med"
+
+    @pytest.mark.asyncio
+    async def test_extract_company_name_object_path_rejects_ticker_echo(
+        self, monkeypatch
+    ):
+        """If longName is just the ticker echoed back, fall through to resolver."""
+        ticker_obj = Mock()
+        ticker_obj.ticker = "7203.T"
+        ticker_obj.info = {"longName": "7203.T", "shortName": "7203"}
+
+        from src.ticker_utils import CompanyNameResult
+
+        async def fake_resolve(_t):
+            return CompanyNameResult(
+                name="Toyota Motor", source="stub", is_resolved=True
+            )
+
+        monkeypatch.setattr("src.ticker_utils.resolve_company_name", fake_resolve)
+
+        company_name = await extract_company_name_async(ticker_obj)
+        assert company_name == "Toyota Motor"
+
 
 class TestMemoryIsolation:
     """Test ChromaDB memory isolation between tickers."""

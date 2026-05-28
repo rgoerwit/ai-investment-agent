@@ -384,6 +384,10 @@ class TestArticleEditor:
             data_block="FINANCIAL_HEALTH: 75%\nP/E: 12.5",
             pm_block="VERDICT: BUY\nCONVICTION: HIGH",
             valuation_params="52_WEEK_HIGH: 100\n52_WEEK_LOW: 50",
+            governance_context=(
+                "=== ENTITY GOVERNANCE CARD (authoritative for identity) ===\n"
+                "Ticker: 009970.KS\nRelated listed tickers: 111770.KS"
+            ),
         )
 
         assert "DATA_BLOCK" in context
@@ -391,6 +395,9 @@ class TestArticleEditor:
         assert "PM_BLOCK" in context
         assert "VERDICT: BUY" in context
         assert "VALUATION PARAMETERS" in context
+        assert "ENTITY GOVERNANCE CARD" in context
+        assert context.count("ENTITY GOVERNANCE CARD") == 1
+        assert "111770.KS" in context
 
     def test_build_fact_check_context_empty(self):
         """build_fact_check_context should handle empty inputs."""
@@ -644,10 +651,15 @@ class TestEditorialLoopIntegration:
             article_draft=draft,
             ticker="TEST",
             company_name="Test Corp",
+            governance_card={
+                "ticker": "009970.KS",
+                "canonical_name": "Youngone Holdings Co., Ltd.",
+            },
         )
 
         # Should have called revise once
         assert writer.revise.called
+        assert "009970.KS" in writer.revise.call_args.kwargs["governance_context"]
         assert feedback["verdict"] == "APPROVED"
 
     @pytest.mark.asyncio
@@ -737,6 +749,10 @@ class TestMainPyIntegration:
                     "fundamentals_report": "DATA_BLOCK",
                     "final_trade_decision": "PM_BLOCK",
                     "valuation_params": "VAL_PARAMS",
+                    "entity_governance_card": {
+                        "ticker": "009970.KS",
+                        "canonical_name": "Youngone Holdings Co., Ltd.",
+                    },
                 },
                 resolve_article_path_fn=lambda *_args,
                 **_kwargs: "/tmp/test_article.md",
@@ -750,6 +766,7 @@ class TestMainPyIntegration:
             assert call_kwargs["data_block"] == "DATA_BLOCK"
             assert call_kwargs["pm_block"] == "PM_BLOCK"
             assert call_kwargs["valuation_params"] == "VAL_PARAMS"
+            assert call_kwargs["governance_card"]["ticker"] == "009970.KS"
 
     @pytest.mark.asyncio
     async def test_handle_article_generation_skips_editor_when_unavailable(self):

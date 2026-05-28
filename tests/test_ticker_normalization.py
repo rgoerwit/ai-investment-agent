@@ -70,6 +70,15 @@ def test_ticker_corrector_real_mapping_is_still_reported_as_correction():
     assert name == "SAP SE"
 
 
+def test_ticker_corrector_maps_boditech_kospi_typo_to_kosdaq():
+    corrected, was_corrected, name = TickerCorrector.apply_correction("206640.KS")
+
+    assert corrected == "206640.KQ"
+    assert was_corrected is True
+    assert name == "Boditech Med Inc."
+    assert normalize_ticker("206640.KS") == "206640.KQ"
+
+
 def test_ticker_corrector_unknown_ticker_returns_unchanged_without_correction():
     corrected, was_corrected, name = TickerCorrector.apply_correction("UNKNOWN.XX")
 

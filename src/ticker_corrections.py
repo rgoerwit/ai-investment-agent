@@ -48,6 +48,8 @@ REUTERS_CORRECTIONS = {
     "7203.T": ("7203", "T", "Toyota Motor Corporation"),
     "6758.T": ("6758", "T", "Sony Group Corporation"),
     "9984.T": ("9984", "T", "SoftBank Group Corp."),
+    # Korean Securities (KOSDAQ tickers sometimes mistyped as KOSPI/.KS)
+    "206640.KS": ("206640", "KQ", "Boditech Med Inc."),
 }
 
 
@@ -88,6 +90,7 @@ KNOWN_VALID_TICKER_NAMES = {
     "MEGP.L": "ME Group International plc",
     "7203.T": "Toyota Motor Corporation",
     "6758.T": "Sony Group Corporation",
+    "206640.KQ": "Boditech Med Inc.",
 }
 
 
@@ -146,7 +149,7 @@ class TickerCorrector:
                 original=ticker,
                 corrected=corrected,
                 company=name,
-                source="reuters_database",
+                source="known_corrections",
             )
 
             return corrected, True, name

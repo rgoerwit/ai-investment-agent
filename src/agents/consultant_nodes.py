@@ -27,6 +27,7 @@ from .forensic_repair import (
     canonicalize_forensic_auditor_output,
     repair_forensic_auditor_output,
 )
+from .governance_prompt import governance_block, governance_card
 from .output_validation import (
     log_output_diagnostics,
     log_truncation_diagnostic,
@@ -327,12 +328,26 @@ Pre-Screening Result: {state.get("pre_screening_result", "UNKNOWN")}
         company_warning = (
             "" if company_resolved else f"\n{support._UNRESOLVED_NAME_WARNING}"
         )
+
+        governance_directive = ""
+
+        card_obj = governance_card(state)
+        if card_obj:
+            if card_obj.confidence == "conflict":
+                governance_directive = (
+                    "\n\nGOVERNANCE RECONCILIATION DIRECTIVE: The governance card "
+                    "reports a conflict across sources on entity_role. Reconcile this "
+                    "explicitly before making any quantitative claim that depends on "
+                    "scope (consolidated vs separate), payout mechanics, or vehicle choice. "
+                    "Cite the primary source you trust and identify the source you reject."
+                )
+
         prompt = f"""{agent_prompt.system_message}
 
 ANALYSIS DATE: {support._format_date_with_fy_hint(current_date)}
 TICKER: {ticker}
 COMPANY: {company_name}{company_warning}
-{_CONSULTANT_QUICK_SCREENING_ADDENDUM if quick_mode else ""}
+{_CONSULTANT_QUICK_SCREENING_ADDENDUM if quick_mode else ""}{governance_block(state)}{governance_directive}
 
 {all_context}
 

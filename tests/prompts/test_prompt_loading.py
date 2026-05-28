@@ -230,8 +230,59 @@ class TestSpecificPromptFiles:
             "DATA_BLOCK" in system_message
         ), "fundamentals_analyst should have DATA_BLOCK instructions"
 
+    def test_fundamentals_governance_fields_parity(self):
+        """`src/prompts.py` in-code default and `prompts/fundamentals_analyst.json`
+        override must list the same GOVERNANCE_BLOCK fields. They are independent
+        prompt sources and drift between them would leave the JSON-overriding
+        runtime silently mis-aligned with the in-code fallback.
+        """
+        from src import prompts as _prompts_mod
+
+        prompt_file = Path("prompts/fundamentals_analyst.json")
+        if not prompt_file.exists():
+            pytest.skip("fundamentals_analyst.json not found")
+
+        with open(prompt_file) as f:
+            json_sm = json.load(f).get("system_message", "")
+
+        # Source the in-code default by reading the module file directly.
+        # (Importing get_prompt resolves to whichever source is loaded; we need
+        # the raw default string this test is enforcing parity against.)
+        in_code_text = Path(_prompts_mod.__file__).read_text(encoding="utf-8")
+
+        for field in (
+            "LISTING_ROLE:",
+            "RELATED_LISTED_TICKERS:",
+            "METRIC_SCOPE_PAYOUT:",
+            "METRIC_SCOPE_OCF:",
+            "Shareholder-return or Value-Up plans",
+        ):
+            assert field in in_code_text, f"{field} missing from src/prompts.py"
+            assert field in json_sm, f"{field} missing from fundamentals_analyst.json"
+
+    def test_foreign_language_governance_fields_parity(self):
+        """Fallback and JSON prompts both require explicit ownership role fields."""
+        from src import prompts as _prompts_mod
+
+        prompt_file = Path("prompts/foreign_language_analyst.json")
+        if not prompt_file.exists():
+            pytest.skip("foreign_language_analyst.json not found")
+
+        with open(prompt_file) as f:
+            json_sm = json.load(f).get("system_message", "")
+
+        in_code_text = Path(_prompts_mod.__file__).read_text(encoding="utf-8")
+
+        for field in ("ENTITY_ROLE_OBSERVED:", "Related Listed Tickers:"):
+            assert field in in_code_text, f"{field} missing from src/prompts.py"
+            assert (
+                field in json_sm
+            ), f"{field} missing from foreign_language_analyst.json"
+
     def test_portfolio_manager_has_thesis_criteria(self):
         """Verify portfolio_manager.json has investment thesis criteria."""
+        from src import prompts as _prompts_mod
+
         prompt_file = Path("prompts/portfolio_manager.json")
         if not prompt_file.exists():
             pytest.skip("portfolio_manager.json not found")
@@ -244,6 +295,9 @@ class TestSpecificPromptFiles:
         assert (
             "Financial Health" in system_message or "HEALTH" in system_message
         ), "portfolio_manager should reference Financial Health criteria"
+        assert "Entity Governance Card metric scope is Senior-derived" in system_message
+        in_code_text = Path(_prompts_mod.__file__).read_text(encoding="utf-8")
+        assert "Entity Governance Card metric scope is Senior-derived" in in_code_text
 
     def test_writer_json_has_valuation_reconciliation_section(self):
         """Verify writer.json has VALUATION-DECISION RECONCILIATION section."""
@@ -445,3 +499,42 @@ class TestPromptVersionTracking:
         assert (
             len(documented_prompts) > 0
         ), "At least one prompt should have change documentation in metadata"
+
+
+class TestCatalystGuardrails:
+    """Stage 3+4 guardrails preventing fabricated country-level catalysts from
+    propagating through Value Trap -> Bull -> RM -> PM."""
+
+    def _load(self, name: str) -> str:
+        path = Path("prompts") / name
+        if not path.exists():
+            pytest.skip(f"{name} not found")
+        return json.loads(path.read_text())["system_message"]
+
+    def test_value_trap_detector_has_catalyst_verification_rule(self):
+        sm = self._load("value_trap_detector.json")
+        assert "## CATALYST VERIFICATION RULE" in sm
+        # Specific protections
+        assert "Korea Value-Up" in sm or "Value-Up" in sm
+        assert "RESTRUCTURING: NONE" in sm
+        assert "MID_TERM_PLAN: NONE" in sm
+        assert "UNVERIFIED" in sm
+
+    def test_research_manager_has_catalyst_provenance_rule(self):
+        sm = self._load("research_manager.json")
+        assert "## CATALYST PROVENANCE RULE" in sm
+        assert "Foreign Language / Local Filings" in sm
+        assert "UNVERIFIED" in sm
+
+    def test_bull_researcher_has_catalyst_sourcing_rule(self):
+        sm = self._load("bull_researcher.json")
+        assert "## CATALYST SOURCING RULE" in sm
+        assert "Foreign Language / Local Filings" in sm
+
+    def test_portfolio_manager_has_catalyst_fabrication_discipline(self):
+        sm = self._load("portfolio_manager.json")
+        assert "## CATALYST FABRICATION DISCIPLINE" in sm
+        # PM must explicitly tie removal to Consultant/APAC confirmation
+        assert "Consultant" in sm
+        assert "APAC" in sm
+        assert "no-catalyst" in sm.lower()

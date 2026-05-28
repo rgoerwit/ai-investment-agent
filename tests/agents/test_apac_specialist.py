@@ -29,6 +29,12 @@ def test_payload_minimization_excludes_forbidden_fields():
         "news_report": "news",
         "sentiment_report": "sentiment",
         "red_flags": [{"type": "LOCAL_COVERAGE_HIGH"}],
+        "entity_governance_card": {
+            "ticker": "7203.T",
+            "canonical_name": "Toyota Motor Corporation",
+            "entity_role": "STANDALONE",
+            "confidence": "clean",
+        },
         "messages": ["raw tool transcript with secrets"],
         "past_insights": "memory lesson",
         "retrospective_snapshots": ["prior run"],
@@ -38,6 +44,8 @@ def test_payload_minimization_excludes_forbidden_fields():
     blob = json.dumps(payload, ensure_ascii=False)
 
     assert payload["ticker"] == "7203.T"
+    assert "ENTITY GOVERNANCE CARD" in payload["entity_governance_card"]
+    assert "Toyota Motor Corporation" in payload["entity_governance_card"]
     assert "raw tool transcript" not in blob
     assert "memory lesson" not in blob
     assert "prior run" not in blob
