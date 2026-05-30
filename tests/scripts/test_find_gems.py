@@ -1860,6 +1860,7 @@ _EXCHANGE_CANARIES: dict[str, str] = {
     ".AX": "BHP.AX",  # BHP (ASX)
     ".SI": "D05.SI",  # DBS Group (SGX)
     ".TO": "RY.TO",  # Royal Bank of Canada (TSX)
+    ".SA": "PETR4.SA",  # Petrobras (B3 Brazil)
 }
 
 

@@ -96,6 +96,18 @@ class TestTickerFromIbkr:
         assert t.symbol == "ABC123"
         assert t.yf == "ABC123.KS"
 
+    # Brazil B3 — alphanumeric tickers, no padding rule
+
+    def test_brazil_b3_ticker_alphanumeric(self):
+        t = Ticker.from_ibkr("PETR4", "BVMF", "BRL")
+        assert t.symbol == "PETR4"
+        assert t.suffix == ".SA"
+        assert t.yf == "PETR4.SA"
+
+    def test_brazil_b3_units_11_suffix(self):
+        t = Ticker.from_ibkr("KNRI11", "BVMF", "BRL")
+        assert t.yf == "KNRI11.SA"
+
     # Currency fallback (when exchange is unknown/SMART)
 
     def test_currency_fallback_hkd(self):
@@ -135,6 +147,11 @@ class TestTickerFromIbkr:
         t = Ticker.from_ibkr("5930", "", "KRW")
         assert t.suffix == ".KS"
         assert t.yf == "005930.KS"
+
+    def test_currency_fallback_brl_defaults_to_sa(self):
+        t = Ticker.from_ibkr("PETR4", "SMART", "BRL")
+        assert t.suffix == ".SA"
+        assert t.yf == "PETR4.SA"
 
     # Exchange priority over conflicting currency
 
@@ -257,6 +274,12 @@ class TestTickerFromYf:
         assert t.symbol == "035420"
         assert t.exchange == "KOSDAQ"
         assert t.yf == "035420.KQ"
+
+    def test_brazil_b3_round_trip(self):
+        for yf_str in ("PETR4.SA", "VALE3.SA", "ITUB4.SA", "KNRI11.SA"):
+            t = Ticker.from_yf(yf_str)
+            assert t.exchange == "BVMF"
+            assert t.yf == yf_str
 
     def test_currency_kwarg_preserved(self):
         t = Ticker.from_yf("7203.T", currency="JPY")

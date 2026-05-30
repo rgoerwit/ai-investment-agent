@@ -408,7 +408,33 @@ def _reconcile_role(
         # Fallback shouldn't trigger
         return opinions[0][1], "unresolved", ""
 
-    # Mixed families → conflict
+    # Mixed families. If a clear majority emerges across senior/fla/hints (≥2 of
+    # ≥3 sources on one side, with only one dissenter), treat the minority as
+    # rejected and resolve to the majority's most specific role with "unresolved"
+    # confidence rather than escalating to conflict. A 1-1 disagreement (no hints)
+    # still goes to conflict.
+    if len(opinions) >= 3:
+        family_groups: dict[str, list[tuple[str, EntityRole]]] = {}
+        for s, role in opinions:
+            fam = "HOLDCO_FAMILY" if is_holdco_family(role) else "STANDALONE"
+            family_groups.setdefault(fam, []).append((s, role))
+        winning_family, winners = max(family_groups.items(), key=lambda kv: len(kv[1]))
+        if len(winners) >= 2 and len(opinions) - len(winners) == 1:
+            rejected = next(
+                s
+                for fam, lst in family_groups.items()
+                if fam != winning_family
+                for s, _ in lst
+            )
+            for src_order in ("senior", "fla", "hints"):
+                for s, role in winners:
+                    if s == src_order:
+                        return (
+                            role,
+                            "unresolved",
+                            f"role disagreement: hints+other corroborate {winning_family}, {rejected} rejected",
+                        )
+
     disagreement = ", ".join(f"{s}={fam}" for s, fam in families.items())
     return "UNKNOWN", "conflict", f"role disagreement: {disagreement}"
 

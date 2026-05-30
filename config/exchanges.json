@@ -249,6 +249,20 @@
       }
     },
     {
+      "country": "Brazil",
+      "exchange_name": "B3 (Brasil Bolsa Balcão)",
+      "enabled": true,
+      "method": "scrape_html",
+      "source_url": "https://stockanalysis.com/list/brazil-stock-exchange/",
+      "yahoo_suffix": ".SA",
+      "min_expected_rows": 400,
+      "params": {
+        "ticker_col": "Symbol",
+        "name_col": "Company Name",
+        "paginate_max_pages": 5
+      }
+    },
+    {
       "country": "Indonesia",
       "exchange_name": "Indonesia Stock Exchange",
       "enabled": true,

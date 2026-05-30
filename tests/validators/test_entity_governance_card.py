@@ -161,6 +161,24 @@ class TestReconciliation:
         # entity_role falls back to UNKNOWN.
         assert requires_structure_disclosure(card) is True
 
+    def test_majority_resolves_senior_dissent_when_hints_corroborate_fla(self):
+        """Senior=STANDALONE but FLA=PURE_HOLDCO and hints fire HOLDCO →
+        2-of-3 majority resolves to PURE_HOLDCO with confidence=unresolved
+        rather than escalating to conflict. Guards against a single Senior
+        miscall on a name where deterministic signals and FLA agree it is a
+        holdco."""
+        card = self._build(
+            merged={
+                "longName": "Foo Holdings Inc",
+                "longBusinessSummary": "operates as a holding company through its subsidiaries",
+            },
+            senior_metrics={"listing_role": "STANDALONE"},
+            fla_report="ENTITY_ROLE_OBSERVED: PURE_HOLDCO",
+        )
+        assert card.entity_role == "PURE_HOLDCO"
+        assert card.confidence == "unresolved"
+        assert "senior rejected" in card.notes
+
     def test_non_english_marker_with_senior_confirmation(self):
         """Japanese 持株会社 name; English token miss but Senior says PURE_HOLDCO."""
         card = self._build(
