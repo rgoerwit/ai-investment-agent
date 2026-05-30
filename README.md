@@ -4,7 +4,7 @@ This repository is a multi-agent international equity research system. It can an
 
 You need Python 3.12+, Poetry, and working API keys. For the default CLI path, set Gemini, Finnhub, and Tavily keys.
 
-I've gone to a lot of trouble to make this work with inexpensive/free services, at the cost of some code complexity. Practically speaking, search, LLM, and data-service keys are needed to get truly useful results. See the `.env.example` file.
+I've gone to a lot of trouble to make this work with inexpensive/free services, at the cost of some code complexity. But practically speaking, search, LLM, and data-service keys are needed to get truly useful results. See the `.env.example` file.
 
 Environment note:
 
@@ -26,7 +26,9 @@ Environment note:
 
 ## Architecture
 
-Many people still equate agentic AI with prompt engineering. This repo is more concrete than that. This is not a single prompt wrapped in a CLI. The runtime fans out work across specialist agents, applies deterministic validation before debate, then routes the surviving analysis into valuation, risk, and portfolio decision stages.
+Many people still equate agentic AI with prompt engineering. Agentic AI, though, takes a next step forward, coordinating the activity of multiple empowered agents to produce better results and to take action. 
+
+Executing an analysis using this repo coordinates work across multiple specialist agents that gather information and then pool that information, apply deterministic rules, and then route surviving equities to additional valuation, risk, and portfolio-decision agents, and wrap the results up as a final recommendation.
 
 ```mermaid
 graph TB
@@ -108,9 +110,9 @@ graph TB
     style Decision fill:#55efc4,color:#333
 ```
 
-`Macro Context Analyst` is a pre-graph summarizer, not a LangGraph node. It can build a cached regional regime brief under `results/.macro_context_cache/` and injects that background only into News Analyst in v1. It remains separate from portfolio-detected macro events stored in `MacroEventsStore`.
+`Macro Context Analyst` is a pre-graph summarizer, not a agent (LangGraph "node"). It can build a cached regional regime brief under `results/.macro_context_cache/` and injects that background only into News Analyst in v1. It remains separate from portfolio-detected macro events stored in `MacroEventsStore`.
 
-At a high level:
+Some additional notes on what is happening:
 
 - A pre-graph macro-context step can summarize cached regional regime background for News Analyst before the graph fan-out begins.
 - Parallel analyst fan-out gathers market, news, sentiment, fundamentals, language, legal, and value-trap evidence.
@@ -123,6 +125,8 @@ At a high level:
 
 ## Quick Start
 
+I am assuming here that you have worked with Git repositories, feel comfortable at a command prompt, and understand basic things like what an exchange and stock ticker are.
+
 ```bash
 git clone https://github.com/rgoerwit/ai-investment-agent.git
 cd ai-investment-agent
@@ -133,19 +137,19 @@ cp .env.example .env
 
 Edit `.env` next. For the normal CLI path, set `GOOGLE_API_KEY`, `FINNHUB_API_KEY`, and `TAVILY_API_KEY`. For better international data or optional consultant paths, add keys such as EODHD, FMP, or OpenAI where your workflow needs them. The exact knobs live in `.env.example`.
 
-Run a fast smoke test:
+Run a fast smoke test (you can use a ticker other than 7203.T, if you want):
 
 ```bash
 poetry run python -m src.main --ticker 7203.T --quick --output results/7203.T.md
 ```
 
-That command exercises the main runtime and writes a markdown report. Saved analysis JSONs in `results/` also power `portfolio_manager.py` and the dashboard later.
+That command exercises the main runtime and writes a markdown report. Saved analysis JSONs in `results/` also, optionally, power `portfolio_manager.py` and the dashboard later.
 
 ## Choose Your Workflow
 
 - **Analyze one ticker**: use `poetry run python -m src.main --ticker ...`
-- **Screen a broader universe**: use `scripts/run_pipeline.sh` with or without `scripts/find_gems.py`
-- **Reconcile a portfolio**: use `scripts/portfolio_manager.py`
+- **Screen a broader universe**: use `scripts/run_pipeline.sh`
+- **Reconcile a portfolio afterwards**: use `scripts/portfolio_manager.py`
 - **Use the browser UI**: run `python -m src.web.ibkr_dashboard.app`, and start the worker only if you want queued refresh jobs
 
 ## Single-Ticker Analysis
@@ -153,7 +157,7 @@ That command exercises the main runtime and writes a markdown report. Saved anal
 This is the core engine. Use it first before touching portfolio workflows or the dashboard.
 
 ```bash
-# Normal run
+# Normal run; again, you can use any ticker you want instead of 0005.HK
 poetry run python -m src.main --ticker 0005.HK
 
 # Save markdown output and charts
@@ -172,7 +176,7 @@ Practical notes:
 - `--output` is the cleanest way to get markdown plus chart assets in a stable location.
 - Analysis can prefetch a cached regional macro brief before the graph runs; it lives under `results/.macro_context_cache/` with a 12-hour TTL, is generated by `Macro Context Analyst`, and is injected only into News Analyst as regime background.
 - Projected token cost includes this pre-graph macro summarizer when it executes.
-- Free-tier Gemini works, but it is slow for larger batches. Paid tiers mostly improve throughput and reduce retry friction.
+- Free-tier Gemini works, but it is slow for larger batches. Paid tiers mostly improve throughput and reduce retry friction (foundation model vendor are getting more restrictive about free tiers)
 - Rough paid-tier ballpark with all default optional agents on (consultant, auditor, APAC specialist): about **$0.12 per `--quick` run** and **$0.22 per full run** per ticker. Disabling optional agents or routing through free-tier providers cuts this materially; see `token_usage.total_cost_usd` in the saved `results/*_analysis.json` for the actual per-run number.
 
 ## Screening Pipeline
@@ -274,6 +278,7 @@ Set `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_BASE_URL` if you
 ## IBKR Portfolio Management
 
 `scripts/portfolio_manager.py` sits on top of the saved analysis JSONs in `results/`. It bridges the evaluator output with live or offline portfolio context.
+
 The IBKR reconciliation path is split by ownership: `src/ibkr/reconciler.py` orchestrates while `analysis_index.py`, `reconciliation_rules.py`, `position_evaluator.py`, `watchlist_evaluator.py`, `opportunity_finder.py`, and `portfolio_health.py` own the underlying loading, rule, and routing logic.
 
 ```bash
