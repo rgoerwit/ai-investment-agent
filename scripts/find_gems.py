@@ -533,9 +533,13 @@ def _apply_filters(df, config):
                 if isinstance(values, list):
                     df = df[~df[actual_col].astype(str).str.strip().isin(values)]
                 else:
+                    # Strip before regex match so anchored patterns (e.g. "3[2-9]$")
+                    # tolerate padded cells from HTML/Excel scrapers — matches the
+                    # list-branch behavior above.
                     df = df[
                         ~df[actual_col]
                         .astype(str)
+                        .str.strip()
                         .str.contains(str(values), case=False, na=False)
                     ]
 

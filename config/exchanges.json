@@ -259,7 +259,10 @@
       "params": {
         "ticker_col": "Symbol",
         "name_col": "Company Name",
-        "paginate_max_pages": 5
+        "paginate_max_pages": 5,
+        "exclude_filter": {
+          "Symbol": "3[2-9]$"
+        }
       }
     },
     {
