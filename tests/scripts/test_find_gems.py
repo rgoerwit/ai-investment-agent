@@ -638,27 +638,8 @@ class TestScrapeExchanges:
         assert len(result) == 1
 
 
-# ============================================================
-# TestBrazilBDRExclusion — regression guard for the .SA exclude_filter
-# ============================================================
-# Backstory: 2026-05-29 — Stage 1 on the full B3 universe produced 43/43
-# DO_NOT_INITIATE because 95% of survivors were BDRs (foreign blue-chip
-# wrappers ending in 3[2-9]) that fail US-Revenue + Analyst-Coverage hard
-# requirements by construction. Fix: exclude_filter "3[2-9]$" on the Brazil
-# entry drops BDRs at scrape time. These tests lock that behavior in.
-#
-# Real-world edge cases covered:
-#   - sponsored BDRs across all 32-39 suffixes
-#   - unsponsored BDRs with internal digits (A1GI34, B1RF34, M2RV34)
-#   - native B3 share classes 3-8 must survive (ON, PN, PNA-D)
-#   - units (11) must survive
-#   - hypothetical 12 (units variant) must survive
-#   - whitespace-padded tickers stripped before match
-#   - mixed-case input still matches (case-insensitive contains)
-#   - filter does NOT leak to other exchange entries
-# ============================================================
 class TestBrazilBDRExclusion:
-    """Regression guard for the .SA exclude_filter pattern."""
+    """Regression guard for Brazil's BDR-only .SA exclude_filter."""
 
     @staticmethod
     def _make_brazil_exchange():
@@ -688,157 +669,55 @@ class TestBrazilBDRExclusion:
                 with patch("find_gems.time.sleep"):
                     return find_gems.scrape_exchanges(config, exclude_us=True)
 
-    # ── BDRs (must be EXCLUDED) ──────────────────────────────────────────────
+    @pytest.mark.parametrize(
+        "symbols",
+        [
+            ["ADBE34", "GILD34", "INTU34"],
+            [
+                "XYZA32",
+                "XYZA33",
+                "XYZA34",
+                "XYZA35",
+                "XYZA36",
+                "XYZA37",
+                "XYZA38",
+                "XYZA39",
+            ],
+            ["A1GI34", "B1RF34", "M2RV34"],
+            [" ADBE34", "GILD34 ", " INTU34 "],
+            ["adbe34", "gild34"],
+        ],
+    )
+    def test_excludes_bdr_like_suffixes(self, symbols):
+        df = pd.DataFrame({"Symbol": symbols, "Company Name": ["x"] * len(symbols)})
+        result = self._scrape(df, self._make_brazil_exchange())
+        assert result.empty, result.get("YF_Ticker", pd.Series(dtype=str)).tolist()
 
-    def test_excludes_sponsored_bdrs_ending_in_34(self):
-        """Standard sponsored BDRs: 4 letters + 34 (Adobe, Gilead, Intuit, ...)."""
-        df = pd.DataFrame(
-            {
-                "Symbol": ["ADBE34", "GILD34", "INTU34", "CMCS34", "FSLR34"],
-                "Company Name": ["Adobe", "Gilead", "Intuit", "Comcast", "First Solar"],
-            }
+    @pytest.mark.parametrize(
+        "symbols",
+        [
+            ["PETR3", "PETR4", "VALE3", "ITUB4", "ABEV3", "B3SA3"],
+            ["XYZA5", "XYZA6", "XYZA7", "XYZA8"],
+            ["KNRI11", "BPAC11", "SAPR11"],
+            ["PETR1", "PETR2"],
+        ],
+    )
+    def test_preserves_native_b3_codes(self, symbols):
+        df = pd.DataFrame({"Symbol": symbols, "Company Name": ["x"] * len(symbols)})
+        result = self._scrape(df, self._make_brazil_exchange())
+        assert sorted(result["YF_Ticker"].tolist()) == sorted(
+            f"{symbol}.SA" for symbol in symbols
         )
-        result = self._scrape(df, self._make_brazil_exchange())
-        assert (
-            len(result) == 0
-        ), f"expected all BDRs excluded, got {result['YF_Ticker'].tolist()}"
-
-    def test_excludes_bdrs_all_sponsorship_levels(self):
-        """B3 BDR codes span 32-39 (different DR sponsorship/voting classes)."""
-        df = pd.DataFrame(
-            {
-                "Symbol": [
-                    "XYZA32",
-                    "XYZA33",
-                    "XYZA34",
-                    "XYZA35",
-                    "XYZA36",
-                    "XYZA37",
-                    "XYZA38",
-                    "XYZA39",
-                ],
-                "Company Name": ["X"] * 8,
-            }
-        )
-        result = self._scrape(df, self._make_brazil_exchange())
-        assert (
-            len(result) == 0
-        ), f"all 3[2-9] codes must be excluded, got {result['YF_Ticker'].tolist()}"
-
-    def test_excludes_unsponsored_bdrs_with_internal_digits(self):
-        """Unsponsored BDRs use alphanumeric prefixes like A1GI34, B1RF34, M2RV34."""
-        df = pd.DataFrame(
-            {
-                "Symbol": ["A1GI34", "B1RF34", "M2RV34", "C1HK34", "D1VN34"],
-                "Company Name": ["Unsponsored"] * 5,
-            }
-        )
-        result = self._scrape(df, self._make_brazil_exchange())
-        assert (
-            len(result) == 0
-        ), f"unsponsored BDRs must be excluded, got {result['YF_Ticker'].tolist()}"
-
-    def test_excludes_bdrs_with_whitespace(self):
-        """Symbols arriving with whitespace (e.g. CSV import artifacts) must still match."""
-        df = pd.DataFrame(
-            {
-                "Symbol": [" ADBE34", "GILD34 ", " INTU34 "],
-                "Company Name": ["Adobe", "Gilead", "Intuit"],
-            }
-        )
-        result = self._scrape(df, self._make_brazil_exchange())
-        assert len(result) == 0
-
-    def test_excludes_bdrs_lowercase(self):
-        """Pattern uses case-insensitive contains; lowercase BDR codes still match."""
-        df = pd.DataFrame(
-            {
-                "Symbol": ["adbe34", "gild34"],
-                "Company Name": ["adobe", "gilead"],
-            }
-        )
-        result = self._scrape(df, self._make_brazil_exchange())
-        assert len(result) == 0
-
-    # ── Native B3 (must be PRESERVED) ────────────────────────────────────────
-
-    def test_preserves_native_ON_PN_share_classes(self):
-        """B3 native codes end in single digit 3 (ON) or 4 (PN) — must survive."""
-        df = pd.DataFrame(
-            {
-                "Symbol": [
-                    "PETR3",  # Petrobras ON
-                    "PETR4",  # Petrobras PN
-                    "VALE3",  # Vale ON
-                    "ITUB4",  # Itaú PN
-                    "ABEV3",  # Ambev ON
-                    "B3SA3",  # B3 itself (mixed alphanumeric prefix)
-                ],
-                "Company Name": ["x"] * 6,
-            }
-        )
-        result = self._scrape(df, self._make_brazil_exchange())
-        tickers = sorted(result["YF_Ticker"].tolist())
-        assert tickers == [
-            "ABEV3.SA",
-            "B3SA3.SA",
-            "ITUB4.SA",
-            "PETR3.SA",
-            "PETR4.SA",
-            "VALE3.SA",
-        ]
-
-    def test_preserves_native_preferred_classes_5_through_8(self):
-        """Less common preferred share classes (PNA, PNB, PNC, PND) end in 5-8 — survive."""
-        df = pd.DataFrame(
-            {
-                "Symbol": ["XYZA5", "XYZA6", "XYZA7", "XYZA8"],
-                "Company Name": ["x"] * 4,
-            }
-        )
-        result = self._scrape(df, self._make_brazil_exchange())
-        assert len(result) == 4
-
-    def test_preserves_native_units_ending_in_11(self):
-        """B3 units (UNT) end in 11, e.g. KNRI11, BPAC11 — survive."""
-        df = pd.DataFrame(
-            {
-                "Symbol": ["KNRI11", "BPAC11", "SAPR11"],
-                "Company Name": ["Kinea", "BTG Pactual", "Sanepar"],
-            }
-        )
-        result = self._scrape(df, self._make_brazil_exchange())
-        assert len(result) == 3
-
-    def test_preserves_native_short_code_ending_in_3(self):
-        """A short ticker like 'B3SA3' must not get caught by partial-suffix match."""
-        df = pd.DataFrame({"Symbol": ["B3SA3"], "Company Name": ["B3"]})
-        result = self._scrape(df, self._make_brazil_exchange())
-        # B3SA3 contains "3SA3" internally but ends in single "3" — must NOT match 3[2-9]$
-        assert len(result) == 1
-        assert result.iloc[0]["YF_Ticker"] == "B3SA3.SA"
-
-    def test_preserves_rights_subscription_codes_ending_in_1_or_2(self):
-        """Subscription rights end in 1 or 2 — must NOT match 3[2-9]$."""
-        df = pd.DataFrame({"Symbol": ["PETR1", "PETR2"], "Company Name": ["x", "y"]})
-        result = self._scrape(df, self._make_brazil_exchange())
-        # 1 and 2 do not match 3[2-9]$ (no leading "3")
-        assert len(result) == 2
-
-    # ── Mixed real-world scenarios ───────────────────────────────────────────
 
     def test_realistic_b3_universe_partition(self):
-        """Mixed sample modeled on the actual 2026-05-29 run output."""
         df = pd.DataFrame(
             {
                 "Symbol": [
-                    # Native B3 (must survive — 5 names)
                     "ABEV3",
                     "B3SA3",
                     "PETR3",
                     "PETR4",
                     "SBSP3",
-                    # BDRs (must drop — 4 names)
                     "ADBE34",
                     "GILD34",
                     "A1GI34",
@@ -868,15 +747,7 @@ class TestBrazilBDRExclusion:
         ]
 
     def test_filter_does_not_apply_to_other_exchanges(self):
-        """The 3[2-9]$ filter must NOT leak to TSX, XETRA, KOSPI, etc.
-
-        Real-world edge case: someone refactoring exchange config might move the
-        filter to a shared 'defaults' block. This test guards against that — a
-        hypothetical XETRA ticker like 'SAP34' (3-letter alphanumeric + 34) must
-        survive in the XETRA pipeline even though it lexically matches the
-        Brazil BDR pattern.
-        """
-        # Build a XETRA config WITHOUT the Brazil exclude_filter.
+        """Brazil's BDR filter must stay exchange-local."""
         xetra_ex = {
             "country": "Germany",
             "exchange_name": "XETRA",
@@ -887,25 +758,19 @@ class TestBrazilBDRExclusion:
         }
         df = pd.DataFrame(
             {
-                "Symbol": ["SAP", "BMW", "ABC34"],  # ABC34 would match if filter leaked
+                "Symbol": ["SAP", "BMW", "ABC34"],
                 "Name": ["SAP", "BMW", "Hypothetical Co"],
             }
         )
         result = self._scrape(df, xetra_ex)
-        assert (
-            "ABC34.DE" in result["YF_Ticker"].tolist()
-        ), "exclude_filter must be per-exchange — XETRA must not inherit Brazil's BDR filter"
+        assert "ABC34.DE" in result["YF_Ticker"].tolist()
 
 
 # ============================================================
 # TestBrazilConfigInvariants — locks the production config shape
 # ============================================================
 class TestBrazilConfigInvariants:
-    """Reads the real config/exchanges.json to lock in B3 entry shape.
-
-    These tests prevent silent regressions where someone reorders fields,
-    drops the exclude_filter, or changes the suffix during an unrelated refactor.
-    """
+    """Lock the production B3 config shape."""
 
     @staticmethod
     def _load_brazil_entry():
@@ -929,17 +794,10 @@ class TestBrazilConfigInvariants:
         params = ex.get("params", {})
         exclude = params.get("exclude_filter", {})
         ticker_col = params.get("ticker_col")
-        assert ticker_col in exclude, (
-            f"Brazil entry MUST carry exclude_filter on the ticker_col ({ticker_col!r}) — "
-            "drops BDRs that auto-fail GARP US-Revenue + Analyst-Coverage hard requirements"
-        )
-        assert exclude[ticker_col] == "3[2-9]$", (
-            f"BDR pattern must be exactly '3[2-9]$' (got {exclude[ticker_col]!r}); "
-            "broader patterns risk excluding native units (11) or share-class 5-8"
-        )
+        assert ticker_col in exclude
+        assert exclude[ticker_col] == "3[2-9]$"
 
     def test_no_other_exchange_carries_brazil_bdr_filter(self):
-        """Defense-in-depth: this filter is Brazil-specific and must not leak."""
         with open(_CONFIG_PATH) as f:
             cfg = json.load(f)
         for ex in cfg["exchanges"]:

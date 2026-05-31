@@ -495,7 +495,7 @@ def _handle_scrape_html(config, session):
             break  # Partial page = last page
 
         if max_pages > 1 and page_num < max_pages:
-            time.sleep(0.5)  # Be polite to stockanalysis.com
+            time.sleep(0.5)  # Throttle paginated sources.
 
     if not all_frames:
         raise ValueError(f"Table containing '{target_col}' not found")

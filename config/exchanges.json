@@ -254,7 +254,7 @@
       "enabled": true,
       "method": "scrape_html",
       "source_url": "https://www.fundamentus.com.br/resultado.php",
-      "note": "Switched from stockanalysis.com on 2026-05-30: that source listed only 23 real B3 equities (the remaining 477 of 500 entries were BDRs). Fundamentus returns the full ~990-row B3 universe with real mid-caps (MGLU3, RENT3, EQTL3, etc.). Uses latin-1 encoding.",
+      "note": "Fundamentus provides the B3 universe; uses latin-1 encoding and excludes BDR-like 3[2-9] suffixes.",
       "yahoo_suffix": ".SA",
       "min_expected_rows": 800,
       "params": {
