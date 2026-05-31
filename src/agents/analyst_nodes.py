@@ -57,6 +57,16 @@ _HORIZON_FIELD_RAW_KEYS = (
     ("EARNINGS_GROWTH_MRQ", "earningsGrowth_MRQ"),
     ("GROWTH_TRAJECTORY", "growth_trajectory"),
 )
+_VALID_ADR_EXCHANGES = {
+    "NYSE",
+    "NASDAQ",
+    "AMEX",
+    "OTC",
+    "OTC-OTCQX",
+    "OTC-OTCQB",
+    "OTC-OTCPK",
+    "PINK",
+}
 
 
 def _replace_or_append_datablock_line(body: str, key: str, value: str) -> str:
@@ -66,6 +76,32 @@ def _replace_or_append_datablock_line(body: str, key: str, value: str) -> str:
         return pattern.sub(replacement, body, count=1)
     suffix = "" if body.endswith("\n") else "\n"
     return f"{body}{suffix}{replacement}"
+
+
+def _extract_datablock_value(body: str, key: str) -> str:
+    match = re.search(rf"(?m)^{re.escape(key)}:\s*(.*)$", body)
+    return match.group(1).strip() if match else ""
+
+
+def _home_suffix(ticker: str) -> str:
+    return ticker[ticker.rfind(".") :].upper() if "." in ticker else ""
+
+
+def _invalid_adr_routing(body: str, ticker: str) -> bool:
+    if _extract_datablock_value(body, "ADR_EXISTS").upper() != "YES":
+        return False
+
+    adr_ticker = _extract_datablock_value(body, "ADR_TICKER").upper()
+    adr_exchange = _extract_datablock_value(body, "ADR_EXCHANGE").upper()
+    suffix = _home_suffix(ticker)
+    ticker_bad = adr_ticker not in {"", "NONE", "N/A"} and (
+        adr_ticker == ticker.upper() or (suffix and adr_ticker.endswith(suffix))
+    )
+    exchange_bad = (
+        adr_exchange not in {"", "NONE", "N/A"}
+        and adr_exchange not in _VALID_ADR_EXCHANGES
+    )
+    return ticker_bad or exchange_bad
 
 
 def _sanitize_fundamentals_output(
@@ -94,6 +130,14 @@ def _sanitize_fundamentals_output(
         for key in _QUARANTINED_FORWARD_KEYS:
             updated_body = _replace_or_append_datablock_line(updated_body, key, "N/A")
 
+    if payload.get("_pe_low_anomaly_quarantined") is True:
+        updated_body = _replace_or_append_datablock_line(
+            updated_body, "PE_RATIO_TTM", "N/A"
+        )
+        updated_body = _replace_or_append_datablock_line(
+            updated_body, "PEG_RATIO", "N/A"
+        )
+
     for datablock_key, raw_key in _HORIZON_FIELD_RAW_KEYS:
         if payload.get(raw_key) is None:
             updated_body = _replace_or_append_datablock_line(
@@ -113,6 +157,22 @@ def _sanitize_fundamentals_output(
             "LATEST_QUARTER_DATE",
             latest_quarter_date,
         )
+
+    if _invalid_adr_routing(updated_body, ticker):
+        for key, value in {
+            "ADR_TICKER": "None",
+            "ADR_EXCHANGE": "None",
+            "ADR_THESIS_IMPACT": "UNCERTAIN",
+            "ADR_DATA_QUALITY_NOTE": (
+                "Invalid ADR routing fields removed; ADR status unresolved."
+            ),
+        }.items():
+            updated_body = _replace_or_append_datablock_line(
+                updated_body,
+                key,
+                value,
+            )
+        logger.warning("adr_routing_invalidated", ticker=ticker)
 
     if updated_body == block_body:
         return content

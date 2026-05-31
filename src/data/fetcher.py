@@ -238,6 +238,11 @@ QUARTER_DATE_RECONCILE_WINDOW_DAYS = 45
 FORWARD_PE_OUTLIER_THRESHOLD = 200.0
 FORWARD_PE_REFERENCE_MAX = 100.0
 FORWARD_PE_OUTLIER_RATIO = 5.0
+MAX_LOW_OVER_PRICE = 1.10
+MIN_HIGH_UNDER_PRICE = 0.90
+LOW_PE_QUARANTINE_THRESHOLD = 3.0
+LOW_PE_FLAG_THRESHOLD = 5.0
+PE_IDENTITY_TOLERANCE = 0.20
 
 # Source quality rankings (higher = more reliable)
 SOURCE_QUALITY = {
@@ -257,6 +262,14 @@ SOURCE_QUALITY = {
 }
 
 MergeResult = namedtuple("MergeResult", ["data", "gaps_filled"])
+
+
+def _quality_notes(info: dict[str, Any]) -> list[str]:
+    notes = info.get("_data_quality_notes")
+    if not isinstance(notes, list):
+        notes = [] if notes in (None, "") else [str(notes)]
+        info["_data_quality_notes"] = notes
+    return notes
 
 
 def _normalize_percent_pair(old_val: float, new_val: float) -> tuple[float, float]:
@@ -1015,6 +1028,63 @@ class SmartMarketDataFetcher(FinancialFetcher):
         )
         return info
 
+    def _flag_low_pe_anomaly(self, info: dict[str, Any], symbol: str) -> None:
+        """Flag or quarantine abnormally low trailing P/E values.
+
+        This runs after the existing trailing-vs-forward reconciliation. If that
+        path already quarantined trailing P/E, this helper short-circuits.
+        """
+        pe = _safe_float(info.get("trailingPE"))
+        if pe is None or pe <= 0 or pe >= LOW_PE_FLAG_THRESHOLD:
+            return
+
+        price = _safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
+        eps = _safe_float(
+            info.get("trailingEps") or info.get("epsTrailingTwelveMonths")
+        )
+        identity_ok = (
+            price is not None
+            and price > 0
+            and eps is not None
+            and eps > 0
+            and abs((price / eps) - pe) / pe <= PE_IDENTITY_TOLERANCE
+        )
+
+        notes = _quality_notes(info)
+
+        if pe < LOW_PE_QUARANTINE_THRESHOLD and not identity_ok:
+            info["trailingPE"] = None
+            info["pegRatio"] = None
+            info["_pe_low_anomaly_quarantined"] = True
+            notes.append(
+                "Trailing P/E below 3 failed price/EPS identity check; quarantined."
+            )
+            logger.warning(
+                "pe_low_anomaly_quarantined",
+                symbol=symbol,
+                reported_pe=pe,
+            )
+            return
+
+        stress: list[str] = []
+        earnings_growth = _safe_float(info.get("earningsGrowth_TTM"))
+        revenue_growth = _safe_float(
+            info.get("revenueGrowth_TTM") or info.get("revenueGrowth")
+        )
+        profit_margins = _safe_float(info.get("profitMargins"))
+        if earnings_growth is not None and earnings_growth < -0.20:
+            stress.append("earnings_collapse")
+        if revenue_growth is not None and revenue_growth < -0.05:
+            stress.append("revenue_decline")
+        if profit_margins is not None and profit_margins < 0.03:
+            stress.append("thin_margins")
+
+        info["_pe_low_anomaly_flag"] = "LOW_PE_REQUIRES_INVESTIGATION"
+        info["_pe_low_anomaly_context"] = stress or [
+            "low_multiple_confirmed_but_unexplained"
+        ]
+        logger.info("pe_low_anomaly_flagged", symbol=symbol, reported_pe=pe)
+
     def _reconcile_latest_quarter_date(
         self, info: dict[str, Any], symbol: str
     ) -> dict[str, Any]:
@@ -1192,7 +1262,63 @@ class SmartMarketDataFetcher(FinancialFetcher):
 
         info = self._quarantine_recent_split_forward_metrics(info, symbol)
         info = self._reconcile_latest_quarter_date(info, symbol)
+        self._flag_low_pe_anomaly(info, symbol)
 
+        return info
+
+    async def _repair_quote_range_from_history(
+        self, info: dict[str, Any], symbol: str
+    ) -> dict[str, Any]:
+        price = _safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
+        low = _safe_float(info.get("fiftyTwoWeekLow"))
+        high = _safe_float(info.get("fiftyTwoWeekHigh"))
+
+        repair_low = (
+            low is None
+            or low <= 0
+            or (price is not None and low > price * MAX_LOW_OVER_PRICE)
+        )
+        repair_high = (
+            high is None
+            or high <= 0
+            or (price is not None and high < price * MIN_HIGH_UNDER_PRICE)
+        )
+        if not (repair_low or repair_high):
+            return info
+
+        notes = _quality_notes(info)
+        try:
+            hist = await self.get_price_history(symbol, period="1y")
+        except Exception as exc:
+            hist = None
+            logger.warning(
+                "quote_range_history_fetch_failed",
+                symbol=symbol,
+                **summarize_exception(
+                    exc,
+                    operation="get_price_history",
+                    provider="yfinance",
+                ),
+            )
+
+        if hist is not None and not hist.empty and {"Low", "High"} <= set(hist.columns):
+            if repair_low:
+                info["fiftyTwoWeekLow"] = float(hist["Low"].dropna().min())
+                info["_fiftyTwoWeekLow_source"] = "calculated_from_1y_history"
+            if repair_high:
+                info["fiftyTwoWeekHigh"] = float(hist["High"].dropna().max())
+                info["_fiftyTwoWeekHigh_source"] = "calculated_from_1y_history"
+            notes.append("52-week range repaired from 1y price history.")
+            logger.info("quote_range_repaired", symbol=symbol)
+        else:
+            if repair_low:
+                info["fiftyTwoWeekLow"] = None
+            if repair_high:
+                info["fiftyTwoWeekHigh"] = None
+            notes.append(
+                "Invalid or missing 52-week range blanked; history unavailable."
+            )
+            logger.warning("quote_range_blanked", symbol=symbol)
         return info
 
     def _validate_basics(self, data: dict, symbol: str) -> DataQuality:
@@ -1550,6 +1676,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
                 merge_metadata["gaps_filled"] += result.gaps_filled
 
             merged = self._normalize_data_integrity(merged, ticker)
+            merged = await self._repair_quote_range_from_history(merged, ticker)
 
             # --- DATA HYGIENE PIPELINE ---
             # Run comprehensive validation including new integrity checks
