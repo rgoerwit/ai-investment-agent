@@ -147,10 +147,10 @@ write_pipeline_marker() {
     mkdir -p "$results_dir"
 
     if [[ -n "${TICKER_LIST:-}" && -f "${TICKER_LIST}" ]]; then
-        candidates=$(grep -c '^[[:space:]]*[^[:space:]#]' "$TICKER_LIST" || echo "0")
+        candidates=$(grep -c '^[[:space:]]*[^[:space:]#]' "$TICKER_LIST" || true)
     fi
     if [[ -n "${BUY_LIST:-}" && -f "${BUY_LIST}" ]]; then
-        buys=$(grep -c '^[[:space:]]*[^[:space:]#]' "$BUY_LIST" || echo "0")
+        buys=$(grep -c '^[[:space:]]*[^[:space:]#]' "$BUY_LIST" || true)
     fi
 
     printf '{\n  "schema_version": 1,\n  "workflow": "run_pipeline",\n  "screening_date": "%s",\n  "completed_at": "%s",\n  "candidate_count": %s,\n  "buy_count": %s\n}\n' \
@@ -481,7 +481,7 @@ if [[ $START_STAGE -le 0 ]]; then
         fi
     fi
 
-    TICKER_COUNT=$(grep -c '^[[:space:]]*[^[:space:]#]' "$TICKER_LIST" || echo "0")
+    TICKER_COUNT=$(grep -c '^[[:space:]]*[^[:space:]#]' "$TICKER_LIST" || true)
     info "Candidates: $TICKER_COUNT tickers in $TICKER_LIST"
 
     if [[ "$TICKER_COUNT" -eq 0 ]]; then
@@ -556,7 +556,7 @@ if [[ $START_STAGE -le 1 ]]; then
 
     # If entering at --stage 1, we haven't shown a preview yet
     if [[ $START_STAGE -eq 1 ]]; then
-        TICKER_COUNT=$(grep -c '^[[:space:]]*[^[:space:]#]' "$TICKER_LIST" || echo "0")
+        TICKER_COUNT=$(grep -c '^[[:space:]]*[^[:space:]#]' "$TICKER_LIST" || true)
 
         STAGE1_TODO=0
         while IFS= read -r ticker || [[ -n "$ticker" ]]; do
@@ -738,7 +738,7 @@ if [[ $START_STAGE -le 2 ]]; then
         exit 0
     fi
 
-    BUY_TOTAL=$(grep -c '^[[:space:]]*[^[:space:]#]' "$BUY_LIST" || echo "0")
+    BUY_TOTAL=$(grep -c '^[[:space:]]*[^[:space:]#]' "$BUY_LIST" || true)
     if [[ "$BUY_TOTAL" -eq 0 ]]; then
         info "No BUY tickers to analyze. Pipeline complete."
         write_pipeline_marker
@@ -848,12 +848,12 @@ echo "========================================"
 echo ""
 
 if [[ -f "$TICKER_LIST" ]]; then
-    TOTAL=$(grep -c '^[[:space:]]*[^[:space:]#]' "$TICKER_LIST" || echo "0")
+    TOTAL=$(grep -c '^[[:space:]]*[^[:space:]#]' "$TICKER_LIST" || true)
     info "Candidates screened: $TOTAL ($TICKER_LIST)"
 fi
 
 if [[ -f "$BUY_LIST" ]]; then
-    BUYS=$(grep -c '^[[:space:]]*[^[:space:]#]' "$BUY_LIST" || echo "0")
+    BUYS=$(grep -c '^[[:space:]]*[^[:space:]#]' "$BUY_LIST" || true)
     info "BUY verdicts: $BUYS ($BUY_LIST)"
 
     if [[ "$BUYS" -gt 0 ]]; then

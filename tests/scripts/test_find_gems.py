@@ -579,6 +579,64 @@ class TestScrapeExchanges:
 
         assert len(result) == 1
 
+    def test_min_expected_rows_violation_raises(self):
+        # Backstory: 2026-05-30 — B3 source silently degraded to 23 real
+        # equities (vs 400+ expected) and the pipeline produced false-
+        # confidence runs. min_expected_rows was declared in config but
+        # never enforced. This test locks the runtime gate in.
+        ex = self._make_exchange("Brazil", "B3", suffix=".SA")
+        ex["min_expected_rows"] = 100
+        config = self._make_config(ex)
+
+        df = pd.DataFrame(
+            {"Code": ["PETR3", "PETR4"], "Name": ["Petrobras", "Petrobras"]}
+        )
+        mock_handler = MagicMock(return_value=df)
+
+        with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
+            with patch.object(find_gems, "_check_deps"):
+                with patch("find_gems.time.sleep"):
+                    with pytest.raises(RuntimeError) as exc_info:
+                        find_gems.scrape_exchanges(config, exclude_us=True)
+        msg = str(exc_info.value)
+        assert "min_expected_rows" in msg
+        assert "B3" in msg
+        assert "got 2" in msg
+        assert "100" in msg
+
+    def test_min_expected_rows_met_no_raise(self):
+        ex = self._make_exchange("Brazil", "B3", suffix=".SA")
+        ex["min_expected_rows"] = 2
+        config = self._make_config(ex)
+
+        df = pd.DataFrame(
+            {"Code": ["PETR3", "PETR4", "VALE3"], "Name": ["a", "b", "c"]}
+        )
+        mock_handler = MagicMock(return_value=df)
+
+        with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
+            with patch.object(find_gems, "_check_deps"):
+                with patch("find_gems.time.sleep"):
+                    result = find_gems.scrape_exchanges(config, exclude_us=True)
+
+        assert len(result) == 3
+
+    def test_min_expected_rows_zero_is_no_op(self):
+        # Backwards-compat: exchanges without the field set should not be gated.
+        ex = self._make_exchange("Japan", "TSE")
+        # No min_expected_rows key at all
+        config = self._make_config(ex)
+
+        df = pd.DataFrame({"Code": ["7203"], "Name": ["Toyota"]})
+        mock_handler = MagicMock(return_value=df)
+
+        with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
+            with patch.object(find_gems, "_check_deps"):
+                with patch("find_gems.time.sleep"):
+                    result = find_gems.scrape_exchanges(config, exclude_us=True)
+
+        assert len(result) == 1
+
 
 # ============================================================
 # TestBrazilBDRExclusion — regression guard for the .SA exclude_filter
@@ -868,13 +926,15 @@ class TestBrazilConfigInvariants:
 
     def test_brazil_bdr_exclude_filter_present(self):
         ex = self._load_brazil_entry()
-        exclude = ex.get("params", {}).get("exclude_filter", {})
-        assert "Symbol" in exclude, (
-            "Brazil entry MUST carry exclude_filter on Symbol — drops BDRs that "
-            "auto-fail GARP US-Revenue + Analyst-Coverage hard requirements"
+        params = ex.get("params", {})
+        exclude = params.get("exclude_filter", {})
+        ticker_col = params.get("ticker_col")
+        assert ticker_col in exclude, (
+            f"Brazil entry MUST carry exclude_filter on the ticker_col ({ticker_col!r}) — "
+            "drops BDRs that auto-fail GARP US-Revenue + Analyst-Coverage hard requirements"
         )
-        assert exclude["Symbol"] == "3[2-9]$", (
-            f"BDR pattern must be exactly '3[2-9]$' (got {exclude['Symbol']!r}); "
+        assert exclude[ticker_col] == "3[2-9]$", (
+            f"BDR pattern must be exactly '3[2-9]$' (got {exclude[ticker_col]!r}); "
             "broader patterns risk excluding native units (11) or share-class 5-8"
         )
 
@@ -886,9 +946,10 @@ class TestBrazilConfigInvariants:
             if ex.get("country") == "Brazil":
                 continue
             exclude = ex.get("params", {}).get("exclude_filter", {})
-            assert (
-                exclude.get("Symbol") != "3[2-9]$"
-            ), f"{ex['exchange_name']}: must not carry Brazil's BDR exclude_filter"
+            for col in ("Symbol", "Papel"):
+                assert (
+                    exclude.get(col) != "3[2-9]$"
+                ), f"{ex['exchange_name']}: must not carry Brazil's BDR exclude_filter on {col!r}"
 
 
 # ============================================================
@@ -2145,6 +2206,43 @@ class TestExchangeScrapeIntegration:
             assert len(df) > 0, (
                 f"{exchange['exchange_name']}: 0 rows survive after filtering "
                 "(filters may be misconfigured or source data format changed)"
+            )
+
+    def test_b3_source_includes_known_midcaps(self):
+        """Catches the May 2026 regression where the B3 source URL returned
+        only mega-caps + BDRs, missing every real mid-cap. A non-empty scrape
+        passed `len > 0` but contained none of MGLU3/RENT3/HAPV3/LREN3/EQTL3.
+        Requires at least 4 of these 6 sentinels to be present.
+        """
+        import requests as _req
+
+        with open(_CONFIG_PATH) as f:
+            cfg = json.load(f)
+        brazil = next(
+            (ex for ex in cfg["exchanges"] if ex.get("country") == "Brazil"), None
+        )
+        if brazil is None or not brazil.get("enabled", True):
+            pytest.skip("Brazil entry missing or disabled")
+
+        handler = find_gems._HANDLERS.get(brazil["method"])
+        assert handler is not None
+
+        sentinels = {"MGLU3", "RENT3", "HAPV3", "LREN3", "EMBR3", "EQTL3"}
+        with _skip_on_wall_clock_timeout(20, "B3 mid-cap presence"):
+            try:
+                df = handler(brazil, self.session)
+            except _req.exceptions.RequestException as exc:
+                pytest.skip(f"B3 source unreachable: {exc}")
+            if df is None or df.empty:
+                pytest.skip("B3 handler returned empty (source may be down)")
+
+            df = find_gems._apply_filters(df, brazil)
+            ticker_col = brazil["params"]["ticker_col"]
+            found = sentinels & set(df[ticker_col].astype(str).str.strip().str.upper())
+            assert len(found) >= 4, (
+                f"B3 source missing real mid-caps: found {sorted(found) or 'none'} "
+                f"of {sorted(sentinels)}. Source may have regressed to a non-comprehensive "
+                "listing (e.g., 'top stocks' widget instead of full universe)."
             )
 
 

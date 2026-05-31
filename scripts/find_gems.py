@@ -446,6 +446,7 @@ def _handle_scrape_html(config, session):
     page_param = params.get("page_param", "p")
     idx = params.get("table_index", 0)
     target_col = params.get("ticker_col")
+    source_encoding = params.get("source_encoding")
 
     all_frames = []
     first_page_len = None
@@ -459,6 +460,9 @@ def _handle_scrape_html(config, session):
             if page_num == 1:
                 raise
             break  # Stop on HTTP error for pages 2+
+
+        if source_encoding:
+            response.encoding = source_encoding
 
         if "<table" not in response.text.lower():
             if page_num == 1:
@@ -554,6 +558,7 @@ def scrape_exchanges(config: dict, *, exclude_us: bool = True) -> pd.DataFrame:
     _check_deps()
     session = _get_session()
     all_dfs = []
+    degraded_exchanges: list[tuple[str, int, int]] = []
 
     print(f"Loaded {config['meta']['description']}", file=sys.stderr)
 
@@ -599,7 +604,16 @@ def scrape_exchanges(config: dict, *, exclude_us: bool = True) -> pd.DataFrame:
             final_df = df[SCRAPE_COLUMNS].dropna(subset=["YF_Ticker"])
             all_dfs.append(final_df)
 
-            if len(final_df) > 0:
+            min_expected = int(ex.get("min_expected_rows") or 0)
+            if min_expected and len(final_df) < min_expected:
+                degraded_exchanges.append(
+                    (ex["exchange_name"], min_expected, len(final_df))
+                )
+                print(
+                    f"DEGRADED ({len(final_df)} rows; expected >= {min_expected})",
+                    file=sys.stderr,
+                )
+            elif len(final_df) > 0:
                 print(f"OK ({len(final_df)} rows)", file=sys.stderr)
             else:
                 print(
@@ -619,6 +633,19 @@ def scrape_exchanges(config: dict, *, exclude_us: bool = True) -> pd.DataFrame:
     master = pd.concat(all_dfs, ignore_index=True)
     master = master.drop_duplicates(subset=["YF_Ticker"])
     print(f"\nScraped {len(master)} unique tickers", file=sys.stderr)
+
+    if degraded_exchanges:
+        lines = "\n".join(
+            f"  - {name}: got {actual}, expected >= {expected}"
+            for name, expected, actual in degraded_exchanges
+        )
+        raise RuntimeError(
+            "Scrape produced row counts below `min_expected_rows` floor for "
+            f"{len(degraded_exchanges)} exchange(s):\n{lines}\n"
+            "Source URL likely degraded or restructured. Fix the source "
+            "(or disable the exchange in config/exchanges.json) before retrying."
+        )
+
     return master
 
 

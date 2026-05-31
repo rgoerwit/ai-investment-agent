@@ -253,15 +253,16 @@
       "exchange_name": "B3 (Brasil Bolsa Balcão)",
       "enabled": true,
       "method": "scrape_html",
-      "source_url": "https://stockanalysis.com/list/brazil-stock-exchange/",
+      "source_url": "https://www.fundamentus.com.br/resultado.php",
+      "note": "Switched from stockanalysis.com on 2026-05-30: that source listed only 23 real B3 equities (the remaining 477 of 500 entries were BDRs). Fundamentus returns the full ~990-row B3 universe with real mid-caps (MGLU3, RENT3, EQTL3, etc.). Uses latin-1 encoding.",
       "yahoo_suffix": ".SA",
-      "min_expected_rows": 400,
+      "min_expected_rows": 800,
       "params": {
-        "ticker_col": "Symbol",
-        "name_col": "Company Name",
-        "paginate_max_pages": 5,
+        "ticker_col": "Papel",
+        "paginate_max_pages": 1,
+        "source_encoding": "latin-1",
         "exclude_filter": {
-          "Symbol": "3[2-9]$"
+          "Papel": "3[2-9]$"
         }
       }
     },
