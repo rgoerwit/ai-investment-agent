@@ -11,6 +11,8 @@ from dataclasses import dataclass
 
 import structlog
 
+from src.agents.pm_verdict_metadata import canonicalize_pm_verdict
+
 logger = structlog.get_logger(__name__)
 
 
@@ -117,14 +119,9 @@ def extract_pm_block(pm_output: str) -> PMBlockData:
     # Use the last (most corrected) block
     pm_block = blocks[-1].group(1)
 
-    # Extract verdict (normalize underscores/spaces)
-    verdict_raw = _extract_str(r"VERDICT:\s*(\S+)", pm_block)
-    verdict = None
-    if verdict_raw:
-        verdict = verdict_raw.upper().replace(" ", "_").replace("-", "_")
-        # Normalize common variations
-        if verdict in ("DO_NOT_INITIATE", "DONOTINITATE", "DONOTINITIATE"):
-            verdict = "DO_NOT_INITIATE"
+    verdict_raw = _extract_str(r"VERDICT:\s*([^\n]+)", pm_block)
+    canonical_verdict = canonicalize_pm_verdict(verdict_raw)
+    verdict = canonical_verdict if canonical_verdict != "UNPARSEABLE" else None
 
     # Determine show_valuation_chart based on verdict
     show_chart_raw = _extract_str(r"SHOW_VALUATION_CHART:\s*(YES|NO)", pm_block)
@@ -151,6 +148,18 @@ def extract_pm_block(pm_output: str) -> PMBlockData:
     if verdict in ("DO_NOT_INITIATE", "SELL"):
         valuation_discount = 0.0
 
+    position_size = _extract_float(r"POSITION_SIZE:\s*([\d.]+)", pm_block)
+    if verdict in {"HOLD", "DO_NOT_INITIATE", "SELL"} and position_size not in (
+        None,
+        0.0,
+    ):
+        logger.warning(
+            "pm_block_position_size_corrected",
+            verdict=verdict,
+            emitted_position_size=position_size,
+        )
+        position_size = 0.0
+
     result = PMBlockData(
         verdict=verdict,
         health_adj=_extract_int(r"HEALTH_ADJ:\s*(\d+)", pm_block),
@@ -159,7 +168,7 @@ def extract_pm_block(pm_output: str) -> PMBlockData:
         zone=zone,
         show_valuation_chart=show_valuation_chart,
         valuation_discount=valuation_discount,
-        position_size=_extract_float(r"POSITION_SIZE:\s*([\d.]+)", pm_block),
+        position_size=position_size,
         valuation_context=_extract_str(r"VALUATION_CONTEXT:\s*(\S+)", pm_block),
     )
 
@@ -202,7 +211,7 @@ def extract_verdict_from_text(pm_output: str) -> str | None:
     for pattern in verdict_patterns:
         match = re.search(pattern, pm_output, re.IGNORECASE)
         if match:
-            verdict = match.group(1).upper().replace(" ", "_")
-            return verdict
+            verdict = canonicalize_pm_verdict(match.group(1))
+            return verdict if verdict != "UNPARSEABLE" else None
 
     return None

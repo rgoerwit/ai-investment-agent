@@ -18,6 +18,8 @@ from typing import Any
 
 import structlog
 
+from src.agents.pm_verdict_metadata import canonicalize_pm_verdict
+from src.charts.extractors.pm_block import extract_pm_block
 from src.data_block_utils import normalize_structured_block_boundaries
 from src.runtime_diagnostics import is_publishable_analysis
 from src.ticker_policy import CHINA_SUFFIXES, KOREA_SUFFIXES, ticker_in_group
@@ -568,16 +570,8 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
 
         return str(content)
 
-    # Valid PM verdicts and their normalized display forms
-    VERDICT_NORMALIZATION = {
-        "BUY": "BUY",
-        "SELL": "SELL",
-        "HOLD": "HOLD",
-        "DO_NOT_INITIATE": "DO NOT INITIATE",
-        "DO NOT INITIATE": "DO NOT INITIATE",
-        "DONOTITIATE": "DO NOT INITIATE",  # Typo variant
-        "REJECT": "DO NOT INITIATE",
-    }
+    def _display_verdict(self, verdict: str) -> str:
+        return "DO NOT INITIATE" if verdict == "DO_NOT_INITIATE" else verdict
 
     def extract_decision(self, final_decision: str) -> str:
         """
@@ -600,8 +594,9 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
             final_decision_upper,
         )
         if pm_block_match:
-            verdict = pm_block_match.group(1).replace("  ", " ")  # Normalize spaces
-            return self.VERDICT_NORMALIZATION.get(verdict, verdict)
+            verdict = canonicalize_pm_verdict(pm_block_match.group(1))
+            if verdict != "UNPARSEABLE":
+                return self._display_verdict(verdict)
 
         # 2. PORTFOLIO MANAGER VERDICT prose (captures multi-word verdicts)
         # Matches: #### PORTFOLIO MANAGER VERDICT: DO NOT INITIATE
@@ -611,11 +606,27 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
             final_decision_upper,
         )
         if verdict_match:
-            verdict = verdict_match.group(1).replace("  ", " ")
-            return self.VERDICT_NORMALIZATION.get(verdict, verdict)
+            verdict = canonicalize_pm_verdict(verdict_match.group(1))
+            if verdict != "UNPARSEABLE":
+                return self._display_verdict(verdict)
 
         # 3. Default to HOLD (safe fallback, no greedy matching)
         return "HOLD"
+
+    def _extract_prose_decision(self, final_decision: str) -> str | None:
+        """Extract only the narrative PM verdict, ignoring PM_BLOCK fields."""
+        final_decision_upper = self._normalize_string(final_decision).upper()
+        verdict_match = re.search(
+            r"PORTFOLIO\s+MANAGER\s+VERDICT\s*:\s*\*?\*?"
+            r"(BUY|SELL|HOLD|DO\s+NOT\s+INITIATE|REJECT)\b",
+            final_decision_upper,
+        )
+        if not verdict_match:
+            return None
+        verdict = canonicalize_pm_verdict(verdict_match.group(1))
+        if verdict == "UNPARSEABLE":
+            return None
+        return self._display_verdict(verdict)
 
     def _extract_decision_rationale(self, final_decision: str) -> str:
         """
@@ -844,11 +855,22 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         # Get final decision with comprehensive error handling
         final_decision_raw = self._get_final_decision_text(result)
         publishable = is_publishable_analysis(result)
-        decision = (
-            self.extract_decision(final_decision_raw)
-            if publishable
-            else "ANALYSIS FAILED"
-        )
+        pm_contract = extract_pm_block(final_decision_raw)
+        block_verdict = canonicalize_pm_verdict(pm_contract.verdict)
+        prose_decision = self._extract_prose_decision(final_decision_raw)
+        prose_verdict = canonicalize_pm_verdict(prose_decision)
+        contract_caveats: list[str] = []
+        if block_verdict != "UNPARSEABLE":
+            extracted_decision = self._display_verdict(block_verdict)
+            if prose_verdict != "UNPARSEABLE" and prose_verdict != block_verdict:
+                contract_caveats.append(
+                    "- PM prose verdict was "
+                    f"{self._display_verdict(prose_verdict)}; PM_BLOCK verdict was "
+                    f"{self._display_verdict(block_verdict)}. PM_BLOCK was used."
+                )
+        else:
+            extracted_decision = self.extract_decision(final_decision_raw)
+        decision = extracted_decision if publishable else "ANALYSIS FAILED"
 
         # Build title
         if self.company_name:
@@ -868,6 +890,17 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
             )
 
         verification_caveat = self._build_verification_caveat(result)
+        if contract_caveats:
+            contract_intro = (
+                "Portfolio Manager output contained structured/verbal verdict "
+                "inconsistency. The structured PM_BLOCK contract controls."
+            )
+            contract_text = contract_intro + "\n\n" + "\n".join(contract_caveats)
+            verification_caveat = (
+                f"{verification_caveat}\n\n{contract_text}"
+                if verification_caveat
+                else contract_text
+            )
         if verification_caveat:
             report_parts.append("\n## Verification Caveats\n\n")
             report_parts.append(f"{verification_caveat}\n\n---\n")
@@ -1056,7 +1089,7 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
                     f"{self._clean_text(normalized, demote_headers=True)}\n\n"
                 )
 
-        _verdict = self.extract_decision(final_decision_raw)
+        _verdict = extracted_decision
         if _verdict in ("DO NOT INITIATE", "SELL"):
             report_parts.append("## Trading Strategy\n\n")
             report_parts.append(
@@ -1080,7 +1113,18 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
                 neutral = risk_state.get("current_neutral_response", "")
 
                 if risky or safe or neutral:
-                    report_parts.append("## Risk Assessment\n\n")
+                    risk_title = (
+                        "Risk Assessment — Archival Debate (Non-Executable)"
+                        if _verdict in ("DO NOT INITIATE", "SELL")
+                        else "Risk Assessment"
+                    )
+                    report_parts.append(f"## {risk_title}\n\n")
+                    if _verdict in ("DO NOT INITIATE", "SELL"):
+                        report_parts.append(
+                            "*These subordinate views predate or challenge the PM "
+                            "override. They are retained for audit context and are "
+                            "not trade instructions.*\n\n"
+                        )
                     if risky:
                         report_parts.append("### Risky Analyst (Aggressive)\n\n")
                         report_parts.append(

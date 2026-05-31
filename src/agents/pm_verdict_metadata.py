@@ -1,15 +1,13 @@
 from __future__ import annotations
 
+import re
 from typing import Literal, cast
 
 from pydantic import BaseModel
 
-from src.charts.extractors.pm_block import extract_pm_block, extract_verdict_from_text
-
 PMVerdict = Literal[
     "BUY",
     "HOLD",
-    "REJECT",
     "SELL",
     "DO_NOT_INITIATE",
     "UNPARSEABLE",
@@ -20,13 +18,23 @@ class PMVerdictMetadata(BaseModel):
     verdict: PMVerdict
 
 
+def canonicalize_pm_verdict(raw: str | None) -> PMVerdict:
+    """Return the canonical PM verdict label for free-text or block values."""
+    cleaned = (raw or "").strip().upper().replace("-", "_").replace(" ", "_")
+    cleaned = re.sub(r"_+", "_", cleaned)
+    if cleaned in {"DO_NOT_INITIATE", "DONOTINITIATE", "DONOTINITATE", "REJECT"}:
+        return "DO_NOT_INITIATE"
+    if cleaned in {"BUY", "HOLD", "SELL"}:
+        return cast(PMVerdict, cleaned)
+    return "UNPARSEABLE"
+
+
 def pm_verdict_metadata_from_text(pm_output: str) -> PMVerdictMetadata:
+    from src.charts.extractors.pm_block import (
+        extract_pm_block,
+        extract_verdict_from_text,
+    )
+
     block = extract_pm_block(pm_output)
     verdict = block.verdict or extract_verdict_from_text(pm_output) or "UNPARSEABLE"
-    if verdict == "DO_NOT_INITIATE":
-        normalized: PMVerdict = "DO_NOT_INITIATE"
-    elif verdict in {"BUY", "HOLD", "REJECT", "SELL"}:
-        normalized = cast(PMVerdict, verdict)
-    else:
-        normalized = "UNPARSEABLE"
-    return PMVerdictMetadata(verdict=normalized)
+    return PMVerdictMetadata(verdict=canonicalize_pm_verdict(verdict))

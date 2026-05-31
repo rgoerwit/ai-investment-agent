@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 
 import structlog
 
+from src.agents.pm_verdict_metadata import canonicalize_pm_verdict
 from src.agents.support import extract_kill_criteria, get_bear_history
 from src.charts.extractors.valuation import extract_valuation_scenarios, resolve_eps_ttm
 from src.data_block_utils import extract_data_block_field
@@ -75,18 +76,6 @@ class InvestmentMemo:
     source_confidence: list[SourceRow] = field(default_factory=list)
 
 
-def _normalize_verdict(raw: str | None) -> str:
-    if not raw:
-        return "UNAVAILABLE"
-    cleaned = raw.strip().upper().replace("-", " ").replace("_", " ")
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    if cleaned in {"DO NOT INITIATE", "DONOTINITATE", "DONOTINITIATE"}:
-        return "DO_NOT_INITIATE"
-    if cleaned in {"BUY", "HOLD", "SELL"}:
-        return cleaned
-    return cleaned.replace(" ", "_") if cleaned else "UNAVAILABLE"
-
-
 def extract_pm_verdict(pm_text: str) -> str:
     """Return the canonical verdict label from PM output, or 'UNAVAILABLE'."""
     if not pm_text:
@@ -95,10 +84,12 @@ def extract_pm_verdict(pm_text: str) -> str:
     if blocks:
         match = _VERDICT_LINE.search(blocks[-1].group(1))
         if match:
-            return _normalize_verdict(match.group(1))
+            verdict = canonicalize_pm_verdict(match.group(1))
+            return "UNAVAILABLE" if verdict == "UNPARSEABLE" else verdict
     narrative = _VERDICT_NARRATIVE.search(pm_text)
     if narrative:
-        return _normalize_verdict(narrative.group(1))
+        verdict = canonicalize_pm_verdict(narrative.group(1))
+        return "UNAVAILABLE" if verdict == "UNPARSEABLE" else verdict
     return "UNAVAILABLE"
 
 

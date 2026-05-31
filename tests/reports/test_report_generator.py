@@ -1157,6 +1157,7 @@ class TestTraderSectionVerdictGating:
         return {
             "final_trade_decision": verdict_text,
             "trader_investment_plan": self._TRADER_CONTENT,
+            "analysis_validity": {"publishable": True},
         }
 
     def test_do_not_initiate_suppresses_entry_levels(self):
@@ -1206,6 +1207,46 @@ class TestTraderSectionVerdictGating:
             self._result("VERDICT: DO_NOT_INITIATE\n\nFails thesis.")
         )
         assert "## Trading Strategy" in report
+
+    def test_pm_block_verdict_controls_report_title_and_caveat(self):
+        reporter = QuietModeReporter("TEST.NZ")
+        report = reporter.generate_report(
+            self._result(
+                "#### PORTFOLIO MANAGER VERDICT: BUY\n\n"
+                "### --- START PM_BLOCK ---\n"
+                "VERDICT: DO_NOT_INITIATE\n"
+                "ZONE: HIGH\n"
+                "POSITION_SIZE: 0.0\n"
+                "### --- END PM_BLOCK ---\n"
+            )
+        )
+        assert "# TEST.NZ: DO NOT INITIATE" in report
+        assert "Verification Caveats" in report
+        assert "PM prose verdict was BUY" in report
+        assert "PM_BLOCK verdict was DO NOT INITIATE" in report
+        assert "6.00 NZD" not in report
+
+    def test_dni_risk_debate_is_labeled_non_executable(self):
+        reporter = QuietModeReporter("TEST.NZ")
+        report = reporter.generate_report(
+            {
+                "final_trade_decision": (
+                    "#### PORTFOLIO MANAGER VERDICT: DO NOT INITIATE\n\n"
+                    "### --- START PM_BLOCK ---\n"
+                    "VERDICT: DO_NOT_INITIATE\n"
+                    "ZONE: HIGH\n"
+                    "POSITION_SIZE: 0.0\n"
+                    "### --- END PM_BLOCK ---\n"
+                ),
+                "risk_debate_state": {
+                    "current_risky_response": "Recommended Initial Position Size: 6.0%",
+                },
+                "analysis_validity": {"publishable": True},
+            }
+        )
+        assert "Risk Assessment — Archival Debate (Non-Executable)" in report
+        assert "not trade instructions" in report
+        assert "Recommended Initial Position Size: 6.0%" in report
 
 
 # ---------------------------------------------------------------------------

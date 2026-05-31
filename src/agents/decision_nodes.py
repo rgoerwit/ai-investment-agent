@@ -14,7 +14,10 @@ from src.agents.pm_inputs import (
     pm_input_present,
     risk_debate_present,
 )
-from src.agents.pm_verdict_metadata import pm_verdict_metadata_from_text
+from src.agents.pm_verdict_metadata import (
+    canonicalize_pm_verdict,
+    pm_verdict_metadata_from_text,
+)
 from src.charts.extractors.pm_block import extract_verdict_from_text
 from src.data_block_utils import has_parseable_data_block
 from src.error_safety import summarize_exception
@@ -219,6 +222,53 @@ def _insert_block_before_pm_block(pm_output: str, block_text: str) -> str:
             pm_block_marker, f"{block_text.rstrip()}\n\n{pm_block_marker}", 1
         )
     return f"{pm_output.rstrip()}\n\n{block_text.rstrip()}\n"
+
+
+def _normalize_pm_block_contract(pm_output: str) -> str:
+    """Rewrite final PM_BLOCK text when its sizing violates verdict semantics.
+
+    PM_BLOCK extraction also clamps no-initiation position size for all readers,
+    including older artifacts. This boundary rewrite keeps newly persisted PM
+    output internally coherent with that same contract.
+    """
+    pm_block_pattern = re.compile(
+        r"### --- START PM_BLOCK[^\n]*---(?P<body>.+?)### --- END PM_BLOCK ---",
+        re.DOTALL,
+    )
+    blocks = list(pm_block_pattern.finditer(pm_output))
+    if not blocks:
+        return pm_output
+
+    last = blocks[-1]
+    body = last.group("body")
+    verdict_match = re.search(r"(?im)^VERDICT:\s*([^\n]+)", body)
+    size_match = re.search(r"(?im)^(POSITION_SIZE:\s*)([\d.]+)", body)
+    if not verdict_match or not size_match:
+        return pm_output
+
+    verdict = canonicalize_pm_verdict(verdict_match.group(1))
+    try:
+        emitted_size = float(size_match.group(2))
+    except ValueError:
+        return pm_output
+
+    if verdict not in {"HOLD", "DO_NOT_INITIATE", "SELL"} or emitted_size == 0.0:
+        return pm_output
+
+    logger.warning(
+        "pm_block_position_size_rewritten",
+        verdict=verdict,
+        emitted_position_size=emitted_size,
+    )
+    rewritten_body = re.sub(
+        r"(?im)^(POSITION_SIZE:\s*)[\d.]+",
+        r"\g<1>0.0",
+        body,
+        count=1,
+    )
+    return (
+        pm_output[: last.start("body")] + rewritten_body + pm_output[last.end("body") :]
+    )
 
 
 def _ensure_apac_resolution_block(pm_output: str, apac_report: str | None) -> str:
@@ -862,6 +912,7 @@ RISK TEAM DEBATE:
                     fallback_content=content_str,
                 )
 
+            content_str = _normalize_pm_block_contract(content_str)
             present_inputs, missing_inputs = _present_pm_inputs(state)
             pm_metadata = pm_verdict_metadata_from_text(content_str)
             logger.info(

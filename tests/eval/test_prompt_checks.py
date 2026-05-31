@@ -80,6 +80,22 @@ No ADR found
 === END RAW DATA ===
 """
 
+
+def test_portfolio_manager_prompt_capex_to_da_is_investigation_flag() -> None:
+    data = json.loads(Path("prompts/portfolio_manager.json").read_text())
+    msg = data["system_message"]
+    assert "CAPEX_TO_DA < 0.7 / UNDERINVESTING is an investigation flag" in msg
+    assert "not proof of moat decay" in msg
+    assert "confirmed underinvestment" in msg
+    assert "operational starvation" in msg
+
+
+def test_portfolio_manager_prompt_requires_override_sizing_disclosure() -> None:
+    data = json.loads(Path("prompts/portfolio_manager.json").read_text())
+    msg = data["system_message"]
+    assert "subordinate sizing views are overridden and non-executable" in msg
+
+
 VALID_CONSULTANT = """### CONSULTANT REVIEW: APPROVED
 
 ### FINAL CONSULTANT VERDICT
