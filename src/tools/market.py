@@ -253,7 +253,11 @@ async def get_fundamental_analysis(
         company_name = await shared.extract_company_name_async(normalized_symbol)
         company_resolved = company_name != normalized_symbol
 
-        ticker_query = f"{ticker} stock analyst coverage count consensus rating American Depositary Receipt exchange listing ADR status"
+        ticker_query = (
+            f"{ticker} stock analyst coverage count consensus rating "
+            "American Depositary Receipt depositary bank sponsored unsponsored "
+            "OTCQX OTCQB OTCPK sponsorship level Form F-6 exchange listing ADR status"
+        )
         ticker_results = await shared._tavily_search_with_timeout(
             {"query": ticker_query}
         )
@@ -293,7 +297,8 @@ async def get_fundamental_analysis(
 
         if not found_adr_info and company_resolved:
             adr_query = (
-                f'"{company_name}" American Depositary Receipt ADR ticker status'
+                f'"{company_name}" American Depositary Receipt ADR depositary bank '
+                "sponsored unsponsored sponsorship level Form F-6 ticker status"
             )
             adr_results = await shared._tavily_search_with_timeout({"query": adr_query})
             adr_results_str = (

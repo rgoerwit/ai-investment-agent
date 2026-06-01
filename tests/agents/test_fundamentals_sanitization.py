@@ -60,6 +60,25 @@ ADR_THESIS_IMPACT: MODERATE_CONCERN
     assert "ADR_DATA_QUALITY_NOTE: Invalid ADR routing fields removed" in sanitized
 
 
+def test_sanitize_invalidates_suffix_stripped_home_ticker_as_adr() -> None:
+    content = """### --- START DATA_BLOCK ---
+ADR_EXISTS: YES
+ADR_TYPE: SPONSORED
+ADR_TICKER: B3SA3
+ADR_EXCHANGE: OTC-OTCQX
+ADR_THESIS_IMPACT: MODERATE_CONCERN
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps({"trailingPE": 17.9})
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "B3SA3.SA")
+
+    assert "ADR_TICKER: None" in sanitized
+    assert "ADR_EXCHANGE: None" in sanitized
+    assert "ADR_THESIS_IMPACT: UNCERTAIN" in sanitized
+    assert "ADR_DATA_QUALITY_NOTE: Invalid ADR routing fields removed" in sanitized
+
+
 def test_sanitize_invalidates_non_us_adr_exchange() -> None:
     content = """### --- START DATA_BLOCK ---
 ADR_EXISTS: YES
@@ -99,6 +118,100 @@ ADR_THESIS_IMPACT: MODERATE_CONCERN
     )
 
     sanitized = _sanitize_fundamentals_output(content, raw_data, "ABEV3.SA")
+
+    assert sanitized == content
+
+
+def test_sanitize_downgrades_loose_otc_sponsored_claim() -> None:
+    content = """### --- START DATA_BLOCK ---
+ADR_EXISTS: YES
+ADR_TYPE: SPONSORED
+ADR_TICKER: BOLSY
+ADR_EXCHANGE: OTC-OTCQX
+ADR_THESIS_IMPACT: MODERATE_CONCERN
+### --- END DATA_BLOCK ---
+"""
+    raw_data = (
+        "### TOOL 2: get_fundamental_analysis\n"
+        "Investing.com profile: B3 SA Brasil Bolsa Balcao sponsored ADR BOLSY "
+        "trades over the counter. No depositary or SEC sponsorship metadata."
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "B3SA3.SA")
+
+    assert "ADR_TYPE: UNCERTAIN" in sanitized
+    assert "ADR_THESIS_IMPACT: UNCERTAIN" in sanitized
+    assert "ADR_DATA_QUALITY_NOTE: OTC sponsorship claim lacked" in sanitized
+
+
+def test_sanitize_corrects_explicit_unsponsored_adr() -> None:
+    content = """### --- START DATA_BLOCK ---
+ADR_EXISTS: YES
+ADR_TYPE: SPONSORED
+ADR_TICKER: BOLSY
+ADR_EXCHANGE: OTC-OTCQX
+ADR_THESIS_IMPACT: MODERATE_CONCERN
+### --- END DATA_BLOCK ---
+"""
+    raw_data = (
+        "Citi Depositary Receipts notice for BOLSY: "
+        "Sponsorship Level: Unsponsored ADR Program."
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "B3SA3.SA")
+
+    assert "ADR_TYPE: UNSPONSORED" in sanitized
+    assert "ADR_THESIS_IMPACT: EMERGING_INTEREST" in sanitized
+    assert "ADR_DATA_QUALITY_NOTE: OTC ADR sponsorship corrected" in sanitized
+
+
+def test_sanitize_preserves_otc_sponsored_with_authoritative_evidence() -> None:
+    content = """### --- START DATA_BLOCK ---
+ADR_EXISTS: YES
+ADR_TYPE: SPONSORED
+ADR_TICKER: EXMPY
+ADR_EXCHANGE: OTC-OTCQX
+ADR_THESIS_IMPACT: MODERATE_CONCERN
+### --- END DATA_BLOCK ---
+"""
+    raw_data = (
+        "Source: https://www.adrbny.com/example\n"
+        "The company maintains a sponsored Level I ADR program."
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "EXMP.SA")
+
+    assert sanitized == content
+
+
+def test_sanitize_preserves_nyse_sponsored_claim() -> None:
+    content = """### --- START DATA_BLOCK ---
+ADR_EXISTS: YES
+ADR_TYPE: SPONSORED
+ADR_TICKER: ABEV
+ADR_EXCHANGE: NYSE
+ADR_THESIS_IMPACT: MODERATE_CONCERN
+### --- END DATA_BLOCK ---
+"""
+    raw_data = "Generic profile text only."
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "ABEV3.SA")
+
+    assert sanitized == content
+
+
+def test_sanitize_preserves_uncertain_otc_claim() -> None:
+    content = """### --- START DATA_BLOCK ---
+ADR_EXISTS: YES
+ADR_TYPE: UNCERTAIN
+ADR_TICKER: BOLSY
+ADR_EXCHANGE: OTC-OTCQX
+ADR_THESIS_IMPACT: UNCERTAIN
+### --- END DATA_BLOCK ---
+"""
+    raw_data = "Generic OTC profile text only."
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "B3SA3.SA")
 
     assert sanitized == content
 

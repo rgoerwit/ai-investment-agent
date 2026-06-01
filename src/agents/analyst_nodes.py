@@ -67,6 +67,35 @@ _VALID_ADR_EXCHANGES = {
     "OTC-OTCPK",
     "PINK",
 }
+_AUTHORITATIVE_ADR_DOMAINS = (
+    "sec.gov",
+    "adr.db.com",
+    "adrbny.com",
+    "depositaryreceipts.citi.com",
+    "citiadr.factsetdigitalsolutions.com",
+    "adr.com",
+    "jpmadr",
+    "markitdigital.com/jpmadr",
+    "otcmarkets.com",
+)
+_UNSPONSORED_ADR_MARKERS = (
+    "unsponsored adr",
+    "unsp/adr",
+    "sponsorship level: unsponsored",
+    "unsponsored adr program",
+    "multi unsponsored",
+)
+_SPONSORED_ADR_MARKERS = (
+    "sponsorship level: sponsored",
+    "sponsored level i adr",
+    "sponsored level ii adr",
+    "sponsored level iii adr",
+    "sponsored level 1 adr",
+    "sponsored level 2 adr",
+    "sponsored level 3 adr",
+    "sponsored adr program",
+    "sponsored depositary receipt program",
+)
 
 
 def _replace_or_append_datablock_line(body: str, key: str, value: str) -> str:
@@ -94,14 +123,32 @@ def _invalid_adr_routing(body: str, ticker: str) -> bool:
     adr_ticker = _extract_datablock_value(body, "ADR_TICKER").upper()
     adr_exchange = _extract_datablock_value(body, "ADR_EXCHANGE").upper()
     suffix = _home_suffix(ticker)
+    ticker_root = ticker.upper().split(".", 1)[0]
     ticker_bad = adr_ticker not in {"", "NONE", "N/A"} and (
-        adr_ticker == ticker.upper() or (suffix and adr_ticker.endswith(suffix))
+        adr_ticker == ticker.upper()
+        or adr_ticker == ticker_root
+        or (suffix and adr_ticker.endswith(suffix))
     )
     exchange_bad = (
         adr_exchange not in {"", "NONE", "N/A"}
         and adr_exchange not in _VALID_ADR_EXCHANGES
     )
     return ticker_bad or exchange_bad
+
+
+def _classify_otc_adr_evidence(raw_text: str) -> str | None:
+    """Classify OTC ADR sponsorship only from explicit authoritative evidence."""
+    text = raw_text.lower()
+    if any(marker in text for marker in _UNSPONSORED_ADR_MARKERS):
+        return "UNSPONSORED"
+    has_authoritative_source = any(
+        domain in text for domain in _AUTHORITATIVE_ADR_DOMAINS
+    )
+    if has_authoritative_source and any(
+        marker in text for marker in _SPONSORED_ADR_MARKERS
+    ):
+        return "SPONSORED"
+    return None
 
 
 def _sanitize_fundamentals_output(
@@ -112,13 +159,15 @@ def _sanitize_fundamentals_output(
     if not raw_data or not has_parseable_data_block(content):
         return content
 
+    has_structured_payload = False
     try:
         payload = json.loads(raw_data)
+        has_structured_payload = isinstance(payload, dict)
     except (TypeError, ValueError, json.JSONDecodeError):
-        return content
+        payload = {}
 
-    if not isinstance(payload, dict):
-        return content
+    if not has_structured_payload:
+        payload = {}
 
     block_body = extract_last_data_block(content, include_markers=False)
     block_with_markers = extract_last_data_block(content, include_markers=True)
@@ -126,11 +175,14 @@ def _sanitize_fundamentals_output(
         return content
 
     updated_body = block_body
-    if payload.get("_split_sensitive_metrics_quarantined") is True:
+    if (
+        has_structured_payload
+        and payload.get("_split_sensitive_metrics_quarantined") is True
+    ):
         for key in _QUARANTINED_FORWARD_KEYS:
             updated_body = _replace_or_append_datablock_line(updated_body, key, "N/A")
 
-    if payload.get("_pe_low_anomaly_quarantined") is True:
+    if has_structured_payload and payload.get("_pe_low_anomaly_quarantined") is True:
         updated_body = _replace_or_append_datablock_line(
             updated_body, "PE_RATIO_TTM", "N/A"
         )
@@ -138,17 +190,23 @@ def _sanitize_fundamentals_output(
             updated_body, "PEG_RATIO", "N/A"
         )
 
-    for datablock_key, raw_key in _HORIZON_FIELD_RAW_KEYS:
-        if payload.get(raw_key) is None:
-            updated_body = _replace_or_append_datablock_line(
-                updated_body,
-                datablock_key,
-                "N/A",
-            )
+    if has_structured_payload:
+        for datablock_key, raw_key in _HORIZON_FIELD_RAW_KEYS:
+            if payload.get(raw_key) is None:
+                updated_body = _replace_or_append_datablock_line(
+                    updated_body,
+                    datablock_key,
+                    "N/A",
+                )
 
     latest_quarter_date = payload.get("latest_quarter_date")
+    latest_quarter_date_reconciled = (
+        has_structured_payload
+        and payload.get("_latest_quarter_date_source")
+        == "reconciled_most_recent_quarter"
+    )
     if (
-        payload.get("_latest_quarter_date_source") == "reconciled_most_recent_quarter"
+        latest_quarter_date_reconciled
         and isinstance(latest_quarter_date, str)
         and latest_quarter_date
     ):
@@ -173,6 +231,40 @@ def _sanitize_fundamentals_output(
                 value,
             )
         logger.warning("adr_routing_invalidated", ticker=ticker)
+
+    adr_exchange = _extract_datablock_value(updated_body, "ADR_EXCHANGE").upper()
+    adr_type = _extract_datablock_value(updated_body, "ADR_TYPE").upper()
+    if adr_exchange.startswith("OTC") and adr_type == "SPONSORED":
+        evidence = _classify_otc_adr_evidence(raw_data)
+        replacements: dict[str, str] | None = None
+        if evidence == "UNSPONSORED":
+            replacements = {
+                "ADR_TYPE": "UNSPONSORED",
+                "ADR_THESIS_IMPACT": "EMERGING_INTEREST",
+                "ADR_DATA_QUALITY_NOTE": (
+                    "OTC ADR sponsorship corrected from explicit unsponsored "
+                    "evidence."
+                ),
+            }
+            logger.warning("adr_sponsorship_corrected_to_unsponsored", ticker=ticker)
+        elif evidence is None:
+            replacements = {
+                "ADR_TYPE": "UNCERTAIN",
+                "ADR_THESIS_IMPACT": "UNCERTAIN",
+                "ADR_DATA_QUALITY_NOTE": (
+                    "OTC sponsorship claim lacked authoritative evidence; loose "
+                    "source language ignored."
+                ),
+            }
+            logger.warning("adr_sponsorship_downgraded_to_uncertain", ticker=ticker)
+
+        if replacements:
+            for key, value in replacements.items():
+                updated_body = _replace_or_append_datablock_line(
+                    updated_body,
+                    key,
+                    value,
+                )
 
     if updated_body == block_body:
         return content
