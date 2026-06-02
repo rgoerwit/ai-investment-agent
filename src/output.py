@@ -308,6 +308,9 @@ async def handle_article_generation(
                 data_block = analysis_result.get("fundamentals_report", "")
                 pm_block = analysis_result.get("final_trade_decision", "")
                 valuation_params = analysis_result.get("valuation_params", "")
+                consultant_review = analysis_result.get("consultant_review", "")
+            else:
+                consultant_review = ""
 
             try:
                 final_article, feedback = await editor.edit(
@@ -318,6 +321,7 @@ async def handle_article_generation(
                     data_block=data_block,
                     pm_block=pm_block,
                     valuation_params=valuation_params,
+                    consultant_review=consultant_review,
                     governance_card=governance_card
                     if isinstance(governance_card, dict)
                     else None,

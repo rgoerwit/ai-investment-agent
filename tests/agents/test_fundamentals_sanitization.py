@@ -39,6 +39,245 @@ GROWTH_TRAJECTORY: STABLE
     assert "GROWTH_TRAJECTORY: N/A" in sanitized
 
 
+def test_sanitize_fundamentals_output_extracts_production_raw_payload() -> None:
+    content = """### --- START DATA_BLOCK ---
+REVENUE_GROWTH_TTM: 20.3%
+EARNINGS_GROWTH_TTM: 33.5%
+NET_DEBT_EBITDA: -0.01
+CASH_TO_ASSETS: 33.1%
+### --- END DATA_BLOCK ---
+"""
+    raw_data = (
+        "### TOOL 1: get_financial_metrics\n"
+        + json.dumps(
+            {
+                "revenueGrowth": 0.203,
+                "revenueGrowth_TTM": None,
+                "earningsGrowth": 0.389,
+                "earningsGrowth_TTM": None,
+                "totalDebt": 15_579_192_320,
+                "cashAndShortTermInvestments": 1_603_617_000,
+                "ebitda": 7_168_355_840,
+                "marketCap": 82_678_956_032,
+                "totalAssets": 48_487_647_000,
+                "capital_cashToAssets": 0.0331,
+            }
+        )
+        + "\n### TOOL 2: supplemental search\nNoisy text."
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "B3SA3.SA")
+
+    assert "REVENUE_GROWTH_TTM: N/A" in sanitized
+    assert "EARNINGS_GROWTH_TTM: N/A" in sanitized
+    assert "NET_DEBT_EBITDA: 1.95" in sanitized
+    assert "CASH_TO_ASSETS: 3.3%" in sanitized
+    assert "GROWTH_DATA_QUALITY_NOTE:" in sanitized
+    assert "BALANCE_SHEET_DATA_QUALITY_NOTE:" in sanitized
+
+
+def test_sanitize_fundamentals_output_extracts_non_first_tool_payload() -> None:
+    content = """### --- START DATA_BLOCK ---
+NET_DEBT_EBITDA: -0.01
+### --- END DATA_BLOCK ---
+"""
+    raw_data = "### TOOL 2: get_financial_metrics\n" + json.dumps(
+        {
+            "totalDebt": 15_579_192_320,
+            "cashAndShortTermInvestments": 1_603_617_000,
+            "ebitda": 7_168_355_840,
+        }
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "B3SA3.SA")
+
+    assert "NET_DEBT_EBITDA: 1.95" in sanitized
+
+
+def test_sanitize_fundamentals_output_ignores_unmarked_json() -> None:
+    content = """### --- START DATA_BLOCK ---
+NET_DEBT_EBITDA: -0.01
+### --- END DATA_BLOCK ---
+"""
+    raw_data = (
+        'Unrelated search output {"totalDebt": 1, '
+        '"cashAndShortTermInvestments": 0, "ebitda": 1}'
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "B3SA3.SA")
+
+    assert sanitized == content
+
+
+def test_sanitize_fundamentals_output_skips_malformed_marked_payload() -> None:
+    content = """### --- START DATA_BLOCK ---
+NET_DEBT_EBITDA: -0.01
+### --- END DATA_BLOCK ---
+"""
+    raw_data = "### TOOL 1: get_financial_metrics\n{not valid json"
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "B3SA3.SA")
+
+    assert sanitized == content
+
+
+def test_sanitize_fundamentals_output_handles_zero_ebitda() -> None:
+    content = """### --- START DATA_BLOCK ---
+NET_DEBT_EBITDA: -0.01
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps(
+        {
+            "totalDebt": 15_579_192_320,
+            "cashAndShortTermInvestments": 1_603_617_000,
+            "ebitda": 0,
+        }
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "B3SA3.SA")
+
+    assert "NET_DEBT_EBITDA: N/A" in sanitized
+
+
+def test_sanitize_fundamentals_output_overrides_na_when_raw_value_computes() -> None:
+    content = """### --- START DATA_BLOCK ---
+NET_DEBT_EBITDA: N/A
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps(
+        {
+            "totalDebt": 15_579_192_320,
+            "cashAndShortTermInvestments": 1_603_617_000,
+            "ebitda": 7_168_355_840,
+        }
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "B3SA3.SA")
+
+    assert "NET_DEBT_EBITDA: 1.95" in sanitized
+
+
+def test_sanitize_fundamentals_output_prefers_capital_cash_to_assets() -> None:
+    content = """### --- START DATA_BLOCK ---
+CASH_TO_ASSETS: 33.1%
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps(
+        {
+            "cashAndShortTermInvestments": 50,
+            "totalAssets": 100,
+            "capital_cashToAssets": 0.0331,
+        }
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "B3SA3.SA")
+
+    assert "CASH_TO_ASSETS: 3.3%" in sanitized
+    assert "CASH_TO_ASSETS: 50.0%" not in sanitized
+
+
+def test_sanitize_fundamentals_output_accepts_four_hash_datablock() -> None:
+    content = """#### --- START DATA_BLOCK ---
+NET_DEBT_EBITDA: -0.01
+#### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps(
+        {
+            "totalDebt": 15_579_192_320,
+            "cashAndShortTermInvestments": 1_603_617_000,
+            "ebitda": 7_168_355_840,
+        }
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "B3SA3.SA")
+
+    assert "NET_DEBT_EBITDA: 1.95" in sanitized
+
+
+def test_sanitize_fundamentals_output_reconciles_b3_balance_sheet_fields() -> None:
+    content = """### --- START DATA_BLOCK ---
+NET_CASH_TO_MARKET_CAP: 1.8%
+CASH_TO_ASSETS: 33.1%
+NET_DEBT_EBITDA: -0.01
+PFIC_ASSET_RATIO: 33.1%
+PFIC_CASH_TRAP: YES
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps(
+        {
+            "totalDebt": 15_579_192_320,
+            "cashAndShortTermInvestments": 1_603_617_000,
+            "ebitda": 7_168_355_840,
+            "marketCap": 82_678_956_032,
+            "totalAssets": 48_487_647_000,
+            "capital_cashToAssets": 0.0331,
+        }
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "B3SA3.SA")
+
+    assert "NET_DEBT_EBITDA: 1.95" in sanitized
+    assert "NET_CASH_TO_MARKET_CAP: -16.9%" in sanitized
+    assert "CASH_TO_ASSETS: 3.3%" in sanitized
+    assert "PFIC_ASSET_RATIO: 3.3%" in sanitized
+    assert "PFIC_CASH_TRAP: NO" in sanitized
+    assert "PFIC_CASH_TRAP: YES" not in sanitized
+
+
+def test_sanitize_fundamentals_output_downgrades_unreliable_pfic_basis() -> None:
+    content = """### --- START DATA_BLOCK ---
+CASH_TO_ASSETS: 33.1%
+PFIC_ASSET_RATIO: 33.1%
+PFIC_CASH_TRAP: YES
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps({"totalDebt": 1_000, "ebitda": 500})
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "B3SA3.SA")
+
+    assert "CASH_TO_ASSETS: N/A" in sanitized
+    assert "PFIC_ASSET_RATIO: N/A" in sanitized
+    assert "PFIC_CASH_TRAP: N/A" in sanitized
+    assert "PFIC_ASSET_NOTE:" in sanitized
+
+
+def test_sanitize_fundamentals_output_appends_coverage_quality_note() -> None:
+    content = """### --- START DATA_BLOCK ---
+ANALYST_COVERAGE_ENGLISH: 2
+ANALYST_COVERAGE_TOTAL_EST: HIGH
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps({"revenueGrowth_TTM": 0.1})
+    foreign_data = "Estimated Local Analysts: HIGH"
+
+    sanitized = _sanitize_fundamentals_output(
+        content,
+        raw_data,
+        "B3SA3.SA",
+        foreign_data=foreign_data,
+    )
+
+    assert "ANALYST_COVERAGE_DATA_QUALITY_NOTE:" in sanitized
+
+
+def test_sanitize_fundamentals_output_uses_foreign_coverage_signal() -> None:
+    content = """### --- START DATA_BLOCK ---
+ANALYST_COVERAGE_ENGLISH: 2
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps({"revenueGrowth_TTM": 0.1})
+    foreign_data = "Estimated Local Analysts: HIGH"
+
+    sanitized = _sanitize_fundamentals_output(
+        content,
+        raw_data,
+        "B3SA3.SA",
+        foreign_data=foreign_data,
+    )
+
+    assert "ANALYST_COVERAGE_DATA_QUALITY_NOTE:" in sanitized
+
+
 def test_sanitize_invalidates_home_ticker_adr_routing() -> None:
     content = """### --- START DATA_BLOCK ---
 ADR_EXISTS: YES

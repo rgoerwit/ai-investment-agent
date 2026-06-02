@@ -406,6 +406,25 @@ class TestArticleEditor:
 
         assert context == "No context provided."
 
+    def test_build_fact_check_context_includes_source_confidence(self):
+        """build_fact_check_context should expose weak-source warnings."""
+        editor = _create_article_editor()
+
+        context = editor.build_fact_check_context(
+            data_block="""### --- START DATA_BLOCK ---
+OPERATING_CASH_FLOW_SOURCE: JUNIOR
+OCF_FILING_REASON: missing filing support
+ANALYST_COVERAGE_DATA_QUALITY_NOTE: English count understates total coverage.
+### --- END DATA_BLOCK ---
+""",
+            consultant_review="SPOT_CHECK: COVERAGE_GAP on OCF.",
+        )
+
+        assert "SOURCE CONFIDENCE" in context
+        assert "OPERATING_CASH_FLOW_SOURCE: JUNIOR" in context
+        assert "COVERAGE_GAP" in context
+        assert "aggregator-indicated" in context
+
     def test_parse_editor_response_valid_json(self):
         """_parse_editor_response should parse valid JSON."""
         editor = _create_article_editor()
@@ -566,6 +585,32 @@ class TestCreateEditorLLM:
 class TestEditorialLoopIntegration:
     """Integration tests for the full editorial loop."""
 
+    def test_review_response_for_citation_errors_shape(self):
+        """Citation audit feedback should match the editor feedback contract."""
+        from src.article_writer import _review_response_for_citation_errors
+
+        errors = [
+            {
+                "location": "DATA_BLOCK citation audit",
+                "claim": "Article cites (A: 1)",
+                "ground_truth": "DATA_BLOCK shows A: 2",
+                "action": "Correct A.",
+            },
+            {
+                "location": "DATA_BLOCK citation audit",
+                "claim": "Article cites (B: 3)",
+                "ground_truth": "DATA_BLOCK shows B: 4",
+                "action": "Correct B.",
+            },
+        ]
+
+        feedback = _review_response_for_citation_errors(errors)
+
+        assert feedback["verdict"] == "REVISE"
+        assert feedback["confidence"] == 1.0
+        assert feedback["deterministic_citation_audit"] is True
+        assert len(feedback["factual_errors"]) == 2
+
     @pytest.mark.asyncio
     async def test_edit_with_unavailable_editor(self):
         """edit() should return original draft when editor unavailable."""
@@ -701,6 +746,74 @@ class TestEditorialLoopIntegration:
         # Should have stopped after MAX_REVISIONS + 1 reviews (initial + after each revision)
         assert review_count == editor.MAX_REVISIONS + 1
         assert writer.revise.call_count == editor.MAX_REVISIONS
+
+    @pytest.mark.asyncio
+    async def test_edit_short_circuits_review_for_citation_mismatch(self):
+        """Citation mismatches should revise before calling the LLM editor."""
+        editor = _create_article_editor()
+        editor.llm = MagicMock()
+        editor.review = AsyncMock(
+            return_value={"verdict": "APPROVED", "confidence": 0.9}
+        )
+
+        writer = MagicMock()
+        writer.revise.return_value = "# Revised\n\nLeverage `(NET_DEBT_EBITDA: 1.95)`."
+        data_block = (
+            "### --- START DATA_BLOCK ---\n"
+            "NET_DEBT_EBITDA: 1.95\n"
+            "### --- END DATA_BLOCK ---"
+        )
+
+        result, feedback = await editor.edit(
+            writer=writer,
+            article_draft="# Draft\n\nLeverage `(NET_DEBT_EBITDA: -0.01)`.",
+            ticker="TEST",
+            company_name="Test Corp",
+            data_block=data_block,
+        )
+
+        assert result == "# Revised\n\nLeverage `(NET_DEBT_EBITDA: 1.95)`."
+        assert feedback["verdict"] == "APPROVED"
+        assert editor.review.call_count == 1
+        assert writer.revise.call_count == 1
+        revise_feedback = writer.revise.call_args.kwargs["editor_feedback"]
+        assert revise_feedback["deterministic_citation_audit"] is True
+        assert revise_feedback["verdict"] == "REVISE"
+
+    @pytest.mark.asyncio
+    async def test_edit_prepends_caveats_for_persistent_citation_mismatch(self):
+        """Unresolved citation mismatches should be visible after max revisions."""
+        editor = _create_article_editor()
+        editor.llm = MagicMock()
+        editor.MAX_REVISIONS = 1
+        editor.review = AsyncMock(
+            return_value={"verdict": "APPROVED", "confidence": 0.9}
+        )
+
+        writer = MagicMock()
+        writer.revise.return_value = (
+            "# Still Wrong\n\nLeverage `(NET_DEBT_EBITDA: -0.01)`."
+        )
+        data_block = (
+            "### --- START DATA_BLOCK ---\n"
+            "NET_DEBT_EBITDA: 1.95\n"
+            "### --- END DATA_BLOCK ---"
+        )
+
+        result, feedback = await editor.edit(
+            writer=writer,
+            article_draft="# Draft\n\nLeverage `(NET_DEBT_EBITDA: -0.01)`.",
+            ticker="TEST",
+            company_name="Test Corp",
+            data_block=data_block,
+        )
+
+        assert result.startswith("## Verification Caveats")
+        assert "NET_DEBT_EBITDA: 1.95" in result
+        assert feedback["verdict"] == "REVISE"
+        assert feedback["deterministic_citation_audit"] is True
+        assert writer.revise.call_count == 1
+        assert editor.review.call_count == 1
 
 
 class TestMainPyIntegration:

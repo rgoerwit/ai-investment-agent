@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import re
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
@@ -14,11 +12,13 @@ from langgraph.types import RunnableConfig
 from src.config import config as settings_config
 from src.data_block_utils import (
     detect_legacy_data_block_shape,
+    extract_block_text_value,
     extract_last_data_block,
     has_parseable_data_block,
     has_parseable_fenced_block,
     normalize_legacy_data_block_report,
     normalize_structured_block_boundaries,
+    replace_or_append_block_line,
 )
 from src.error_safety import summarize_exception
 from src.runtime_config import get_runtime_config
@@ -27,6 +27,12 @@ from src.tooling.text_boundary import format_untrusted_block
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .fundamentals_reconciler import (
+    HORIZON_FIELD_RAW_KEYS,
+    append_analyst_coverage_data_quality_note,
+    extract_raw_metrics_payload,
+    reconcile_high_risk_fields,
+)
 from .output_limits import cap_state_value
 from .output_validation import (
     log_output_diagnostics,
@@ -50,13 +56,6 @@ Do NOT use markdown tables inside DATA_BLOCK.
 """
 
 _QUARANTINED_FORWARD_KEYS = ("PE_RATIO_FORWARD", "PEG_RATIO")
-_HORIZON_FIELD_RAW_KEYS = (
-    ("REVENUE_GROWTH_TTM", "revenueGrowth_TTM"),
-    ("REVENUE_GROWTH_MRQ", "revenueGrowth_MRQ"),
-    ("EARNINGS_GROWTH_TTM", "earningsGrowth_TTM"),
-    ("EARNINGS_GROWTH_MRQ", "earningsGrowth_MRQ"),
-    ("GROWTH_TRAJECTORY", "growth_trajectory"),
-)
 _VALID_ADR_EXCHANGES = {
     "NYSE",
     "NASDAQ",
@@ -98,30 +97,16 @@ _SPONSORED_ADR_MARKERS = (
 )
 
 
-def _replace_or_append_datablock_line(body: str, key: str, value: str) -> str:
-    pattern = re.compile(rf"(?m)^{re.escape(key)}:\s*.*$")
-    replacement = f"{key}: {value}"
-    if pattern.search(body):
-        return pattern.sub(replacement, body, count=1)
-    suffix = "" if body.endswith("\n") else "\n"
-    return f"{body}{suffix}{replacement}"
-
-
-def _extract_datablock_value(body: str, key: str) -> str:
-    match = re.search(rf"(?m)^{re.escape(key)}:\s*(.*)$", body)
-    return match.group(1).strip() if match else ""
-
-
 def _home_suffix(ticker: str) -> str:
     return ticker[ticker.rfind(".") :].upper() if "." in ticker else ""
 
 
 def _invalid_adr_routing(body: str, ticker: str) -> bool:
-    if _extract_datablock_value(body, "ADR_EXISTS").upper() != "YES":
+    if extract_block_text_value(body, "ADR_EXISTS").upper() != "YES":
         return False
 
-    adr_ticker = _extract_datablock_value(body, "ADR_TICKER").upper()
-    adr_exchange = _extract_datablock_value(body, "ADR_EXCHANGE").upper()
+    adr_ticker = extract_block_text_value(body, "ADR_TICKER").upper()
+    adr_exchange = extract_block_text_value(body, "ADR_EXCHANGE").upper()
     suffix = _home_suffix(ticker)
     ticker_root = ticker.upper().split(".", 1)[0]
     ticker_bad = adr_ticker not in {"", "NONE", "N/A"} and (
@@ -155,19 +140,13 @@ def _sanitize_fundamentals_output(
     content: str,
     raw_data: str,
     ticker: str,
+    foreign_data: str = "",
 ) -> str:
     if not raw_data or not has_parseable_data_block(content):
         return content
 
-    has_structured_payload = False
-    try:
-        payload = json.loads(raw_data)
-        has_structured_payload = isinstance(payload, dict)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        payload = {}
-
-    if not has_structured_payload:
-        payload = {}
+    payload = extract_raw_metrics_payload(raw_data)
+    has_structured_payload = bool(payload)
 
     block_body = extract_last_data_block(content, include_markers=False)
     block_with_markers = extract_last_data_block(content, include_markers=True)
@@ -175,25 +154,29 @@ def _sanitize_fundamentals_output(
         return content
 
     updated_body = block_body
+    if has_structured_payload:
+        updated_body = reconcile_high_risk_fields(updated_body, payload)
+
+    updated_body = append_analyst_coverage_data_quality_note(
+        updated_body,
+        foreign_data,
+    )
+
     if (
         has_structured_payload
         and payload.get("_split_sensitive_metrics_quarantined") is True
     ):
         for key in _QUARANTINED_FORWARD_KEYS:
-            updated_body = _replace_or_append_datablock_line(updated_body, key, "N/A")
+            updated_body = replace_or_append_block_line(updated_body, key, "N/A")
 
     if has_structured_payload and payload.get("_pe_low_anomaly_quarantined") is True:
-        updated_body = _replace_or_append_datablock_line(
-            updated_body, "PE_RATIO_TTM", "N/A"
-        )
-        updated_body = _replace_or_append_datablock_line(
-            updated_body, "PEG_RATIO", "N/A"
-        )
+        updated_body = replace_or_append_block_line(updated_body, "PE_RATIO_TTM", "N/A")
+        updated_body = replace_or_append_block_line(updated_body, "PEG_RATIO", "N/A")
 
     if has_structured_payload:
-        for datablock_key, raw_key in _HORIZON_FIELD_RAW_KEYS:
+        for datablock_key, raw_key in HORIZON_FIELD_RAW_KEYS:
             if payload.get(raw_key) is None:
-                updated_body = _replace_or_append_datablock_line(
+                updated_body = replace_or_append_block_line(
                     updated_body,
                     datablock_key,
                     "N/A",
@@ -210,7 +193,7 @@ def _sanitize_fundamentals_output(
         and isinstance(latest_quarter_date, str)
         and latest_quarter_date
     ):
-        updated_body = _replace_or_append_datablock_line(
+        updated_body = replace_or_append_block_line(
             updated_body,
             "LATEST_QUARTER_DATE",
             latest_quarter_date,
@@ -225,15 +208,15 @@ def _sanitize_fundamentals_output(
                 "Invalid ADR routing fields removed; ADR status unresolved."
             ),
         }.items():
-            updated_body = _replace_or_append_datablock_line(
+            updated_body = replace_or_append_block_line(
                 updated_body,
                 key,
                 value,
             )
         logger.warning("adr_routing_invalidated", ticker=ticker)
 
-    adr_exchange = _extract_datablock_value(updated_body, "ADR_EXCHANGE").upper()
-    adr_type = _extract_datablock_value(updated_body, "ADR_TYPE").upper()
+    adr_exchange = extract_block_text_value(updated_body, "ADR_EXCHANGE").upper()
+    adr_type = extract_block_text_value(updated_body, "ADR_TYPE").upper()
     if adr_exchange.startswith("OTC") and adr_type == "SPONSORED":
         evidence = _classify_otc_adr_evidence(raw_data)
         replacements: dict[str, str] | None = None
@@ -260,7 +243,7 @@ def _sanitize_fundamentals_output(
 
         if replacements:
             for key, value in replacements.items():
-                updated_body = _replace_or_append_datablock_line(
+                updated_body = replace_or_append_block_line(
                     updated_body,
                     key,
                     value,
@@ -291,6 +274,7 @@ def _normalize_structured_output(
     ticker: str,
     *,
     raw_data: str = "",
+    foreign_data: str = "",
 ) -> str:
     """Apply narrow deterministic output repairs for known model-format drift."""
     if agent_key != "fundamentals_analyst":
@@ -320,7 +304,12 @@ def _normalize_structured_output(
             repaired_has_datablock=has_parseable_data_block(boundary_normalized),
         )
     normalized = boundary_normalized or normalized
-    normalized = _sanitize_fundamentals_output(normalized, raw_data, ticker)
+    normalized = _sanitize_fundamentals_output(
+        normalized,
+        raw_data,
+        ticker,
+        foreign_data=foreign_data,
+    )
     return normalized
 
 
@@ -671,6 +660,9 @@ def create_analyst_node(
                 content_str,
                 ticker,
                 raw_data=raw_data if agent_key == "fundamentals_analyst" else "",
+                foreign_data=foreign_data
+                if agent_key == "fundamentals_analyst"
+                else "",
             )
 
             if (
@@ -719,6 +711,9 @@ def create_analyst_node(
                         retry_content_str,
                         ticker,
                         raw_data=raw_data
+                        if agent_key == "fundamentals_analyst"
+                        else "",
+                        foreign_data=foreign_data
                         if agent_key == "fundamentals_analyst"
                         else "",
                     )

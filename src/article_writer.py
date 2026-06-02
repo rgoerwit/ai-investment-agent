@@ -18,6 +18,11 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, Field
 
+from src.article_audit import (
+    audit_article_citations,
+    extract_source_confidence_context,
+    prepend_verification_caveats,
+)
 from src.config import config
 from src.error_safety import summarize_exception
 from src.llms import create_deep_thinking_llm, create_writer_llm
@@ -93,6 +98,17 @@ class EditorReviewResult(BaseModel):
     cuts: list[str] = Field(default_factory=list)
     style_issues: list[str] = Field(default_factory=list)
     confidence: float = 0.5
+
+
+def _review_response_for_citation_errors(errors: list[dict[str, str]]) -> dict:
+    feedback = EditorReviewResult(
+        verdict="REVISE",
+        factual_errors=[EditorFactualError(**error) for error in errors],
+        confidence=1.0,
+    ).model_dump()
+    # Internal loop metadata; intentionally not part of the editor response schema.
+    feedback["deterministic_citation_audit"] = True
+    return feedback
 
 
 def _should_emit_editor_structured_output_warnings() -> bool:
@@ -1219,6 +1235,7 @@ class ArticleEditor:
         valuation_params: str | None = None,
         voice_samples: str | None = None,
         governance_context: str | None = None,
+        consultant_review: str | None = None,
     ) -> str:
         """
         Assemble fact-check context for the editor.
@@ -1245,6 +1262,13 @@ class ArticleEditor:
 
         if governance_context:
             context_parts.append(governance_context)
+
+        source_confidence_context = extract_source_confidence_context(
+            data_block,
+            consultant_review,
+        )
+        if source_confidence_context:
+            context_parts.append(source_confidence_context)
 
         if voice_samples:
             # Truncate voice samples to control token usage
@@ -1610,6 +1634,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
         valuation_params: str | None = None,
         voice_samples: str | None = None,
         governance_card: dict[str, Any] | None = None,
+        consultant_review: str | None = None,
     ) -> tuple[str, dict]:
         """
         Run the full editorial loop: review -> revise -> review.
@@ -1646,6 +1671,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
             valuation_params=valuation_params,
             voice_samples=voice_samples,
             governance_context=governance_context,
+            consultant_review=consultant_review,
         )
 
         current_draft = article_draft
@@ -1656,8 +1682,17 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
         self._url_cache = {}
         try:
             while revision_count < self.MAX_REVISIONS:
-                # Review the current draft
-                feedback = await self.review(current_draft, fact_check_context)
+                citation_errors = audit_article_citations(current_draft, data_block)
+                if citation_errors:
+                    feedback = _review_response_for_citation_errors(citation_errors)
+                    logger.warning(
+                        "article_citation_audit_failed",
+                        ticker=ticker,
+                        mismatch_count=len(citation_errors),
+                    )
+                else:
+                    # Review the current draft
+                    feedback = await self.review(current_draft, fact_check_context)
 
                 logger.info(
                     "Editor review complete",
@@ -1691,6 +1726,15 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
 
             # Max revisions reached, do final review
             final_feedback = await self.review(current_draft, fact_check_context)
+            final_citation_errors = audit_article_citations(current_draft, data_block)
+            if final_citation_errors:
+                current_draft = prepend_verification_caveats(
+                    current_draft,
+                    final_citation_errors,
+                )
+                final_feedback["verdict"] = "REVISE"
+                final_feedback["deterministic_citation_audit"] = True
+                final_feedback["factual_errors"] = final_citation_errors
 
             # Add revision count to feedback for caller logging
             final_feedback["revisions"] = revision_count
