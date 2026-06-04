@@ -432,6 +432,8 @@ def _make_dip_item(
     stop: float,
     target: float,
     currency: str = "JPY",
+    verdict: str = "BUY",
+    zone: str = "MODERATE",
 ) -> ReconciliationItem:
     """Create a demoted SOFT_REJECT REVIEW item with a full analysis record."""
     from datetime import datetime, timedelta
@@ -440,16 +442,16 @@ def _make_dip_item(
     analysis = AnalysisRecord(
         ticker=ticker,
         analysis_date=analysis_date,
-        verdict="DO_NOT_INITIATE",
+        verdict=verdict,
         health_adj=health,
         growth_adj=growth,
-        zone="MODERATE",
+        zone=zone,
         entry_price=entry,
         stop_price=stop,
         target_1_price=target,
         currency=currency,
         trade_block=TradeBlockData(
-            action="DO_NOT_INITIATE",
+            action=verdict,
             entry_price=entry,
             stop_price=stop,
             target_1_price=target,
@@ -465,7 +467,7 @@ def _make_dip_item(
         action="REVIEW",
         urgency="MEDIUM",
         reason=(
-            f"Verdict → DO_NOT_INITIATE  ({analysis_date})"
+            f"Verdict → {verdict}  ({analysis_date})"
             "  [MACRO_WATCH: demoted from SELL — correlated event detected]"
         ),
         ibkr_position=pos,
@@ -686,6 +688,26 @@ class TestDipWatch:
         assert "LGRW.T" not in section
         assert "GOOD.T" in section
 
+    def test_dip_watch_excludes_rejected_analysis(self):
+        """A fresh, high-scoring DNI macro review is not a dip-buy candidate."""
+        rejected = _make_dip_item(
+            "DNI.T",
+            health=95,
+            growth=88,
+            entry=2000,
+            current_price=1700,
+            stop=1600,
+            target=2800,
+            verdict="DO_NOT_INITIATE",
+            zone="HIGH",
+        )
+        report = format_report(
+            [rejected],
+            _make_portfolio(),
+            portfolio_health_flags=[_CORR_FLAG],
+        )
+        assert "DIP WATCH" not in report
+
     def test_dip_watch_absent_when_no_scoreable_items(self):
         """CORRELATED_SELL_EVENT but all macro_reviews have health < 55 → no DIP WATCH."""
         items = [
@@ -721,9 +743,10 @@ class TestDipWatch:
         analysis = AnalysisRecord(
             ticker="BARE.L",  # canonical yfinance ticker found via _alpha_base_lookup
             analysis_date=analysis_date,
-            verdict="DO_NOT_INITIATE",
+            verdict="BUY",
             health_adj=75.0,  # >= 55 → passes DIP WATCH quality filter
             growth_adj=70.0,  # >= 55 → passes
+            zone="MODERATE",
             entry_price=200.0,
             stop_price=170.0,
             target_1_price=250.0,
@@ -744,7 +767,7 @@ class TestDipWatch:
             action="REVIEW",
             urgency="MEDIUM",
             reason=(
-                f"Verdict → DO_NOT_INITIATE  ({analysis_date})"
+                f"Verdict → BUY  ({analysis_date})"
                 "  [MACRO_WATCH: demoted from SELL — correlated event detected]"
             ),
             ibkr_position=pos,

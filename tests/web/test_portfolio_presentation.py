@@ -24,7 +24,7 @@ def test_group_portfolio_actions_matches_cli_buckets(sample_bundle):
     assert [item.ticker.yf for item in groups.holds_real] == ["MEGP.L"]
     assert [item.ticker.yf for item in groups.new_buys] == ["ASML.AS"]
     assert [item.ticker.yf for item in groups.watchlist_candidates] == ["BMW.DE"]
-    assert [item.ticker.yf for item in groups.dip_candidates] == ["5285.T"]
+    assert groups.dip_candidates == ()
 
 
 def test_build_action_summary_counts_separates_buys_from_candidates(sample_bundle):
@@ -90,7 +90,6 @@ def test_build_action_display_sections_matches_cli_contract(sample_bundle):
     assert [section.key for section in sections] == [
         "sell_recommendations",
         "sell_related_reviews",
-        "dip_watch",
         "hold",
     ]
     assert sections[0].title == SELL_RECOMMENDATIONS_TITLE

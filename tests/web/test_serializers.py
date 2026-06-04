@@ -38,6 +38,7 @@ def test_serialize_dashboard_snapshot_shapes_payload(sample_bundle):
     assert payload["macro_alert"] == macro_alert
     assert payload["refreshing"] is True
     assert payload["actions"]["watchlist_candidate"][0]["ticker_yf"] == "BMW.DE"
+    assert payload["actions"]["dip_watch"] == []
     assert payload["overview"]["candidates"] == 1
     assert payload["freshness_overview"]["blocking_now"] == 1
     assert payload["actions"]["action_sections"][0]["key"] == "sell_recommendations"

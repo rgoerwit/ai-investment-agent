@@ -3,7 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from src.ibkr.models import ReconciliationItem
+from src.ibkr.reconciliation_rules import _normalize_verdict
 from src.ibkr.refresh_service import run_ticker_for
+
+_DEFAULT_DIP_WATCH_MAX_AGE_DAYS = 30
+_DEFAULT_DIP_WATCH_EXCLUDED_ZONES = frozenset({"HIGH"})
 
 
 @dataclass(frozen=True)
@@ -75,22 +79,54 @@ def risk_reward_ratio(item: ReconciliationItem) -> float | None:
     return round(upside / downside, 1)
 
 
+def is_dip_watch_eligible(
+    item: ReconciliationItem,
+    *,
+    min_health: float = 55.0,
+    min_growth: float = 55.0,
+    min_score: float = 50.0,
+    max_age_days: int = _DEFAULT_DIP_WATCH_MAX_AGE_DAYS,
+    excluded_zones: frozenset[str] = _DEFAULT_DIP_WATCH_EXCLUDED_ZONES,
+) -> bool:
+    """Return True when a held item is safe to surface as a dip-watch candidate."""
+    analysis = item.analysis
+    if analysis is None:
+        return False
+    if _normalize_verdict(analysis.verdict or "") != "BUY":
+        return False
+    if (analysis.zone or "").strip().upper() in excluded_zones:
+        return False
+    if analysis.age_days > max_age_days:
+        return False
+    if (analysis.health_adj or 0.0) < min_health:
+        return False
+    if (analysis.growth_adj or 0.0) < min_growth:
+        return False
+    return compute_dip_score(item) >= min_score
+
+
 def select_dip_watch_candidates(
     items: list[ReconciliationItem],
     *,
     min_health: float = 55.0,
     min_growth: float = 55.0,
     min_score: float = 50.0,
+    max_age_days: int = _DEFAULT_DIP_WATCH_MAX_AGE_DAYS,
+    excluded_zones: frozenset[str] = _DEFAULT_DIP_WATCH_EXCLUDED_ZONES,
     limit: int | None = None,
 ) -> list[ReconciliationItem]:
     """Return items eligible for DIP WATCH using the current CLI rules."""
     ranked = [
         item
         for item in items
-        if item.analysis is not None
-        and (item.analysis.health_adj or 0.0) >= min_health
-        and (item.analysis.growth_adj or 0.0) >= min_growth
-        and compute_dip_score(item) >= min_score
+        if is_dip_watch_eligible(
+            item,
+            min_health=min_health,
+            min_growth=min_growth,
+            min_score=min_score,
+            max_age_days=max_age_days,
+            excluded_zones=excluded_zones,
+        )
     ]
     ranked.sort(key=compute_dip_score, reverse=True)
     if limit is not None:
@@ -104,6 +140,8 @@ def build_dip_watch_candidates(
     min_health: float = 55.0,
     min_growth: float = 55.0,
     min_score: float = 50.0,
+    max_age_days: int = _DEFAULT_DIP_WATCH_MAX_AGE_DAYS,
+    excluded_zones: frozenset[str] = _DEFAULT_DIP_WATCH_EXCLUDED_ZONES,
     limit: int | None = None,
 ) -> list[DipWatchCandidate]:
     """Return serializable dip-watch candidates derived from reconciliation items."""
@@ -112,6 +150,8 @@ def build_dip_watch_candidates(
         min_health=min_health,
         min_growth=min_growth,
         min_score=min_score,
+        max_age_days=max_age_days,
+        excluded_zones=excluded_zones,
         limit=limit,
     )
     rows: list[DipWatchCandidate] = []
