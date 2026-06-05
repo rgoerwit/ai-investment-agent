@@ -434,6 +434,8 @@ def _make_dip_item(
     currency: str = "JPY",
     verdict: str = "BUY",
     zone: str = "MODERATE",
+    action: str = "REVIEW",
+    sell_type: str | None = "SOFT_REJECT",
 ) -> ReconciliationItem:
     """Create a demoted SOFT_REJECT REVIEW item with a full analysis record."""
     from datetime import datetime, timedelta
@@ -464,7 +466,7 @@ def _make_dip_item(
     )
     return ReconciliationItem(
         ticker=ticker,
-        action="REVIEW",
+        action=action,
         urgency="MEDIUM",
         reason=(
             f"Verdict → {verdict}  ({analysis_date})"
@@ -472,7 +474,7 @@ def _make_dip_item(
         ),
         ibkr_position=pos,
         analysis=analysis,
-        sell_type="SOFT_REJECT",
+        sell_type=sell_type,
     )
 
 
@@ -613,6 +615,23 @@ class TestDipWatch:
         )
         assert "DIP WATCH" not in report
 
+    def test_dip_watch_held_buy_pullback_shows_without_correlated_event(self):
+        """Held BUY pullbacks do not require a correlated-sell event."""
+        item = _make_dip_item(
+            "HELD.T",
+            health=80,
+            growth=78,
+            entry=2000,
+            current_price=1800,
+            stop=1700,
+            target=2600,
+            action="HOLD",
+            sell_type=None,
+        )
+        report = format_report([item], _make_portfolio(), portfolio_health_flags=[])
+        assert "DIP WATCH" in report
+        assert "HELD.T" in report
+
     def test_dip_watch_items_ranked_by_score(self):
         """Higher-scoring items appear before lower-scoring items in DIP WATCH."""
         high_score = _make_dip_item(
@@ -629,7 +648,7 @@ class TestDipWatch:
             health=58,
             growth=56,
             entry=2000,
-            current_price=1980,
+            current_price=1880,
             stop=1900,
             target=2100,
         )
@@ -1044,14 +1063,15 @@ class TestScoreLine:
             current_price=2700,
             stop=2600,
             target=3200,
+            verdict="DO_NOT_INITIATE",
         )
         report = format_report(
             [item], _make_portfolio(), portfolio_health_flags=[_CORR_FLAG]
         )
-        # Health/Growth appear (via _display_data_line), but not the analysis date
-        # that _score_line would add (since _display_data_line doesn't add it)
-        assert "Health:75" in report
-        assert "Growth:68" in report
+        # Health/Growth appear through the compact macro-review detail path, not
+        # the dated _score_line path.
+        assert "H:75%" in report
+        assert "G:68%" in report
 
 
 # ── Order annotation helpers ──────────────────────────────────────────────────

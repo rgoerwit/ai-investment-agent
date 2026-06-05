@@ -154,6 +154,24 @@ def evaluate_positions(
 
         verdict_upper = _normalize_verdict(analysis.verdict or "")
         if verdict_upper in _REJECT_VERDICTS:
+            zone = (analysis.zone or "").strip().upper()
+            if verdict_upper == "DO_NOT_INITIATE" and zone in {"LOW", "MODERATE"}:
+                items.append(
+                    ReconciliationItem(
+                        ticker=item_ticker,
+                        action="REVIEW",
+                        reason=(
+                            f"Screen-threshold DNI ({zone} zone) - "
+                            f"review held position ({analysis.analysis_date})"
+                        ),
+                        urgency="MEDIUM",
+                        ibkr_position=pos,
+                        analysis=analysis,
+                        sell_type="SCREEN_REJECT",
+                    )
+                )
+                continue
+
             items.append(
                 ReconciliationItem(
                     ticker=item_ticker,

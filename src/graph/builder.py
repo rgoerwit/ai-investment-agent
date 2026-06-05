@@ -17,6 +17,7 @@ from .routing import (
     dispatch_destinations,
     fan_out_to_analysts,
     fundamentals_sync_router,
+    post_research_sync_router,
     should_continue_analyst,
     sync_check_router,
 )
@@ -297,8 +298,13 @@ BEAR RESEARCHER:
     workflow.add_edge("Bear Researcher R2", "Debate Sync Final")
     workflow.add_edge("Debate Sync Final", "Research Manager")
 
+    async def post_research_sync_node(state: AgentState, config: RunnableConfig):
+        return {}
+
+    workflow.add_node("Post Research Sync", post_research_sync_node)
+
     workflow.add_edge("Research Manager", "Valuation Calculator")
-    workflow.add_edge("Valuation Calculator", "Trader")
+    workflow.add_edge("Valuation Calculator", "Post Research Sync")
     if components.apac_specialist_enabled:
         workflow.add_edge("Research Manager", "APAC Regional Specialist")
         consultant_gate_source = "APAC Regional Specialist"
@@ -329,10 +335,26 @@ BEAR RESEARCHER:
             consultant_gate_router,
             ["Consultant", "Consultant Skip"],
         )
-        workflow.add_edge("Consultant", "Trader")
-        workflow.add_edge("Consultant Skip", "Trader")
+        workflow.add_edge("Consultant", "Post Research Sync")
+        workflow.add_edge("Consultant Skip", "Post Research Sync")
     elif components.apac_specialist_enabled:
-        workflow.add_edge("APAC Regional Specialist", "Trader")
+        workflow.add_edge("APAC Regional Specialist", "Post Research Sync")
+
+    def post_research_router(
+        state: AgentState, config: RunnableConfig
+    ) -> Literal["Trader", "__end__"]:
+        return post_research_sync_router(
+            state,
+            config,
+            apac_required=components.apac_specialist_enabled,
+            consultant_required=components.consultant_enabled,
+        )
+
+    workflow.add_conditional_edges(
+        "Post Research Sync",
+        post_research_router,
+        ["__end__", "Trader"],
+    )
 
     workflow.add_edge("Trader", "Risky Analyst")
     workflow.add_edge("Trader", "Safe Analyst")

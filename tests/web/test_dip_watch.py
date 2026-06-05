@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from src.ibkr.dip_watch import (
     build_dip_watch_candidates,
+    collect_dip_watch_source_items,
     compute_dip_score,
+    dip_pct,
+    dip_watch_source,
     is_dip_watch_eligible,
     risk_reward_ratio,
     select_dip_watch_candidates,
@@ -23,6 +26,9 @@ def _dip_item(
     current_price: float = 1800.0,
     stop_price: float | None = 1700.0,
     target_1: float | None = 2600.0,
+    action: str = "REVIEW",
+    sell_type: str | None = "SOFT_REJECT",
+    held: bool = True,
 ) -> ReconciliationItem:
     analysis = make_analysis(
         ticker=ticker,
@@ -41,12 +47,14 @@ def _dip_item(
     analysis.target_1_price = target_1
     return ReconciliationItem(
         ticker=ticker,
-        action="REVIEW",
+        action=action,
         urgency="MEDIUM",
         reason="Macro review",
-        ibkr_position=make_position(ticker=ticker, current_price=current_price),
+        ibkr_position=(
+            make_position(ticker=ticker, current_price=current_price) if held else None
+        ),
         analysis=analysis,
-        sell_type="SOFT_REJECT",
+        sell_type=sell_type,
     )
 
 
@@ -72,6 +80,8 @@ def test_build_dip_watch_candidates_includes_star_thresholds(sample_bundle):
     assert rows[0].ticker_yf == "7203.T"
     assert rows[0].stars in {"★★★", "★★", "★"}
     assert rows[0].run_ticker == "7203.T"
+    assert rows[0].source == "macro_review"
+    assert rows[0].dip_pct == 14.3
 
 
 def test_risk_reward_ratio_returns_none_when_stop_or_target_missing():
@@ -110,6 +120,52 @@ def test_compute_dip_score_prefers_better_dip():
 
 def test_select_dip_watch_candidates_includes_fresh_buy():
     selected = select_dip_watch_candidates([_dip_item()])
+    assert [item.ticker.yf for item in selected] == ["7203.T"]
+
+
+def test_source_collector_includes_held_buy_pullback_and_macro_review():
+    held_buy = _dip_item(ticker="HELD.T", action="HOLD", sell_type=None)
+    macro_review = _dip_item(ticker="MACRO.T")
+    rejected_macro = _dip_item(ticker="DNI.T", verdict="DO_NOT_INITIATE")
+    stop_review = _dip_item(ticker="STOP.T", action="REVIEW", sell_type="STOP_BREACH")
+    profit_review = _dip_item(
+        ticker="PROFIT.T",
+        action="REVIEW",
+        sell_type="PROFIT_TAKE",
+    )
+    plain_review = _dip_item(ticker="PLAIN.T", action="REVIEW", sell_type=None)
+    sell = _dip_item(ticker="SELL.T", action="SELL", sell_type=None)
+    trim = _dip_item(ticker="TRIM.T", action="TRIM", sell_type=None)
+    unheld = _dip_item(ticker="UNHELD.T", action="HOLD", sell_type=None, held=False)
+
+    source_items = collect_dip_watch_source_items(
+        [
+            held_buy,
+            macro_review,
+            rejected_macro,
+            stop_review,
+            profit_review,
+            plain_review,
+            sell,
+            trim,
+            unheld,
+        ]
+    )
+
+    assert [item.ticker.yf for item in source_items] == ["HELD.T", "MACRO.T", "DNI.T"]
+    assert dip_watch_source(held_buy) == "held_buy_pullback"
+    assert dip_watch_source(macro_review) == "macro_review"
+    assert dip_watch_source(stop_review) is None
+
+
+def test_held_buy_pullback_must_clear_eligibility_gate():
+    held_buy = _dip_item(action="HOLD", sell_type=None)
+    rejected_macro = _dip_item(verdict="DO_NOT_INITIATE")
+
+    selected = select_dip_watch_candidates(
+        collect_dip_watch_source_items([held_buy, rejected_macro])
+    )
+
     assert [item.ticker.yf for item in selected] == ["7203.T"]
 
 
@@ -160,6 +216,16 @@ def test_dip_watch_excludes_high_zone_even_when_buy():
 def test_dip_watch_freshness_boundary_is_30_days():
     assert is_dip_watch_eligible(_dip_item(age_days=30)) is True
     assert is_dip_watch_eligible(_dip_item(age_days=31)) is False
+
+
+def test_dip_watch_requires_minimum_five_percent_dip():
+    shallow = _dip_item(entry_price=100.0, current_price=96.0)
+    boundary = _dip_item(entry_price=100.0, current_price=95.0)
+
+    assert dip_pct(shallow) == 4.0
+    assert is_dip_watch_eligible(shallow) is False
+    assert dip_pct(boundary) == 5.0
+    assert is_dip_watch_eligible(boundary) is True
 
 
 def test_dip_watch_excludes_invalid_or_missing_analysis_date():

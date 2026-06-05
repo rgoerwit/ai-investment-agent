@@ -24,7 +24,7 @@ def test_group_portfolio_actions_matches_cli_buckets(sample_bundle):
     assert [item.ticker.yf for item in groups.holds_real] == ["MEGP.L"]
     assert [item.ticker.yf for item in groups.new_buys] == ["ASML.AS"]
     assert [item.ticker.yf for item in groups.watchlist_candidates] == ["BMW.DE"]
-    assert groups.dip_candidates == ()
+    assert [item.ticker.yf for item in groups.dip_candidates] == ["MEGP.L"]
 
 
 def test_build_action_summary_counts_separates_buys_from_candidates(sample_bundle):
@@ -66,6 +66,25 @@ def test_profit_take_items_have_distinct_sell_and_review_buckets():
     assert counts["REVIEW"] == 1
 
 
+def test_screen_reject_review_routes_to_generic_reviews():
+    item = ReconciliationItem(
+        ticker=Ticker.from_yf("4396.T"),
+        action="REVIEW",
+        reason="Screen-threshold DNI",
+        urgency="MEDIUM",
+        sell_type="SCREEN_REJECT",
+    )
+
+    groups = group_portfolio_actions([item])
+    counts = build_action_summary_counts(groups)
+
+    assert groups.hard_sells == ()
+    assert groups.soft_sells == ()
+    assert groups.stop_sells == ()
+    assert groups.reviews == (item,)
+    assert counts["REVIEW"] == 1
+
+
 def test_aggregate_sector_weights_normalizes_equivalent_labels():
     weights = aggregate_sector_weights({"Healthcare": 12.5, "Health Care": 7.5})
     assert weights == {"Health Care": 20.0}
@@ -75,6 +94,7 @@ def test_get_sell_type_label_uses_shared_backend_labels():
     assert get_sell_type_label("STOP_BREACH") == "STOP BREACH"
     assert get_sell_type_label("HARD_REJECT") == "FUNDAMENTAL FAILURE"
     assert get_sell_type_label("SOFT_REJECT") == "SOFT REJECTION"
+    assert get_sell_type_label("SCREEN_REJECT") == "SCREEN REVIEW"
     assert get_sell_type_label("PROFIT_TAKE") == "PROFIT TAKE"
     assert get_sell_type_label("UNKNOWN") == "SELL"
 
@@ -90,6 +110,7 @@ def test_build_action_display_sections_matches_cli_contract(sample_bundle):
     assert [section.key for section in sections] == [
         "sell_recommendations",
         "sell_related_reviews",
+        "dip_watch",
         "hold",
     ]
     assert sections[0].title == SELL_RECOMMENDATIONS_TITLE

@@ -25,8 +25,6 @@ from src.ibkr.screening_freshness import ScreeningFreshnessSummary
 from src.sector_normalization import aggregate_sector_weights
 from src.web.ibkr_dashboard.drilldown_service import build_structured_sections
 
-_DIP_WATCH_LIMIT = 7
-
 
 def serialize_dashboard_snapshot(
     bundle: PortfolioRecommendationBundle,
@@ -241,10 +239,7 @@ def _serialize_actions(
     groups = group_portfolio_actions(items, watchlist_tickers=watchlist_tickers)
     dip_watch = [
         _serialize_dip_watch(candidate)
-        for candidate in build_dip_watch_candidates(
-            list(groups.macro_reviews),
-            limit=_DIP_WATCH_LIMIT,
-        )
+        for candidate in build_dip_watch_candidates(list(groups.dip_candidates))
     ]
 
     return {
@@ -354,6 +349,7 @@ def _serialize_dip_watch(candidate: DipWatchCandidate) -> dict[str, Any]:
         "current_price": candidate.current_price,
         "currency": candidate.currency,
         "run_ticker": candidate.run_ticker,
+        "source": candidate.source,
     }
 
 

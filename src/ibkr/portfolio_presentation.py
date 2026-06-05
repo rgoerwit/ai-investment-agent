@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.ibkr.dip_watch import select_dip_watch_candidates
+from src.ibkr.dip_watch import (
+    collect_dip_watch_source_items,
+    select_dip_watch_candidates,
+)
 from src.ibkr.models import PortfolioSummary, ReconciliationItem
 from src.ibkr.refresh_service import AnalysisFreshnessSummary, RefreshActivity
 
@@ -13,6 +16,7 @@ SELL_TYPE_LABELS: dict[str | None, str] = {
     "STOP_BREACH": "STOP BREACH",
     "HARD_REJECT": "FUNDAMENTAL FAILURE",
     "SOFT_REJECT": "SOFT REJECTION",
+    "SCREEN_REJECT": "SCREEN REVIEW",
     "PROFIT_TAKE": "PROFIT TAKE",
     None: "SELL",
 }
@@ -200,7 +204,7 @@ def group_portfolio_actions(
     )
     dip_candidates = tuple(
         select_dip_watch_candidates(
-            list(macro_reviews),
+            collect_dip_watch_source_items(items),
             limit=dip_watch_limit,
         )
     )

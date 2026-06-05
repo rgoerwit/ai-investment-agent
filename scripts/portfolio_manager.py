@@ -44,7 +44,7 @@ from src.ibkr.cli_options import (
     portfolio_request_kwargs_from_args,
     validate_common_portfolio_request_args,
 )
-from src.ibkr.dip_watch import compute_dip_score
+from src.ibkr.dip_watch import compute_dip_score, dip_watch_source
 from src.ibkr.exceptions import IBKRAuthError, IBKRError
 from src.ibkr.models import (
     AnalysisRecord,
@@ -1838,8 +1838,14 @@ def format_report(
 
     # ── DIP WATCH ────────────────────────────────────────────────────────────
     dip_candidates: list[ReconciliationItem] = list(action_groups.dip_candidates)
-    if _correlated_flag and dip_candidates:
-        _render_dip_watch_section(dip_candidates)
+    display_dip_candidates = [
+        item
+        for item in dip_candidates
+        if dip_watch_source(item) == "held_buy_pullback"
+        or (_correlated_flag and dip_watch_source(item) == "macro_review")
+    ]
+    if display_dip_candidates:
+        _render_dip_watch_section(display_dip_candidates)
 
     # ── TRIMS ────────────────────────────────────────────────────────────────
     if trims:
@@ -2223,7 +2229,7 @@ def format_report(
     if (
         action_today
         or funded_today
-        or dip_candidates
+        or display_dip_candidates
         or settle_groups
         or settle_conditional
         or _cands_deduped
@@ -2317,10 +2323,10 @@ def format_report(
                 )
             lines.append("")
 
-        if dip_candidates:
+        if display_dip_candidates:
             lines.append(f"  DIP OPPORTUNITIES ({today_str}):")
             _dips_in_flight: list[str] = []
-            for _di in dip_candidates:
+            for _di in display_dip_candidates:
                 _dexisting = _find_live_order(_di)
                 if _dexisting and _dexisting[1] == "BUY":
                     _dips_in_flight.append(_display_ticker(_di))
@@ -2407,8 +2413,10 @@ def format_report(
                 lines.append(
                     "    → No confirmed proceeds — review soft sells before counting on this cash"
                 )
-            if dip_candidates:
-                top_tickers = "  ".join(_display_ticker(i) for i in dip_candidates[:3])
+            if display_dip_candidates:
+                top_tickers = "  ".join(
+                    _display_ticker(i) for i in display_dip_candidates[:3]
+                )
                 lines.append(
                     f"    → Top dip candidates for deployment: {top_tickers}"
                     "  (see DIP OPPORTUNITIES above)"
