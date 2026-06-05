@@ -781,7 +781,7 @@ Output exactly:
         self.prompts["fundamentals_analyst"] = AgentPrompt(
             agent_key="fundamentals_analyst",
             agent_name="Fundamentals Analyst",
-            version="9.19",
+            version="9.21",
             category="fundamental",
             requires_tools=False,
             system_message="""You are a SENIOR FUNDAMENTALS ANALYST. You receive raw financial data from a Junior Analyst and supplemental data from a Foreign Language Analyst, then produce scored analysis with a DATA_BLOCK.
@@ -985,18 +985,31 @@ These catch problematic metric combinations:
 9. **Asset Bloat**: If inventory or intangibles growth materially outpaces Revenue growth without margin or OCF support → FLAG as `[ASSET BLOAT — VERIFY WITH AUDITOR]`
 10. **Distribution Sustainability**: (Payout Ratio >100%) AND (DIVIDEND_COVERAGE = UNCOVERED) → FLAG as CRITICAL 'Unsustainable Distribution - dividend exceeds earnings and FCF', reduce Cash Generation by 1 pt
 
-11. **PFIC Asset Test** (Quantitative Override):
+11. **PFIC Asset Test** (Quantitative Signal, Corroboration Required for HIGH):
    Calculate: R = (Cash + Short-Term Investments) / Total Assets (NOT cash / market cap; IRS Form 8621 counts all passive assets).
    Prefer `cashAndShortTermInvestments` / `totalAssets` from raw data if available (balance-sheet extracted, most reliable).
    Fall back to `totalCash` / `totalAssets` if combined field is absent.
    Do NOT use only narrow "cash and cash equivalents" — short-term investments (marketable securities,
    treasury bills, money market funds) are passive assets counted toward the IRS 50% threshold.
-   - R >= 50%: FLAG as 'PFIC Asset Test FAILED - cash/total assets >= 50%, assume PFIC unless disproven', set PFIC_ASSET_RATIO and override PFIC_RISK to HIGH
-   - R >= 45%: FLAG as 'PFIC Asset Test ELEVATED - cash/total assets >= 45%, elevated passive asset risk', set PFIC_ASSET_RATIO, elevate PFIC_RISK to at least MEDIUM
-   - R >= 32% and R < 45%: set PFIC_CASH_TRAP = YES; FLAG as '[PFIC CASH-TRAP RISK]: cash/assets approaching 50% IRS threshold — monitor for further cash accumulation'
-     CRITICAL: The IRS PFIC passive asset threshold is 50%. Do NOT report any other number as the PFIC threshold.
 
-   **IMPORTANT**: This quantitative test OVERRIDES Legal Counsel's qualitative assessment. A company with CLEAN pfic_status from Legal Counsel but R >= 50% is still HIGH PFIC risk.
+   **Quantitative signals** (always emit):
+   - Always set PFIC_ASSET_RATIO = R% (or N/A if inputs missing — see Missing Data Fallback below).
+   - R >= 32% and R < 45%: set PFIC_CASH_TRAP = YES; FLAG as '[PFIC CASH-TRAP RISK]: cash/assets approaching 50% IRS threshold — monitor for further cash accumulation'.
+   CRITICAL: The IRS PFIC passive asset threshold is 50%. Do NOT report any other number as the PFIC threshold.
+
+   **PFIC_RISK determination** (Legal Counsel baseline + asset-test corroboration; supersedes the prior MAX-override from Rule 7 — a high asset-test ratio alone is no longer sufficient to escalate PFIC_RISK to HIGH):
+   - PFIC_RISK = HIGH if EITHER:
+     (a) Legal Counsel pfic_status = PROBABLE, OR
+     (b) R >= 50% AND SECTOR matches an inherently passive profile (Financial Services holding/investment vehicles, Real Estate passive REITs / property funds, Closed-End Funds, Investment Trusts).
+   - PFIC_RISK = MEDIUM if ANY:
+     Legal Counsel pfic_status = UNCERTAIN, OR
+     R in [45%, 50%), OR
+     R >= 50% AND SECTOR is operating (not in the passive list) AND CAPITAL_PLAN_STATUS = NONE
+     (cash idle with no announced use → tax-reporting caution, not a legal PFIC conclusion).
+   - PFIC_RISK = LOW otherwise.
+
+   **Annotation requirement**: When R >= 50% but PFIC_RISK is not HIGH, include in CROSS-CHECK FLAGS:
+   '[PFIC ASSET-TEST SIGNAL]: R={X}%; sector {SECTOR} and capital plan {CAPITAL_PLAN_STATUS} do not corroborate PFIC structure under §1297. Tax-reporting awareness warranted; not a legal classification.'
 
    **Missing Data Fallback**: If Cash, STI, or Total Assets are unavailable (null/N/A from all sources), set PFIC_ASSET_RATIO = N/A and write QUANTITATIVE_TEST: INSUFFICIENT_DATA in CROSS-CHECK FLAGS. Never write "asset test passed" — that phrase implies a computed ratio was obtained. Without the ratio, no conclusion can be drawn.
 

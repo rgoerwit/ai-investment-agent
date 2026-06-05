@@ -260,6 +260,52 @@ class TestSpecificPromptFiles:
             assert field in in_code_text, f"{field} missing from src/prompts.py"
             assert field in json_sm, f"{field} missing from fundamentals_analyst.json"
 
+    def test_fundamentals_pfic_corroboration_rule_parity(self):
+        """PFIC Cross-Check #11 must require corroboration before escalating
+        PFIC_RISK to HIGH, in both the JSON override and the in-code fallback.
+
+        Locks the 2371.T-class fix: a high cash/asset ratio alone should not
+        force a PFIC HIGH classification when the sector is operating and a
+        capital plan is in place. The old text said "OVERRIDES Legal
+        Counsel's qualitative assessment" — neither prompt should still say
+        that.
+        """
+        from src import prompts as _prompts_mod
+
+        prompt_file = Path("prompts/fundamentals_analyst.json")
+        if not prompt_file.exists():
+            pytest.skip("fundamentals_analyst.json not found")
+
+        with open(prompt_file) as f:
+            json_sm = json.load(f).get("system_message", "")
+
+        in_code_text = Path(_prompts_mod.__file__).read_text(encoding="utf-8")
+
+        # Both prompts must adopt the corroboration framing.
+        required_phrases = (
+            "Corroboration Required for HIGH",
+            "PFIC_RISK = HIGH if EITHER",
+            "Legal Counsel pfic_status = PROBABLE",
+            "inherently passive profile",
+            "PFIC_RISK = LOW otherwise",
+            "[PFIC ASSET-TEST SIGNAL]",
+        )
+        for phrase in required_phrases:
+            assert phrase in in_code_text, f"{phrase!r} missing from src/prompts.py"
+            assert (
+                phrase in json_sm
+            ), f"{phrase!r} missing from fundamentals_analyst.json"
+
+        # Neither prompt should still describe the asset test as an
+        # unconditional override of Legal Counsel.
+        forbidden = "This quantitative test OVERRIDES Legal Counsel"
+        assert (
+            forbidden not in in_code_text
+        ), f"src/prompts.py still contains stale override framing: {forbidden!r}"
+        assert (
+            forbidden not in json_sm
+        ), f"fundamentals_analyst.json still contains stale override framing: {forbidden!r}"
+
     def test_foreign_language_governance_fields_parity(self):
         """Fallback and JSON prompts both require explicit ownership role fields."""
         from src import prompts as _prompts_mod
