@@ -325,6 +325,92 @@ class TestSpecificPromptFiles:
                 field in json_sm
             ), f"{field} missing from foreign_language_analyst.json"
 
+    def test_foreign_language_active_tender_search_parity(self):
+        """FLA must have a structured M&A / tender-offer search step, so the
+        downstream PM event-driven override and the IBKR `M&A EXIT` sell-type
+        label have data to act on. JSON override and in-code fallback must stay
+        in sync.
+        """
+        from src import prompts as _prompts_mod
+
+        prompt_file = Path("prompts/foreign_language_analyst.json")
+        if not prompt_file.exists():
+            pytest.skip("foreign_language_analyst.json not found")
+
+        with open(prompt_file) as f:
+            json_sm = json.load(f).get("system_message", "")
+
+        in_code_text = Path(_prompts_mod.__file__).read_text(encoding="utf-8")
+
+        required = (
+            "**Search I: Active M&A / Tender Offer Disclosures**",
+            "公開買付け",  # JP TOB search term
+            "공개매수",  # KR tender offer
+            "**M&A EVENT** (if found)",
+            "Active Tender Offer: [YES / NO]",
+            "Tender Price:",
+            "No active M&A event detected.",
+        )
+        for needle in required:
+            assert needle in in_code_text, f"{needle!r} missing from src/prompts.py"
+            assert (
+                needle in json_sm
+            ), f"{needle!r} missing from foreign_language_analyst.json"
+
+    def test_fundamentals_m_and_a_data_block_parity(self):
+        """Senior promotes the FLA M&A EVENT section into DATA_BLOCK as
+        M_AND_A_STATUS and M_AND_A_TENDER_PRICE. Both prompt sources must
+        agree on the field shapes and the spread-narrative rule.
+        """
+        from src import prompts as _prompts_mod
+
+        prompt_file = Path("prompts/fundamentals_analyst.json")
+        if not prompt_file.exists():
+            pytest.skip("fundamentals_analyst.json not found")
+
+        with open(prompt_file) as f:
+            json_sm = json.load(f).get("system_message", "")
+
+        in_code_text = Path(_prompts_mod.__file__).read_text(encoding="utf-8")
+
+        for needle in (
+            "M_AND_A_STATUS: [ACTIVE_TENDER / RUMORED / NONE]",
+            "M_AND_A_TENDER_PRICE:",
+            "9. **M&A Event from Foreign Language Analyst**",
+            "Market {currency}{current} vs. tender",
+        ):
+            assert needle in in_code_text, f"{needle!r} missing from src/prompts.py"
+            assert (
+                needle in json_sm
+            ), f"{needle!r} missing from fundamentals_analyst.json"
+
+    def test_portfolio_manager_event_driven_override_parity(self):
+        """The PM must treat `M_AND_A_STATUS: ACTIVE_TENDER` as a
+        special-situation override of the standard hard-fail / risk-tally
+        framework, in both the JSON override and the in-code fallback.
+
+        Locks the 2371.T fix: a held tender-offer position should be evaluated
+        on the market-vs-tender spread, not on trailing P/E or Growth.
+        """
+        from src import prompts as _prompts_mod
+
+        prompt_file = Path("prompts/portfolio_manager.json")
+        if not prompt_file.exists():
+            pytest.skip("portfolio_manager.json not found")
+
+        with open(prompt_file) as f:
+            json_sm = json.load(f).get("system_message", "")
+
+        in_code_text = Path(_prompts_mod.__file__).read_text(encoding="utf-8")
+
+        for needle in (
+            "**0) EVENT-DRIVEN OVERRIDE (M&A Active Tender)**",
+            "M_AND_A_STATUS: ACTIVE_TENDER",
+            "spread > +3%",
+        ):
+            assert needle in in_code_text, f"{needle!r} missing from src/prompts.py"
+            assert needle in json_sm, f"{needle!r} missing from portfolio_manager.json"
+
     def test_portfolio_manager_has_thesis_criteria(self):
         """Verify portfolio_manager.json has investment thesis criteria."""
         from src import prompts as _prompts_mod

@@ -339,6 +339,7 @@ def _build_analysis_record_from_data(
         exchange=snapshot.get("exchange") or _exchange_from_ticker(ticker),
         is_quick_mode=bool(snapshot.get("is_quick_mode", False)),
         capital_flag_types=_extract_capital_flag_types(data, ticker),
+        m_and_a_status=(snapshot.get("m_and_a_status") or "").strip().upper(),
     )
 
 

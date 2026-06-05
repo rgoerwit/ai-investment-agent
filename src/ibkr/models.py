@@ -183,6 +183,10 @@ class AnalysisRecord(BaseModel):
     exchange: str = ""  # Exchange suffix (e.g. "HK", "T"), inferred from ticker
     is_quick_mode: bool = False  # True if analysis was run with --quick (less thorough)
     capital_flag_types: tuple[str, ...] = ()
+    # Special-situation routing (Senior promotes from Foreign Language M&A EVENT
+    # section). Empty string when no analysis ever set it or the analysis predates
+    # the field; otherwise one of ACTIVE_TENDER / RUMORED / NONE.
+    m_and_a_status: str = ""
 
     @property
     def age_days(self) -> int:

@@ -106,3 +106,43 @@ def test_explicit_sell_verdict_remains_sell_even_if_low_zone():
 
     assert item.action == "SELL"
     assert item.sell_type == "HARD_REJECT"
+
+
+def test_active_tender_emits_special_situation_exit_label():
+    """2371.T regression: held position with M_AND_A_STATUS=ACTIVE_TENDER
+    routes to executable SELL labelled M&A EXIT, not FUNDAMENTAL FAILURE.
+
+    The PM still produces a HIGH-zone DNI verdict here (so it does not
+    fall through the SCREEN_REJECT REVIEW path), but `_classify_sell_type`
+    sees the active tender and prefers SPECIAL_SITUATION_EXIT over the
+    default HARD_REJECT classifier output.
+    """
+    from src.ibkr.portfolio_presentation import get_sell_type_label
+
+    pos = _make_position(
+        ticker="2371.T",
+        quantity=100,
+        avg_cost=2604.0,
+        current_price=3338.98,
+        market_value_usd=2237.0,
+    )
+    analysis = _make_analysis(
+        ticker="2371.T",
+        verdict="DO_NOT_INITIATE",
+        stop_price=None,
+    )
+    analysis.zone = "HIGH"
+    analysis.health_adj = 67.0
+    analysis.growth_adj = 33.0
+    analysis.m_and_a_status = "ACTIVE_TENDER"
+
+    items = reconcile([pos], {"2371.T": analysis}, _make_portfolio())
+    item = _first_item_for_ticker(items, "2371.T")
+
+    assert item.action == "SELL"
+    assert item.sell_type == "SPECIAL_SITUATION_EXIT"
+    assert get_sell_type_label(item.sell_type) == "M&A EXIT"
+    # Still an executable sell — the operator gets quantity + cash impact —
+    # only the displayed reason changes.
+    assert item.suggested_quantity == 100
+    assert item.cash_impact_usd == 2237.0

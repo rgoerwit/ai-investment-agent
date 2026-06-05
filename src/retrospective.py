@@ -388,6 +388,11 @@ def extract_snapshot(
         ),
         "52w_high": _extract_data_block_float(fundamentals, "52W_HIGH"),
         "52w_low": _extract_data_block_float(fundamentals, "52W_LOW"),
+        # Special-situation routing: Senior promotes the FLA M&A EVENT section
+        # into M_AND_A_STATUS so the IBKR reconciler can route held positions
+        # as M&A EXIT rather than FUNDAMENTAL FAILURE. Empty/missing when no
+        # active deal; values are ACTIVE_TENDER, RUMORED, or NONE.
+        "m_and_a_status": _extract_data_block_field(fundamentals, "M_AND_A_STATUS"),
         # TRADE_BLOCK fields (structured for portfolio reconciliation)
         **trade_block_fields,
         # Bear thesis excerpt

@@ -781,7 +781,7 @@ Output exactly:
         self.prompts["fundamentals_analyst"] = AgentPrompt(
             agent_key="fundamentals_analyst",
             agent_name="Fundamentals Analyst",
-            version="9.21",
+            version="9.22",
             category="fundamental",
             requires_tools=False,
             system_message="""You are a SENIOR FUNDAMENTALS ANALYST. You receive raw financial data from a Junior Analyst and supplemental data from a Foreign Language Analyst, then produce scored analysis with a DATA_BLOCK.
@@ -819,6 +819,13 @@ You will receive THREE data sources:
 7. **Legal Counsel for PFIC** - Set PFIC_RISK baseline from Legal Counsel: CLEAN → LOW, UNCERTAIN → MEDIUM, PROBABLE → HIGH, N/A → LOW. Then apply Cross-Check #11 (Quantitative Asset Test) which may override upward. Final PFIC_RISK = MAX(baseline, quantitative override).
 
 8. **TIME-WEIGHTING RULE**: Current-year metrics that deviate >50% from 5Y averages (ROA, ROE, margins, OCF) may reflect either (a) cyclical extremes, where current metrics should revert toward mid-cycle levels, or (b) one-time / step-change distortions such as acquisition-led consolidation, asset sales, legal settlements, regulatory windfalls, or restructuring gains. In both cases, weight 5Y trends alongside current figures. Do NOT award full points for metrics at extremes; note in CROSS-CHECK FLAGS whether the likely pattern is cyclical or one-time so Bull/Bear/PM can assess whether current strength is durable.
+
+9. **M&A Event from Foreign Language Analyst** - When the Foreign Language Analyst report contains an "M&A EVENT" section with `Active Tender Offer: YES`, promote the structured facts into DATA_BLOCK:
+   - Set `M_AND_A_STATUS: ACTIVE_TENDER` and `M_AND_A_TENDER_PRICE: <value with currency>`.
+   - In your DATA_BLOCK_SCOPE narrative AND the DECISION RATIONALE area, include the market-vs-tender spread when CURRENT_PRICE is known: `Market {currency}{current} vs. tender {currency}{tender} = {sign}{X.X}% spread.`
+   - When the FLA reports rumored/exploratory M&A activity without a confirmed tender offer, set `M_AND_A_STATUS: RUMORED` and leave `M_AND_A_TENDER_PRICE: N/A`.
+   - Otherwise (no FLA M&A section, or `No active M&A event detected.`), set `M_AND_A_STATUS: NONE` and `M_AND_A_TENDER_PRICE: N/A`.
+   These fields drive downstream special-situation routing (e.g., the Portfolio Manager event-driven override and the IBKR sell-type label); an unset value silently disables that routing.
 
 **CRITICAL**: Parse the raw data carefully. Extract actual numeric values, not placeholders. If a metric shows a number, USE IT. Only report "N/A" if BOTH sources show null/error.
 
@@ -1243,6 +1250,8 @@ ROE_ROIC_RATIO: [X.XX] or N/A
 PAYOUT_RATIO: [X.XX]% or N/A
 DIVIDEND_COVERAGE: [COVERED / PARTIAL / UNCOVERED / N/A]
 VALUATION_CONTEXT: [CONTRACTUAL / IMPROVING_EFFICIENCY / MOAT_PROTECTED / STANDARD]
+M_AND_A_STATUS: [ACTIVE_TENDER / RUMORED / NONE]
+M_AND_A_TENDER_PRICE: [Value + currency] or N/A
 ### --- END DATA_BLOCK ---
 
 OUTPUT FORMAT - MANDATORY:
@@ -1417,7 +1426,7 @@ The Senior Analyst depends on receiving complete raw data to perform accurate an
         self.prompts["foreign_language_analyst"] = AgentPrompt(
             agent_key="foreign_language_analyst",
             agent_name="Foreign Language Analyst",
-            version="1.9",
+            version="1.10",
             category="fundamental",
             requires_tools=True,
             system_message="""You are a FOREIGN LANGUAGE ANALYST. Your role is to find financial data from NATIVE-LANGUAGE sources that English-only tools miss.
@@ -1537,6 +1546,14 @@ Run 3 additional `search_foreign_sources` calls for data that API-only tools MIS
 - FR: `{company} changement de commissaire aux comptes`, `{company} démission directeur financier`
 - Extract: recent CFO changes, auditor changes, opinion changes, dates, and stated reasons if disclosed; write "Not found" if absent
 
+**Search I: Active M&A / Tender Offer Disclosures**
+- JP: `{company} 公開買付け TOB 株式公開買付届出書 {year}`
+- KR: `{company} 공개매수 {year}`
+- CN/HK: `{company} 收购要约 {year}`
+- DE: `{company} Übernahmeangebot {year}`
+- EN fallback: `{company} tender offer take-private SPV bidder {year}`
+- Extract: bidder name (+ parent fund if SPV), tender price (with currency), tender period end, acceptance threshold, board recommendation, source URL; write "Not found" if absent
+
 **STEP 3: FALLBACK (if native sources fail)**
 Search English premium sources WITHOUT login/API:
 - "site:bloomberg.com {ticker} financials"
@@ -1617,6 +1634,15 @@ If not found, write: "Capital policy data not found."
 - Auditor opinion change: [FOUND / NOT_FOUND]
 - Source: [URL]
 If not found, write: "Governance turnover data not found."
+
+**M&A EVENT** (if found)
+- Active Tender Offer: [YES / NO]
+- Bidder: [Name (+ parent fund if SPV)]
+- Tender Price: [Value + currency]
+- Tender Period End: [YYYY-MM-DD]
+- Board Recommendation: [SUPPORT / OPPOSE / NEUTRAL]
+- Source: [URL]
+If not found, write: "No active M&A event detected."
 
 **RELIABILITY**
 - Source Quality: [Official/Premium/News]
@@ -2611,6 +2637,12 @@ The user needs the complete data table filled out regardless of your final decis
 Entity Governance Card metric scope is Senior-derived; if APAC or Consultant cites local filing scope conflict, reconcile it as a real dispute rather than automatically rejecting it.
 
 ### STEP 1: VALIDATE THESIS (HIERARCHICAL DECISION LOGIC)
+
+**0) EVENT-DRIVEN OVERRIDE (M&A Active Tender)**: If DATA_BLOCK has `M_AND_A_STATUS: ACTIVE_TENDER`, the security is a special-situation asset whose price is set by deal mechanics, not by trailing fundamentals. Required in your rationale:
+- State the market-vs-tender spread from DATA_BLOCK explicitly (`Market {currency}{CURRENT_PRICE} vs. tender {currency}{M_AND_A_TENDER_PRICE} = {sign}{X.X}%`).
+- For held positions, prefer SELL at market when spread > +3% (capture premium before squeeze-out convergence) or HOLD when the spread is non-positive or the board opposes the offer.
+- Do NOT anchor verdict on trailing P/E, Growth Transition score, or the standard hard-fail / risk-tally framework — they are secondary to deal mechanics. Still emit a PM_BLOCK with `VALUATION_CONTEXT: STANDARD` and a `RISK_TALLY` reflecting deal-break risk (FEFTA / regulatory / financing).
+If `M_AND_A_STATUS` is `RUMORED`, `NONE`, missing, or `N/A`, proceed to **A) CHECK FOR HARD FAILS** below as usual.
 
 **A) CHECK FOR HARD FAILS (Instant SELL - NO OVERRIDES):**
 

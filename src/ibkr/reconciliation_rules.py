@@ -341,6 +341,10 @@ def _classify_sell_type(analysis: AnalysisRecord | None, stop_breached: bool) ->
         return "STOP_BREACH"
     if analysis is None:
         return "HARD_REJECT"
+    # M&A take-private is event-driven, not fundamental — surface the deal
+    # context to the operator regardless of zone/score routing below.
+    if analysis.m_and_a_status == "ACTIVE_TENDER":
+        return "SPECIAL_SITUATION_EXIT"
     health_ok = (analysis.health_adj or 0.0) >= 50.0
     growth_ok = (analysis.growth_adj or 0.0) >= 50.0
     return "SOFT_REJECT" if (health_ok and growth_ok) else "HARD_REJECT"
