@@ -3,7 +3,12 @@
 import pytest
 
 from src.ibkr.models import AnalysisRecord, NormalizedPosition
-from src.ibkr.reconciliation_rules import _classify_sell_type, _cost_basis_return_pct
+from src.ibkr.reconciliation_rules import (
+    SCREEN_REVIEW_DNI_ZONES,
+    _classify_sell_type,
+    _cost_basis_return_pct,
+    _normalize_zone,
+)
 from tests.ibkr.reconciler_cases import (
     TestCheckStaleness,
     TestCheckStopBreach,
@@ -57,6 +62,17 @@ class TestCostBasisReturnPct:
     def test_negative_avg_cost_returns_none(self):
         pos = _make_position(avg_cost=-50.0, current_price=100.0)
         assert _cost_basis_return_pct(pos) is None
+
+
+class TestNormalizeZone:
+    def test_none_returns_empty_string(self):
+        assert _normalize_zone(None) == ""
+
+    def test_strips_and_upcases(self):
+        assert _normalize_zone(" moderate ") == "MODERATE"
+
+    def test_screen_review_dni_zones_are_low_and_moderate(self):
+        assert SCREEN_REVIEW_DNI_ZONES == frozenset({"LOW", "MODERATE"})
 
 
 class TestClassifySellType:

@@ -153,7 +153,13 @@ def _normalize_verdict(raw: str) -> str:
     return normed
 
 
+def _normalize_zone(raw: str | None) -> str:
+    """Normalize a PM risk-zone string to its canonical uppercase token."""
+    return (raw or "").strip().upper()
+
+
 _REJECT_VERDICTS = frozenset({"DO_NOT_INITIATE", "SELL", "REJECT"})
+SCREEN_REVIEW_DNI_ZONES = frozenset({"LOW", "MODERATE"})
 _PROFIT_TAKE_MIN_GAIN_PCT = 25.0
 _PROFIT_TAKE_RISK_LARGE_GAIN_PCT = 50.0
 _PROFIT_TAKE_UNKNOWN_TAX_SEVERE_GAIN_PCT = 60.0

@@ -14,9 +14,11 @@ from src.ibkr.order_builder import round_to_lot_size
 from src.ibkr.reconciliation_rules import (
     _MIN_ORDER_USD,
     _REJECT_VERDICTS,
+    SCREEN_REVIEW_DNI_ZONES,
     _classify_sell_type,
     _exchange_from_position,
     _normalize_verdict,
+    _normalize_zone,
     _settlement_date,
     check_staleness,
     check_stop_breach,
@@ -154,8 +156,8 @@ def evaluate_positions(
 
         verdict_upper = _normalize_verdict(analysis.verdict or "")
         if verdict_upper in _REJECT_VERDICTS:
-            zone = (analysis.zone or "").strip().upper()
-            if verdict_upper == "DO_NOT_INITIATE" and zone in {"LOW", "MODERATE"}:
+            zone = _normalize_zone(analysis.zone)
+            if verdict_upper == "DO_NOT_INITIATE" and zone in SCREEN_REVIEW_DNI_ZONES:
                 items.append(
                     ReconciliationItem(
                         ticker=item_ticker,

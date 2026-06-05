@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from src.ibkr.models import ReconciliationItem
-from src.ibkr.reconciliation_rules import _normalize_verdict
+from src.ibkr.reconciliation_rules import _normalize_verdict, _normalize_zone
 from src.ibkr.refresh_service import run_ticker_for
 
 _DEFAULT_DIP_WATCH_MAX_AGE_DAYS = 30
@@ -135,7 +135,7 @@ def is_dip_watch_eligible(
         return False
     if _normalize_verdict(analysis.verdict or "") != "BUY":
         return False
-    if (analysis.zone or "").strip().upper() in excluded_zones:
+    if _normalize_zone(analysis.zone) in excluded_zones:
         return False
     if analysis.age_days > max_age_days:
         return False
