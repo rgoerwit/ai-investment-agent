@@ -108,6 +108,16 @@ def test_save_results_to_file_preserves_macro_context_metadata(tmp_path, monkeyp
         "macro_context_generated_at": "2026-04-18T00:00:00+00:00",
         "macro_context_injected_into_news": True,
         "macro_context_report": "brief",
+        "macro_regime_block": {
+            "risk_appetite": "RISK_OFF",
+            "shock_type": "ENERGY",
+            "shock_phase": "ACUTE",
+            "equity_transmission": "EARNINGS_PRESSURE",
+            "dip_posture": "WAIT_FOR_CONFIRMATION",
+            "confidence": "MEDIUM",
+            "present": True,
+        },
+        "macro_regime_raw": "MACRO_REGIME_BLOCK:\nRISK_APPETITE: RISK_OFF",
     }
 
     output_path = save_results_to_file(result, "7203.T", quick_mode=True)
@@ -121,6 +131,8 @@ def test_save_results_to_file_preserves_macro_context_metadata(tmp_path, monkeyp
     assert payload["macro_context"]["cache_dir"] == str(
         tmp_path / ".macro_context_cache"
     )
+    assert payload["macro_regime_block"]["risk_appetite"] == "RISK_OFF"
+    assert payload["macro_regime_raw"].startswith("MACRO_REGIME_BLOCK:")
     assert payload["reports"]["apac_regional_report"].startswith(
         "### APAC REGIONAL AUDIT"
     )

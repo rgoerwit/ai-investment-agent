@@ -411,6 +411,37 @@ class TestSpecificPromptFiles:
             assert needle in in_code_text, f"{needle!r} missing from src/prompts.py"
             assert needle in json_sm, f"{needle!r} missing from portfolio_manager.json"
 
+    def test_macro_regime_policy_json_fallback_parity(self):
+        """Decision prompts and in-code fallbacks both carry macro policy."""
+        from src import prompts as _prompts_mod
+
+        in_code_text = Path(_prompts_mod.__file__).read_text(encoding="utf-8")
+        prompt_files = (
+            "bear_researcher.json",
+            "trader.json",
+            "risky_analyst.json",
+            "safe_analyst.json",
+            "neutral_analyst.json",
+            "portfolio_manager.json",
+        )
+
+        for filename in prompt_files:
+            prompt_file = Path("prompts") / filename
+            if not prompt_file.exists():
+                pytest.skip(f"{filename} not found")
+            with open(prompt_file) as f:
+                json_sm = json.load(f).get("system_message", "")
+            assert "## MACRO REGIME SIGNAL POLICY" in json_sm
+
+        for needle in (
+            "## MACRO REGIME SIGNAL POLICY",
+            "MACRO_REGIME_BLOCK",
+            "CONFIDENCE: LOW",
+            "DIP_POSTURE",
+        ):
+            assert needle in in_code_text, f"{needle!r} missing from src/prompts.py"
+        assert in_code_text.count("## MACRO REGIME SIGNAL POLICY") >= len(prompt_files)
+
     def test_portfolio_manager_has_thesis_criteria(self):
         """Verify portfolio_manager.json has investment thesis criteria."""
         from src import prompts as _prompts_mod

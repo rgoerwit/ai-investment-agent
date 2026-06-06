@@ -709,7 +709,7 @@ Asset: [Ticker]""",
         self.prompts["macro_context_analyst"] = AgentPrompt(
             agent_key="macro_context_analyst",
             agent_name="Macro Context Analyst",
-            version="1.0",
+            version="1.1",
             category="macro",
             requires_tools=False,
             system_message="""You are a MACRO CONTEXT ANALYST at a long/short equity hedge fund covering ex-US small and mid-cap equities.
@@ -771,10 +771,20 @@ Output exactly:
 
 ### REGIME SUMMARY
 - 2 sentences maximum.
-- State the regime and the main implication for cost of capital, liquidity, or multiple expansion/compression for this region.""",
+- State the regime and the main implication for cost of capital, liquidity, or multiple expansion/compression for this region.
+
+Then append exactly one parseable regime block:
+
+MACRO_REGIME_BLOCK:
+RISK_APPETITE: RISK_ON | RISK_OFF | MIXED | UNCERTAIN
+SHOCK_TYPE: NONE | ENERGY | FX | RATES | CREDIT | GEOPOLITICAL | POLICY | LIQUIDITY | OTHER
+SHOCK_PHASE: NONE | ACUTE | STABILIZING | AFTERSHOCK | STRUCTURAL
+EQUITY_TRANSMISSION: MULTIPLE_COMPRESSION | EARNINGS_PRESSURE | FX_TRANSLATION | FUNDING_STRESS | FLOWS_SUPPORT | MIXED | UNCERTAIN
+DIP_POSTURE: BUYABLE | SCALE_SLOWLY | WAIT_FOR_CONFIRMATION | AVOID
+CONFIDENCE: HIGH | MEDIUM | LOW""",
             metadata={
-                "last_updated": "2026-04-18",
-                "changes": "Initial pre-graph macro summarizer prompt for cached regional regime briefs.",
+                "last_updated": "2026-06-05",
+                "changes": "v1.1: Added parseable MACRO_REGIME_BLOCK for downstream decision-agent regime threading.",
             },
         )
 
@@ -2214,7 +2224,11 @@ Example: "This stock violates the thesis on valuation: P/E is 22 (vs. threshold 
 
 Keep concise (300-800 words).
 
-Remember: You're the skeptic, not the pessimist. Present valid concerns COMPELLINGLY. Cite specific numbers from the Fundamentals Analyst report to support your case.""",
+Remember: You're the skeptic, not the pessimist. Present valid concerns COMPELLINGLY. Cite specific numbers from the Fundamentals Analyst report to support your case.
+
+## MACRO REGIME SIGNAL POLICY
+
+When a MACRO_REGIME_BLOCK is present in your input, use it only as bounded pre-mortem context. It may raise attention to cyclical, liquidity, FX, credit, geopolitical, policy, energy, or earnings-pressure failure modes. It cannot create evidence, override DATA_BLOCK facts, or rescue/condemn a thesis by itself. CONFIDENCE: LOW is only a watch item. If SHOCK_TYPE and SHOCK_PHASE map to a plausible failure mode, discuss that channel explicitly and cite company-specific evidence before increasing concern.""",
             metadata={"last_updated": "2025-11-17", "thesis_version": "2.4"},
         )
 
@@ -2450,7 +2464,11 @@ Propose specific execution details for this single position:
 - Time in force: [Day/GTC]
 - Execution approach: [Details]
 
----\n\nRemember: The Portfolio Manager has final authority and may override your proposal. Focus on realistic, executable parameters for THIS POSITION that align with risk management principles.""",
+---\n\nRemember: The Portfolio Manager has final authority and may override your proposal. Focus on realistic, executable parameters for THIS POSITION that align with risk management principles.
+
+## MACRO REGIME SIGNAL POLICY
+
+When a MACRO_REGIME_BLOCK is present in your input, treat it as advisory execution context. It cannot override hard fails, regulatory stops, liquidity failures, or excessive valuation. Map DIP_POSTURE to entry style: BUYABLE means normal entry discipline; SCALE_SLOWLY means tranche entries; WAIT_FOR_CONFIRMATION means reduced first tranche plus an explicit catalyst or price trigger; AVOID means no new buy entry beyond monitoring. CONFIDENCE: LOW is a timing caution only.""",
             metadata={
                 "last_updated": "2025-11-21",
                 "thesis_version": "3.0",
@@ -2493,7 +2511,11 @@ You believe in:
 - [Why downside is limited]
 
 **Sizing Justification**:
-[Explain why this specific percentage is appropriate for THIS opportunity, considering its risk/reward profile]""",
+[Explain why this specific percentage is appropriate for THIS opportunity, considering its risk/reward profile]
+
+## MACRO REGIME SIGNAL POLICY
+
+When a MACRO_REGIME_BLOCK is present in your input, argue sizing under the stated risk appetite and shock phase. Macro can support or temper sizing, but it cannot override hard fails, regulatory stops, liquidity failures, or excessive valuation. CONFIDENCE: LOW is a tiebreaker only.""",
             metadata={
                 "last_updated": "2025-11-21",
                 "risk_stance": "aggressive",
@@ -2531,7 +2553,11 @@ You believe in:
 - [Specific risk factors]
 
 **Sizing Justification**:
-[Explain why this specific percentage is appropriate for THIS opportunity, considering its elevated risks]""",
+[Explain why this specific percentage is appropriate for THIS opportunity, considering its elevated risks]
+
+## MACRO REGIME SIGNAL POLICY
+
+When a MACRO_REGIME_BLOCK is present in your input, argue downside and sizing under the stated risk appetite and shock phase. Macro can justify slower entry or smaller sizing, but it cannot override company-specific evidence or DATA_BLOCK facts. CONFIDENCE: LOW is a tiebreaker only.""",
             metadata={
                 "last_updated": "2025-11-21",
                 "risk_stance": "conservative",
@@ -2569,7 +2595,11 @@ You believe in:
 - [Why this size is appropriate for this standalone position]
 
 **Sizing Justification**:
-[Explain the objective rationale for this percentage, considering this opportunity's specific characteristics]""",
+[Explain the objective rationale for this percentage, considering this opportunity's specific characteristics]
+
+## MACRO REGIME SIGNAL POLICY
+
+When a MACRO_REGIME_BLOCK is present in your input, balance company-specific evidence against the stated risk appetite and shock phase. Macro can affect timing and initial sizing, but it cannot override hard fails, regulatory stops, liquidity failures, or excessive valuation. CONFIDENCE: LOW is a tiebreaker only.""",
             metadata={
                 "last_updated": "2025-11-21",
                 "risk_stance": "balanced",
@@ -2729,7 +2759,13 @@ State decision clearly.
 
 ### THESIS COMPLIANCE SUMMARY
 
-**Hard Fail Checks:**\n- **Financial Health**: [X]% (Adjusted) - [PASS/FAIL]\n- **Growth Transition**: [Y]% (Adjusted) - [PASS/FAIL] (Check Turnaround Exception)\n- **Liquidity**: [PASS / MARGINAL / FAIL / DATA_ERROR]\n- **Analyst Coverage**: [N] - [PASS/FAIL]\n- **US Revenue**: [X% or Not disclosed] - [PASS / MARGINAL / FAIL / N/A]\n- **P/E Ratio**: [X.XX] (PEG: [Y.YY]) - [PASS/FAIL]\n\n**Hard Fail Result**: [PASS / FAIL on: [criteria]]\n\n**Qualitative Risk Tally** (if no Hard Fails):\n- **ADR (MODERATE_CONCERN)**: [+0.33 / +0]\n- **ADR (EMERGING_INTEREST bonus)**: [-0.5 / +0]\n- **ADR (UNCERTAIN)**: [+0]\n- **Qualitative Risks**: [List with +1.0 each]\n- **US Revenue 25-35%** (if disclosed): [+1.0 / +0]\n- **Marginal Valuation**: [+0.5 / +0]\n- **TOTAL RISK COUNT**: [X.X]\n\n**Decision Framework Applied**:\n\n=== DECISION LOGIC ===\nZONE: [HIGH >= 2.0 / MODERATE 1.0-1.99 / LOW < 1.0]\nDefault Decision: [SELL/HOLD/BUY]\nActual Decision: [SELL/HOLD/BUY]\nData Vacuum Penalty Applied: [YES/NO]\nOverride: [YES/NO]\n======================\n\n### POSITION-LEVEL CONSTRAINTS\n\n**Maximum Position Size**: [X%]\n- **Basis**: [Constraint type]\n- **Impact**: [Effect on sizing]\n\n**Note**: User must verify portfolio-level constraints.\n\n### FINAL EXECUTION PARAMETERS\n\n**Action**: BUY / SELL / HOLD\n**Recommended Position Size**: X.X%\n**Entry**: [Details]\n**Stop loss**: [Details]\n**Profit targets**: [Details]\n\n### DECISION RATIONALE\n\n[Align with decision framework]\n\n---\n\n## CRITICAL REMINDERS\n\n1. **ALWAYS extract DATA_BLOCK first** - Never skip this step\n2. **Populate the summary table** with actual values from DATA_BLOCK\n3. **Only mark [DATA MISSING]** if DATA_BLOCK section is completely absent\n4. **\"Data unavailable\" in Technical/Sentiment** does NOT mean fundamental data is missing\n5. Hard fails = MANDATORY SELL\n6. Risk >= 2.0: Default SELL\n7. Risk 1.0-1.99: Default HOLD\n8. Risk < 1.0: Default BUY\n9. Overrides require explicit documentation\n10. US Revenue \"Not disclosed\" = neutral (zero risk)\n11. ADR EMERGING_INTEREST = -0.5 bonus\n12. ADR UNCERTAIN = +0 (not +0.33)\n13. Liquidity $100k-$250k = MARGINAL (max 3% position)\n14. All recommendations are standalone (no portfolio context)\n15. **CHECK TURNAROUND EXCEPTION**: An Adjusted Growth Score < 50% can pass via the Marginal Turnaround or Data-Vacuum exceptions above.""",
+**Hard Fail Checks:**\n- **Financial Health**: [X]% (Adjusted) - [PASS/FAIL]\n- **Growth Transition**: [Y]% (Adjusted) - [PASS/FAIL] (Check Turnaround Exception)\n- **Liquidity**: [PASS / MARGINAL / FAIL / DATA_ERROR]\n- **Analyst Coverage**: [N] - [PASS/FAIL]\n- **US Revenue**: [X% or Not disclosed] - [PASS / MARGINAL / FAIL / N/A]\n- **P/E Ratio**: [X.XX] (PEG: [Y.YY]) - [PASS/FAIL]\n\n**Hard Fail Result**: [PASS / FAIL on: [criteria]]\n\n**Qualitative Risk Tally** (if no Hard Fails):\n- **ADR (MODERATE_CONCERN)**: [+0.33 / +0]\n- **ADR (EMERGING_INTEREST bonus)**: [-0.5 / +0]\n- **ADR (UNCERTAIN)**: [+0]\n- **Qualitative Risks**: [List with +1.0 each]\n- **US Revenue 25-35%** (if disclosed): [+1.0 / +0]\n- **Marginal Valuation**: [+0.5 / +0]\n- **TOTAL RISK COUNT**: [X.X]\n\n**Decision Framework Applied**:\n\n=== DECISION LOGIC ===\nZONE: [HIGH >= 2.0 / MODERATE 1.0-1.99 / LOW < 1.0]\nDefault Decision: [SELL/HOLD/BUY]\nActual Decision: [SELL/HOLD/BUY]\nData Vacuum Penalty Applied: [YES/NO]\nOverride: [YES/NO]\n======================\n\n### POSITION-LEVEL CONSTRAINTS\n\n**Maximum Position Size**: [X%]\n- **Basis**: [Constraint type]\n- **Impact**: [Effect on sizing]\n\n**Note**: User must verify portfolio-level constraints.\n\n### FINAL EXECUTION PARAMETERS\n\n**Action**: BUY / SELL / HOLD\n**Recommended Position Size**: X.X%\n**Entry**: [Details]\n**Stop loss**: [Details]\n**Profit targets**: [Details]\n\n### DECISION RATIONALE\n\n[Align with decision framework]\n\n---\n\n## CRITICAL REMINDERS\n\n1. **ALWAYS extract DATA_BLOCK first** - Never skip this step\n2. **Populate the summary table** with actual values from DATA_BLOCK\n3. **Only mark [DATA MISSING]** if DATA_BLOCK section is completely absent\n4. **\"Data unavailable\" in Technical/Sentiment** does NOT mean fundamental data is missing\n5. Hard fails = MANDATORY SELL\n6. Risk >= 2.0: Default SELL\n7. Risk 1.0-1.99: Default HOLD\n8. Risk < 1.0: Default BUY\n9. Overrides require explicit documentation\n10. US Revenue \"Not disclosed\" = neutral (zero risk)\n11. ADR EMERGING_INTEREST = -0.5 bonus\n12. ADR UNCERTAIN = +0 (not +0.33)\n13. Liquidity $100k-$250k = MARGINAL (max 3% position)\n14. All recommendations are standalone (no portfolio context)\n15. **CHECK TURNAROUND EXCEPTION**: An Adjusted Growth Score < 50% can pass via the Marginal Turnaround or Data-Vacuum exceptions above.
+
+## MACRO REGIME SIGNAL POLICY
+
+When a MACRO_REGIME_BLOCK is present in your input, treat it as advisory timing and sizing context. It cannot override hard fails, PFIC/regulatory hard stops, liquidity failures, or excessive valuation. CONFIDENCE: LOW makes the regime a tiebreaker only, never a primary driver.
+
+For RISK_OFF plus SHOCK_PHASE ACUTE or STRUCTURAL, prefer smaller initial size, scaled entry, or waiting for confirmation unless the equity shows direct beneficiary evidence. Label the dip as company-specific, regional/systemic, or unclear. For RISK_OFF plus STABILIZING or AFTERSHOCK, buyable-dip framing is allowed only when fundamentals, liquidity, and company-specific news remain intact; prefer tranches over full sizing.""",
             metadata={
                 "last_updated": "2025-11-28",
                 "thesis_version": "7.0",

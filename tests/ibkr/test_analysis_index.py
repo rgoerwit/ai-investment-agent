@@ -47,6 +47,53 @@ def test_build_analysis_record_normalizes_consumer_cyclical_sector():
     assert record.sector == "Consumer Discretionary"
 
 
+def test_build_analysis_record_loads_macro_regime_block():
+    record = _build_analysis_record_from_data(
+        Path("7203.T_20260425_000000_analysis.json"),
+        {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-04-25",
+                "verdict": "BUY",
+                "sector": "Consumer Cyclical",
+                "currency": "JPY",
+            },
+            "macro_regime_block": {
+                "present": True,
+                "risk_appetite": "RISK_OFF",
+                "shock_type": "ENERGY",
+                "shock_phase": "ACUTE",
+                "equity_transmission": "EARNINGS_PRESSURE",
+                "dip_posture": "WAIT_FOR_CONFIRMATION",
+                "confidence": "MEDIUM",
+            },
+            "investment_analysis": {"trader_plan": ""},
+        },
+    )
+
+    assert record is not None
+    assert record.macro_regime["risk_appetite"] == "RISK_OFF"
+
+
+def test_build_analysis_record_legacy_json_defaults_macro_regime_empty():
+    record = _build_analysis_record_from_data(
+        Path("7203.T_20260425_000000_analysis.json"),
+        {
+            "prediction_snapshot": {
+                "ticker": "7203.T",
+                "analysis_date": "2026-04-25",
+                "verdict": "BUY",
+                "sector": "Consumer Cyclical",
+                "currency": "JPY",
+            },
+            "investment_analysis": {"trader_plan": ""},
+        },
+    )
+
+    assert record is not None
+    assert record.macro_regime == {}
+
+
 def test_build_analysis_record_repairs_legacy_currency():
     record = _build_analysis_record_from_data(
         Path("PINFRA.MX_20260425_000000_analysis.json"),

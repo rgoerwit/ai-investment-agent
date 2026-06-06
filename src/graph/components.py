@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +48,7 @@ class TradingContext:
     macro_context_report: str = ""
     macro_context_region: str = ""
     macro_context_status: str = "disabled"
+    macro_regime: dict[str, str | bool] = field(default_factory=dict)
 
 
 @dataclass

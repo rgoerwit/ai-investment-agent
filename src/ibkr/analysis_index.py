@@ -312,6 +312,10 @@ def _build_analysis_record_from_data(
     currency_source = repaired_currency["currency_source"]
     currency_repaired = repaired_currency["currency_repaired"]
     currency_repair_reason = repaired_currency["currency_repair_reason"]
+    macro_regime_raw = (
+        data.get("macro_regime_block") or snapshot.get("regime_at_decision") or {}
+    )
+    macro_regime = macro_regime_raw if isinstance(macro_regime_raw, dict) else {}
 
     return AnalysisRecord(
         ticker=ticker,
@@ -339,6 +343,7 @@ def _build_analysis_record_from_data(
         exchange=snapshot.get("exchange") or _exchange_from_ticker(ticker),
         is_quick_mode=bool(snapshot.get("is_quick_mode", False)),
         capital_flag_types=_extract_capital_flag_types(data, ticker),
+        macro_regime=macro_regime,
         m_and_a_status=(snapshot.get("m_and_a_status") or "").strip().upper(),
     )
 

@@ -324,6 +324,8 @@ async def _prefetch_macro_context(
     callbacks: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Load macro context with a deterministic failed fallback."""
+    from src.macro_regime import MacroRegime
+
     default_result = {
         "report": "",
         "region": "GLOBAL",
@@ -331,6 +333,8 @@ async def _prefetch_macro_context(
         "generated_at": None,
         "llm_invoked": False,
         "prompt_used": None,
+        "regime_block_dict": MacroRegime().to_dict(),
+        "regime_raw": "",
     }
 
     try:
@@ -341,6 +345,7 @@ async def _prefetch_macro_context(
             trade_date,
             callbacks=callbacks,
         )
+        regime = getattr(macro_context, "regime", MacroRegime())
         result = {
             "report": macro_context.report,
             "region": macro_context.region,
@@ -348,6 +353,8 @@ async def _prefetch_macro_context(
             "generated_at": macro_context.generated_at,
             "llm_invoked": macro_context.llm_invoked,
             "prompt_used": macro_context.prompt_used,
+            "regime_block_dict": regime.to_dict(),
+            "regime_raw": regime.raw_block,
         }
         logger.info(
             "macro_context_prefetch_complete",
@@ -466,6 +473,8 @@ async def run_analysis(
             macro_context_generated_at = macro_context["generated_at"]
             macro_context_llm_invoked = macro_context["llm_invoked"]
             macro_context_prompt_used = macro_context["prompt_used"]
+            macro_regime_block = macro_context.get("regime_block_dict") or {}
+            macro_regime_raw = macro_context.get("regime_raw", "")
 
             session_id = _resolve_langfuse_session_id(
                 session_id or f"{ticker}-{real_date}-{uuid.uuid4().hex[:8]}"
@@ -570,6 +579,7 @@ async def run_analysis(
                 macro_context_report=macro_context_report,
                 macro_context_region=macro_context_region,
                 macro_context_status=macro_context_status,
+                macro_regime=macro_regime_block,
             )
 
             logger.info(
@@ -649,6 +659,8 @@ async def run_analysis(
                 result["macro_context_status"] = macro_context_status
                 result["macro_context_generated_at"] = macro_context_generated_at
                 result["macro_context_llm_invoked"] = macro_context_llm_invoked
+                result["macro_regime_block"] = macro_regime_block
+                result["macro_regime_raw"] = macro_regime_raw
                 result["macro_context_injected_into_news"] = bool(
                     result.get("macro_context_injected_into_news", False)
                 )

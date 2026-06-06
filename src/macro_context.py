@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -25,6 +25,7 @@ import structlog
 from langchain_core.callbacks import BaseCallbackHandler
 
 import src.config as config_module
+from src.macro_regime import MacroRegime, parse_macro_regime
 from src.macro_regions import infer_macro_region
 from src.runtime_services import get_current_inspection_service
 from src.tooling.inspector import InspectionEnvelope, SourceKind
@@ -54,6 +55,7 @@ class MacroContextResult:
     generated_at: str | None = None
     llm_invoked: bool = False
     prompt_used: dict[str, Any] | None = None
+    regime: MacroRegime = field(default_factory=MacroRegime)
 
 
 def _cache_path(region: str) -> Path:
@@ -342,6 +344,7 @@ async def get_macro_context(
             region=region,
             status="cached",
             generated_at=cached.get("generated_at"),
+            regime=parse_macro_regime(report),
         )
 
     try:
@@ -416,6 +419,7 @@ async def get_macro_context(
             generated_at=generated_at,
             llm_invoked=llm_invoked,
             prompt_used=prompt_used,
+            regime=parse_macro_regime(report),
         )
     except Exception as exc:
         logger.warning(

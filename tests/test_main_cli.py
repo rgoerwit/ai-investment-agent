@@ -200,6 +200,8 @@ class TestOutputCompanyNameLookup:
         assert result["analysis_validity"] == {"ok": True}
         assert result["macro_context_status"] == "failed"
         assert result["macro_context_region"]
+        assert result["macro_regime_block"] == {}
+        assert result["macro_regime_raw"] == ""
         warning_calls = [
             call
             for call in mock_logger.warning.call_args_list
@@ -234,6 +236,16 @@ class TestOutputCompanyNameLookup:
             "generated_at": None,
             "llm_invoked": False,
             "prompt_used": None,
+            "regime_block_dict": {
+                "risk_appetite": "RISK_OFF",
+                "shock_type": "ENERGY",
+                "shock_phase": "ACUTE",
+                "equity_transmission": "EARNINGS_PRESSURE",
+                "dip_posture": "WAIT_FOR_CONFIRMATION",
+                "confidence": "MEDIUM",
+                "present": True,
+            },
+            "regime_raw": "MACRO_REGIME_BLOCK:\nRISK_APPETITE: RISK_OFF",
         }
 
         with (
@@ -273,6 +285,9 @@ class TestOutputCompanyNameLookup:
         assert context.macro_context_report == macro_result["report"]
         assert context.macro_context_region == "JAPAN"
         assert context.macro_context_status == "cached"
+        assert context.macro_regime["risk_appetite"] == "RISK_OFF"
+        assert result["macro_regime_block"]["risk_appetite"] == "RISK_OFF"
+        assert result["macro_regime_raw"].startswith("MACRO_REGIME_BLOCK:")
 
     def test_strict_and_quick_composable(self):
         """--strict --quick can be combined without conflict."""
@@ -506,6 +521,16 @@ class TestTracingMetadataFlow:
             "generated_at": "2026-04-18T00:00:00+00:00",
             "llm_invoked": True,
             "prompt_used": {"agent_name": "Macro Context Analyst", "version": "1.0"},
+            "regime_block_dict": {
+                "risk_appetite": "UNCERTAIN",
+                "shock_type": "NONE",
+                "shock_phase": "NONE",
+                "equity_transmission": "UNCERTAIN",
+                "dip_posture": "WAIT_FOR_CONFIRMATION",
+                "confidence": "LOW",
+                "present": False,
+            },
+            "regime_raw": "",
         }
 
         with (
@@ -577,6 +602,16 @@ class TestTracingMetadataFlow:
             "generated_at": "2026-04-19T13:49:10.364729+00:00",
             "llm_invoked": True,
             "prompt_used": {"agent_name": "Macro Context Analyst", "version": "1.0"},
+            "regime_block_dict": {
+                "risk_appetite": "UNCERTAIN",
+                "shock_type": "NONE",
+                "shock_phase": "NONE",
+                "equity_transmission": "UNCERTAIN",
+                "dip_posture": "WAIT_FOR_CONFIRMATION",
+                "confidence": "LOW",
+                "present": False,
+            },
+            "regime_raw": "",
         }
         mock_logger.info.assert_any_call(
             "macro_context_prefetch_complete",

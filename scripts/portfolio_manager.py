@@ -44,7 +44,7 @@ from src.ibkr.cli_options import (
     portfolio_request_kwargs_from_args,
     validate_common_portfolio_request_args,
 )
-from src.ibkr.dip_watch import compute_dip_score, dip_watch_source
+from src.ibkr.dip_watch import dip_watch_source, score_dip_watch_item
 from src.ibkr.exceptions import IBKRAuthError, IBKRError
 from src.ibkr.models import (
     AnalysisRecord,
@@ -1023,7 +1023,7 @@ def _bar_chart(pct: float, limit: float, width: int = 14) -> str:
 
 def _compute_dip_score(item: ReconciliationItem) -> float:
     """Backward-compatible alias for the shared dip-watch scorer."""
-    return compute_dip_score(item)
+    return score_dip_watch_item(item)
 
 
 def _display_ticker(item: ReconciliationItem) -> str:

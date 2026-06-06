@@ -437,6 +437,7 @@ def create_trader_node(llm, memory: Any | None) -> Callable:
             f"\n\nVALUATION PARAMETERS:\n{valuation}" if valuation else ""
         )
         governance_section = governance_block(state, with_label=True)
+        macro_section = support.macro_section_for(config)
 
         market_report = state.get("market_report", "N/A")
         sentiment_report = state.get("sentiment_report", "N/A")
@@ -456,7 +457,7 @@ FUNDAMENTALS ANALYST REPORT:
 {support.summarize_for_pm(fundamentals_report, "fundamentals", 6000) if fundamentals_report != "N/A" else "N/A"}
 
 RESEARCH MANAGER PLAN:
-{support.summarize_for_pm(investment_plan, "research", 3500) if investment_plan != "N/A" else "N/A"}{apac_section}{consultant_section}{valuation_section}{governance_section}"""
+{support.summarize_for_pm(investment_plan, "research", 3500) if investment_plan != "N/A" else "N/A"}{macro_section}{apac_section}{consultant_section}{valuation_section}{governance_section}"""
         prompt = f"{agent_prompt.system_message}\n\n{all_input}\n\nCreate Trading Plan."
 
         try:
@@ -530,10 +531,11 @@ def create_risk_debater_node(llm, agent_key: str) -> Callable:
             f"{consultant if consultant else 'N/A (consultant disabled or unavailable)'}"
         )
         governance_section = governance_block(state, with_label=True)
+        macro_section = support.macro_section_for(config)
 
         prompt = (
             f"{agent_prompt.system_message}\n\nTRADER PLAN: "
-            f"{state.get('trader_investment_plan')}{consultant_section}{governance_section}\n\n"
+            f"{state.get('trader_investment_plan')}{consultant_section}{governance_section}{macro_section}\n\n"
             "Provide risk assessment."
         )
         try:
@@ -600,6 +602,7 @@ NEUTRAL ANALYST (Balanced):
         pre_screening_result = state.get("pre_screening_result", "N/A")
         red_flags = list(state.get("red_flags", []))
         ticker = state.get("company_of_interest", "UNKNOWN")
+        macro_section = support.macro_section_for(config)
 
         if value_trap:
             value_trap_warnings = RedFlagDetector.detect_value_trap_flags(
@@ -801,7 +804,7 @@ FUNDAMENTALS ANALYST REPORT:
 {support.summarize_for_pm(fundamentals, "fundamentals", 4000) if fundamentals else "N/A"}{attribution_table}{conflict_table}
 
 VALUE TRAP ANALYSIS:
-{support.extract_value_trap_verdict(value_trap)}{support.summarize_for_pm(value_trap, "value_trap", 2500) if value_trap else "N/A"}{red_flag_section}
+{support.extract_value_trap_verdict(value_trap)}{support.summarize_for_pm(value_trap, "value_trap", 2500) if value_trap else "N/A"}{red_flag_section}{macro_section}
 
 RESEARCH MANAGER RECOMMENDATION:
 {support.summarize_for_pm(inv_plan, "research", 3000) if inv_plan else "N/A"}{apac_section}{consultant_section}{kill_criteria_section}{valuation_section}

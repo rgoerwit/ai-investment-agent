@@ -191,8 +191,15 @@ Now provide your Round 2 rebuttal, addressing the opponent's key points."""
 
                 lessons_memory = create_lessons_memory()
                 sector = support._extract_sector_from_state(state)
+                context = support.get_context_from_config(config)
+                current_regime = (
+                    getattr(context, "macro_regime", None) if context else None
+                )
                 lessons_text = await format_lessons_for_injection(
-                    lessons_memory, ticker, sector
+                    lessons_memory,
+                    ticker,
+                    sector,
+                    current_regime=current_regime,
                 )
                 if lessons_text:
                     logger.info(
@@ -244,6 +251,15 @@ Only use data explicitly related to {ticker} ({company_name}).{governance_block(
             context_block += (
                 f"\n\n{wrapped_lessons}" if context_block else wrapped_lessons
             )
+        if agent_key == "bear_researcher":
+            macro_context = support.macro_section_for(
+                config,
+                prefix="",
+            )
+            if macro_context:
+                context_block += (
+                    f"\n\n{macro_context}" if context_block else macro_context
+                )
 
         prompt = (
             f"{agent_prompt.system_message}\n{negative_constraint}\n\n{context_section_title}:\n"

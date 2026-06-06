@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -359,6 +359,9 @@ def extract_snapshot(
     # TRADE_BLOCK extraction from trader plan (zero LLM cost — pure regex)
     trader_plan = result.get("investment_analysis", {}).get("trader_plan", "") or ""
     trade_block_fields = _extract_trade_block_fields(trader_plan)
+    macro_regime_raw = result.get("macro_regime_block") or {}
+    macro_regime = macro_regime_raw if isinstance(macro_regime_raw, dict) else {}
+    regime_at_decision = macro_regime if macro_regime.get("present") else None
 
     snapshot = {
         # Core verdict
@@ -416,6 +419,10 @@ def extract_snapshot(
         # rejections.
         "is_strict_mode": is_strict_mode,
         "trace_id": trace_id,
+        "regime_at_decision": regime_at_decision,
+        "regime_confidence": macro_regime.get("confidence")
+        if regime_at_decision
+        else None,
     }
 
     logger.info(
@@ -1263,6 +1270,17 @@ async def store_lesson(
         "confidence_weight": float(confidence),
         "timestamp": datetime.now().isoformat(),
     }
+    regime = comparison.get("regime_at_decision") or {}
+    if isinstance(regime, dict):
+        metadata.update(
+            {
+                "regime_risk_appetite": regime.get("risk_appetite", ""),
+                "regime_shock_type": regime.get("shock_type", ""),
+                "regime_shock_phase": regime.get("shock_phase", ""),
+                "regime_dip_posture": regime.get("dip_posture", ""),
+                "regime_confidence": comparison.get("regime_confidence", "") or "",
+            }
+        )
 
     stored = await lessons_memory.add_situations([lesson], [metadata])
     if stored:
@@ -1355,9 +1373,10 @@ async def format_lessons_for_injection(
     lessons_memory: Any,
     ticker: str,
     sector: str,
+    current_regime: Mapping[str, Any] | None = None,
 ) -> str:
     """
-    Query global lessons collection, rank by confidence + geographic boost,
+    Query global lessons collection, rank by confidence + geographic/regime boost,
     return formatted text for injection into researcher prompts.
 
     Called from agents.py researcher_node (2-line integration).
@@ -1366,6 +1385,7 @@ async def format_lessons_for_injection(
         lessons_memory: FinancialSituationMemory for lessons_learned collection
         ticker: Current ticker being analyzed
         sector: Sector of current ticker
+        current_regime: Optional parsed MACRO_REGIME_BLOCK for relevance boosting
 
     Returns:
         Formatted string for prompt injection, or "" if no lessons available
@@ -1447,6 +1467,20 @@ async def format_lessons_for_injection(
                 boost += 0.15
             if meta.get("currency") == current_currency:
                 boost += 0.10
+
+            if current_regime and current_regime.get("confidence") in {
+                "HIGH",
+                "MEDIUM",
+            }:
+                appetite = current_regime.get("risk_appetite")
+                if appetite and meta.get("regime_risk_appetite") == appetite:
+                    boost += 0.06
+                shock_type = current_regime.get("shock_type")
+                if shock_type and meta.get("regime_shock_type") == shock_type:
+                    boost += 0.06
+                dip_posture = current_regime.get("dip_posture")
+                if dip_posture and meta.get("regime_dip_posture") == dip_posture:
+                    boost += 0.03
 
         effective_score = base_confidence + boost
 

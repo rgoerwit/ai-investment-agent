@@ -427,6 +427,8 @@ def save_results_to_file(
             result,
             cache_dir=results_dir / ".macro_context_cache",
         ),
+        "macro_regime_block": result.get("macro_regime_block") or {},
+        "macro_regime_raw": result.get("macro_regime_raw", ""),
         "prompts_metadata": {
             "prompts_used": prompts_used,
             "available_prompts": available_prompts,

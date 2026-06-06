@@ -7,7 +7,9 @@ from src.ibkr.dip_watch import (
     dip_pct,
     dip_watch_source,
     is_dip_watch_eligible,
+    macro_regime_price_multiplier,
     risk_reward_ratio,
+    score_dip_watch_item,
     select_dip_watch_candidates,
 )
 from src.ibkr.models import ReconciliationItem
@@ -67,6 +69,7 @@ def test_compute_dip_score_returns_zero_without_analysis():
         ibkr_position=make_position(),
     )
     assert compute_dip_score(item) == 0.0
+    assert score_dip_watch_item(item) == 0.0
 
 
 def test_select_dip_watch_candidates_filters_and_ranks(sample_bundle):
@@ -116,6 +119,66 @@ def test_compute_dip_score_prefers_better_dip():
         analysis=make_analysis(entry_price=2100, current_price=2100),
     )
     assert compute_dip_score(strong) > compute_dip_score(weak)
+
+
+def test_compute_dip_score_regime_multiplier_changes_only_price_bonus():
+    item = _dip_item(
+        health_adj=75.0,
+        growth_adj=75.0,
+        entry_price=2000.0,
+        current_price=1800.0,
+        stop_price=None,
+        target_1=None,
+    )
+
+    baseline = compute_dip_score(item)
+    suppressed = compute_dip_score(item, regime_multiplier=0.3)
+
+    assert baseline == 75.0 * 0.4 + 75.0 * 0.4 + 12.0
+    assert suppressed == 75.0 * 0.4 + 75.0 * 0.4 + (12.0 * 0.3)
+
+
+def test_macro_regime_multiplier_defaults_to_one_when_absent_or_low_confidence():
+    absent = _dip_item()
+    low = _dip_item()
+    low.analysis.macro_regime = {
+        "present": True,
+        "confidence": "LOW",
+        "dip_posture": "AVOID",
+    }
+
+    assert macro_regime_price_multiplier(absent) == 1.0
+    assert macro_regime_price_multiplier(low) == 1.0
+
+
+def test_partial_block_default_dip_posture_yields_sixty_percent_multiplier():
+    item = _dip_item()
+    item.analysis.macro_regime = {
+        "present": True,
+        "confidence": "HIGH",
+        "dip_posture": "WAIT_FOR_CONFIRMATION",
+    }
+
+    assert macro_regime_price_multiplier(item) == 0.60
+
+
+def test_select_dip_watch_candidates_ranking_uses_regime_adjusted_score():
+    buyable = _dip_item(ticker="BUYABLE.T", health_adj=70.0, growth_adj=70.0)
+    buyable.analysis.macro_regime = {
+        "present": True,
+        "confidence": "HIGH",
+        "dip_posture": "BUYABLE",
+    }
+    waiting = _dip_item(ticker="WAIT.T", health_adj=71.0, growth_adj=71.0)
+    waiting.analysis.macro_regime = {
+        "present": True,
+        "confidence": "HIGH",
+        "dip_posture": "WAIT_FOR_CONFIRMATION",
+    }
+
+    selected = select_dip_watch_candidates([waiting, buyable])
+
+    assert [item.ticker.yf for item in selected] == ["BUYABLE.T", "WAIT.T"]
 
 
 def test_select_dip_watch_candidates_includes_fresh_buy():

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 from langchain_core.messages import ToolMessage
@@ -13,6 +13,7 @@ from src.data_block_utils import (
     extract_data_block_field,
     has_parseable_data_block,
 )
+from src.macro_regime import parse_macro_regime
 from src.runtime_diagnostics import get_model_name as _get_model_name
 from src.runtime_diagnostics import infer_provider
 
@@ -24,6 +25,9 @@ _UNRESOLVED_NAME_WARNING = (
     "this ticker belongs to. If you cannot confirm the identity from your tool "
     "results, state that the company identity is unverified."
 )
+_MACRO_SECTION_CAP_NEWS = 5000
+# Macro prompt caps output at 420 words; decision agents only need the regime slice.
+_MACRO_SECTION_CAP_DECISION = 1200
 
 
 def infer_provider_name(runnable: Any) -> str:
@@ -46,6 +50,110 @@ def get_context_from_config(config: RunnableConfig) -> Any | None:
         return configurable.get("context")
     except (AttributeError, TypeError):
         return None
+
+
+def _resolve_context(source: Any | None) -> Any | None:
+    """Accept either RunnableConfig or the TradingContext object itself."""
+    if source is None:
+        return None
+    if isinstance(source, Mapping):
+        return get_context_from_config(source)
+    return source
+
+
+def _unpack_macro_context(context: Any | None) -> tuple[str, str, str]:
+    """Return normalized (report, status, region) from a TradingContext-like object."""
+    if context is None:
+        return "", "disabled", "GLOBAL"
+    report = getattr(context, "macro_context_report", "")
+    status = getattr(context, "macro_context_status", "disabled")
+    region = getattr(context, "macro_context_region", "GLOBAL")
+    return (
+        report.strip() if isinstance(report, str) else "",
+        (status or "disabled").lower() if isinstance(status, str) else "disabled",
+        region if isinstance(region, str) and region else "GLOBAL",
+    )
+
+
+def _extract_heading_block(report: str, heading: str) -> str:
+    pattern = (
+        rf"(?ims)^###\s+{re.escape(heading)}\s*\n"
+        r"(?P<body>.*?)(?=^###\s+|^MACRO_REGIME_BLOCK:|\Z)"
+    )
+    match = re.search(pattern, report)
+    if not match:
+        return ""
+    body = match.group("body").strip()
+    return f"### {heading}\n{body}" if body else ""
+
+
+def _extract_macro_regime_block(report: str) -> str:
+    regime = parse_macro_regime(report)
+    return regime.raw_block if regime.present else ""
+
+
+def _cap_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars].rstrip()}\n[TRUNCATED]"
+
+
+def format_macro_context_for_agent(
+    context_or_config: Any | None,
+    *,
+    audience: Literal["news", "decision"] | str = "decision",
+    max_chars: int | None = None,
+) -> str:
+    """Format existing pre-graph macro context for prompt injection.
+
+    The macro report is advisory regime context. This helper deliberately keeps
+    it textual and bounded so consumers share one vocabulary without adding a
+    new graph-state schema.
+    """
+    context = _resolve_context(context_or_config)
+    report, status, region = _unpack_macro_context(context)
+    if not report:
+        return ""
+
+    if status in {"disabled", "failed"}:
+        return ""
+
+    normalized_audience = (audience or "decision").lower()
+
+    if normalized_audience == "news":
+        text = f"### REGIONAL MACRO CONTEXT\nRegion: {region}\n{report}"
+        return _cap_text(text, max_chars or _MACRO_SECTION_CAP_NEWS)
+
+    regime_block = _extract_macro_regime_block(report)
+    if not regime_block:
+        return ""
+
+    summary = _extract_heading_block(report, "REGIME SUMMARY")
+    lines = [
+        "### MACRO REGIME SIGNAL",
+        f"Region: {region}",
+    ]
+    if summary:
+        lines.append(summary)
+    lines.append(regime_block)
+
+    return _cap_text("\n".join(lines), max_chars or _MACRO_SECTION_CAP_DECISION)
+
+
+def macro_section_for(
+    context_or_config: Any | None,
+    *,
+    audience: Literal["news", "decision"] | str = "decision",
+    max_chars: int | None = None,
+    prefix: str = "\n\n",
+) -> str:
+    """Return a formatted macro prompt section with prefix, or empty string."""
+    body = format_macro_context_for_agent(
+        context_or_config,
+        audience=audience,
+        max_chars=max_chars,
+    )
+    return f"{prefix}{body}" if body else ""
 
 
 def _company_line(company_name: str, resolved: bool) -> str:

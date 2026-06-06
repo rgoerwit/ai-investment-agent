@@ -373,12 +373,7 @@ def _build_portfolio_macro_event_context(ticker: str) -> str:
 
 def _build_regional_macro_context_block(context: Any | None, ticker: str) -> str:
     """Return the cached regional macro brief block for News Analyst."""
-    macro_report = getattr(context, "macro_context_report", "") if context else ""
-    if not macro_report:
-        return ""
-
-    macro_region = getattr(context, "macro_context_region", "GLOBAL") or "GLOBAL"
-    return "### REGIONAL MACRO CONTEXT\n" f"Region: {macro_region}\n" f"{macro_report}"
+    return support.format_macro_context_for_agent(context, audience="news")
 
 
 def _build_news_macro_extra_context(ticker: str, context: Any | None) -> str:

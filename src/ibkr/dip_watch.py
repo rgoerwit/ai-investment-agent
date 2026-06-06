@@ -10,6 +10,12 @@ from src.ibkr.refresh_service import run_ticker_for
 _DEFAULT_DIP_WATCH_MAX_AGE_DAYS = 30
 _DEFAULT_DIP_WATCH_EXCLUDED_ZONES = frozenset({"HIGH"})
 _DEFAULT_DIP_WATCH_MIN_DIP_PCT = 5.0
+_DIP_POSTURE_PRICE_MULTIPLIERS = {
+    "BUYABLE": 1.0,
+    "SCALE_SLOWLY": 0.85,
+    "WAIT_FOR_CONFIRMATION": 0.60,
+    "AVOID": 0.30,
+}
 DipWatchSource = Literal["held_buy_pullback", "macro_review"]
 
 
@@ -71,7 +77,22 @@ def collect_dip_watch_source_items(
     return [item for item in items if dip_watch_source(item) is not None]
 
 
-def compute_dip_score(item: ReconciliationItem) -> float:
+def macro_regime_price_multiplier(item: ReconciliationItem) -> float:
+    """Return the regime multiplier for the price-pullback portion of DIP WATCH."""
+    analysis = getattr(item, "analysis", None)
+    if analysis is None:
+        return 1.0
+    regime = getattr(analysis, "macro_regime", None) or {}
+    if not regime.get("present") or regime.get("confidence") == "LOW":
+        return 1.0
+    return _DIP_POSTURE_PRICE_MULTIPLIERS.get(regime.get("dip_posture"), 1.0)
+
+
+def compute_dip_score(
+    item: ReconciliationItem,
+    *,
+    regime_multiplier: float = 1.0,
+) -> float:
     """Return the current CLI dip-watch score for one reconciliation item."""
     analysis = item.analysis
     position = item.ibkr_position
@@ -85,7 +106,7 @@ def compute_dip_score(item: ReconciliationItem) -> float:
     price_bonus = 0.0
     current_dip_pct = dip_pct(item)
     if current_dip_pct > 0:
-        price_bonus = min(current_dip_pct * 1.5, 12.0)
+        price_bonus = min(current_dip_pct * 1.5, 12.0) * regime_multiplier
 
     rr_bonus = 0.0
     if analysis.target_1_price and analysis.stop_price and position:
@@ -96,6 +117,14 @@ def compute_dip_score(item: ReconciliationItem) -> float:
             rr_bonus = min((upside / downside) * 2.5, 8.0)
 
     return base + price_bonus + rr_bonus
+
+
+def score_dip_watch_item(item: ReconciliationItem) -> float:
+    """Return the DIP WATCH score after applying macro regime price discipline."""
+    return compute_dip_score(
+        item,
+        regime_multiplier=macro_regime_price_multiplier(item),
+    )
 
 
 def risk_reward_ratio(item: ReconciliationItem) -> float | None:
@@ -145,7 +174,7 @@ def is_dip_watch_eligible(
         return False
     if dip_pct(item) < min_dip_pct:
         return False
-    return compute_dip_score(item) >= min_score
+    return score_dip_watch_item(item) >= min_score
 
 
 def select_dip_watch_candidates(
@@ -173,7 +202,7 @@ def select_dip_watch_candidates(
             min_dip_pct=min_dip_pct,
         )
     ]
-    ranked.sort(key=compute_dip_score, reverse=True)
+    ranked.sort(key=score_dip_watch_item, reverse=True)
     if limit is not None:
         return ranked[:limit]
     return ranked
@@ -211,7 +240,7 @@ def build_dip_watch_candidates(
         if source is None:
             continue
         current_price = position.current_price_local
-        score = compute_dip_score(item)
+        score = score_dip_watch_item(item)
         rows.append(
             DipWatchCandidate(
                 ticker_yf=item.ticker.yf,
