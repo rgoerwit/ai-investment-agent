@@ -89,6 +89,87 @@ def test_high_zone_dni_remains_executable_sell():
     assert item.cash_impact_usd == 820.0
 
 
+def test_data_vacuum_high_zone_dni_routes_to_review_not_sell():
+    """Bad suffix/data-vacuum DNI must not become an executable held SELL."""
+    pos = _make_position(
+        ticker="1264.TW",
+        quantity=50,
+        avg_cost=270.0,
+        current_price=271.0,
+        market_value_usd=433.0,
+        currency="TWD",
+    )
+    bad_analysis = _make_analysis(
+        ticker="1264.TW",
+        verdict="DO_NOT_INITIATE",
+        stop_price=None,
+        current_price=None,
+    )
+    bad_analysis.zone = "HIGH"
+    bad_analysis.health_adj = 20.0
+    bad_analysis.growth_adj = 0.0
+    bad_analysis.data_quality = {"data_vacuum": True}
+    sibling_analysis = _make_analysis(
+        ticker="1264.TWO",
+        verdict="HOLD",
+        stop_price=245.0,
+        current_price=270.5,
+    )
+    sibling_analysis.zone = "LOW"
+    unrelated_same_base = _make_analysis(
+        ticker="1264.KS",
+        verdict="BUY",
+        current_price=10.0,
+    )
+
+    items = reconcile(
+        [pos],
+        {
+            "1264.TW": bad_analysis,
+            "1264.TWO": sibling_analysis,
+            "1264.KS": unrelated_same_base,
+        },
+        _make_portfolio(),
+    )
+    item = _first_item_for_ticker(items, "1264.TW")
+
+    assert item.action == "REVIEW"
+    assert item.urgency == "HIGH"
+    assert item.sell_type == "DATA_QUALITY_REVIEW"
+    assert item.analysis is bad_analysis
+    assert "1264.TW" in item.reason
+    assert "1264.TWO" in item.reason
+    assert "1264.KS" not in item.reason
+    assert item.suggested_quantity is None
+    assert item.cash_impact_usd == 0.0
+
+
+def test_data_vacuum_dni_stop_breach_still_routes_to_sell():
+    """Stop-loss protection remains executable even if analysis quality was poor."""
+    pos = _make_position(
+        ticker="1264.TW",
+        quantity=50,
+        avg_cost=270.0,
+        current_price=240.0,
+        market_value_usd=383.0,
+        currency="TWD",
+    )
+    analysis = _make_analysis(
+        ticker="1264.TW",
+        verdict="DO_NOT_INITIATE",
+        stop_price=245.0,
+        current_price=None,
+    )
+    analysis.zone = "HIGH"
+    analysis.data_quality = {"data_vacuum": True}
+
+    items = reconcile([pos], {"1264.TW": analysis}, _make_portfolio())
+    item = _first_item_for_ticker(items, "1264.TW")
+
+    assert item.action == "SELL"
+    assert item.sell_type == "STOP_BREACH"
+
+
 def test_explicit_sell_verdict_remains_sell_even_if_low_zone():
     """A PM SELL verdict remains executable regardless of zone."""
     pos = _make_position(ticker="4396.T", current_price=1009.30)

@@ -14,6 +14,10 @@ TAIWAN_SUFFIXES = frozenset({".TW", ".TWO"})
 INDIA_SUFFIXES = frozenset({".NS", ".BO"})
 SEARCH_RESOLUTION_SUFFIXES = frozenset({".HK", ".KL", ".TW", ".TWO"})
 FRAGILE_EXCHANGE_SUFFIXES = frozenset({".HK", ".TW", ".TWO", ".KS", ".T", ".L"})
+SIBLING_SUFFIXES: dict[str, tuple[str, ...]] = {
+    ".TW": (".TWO",),
+    ".TWO": (".TW",),
+}
 
 
 def get_ticker_suffix(ticker: str) -> str:
@@ -31,6 +35,15 @@ def split_ticker(ticker: str) -> tuple[str, str]:
     if not suffix:
         return cleaned, ""
     return cleaned[: -len(suffix)], suffix
+
+
+def sibling_ticker_candidates(ticker: str) -> tuple[str, ...]:
+    """Return deterministic same-market sibling ticker candidates."""
+    base, suffix = split_ticker(ticker)
+    return tuple(
+        f"{normalize_exchange_specific_base(base, s)}{s}"
+        for s in SIBLING_SUFFIXES.get(suffix, ())
+    )
 
 
 def is_pure_numeric_base(base: str) -> bool:

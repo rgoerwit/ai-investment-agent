@@ -535,6 +535,142 @@ class TestPanicMode:
         assert fetcher._fetch_all_sources_parallel.await_count == 2
 
     @pytest.mark.asyncio
+    async def test_sibling_suffix_rescue_accepts_taiwan_otc_candidate(self, fetcher):
+        fetcher._resolve_ticker_via_search = AsyncMock(return_value=None)
+        fetcher._fetch_all_sources_parallel = AsyncMock(
+            side_effect=[
+                {"yfinance": None, "yahooquery": None, "fmp": None},
+                {
+                    "yfinance": {
+                        "symbol": "1264.TWO",
+                        "currentPrice": 271.0,
+                        "currency": "TWD",
+                        "longName": "Tehmag Foods Corporation",
+                        "industry": "Packaged Foods",
+                        "sector": "Consumer Staples",
+                        "fiftyTwoWeekHigh": 300.0,
+                        "fiftyTwoWeekLow": 220.0,
+                    }
+                },
+            ]
+        )
+        fetcher._fetch_tavily_gaps = AsyncMock(return_value={})
+        fetcher._probe_ibkr_security = AsyncMock(
+            return_value=SimpleNamespace(
+                configured=True,
+                identity_confidence="VERIFIED",
+                resolved_yf_ticker="1264.TWO",
+                company_name="Tehmag Foods Corporation",
+                market_data_availability="R",
+                error_kind=None,
+            )
+        )
+
+        result = await fetcher.get_financial_metrics("1264.TW")
+
+        assert result["symbol"] == "1264.TWO"
+        assert result["currentPrice"] == 271.0
+        assert result["_ticker_rescue_original"] == "1264.TW"
+        assert result["_ticker_rescue_resolved"] == "1264.TWO"
+        assert result["_ticker_rescue_reason"] == "sibling_suffix_data_vacuum"
+        assert result["_ticker_rescue_ibkr_identity_confidence"] == "VERIFIED"
+        fetcher._probe_ibkr_security.assert_awaited_once_with("1264.TWO")
+        assert fetcher._fetch_all_sources_parallel.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_sibling_suffix_rescue_rejects_ibkr_unverified_company(self, fetcher):
+        probe = SimpleNamespace(
+            configured=True,
+            identity_confidence="UNVERIFIED",
+            resolved_yf_ticker=None,
+            company_name=None,
+            market_data_availability=None,
+            error_kind="NO_MATCH",
+        )
+        fetcher._resolve_ticker_via_search = AsyncMock(return_value=None)
+        fetcher._fetch_all_sources_parallel = AsyncMock(
+            side_effect=[
+                {"yfinance": None, "yahooquery": None, "fmp": None},
+                {
+                    "yfinance": {
+                        "symbol": "1264.TW",
+                        "currentPrice": 271.0,
+                        "currency": "TWD",
+                        "longName": "Different TWSE Company",
+                        "industry": "Electronics",
+                    }
+                },
+            ]
+        )
+        fetcher._fetch_tavily_gaps = AsyncMock(return_value={})
+        fetcher._probe_ibkr_security = AsyncMock(return_value=probe)
+
+        result = await fetcher.get_financial_metrics("1264.TWO")
+
+        assert "_ticker_rescue_resolved" not in result
+        assert fetcher._probe_ibkr_security.await_args_list[0].args == ("1264.TW",)
+
+    @pytest.mark.asyncio
+    async def test_sibling_suffix_rescue_not_attempted_when_original_has_basics(
+        self, fetcher
+    ):
+        fetcher._resolve_ticker_via_search = AsyncMock(return_value=None)
+        fetcher._fetch_all_sources_parallel = AsyncMock(
+            return_value={
+                "yfinance": {
+                    "symbol": "1264.TW",
+                    "currentPrice": 271.0,
+                    "currency": "TWD",
+                    "longName": "TWSE Listed Company",
+                    "industry": "Packaged Foods",
+                    "sector": "Consumer Staples",
+                    "fiftyTwoWeekHigh": 300.0,
+                    "fiftyTwoWeekLow": 220.0,
+                }
+            }
+        )
+        fetcher._fetch_tavily_gaps = AsyncMock(return_value={})
+        fetcher._probe_ibkr_security = AsyncMock()
+
+        result = await fetcher.get_financial_metrics("1264.TW")
+
+        assert "_ticker_rescue_resolved" not in result
+        assert fetcher._fetch_all_sources_parallel.await_count == 1
+        fetcher._probe_ibkr_security.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_sibling_suffix_rescue_rejects_candidate_without_price(self, fetcher):
+        probe = SimpleNamespace(
+            identity_confidence="UNVERIFIED",
+            resolved_yf_ticker=None,
+            company_name=None,
+            currency=None,
+            market_data_availability=None,
+            last_price=None,
+            error_kind="NO_MATCH",
+        )
+        fetcher._resolve_ticker_via_search = AsyncMock(return_value=None)
+        fetcher._fetch_all_sources_parallel = AsyncMock(
+            side_effect=[
+                {"yfinance": None, "yahooquery": None, "fmp": None},
+                {
+                    "yfinance": {
+                        "symbol": "1264.TWO",
+                        "currency": "TWD",
+                        "longName": "Tehmag Foods Corporation",
+                    }
+                },
+            ]
+        )
+        fetcher._fetch_tavily_gaps = AsyncMock(return_value={})
+        fetcher._probe_ibkr_security = AsyncMock(return_value=probe)
+
+        result = await fetcher.get_financial_metrics("1264.TW")
+
+        assert "_ticker_rescue_resolved" not in result
+        fetcher._probe_ibkr_security.assert_awaited_once_with("1264.TW")
+
+    @pytest.mark.asyncio
     async def test_ibkr_rescue_does_not_override_existing_statement_fields(
         self, fetcher
     ):

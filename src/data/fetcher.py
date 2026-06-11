@@ -123,6 +123,7 @@ from src.ticker_policy import (
     allows_search_resolution,
     get_ticker_suffix,
     normalize_exchange_specific_base,
+    sibling_ticker_candidates,
 )
 from src.ticker_utils import generate_strict_search_query
 from src.yfinance_runtime import configure_yfinance_defaults
@@ -535,6 +536,118 @@ class SmartMarketDataFetcher(FinancialFetcher):
         if not data:
             return False
         return any(data.get(field) for field in ("longName", "shortName", "industry"))
+
+    @staticmethod
+    def _has_price_anchor(data: dict[str, Any]) -> bool:
+        if not data:
+            return False
+        return any(
+            data.get(field) is not None
+            for field in ("currentPrice", "regularMarketPrice", "previousClose")
+        )
+
+    def _has_required_quote_identity(self, data: dict[str, Any]) -> bool:
+        return (
+            bool(data.get("currency"))
+            and self._has_price_anchor(data)
+            and self._has_safe_identity_anchor(data)
+        )
+
+    async def _ibkr_probe_allows_sibling_rescue(
+        self, original: str, candidate: str, candidate_merged: dict[str, Any]
+    ) -> bool:
+        """Use IBKR as a contract-level guardrail when it is configured."""
+        probe = await self._probe_ibkr_security(candidate)
+        if probe is None:
+            logger.info(
+                "ticker_sibling_rescue_rejected",
+                original=original,
+                candidate=candidate,
+                reason="ibkr_probe_missing",
+            )
+            return False
+
+        confidence = getattr(probe, "identity_confidence", None)
+        error_kind = getattr(probe, "error_kind", None)
+        resolved = getattr(probe, "resolved_yf_ticker", None)
+        candidate_merged["_ticker_rescue_ibkr_identity_confidence"] = confidence
+        if error_kind:
+            candidate_merged["_ticker_rescue_ibkr_probe_error_kind"] = error_kind
+
+        if (
+            getattr(probe, "configured", True) is False
+            or error_kind == "NOT_CONFIGURED"
+        ):
+            logger.info(
+                "ticker_sibling_rescue_ibkr_probe_unavailable",
+                original=original,
+                candidate=candidate,
+                reason=error_kind or "NOT_CONFIGURED",
+            )
+            return True
+
+        if confidence == "VERIFIED" and (not resolved or resolved == candidate):
+            candidate_merged["_ibkr_identity_confidence"] = confidence
+            if resolved:
+                candidate_merged["_ticker_rescue_ibkr_resolved"] = resolved
+            if getattr(probe, "company_name", None):
+                candidate_merged.setdefault("_ibkr_company_name", probe.company_name)
+            if getattr(probe, "market_data_availability", None):
+                candidate_merged["_ibkr_market_data_availability"] = (
+                    probe.market_data_availability
+                )
+            return True
+
+        logger.info(
+            "ticker_sibling_rescue_rejected",
+            original=original,
+            candidate=candidate,
+            reason="ibkr_probe_not_verified",
+            identity_confidence=confidence,
+            resolved=resolved,
+            error_kind=error_kind,
+        )
+        return False
+
+    async def _try_sibling_suffix_rescue(
+        self, ticker: str
+    ) -> tuple[str, dict[str, Any], dict[str, Any]] | None:
+        """Return a verified sibling ticker payload for exchange-suffix vacuums."""
+        for candidate in sibling_ticker_candidates(ticker):
+            if candidate == ticker:
+                continue
+            logger.info(
+                "ticker_sibling_rescue_attempt",
+                original=ticker,
+                candidate=candidate,
+            )
+            source_results = await self._fetch_all_sources_parallel(candidate)
+            candidate_merged, candidate_metadata = self._smart_merge_with_quality(
+                source_results, candidate
+            )
+            if self._has_required_quote_identity(
+                candidate_merged
+            ) and await self._ibkr_probe_allows_sibling_rescue(
+                ticker, candidate, candidate_merged
+            ):
+                candidate_merged["_ticker_rescue_original"] = ticker
+                candidate_merged["_ticker_rescue_resolved"] = candidate
+                candidate_merged["_ticker_rescue_reason"] = "sibling_suffix_data_vacuum"
+                logger.info(
+                    "ticker_sibling_rescue_accepted",
+                    original=ticker,
+                    resolved=candidate,
+                )
+                return candidate, candidate_merged, candidate_metadata
+            logger.info(
+                "ticker_sibling_rescue_rejected",
+                original=ticker,
+                candidate=candidate,
+                has_price=self._has_price_anchor(candidate_merged),
+                has_currency=bool(candidate_merged.get("currency")),
+                has_identity=self._has_safe_identity_anchor(candidate_merged),
+            )
+        return None
 
     def _history_cache_key(
         self,
@@ -1582,7 +1695,15 @@ class SmartMarketDataFetcher(FinancialFetcher):
                     msg=f"Triggering Panic Mode ({panic_reason})",
                 )
                 all_critical = self.IMPORTANT_FIELDS + self.REQUIRED_BASICS
-                probe = await self._probe_ibkr_security(ticker)
+                sibling_rescue = await self._try_sibling_suffix_rescue(ticker)
+                if sibling_rescue is not None:
+                    ticker, merged, merge_metadata = sibling_rescue
+
+                probe = (
+                    None
+                    if sibling_rescue is not None
+                    else await self._probe_ibkr_security(ticker)
+                )
                 if probe is not None:
                     merged.setdefault("_ibkr_probe_used", True)
                     merged["_ibkr_identity_confidence"] = probe.identity_confidence
@@ -1645,13 +1766,14 @@ class SmartMarketDataFetcher(FinancialFetcher):
                                 )
                                 ticker = resolved_ticker
 
-                tavily_rescue = await self._fetch_tavily_gaps(ticker, all_critical)
-                if tavily_rescue:
-                    merged = self._merge_gap_fill_data(
-                        merged, tavily_rescue, merge_metadata
-                    )
-                    if "currentPrice" not in merged and "price" in tavily_rescue:
-                        merged["currentPrice"] = tavily_rescue["price"]
+                if sibling_rescue is None:
+                    tavily_rescue = await self._fetch_tavily_gaps(ticker, all_critical)
+                    if tavily_rescue:
+                        merged = self._merge_gap_fill_data(
+                            merged, tavily_rescue, merge_metadata
+                        )
+                        if "currentPrice" not in merged and "price" in tavily_rescue:
+                            merged["currentPrice"] = tavily_rescue["price"]
 
             if not merged:
                 return {"error": "No data available", "symbol": ticker}

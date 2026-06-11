@@ -2,7 +2,10 @@
 
 from pathlib import Path
 
-from src.ibkr.analysis_index import _build_analysis_record_from_data
+from src.ibkr.analysis_index import (
+    _build_analysis_record_from_data,
+    _extract_tool1_financial_metrics,
+)
 from tests.ibkr.reconciler_cases import (
     TestLoadLatestAnalyses,
     TestParseScoresFromFinalDecision,
@@ -92,6 +95,77 @@ def test_build_analysis_record_legacy_json_defaults_macro_regime_empty():
 
     assert record is not None
     assert record.macro_regime == {}
+    assert record.data_quality == {}
+
+
+def test_build_analysis_record_loads_data_vacuum_metadata():
+    raw_fundamentals = (
+        "=== RAW FINANCIAL DATA FOR 1264.TW ===\n\n"
+        "### TOOL 1: get_financial_metrics\n"
+        '{"_coverage_pct":0.294,"_quality":{"basics_ok":false},'
+        '"_sources_used":[],"_ibkr_identity_confidence":"UNVERIFIED",'
+        '"_ibkr_probe_error_kind":"NO_MATCH",'
+        '"_ticker_rescue_original":"1264.TW",'
+        '"_ticker_rescue_resolved":"1264.TWO",'
+        '"_ticker_rescue_reason":"sibling_suffix_data_vacuum",'
+        '"_ticker_rescue_ibkr_identity_confidence":"VERIFIED",'
+        '"trailingPE":13.09}'
+    )
+    record = _build_analysis_record_from_data(
+        Path("1264.TW_20260605_211727_analysis.json"),
+        {
+            "prediction_snapshot": {
+                "ticker": "1264.TW",
+                "analysis_date": "2026-06-05",
+                "verdict": "DO_NOT_INITIATE",
+                "sector": "Consumer Staples",
+                "currency": "TWD",
+                "current_price": None,
+            },
+            "source_artifacts": {"raw_fundamentals_data": raw_fundamentals},
+            "investment_analysis": {"trader_plan": ""},
+        },
+    )
+
+    assert record is not None
+    assert record.data_quality["coverage_pct"] == 29.4
+    assert record.data_quality["basics_ok"] is False
+    assert record.data_quality["sources_used"] == []
+    assert record.data_quality["ibkr_identity_confidence"] == "UNVERIFIED"
+    assert record.data_quality["ibkr_probe_error_kind"] == "NO_MATCH"
+    assert record.data_quality["ticker_rescue_original"] == "1264.TW"
+    assert record.data_quality["ticker_rescue_resolved"] == "1264.TWO"
+    assert record.data_quality["ticker_rescue_reason"] == "sibling_suffix_data_vacuum"
+    assert record.data_quality["ticker_rescue_ibkr_identity_confidence"] == "VERIFIED"
+    assert record.data_quality["data_vacuum"] is True
+
+
+def test_extract_tool1_financial_metrics_handles_malformed_transcripts():
+    assert _extract_tool1_financial_metrics({}) == {}
+    assert (
+        _extract_tool1_financial_metrics(
+            {"source_artifacts": {"raw_fundamentals_data": "no tool data here"}}
+        )
+        == {}
+    )
+    assert (
+        _extract_tool1_financial_metrics(
+            {"source_artifacts": {"raw_fundamentals_data": "get_financial_metrics"}}
+        )
+        == {}
+    )
+    assert (
+        _extract_tool1_financial_metrics(
+            {
+                "source_artifacts": {
+                    "raw_fundamentals_data": (
+                        "### TOOL 1: get_financial_metrics\n{not-json"
+                    )
+                }
+            }
+        )
+        == {}
+    )
 
 
 def test_build_analysis_record_repairs_legacy_currency():

@@ -95,6 +95,7 @@ def test_get_sell_type_label_uses_shared_backend_labels():
     assert get_sell_type_label("HARD_REJECT") == "FUNDAMENTAL FAILURE"
     assert get_sell_type_label("SOFT_REJECT") == "SOFT REJECTION"
     assert get_sell_type_label("SCREEN_REJECT") == "SCREEN REVIEW"
+    assert get_sell_type_label("DATA_QUALITY_REVIEW") == "DATA REVIEW"
     assert get_sell_type_label("SPECIAL_SITUATION_EXIT") == "M&A EXIT"
     assert get_sell_type_label("PROFIT_TAKE") == "PROFIT TAKE"
     assert get_sell_type_label("UNKNOWN") == "SELL"

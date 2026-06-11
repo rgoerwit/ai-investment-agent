@@ -29,7 +29,8 @@ from src.sector_normalization import normalize_sector_label
 from src.validators.supplemental_flags import detect_capital_efficiency_flags
 
 logger = structlog.get_logger(__name__)
-_ANALYSIS_INDEX_VERSION = 3
+_ANALYSIS_INDEX_VERSION = 4
+_DATA_VACUUM_COVERAGE_THRESHOLD_PCT = 40.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +271,109 @@ def _extract_capital_flag_types(data: dict[str, Any], ticker: str) -> tuple[str,
     return tuple(dict.fromkeys(filtered))
 
 
+def _extract_tool1_financial_metrics(data: dict[str, Any]) -> dict[str, Any]:
+    """Parse the saved Junior Tool 1 financial-metrics JSON payload."""
+    raw = (
+        ((data.get("source_artifacts") or {}).get("raw_fundamentals_data"))
+        or data.get("raw_fundamentals_data")
+        or ""
+    )
+    if not isinstance(raw, str) or not raw:
+        return {}
+    marker_idx = raw.find("get_financial_metrics")
+    if marker_idx < 0:
+        return {}
+    body = raw[marker_idx:]
+    start = body.find("{")
+    if start < 0:
+        return {}
+    try:
+        parsed, _ = json.JSONDecoder().raw_decode(body[start:])
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coverage_as_percent(value: Any) -> float | None:
+    coverage = _as_float(value)
+    if coverage is None:
+        return None
+    return coverage * 100.0 if 0.0 <= coverage <= 1.0 else coverage
+
+
+def _extract_analysis_data_quality(
+    data: dict[str, Any], snapshot: dict[str, Any]
+) -> dict[str, Any]:
+    """Extract compact data-quality metadata used by held-position routing."""
+    payload = _extract_tool1_financial_metrics(data)
+    if not payload:
+        return {}
+
+    quality = payload.get("_quality")
+    quality = quality if isinstance(quality, dict) else {}
+
+    coverage_pct = _coverage_as_percent(payload.get("_coverage_pct"))
+    if coverage_pct is None:
+        coverage_pct = _coverage_as_percent(quality.get("coverage_pct"))
+
+    basics_ok = quality.get("basics_ok")
+    basics_ok = basics_ok if isinstance(basics_ok, bool) else None
+
+    sources_used = payload.get("_sources_used")
+    if not isinstance(sources_used, list):
+        sources_used = quality.get("sources_used")
+    normalized_sources = (
+        [str(source) for source in sources_used if source]
+        if isinstance(sources_used, list)
+        else []
+    )
+
+    ibkr_identity = payload.get("_ibkr_identity_confidence")
+    ibkr_probe_error = payload.get("_ibkr_probe_error_kind")
+    rescue_original = payload.get("_ticker_rescue_original")
+    rescue_resolved = payload.get("_ticker_rescue_resolved")
+    rescue_reason = payload.get("_ticker_rescue_reason")
+    rescue_ibkr_identity = payload.get("_ticker_rescue_ibkr_identity_confidence")
+    rescue_ibkr_error = payload.get("_ticker_rescue_ibkr_probe_error_kind")
+    current_price = snapshot.get("current_price")
+    if current_price is None:
+        current_price = payload.get("currentPrice")
+
+    # Below 40%, the saved DATA_BLOCK is usually too sparse to justify an
+    # executable held-position sell without a human data-quality review.
+    data_vacuum = (
+        basics_ok is False
+        and coverage_pct is not None
+        and coverage_pct < _DATA_VACUUM_COVERAGE_THRESHOLD_PCT
+        and (
+            current_price is None
+            or not normalized_sources
+            or (ibkr_identity not in (None, "", "VERIFIED"))
+        )
+    )
+
+    return {
+        "coverage_pct": coverage_pct,
+        "basics_ok": basics_ok,
+        "sources_used": normalized_sources,
+        "ibkr_identity_confidence": ibkr_identity,
+        "ibkr_probe_error_kind": ibkr_probe_error,
+        "ticker_rescue_original": rescue_original,
+        "ticker_rescue_resolved": rescue_resolved,
+        "ticker_rescue_reason": rescue_reason,
+        "ticker_rescue_ibkr_identity_confidence": rescue_ibkr_identity,
+        "ticker_rescue_ibkr_probe_error_kind": rescue_ibkr_error,
+        "data_vacuum": data_vacuum,
+    }
+
+
 def _build_analysis_record_from_data(
     filepath: Path, data: dict[str, Any]
 ) -> AnalysisRecord | None:
@@ -316,6 +420,7 @@ def _build_analysis_record_from_data(
         data.get("macro_regime_block") or snapshot.get("regime_at_decision") or {}
     )
     macro_regime = macro_regime_raw if isinstance(macro_regime_raw, dict) else {}
+    data_quality = _extract_analysis_data_quality(data, snapshot)
 
     return AnalysisRecord(
         ticker=ticker,
@@ -344,6 +449,7 @@ def _build_analysis_record_from_data(
         is_quick_mode=bool(snapshot.get("is_quick_mode", False)),
         capital_flag_types=_extract_capital_flag_types(data, ticker),
         macro_regime=macro_regime,
+        data_quality=data_quality,
         m_and_a_status=(snapshot.get("m_and_a_status") or "").strip().upper(),
     )
 

@@ -26,6 +26,7 @@ from src.ibkr.reconciliation_rules import (
     classify_profit_take,
 )
 from src.ibkr.ticker import Ticker
+from src.ticker_policy import sibling_ticker_candidates
 
 logger = structlog.get_logger(__name__)
 
@@ -49,6 +50,35 @@ def _profit_take_reason(reasons: tuple[str, ...], target_hit: bool) -> str:
     if target_hit and "capital_idle_cash_risk_plus_target_hit" not in reasons:
         context = f"{context}; target hit"
     return f"{prefix}: {context}"
+
+
+def _same_base_sibling_keys(
+    ticker: str, analyses: dict[str, AnalysisRecord]
+) -> tuple[str, ...]:
+    """Return whitelisted same-market sibling analysis keys for diagnostics only."""
+    candidates = set(sibling_ticker_candidates(ticker))
+    if not candidates:
+        return ()
+    siblings = [analysis_key for analysis_key in analyses if analysis_key in candidates]
+    return tuple(sorted(siblings))
+
+
+def _data_vacuum_review_reason(
+    analysis: AnalysisRecord, siblings: tuple[str, ...]
+) -> str:
+    if siblings:
+        return (
+            f"Data-vacuum DNI for {analysis.ticker} conflicts with sibling analysis "
+            f"{siblings[0]}; verify exchange suffix."
+        )
+    resolved = analysis.data_quality.get("ticker_rescue_resolved")
+    original = analysis.data_quality.get("ticker_rescue_original")
+    if original and resolved:
+        return (
+            f"Data-vacuum DNI for {analysis.ticker}; ticker rescue attempted "
+            f"{original} -> {resolved}; verify exchange suffix."
+        )
+    return f"Data-vacuum DNI for {analysis.ticker}; verify data coverage."
 
 
 def evaluate_positions(
@@ -170,6 +200,27 @@ def evaluate_positions(
                         ibkr_position=pos,
                         analysis=analysis,
                         sell_type="SCREEN_REJECT",
+                    )
+                )
+                continue
+
+            if (
+                verdict_upper == "DO_NOT_INITIATE"
+                and analysis.data_quality.get("data_vacuum") is True
+                # Belt-and-suspenders: only block executable SELLs when the
+                # saved analysis also lacks its own price anchor.
+                and analysis.current_price is None
+            ):
+                siblings = _same_base_sibling_keys(analysis.ticker, analyses)
+                items.append(
+                    ReconciliationItem(
+                        ticker=item_ticker,
+                        action="REVIEW",
+                        reason=_data_vacuum_review_reason(analysis, siblings),
+                        urgency="HIGH",
+                        ibkr_position=pos,
+                        analysis=analysis,
+                        sell_type="DATA_QUALITY_REVIEW",
                     )
                 )
                 continue

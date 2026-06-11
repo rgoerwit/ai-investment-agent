@@ -184,6 +184,7 @@ class AnalysisRecord(BaseModel):
     is_quick_mode: bool = False  # True if analysis was run with --quick (less thorough)
     capital_flag_types: tuple[str, ...] = ()
     macro_regime: dict[str, Any] = Field(default_factory=dict)
+    data_quality: dict[str, Any] = Field(default_factory=dict)
     # Special-situation routing (Senior promotes from Foreign Language M&A EVENT
     # section). Empty string when no analysis ever set it or the analysis predates
     # the field; otherwise one of ACTIVE_TENDER / RUMORED / NONE.
