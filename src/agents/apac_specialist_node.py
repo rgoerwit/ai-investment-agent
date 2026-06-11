@@ -8,6 +8,7 @@ import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.types import RunnableConfig
 
+from src.error_safety import summarize_exception
 from src.runtime_diagnostics import failure_artifact, success_artifact
 from src.tooling.text_boundary import format_untrusted_block
 
@@ -112,7 +113,7 @@ def create_apac_specialist_node(llm) -> Callable:
             logger.warning(
                 "apac_specialist_failed",
                 ticker=ticker,
-                error=str(exc),
+                **summarize_exception(exc, operation="apac_specialist_failed"),
                 exc_info=True,
             )
             result = failure_artifact(

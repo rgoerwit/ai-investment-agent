@@ -33,6 +33,7 @@ import requests
 import yfinance as yf
 
 from src.fx_normalization import normalize_minor_unit_amount
+from src.thesis_constants import LIQUIDITY_MIN_USD, PE_MAX
 from src.ticker_utils import to_yfinance
 from src.yfinance_runtime import YFRateLimitError, configure_yfinance_defaults
 
@@ -45,14 +46,16 @@ configure_yfinance_defaults()
 DEFAULT_CONFIG_PATH = "config/exchanges.json"
 DEFAULT_WORKERS = 4
 BATCH_SIZE = 50
-DEFAULT_MAX_PE = 18.0
+DEFAULT_MAX_PE = PE_MAX  # thesis P/E ceiling (src/thesis_constants.py)
 DEFAULT_MAX_PE_CONTEXTUAL = 24.0
 DEFAULT_MIN_ROE = 13.0
 DEFAULT_MIN_ROA = 6.0
 DEFAULT_MAX_DE = 150.0
 DEFAULT_MIN_MCAP = 50_000_000
-DEFAULT_MIN_VOLUME = 100_000
-DEFAULT_MAX_COVERAGE = 30
+DEFAULT_MIN_VOLUME = LIQUIDITY_MIN_USD  # thesis hard floor; analysis applies $250k pass
+DEFAULT_MAX_COVERAGE = (
+    30  # deliberately looser than thesis 15: screener pre-filter only
+)
 DEFAULT_MIN_OCF_NI_RATIO = 0.8
 DEFAULT_MIN_REVENUE_YEARS = 3
 

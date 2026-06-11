@@ -16,6 +16,7 @@ from typing import Any
 import structlog
 
 from src.blocking_io import FX_RATE_POLICY, run_blocking_call
+from src.error_safety import summarize_exception
 
 logger = structlog.get_logger(__name__)
 
@@ -460,7 +461,7 @@ async def normalize_financial_dict(
                     "field_normalization_failed",
                     field=field,
                     value=data[field],
-                    error=str(e),
+                    **summarize_exception(e, operation="field_normalization_failed"),
                 )
 
     # Add metadata

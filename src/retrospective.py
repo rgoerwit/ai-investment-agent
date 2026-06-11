@@ -32,6 +32,7 @@ from src.data_block_utils import (
     extract_data_block_field,
     extract_data_block_number,
 )
+from src.error_safety import summarize_exception
 from src.exchange_metadata import SUFFIX_TO_CURRENCY_CODE
 from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import classify_failure
@@ -567,10 +568,8 @@ def load_past_snapshots(
             logger.warning(
                 "snapshot_load_error",
                 file=filepath.name,
-                error=str(e),
-                error_type=type(e).__name__,
-                root_cause_type=type(e.__cause__ or e.__context__ or e).__name__,
                 exc_info=True,
+                **summarize_exception(e, operation="snapshot_load"),
             )
             emit_progress()
 
@@ -1623,10 +1622,8 @@ async def run_retrospective(
         except Exception as e:
             logger.error(
                 "lessons_memory_init_failed",
-                error=str(e),
-                error_type=type(e).__name__,
-                root_cause_type=type(e.__cause__ or e.__context__ or e).__name__,
                 exc_info=True,
+                **summarize_exception(e, operation="lessons_memory_init"),
             )
             return []
 

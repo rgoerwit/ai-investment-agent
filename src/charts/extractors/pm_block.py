@@ -101,7 +101,7 @@ def extract_pm_block(pm_output: str) -> PMBlockData:
         PMBlockData with extracted values (defaults for missing fields)
     """
     if not pm_output:
-        logger.debug("No PM output provided")
+        logger.debug("no_pm_output_provided")
         return PMBlockData()
 
     # Find the PM_BLOCK section (take last one for self-correction pattern)
@@ -173,7 +173,7 @@ def extract_pm_block(pm_output: str) -> PMBlockData:
     )
 
     logger.debug(
-        "Extracted PM_BLOCK data",
+        "extracted_pm_block_data",
         verdict=result.verdict,
         health_adj=result.health_adj,
         growth_adj=result.growth_adj,

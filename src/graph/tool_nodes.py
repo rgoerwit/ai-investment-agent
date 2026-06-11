@@ -8,6 +8,7 @@ import structlog
 from langchain_core.messages import AIMessage, ToolMessage
 
 from src.agents import AgentState
+from src.error_safety import summarize_exception
 from src.runtime_services import get_current_tool_service
 from src.tooling.runtime import ToolInvocation
 
@@ -172,7 +173,7 @@ def create_agent_tool_node(tools: list, agent_key: str):
                 "tool_call_error",
                 agent=agent_key,
                 tool=tool_name,
-                error=str(exc),
+                **summarize_exception(exc, operation="tool_call_error"),
             )
             return _error_message(tool_name, tool_id, f"Error: {exc}")
 

@@ -59,6 +59,7 @@ from src.data.gap_fill import (
     merge_gap_fill_data as merge_gap_fill_data_impl,
 )
 from src.data.interfaces import FinancialFetcher
+from src.data.merge_policy import QUOTE_PRICE_FIELDS
 from src.data.merge_policy import (
     quarantine_forward_pe_outlier as quarantine_forward_pe_outlier_impl,
 )
@@ -165,102 +166,23 @@ except ImportError:
     logger.warning("tavily_python_not_available")
 
 
-# Constants
+# Constants (merge-policy field sets and source rankings live in
+# src/data/merge_policy.py — the canonical home; do not redefine here)
 # D/E > 10 (1000%) is extremely rare; values like 14.77 are percentages (14.77%)
 DEBT_EQUITY_PERCENTAGE_THRESHOLD = 10.0
-PRICE_TO_BOOK_CURRENCY_MISMATCH_THRESHOLD = 5.0
 FX_CACHE_TTL_SECONDS = 3600
 FETCH_RESULT_CACHE_TTL_SECONDS = 30
 PRICE_HISTORY_CACHE_TTL_SECONDS = 30
 PER_SOURCE_TIMEOUT = 15
-# These fields are safely comparable with the simple "fraction vs percent" heuristic
-# used in _normalize_percent_pair(). Growth/return metrics are intentionally excluded:
-# values > 1.0 can be legitimate in decimal form, so blind scaling creates false conflicts.
-PERCENT_LIKE_FIELDS = frozenset(
-    {
-        "dividendYield",
-        "trailingAnnualDividendYield",
-        "fiveYearAvgDividendYield",
-        "regularMarketChangePercent",
-    }
-)
-NON_FINANCIAL_METADATA_FIELDS = frozenset({"maxAge"})
-NON_ACTIONABLE_CONFLICT_FIELDS = frozenset(
-    {
-        "bidSize",
-        "askSize",
-        "bid",
-        "ask",
-        "regularMarketBidSize",
-        "regularMarketAskSize",
-    }
-)
-CRITICAL_ANALYSIS_FIELDS = (
-    "trailingPE",
-    "forwardPE",
-    "priceToBook",
-    "pegRatio",
-    "returnOnEquity",
-    "returnOnAssets",
-    "debtToEquity",
-    "currentRatio",
-    "operatingMargins",
-    "grossMargins",
-    "profitMargins",
-    "revenueGrowth",
-    "earningsGrowth",
-    "operatingCashflow",
-    "freeCashflow",
-    "numberOfAnalystOpinions",
-)
-ANALYSIS_CRITICAL_CONFLICT_FIELDS = frozenset(CRITICAL_ANALYSIS_FIELDS)
-QUOTE_PRICE_FIELDS = (
-    "currentPrice",
-    "regularMarketPrice",
-    "previousClose",
-    "regularMarketPreviousClose",
-    "open",
-    "regularMarketOpen",
-    "dayLow",
-    "dayHigh",
-    "regularMarketDayLow",
-    "regularMarketDayHigh",
-    "bid",
-    "ask",
-    "fiftyDayAverage",
-    "twoHundredDayAverage",
-    "fiftyTwoWeekLow",
-    "fiftyTwoWeekHigh",
-)
 
 RECENT_SPLIT_WINDOW_DAYS = 180
 SPLIT_RATIO_MATCH_TOLERANCE = 0.25
 QUARTER_DATE_RECONCILE_WINDOW_DAYS = 45
-FORWARD_PE_OUTLIER_THRESHOLD = 200.0
-FORWARD_PE_REFERENCE_MAX = 100.0
-FORWARD_PE_OUTLIER_RATIO = 5.0
 MAX_LOW_OVER_PRICE = 1.10
 MIN_HIGH_UNDER_PRICE = 0.90
 LOW_PE_QUARANTINE_THRESHOLD = 3.0
 LOW_PE_FLAG_THRESHOLD = 5.0
 PE_IDENTITY_TOLERANCE = 0.20
-
-# Source quality rankings (higher = more reliable)
-SOURCE_QUALITY = {
-    "yfinance_statements": 10,  # Calculated directly from filings (Highest trust)
-    "calculated_from_statements": 10,  # Tag used by extraction logic
-    "eodhd": 9.5,  # Professional paid feed (High trust for Int'l)
-    "yfinance": 9,  # Standard feed
-    "yfinance_info": 9,  # Standard feed
-    "alpha_vantage": 9,  # High-quality fundamentals (Int'l)
-    "calculated": 8,  # Derived metrics
-    "fmp": 7,  # Good backup
-    "fmp_info": 7,
-    "yahooquery": 6,  # Scraped backup
-    "yahooquery_info": 6,
-    "tavily_extraction": 4,  # Web NLP extraction
-    "proxy": 2,  # Estimates
-}
 
 MergeResult = namedtuple("MergeResult", ["data", "gaps_filled"])
 
@@ -271,22 +193,6 @@ def _quality_notes(info: dict[str, Any]) -> list[str]:
         notes = [] if notes in (None, "") else [str(notes)]
         info["_data_quality_notes"] = notes
     return notes
-
-
-def _normalize_percent_pair(old_val: float, new_val: float) -> tuple[float, float]:
-    """Normalize decimal-vs-percent representations before comparison."""
-    candidates = [
-        (old_val, new_val),
-        (old_val * 100, new_val),
-        (old_val, new_val * 100),
-    ]
-
-    def relative_gap(pair: tuple[float, float]) -> float:
-        left, right = pair
-        baseline = max(abs(left), abs(right), 1e-9)
-        return abs(left - right) / baseline
-
-    return min(candidates, key=relative_gap)
 
 
 def _coerce_positive_float(value: Any) -> float | None:
@@ -320,23 +226,6 @@ def _identity_match_from_price(
         return False
     expected = price_f / denom_f
     return abs(expected - ratio_f) / ratio_f <= tolerance
-
-
-def _conflict_field_class(field: str) -> str:
-    if field in NON_ACTIONABLE_CONFLICT_FIELDS:
-        return "microstructure"
-    if field in ANALYSIS_CRITICAL_CONFLICT_FIELDS:
-        return "valuation"
-    return "other"
-
-
-def _is_actionable_conflict(
-    field: str, left_quality: float, right_quality: float
-) -> bool:
-    if field not in ANALYSIS_CRITICAL_CONFLICT_FIELDS:
-        return False
-    quality_gap = abs(left_quality - right_quality)
-    return quality_gap <= 1.0 or (left_quality >= 9 and right_quality >= 9)
 
 
 def _normalize_history_bound(value: str | None) -> str | None:

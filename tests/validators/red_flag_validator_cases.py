@@ -4050,3 +4050,41 @@ REVENUE_GROWTH_TTM: 124%
         flags, _ = RedFlagDetector.detect_red_flags(metrics, "CADLR.OL")
         peg_flags = [f for f in flags if f["type"] == "UNRELIABLE_PEG"]
         assert len(peg_flags) == 0
+
+
+class TestConsultantVerdictVariants:
+    """Verdict markers must tolerate hyphen/underscore/singular variants."""
+
+    @pytest.mark.parametrize(
+        ("marker", "expected"),
+        [
+            ("MAJOR CONCERNS", "MAJOR_CONCERNS"),
+            ("MAJOR_CONCERNS", "MAJOR_CONCERNS"),
+            ("Major-Concerns", "MAJOR_CONCERNS"),
+            ("major concern", "MAJOR_CONCERNS"),
+            ("CONDITIONAL APPROVAL", "CONDITIONAL_APPROVAL"),
+            ("Conditional-Approval", "CONDITIONAL_APPROVAL"),
+            ("APPROVED", "APPROVED"),
+        ],
+    )
+    def test_variant_markers_classified(self, marker, expected):
+        review = f"### CONSULTANT REVIEW\n\n**Overall Assessment**: {marker}\n"
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["verdict"] == expected
+
+    def test_most_severe_verdict_wins_when_multiple_present(self):
+        review = "Earlier draft said APPROVED, but final assessment: MAJOR CONCERNS.\n"
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["verdict"] == "MAJOR_CONCERNS"
+
+    def test_hyphenated_breach_and_stop_markers(self):
+        review = "MANDATE-BREACH: PFIC.\nHARD-STOP: restricted entity.\n"
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["has_mandate_breach"] is True
+        assert conditions["has_hard_stop"] is True
+
+    def test_garbage_input_returns_unknown_without_error(self):
+        for garbage in ("", "no verdict markers here", "12345 ###"):
+            conditions = RedFlagDetector.parse_consultant_conditions(garbage)
+            assert conditions["verdict"] == "UNKNOWN"
+            assert conditions["has_mandate_breach"] is False

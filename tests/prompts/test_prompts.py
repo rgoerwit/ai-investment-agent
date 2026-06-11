@@ -1,22 +1,36 @@
 """
 Tests for prompts.py
 Covers prompt loading, retrieval, and export.
+
+prompts/*.json is the canonical (and only) prompt source; loading fails
+loudly when the directory or a required agent prompt is missing.
 """
 
 import json
 import re
+import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
 
 from src.prompts import (
+    REQUIRED_AGENT_KEYS,
     AgentPrompt,
+    PromptLoadError,
     PromptRegistry,
     get_all_prompts,
     get_prompt,
     get_registry,
 )
+
+
+@pytest.fixture
+def prompts_copy(tmp_path):
+    """Mutable copy of the canonical prompts/ directory."""
+    dst = tmp_path / "prompts"
+    shutil.copytree("prompts", dst)
+    return dst
 
 
 class TestAgentPrompt:
@@ -82,180 +96,151 @@ class TestPromptRegistryInit:
     """Test PromptRegistry initialization."""
 
     def test_init_creates_registry(self):
-        """Test registry initialization."""
+        """Test registry initialization from the canonical prompts dir."""
+        registry = PromptRegistry()
+        assert isinstance(registry.prompts, dict)
+
+    def test_init_loads_canonical_prompts(self):
+        """Test canonical JSON prompts are loaded."""
+        registry = PromptRegistry()
+
+        assert len(registry.prompts) > 0
+        assert "market_analyst" in registry.prompts
+        assert "fundamentals_analyst" in registry.prompts
+
+    def test_init_with_nonexistent_dir_fails_loudly(self):
+        """A missing prompts directory is a startup failure, not a fallback."""
+        with pytest.raises(PromptLoadError, match="/nonexistent/path"):
+            PromptRegistry(prompts_dir="/nonexistent/path")
+
+    def test_init_with_empty_dir_names_missing_keys(self):
+        """An empty prompts dir must fail and name the missing agent keys."""
         with TemporaryDirectory() as tmpdir:
-            registry = PromptRegistry(prompts_dir=tmpdir)
-            assert isinstance(registry.prompts, dict)
+            with pytest.raises(PromptLoadError, match="portfolio_manager"):
+                PromptRegistry(prompts_dir=tmpdir)
 
-    def test_init_loads_default_prompts(self):
-        """Test default prompts are loaded."""
-        with TemporaryDirectory() as tmpdir:
-            registry = PromptRegistry(prompts_dir=tmpdir)
-
-            # Should have loaded default prompts
-            assert len(registry.prompts) > 0
-            assert "market_analyst" in registry.prompts
-            assert "fundamentals_analyst" in registry.prompts
-
-    def test_init_with_nonexistent_dir(self):
-        """Test initialization with non-existent directory."""
-        # Should not raise error
-        registry = PromptRegistry(prompts_dir="/nonexistent/path")
-        assert len(registry.prompts) > 0  # Still has defaults
-
-    def test_init_uses_config_prompts_dir(self):
+    def test_init_uses_config_prompts_dir(self, prompts_copy):
         """Test prompts_dir from config Settings."""
         from unittest.mock import patch
 
-        with TemporaryDirectory() as tmpdir:
-            with patch("src.prompts.config") as mock_config:
-                mock_config.prompts_dir = Path(tmpdir)
-                registry = PromptRegistry()
+        with patch("src.prompts.config") as mock_config:
+            mock_config.prompts_dir = prompts_copy
+            registry = PromptRegistry()
 
-                assert str(registry.prompts_dir) == tmpdir
+            assert registry.prompts_dir == prompts_copy
 
 
-class TestLoadDefaultPrompts:
-    """Test _load_default_prompts() method."""
+class TestLoadJsonPrompts:
+    """Test JSON corpus loading."""
 
     def test_load_all_agent_types(self):
         """Test all expected agents are loaded."""
-        with TemporaryDirectory() as tmpdir:
-            registry = PromptRegistry(prompts_dir=tmpdir)
+        registry = PromptRegistry()
 
-            expected_agents = [
-                "market_analyst",
-                "sentiment_analyst",
-                "news_analyst",
-                "fundamentals_analyst",
-                "bull_researcher",
-                "bear_researcher",
-                "research_manager",
-                "trader",
-                "risky_analyst",
-                "safe_analyst",
-                "neutral_analyst",
-                "portfolio_manager",
-            ]
-
-            for agent in expected_agents:
-                assert agent in registry.prompts, f"{agent} not loaded"
+        for agent in sorted(REQUIRED_AGENT_KEYS):
+            assert agent in registry.prompts, f"{agent} not loaded"
 
     def test_prompts_have_required_fields(self):
         """Test all prompts have required fields."""
-        with TemporaryDirectory() as tmpdir:
-            registry = PromptRegistry(prompts_dir=tmpdir)
+        registry = PromptRegistry()
 
-            for agent_key, prompt in registry.prompts.items():
-                assert prompt.agent_key == agent_key
-                assert prompt.agent_name
-                assert prompt.version
-                assert prompt.system_message
-                assert prompt.category
+        for agent_key, prompt in registry.prompts.items():
+            assert prompt.agent_key == agent_key
+            assert prompt.agent_name
+            assert prompt.version
+            assert prompt.system_message
+            assert prompt.category
 
     def test_prompts_have_metadata(self):
         """Test prompts have metadata."""
-        with TemporaryDirectory() as tmpdir:
-            registry = PromptRegistry(prompts_dir=tmpdir)
+        registry = PromptRegistry()
 
-            for prompt in registry.prompts.values():
-                assert isinstance(prompt.metadata, dict)
+        for prompt in registry.prompts.values():
+            assert isinstance(prompt.metadata, dict)
 
     def test_market_analyst_requires_tools(self):
         """Test market_analyst has requires_tools=True."""
-        with TemporaryDirectory() as tmpdir:
-            registry = PromptRegistry(prompts_dir=tmpdir)
+        registry = PromptRegistry()
 
-            prompt = registry.prompts["market_analyst"]
-            assert prompt.requires_tools is True
+        prompt = registry.prompts["market_analyst"]
+        assert prompt.requires_tools is True
 
     def test_fundamentals_analyst_system_message(self):
         """Test fundamentals_analyst has proper system message."""
-        with TemporaryDirectory() as tmpdir:
-            registry = PromptRegistry(prompts_dir=tmpdir)
+        registry = PromptRegistry()
 
-            prompt = registry.prompts["fundamentals_analyst"]
-            assert "DATA_BLOCK" in prompt.system_message
-            assert "ADAPTIVE SCORING" in prompt.system_message
+        prompt = registry.prompts["fundamentals_analyst"]
+        assert "DATA_BLOCK" in prompt.system_message
+        assert "ADAPTIVE SCORING" in prompt.system_message
 
 
-class TestLoadCustomPrompts:
-    """Test _load_custom_prompts() method."""
+class TestLoadFromCustomDir:
+    """Test loading behavior against a mutable copy of the corpus."""
 
-    def test_load_custom_prompt_overrides_default(self):
-        """Test custom prompt overrides default."""
-        with TemporaryDirectory() as tmpdir:
-            # Create custom prompt file
-            custom_prompt = {
-                "agent_key": "market_analyst",
-                "agent_name": "Custom Market Analyst",
-                "version": "99.0",
-                "system_message": "Custom message",
-                "category": "custom",
-                "requires_tools": False,
-                "metadata": {"custom": True},
-            }
+    def test_modified_prompt_file_is_authoritative(self, prompts_copy):
+        """The JSON file content is the prompt — no hidden defaults."""
+        modified = {
+            "agent_key": "market_analyst",
+            "agent_name": "Custom Market Analyst",
+            "version": "99.0",
+            "system_message": "Custom message",
+            "category": "custom",
+            "requires_tools": False,
+            "metadata": {"custom": True},
+        }
+        (prompts_copy / "market_analyst.json").write_text(json.dumps(modified))
 
-            with open(f"{tmpdir}/market_analyst.json", "w") as f:
-                json.dump(custom_prompt, f)
+        registry = PromptRegistry(prompts_dir=str(prompts_copy))
 
-            registry = PromptRegistry(prompts_dir=tmpdir)
+        prompt = registry.prompts["market_analyst"]
+        assert prompt.version == "99.0"
+        assert prompt.system_message == "Custom message"
+        assert prompt.metadata["custom"] is True
 
-            # Should have loaded custom version
-            prompt = registry.prompts["market_analyst"]
-            assert prompt.version == "99.0"
-            assert prompt.system_message == "Custom message"
-            assert prompt.metadata["custom"] is True
-
-    def test_load_multiple_custom_prompts(self):
-        """Test loading multiple custom prompts."""
-        with TemporaryDirectory() as tmpdir:
-            # Create two custom prompts
-            for i in range(2):
-                custom = {
-                    "agent_key": f"custom_agent_{i}",
-                    "agent_name": f"Custom {i}",
-                    "version": "1.0",
-                    "system_message": f"Message {i}",
-                }
-
-                with open(f"{tmpdir}/custom_agent_{i}.json", "w") as f:
-                    json.dump(custom, f)
-
-            registry = PromptRegistry(prompts_dir=tmpdir)
-
-            assert "custom_agent_0" in registry.prompts
-            assert "custom_agent_1" in registry.prompts
-
-    def test_malformed_json_skipped(self):
-        """Test malformed JSON file is skipped."""
-        with TemporaryDirectory() as tmpdir:
-            # Create malformed JSON
-            with open(f"{tmpdir}/bad.json", "w") as f:
-                f.write("{invalid json")
-
-            # Should not raise error
-            registry = PromptRegistry(prompts_dir=tmpdir)
-
-            # Should still have default prompts
-            assert len(registry.prompts) > 0
-
-    def test_missing_agent_key_skipped(self):
-        """Test JSON without agent_key is skipped."""
-        with TemporaryDirectory() as tmpdir:
-            bad_prompt = {
-                "agent_name": "Bad Agent",
+    def test_extra_prompt_files_load_alongside_required(self, prompts_copy):
+        """Non-required experimental prompts load without ceremony."""
+        for i in range(2):
+            extra = {
+                "agent_key": f"custom_agent_{i}",
+                "agent_name": f"Custom {i}",
                 "version": "1.0",
-                "system_message": "Message",
+                "system_message": f"Message {i}",
             }
+            (prompts_copy / f"custom_agent_{i}.json").write_text(json.dumps(extra))
 
-            with open(f"{tmpdir}/bad.json", "w") as f:
-                json.dump(bad_prompt, f)
+        registry = PromptRegistry(prompts_dir=str(prompts_copy))
 
-            registry = PromptRegistry(prompts_dir=tmpdir)
+        assert "custom_agent_0" in registry.prompts
+        assert "custom_agent_1" in registry.prompts
 
-            # Should not have loaded bad prompt
-            assert "bad_agent" not in registry.prompts
+    def test_malformed_extra_json_skipped(self, prompts_copy):
+        """A malformed non-required file is skipped, not fatal."""
+        (prompts_copy / "bad.json").write_text("{invalid json")
+
+        registry = PromptRegistry(prompts_dir=str(prompts_copy))
+
+        assert "bad" not in registry.prompts
+        assert "market_analyst" in registry.prompts
+
+    def test_malformed_required_prompt_is_fatal(self, prompts_copy):
+        """A required prompt file that fails to parse must fail startup."""
+        (prompts_copy / "portfolio_manager.json").write_text("{invalid json")
+
+        with pytest.raises(PromptLoadError, match="portfolio_manager"):
+            PromptRegistry(prompts_dir=str(prompts_copy))
+
+    def test_missing_agent_key_skipped(self, prompts_copy):
+        """Test JSON without agent_key is skipped."""
+        bad_prompt = {
+            "agent_name": "Bad Agent",
+            "version": "1.0",
+            "system_message": "Message",
+        }
+        (prompts_copy / "bad.json").write_text(json.dumps(bad_prompt))
+
+        registry = PromptRegistry(prompts_dir=str(prompts_copy))
+
+        assert "bad_agent" not in registry.prompts
 
 
 class TestGetMethod:
@@ -263,50 +248,79 @@ class TestGetMethod:
 
     def test_get_existing_prompt(self):
         """Test retrieving existing prompt."""
-        with TemporaryDirectory() as tmpdir:
-            registry = PromptRegistry(prompts_dir=tmpdir)
+        registry = PromptRegistry()
 
-            prompt = registry.get("market_analyst")
+        prompt = registry.get("market_analyst")
 
-            assert prompt is not None
-            assert prompt.agent_key == "market_analyst"
+        assert prompt is not None
+        assert prompt.agent_key == "market_analyst"
 
     def test_get_nonexistent_prompt(self):
         """Test retrieving non-existent prompt returns None."""
-        with TemporaryDirectory() as tmpdir:
-            registry = PromptRegistry(prompts_dir=tmpdir)
+        registry = PromptRegistry()
 
-            prompt = registry.get("nonexistent")
+        prompt = registry.get("nonexistent")
 
-            assert prompt is None
+        assert prompt is None
 
     def test_get_with_env_override(self, monkeypatch):
         """Test environment variable override."""
-        with TemporaryDirectory() as tmpdir:
-            registry = PromptRegistry(prompts_dir=tmpdir)
+        registry = PromptRegistry()
 
-            # Set environment override
-            monkeypatch.setenv("PROMPT_MARKET_ANALYST", "Override message")
+        # Set environment override
+        monkeypatch.setenv("PROMPT_MARKET_ANALYST", "Override message")
 
-            prompt = registry.get("market_analyst")
+        prompt = registry.get("market_analyst")
 
-            assert prompt.system_message == "Override message"
-            assert prompt.version.endswith("-env")
-            assert prompt.metadata["source"] == "environment"
+        assert prompt.system_message == "Override message"
+        assert prompt.version.endswith("-env")
+        assert prompt.metadata["source"] == "environment"
 
     def test_env_override_preserves_metadata(self, monkeypatch):
         """Test env override preserves other fields."""
-        with TemporaryDirectory() as tmpdir:
-            registry = PromptRegistry(prompts_dir=tmpdir)
+        registry = PromptRegistry()
 
-            monkeypatch.setenv("PROMPT_MARKET_ANALYST", "Override")
+        monkeypatch.setenv("PROMPT_MARKET_ANALYST", "Override")
 
-            prompt = registry.get("market_analyst")
+        prompt = registry.get("market_analyst")
 
-            # Should preserve these from base prompt
-            assert prompt.agent_name == "Market Analyst"
-            assert prompt.category == "technical"
-            assert prompt.requires_tools is True
+        # Should preserve these from base prompt
+        assert prompt.agent_name == "Market Analyst"
+        assert prompt.category == "technical"
+        assert prompt.requires_tools is True
+
+    def test_env_override_honors_dotenv_file(self, monkeypatch):
+        """Overrides defined only in .env (not shell) must be honored."""
+        import src.config as config_module
+
+        registry = PromptRegistry()
+
+        monkeypatch.delenv("PROMPT_MARKET_ANALYST", raising=False)
+        monkeypatch.setattr(
+            config_module,
+            "_cached_env_file_values",
+            lambda: {"PROMPT_MARKET_ANALYST": "Dotenv override"},
+        )
+
+        prompt = registry.get("market_analyst")
+
+        assert prompt.system_message == "Dotenv override"
+        assert prompt.metadata["source"] == "environment"
+
+    def test_shell_export_wins_over_dotenv(self, monkeypatch):
+        """Shell-exported value takes precedence over the .env file."""
+        import src.config as config_module
+
+        registry = PromptRegistry()
+
+        monkeypatch.setenv("PROMPT_MARKET_ANALYST", "Shell override")
+        monkeypatch.setattr(
+            config_module,
+            "_cached_env_file_values",
+            lambda: {"PROMPT_MARKET_ANALYST": "Dotenv override"},
+        )
+
+        assert registry.get("market_analyst").system_message == "Shell override"
 
 
 class TestGetAllMethod:
@@ -314,32 +328,29 @@ class TestGetAllMethod:
 
     def test_get_all_returns_dict(self):
         """Test get_all returns dictionary."""
-        with TemporaryDirectory() as tmpdir:
-            registry = PromptRegistry(prompts_dir=tmpdir)
+        registry = PromptRegistry()
 
-            all_prompts = registry.get_all()
+        all_prompts = registry.get_all()
 
-            assert isinstance(all_prompts, dict)
+        assert isinstance(all_prompts, dict)
 
     def test_get_all_returns_copy(self):
         """Test get_all returns copy, not reference."""
-        with TemporaryDirectory() as tmpdir:
-            registry = PromptRegistry(prompts_dir=tmpdir)
+        registry = PromptRegistry()
 
-            all_prompts = registry.get_all()
-            all_prompts.clear()
+        all_prompts = registry.get_all()
+        all_prompts.clear()
 
-            # Original should still have prompts
-            assert len(registry.prompts) > 0
+        # Original should still have prompts
+        assert len(registry.prompts) > 0
 
     def test_get_all_contains_all_prompts(self):
         """Test get_all contains all loaded prompts."""
-        with TemporaryDirectory() as tmpdir:
-            registry = PromptRegistry(prompts_dir=tmpdir)
+        registry = PromptRegistry()
 
-            all_prompts = registry.get_all()
+        all_prompts = registry.get_all()
 
-            assert len(all_prompts) == len(registry.prompts)
+        assert len(all_prompts) == len(registry.prompts)
 
 
 class TestListKeys:
@@ -347,22 +358,20 @@ class TestListKeys:
 
     def test_list_keys_returns_list(self):
         """Test list_keys returns list."""
-        with TemporaryDirectory() as tmpdir:
-            registry = PromptRegistry(prompts_dir=tmpdir)
+        registry = PromptRegistry()
 
-            keys = registry.list_keys()
+        keys = registry.list_keys()
 
-            assert isinstance(keys, list)
+        assert isinstance(keys, list)
 
     def test_list_keys_contains_expected(self):
         """Test list_keys contains expected keys."""
-        with TemporaryDirectory() as tmpdir:
-            registry = PromptRegistry(prompts_dir=tmpdir)
+        registry = PromptRegistry()
 
-            keys = registry.list_keys()
+        keys = registry.list_keys()
 
-            assert "market_analyst" in keys
-            assert "fundamentals_analyst" in keys
+        assert "market_analyst" in keys
+        assert "fundamentals_analyst" in keys
 
 
 class TestExportToJson:
@@ -370,9 +379,9 @@ class TestExportToJson:
 
     def test_export_creates_files(self):
         """Test export creates JSON files."""
-        with TemporaryDirectory() as tmpdir:
-            registry = PromptRegistry(prompts_dir=tmpdir)
+        registry = PromptRegistry()
 
+        with TemporaryDirectory() as tmpdir:
             export_dir = f"{tmpdir}/export"
             registry.export_to_json(export_dir)
 
@@ -383,9 +392,9 @@ class TestExportToJson:
 
     def test_export_valid_json(self):
         """Test exported files are valid JSON."""
-        with TemporaryDirectory() as tmpdir:
-            registry = PromptRegistry(prompts_dir=tmpdir)
+        registry = PromptRegistry()
 
+        with TemporaryDirectory() as tmpdir:
             export_dir = f"{tmpdir}/export"
             registry.export_to_json(export_dir)
 
@@ -398,9 +407,9 @@ class TestExportToJson:
 
     def test_export_preserves_all_fields(self):
         """Test export preserves all fields."""
-        with TemporaryDirectory() as tmpdir:
-            registry = PromptRegistry(prompts_dir=tmpdir)
+        registry = PromptRegistry()
 
+        with TemporaryDirectory() as tmpdir:
             export_dir = f"{tmpdir}/export"
             registry.export_to_json(export_dir)
 
@@ -422,9 +431,9 @@ class TestExportToJson:
 
     def test_export_creates_directory(self):
         """Test export creates directory if not exists."""
-        with TemporaryDirectory() as tmpdir:
-            registry = PromptRegistry(prompts_dir=tmpdir)
+        registry = PromptRegistry()
 
+        with TemporaryDirectory() as tmpdir:
             export_dir = f"{tmpdir}/new/nested/dir"
             registry.export_to_json(export_dir)
 
@@ -513,22 +522,21 @@ class TestPromptConsistency:
 
     def test_reload_produces_same_prompts(self):
         """Test reloading produces identical prompts."""
-        with TemporaryDirectory() as tmpdir:
-            registry1 = PromptRegistry(prompts_dir=tmpdir)
-            registry2 = PromptRegistry(prompts_dir=tmpdir)
+        registry1 = PromptRegistry()
+        registry2 = PromptRegistry()
 
-            # Should have same keys
-            assert set(registry1.list_keys()) == set(registry2.list_keys())
+        # Should have same keys
+        assert set(registry1.list_keys()) == set(registry2.list_keys())
 
-            # Should have same versions
-            for key in registry1.list_keys():
-                assert registry1.get(key).version == registry2.get(key).version
+        # Should have same versions
+        for key in registry1.list_keys():
+            assert registry1.get(key).version == registry2.get(key).version
 
     def test_export_import_roundtrip(self):
         """Test export then import produces same data."""
-        with TemporaryDirectory() as tmpdir:
-            registry1 = PromptRegistry(prompts_dir=tmpdir)
+        registry1 = PromptRegistry()
 
+        with TemporaryDirectory() as tmpdir:
             # Export
             export_dir = f"{tmpdir}/export"
             registry1.export_to_json(export_dir)

@@ -16,6 +16,7 @@ from typing import Any
 
 import structlog
 
+from src.error_safety import summarize_exception
 from src.exchange_metadata import IBKR_TO_YFINANCE
 from src.ibkr.exceptions import IBKRTickerResolutionError
 from src.ibkr.order_builder import parse_price
@@ -70,7 +71,10 @@ def _save_cache(cache: dict) -> None:
         with open(CACHE_FILE, "w") as f:
             json.dump(cache, f, indent=2)
     except OSError as e:
-        logger.warning("conid_cache_save_failed", error=str(e))
+        logger.warning(
+            "conid_cache_save_failed",
+            **summarize_exception(e, operation="conid_cache_save_failed"),
+        )
 
 
 # Venues that should be excluded from yfinance.Search fallback results
@@ -342,7 +346,11 @@ def resolve_conid(yf_ticker: str, client: Any | None = None) -> int | None:
     except IBKRTickerResolutionError:
         raise
     except Exception as e:
-        logger.warning("conid_resolution_failed", ticker=yf_ticker, error=str(e))
+        logger.warning(
+            "conid_resolution_failed",
+            ticker=yf_ticker,
+            **summarize_exception(e, operation="conid_resolution_failed"),
+        )
         raise IBKRTickerResolutionError(yf_ticker, str(e)) from e
 
 

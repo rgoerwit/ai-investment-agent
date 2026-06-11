@@ -21,6 +21,7 @@ import structlog
 
 from src.config import config
 from src.data.interfaces import FinancialFetcher
+from src.error_safety import redact_sensitive_text, summarize_exception
 
 logger = structlog.get_logger(__name__)
 
@@ -145,7 +146,9 @@ class EODHDFetcher(FinancialFetcher):
                     elif response.status == 429:
                         preview = await self._response_preview(response)
                         logger.error(
-                            "eodhd_rate_limit_429", symbol=eod_symbol, preview=preview
+                            "eodhd_rate_limit_429",
+                            symbol=eod_symbol,
+                            preview=redact_sensitive_text(preview, max_chars=200),
                         )
                         self._is_exhausted = True
                         return None
@@ -155,7 +158,7 @@ class EODHDFetcher(FinancialFetcher):
                         logger.warning(
                             "eodhd_payment_required_402",
                             symbol=eod_symbol,
-                            preview=preview,
+                            preview=redact_sensitive_text(preview, max_chars=200),
                         )
                         # Don't disable globally, might just be this specific exchange
                         return None
@@ -170,7 +173,7 @@ class EODHDFetcher(FinancialFetcher):
                             "eodhd_api_error",
                             status=response.status,
                             symbol=eod_symbol,
-                            preview=preview,
+                            preview=redact_sensitive_text(preview, max_chars=200),
                         )
                         return None
 
@@ -241,7 +244,7 @@ class EODHDFetcher(FinancialFetcher):
                         logger.error(
                             "eodhd_anchor_rate_limit_429",
                             symbol=eod_symbol,
-                            preview=preview,
+                            preview=redact_sensitive_text(preview, max_chars=200),
                         )
                         return None
 
@@ -253,7 +256,7 @@ class EODHDFetcher(FinancialFetcher):
                             "eodhd_anchor_auth_error",
                             status=response.status,
                             symbol=eod_symbol,
-                            preview=preview,
+                            preview=redact_sensitive_text(preview, max_chars=200),
                         )
                         return None
 
@@ -360,7 +363,10 @@ class EODHDFetcher(FinancialFetcher):
                     )
 
         except Exception as e:
-            logger.warning("eodhd_parse_error", error=str(e))
+            logger.warning(
+                "eodhd_parse_error",
+                **summarize_exception(e, operation="eodhd_parse_error"),
+            )
 
         return output
 

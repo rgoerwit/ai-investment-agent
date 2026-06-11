@@ -212,7 +212,9 @@ class TestGetSentiment:
             result = await api.get_sentiment("AAPL")
 
         assert "error" in result
-        assert "Connection failed" in result["error"]
+        # Typed error only — raw exception prose stays in operator logs
+        assert "ClientError" in result["error"]
+        assert "Connection failed" not in result["error"]
 
     @pytest.mark.asyncio
     async def test_get_sentiment_timeout(self):

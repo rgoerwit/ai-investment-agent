@@ -18,6 +18,7 @@ from typing import Any
 
 import structlog
 
+from src.error_safety import summarize_exception
 from src.mcp.errors import parse_mcp_tool_name
 from src.runtime_services import (
     get_current_inspection_service,
@@ -148,7 +149,9 @@ class ContentInspectionHook:
                 tool=call.name,
                 source=call.source,
                 agent_key=call.agent_key,
-                error=str(exc),
+                **summarize_exception(
+                    exc, operation="inspection_input_serialization_failed"
+                ),
             )
             return result
 

@@ -18,7 +18,11 @@ from src.agents.pm_verdict_metadata import (
     canonicalize_pm_verdict,
     pm_verdict_metadata_from_text,
 )
-from src.charts.extractors.pm_block import extract_verdict_from_text
+
+# NOTE: do not import src.charts.extractors.pm_block at module level — it
+# imports src.agents.pm_verdict_metadata, which triggers this package's
+# __init__ and circles back here. Import it inside functions (same pattern
+# as pm_verdict_metadata.pm_verdict_metadata_from_text).
 from src.data_block_utils import has_parseable_data_block
 from src.error_safety import summarize_exception
 from src.runtime_diagnostics import (
@@ -83,7 +87,7 @@ They OVERRIDE normal zone decisions where they conflict.
 - Growth Score ≥ 55% (vs 50% normal)
 - Analyst Coverage ≤ 10 (vs 15 normal)
 - P/E ≤ 15 (vs 18/25 contextual normal)
-- Liquidity ≥ $750k daily USD (vs $500k normal)
+- Liquidity ≥ $750k daily USD (vs $250k full-pass normal)
 - Graham Earnings Test: PASS
 - Risk tally < 1.5
 
@@ -432,18 +436,22 @@ def create_trader_node(llm, memory: Any | None) -> Callable:
             "\n\nAPAC REGIONAL SPECIALIST:\n"
             f"{support.summarize_for_pm(apac, 'apac', 1800) if apac else 'N/A'}"
         )
-        valuation = state.get("valuation_params", "")
+        valuation = get_valid_artifact_content(state, "valuation_params")
         valuation_section = (
             f"\n\nVALUATION PARAMETERS:\n{valuation}" if valuation else ""
         )
         governance_section = governance_block(state, with_label=True)
         macro_section = support.macro_section_for(config)
 
-        market_report = state.get("market_report", "N/A")
-        sentiment_report = state.get("sentiment_report", "N/A")
-        news_report = state.get("news_report", "N/A")
-        fundamentals_report = state.get("fundamentals_report", "N/A")
-        investment_plan = state.get("investment_plan", "N/A")
+        market_report = get_valid_artifact_content(state, "market_report") or "N/A"
+        sentiment_report = (
+            get_valid_artifact_content(state, "sentiment_report") or "N/A"
+        )
+        news_report = get_valid_artifact_content(state, "news_report") or "N/A"
+        fundamentals_report = (
+            get_valid_artifact_content(state, "fundamentals_report") or "N/A"
+        )
+        investment_plan = get_valid_artifact_content(state, "investment_plan") or "N/A"
         all_input = f"""MARKET ANALYST REPORT:
 {support.summarize_for_pm(market_report, "market", 1800) if market_report != "N/A" else "N/A"}
 
@@ -525,7 +533,7 @@ def create_risk_debater_node(llm, agent_key: str) -> Callable:
                 }
             }
 
-        consultant = state.get("consultant_review", "")
+        consultant = get_valid_artifact_content(state, "consultant_review")
         consultant_section = (
             "\n\nEXTERNAL CONSULTANT REVIEW (Cross-Validation):\n"
             f"{consultant if consultant else 'N/A (consultant disabled or unavailable)'}"
@@ -533,9 +541,12 @@ def create_risk_debater_node(llm, agent_key: str) -> Callable:
         governance_section = governance_block(state, with_label=True)
         macro_section = support.macro_section_for(config)
 
+        trader_plan = (
+            get_valid_artifact_content(state, "trader_investment_plan") or "N/A"
+        )
         prompt = (
             f"{agent_prompt.system_message}\n\nTRADER PLAN: "
-            f"{state.get('trader_investment_plan')}{consultant_section}{governance_section}{macro_section}\n\n"
+            f"{trader_plan}{consultant_section}{governance_section}{macro_section}\n\n"
             "Provide risk assessment."
         )
         try:
@@ -552,9 +563,13 @@ def create_risk_debater_node(llm, agent_key: str) -> Callable:
                 }
             }
         except Exception as exc:
+            summary = summarize_exception(exc, operation=f"risk_node:{agent_key}")
+            logger.error("risk_node_failed", agent_key=agent_key, **summary)
             return {
                 "risk_debate_state": {
-                    field_name: f"[ERROR]: {agent_key} failed - {str(exc)}",
+                    field_name: (
+                        f"[ERROR]: {agent_key} failed - {summary['error_type']}"
+                    ),
                     "latest_speaker": agent_key,
                 }
             }
@@ -914,6 +929,8 @@ RISK TEAM DEBATE:
                     provider=support.infer_provider_name(llm),
                     fallback_content=content_str,
                 )
+
+            from src.charts.extractors.pm_block import extract_verdict_from_text
 
             content_str = _normalize_pm_block_contract(content_str)
             present_inputs, missing_inputs = _present_pm_inputs(state)

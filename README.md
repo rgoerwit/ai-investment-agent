@@ -321,10 +321,11 @@ poetry run python -m src.web.ibkr_dashboard.worker
 
 # Live broker mode with an explicit account and watchlist
 poetry run python -m src.web.ibkr_dashboard.app \
+  --live \
   --account-id U20958465 \
   --watchlist-name "default watchlist"
 
-# Offline/read-only mode for saved results only
+# Offline/read-only mode for saved results only (the default)
 poetry run python -m src.web.ibkr_dashboard.app --read-only
 ```
 
@@ -362,7 +363,7 @@ The dashboard includes:
 Operational notes:
 
 - The dashboard is read-only for trading.
-- Live IBKR mode is the default. Use `--read-only` or `IBKR_DASHBOARD_READ_ONLY=true` when you want a saved-results-only snapshot.
+- Read-only mode (saved-results-only snapshot) is the default. Use `--live` or `IBKR_DASHBOARD_READ_ONLY=false` when you want live IBKR portfolio data.
 - Set the account explicitly with `--account-id` or `IBKR_DASHBOARD_ACCOUNT_ID` when the default IBKR account is not the one you want.
 - Set the watchlist explicitly with `--watchlist-name` or in the Settings tab. Startup flags win for that run even if saved dashboard preferences differ.
 - The page auto-loads a snapshot on first open. `Refresh Snapshot` is the manual force-reload control.
@@ -384,7 +385,7 @@ Hard requirements:
 
 - Financial health score of at least 50%
 - Growth score of at least 50%
-- Liquidity of at least about $500k USD daily
+- Liquidity of at least $100k USD daily turnover (about $250k for a full pass)
 - Low enough analyst coverage to still be plausibly underfollowed
 
 Soft factors that still matter:

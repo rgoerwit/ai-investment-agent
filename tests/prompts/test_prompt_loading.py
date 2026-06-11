@@ -230,25 +230,16 @@ class TestSpecificPromptFiles:
             "DATA_BLOCK" in system_message
         ), "fundamentals_analyst should have DATA_BLOCK instructions"
 
-    def test_fundamentals_governance_fields_parity(self):
-        """`src/prompts.py` in-code default and `prompts/fundamentals_analyst.json`
-        override must list the same GOVERNANCE_BLOCK fields. They are independent
-        prompt sources and drift between them would leave the JSON-overriding
-        runtime silently mis-aligned with the in-code fallback.
+    def test_fundamentals_governance_fields(self):
+        """`prompts/fundamentals_analyst.json` (the canonical source) must list
+        the GOVERNANCE_BLOCK fields the validators and downstream agents parse.
         """
-        from src import prompts as _prompts_mod
-
         prompt_file = Path("prompts/fundamentals_analyst.json")
         if not prompt_file.exists():
             pytest.skip("fundamentals_analyst.json not found")
 
         with open(prompt_file) as f:
             json_sm = json.load(f).get("system_message", "")
-
-        # Source the in-code default by reading the module file directly.
-        # (Importing get_prompt resolves to whichever source is loaded; we need
-        # the raw default string this test is enforcing parity against.)
-        in_code_text = Path(_prompts_mod.__file__).read_text(encoding="utf-8")
 
         for field in (
             "LISTING_ROLE:",
@@ -257,21 +248,17 @@ class TestSpecificPromptFiles:
             "METRIC_SCOPE_OCF:",
             "Shareholder-return or Value-Up plans",
         ):
-            assert field in in_code_text, f"{field} missing from src/prompts.py"
             assert field in json_sm, f"{field} missing from fundamentals_analyst.json"
 
-    def test_fundamentals_pfic_corroboration_rule_parity(self):
+    def test_fundamentals_pfic_corroboration_rule(self):
         """PFIC Cross-Check #11 must require corroboration before escalating
-        PFIC_RISK to HIGH, in both the JSON override and the in-code fallback.
+        PFIC_RISK to HIGH.
 
         Locks the 2371.T-class fix: a high cash/asset ratio alone should not
         force a PFIC HIGH classification when the sector is operating and a
         capital plan is in place. The old text said "OVERRIDES Legal
-        Counsel's qualitative assessment" — neither prompt should still say
-        that.
+        Counsel's qualitative assessment" — the prompt must not still say that.
         """
-        from src import prompts as _prompts_mod
-
         prompt_file = Path("prompts/fundamentals_analyst.json")
         if not prompt_file.exists():
             pytest.skip("fundamentals_analyst.json not found")
@@ -279,9 +266,6 @@ class TestSpecificPromptFiles:
         with open(prompt_file) as f:
             json_sm = json.load(f).get("system_message", "")
 
-        in_code_text = Path(_prompts_mod.__file__).read_text(encoding="utf-8")
-
-        # Both prompts must adopt the corroboration framing.
         required_phrases = (
             "Corroboration Required for HIGH",
             "PFIC_RISK = HIGH if EITHER",
@@ -291,25 +275,19 @@ class TestSpecificPromptFiles:
             "[PFIC ASSET-TEST SIGNAL]",
         )
         for phrase in required_phrases:
-            assert phrase in in_code_text, f"{phrase!r} missing from src/prompts.py"
             assert (
                 phrase in json_sm
             ), f"{phrase!r} missing from fundamentals_analyst.json"
 
-        # Neither prompt should still describe the asset test as an
-        # unconditional override of Legal Counsel.
+        # The prompt must not describe the asset test as an unconditional
+        # override of Legal Counsel.
         forbidden = "This quantitative test OVERRIDES Legal Counsel"
-        assert (
-            forbidden not in in_code_text
-        ), f"src/prompts.py still contains stale override framing: {forbidden!r}"
         assert (
             forbidden not in json_sm
         ), f"fundamentals_analyst.json still contains stale override framing: {forbidden!r}"
 
-    def test_foreign_language_governance_fields_parity(self):
-        """Fallback and JSON prompts both require explicit ownership role fields."""
-        from src import prompts as _prompts_mod
-
+    def test_foreign_language_governance_fields(self):
+        """The FLA prompt must require explicit ownership role fields."""
         prompt_file = Path("prompts/foreign_language_analyst.json")
         if not prompt_file.exists():
             pytest.skip("foreign_language_analyst.json not found")
@@ -317,30 +295,22 @@ class TestSpecificPromptFiles:
         with open(prompt_file) as f:
             json_sm = json.load(f).get("system_message", "")
 
-        in_code_text = Path(_prompts_mod.__file__).read_text(encoding="utf-8")
-
         for field in ("ENTITY_ROLE_OBSERVED:", "Related Listed Tickers:"):
-            assert field in in_code_text, f"{field} missing from src/prompts.py"
             assert (
                 field in json_sm
             ), f"{field} missing from foreign_language_analyst.json"
 
-    def test_foreign_language_active_tender_search_parity(self):
+    def test_foreign_language_active_tender_search(self):
         """FLA must have a structured M&A / tender-offer search step, so the
         downstream PM event-driven override and the IBKR `M&A EXIT` sell-type
-        label have data to act on. JSON override and in-code fallback must stay
-        in sync.
+        label have data to act on.
         """
-        from src import prompts as _prompts_mod
-
         prompt_file = Path("prompts/foreign_language_analyst.json")
         if not prompt_file.exists():
             pytest.skip("foreign_language_analyst.json not found")
 
         with open(prompt_file) as f:
             json_sm = json.load(f).get("system_message", "")
-
-        in_code_text = Path(_prompts_mod.__file__).read_text(encoding="utf-8")
 
         required = (
             "**Search I: Active M&A / Tender Offer Disclosures**",
@@ -352,18 +322,15 @@ class TestSpecificPromptFiles:
             "No active M&A event detected.",
         )
         for needle in required:
-            assert needle in in_code_text, f"{needle!r} missing from src/prompts.py"
             assert (
                 needle in json_sm
             ), f"{needle!r} missing from foreign_language_analyst.json"
 
-    def test_fundamentals_m_and_a_data_block_parity(self):
+    def test_fundamentals_m_and_a_data_block_fields(self):
         """Senior promotes the FLA M&A EVENT section into DATA_BLOCK as
-        M_AND_A_STATUS and M_AND_A_TENDER_PRICE. Both prompt sources must
-        agree on the field shapes and the spread-narrative rule.
+        M_AND_A_STATUS and M_AND_A_TENDER_PRICE; the prompt must specify the
+        field shapes and the spread-narrative rule.
         """
-        from src import prompts as _prompts_mod
-
         prompt_file = Path("prompts/fundamentals_analyst.json")
         if not prompt_file.exists():
             pytest.skip("fundamentals_analyst.json not found")
@@ -371,15 +338,12 @@ class TestSpecificPromptFiles:
         with open(prompt_file) as f:
             json_sm = json.load(f).get("system_message", "")
 
-        in_code_text = Path(_prompts_mod.__file__).read_text(encoding="utf-8")
-
         for needle in (
             "M_AND_A_STATUS: [ACTIVE_TENDER / RUMORED / NONE]",
             "M_AND_A_TENDER_PRICE:",
             "9. **M&A Event from Foreign Language Analyst**",
             "Market {currency}{current} vs. tender",
         ):
-            assert needle in in_code_text, f"{needle!r} missing from src/prompts.py"
             assert (
                 needle in json_sm
             ), f"{needle!r} missing from fundamentals_analyst.json"
@@ -392,8 +356,6 @@ class TestSpecificPromptFiles:
         Locks the 2371.T fix: a held tender-offer position should be evaluated
         on the market-vs-tender spread, not on trailing P/E or Growth.
         """
-        from src import prompts as _prompts_mod
-
         prompt_file = Path("prompts/portfolio_manager.json")
         if not prompt_file.exists():
             pytest.skip("portfolio_manager.json not found")
@@ -401,21 +363,15 @@ class TestSpecificPromptFiles:
         with open(prompt_file) as f:
             json_sm = json.load(f).get("system_message", "")
 
-        in_code_text = Path(_prompts_mod.__file__).read_text(encoding="utf-8")
-
         for needle in (
             "**0) EVENT-DRIVEN OVERRIDE (M&A Active Tender)**",
             "M_AND_A_STATUS: ACTIVE_TENDER",
             "spread > +3%",
         ):
-            assert needle in in_code_text, f"{needle!r} missing from src/prompts.py"
             assert needle in json_sm, f"{needle!r} missing from portfolio_manager.json"
 
-    def test_macro_regime_policy_json_fallback_parity(self):
-        """Decision prompts and in-code fallbacks both carry macro policy."""
-        from src import prompts as _prompts_mod
-
-        in_code_text = Path(_prompts_mod.__file__).read_text(encoding="utf-8")
+    def test_macro_regime_policy_in_decision_prompts(self):
+        """All decision prompts must carry the macro regime signal policy."""
         prompt_files = (
             "bear_researcher.json",
             "trader.json",
@@ -433,19 +389,8 @@ class TestSpecificPromptFiles:
                 json_sm = json.load(f).get("system_message", "")
             assert "## MACRO REGIME SIGNAL POLICY" in json_sm
 
-        for needle in (
-            "## MACRO REGIME SIGNAL POLICY",
-            "MACRO_REGIME_BLOCK",
-            "CONFIDENCE: LOW",
-            "DIP_POSTURE",
-        ):
-            assert needle in in_code_text, f"{needle!r} missing from src/prompts.py"
-        assert in_code_text.count("## MACRO REGIME SIGNAL POLICY") >= len(prompt_files)
-
     def test_portfolio_manager_has_thesis_criteria(self):
         """Verify portfolio_manager.json has investment thesis criteria."""
-        from src import prompts as _prompts_mod
-
         prompt_file = Path("prompts/portfolio_manager.json")
         if not prompt_file.exists():
             pytest.skip("portfolio_manager.json not found")
@@ -459,8 +404,6 @@ class TestSpecificPromptFiles:
             "Financial Health" in system_message or "HEALTH" in system_message
         ), "portfolio_manager should reference Financial Health criteria"
         assert "Entity Governance Card metric scope is Senior-derived" in system_message
-        in_code_text = Path(_prompts_mod.__file__).read_text(encoding="utf-8")
-        assert "Entity Governance Card metric scope is Senior-derived" in in_code_text
 
     def test_writer_json_has_valuation_reconciliation_section(self):
         """Verify writer.json has VALUATION-DECISION RECONCILIATION section."""

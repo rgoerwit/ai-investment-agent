@@ -24,6 +24,7 @@ from typing import Any, Literal
 
 import structlog
 
+from src.error_safety import summarize_exception
 from src.tooling.inspector import (
     ContentInspector,
     InspectionDecision,
@@ -208,7 +209,9 @@ class InspectionService:
                     "content_inspection_backend_error",
                     source_kind=envelope.source_kind.value,
                     source_name=envelope.source_name,
-                    error=str(exc),
+                    **summarize_exception(
+                        exc, operation="content_inspection_backend_error"
+                    ),
                     fail_policy=self._fail_policy,
                 )
                 blocked = _BLOCKED_PLACEHOLDER.format(reason=reason)
@@ -225,7 +228,9 @@ class InspectionService:
                 "content_inspection_backend_error",
                 source_kind=envelope.source_kind.value,
                 source_name=envelope.source_name,
-                error=str(exc),
+                **summarize_exception(
+                    exc, operation="content_inspection_backend_error"
+                ),
                 fail_policy=self._fail_policy,
             )
             return (

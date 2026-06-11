@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import structlog
 
+from src.error_safety import summarize_exception
 from src.fx_normalization import FALLBACK_RATES_TO_USD
 from src.ibkr.client import IbkrClient
 from src.ibkr.models import NormalizedPosition, PortfolioSummary
@@ -348,7 +349,10 @@ def read_portfolio(
     try:
         client.get_accounts()
     except Exception as e:
-        logger.warning("portfolio_accounts_preflight_failed", error=str(e))
+        logger.warning(
+            "portfolio_accounts_preflight_failed",
+            **summarize_exception(e, operation="portfolio_accounts_preflight_failed"),
+        )
 
     raw_positions = client.get_positions(acct)
     positions = normalize_positions(raw_positions)

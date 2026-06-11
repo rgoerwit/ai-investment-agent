@@ -215,7 +215,7 @@ def test_apply_preferences_preserves_cached_snapshot_for_non_bundle_fields(
     invalidated = service.apply_preferences(
         DashboardPreferences(
             account_id=None,
-            read_only=False,
+            read_only=True,  # matches the settings-seeded default (non-bundle change)
             watchlist_name=None,
             max_age_days=14,
             quick_mode_default=False,

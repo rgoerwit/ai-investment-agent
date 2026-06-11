@@ -26,7 +26,11 @@ from tenacity import (
 )
 
 from src.config import config
-from src.error_safety import safe_error_payload, summarize_exception
+from src.error_safety import (
+    redact_sensitive_text,
+    safe_error_payload,
+    summarize_exception,
+)
 from src.runtime_diagnostics import classify_failure
 from src.runtime_services import get_current_inspection_service
 from src.tooling.inspector import InspectionEnvelope, SourceKind
@@ -455,7 +459,7 @@ class FinancialSituationMemory:
                     "situation_collection_handle_stale_refetching",
                     collection=self.name,
                     error_type=type(exc).__name__,
-                    message_preview=str(exc)[:120],
+                    message_preview=redact_sensitive_text(str(exc), max_chars=120),
                 )
                 self.situation_collection = self.chroma_client.get_or_create_collection(
                     name=self.name,

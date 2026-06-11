@@ -29,6 +29,7 @@ import structlog
 from langgraph.types import RunnableConfig
 
 from src.charts.base import CurrencyFormat
+from src.thesis_constants import ANALYST_COVERAGE_MAX
 
 logger = structlog.get_logger(__name__)
 
@@ -153,7 +154,7 @@ def create_chart_generator_node(
         # Early exit if charts disabled
         if skip_charts or quick_mode:
             logger.debug(
-                "Chart generation skipped",
+                "chart_generation_skipped",
                 skip_charts=skip_charts,
                 quick_mode=quick_mode,
             )
@@ -189,7 +190,7 @@ def create_chart_generator_node(
                 verdict = _extract_verdict_fallback(pm_output)
 
             logger.info(
-                "Chart generator processing",
+                "chart_generator_processing",
                 ticker=ticker,
                 verdict=verdict,
                 pm_block_found=pm_block.verdict is not None,
@@ -222,7 +223,7 @@ def create_chart_generator_node(
                     chart_paths["football_field"] = str(football_path)
             else:
                 logger.info(
-                    "Football field chart suppressed for negative verdict",
+                    "football_field_chart_suppressed_for_negative_verdict",
                     ticker=ticker,
                     verdict=verdict,
                 )
@@ -308,7 +309,7 @@ def _generate_football_field(
 
     # Check minimum data requirements
     if not data_block.current_price or not data_block.fifty_two_week_high:
-        logger.debug("Insufficient data for football field chart", ticker=ticker)
+        logger.debug("insufficient_data_for_football_field_chart", ticker=ticker)
         return None
 
     # Extract valuation targets from Valuation Calculator
@@ -345,7 +346,7 @@ def _generate_football_field(
         if our_target_high:
             our_target_high = round(our_target_high * pm_block.valuation_discount, 2)
         logger.debug(
-            "Applied valuation discount to targets",
+            "applied_valuation_discount_to_targets",
             discount=pm_block.valuation_discount,
             original_low=targets.low,
             adjusted_low=our_target_low,
@@ -433,7 +434,7 @@ def _generate_radar_chart(
 
     # Need at least health score
     if health is None:
-        logger.debug("Insufficient data for radar chart (no health score)")
+        logger.debug("insufficient_data_for_radar_chart")
         return None
 
     # Apply D/E and ROA adjustments if using raw scores
@@ -485,7 +486,7 @@ def _generate_radar_chart(
         if data_block.analyst_coverage is not None and data_block.analyst_coverage > 0
         else 10
     )
-    undiscovered = max(0.0, min(100.0, (15.0 - coverage) * 10.0))
+    undiscovered = max(0.0, min(100.0, (ANALYST_COVERAGE_MAX - coverage) * 10.0))
 
     # Regulatory score (PFIC, VIE, CMIC, ADR penalties)
     regulatory = 100.0

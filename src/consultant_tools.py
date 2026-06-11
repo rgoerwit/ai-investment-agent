@@ -23,7 +23,11 @@ from langchain_core.tools import tool
 
 from src.async_utils import run_with_hard_timeout
 from src.config import config
-from src.error_safety import safe_error_payload, summarize_exception
+from src.error_safety import (
+    redact_sensitive_text,
+    safe_error_payload,
+    summarize_exception,
+)
 from src.mcp.errors import MCPCallError, make_mcp_tool_name
 from src.runtime_diagnostics import classify_failure
 from src.runtime_services import (
@@ -508,7 +512,9 @@ async def spot_check_metric_alt(
             failure_kind=details.kind,
             retryable=details.retryable,
             error_type=details.error_type,
-            message_preview=safe_payload.get("message_preview"),
+            message_preview=redact_sensitive_text(
+                safe_payload.get("message_preview"), max_chars=200
+            ),
         )
         return json.dumps(safe_payload)
 

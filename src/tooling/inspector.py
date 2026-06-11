@@ -123,7 +123,7 @@ class CompositeInspector:
                 strategy=self._strategy,
                 source_kind=envelope.source_kind.value,
                 source_name=envelope.source_name,
-                error=str(exc),
+                reason=str(exc),
             )
 
         if not decisions:

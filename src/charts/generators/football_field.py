@@ -49,7 +49,7 @@ def _is_target_reasonable(
 
     if target < lower_bound or target > upper_bound:
         logger.warning(
-            "Target price outside reasonable bounds - likely LLM calculation error",
+            "target_price_outside_reasonable_bounds_likely_llm_calculatio",
             target=target,
             current_price=current_price,
             lower_bound=lower_bound,
@@ -86,7 +86,7 @@ def _overlay_scenarios(
         from src.error_safety import summarize_exception
 
         logger.warning(
-            "Scenario overlay skipped: malformed scenarios object",
+            "scenario_overlay_skipped_malformed_scenarios_object",
             **summarize_exception(exc, operation="football_field_scenario_overlay"),
         )
         return None
@@ -95,7 +95,7 @@ def _overlay_scenarios(
     values = (bear_iv, base_iv, bull_iv, weighted_iv)
     if not all(isinstance(v, float) and v > 0 for v in values):
         logger.warning(
-            "Scenario overlay skipped: non-positive IV detected", values=values
+            "scenario_overlay_skipped_non_positive_iv_detected", values=values
         )
         return None
 
@@ -207,7 +207,7 @@ def generate_football_field(
     """
     if not data.has_minimum_data():
         logger.warning(
-            "Insufficient data for football field chart",
+            "insufficient_data_for_football_field_chart",
             ticker=data.ticker,
             current_price=data.current_price,
             high=data.fifty_two_week_high,
@@ -537,7 +537,7 @@ def generate_football_field(
     plt.close(fig)
 
     logger.info(
-        "Generated football field chart",
+        "generated_football_field_chart",
         ticker=data.ticker,
         output_path=str(output_path),
         format=config.format.value,

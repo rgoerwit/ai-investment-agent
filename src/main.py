@@ -185,6 +185,8 @@ def configure_content_inspection_from_config(*, provider_runtime=None):
 
 def _resolve_langfuse_session_id(default_session_id: str) -> str:
     """Resolve the session ID, honoring batch/session overrides."""
+    # Deliberate raw os.getenv: per-invocation shell export set by batch
+    # scripts, not a .env-defined key (those must use get_env_value).
     return os.getenv("LANGFUSE_SESSION_ID") or default_session_id
 
 
@@ -241,6 +243,7 @@ def configure_cli_logging(args) -> dict[str, dict[str, str]]:
     for name, level in CLI_NOISY_DEPENDENCY_LOGGERS.items():
         logging.getLogger(name).setLevel(level)
 
+    # Deliberate raw os.getenv: one-off debug toggle, shell export only.
     if mode == "debug" and os.getenv("INVESTMENT_AGENT_TRACE_HTTP") == "1":
         for name in HTTP_TRACE_LOGGERS:
             logging.getLogger(name).setLevel(logging.DEBUG)

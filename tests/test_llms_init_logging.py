@@ -39,8 +39,10 @@ def test_consultant_llm_init_failure_logs_stack_trace():
     assert args[0] == "consultant_llm_init_failed"
     assert kwargs["model"] == "gpt-5.2"
     assert kwargs["quick_mode"] is False
+    # summarize_exception fields — raw str(exc) must not appear as `error=`
     assert kwargs["error_type"] == "RuntimeError"
-    assert kwargs["error"] == "boom"
+    assert kwargs["message_preview"] == "boom"
+    assert "error" not in kwargs
     assert kwargs["exc_info"] is True
 
 

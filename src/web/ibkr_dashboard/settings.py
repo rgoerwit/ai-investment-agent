@@ -13,7 +13,9 @@ class DashboardSettings(BaseSettings):
     account_id: str | None = None
     watchlist_name: str | None = None
 
-    read_only: bool = False
+    # Safe default: disk-only mode. Live IBKR portfolio access is opt-in via
+    # IBKR_DASHBOARD_READ_ONLY=false or saved preferences.
+    read_only: bool = True
     cash_buffer: float = 0.05
     max_age_days: int = 14
     drift_pct: float = 15.0
@@ -37,7 +39,7 @@ class DashboardSettings(BaseSettings):
 
 class DashboardPreferences(BaseModel):
     account_id: str | None = None
-    read_only: bool = False
+    read_only: bool = True
     watchlist_name: str | None = None
     max_age_days: int = 14
     quick_mode_default: bool = True

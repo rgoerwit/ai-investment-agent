@@ -8,6 +8,7 @@ from typing import Any
 import structlog
 
 from src.config import config
+from src.error_safety import summarize_exception
 
 logger = structlog.get_logger(__name__)
 
@@ -86,7 +87,7 @@ if _tavily_api_key:
             hint="Run 'poetry add langchain-tavily' to enable Tavily search",
         )
 else:
-    logger.warning("TAVILY_API_KEY not set. Tavily tools disabled.")
+    logger.warning("tavily_api_key_not_set_tavily_tools_disabled")
 
 from src.tavily_utils import set_tavily_tool, tavily_search_with_timeout
 
@@ -176,10 +177,14 @@ async def fetch_with_timeout(coroutine, timeout_seconds=10, error_msg="Timeout")
             label=f"shared.fetch_with_timeout:{error_msg}",
         )
     except asyncio.TimeoutError:
-        logger.warning(f"YFINANCE TIMEOUT: {error_msg}")
+        logger.warning("yfinance_timeout", context=error_msg)
         return None
     except Exception as exc:
-        logger.warning(f"YFINANCE ERROR: {error_msg} - {str(exc)}")
+        logger.warning(
+            "yfinance_fetch_failed",
+            context=error_msg,
+            **summarize_exception(exc, operation="yfinance_fetch"),
+        )
         return None
 
 

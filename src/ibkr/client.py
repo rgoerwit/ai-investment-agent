@@ -11,6 +11,7 @@ from typing import Any
 
 import structlog
 
+from src.error_safety import summarize_exception
 from src.ibkr.exceptions import (
     IBKRAPIError,
     IBKRAuthError,
@@ -320,7 +321,9 @@ class IbkrClient:
             return True
         except Exception as e:
             logger.warning(
-                "brokerage_session_init_failed", error=str(e), compete=compete
+                "brokerage_session_init_failed",
+                **summarize_exception(e, operation="brokerage_session_init_failed"),
+                compete=compete,
             )
             return False
 
@@ -521,7 +524,10 @@ class IbkrClient:
             logger.info("watchlist_loaded", name=wl_name, count=len(rows))
             return rows
         except Exception as e:
-            logger.warning("watchlist_fetch_failed", error=str(e))
+            logger.warning(
+                "watchlist_fetch_failed",
+                **summarize_exception(e, operation="watchlist_fetch_failed"),
+            )
             return []  # API error — transient failure, distinct from "not found" (None)
 
     def get_live_orders(self, account_id: str | None = None) -> list[dict]:
@@ -562,7 +568,10 @@ class IbkrClient:
             logger.info("live_orders_fetched", count=len(orders))
             return orders
         except Exception as e:
-            logger.warning("live_orders_fetch_failed", error=str(e))
+            logger.warning(
+                "live_orders_fetch_failed",
+                **summarize_exception(e, operation="live_orders_fetch_failed"),
+            )
             return []
 
     def get_contract_info(self, conid: int, *, compete: bool = True) -> dict:

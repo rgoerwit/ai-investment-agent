@@ -3,8 +3,10 @@ from typing import Annotated
 import structlog
 from langchain_core.tools import tool
 
+from src.error_safety import summarize_exception
 from src.fx_normalization import get_fx_rate
 from src.runtime_services import get_current_market_data_fetcher
+from src.thesis_constants import LIQUIDITY_MIN_USD, LIQUIDITY_PASS_USD
 from src.ticker_utils import normalize_ticker
 
 logger = structlog.get_logger(__name__)
@@ -126,8 +128,8 @@ Error: Could not determine trading currency for turnover conversion.
         avg_turnover_usd = avg_turnover_local * fx_rate
 
         # Thresholds (Aligned with Portfolio Manager Prompt)
-        THRESHOLD_PASS = 250_000
-        THRESHOLD_MARGINAL = 100_000
+        THRESHOLD_PASS = LIQUIDITY_PASS_USD
+        THRESHOLD_MARGINAL = LIQUIDITY_MIN_USD
 
         # Failure Conditions
         fails_zero_vol = pct_zero > 15.0
@@ -176,14 +178,15 @@ Avg Daily Volume (3mo): {int(avg_volume):,}
 Avg Daily Turnover (USD): ${int(avg_turnover_usd):,}
 Trading Regularity: {pct_zero:.0f}% zero-volume days, {pct_flat:.0f}% flat-price days (last 3mo)
 Details: {currency} turnover converted at FX rate {fx_rate:.6f} (source: {fx_source})
-Thresholds: $100,000 USD minimum (MARGINAL), $250,000 USD recommended (PASS), <15% zero-volume days, <30% flat-price days{agent_note}
+Thresholds: ${LIQUIDITY_MIN_USD:,} USD minimum (MARGINAL), ${LIQUIDITY_PASS_USD:,} USD recommended (PASS), <15% zero-volume days, <30% flat-price days{agent_note}
 """
 
     except Exception as e:
+        summary = summarize_exception(e, operation="liquidity_calculation")
         logger.error(
-            "liquidity_calculation_failed", ticker=ticker, error=str(e), exc_info=True
+            "liquidity_calculation_failed", ticker=ticker, exc_info=True, **summary
         )
         return f"""Liquidity Analysis for {ticker}:
 Status: ERROR
-Error: {str(e)}
+Error: {summary["error_type"]} (details in operator logs)
 """

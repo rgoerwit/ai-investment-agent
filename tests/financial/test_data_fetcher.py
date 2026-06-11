@@ -1089,3 +1089,42 @@ class TestQuoteUnitNormalization:
         assert "currency_alias:GBp" in result["_unit_normalization"]["evidence"]
         assert "financial_currency_match" in result["_unit_normalization"]["evidence"]
         assert result["_sources_used"] == ["yfinance"]
+
+
+class TestMergePolicyConstantsCanonical:
+    """fetcher must consume merge_policy's field sets, not redefine them."""
+
+    def test_quote_price_fields_identity(self):
+        from src.data import fetcher, merge_policy
+
+        assert fetcher.QUOTE_PRICE_FIELDS is merge_policy.QUOTE_PRICE_FIELDS
+
+    def test_fetcher_does_not_shadow_merge_policy_constants(self):
+        import ast
+        import inspect
+
+        from src.data import fetcher, merge_policy
+
+        tree = ast.parse(inspect.getsource(fetcher))
+        module_level_names = {
+            target.id
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+        canonical = {
+            "PERCENT_LIKE_FIELDS",
+            "NON_FINANCIAL_METADATA_FIELDS",
+            "NON_ACTIONABLE_CONFLICT_FIELDS",
+            "CRITICAL_ANALYSIS_FIELDS",
+            "ANALYSIS_CRITICAL_CONFLICT_FIELDS",
+            "QUOTE_PRICE_FIELDS",
+            "SOURCE_QUALITY",
+            "FORWARD_PE_OUTLIER_THRESHOLD",
+            "FORWARD_PE_REFERENCE_MAX",
+            "FORWARD_PE_OUTLIER_RATIO",
+        }
+        shadowed = canonical & module_level_names
+        assert not shadowed, f"fetcher redefines merge_policy constants: {shadowed}"
+        assert canonical <= set(dir(merge_policy))

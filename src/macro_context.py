@@ -25,6 +25,7 @@ import structlog
 from langchain_core.callbacks import BaseCallbackHandler
 
 import src.config as config_module
+from src.error_safety import summarize_exception
 from src.macro_regime import MacroRegime, parse_macro_regime
 from src.macro_regions import infer_macro_region
 from src.runtime_services import get_current_inspection_service
@@ -144,7 +145,7 @@ def _read_cache(
             "macro_context_cache_read_failed",
             region=region,
             path=str(path),
-            error=str(exc),
+            **summarize_exception(exc, operation="macro_context_cache_read"),
         )
         return None
 
@@ -427,6 +428,6 @@ async def get_macro_context(
             ticker=ticker,
             region=region,
             trade_date=trade_date,
-            error=str(exc),
+            **summarize_exception(exc, operation="macro_context"),
         )
         return MacroContextResult("", region, "failed")

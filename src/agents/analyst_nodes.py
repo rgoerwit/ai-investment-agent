@@ -742,7 +742,9 @@ def create_analyst_node(
                         "analyst_retry_failed",
                         agent_key=agent_key,
                         ticker=ticker,
-                        error=str(retry_error),
+                        **summarize_exception(
+                            retry_error, operation="analyst_retry_failed"
+                        ),
                     )
 
             from src.utils import detect_truncation
@@ -805,7 +807,9 @@ def create_analyst_node(
             return new_state
         except Exception as exc:
             logger.error(
-                "analyst_node_error", output_field=output_field, error=str(exc)
+                "analyst_node_error",
+                output_field=output_field,
+                **summarize_exception(exc, operation="analyst_node_error"),
             )
             error_message = AIMessage(content=f"Error: {str(exc)}")
             error_message.name = agent_key

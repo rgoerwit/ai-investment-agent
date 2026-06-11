@@ -24,6 +24,7 @@ from langchain_google_genai import (
 
 import src.config as config_module
 from src.config import config
+from src.error_safety import summarize_exception
 from src.llm_budgets import GenerationBudget, get_generation_budget
 from src.runtime_config import get_runtime_config
 from src.runtime_services import get_current_provider_runtime
@@ -678,7 +679,10 @@ def create_auditor_llm(
     try:
         from langchain_openai import ChatOpenAI
     except ImportError as e:
-        logger.warning("langchain_openai_missing", error=str(e))
+        logger.warning(
+            "langchain_openai_missing",
+            **summarize_exception(e, operation="langchain_openai_missing"),
+        )
         return None
 
     if not config.enable_consultant:
@@ -770,7 +774,12 @@ def create_apac_specialist_llm(
     try:
         from langchain_openai import ChatOpenAI
     except ImportError as exc:
-        logger.warning("langchain_openai_missing_for_apac_specialist", error=str(exc))
+        logger.warning(
+            "langchain_openai_missing_for_apac_specialist",
+            **summarize_exception(
+                exc, operation="langchain_openai_missing_for_apac_specialist"
+            ),
+        )
         return None
 
     model_name = config.apac_specialist_model
@@ -922,7 +931,10 @@ def create_editor_llm(
     try:
         from langchain_openai import ChatOpenAI
     except ImportError as e:
-        logger.warning("langchain_openai_missing", error=str(e))
+        logger.warning(
+            "langchain_openai_missing",
+            **summarize_exception(e, operation="langchain_openai_missing"),
+        )
         return None
 
     if not config.enable_consultant:
@@ -1029,8 +1041,7 @@ def get_consultant_llm(
                 else config.consultant_model
             ),
             quick_mode=quick_mode,
-            error_type=type(e).__name__,
-            error=str(e),
             exc_info=True,
+            **summarize_exception(e, operation="consultant_llm_init"),
         )
         return None

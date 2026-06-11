@@ -16,6 +16,7 @@ from pathlib import Path
 
 import structlog
 
+from src.error_safety import summarize_exception
 from src.runtime_config import get_runtime_config
 
 # Add the repository root to Python path
@@ -127,7 +128,11 @@ def check_imports() -> bool:
             version = get_package_version(mod_name, pkg_name)
             logger.info("import_ok", package=pkg_name, version=version)
         except ImportError as e:
-            logger.error("import_failed", package=pkg_name, error=str(e))
+            logger.error(
+                "import_failed",
+                package=pkg_name,
+                **summarize_exception(e, operation="import_failed"),
+            )
             critical_failures.append(pkg_name)
 
     # Check for ChromaDB (Optional but recommended)
@@ -188,10 +193,16 @@ async def check_llm_connectivity() -> bool:
         logger.error("llm_connectivity_timeout")
         return False
     except ImportError as e:
-        logger.error("llm_connectivity_import_error", error=str(e))
+        logger.error(
+            "llm_connectivity_import_error",
+            **summarize_exception(e, operation="llm_connectivity_import_error"),
+        )
         return False
     except Exception as e:
-        logger.error("llm_connectivity_error", error=str(e))
+        logger.error(
+            "llm_connectivity_error",
+            **summarize_exception(e, operation="llm_connectivity_error"),
+        )
         return False
 
 
@@ -211,7 +222,10 @@ async def run_comprehensive_health_check() -> bool:
 
         logger.info("llms_import_ok")
     except ImportError as e:
-        logger.error("llms_import_failed", error=str(e))
+        logger.error(
+            "llms_import_failed",
+            **summarize_exception(e, operation="llms_import_failed"),
+        )
         return False
 
     llm_ok = await check_llm_connectivity()

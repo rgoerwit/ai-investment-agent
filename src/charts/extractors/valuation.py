@@ -60,7 +60,7 @@ def _extract_params(valuation_params_report: str) -> ValuationParams:
 
     block = extract_last_fenced_block(valuation_params_report, "VALUATION_PARAMS")
     if not block:
-        logger.debug("No VALUATION_PARAMS block found")
+        logger.debug("no_valuation_params_block_found")
         return ValuationParams()
 
     def extract_float(pattern: str) -> float | None:
@@ -112,7 +112,7 @@ def _calculate_pe_normalization(params: ValuationParams) -> ValuationTargets:
         or params.sector_median_pe is None
         or params.current_pe <= 0
     ):
-        logger.warning("Insufficient data for P/E normalization calculation")
+        logger.warning("insufficient_data_for_p_e_normalization_calculation")
         return ValuationTargets(confidence=params.confidence)
 
     # Calculate fair value
@@ -129,7 +129,7 @@ def _calculate_pe_normalization(params: ValuationParams) -> ValuationTargets:
     )
 
     logger.debug(
-        "P/E normalization calculation",
+        "p_e_normalization_calculation",
         current_price=params.current_price,
         current_pe=params.current_pe,
         sector_median_pe=params.sector_median_pe,
@@ -159,7 +159,7 @@ def _calculate_peg_based(params: ValuationParams) -> ValuationTargets:
         or params.peg_ratio is None
         or params.peg_ratio <= 0
     ):
-        logger.warning("Insufficient data for PEG-based calculation")
+        logger.warning("insufficient_data_for_peg_based_calculation")
         return ValuationTargets(confidence=params.confidence)
 
     # PEG-implied fair value (assuming fair PEG = 1.0)
@@ -177,7 +177,7 @@ def _calculate_peg_based(params: ValuationParams) -> ValuationTargets:
     methodology = f"PEG-based: PEG ratio {params.peg_ratio:.2f} implies fair value at ${fair_value:.2f}"
 
     logger.debug(
-        "PEG-based calculation",
+        "peg_based_calculation",
         current_price=params.current_price,
         peg_ratio=params.peg_ratio,
         fair_value=fair_value,
@@ -202,7 +202,7 @@ def _calculate_growth_adjusted(params: ValuationParams) -> ValuationTargets:
         Apply ±10% range (tighter for lower confidence method)
     """
     if params.current_price is None or params.growth_score_pct is None:
-        logger.warning("Insufficient data for growth-adjusted calculation")
+        logger.warning("insufficient_data_for_growth_adjusted_calculation")
         return ValuationTargets(confidence=params.confidence)
 
     # Growth score as upside indicator (conservative 0.5x multiplier)
@@ -224,7 +224,7 @@ def _calculate_growth_adjusted(params: ValuationParams) -> ValuationTargets:
     )
 
     logger.debug(
-        "Growth-adjusted calculation",
+        "growth_adjusted_calculation",
         current_price=params.current_price,
         growth_score_pct=params.growth_score_pct,
         upside_pct=upside_pct,
@@ -258,13 +258,13 @@ def calculate_valuation_targets(valuation_params_report: str) -> ValuationTarget
     params = _extract_params(valuation_params_report)
 
     if not params.method:
-        logger.debug("No valuation method specified")
+        logger.debug("no_valuation_method_specified")
         return ValuationTargets()
 
     method = params.method.upper().replace(" ", "_").replace("-", "_")
 
     logger.info(
-        "Calculating valuation targets",
+        "calculating_valuation_targets",
         method=method,
         current_price=params.current_price,
         confidence=params.confidence,
@@ -277,13 +277,13 @@ def calculate_valuation_targets(valuation_params_report: str) -> ValuationTarget
     elif method == "GROWTH_ADJUSTED":
         return _calculate_growth_adjusted(params)
     elif method == "INSUFFICIENT_DATA":
-        logger.info("Valuation Calculator reported insufficient data")
+        logger.info("valuation_calculator_reported_insufficient_data")
         return ValuationTargets(
             methodology="Insufficient data for valuation",
             confidence="LOW",
         )
     else:
-        logger.warning(f"Unknown valuation method: {method}")
+        logger.warning("unknown_valuation_method", method=method)
         return ValuationTargets()
 
 
@@ -442,11 +442,11 @@ def extract_valuation_scenarios(
     suff_match = re.search(r"DATA_SUFFICIENCY:\s*(\w+)", block, re.IGNORECASE)
     data_sufficiency = suff_match.group(1).upper() if suff_match else "LOW"
     if data_sufficiency == "LOW":
-        logger.debug("Valuation scenarios suppressed: DATA_SUFFICIENCY=LOW")
+        logger.debug("valuation_scenarios_suppressed_data_sufficiency_low")
         return None
 
     if eps_ttm is None or eps_ttm <= 0:
-        logger.debug("Valuation scenarios suppressed: eps_ttm missing or non-positive")
+        logger.debug("valuation_scenarios_suppressed_eps_ttm_missing")
         return None
 
     method_match = re.search(r"METHODOLOGY:\s*(.+?)(?:\n|$)", block, re.IGNORECASE)
@@ -456,22 +456,22 @@ def extract_valuation_scenarios(
     base = _parse_scenario(block, "BASE")
     bull = _parse_scenario(block, "BULL")
     if bear is None or base is None or bull is None:
-        logger.debug("Valuation scenarios: one or more scenario rows failed to parse")
+        logger.debug("valuation_scenarios_row_parse_failed")
         return None
 
     prob_sum = bear.probability + base.probability + bull.probability
     if abs(prob_sum - 100.0) > 1.0:
         logger.warning(
-            "Valuation scenarios rejected: probabilities sum to %.1f (expected 100)",
-            prob_sum,
+            "valuation_scenarios_rejected_probability_sum",
+            prob_sum=prob_sum,
         )
         return None
 
     if bear.multiple > bull.multiple:
         logger.warning(
-            "Valuation scenarios rejected: bear_multiple (%.2f) > bull_multiple (%.2f)",
-            bear.multiple,
-            bull.multiple,
+            "valuation_scenarios_rejected_inverted_multiples",
+            bear_multiple=bear.multiple,
+            bull_multiple=bull.multiple,
         )
         return None
 
@@ -482,9 +482,9 @@ def extract_valuation_scenarios(
     if bear_iv > bull_iv:
         # Possible after applying growth + margin deltas even with ordered multiples.
         logger.warning(
-            "Valuation scenarios rejected: bear_iv (%.2f) > bull_iv (%.2f) post-compute",
-            bear_iv,
-            bull_iv,
+            "valuation_scenarios_rejected_inverted_iv_post_compute",
+            bear_iv=bear_iv,
+            bull_iv=bull_iv,
         )
         return None
 

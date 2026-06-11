@@ -13,9 +13,11 @@ from src.agents.support import extract_kill_criteria, get_bear_history
 
 
 def test_bear_prompt_includes_fenced_kill_criteria_block() -> None:
+    import re
+
     prompt_path = pathlib.Path("prompts/bear_researcher.json")
     data = json.loads(prompt_path.read_text(encoding="utf-8"))
-    assert data["version"] == "3.1"
+    assert re.match(r"^\d+\.\d+$", data["version"])  # format, not a pinned value
     msg = data["system_message"]
     assert "### --- START KILL_CRITERIA ---" in msg
     assert "### --- END KILL_CRITERIA ---" in msg

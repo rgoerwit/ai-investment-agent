@@ -10,7 +10,11 @@ from langgraph.types import RunnableConfig
 from src.config import config as settings_config
 from src.error_safety import summarize_exception
 from src.runtime_config import get_runtime_config
-from src.runtime_diagnostics import failure_artifact, success_artifact
+from src.runtime_diagnostics import (
+    failure_artifact,
+    get_valid_artifact_content,
+    success_artifact,
+)
 from src.tooling.text_boundary import format_untrusted_block
 
 from . import message_utils, support
@@ -75,11 +79,15 @@ def _summarize_report(report: str, kind: str, budget: int) -> str:
 
 
 def _build_research_report_bundle(state: AgentState, budgets: dict[str, int]) -> str:
-    market_report = state.get("market_report", "N/A")
-    sentiment_report = state.get("sentiment_report", "N/A")
-    news_report = state.get("news_report", "N/A")
-    fundamentals_report = state.get("fundamentals_report", "N/A")
-    foreign_language_report = state.get("foreign_language_report", "N/A")
+    market_report = get_valid_artifact_content(state, "market_report") or "N/A"
+    sentiment_report = get_valid_artifact_content(state, "sentiment_report") or "N/A"
+    news_report = get_valid_artifact_content(state, "news_report") or "N/A"
+    fundamentals_report = (
+        get_valid_artifact_content(state, "fundamentals_report") or "N/A"
+    )
+    foreign_language_report = (
+        get_valid_artifact_content(state, "foreign_language_report") or "N/A"
+    )
 
     parts = [
         f"MARKET ANALYST REPORT:\n{_summarize_report(market_report, 'market', budgets['market'])}",
@@ -212,7 +220,9 @@ Now provide your Round 2 rebuttal, addressing the opponent's key points."""
                     logger.debug("no_lessons_available", agent=agent_key, ticker=ticker)
             except Exception as exc:
                 logger.warning(
-                    "lessons_injection_failed", agent=agent_key, error=str(exc)
+                    "lessons_injection_failed",
+                    agent=agent_key,
+                    **summarize_exception(exc, operation="lessons_injection_failed"),
                 )
         else:
             # --no-memory: don't even touch the global lessons_learned
@@ -313,7 +323,7 @@ Only use data explicitly related to {ticker} ({company_name}).{governance_block(
                 "researcher_error",
                 agent=agent_key,
                 round=round_num,
-                error=str(exc),
+                **summarize_exception(exc, operation="researcher_error"),
             )
             field_name = f"{researcher_type}_round{round_num}"
             return {
@@ -340,7 +350,7 @@ def create_research_manager_node(
             return {"investment_plan": "Error: Missing prompt"}
 
         debate = state.get("investment_debate_state", {})
-        value_trap = state.get("value_trap_report", "N/A")
+        value_trap = get_valid_artifact_content(state, "value_trap_report") or "N/A"
         field_sources = support.extract_field_sources_from_messages(
             state.get("messages", [])
         )
@@ -354,11 +364,17 @@ def create_research_manager_node(
                 "When Bull/Bear cite conflicting figures, check if they reference different time periods."
             )
 
-        market_report = state.get("market_report", "N/A")
-        sentiment_report = state.get("sentiment_report", "N/A")
-        news_report = state.get("news_report", "N/A")
-        fundamentals_report = state.get("fundamentals_report", "N/A")
-        foreign_language_report = state.get("foreign_language_report", "N/A")
+        market_report = get_valid_artifact_content(state, "market_report") or "N/A"
+        sentiment_report = (
+            get_valid_artifact_content(state, "sentiment_report") or "N/A"
+        )
+        news_report = get_valid_artifact_content(state, "news_report") or "N/A"
+        fundamentals_report = (
+            get_valid_artifact_content(state, "fundamentals_report") or "N/A"
+        )
+        foreign_language_report = (
+            get_valid_artifact_content(state, "foreign_language_report") or "N/A"
+        )
         bull_history = debate.get("bull_history", "N/A")
         bear_history = debate.get("bear_history", "N/A")
         # FLA carries absence-of-evidence signals (e.g., "no Value-Up disclosure

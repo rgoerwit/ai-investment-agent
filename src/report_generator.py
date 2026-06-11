@@ -21,7 +21,9 @@ import structlog
 from src.agents.pm_verdict_metadata import canonicalize_pm_verdict
 from src.charts.extractors.pm_block import extract_pm_block
 from src.data_block_utils import normalize_structured_block_boundaries
+from src.error_safety import summarize_exception
 from src.runtime_diagnostics import is_publishable_analysis
+from src.thesis_constants import ANALYST_COVERAGE_MAX
 from src.ticker_policy import CHINA_SUFFIXES, KOREA_SUFFIXES, ticker_in_group
 
 logger = structlog.get_logger(__name__)
@@ -295,10 +297,16 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
             return chart_path
 
         except ImportError as e:
-            logger.warning("chart_deps_unavailable", error=str(e))
+            logger.warning(
+                "chart_deps_unavailable",
+                **summarize_exception(e, operation="chart_deps_unavailable"),
+            )
             return None
         except Exception as e:
-            logger.warning("chart_generation_failed", error=str(e))
+            logger.warning(
+                "chart_generation_failed",
+                **summarize_exception(e, operation="chart_generation_failed"),
+            )
             return None
 
     def _generate_radar_chart(self, result: dict) -> Path | None:
@@ -401,7 +409,7 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
             # 4. Undiscovered (Derived from Analyst Count)
             # Target: <5 analysts is 100% (hidden gem), >15 is 0% (well-covered)
             coverage = raw.analyst_coverage if raw.analyst_coverage is not None else 10
-            undiscovered = (15.0 - coverage) * 10.0
+            undiscovered = (ANALYST_COVERAGE_MAX - coverage) * 10.0
             undiscovered = max(0.0, min(100.0, undiscovered))
 
             # 5. Regulatory Score (PFIC, VIE, CMIC, ADR risks)
@@ -539,7 +547,10 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
             return chart_path
 
         except Exception as e:
-            logger.warning("radar_chart_generation_failed", error=str(e))
+            logger.warning(
+                "radar_chart_generation_failed",
+                **summarize_exception(e, operation="radar_chart_generation_failed"),
+            )
             return None
 
     def _normalize_string(self, content: Any) -> str:

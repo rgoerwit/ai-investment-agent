@@ -12,6 +12,7 @@ from typing import Any, Literal
 import structlog
 
 from src.config import config
+from src.error_safety import summarize_exception
 from src.runtime_services import get_current_inspection_service
 from src.tooling.inspector import InspectionEnvelope, SourceKind
 
@@ -121,7 +122,7 @@ async def tavily_search_with_timeout(
         logger.warning(
             "tavily_search_error",
             query=query.get("query", "")[:100],
-            error=str(e),
+            **summarize_exception(e, operation="tavily_search_error"),
         )
         return None
 
@@ -162,7 +163,7 @@ async def search_tavily_inspected(
         logger.warning(
             "tavily_search_error",
             query=query[:100],
-            error=str(exc),
+            **summarize_exception(exc, operation="tavily_search_error"),
             profile=profile,
         )
         return None
@@ -198,7 +199,7 @@ def search_tavily_sync_inspected(
             logger.warning(
                 "tavily_search_error",
                 query=query[:100],
-                error=str(exc),
+                **summarize_exception(exc, operation="tavily_search_error"),
                 profile=profile,
             )
             return None

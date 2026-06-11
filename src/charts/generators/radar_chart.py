@@ -226,7 +226,7 @@ def generate_radar_chart(
     plt.close(fig)
 
     logger.info(
-        "Generated radar chart",
+        "generated_radar_chart",
         ticker=data.ticker,
         output_path=str(output_path),
     )
