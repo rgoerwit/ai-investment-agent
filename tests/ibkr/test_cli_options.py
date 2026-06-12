@@ -17,7 +17,7 @@ from src.ibkr.cli_options import (
 def test_portfolio_request_kwargs_from_args_normalizes_shared_fields():
     args = Namespace(
         results_dir="results/",
-        account_id=" U20958465 ",
+        account_id=" U1234567 ",
         watchlist_name=" default watchlist ",
         cash_buffer=0.05,
         max_age=21,
@@ -32,7 +32,7 @@ def test_portfolio_request_kwargs_from_args_normalizes_shared_fields():
 
     assert payload == {
         "results_dir": Path("results/"),
-        "account_id": "U20958465",
+        "account_id": "U1234567",
         "watchlist_name": "default watchlist",
         "cash_buffer": 0.05,
         "max_age_days": 21,
@@ -47,7 +47,7 @@ def test_portfolio_request_kwargs_from_args_normalizes_shared_fields():
 def test_dashboard_overrides_only_include_explicit_values():
     args = Namespace(
         results_dir=None,
-        account_id=" U20958465 ",
+        account_id=" U1234567 ",
         watchlist_name=None,
         cash_buffer=None,
         max_age=None,
@@ -61,8 +61,8 @@ def test_dashboard_overrides_only_include_explicit_values():
     settings_overrides = dashboard_settings_overrides_from_args(args)
     preferences_overrides = dashboard_preferences_overrides_from_args(args)
 
-    assert settings_overrides == {"account_id": "U20958465"}
-    assert preferences_overrides == {"account_id": "U20958465"}
+    assert settings_overrides == {"account_id": "U1234567"}
+    assert preferences_overrides == {"account_id": "U1234567"}
 
 
 def test_common_portfolio_arg_help_formats_with_percent_literals():
@@ -85,7 +85,7 @@ def test_portfolio_manager_parse_args_supports_shared_portfolio_flags(monkeypatc
             "--watchlist-name",
             "default watchlist",
             "--account-id",
-            "U20958465",
+            "U1234567",
             "--max-age",
             "21",
             "--refresh-limit",
@@ -97,7 +97,7 @@ def test_portfolio_manager_parse_args_supports_shared_portfolio_flags(monkeypatc
     args = parse_args()
 
     assert args.watchlist_name == "default watchlist"
-    assert args.account_id == "U20958465"
+    assert args.account_id == "U1234567"
     assert args.max_age == 21
     assert args.refresh_limit == 5
     assert args.read_only is True

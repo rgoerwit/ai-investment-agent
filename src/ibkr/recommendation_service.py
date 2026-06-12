@@ -4,6 +4,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import structlog
+
 from src.ibkr.analysis_index import load_latest_analyses
 from src.ibkr.models import (
     AnalysisRecord,
@@ -27,6 +29,26 @@ from src.ibkr.screening_freshness import (
     load_screening_freshness,
 )
 from src.ibkr.types import ProgressCallback
+
+logger = structlog.get_logger(__name__)
+
+
+def _load_active_macro_events() -> list:
+    """Best-effort fetch of unexpired macro events to sustain SELL demotions."""
+    try:
+        from src.memory import create_macro_events_store
+
+        store = create_macro_events_store()
+        if store.available:
+            return store.get_active_events()
+    except Exception as exc:
+        from src.error_safety import summarize_exception
+
+        logger.warning(
+            "active_macro_events_load_failed",
+            **summarize_exception(exc, operation="active_macro_events_load"),
+        )
+    return []
 
 
 @dataclass(frozen=True)
@@ -242,6 +264,7 @@ class PortfolioRecommendationService:
             portfolio=portfolio,
             max_age_days=request.max_age_days,
             reconciliation_items=items,
+            active_macro_events=_load_active_macro_events(),
         )
         freshness_summary = self._refresh_service.classify(
             items,

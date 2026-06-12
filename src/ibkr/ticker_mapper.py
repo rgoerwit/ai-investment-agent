@@ -117,7 +117,11 @@ def ibkr_symbol_to_yf(symbol: str, exchange: str, currency: str = "") -> str:
             )
 
     if suffix:
-        return f"{_pad_numeric_symbol_for_suffix(symbol, suffix)}{suffix}"
+        from src.ticker_corrections import apply_operator_override
+
+        candidate = f"{_pad_numeric_symbol_for_suffix(symbol, suffix)}{suffix}"
+        overridden, _ = apply_operator_override(candidate)
+        return overridden
 
     # Returning bare symbol — try yfinance search as a last resort.
     #

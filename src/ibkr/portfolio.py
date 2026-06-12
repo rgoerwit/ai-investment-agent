@@ -20,6 +20,7 @@ from src.ibkr.ticker_mapper import (
     ibkr_symbol_to_yf,
     yf_ticker_from_conid,
 )
+from src.ticker_corrections import apply_operator_override
 
 # IBKR exchange codes for US venues — these never need a yfinance suffix search
 _US_EXCHANGES: frozenset[str] = frozenset(
@@ -76,6 +77,13 @@ def normalize_positions(raw_positions: list[dict]) -> list[NormalizedPosition]:
             yf_str = _yf_search_ticker(raw_symbol, raw_exchange, raw_currency)
             if yf_str:
                 ticker_obj = Ticker.from_yf(yf_str, currency=raw_currency)
+
+        # Operator-confirmed listing migrations (config/ticker_overrides.json):
+        # keep position keys aligned with the analysis side until IBKR's own
+        # exchange metadata catches up with the move.
+        overridden_yf, was_overridden = apply_operator_override(ticker_obj.yf)
+        if was_overridden:
+            ticker_obj = Ticker.from_yf(overridden_yf, currency=raw_currency)
 
         raw_market_value = float(raw.get("mktValue", 0) or raw.get("marketValue", 0))
         currency = raw_currency or ("GBP" if ticker_obj.suffix == ".L" else "USD")

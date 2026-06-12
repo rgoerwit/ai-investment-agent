@@ -322,7 +322,7 @@ poetry run python -m src.web.ibkr_dashboard.worker
 # Live broker mode with an explicit account and watchlist
 poetry run python -m src.web.ibkr_dashboard.app \
   --live \
-  --account-id U20958465 \
+  --account-id U1234567 \
   --watchlist-name "default watchlist"
 
 # Offline/read-only mode for saved results only (the default)
@@ -341,7 +341,7 @@ Convenience options:
 ./scripts/run_ibkr_dashboard.sh --no-worker
 
 # Pass startup flags through to the app
-./scripts/run_ibkr_dashboard.sh -- --account-id U20958465 --watchlist-name "default watchlist"
+./scripts/run_ibkr_dashboard.sh -- --account-id U1234567 --watchlist-name "default watchlist"
 ```
 
 If you have already run `poetry install`, the Poetry script shims also work:

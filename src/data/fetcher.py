@@ -343,6 +343,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         self._mnemonic_cache: dict[str, str] = self._load_mnemonic_cache()
         self._metrics_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._metrics_inflight: dict[str, asyncio.Task[dict[str, Any]]] = {}
+        self._history_failure_logged: set[str] = set()
         self._history_cache: dict[
             tuple[str, str, str | None, str | None], tuple[float, pd.DataFrame]
         ] = {}
@@ -496,6 +497,19 @@ class SmartMarketDataFetcher(FinancialFetcher):
             resolved=resolved,
             error_kind=error_kind,
         )
+        # The candidate had full market data but IBKR could not verify identity
+        # — the classic signature of a listing migration (e.g. TWSE→TPEx).
+        # Never auto-apply (the strict probe prevents cross-matching the wrong
+        # security); surface it for the operator instead.
+        logger.warning(
+            "ticker_migration_suspected",
+            original=original,
+            candidate=candidate,
+            action=(
+                "verify listing change; if confirmed, add to "
+                "config/ticker_overrides.json"
+            ),
+        )
         return False
 
     async def _try_sibling_suffix_rescue(
@@ -529,7 +543,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
                 )
                 return candidate, candidate_merged, candidate_metadata
             logger.info(
-                "ticker_sibling_rescue_rejected",
+                "ticker_sibling_rescue_candidate_incomplete",
                 original=ticker,
                 candidate=candidate,
                 has_price=self._has_price_anchor(candidate_merged),
@@ -1844,15 +1858,20 @@ class SmartMarketDataFetcher(FinancialFetcher):
                     )
             return hist
         except Exception as e:
-            logger.error(
-                "history_fetch_failed",
-                ticker=ticker,
-                **summarize_exception(
-                    e,
-                    operation="get_historical_prices",
-                    provider="unknown",
-                ),
+            summary = summarize_exception(
+                e, operation="get_historical_prices", provider="unknown"
             )
+            repeated = ticker in self._history_failure_logged
+            self._history_failure_logged.add(ticker)
+            if repeated:
+                log = logger.debug  # one operator-visible record per ticker per run
+            elif summary["failure_kind"] == "data_unavailable":
+                log = (
+                    logger.warning
+                )  # expected absence (delisted/migrated), not a fault
+            else:
+                log = logger.error
+            log("history_fetch_failed", ticker=ticker, repeated=repeated, **summary)
             return pd.DataFrame()
 
     async def get_price_history(

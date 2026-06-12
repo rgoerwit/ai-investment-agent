@@ -1279,6 +1279,24 @@ class MacroEventsStore:
                 }
             )
             if existing and existing.get("ids"):
+                # Re-detection of an ongoing event: extend the stored expiry
+                # instead of dropping the signal, so the macro override keeps
+                # rolling forward while the situation persists.
+                new_expiry_ts = _date_to_int(event.expiry)
+                for event_id, meta in zip(
+                    existing["ids"], existing.get("metadatas") or [], strict=False
+                ):
+                    if new_expiry_ts > int(meta.get("expiry_ts", 0)):
+                        meta = dict(meta)
+                        meta["expiry"] = event.expiry
+                        meta["expiry_ts"] = new_expiry_ts
+                        meta["detected_date"] = event.detected_date
+                        self.collection.update(ids=[event_id], metadatas=[meta])
+                        logger.info(
+                            "macro_event_expiry_extended",
+                            event_date=meta.get("event_date"),
+                            new_expiry=event.expiry,
+                        )
                 logger.debug("macro_event_dedup_skipped", event_date=event.event_date)
                 return False
 

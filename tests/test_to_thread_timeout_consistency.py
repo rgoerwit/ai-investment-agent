@@ -81,19 +81,19 @@ OUTER_WRAPPED_ALLOWLIST: dict[str, str] = {
     "src/data/filings/edinet_fetcher.py:117": (
         "wrapped by run_with_hard_timeout in FilingRegistry.fetch"
     ),
-    "src/data/filings/edinet_fetcher.py:159": (
+    "src/data/filings/edinet_fetcher.py:163": (
         "wrapped by run_with_hard_timeout in FilingRegistry.fetch"
     ),
-    "src/data/filings/edinet_fetcher.py:165": (
+    "src/data/filings/edinet_fetcher.py:169": (
         "wrapped by run_with_hard_timeout in FilingRegistry.fetch"
     ),
-    "src/data/filings/edinet_fetcher.py:215": (
+    "src/data/filings/edinet_fetcher.py:219": (
         "wrapped by run_with_hard_timeout in FilingRegistry.fetch"
     ),
-    "src/data/filings/edinet_fetcher.py:238": (
+    "src/data/filings/edinet_fetcher.py:242": (
         "wrapped by run_with_hard_timeout in FilingRegistry.fetch"
     ),
-    "src/data/filings/edinet_fetcher.py:287": (
+    "src/data/filings/edinet_fetcher.py:291": (
         "wrapped by run_with_hard_timeout in FilingRegistry.fetch"
     ),
 }

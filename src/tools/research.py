@@ -32,11 +32,13 @@ async def search_foreign_sources(
         normalized_symbol = normalize_ticker(ticker)
         company_name = await shared.extract_company_name_async(normalized_symbol)
         company_resolved = company_name != normalized_symbol
-        full_query = (
-            f"{search_query} {company_name} {ticker}"
-            if company_resolved
-            else f"{search_query} {ticker}"
+        # Agents often interpolate the ticker into search_query already; avoid
+        # degenerate queries like "1264.TW company name 1264.TW".
+        ticker_suffix = (
+            "" if ticker.casefold() in search_query.casefold() else f" {ticker}"
         )
+        name_part = f" {company_name}" if company_resolved else ""
+        full_query = f"{search_query}{name_part}{ticker_suffix}"
 
         logger.info("foreign_source_search", ticker=ticker, query=full_query[:100])
 

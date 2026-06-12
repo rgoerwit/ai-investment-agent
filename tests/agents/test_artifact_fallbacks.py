@@ -13,7 +13,9 @@ class TestArtifactFallbacks:
     async def test_legal_counsel_failure_preserves_conservative_fallback(
         self, mock_get_prompt
     ):
-        mock_get_prompt.return_value = SimpleNamespace(system_message="legal prompt")
+        mock_get_prompt.return_value = SimpleNamespace(
+            system_message="legal prompt", agent_name="Legal Counsel"
+        )
 
         # The manual loop invokes llm.ainvoke directly — mock the LLM to fail.
         mock_llm = SimpleNamespace(
@@ -45,7 +47,9 @@ class TestArtifactFallbacks:
     async def test_auditor_context_limit_preserves_graceful_report(
         self, mock_get_prompt
     ):
-        mock_get_prompt.return_value = SimpleNamespace(system_message="auditor prompt")
+        mock_get_prompt.return_value = SimpleNamespace(
+            system_message="auditor prompt", agent_name="Forensic Auditor"
+        )
 
         # The manual loop invokes llm.ainvoke directly — mock the LLM to raise a
         # context-limit error so the graceful fallback path is exercised.
@@ -77,7 +81,9 @@ class TestArtifactFallbacks:
     @pytest.mark.asyncio
     @patch("src.prompts.get_prompt")
     async def test_auditor_param_error_retries_with_fallback_llm(self, mock_get_prompt):
-        mock_get_prompt.return_value = SimpleNamespace(system_message="auditor prompt")
+        mock_get_prompt.return_value = SimpleNamespace(
+            system_message="auditor prompt", agent_name="Forensic Auditor"
+        )
 
         initial_llm = SimpleNamespace(model_name="gpt-4o")
         fallback_llm = SimpleNamespace(model_name="gpt-4o")
@@ -113,7 +119,9 @@ class TestArtifactFallbacks:
     @pytest.mark.asyncio
     @patch("src.prompts.get_prompt")
     async def test_auditor_repairs_recoverable_invalid_structure(self, mock_get_prompt):
-        mock_get_prompt.return_value = SimpleNamespace(system_message="auditor prompt")
+        mock_get_prompt.return_value = SimpleNamespace(
+            system_message="auditor prompt", agent_name="Forensic Auditor"
+        )
 
         initial_llm = SimpleNamespace(model_name="gpt-4o")
         initial_response = SimpleNamespace(
@@ -170,7 +178,9 @@ class TestArtifactFallbacks:
     async def test_auditor_unrecoverable_invalid_structure_logs_preview(
         self, mock_get_prompt
     ):
-        mock_get_prompt.return_value = SimpleNamespace(system_message="auditor prompt")
+        mock_get_prompt.return_value = SimpleNamespace(
+            system_message="auditor prompt", agent_name="Forensic Auditor"
+        )
 
         initial_llm = SimpleNamespace(model_name="gpt-4o")
         invalid_response = SimpleNamespace(content="nonsense output", tool_calls=None)

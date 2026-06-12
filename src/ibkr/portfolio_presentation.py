@@ -387,11 +387,16 @@ def build_cash_timeline(
 
 
 def _soft_sell_proceeds_usd(items: list[ReconciliationItem]) -> float:
-    """Total USD proceeds from SOFT_REJECT sells (conditional, not confirmed)."""
+    """Total USD proceeds from SOFT_REJECT sells (conditional, not confirmed).
+
+    Includes macro-demoted items (action REVIEW, sell_type SOFT_REJECT): the
+    operator still sees their potential proceeds in the conditional bucket —
+    that is what "soft-sell reviews" means in the report.
+    """
     return sum(
         item.cash_impact_usd
         for item in items
-        if item.action == "SELL"
+        if item.action in ("SELL", "REVIEW")
         and item.sell_type == "SOFT_REJECT"
         and item.cash_impact_usd > 0
     )

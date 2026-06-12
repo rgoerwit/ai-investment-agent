@@ -11,11 +11,72 @@ Common issues:
 - IBKR may use different conventions than yfinance
 """
 
+import json
+from pathlib import Path
+
 import structlog
 
 from src.exchange_metadata import EXCHANGES_BY_SUFFIX, canonical_suffix_for_token
 
 logger = structlog.get_logger(__name__)
+
+# Operator-curated registry for confirmed listing migrations (e.g. a TWSE→TPEx
+# move: "1264.TW" → "1264.TWO"). The pipeline logs ticker_migration_suspected
+# when it suspects one but NEVER auto-applies; an operator verifies the listing
+# change and records it here. Applied on both the analysis side
+# (normalize_ticker) and the IBKR position/watchlist side so reconciliation
+# keys agree. Entry shape: {"1264.TW": {"new_ticker": "1264.TWO", ...}} or the
+# shorthand {"1264.TW": "1264.TWO"}.
+TICKER_OVERRIDES_PATH = Path("config/ticker_overrides.json")
+_operator_overrides_cache: dict[str, str] | None = None
+
+
+def load_operator_overrides(*, force_reload: bool = False) -> dict[str, str]:
+    """Return {old_yf_ticker: new_yf_ticker} from the operator registry."""
+    global _operator_overrides_cache
+    if _operator_overrides_cache is not None and not force_reload:
+        return _operator_overrides_cache
+
+    overrides: dict[str, str] = {}
+    try:
+        if TICKER_OVERRIDES_PATH.exists():
+            raw = json.loads(TICKER_OVERRIDES_PATH.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("registry root must be a JSON object")
+            for old, spec in raw.items():
+                new = spec.get("new_ticker") if isinstance(spec, dict) else spec
+                if isinstance(new, str) and new.strip():
+                    overrides[old.strip().upper()] = new.strip().upper()
+                else:
+                    logger.warning(
+                        "ticker_override_entry_invalid",
+                        ticker=old,
+                        path=str(TICKER_OVERRIDES_PATH),
+                    )
+    except (OSError, ValueError) as exc:
+        from src.error_safety import summarize_exception
+
+        logger.warning(
+            "ticker_overrides_load_failed",
+            path=str(TICKER_OVERRIDES_PATH),
+            **summarize_exception(exc, operation="ticker_overrides_load"),
+        )
+        overrides = {}
+
+    if overrides:
+        logger.info("ticker_overrides_loaded", count=len(overrides))
+    _operator_overrides_cache = overrides
+    return overrides
+
+
+def apply_operator_override(ticker: str) -> tuple[str, bool]:
+    """Apply a confirmed-migration override; returns (ticker, was_overridden)."""
+    cleaned = ticker.strip().upper()
+    replacement = load_operator_overrides().get(cleaned)
+    if replacement and replacement != cleaned:
+        logger.info("ticker_override_applied", original=cleaned, override=replacement)
+        return replacement, True
+    return cleaned, False
 
 
 # Known corrections: Reuters/Bloomberg codes to actual trading symbols
@@ -136,6 +197,11 @@ class TickerCorrector:
             Tuple of (corrected_ticker, was_corrected, company_name)
         """
         ticker = ticker.strip().upper()
+
+        # Operator-confirmed listing migrations take precedence over everything.
+        overridden, was_overridden = apply_operator_override(ticker)
+        if was_overridden:
+            return overridden, True, None
 
         # Check Reuters corrections
         if ticker in REUTERS_CORRECTIONS:

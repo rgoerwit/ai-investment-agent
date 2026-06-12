@@ -147,8 +147,10 @@ class TestFormatReportPanicDay:
     def test_macro_banner_shows_count_date_and_pct(self):
         """MACRO ALERT banner must show the count, date, and percentage parsed from the flag."""
         report = self._report_with_flag()
-        # All three parsed values must appear in the banner
-        assert "8 positions changed verdict on 2026-03-05" in report
+        # All three parsed values must appear in the banner. Wording is
+        # trigger-neutral ("impacted") because the flag may be verdict-flip
+        # or drawdown-breadth evidence.
+        assert "8 positions impacted (as of 2026-03-05)" in report
         assert "80% of held positions" in report
 
     def test_macro_banner_absent_when_no_flag(self):
@@ -2240,7 +2242,7 @@ class TestAnalysisFreshnessReporting:
 class TestCashHeaderWording:
     def test_cash_total_notes_when_unsettled_proceeds_are_present(self):
         portfolio = PortfolioSummary(
-            account_id="U20958465",
+            account_id="U1234567",
             portfolio_value_usd=52_436,
             cash_balance_usd=1_323,
             settled_cash_usd=500,
@@ -2257,7 +2259,7 @@ class TestCashHeaderWording:
 
     def test_cash_total_omits_unsettled_warning_when_all_cash_is_settled(self):
         portfolio = PortfolioSummary(
-            account_id="U20958465",
+            account_id="U1234567",
             portfolio_value_usd=52_436,
             cash_balance_usd=1_323,
             settled_cash_usd=1_323,
@@ -2309,7 +2311,7 @@ class TestCliUiSharedPresentationAlignment:
 
     def test_shared_cash_summary_matches_report_pending_inflows(self):
         portfolio = PortfolioSummary(
-            account_id="U20958465",
+            account_id="U1234567",
             portfolio_value_usd=52_436,
             cash_balance_usd=1_323,
             settled_cash_usd=1_323,
@@ -2356,7 +2358,7 @@ class TestCliUiSharedPresentationAlignment:
     def test_soft_sell_excluded_from_pending_inflows(self):
         """SOFT_REJECT sells should not appear in pending_inflows."""
         portfolio = PortfolioSummary(
-            account_id="U20958465",
+            account_id="U1234567",
             portfolio_value_usd=50_000,
             cash_balance_usd=500,
             settled_cash_usd=500,
@@ -2402,7 +2404,7 @@ class TestCliUiSharedPresentationAlignment:
     def test_hard_sells_and_stops_included_in_pending(self):
         """HARD_REJECT and STOP_BREACH sells appear in pending_inflows."""
         portfolio = PortfolioSummary(
-            account_id="U20958465",
+            account_id="U1234567",
             portfolio_value_usd=50_000,
             cash_balance_usd=500,
             settled_cash_usd=500,
@@ -2440,7 +2442,7 @@ class TestCliUiSharedPresentationAlignment:
     def test_conditional_proceeds_shown_in_report(self):
         """When soft sells exist, report shows conditional proceeds line."""
         portfolio = PortfolioSummary(
-            account_id="U20958465",
+            account_id="U1234567",
             portfolio_value_usd=50_000,
             cash_balance_usd=500,
             settled_cash_usd=500,

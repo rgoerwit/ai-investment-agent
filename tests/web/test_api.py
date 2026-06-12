@@ -313,7 +313,7 @@ def test_settings_round_trip(client):
     response = client.post(
         "/api/settings",
         json={
-            "account_id": "U20958465",
+            "account_id": "U1234567",
             "watchlist_name": "alpha",
             "read_only": True,
             "max_age_days": 21,
@@ -321,7 +321,7 @@ def test_settings_round_trip(client):
     )
     assert response.status_code == 200
     payload = client.get("/api/settings").get_json()
-    assert payload["account_id"] == "U20958465"
+    assert payload["account_id"] == "U1234567"
     assert payload["watchlist_name"] == "alpha"
     assert payload["read_only"] is True
     assert payload["max_age_days"] == 21
@@ -358,7 +358,7 @@ def test_settings_save_preserves_startup_overrides_on_partial_update(
             last_error=None,
         ),
         preferences_override={
-            "account_id": "U20958465",
+            "account_id": "U1234567",
             "read_only": True,
             "watchlist_name": "default watchlist",
         },
@@ -368,7 +368,7 @@ def test_settings_save_preserves_startup_overrides_on_partial_update(
     assert response.status_code == 200
     payload = response.get_json()
 
-    assert payload["account_id"] == "U20958465"
+    assert payload["account_id"] == "U1234567"
     assert payload["read_only"] is True
     assert payload["watchlist_name"] == "default watchlist"
     assert payload["notes"] == "operator note"

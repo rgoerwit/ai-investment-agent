@@ -81,6 +81,27 @@ def _data_vacuum_review_reason(
     return f"Data-vacuum DNI for {analysis.ticker}; verify data coverage."
 
 
+_CURRENCY_EQUIVALENTS = {"GBX": "GBP", "GBP": "GBX"}  # same economy, unit scaled
+
+
+def _base_match_allowed(pos: NormalizedPosition, analysis: AnalysisRecord) -> bool:
+    """Whether a base-symbol fallback match is safe for this position.
+
+    Suffix-less positions (IBKR couldn't resolve the exchange) may borrow the
+    single base-matched analysis. A SUFFIXED position may only do so when the
+    analysis currency agrees — otherwise it is a different listing entirely.
+    """
+    if not pos.ticker.has_suffix:
+        return True
+    a_ccy = (getattr(analysis, "currency", "") or "").upper()
+    p_ccy = (pos.currency or "").upper()
+    if not a_ccy or not p_ccy:
+        # Legacy records without a recorded currency: allow — ambiguous-base
+        # poisoning in the lookup builder already guards multi-listing bases.
+        return True
+    return a_ccy == p_ccy or _CURRENCY_EQUIVALENTS.get(a_ccy) == p_ccy
+
+
 def evaluate_positions(
     positions: list[NormalizedPosition],
     analyses: dict[str, AnalysisRecord],
@@ -129,8 +150,20 @@ def evaluate_positions(
             analysis = analyses.get(yf_key)
 
         if analysis is None and pos.ticker.ibkr and not pos.ticker.ibkr.isdigit():
-            analysis = alpha_base_lookup.get(pos.ticker.ibkr.upper())
-            if analysis:
+            candidate = alpha_base_lookup.get(pos.ticker.ibkr.upper())
+            if candidate is not None and not _base_match_allowed(pos, candidate):
+                # A suffixed position must never borrow a different exchange's
+                # analysis (the AGS.BR-shows-AGS.SI bug) — currency must agree.
+                logger.warning(
+                    "base_symbol_match_blocked",
+                    position_ticker=pos.ticker.yf,
+                    candidate_analysis=candidate.ticker,
+                    position_currency=pos.currency,
+                    analysis_currency=getattr(candidate, "currency", None),
+                )
+                candidate = None
+            if candidate is not None:
+                analysis = candidate
                 logger.debug(
                     "analysis_found_via_base_symbol",
                     yf_ticker=pos.ticker.yf,

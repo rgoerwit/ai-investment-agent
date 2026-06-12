@@ -54,7 +54,9 @@ console = Console()
 CLI_APP_DEBUG_LOGGERS = ("__main__", "src")
 CLI_NOISY_DEPENDENCY_LOGGERS: dict[str, int] = {
     "anthropic": logging.WARNING,
+    "ddgs": logging.WARNING,  # search-engine "response: <url> 200" lines
     "google": logging.INFO,
+    "google.genai": logging.WARNING,  # "AFC is enabled..." SDK chatter
     "google_genai": logging.WARNING,
     "hpack": logging.WARNING,
     "httpcore": logging.WARNING,
@@ -62,6 +64,7 @@ CLI_NOISY_DEPENDENCY_LOGGERS: dict[str, int] = {
     "langchain": logging.INFO,
     "langgraph": logging.INFO,
     "openai": logging.WARNING,
+    "primp": logging.WARNING,  # ddgs HTTP client
     "urllib3": logging.WARNING,
 }
 HTTP_TRACE_LOGGERS = ("openai", "httpx", "httpcore", "hpack")
@@ -383,6 +386,33 @@ async def _prefetch_macro_context(
         return default_result
 
 
+async def _is_total_data_vacuum(ticker: str) -> bool:
+    """Cheap no-LLM probe: True when no source has price, currency, or identity.
+
+    Fail-open: probe errors return False so a transient probe failure never
+    blocks an otherwise healthy analysis.
+    """
+    from src.error_safety import summarize_exception
+    from src.runtime_services import get_current_market_data_fetcher
+
+    try:
+        metrics = await get_current_market_data_fetcher().get_financial_metrics(ticker)
+    except Exception as exc:
+        logger.warning(
+            "data_vacuum_preflight_probe_failed",
+            ticker=ticker,
+            **summarize_exception(exc, operation="data_vacuum_preflight"),
+        )
+        return False
+
+    if not isinstance(metrics, dict):
+        return True
+    has_price = bool(metrics.get("currentPrice") or metrics.get("regularMarketPrice"))
+    has_currency = bool(metrics.get("currency"))
+    has_identity = bool(metrics.get("longName") or metrics.get("shortName"))
+    return not (has_price or has_currency or has_identity)
+
+
 async def run_analysis(
     ticker: str,
     quick_mode: bool,
@@ -391,6 +421,7 @@ async def run_analysis(
     transparent_charts: bool = False,
     image_dir: Path | None = None,
     skip_charts: bool = False,
+    force_data_vacuum: bool = False,
     baseline_capture: BaselineCaptureManager | None = None,
     capture_args: argparse.Namespace | None = None,
     node_observer: Any | None = None,
@@ -459,6 +490,37 @@ async def run_analysis(
                     ],
                     message="No source could resolve company name — LLM hallucination risk",
                 )
+                # Pre-LLM gate: an unresolved name plus a total data vacuum is
+                # the delisted/migrated-ticker signature (e.g. 1264.TW after
+                # its TWSE→TPEx move). Abort BEFORE any LLM cost; the cheap
+                # probe only runs when name resolution already failed.
+                if not force_data_vacuum and await _is_total_data_vacuum(ticker):
+                    from src.ticker_policy import sibling_ticker_candidates
+
+                    siblings = sibling_ticker_candidates(ticker)
+                    logger.warning(
+                        "analysis_aborted_data_vacuum",
+                        ticker=ticker,
+                        sibling_candidates=list(siblings),
+                        action=(
+                            "verify the listing (possible delisting/migration); "
+                            "if migrated, add to config/ticker_overrides.json; "
+                            "use --force-data-vacuum to analyze anyway"
+                        ),
+                    )
+                    print(
+                        f"\n⚠ Aborted before LLM analysis: {ticker} is a total "
+                        "data vacuum (no source has price/currency/identity).\n"
+                        + (
+                            f"  Sibling listing(s) to verify: {', '.join(siblings)}\n"
+                            if siblings
+                            else ""
+                        )
+                        + "  If the listing migrated, record it in "
+                        "config/ticker_overrides.json.\n"
+                        "  Use --force-data-vacuum to run the analysis anyway."
+                    )
+                    return None
 
             # Fetch benchmark context once (non-blocking) before graph starts.
             # Prepended to the HumanMessage so every agent receives it as session context.
@@ -989,6 +1051,7 @@ async def _execute_analysis(
         args.ticker,
         args.quick,
         strict_mode=args.strict,
+        force_data_vacuum=getattr(args, "force_data_vacuum", False),
         chart_format="svg" if args.svg else "png",
         transparent_charts=args.transparent,
         image_dir=output_targets.image_dir,

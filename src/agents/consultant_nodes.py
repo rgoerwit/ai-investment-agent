@@ -568,7 +568,7 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
                 response = await _invoke_agent_loop_llm(
                     llm,
                     messages,
-                    context="legal_counsel",
+                    context=agent_prompt.agent_name,
                 )
                 tool_calls = getattr(response, "tool_calls", None)
 
@@ -799,7 +799,7 @@ Perform a forensic audit using your tools."""
                 response = await _invoke_agent_loop_llm(
                     active_llm,
                     llm_input,
-                    context="global_forensic_auditor",
+                    context=agent_prompt.agent_name,
                 )
                 tool_calls = getattr(response, "tool_calls", None)
 

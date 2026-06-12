@@ -37,18 +37,38 @@ class ReconciliationDiagnostics:
 def _build_alpha_base_lookup(
     analyses: dict[str, AnalysisRecord],
 ) -> tuple[dict[str, AnalysisRecord], dict[str, str]]:
-    """Build base-symbol lookup tables for safe alphabetic cross-format matching."""
+    """Build base-symbol lookup tables for safe alphabetic cross-format matching.
+
+    A base shared by two DIFFERENT suffixed tickers (e.g. AGS.SI vs AGS.BR —
+    different companies on different exchanges) is ambiguous and is poisoned:
+    cross-matching it once attached a Singapore analysis to a Brussels
+    position (SGD entry against EUR P/L).
+    """
     alpha_base_lookup: dict[str, AnalysisRecord] = {}
     alpha_base_to_key: dict[str, str] = {}
+    ambiguous: set[str] = set()
     for yf_ticker, record in analyses.items():
         base, _suffix = split_ticker(yf_ticker)
-        if is_safe_symbol_crossmatch_base(base):
-            if "." in yf_ticker:
-                alpha_base_lookup[base] = record
-                alpha_base_to_key[base] = yf_ticker
-            else:
-                alpha_base_lookup.setdefault(base, record)
-                alpha_base_to_key.setdefault(base, yf_ticker)
+        if not is_safe_symbol_crossmatch_base(base) or base in ambiguous:
+            continue
+        if "." in yf_ticker:
+            existing_key = alpha_base_to_key.get(base)
+            if existing_key and "." in existing_key and existing_key != yf_ticker:
+                ambiguous.add(base)
+                alpha_base_lookup.pop(base, None)
+                alpha_base_to_key.pop(base, None)
+                logger.warning(
+                    "alpha_base_ambiguous",
+                    base=base,
+                    tickers=sorted([existing_key, yf_ticker]),
+                    action="base-symbol cross-matching disabled for this base",
+                )
+                continue
+            alpha_base_lookup[base] = record
+            alpha_base_to_key[base] = yf_ticker
+        else:
+            alpha_base_lookup.setdefault(base, record)
+            alpha_base_to_key.setdefault(base, yf_ticker)
     return alpha_base_lookup, alpha_base_to_key
 
 

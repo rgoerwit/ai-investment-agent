@@ -180,6 +180,8 @@ class TestOutputCompanyNameLookup:
                 ),
             ),
             patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
+            # Name is unresolved but data exists — the vacuum gate must not fire.
+            patch("src.main._is_total_data_vacuum", new=AsyncMock(return_value=False)),
             patch(
                 "src.main._prefetch_macro_context",
                 new=AsyncMock(return_value=fake_macro_context),

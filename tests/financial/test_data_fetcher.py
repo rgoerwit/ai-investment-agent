@@ -1128,3 +1128,51 @@ class TestMergePolicyConstantsCanonical:
         shadowed = canonical & module_level_names
         assert not shadowed, f"fetcher redefines merge_policy constants: {shadowed}"
         assert canonical <= set(dir(merge_policy))
+
+
+class TestHistoryFetchFailureLogging:
+    """First failure per ticker is operator-visible; repeats demote to debug."""
+
+    @pytest.mark.asyncio
+    async def test_data_unavailable_warns_then_demotes(self, monkeypatch):
+        class _Recorder:
+            def __init__(self):
+                self.events = []
+
+            def debug(self, event, **kw):
+                self.events.append(("debug", event, kw))
+
+            def warning(self, event, **kw):
+                self.events.append(("warning", event, kw))
+
+            def error(self, event, **kw):
+                self.events.append(("error", event, kw))
+
+            def info(self, event, **kw):
+                self.events.append(("info", event, kw))
+
+        from src.data import fetcher as fetcher_module
+
+        recorder = _Recorder()
+        monkeypatch.setattr(fetcher_module, "logger", recorder)
+
+        f = SmartMarketDataFetcher()
+
+        class YFPricesMissingError(Exception):
+            pass
+
+        with patch("yfinance.Ticker") as mock_ticker:
+            mock_ticker.return_value.history.side_effect = YFPricesMissingError(
+                "$1264.TW: possibly delisted; no price data found"
+            )
+            await f.get_historical_prices("1264.TW")
+            await f.get_historical_prices("1264.TW")
+
+        history_events = [
+            (lvl, kw) for lvl, ev, kw in recorder.events if ev == "history_fetch_failed"
+        ]
+        assert len(history_events) == 2
+        assert history_events[0][0] == "warning"  # expected absence, not error
+        assert history_events[0][1]["failure_kind"] == "data_unavailable"
+        assert history_events[1][0] == "debug"  # repeat demoted
+        assert history_events[1][1]["repeated"] is True

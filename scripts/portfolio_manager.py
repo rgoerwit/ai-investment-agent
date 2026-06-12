@@ -902,8 +902,11 @@ def _store_macro_event_if_detected(
     if not correlated_flag:
         return
 
+    # Tolerant of the three trigger phrasings: "within Nd of DATE" (window)
+    # and "as of DATE" (cumulative / drawdown_breadth).
     m = _re.search(
-        r"CORRELATED_SELL_EVENT:\s*(\d+) positions.*?(\d+)d of (\d{4}-\d{2}-\d{2})"
+        r"CORRELATED_SELL_EVENT:\s*(\d+) positions"
+        r".*?(?:within (\d+)d of|as of) (\d{4}-\d{2}-\d{2})"
         r".*?\((\d+\.?\d*)%",
         correlated_flag,
     )
@@ -919,17 +922,27 @@ def _store_macro_event_if_detected(
     total_held = sum(
         1 for item in reconciliation_items if item.ibkr_position is not None
     )
+    # Event evidence for region/sector characterization. Demotion has ALREADY
+    # run by the time this executes, so the dominant soft-rejects are action
+    # REVIEW — restricting to action SELL would characterize the event from
+    # leftovers (or nothing). Include the demoted items.
     sell_items = [
         item
         for item in reconciliation_items
-        if item.action == "SELL" and item.ibkr_position is not None
+        if item.ibkr_position is not None
+        and item.action in ("SELL", "REVIEW")
+        and item.sell_type in ("HARD_REJECT", "SOFT_REJECT", "STOP_BREACH")
     ]
 
     scope, primary_region, primary_sector, impact, event_type, headline, detail = (
         _characterize_macro_event(event_date, sell_items, correlation_pct, peak_count)
     )
 
-    anchor = _date.fromisoformat(event_date)
+    # Anchor expiry on the LATER of event date and detection date: for an
+    # ongoing situation (e.g. a months-long strait closure) each re-detection
+    # rolls the override window forward instead of letting it expire while
+    # the event is still live.
+    anchor = max(_date.fromisoformat(event_date), _date.today())
     expiry = (anchor + _td(days=_EXPIRY_DAYS.get(event_type, 60))).isoformat()
 
     try:
@@ -1554,10 +1567,13 @@ def format_report(
         (f for f in (portfolio_health_flags or []) if "CORRELATED_SELL_EVENT" in f),
         None,
     )
+    _active_flag = next(
+        (f for f in (portfolio_health_flags or []) if "ACTIVE_MACRO_EVENT" in f),
+        None,
+    )
     if _correlated_flag:
-        # Parse "CORRELATED_SELL_EVENT: N positions changed verdict within Xd of DATE (P% …"
-        # Flag format (from compute_portfolio_health):
-        #   "CORRELATED_SELL_EVENT: 30 positions changed verdict within 7d of 2026-02-28 (61% …"
+        # Parse the flag from compute_portfolio_health. Tolerant of all three
+        # trigger phrasings: "within Nd of DATE" and "as of DATE".
         import re as _re
 
         _bm = _re.search(
@@ -1567,11 +1583,13 @@ def format_report(
             _cnt, _dt, _pct = _bm.group(1), _bm.group(2), f"{_bm.group(3)}%"
         else:
             _cnt, _dt, _pct = "?", "?", "?%"
+        # Truthful summary line: the trigger may be verdict-flip evidence OR a
+        # current price-drawdown breadth — "impacted" covers both.
         _W = 52  # inner text width (54 inner box chars minus 2-space left indent)
         _banner_lines = [
             "╔" + "═" * 54 + "╗",
             f"║  {'!! MACRO ALERT':<{_W}}║",
-            f"║  {f'{_cnt} positions changed verdict on {_dt}':<{_W}}║",
+            f"║  {f'{_cnt} positions impacted (as of {_dt})':<{_W}}║",
             f"║  {f'({_pct} of held positions) — probable macro event':<{_W}}║",
             f"║  {'Likely macro event, not individual thesis failure.':<{_W}}║",
             f"║  {'Execute stops (weak only); review strong stops first.':<{_W}}║",
@@ -1601,6 +1619,26 @@ def format_report(
         except Exception:
             pass
         for bl in _banner_lines:
+            lines.append(bl)
+        lines.append("")
+    elif _active_flag:
+        # Sustained override from a stored, unexpired event — the demotions are
+        # still active; the operator must see WHY sells became reviews.
+        import re as _re
+
+        _am = _re.search(
+            r"ACTIVE_MACRO_EVENT:\s*(\S+) event active until (\S+)\s*—\s*(\d+)",
+            _active_flag,
+        )
+        _type, _until, _n = _am.groups() if _am else ("MACRO", "?", "?")
+        _W = 52
+        for bl in (
+            "╔" + "═" * 54 + "╗",
+            f"║  {'!! MACRO OVERRIDE ACTIVE':<{_W}}║",
+            f"║  {f'{_type} event active until {_until}':<{_W}}║",
+            f"║  {f'{_n} SELL(s) held in REVIEW (sustained override)':<{_W}}║",
+            "╚" + "═" * 54 + "╝",
+        ):
             lines.append(bl)
         lines.append("")
 

@@ -962,11 +962,14 @@ class Settings(BaseSettings):
         self.mcp_servers_path = Path(os.path.expanduser(str(self.mcp_servers_path)))
         self.mcp_usage_db_path = Path(os.path.expanduser(str(self.mcp_usage_db_path)))
 
-        # Set logging level
+        # Set logging level on the ROOT logger only. Never force-level every
+        # registered logger (the old loggerDict loop): that flattened the
+        # deliberate WARNING suppression of noisy third-party loggers (httpx,
+        # ibind, google_genai, ddgs, ...) applied by CLI entrypoints — Settings
+        # construction can happen after those entrypoints configure logging.
+        # Loggers left at NOTSET inherit the root level anyway.
         log_level_value = getattr(logging, self.log_level.upper(), logging.INFO)
         logging.getLogger().setLevel(log_level_value)
-        for name in logging.root.manager.loggerDict:
-            logging.getLogger(name).setLevel(log_level_value)
 
         # Export LangSmith settings to os.environ for SDK auto-detection.
         # The LangSmith SDK reads directly from os.environ, not from our config.

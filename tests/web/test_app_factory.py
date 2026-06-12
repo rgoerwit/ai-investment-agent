@@ -31,14 +31,14 @@ def test_create_app_applies_startup_preference_overrides(tmp_path):
     app = create_app(
         settings,
         preferences_override={
-            "account_id": "U20958465",
+            "account_id": "U1234567",
             "watchlist_name": "default watchlist",
             "read_only": True,
         },
     )
 
     preferences = app.config["SNAPSHOT_SERVICE"].current_preferences()
-    assert preferences.account_id == "U20958465"
+    assert preferences.account_id == "U1234567"
     assert preferences.watchlist_name == "default watchlist"
     assert preferences.read_only is True
 

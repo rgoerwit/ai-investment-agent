@@ -10,6 +10,38 @@ from src.ibkr.reconciliation_rules import _EXCHANGE_LONG_NAMES
 logger = structlog.get_logger(__name__)
 
 
+def _apply_macro_demotions(
+    reconciliation_items: list, soft_tag: str, stop_tag_template: str
+) -> int:
+    """Demote macro-driven SELLs to REVIEW; returns number demoted.
+
+    SOFT_REJECT sells always demote. STOP_BREACH sells demote only when
+    fundamentals are intact (health and growth both >= 50%) — weak positions
+    keep their executable stop.
+    """
+    demoted = 0
+    for item in reconciliation_items:
+        if item.action == "SELL" and item.sell_type == "SOFT_REJECT":
+            item.action = "REVIEW"
+            item.urgency = "MEDIUM"
+            item.reason += soft_tag
+            demoted += 1
+        elif item.action == "SELL" and item.sell_type == "STOP_BREACH":
+            analysis = item.analysis
+            if (
+                analysis is not None
+                and (analysis.health_adj or 0.0) >= 50.0
+                and (analysis.growth_adj or 0.0) >= 50.0
+            ):
+                item.action = "REVIEW"
+                item.urgency = "MEDIUM"
+                item.reason += stop_tag_template.format(
+                    health=analysis.health_adj, growth=analysis.growth_adj
+                )
+                demoted += 1
+    return demoted
+
+
 def compute_portfolio_health(
     positions: list[NormalizedPosition],
     analyses: dict[str, AnalysisRecord],
@@ -17,6 +49,10 @@ def compute_portfolio_health(
     max_age_days: int = 14,
     reconciliation_items: list | None = None,
     correlated_window_days: int = 14,
+    drawdown_pct: float = 10.0,
+    drawdown_breadth_ratio: float = 0.35,
+    cumulative_fallback_ratio: float = 0.35,
+    active_macro_events: list | None = None,
 ) -> list[str]:
     """Compute portfolio-level health flags using data already in held analyses."""
     if not positions or portfolio.portfolio_value_usd <= 0:
@@ -145,21 +181,27 @@ def compute_portfolio_health(
         from datetime import date as _date
         from datetime import timedelta as _td
 
-        # Correlated-sell events are thesis/verdict failures. PROFIT_TAKE is
-        # deliberately excluded because capital-allocation exits are firm-specific.
-        verdict_sells = [
+        # Event evidence: thesis/verdict failures PLUS stop breaches — a burst
+        # of breached stops is the purest same-time price-shock signal.
+        # PROFIT_TAKE stays excluded (capital-allocation exits are firm-specific).
+        event_sells = [
             item
             for item in reconciliation_items
             if item.action == "SELL"
-            and item.sell_type in ("HARD_REJECT", "SOFT_REJECT")
+            and item.sell_type in ("HARD_REJECT", "SOFT_REJECT", "STOP_BREACH")
         ]
         total_held = sum(
             1 for item in reconciliation_items if item.ibkr_position is not None
         )
 
-        if verdict_sells:
+        correlated_event = False
+        peak_count = 0
+        peak_anchor = None
+        trigger = ""
+
+        if event_sells and total_held > 0:
             dated: list[tuple] = []
-            for item in verdict_sells:
+            for item in event_sells:
                 if item.analysis and item.analysis.analysis_date:
                     try:
                         d = _date.fromisoformat(item.analysis.analysis_date)
@@ -169,9 +211,6 @@ def compute_portfolio_health(
 
             if dated:
                 all_dates = [d for _, d in dated]
-                peak_count = 0
-                peak_anchor = None
-
                 for anchor in all_dates:
                     window_end = anchor + _td(days=correlated_window_days - 1)
                     count = sum(1 for d in all_dates if anchor <= d <= window_end)
@@ -179,58 +218,126 @@ def compute_portfolio_health(
                         peak_count = count
                         peak_anchor = anchor
 
-                correlated_event = (
-                    peak_count >= 5
-                    and total_held > 0
-                    and peak_count / total_held >= 0.25
-                )
-                if not correlated_event and total_held > 0:
-                    total_verdict_ratio = len(verdict_sells) / total_held
-                    correlated_event = (
-                        len(verdict_sells) >= 8 and total_verdict_ratio >= 0.40
-                    )
-                    if correlated_event:
-                        peak_count = len(verdict_sells)
+                correlated_event = peak_count >= 5 and peak_count / total_held >= 0.25
+                trigger = "window" if correlated_event else ""
+
+                if not correlated_event:
+                    # Cumulative fallback: refresh throttling smears verdict
+                    # flips across months, so the window can stay sparse while
+                    # the book fills with macro-driven sells.
+                    total_ratio = len(event_sells) / total_held
+                    if (
+                        len(event_sells) >= 8
+                        and total_ratio >= cumulative_fallback_ratio
+                    ):
+                        correlated_event = True
+                        trigger = "cumulative"
+                        peak_count = len(event_sells)
                         peak_anchor = max(all_dates)
 
-                if correlated_event and peak_anchor is not None:
-                    flags.append(
-                        f"CORRELATED_SELL_EVENT: {peak_count} positions changed verdict"
-                        f" within {correlated_window_days}d of {peak_anchor.isoformat()}"
-                        f" ({peak_count / total_held:.0%} of held"
-                        f" positions) — probable macro event. Execute stop-breach SELLs"
-                        f" on fundamentally weak positions only; review others before acting."
-                    )
-                    for item in reconciliation_items:
-                        if item.action == "SELL" and item.sell_type == "SOFT_REJECT":
-                            item.action = "REVIEW"
-                            item.urgency = "MEDIUM"
-                            item.reason += (
-                                "  [MACRO_WATCH: demoted from SELL — correlated"
-                                " event detected]"
-                            )
-                        elif item.action == "SELL" and item.sell_type == "STOP_BREACH":
-                            analysis = item.analysis
-                            if (
-                                analysis is not None
-                                and (analysis.health_adj or 0.0) >= 50.0
-                                and (analysis.growth_adj or 0.0) >= 50.0
-                            ):
-                                item.action = "REVIEW"
-                                item.urgency = "MEDIUM"
-                                item.reason += (
-                                    "  [MACRO_STOP: stop breach during correlated event"
-                                    " — fundamentals intact (health"
-                                    f" {analysis.health_adj:.0f}%, growth"
-                                    f" {analysis.growth_adj:.0f}%); review before executing]"
-                                )
-                    logger.info(
-                        "correlated_sell_event_detected",
-                        peak_date=peak_anchor.isoformat(),
-                        window_days=correlated_window_days,
-                        peak_count=peak_count,
-                        total_held=total_held,
-                        pct=f"{peak_count / total_held:.0%}",
-                    )
+        if not correlated_event and total_held > 0:
+            # Drawdown breadth: refresh-schedule-independent price evidence —
+            # how much of the held book trades well below its analysis entry
+            # right now. Uses the same entry/current fields as the staleness
+            # drift check (both LOCAL currency, GBX-normalized upstream).
+            drawdown_count = 0
+            for item in reconciliation_items:
+                pos = item.ibkr_position
+                analysis = item.analysis
+                if pos is None or analysis is None:
+                    continue
+                entry = analysis.entry_price or analysis.current_price
+                current = pos.current_price_local
+                if not entry or not current or entry <= 0:
+                    continue
+                if (entry - current) / entry * 100 >= drawdown_pct:
+                    drawdown_count += 1
+            if (
+                drawdown_count >= 8
+                and drawdown_count / total_held >= drawdown_breadth_ratio
+            ):
+                correlated_event = True
+                trigger = "drawdown_breadth"
+                peak_count = drawdown_count
+                peak_anchor = _date.today()
+
+        if correlated_event and peak_anchor is not None:
+            # Truthful per-trigger phrasing. The "(within Nd of|as of) DATE"
+            # shape is a parsing contract with _store_macro_event_if_detected
+            # and the report banner — keep them in sync.
+            if trigger == "window":
+                evidence = (
+                    f"changed verdict within {correlated_window_days}d"
+                    f" of {peak_anchor.isoformat()}"
+                )
+            elif trigger == "cumulative":
+                evidence = (
+                    "changed verdict across the held book"
+                    f" as of {peak_anchor.isoformat()}"
+                )
+            else:  # drawdown_breadth
+                evidence = (
+                    f"currently trading ≥{drawdown_pct:.0f}% below entry"
+                    f" as of {peak_anchor.isoformat()}"
+                )
+            flags.append(
+                f"CORRELATED_SELL_EVENT: {peak_count} positions {evidence}"
+                f" ({peak_count / total_held:.0%} of held"
+                f" positions) — probable macro event [{trigger}]. Execute"
+                f" stop-breach SELLs on fundamentally weak positions only;"
+                f" review others before acting."
+            )
+            demoted = _apply_macro_demotions(
+                reconciliation_items,
+                soft_tag=(
+                    "  [MACRO_WATCH: demoted from SELL — correlated" " event detected]"
+                ),
+                stop_tag_template=(
+                    "  [MACRO_STOP: stop breach during correlated event"
+                    " — fundamentals intact (health {health:.0f}%, growth"
+                    " {growth:.0f}%); review before executing]"
+                ),
+            )
+            logger.info(
+                "correlated_sell_event_detected",
+                trigger=trigger,
+                peak_date=peak_anchor.isoformat(),
+                window_days=correlated_window_days,
+                peak_count=peak_count,
+                total_held=total_held,
+                demoted=demoted,
+                pct=f"{peak_count / total_held:.0%}",
+            )
+        elif active_macro_events:
+            # No fresh detection, but a previously detected event is still
+            # active (unexpired) — sustain the demotion across runs so the
+            # override doesn't vanish the day after detection.
+            event = active_macro_events[0]
+            event_type = getattr(event, "event_type", "MACRO")
+            expiry = getattr(event, "expiry", "?")
+            demoted = _apply_macro_demotions(
+                reconciliation_items,
+                soft_tag=(
+                    f"  [MACRO_WATCH: active {event_type} event"
+                    f" until {expiry} — demoted from SELL]"
+                ),
+                stop_tag_template=(
+                    f"  [MACRO_STOP: stop breach during active {event_type}"
+                    " event — fundamentals intact (health {health:.0f}%,"
+                    " growth {growth:.0f}%); review before executing]"
+                ),
+            )
+            if demoted:
+                flags.append(
+                    f"ACTIVE_MACRO_EVENT: {event_type} event active until"
+                    f" {expiry} — {demoted} SELL(s) demoted to REVIEW"
+                    " (sustained macro override)."
+                )
+                logger.info(
+                    "active_macro_event_demotions_sustained",
+                    event_type=event_type,
+                    expiry=expiry,
+                    demoted=demoted,
+                )
 
     return flags

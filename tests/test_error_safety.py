@@ -89,3 +89,24 @@ def test_safe_error_payload_sanitizes_exception_text():
     assert "secret1234567890" not in payload["error"]
     assert "results.json" not in payload["error"]
     assert "secret1234567890" not in payload.get("message_preview", "")
+
+
+def test_classify_failure_recognizes_yfinance_data_absence():
+    from src.runtime_diagnostics import classify_failure
+
+    class YFPricesMissingError(Exception):
+        pass
+
+    details = classify_failure(
+        YFPricesMissingError("$1264.TW: possibly delisted; no price data found")
+    )
+    assert details.kind == "data_unavailable"
+    assert details.retryable is False
+
+    # Message-marker path for wrapped exceptions
+    details = classify_failure(RuntimeError("no price data found (period=3mo)"))
+    assert details.kind == "data_unavailable"
+
+    # Unrelated errors keep their existing classification
+    details = classify_failure(RuntimeError("connection reset by peer"))
+    assert details.kind != "data_unavailable"

@@ -21,6 +21,7 @@ FailureKind = Literal[
     "model_not_found",
     "bad_request",
     "application_error",
+    "data_unavailable",
     "provider_partial_response",
     "unknown_provider_error",
 ]
@@ -176,6 +177,13 @@ def classify_failure(
     ):
         kind = "timeout"
         retryable = True
+    elif type(root).__name__ in {"YFPricesMissingError", "YFTzMissingError"} or any(
+        marker in combined
+        for marker in ("possibly delisted", "no price data found", "no timezone found")
+    ):
+        # Expected data absence (delisted/migrated tickers), not a system fault.
+        kind = "data_unavailable"
+        retryable = False
     elif isinstance(
         root,
         TypeError | AttributeError | ImportError | NotImplementedError | AssertionError,
