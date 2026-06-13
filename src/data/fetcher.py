@@ -436,6 +436,17 @@ class SmartMarketDataFetcher(FinancialFetcher):
             for field in ("currentPrice", "regularMarketPrice", "previousClose")
         )
 
+    def _has_vacuum_anchor(self, data: dict[str, Any]) -> bool:
+        """Return True when data has enough quote/entity anchor to avoid panic mode."""
+        if not data:
+            return False
+        return (
+            self._has_price_anchor(data)
+            or bool(data.get("currency"))
+            or bool(data.get("longName"))
+            or bool(data.get("shortName"))
+        )
+
     def _has_required_quote_identity(self, data: dict[str, Any]) -> bool:
         return (
             bool(data.get("currency"))
@@ -1594,12 +1605,20 @@ class SmartMarketDataFetcher(FinancialFetcher):
                 and not self._has_safe_identity_anchor(merged)
                 and not merged.get("currentPrice")
             )
+            identity_vacuum = bool(merged) and not self._has_vacuum_anchor(merged)
 
-            if not merged or (is_fragile_exchange and basics_failed) or identity_weak:
+            if (
+                not merged
+                or (is_fragile_exchange and basics_failed)
+                or identity_weak
+                or identity_vacuum
+            ):
                 if not merged:
                     panic_reason = "total data vacuum"
                 elif identity_weak:
                     panic_reason = "identity weak"
+                elif identity_vacuum:
+                    panic_reason = "identity vacuum"
                 else:
                     panic_reason = "basics missing"
                 logger.warning(
@@ -1643,9 +1662,10 @@ class SmartMarketDataFetcher(FinancialFetcher):
                             merged["currentPrice"] = probe.last_price
 
                         if resolved_ticker and resolved_ticker != ticker:
+                            original_ticker = ticker
                             logger.info(
                                 "ibkr_ticker_retry",
-                                original=ticker,
+                                original=original_ticker,
                                 resolved=resolved_ticker,
                             )
                             retry_results = await self._fetch_all_sources_parallel(
@@ -1676,6 +1696,12 @@ class SmartMarketDataFetcher(FinancialFetcher):
                                         ).items()
                                         if key not in merge_metadata["field_sources"]
                                     }
+                                )
+                                merged["symbol"] = resolved_ticker
+                                merged["_ticker_rescue_original"] = original_ticker
+                                merged["_ticker_rescue_resolved"] = resolved_ticker
+                                merged["_ticker_rescue_reason"] = (
+                                    "ibkr_original_probe_identity_vacuum"
                                 )
                                 ticker = resolved_ticker
 

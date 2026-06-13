@@ -498,10 +498,35 @@ async def run_analysis(
                     from src.ticker_policy import sibling_ticker_candidates
 
                     siblings = sibling_ticker_candidates(ticker)
+                    history_candidates: list[str] = []
+                    try:
+                        from src.config import config as settings_config
+                        from src.ticker_history_resolver import (
+                            historical_resolution_candidates,
+                        )
+
+                        history_candidates = [
+                            candidate.display_label()
+                            for candidate in historical_resolution_candidates(
+                                ticker,
+                                results_dir=Path(settings_config.results_dir),
+                            )
+                        ]
+                    except Exception as exc:
+                        logger.debug(
+                            "history_resolution_candidates_failed",
+                            ticker=ticker,
+                            **summarize_exception(
+                                exc,
+                                operation="history resolution candidate lookup",
+                                provider="local",
+                            ),
+                        )
                     logger.warning(
                         "analysis_aborted_data_vacuum",
                         ticker=ticker,
                         sibling_candidates=list(siblings),
+                        history_candidates=history_candidates,
                         action=(
                             "verify the listing (possible delisting/migration); "
                             "if migrated, add to config/ticker_overrides.json; "
@@ -514,6 +539,12 @@ async def run_analysis(
                         + (
                             f"  Sibling listing(s) to verify: {', '.join(siblings)}\n"
                             if siblings
+                            else ""
+                        )
+                        + (
+                            "  Prior reliable same-base analysis(es): "
+                            f"{'; '.join(history_candidates)}\n"
+                            if history_candidates
                             else ""
                         )
                         + "  If the listing migrated, record it in "

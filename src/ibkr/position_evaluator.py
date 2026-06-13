@@ -258,6 +258,28 @@ def evaluate_positions(
                 )
                 continue
 
+            if (
+                verdict_upper == "DO_NOT_INITIATE"
+                and isinstance(analysis.health_adj, int | float)
+                and isinstance(analysis.growth_adj, int | float)
+                and analysis.health_adj == 0
+                and analysis.growth_adj == 0
+                and analysis.current_price is None
+            ):
+                siblings = _same_base_sibling_keys(analysis.ticker, analyses)
+                items.append(
+                    ReconciliationItem(
+                        ticker=item_ticker,
+                        action="REVIEW",
+                        reason=_data_vacuum_review_reason(analysis, siblings),
+                        urgency="HIGH",
+                        ibkr_position=pos,
+                        analysis=analysis,
+                        sell_type="DATA_QUALITY_REVIEW",
+                    )
+                )
+                continue
+
             items.append(
                 ReconciliationItem(
                     ticker=item_ticker,

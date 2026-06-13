@@ -724,6 +724,92 @@ class TestPanicMode:
         fetcher._probe_ibkr_security.assert_awaited_once_with("BEC.SG")
 
     @pytest.mark.asyncio
+    async def test_identity_vacuum_bare_ticker_uses_original_ibkr_retry(self, fetcher):
+        """Bare KRN with junk-only data should reach the existing IBKR oracle."""
+        fetcher._resolve_ticker_via_search = AsyncMock(return_value=None)
+        fetcher._fetch_all_sources_parallel = AsyncMock(
+            side_effect=[
+                {
+                    "yahooquery": {
+                        "symbol": "KRN",
+                        "marketCap": 123456789,
+                        "industry": "Machinery",
+                    }
+                },
+                {
+                    "yfinance": {
+                        "symbol": "KRN.DE",
+                        "currentPrice": 108.8,
+                        "currency": "EUR",
+                        "longName": "Krones AG",
+                        "industry": "Specialty Industrial Machinery",
+                        "sector": "Industrials",
+                    }
+                },
+            ]
+        )
+        fetcher._fetch_tavily_gaps = AsyncMock(return_value={})
+        fetcher._probe_ibkr_security = AsyncMock(
+            return_value=SimpleNamespace(
+                configured=True,
+                identity_confidence="VERIFIED",
+                resolved_yf_ticker="KRN.DE",
+                company_name="Krones AG",
+                currency="EUR",
+                market_data_availability="R",
+                last_price=108.8,
+                error_kind=None,
+            )
+        )
+
+        result = await fetcher.get_financial_metrics("KRN")
+
+        assert result["symbol"] == "KRN.DE"
+        assert result["currentPrice"] == 108.8
+        assert result["currency"] == "EUR"
+        assert result["longName"] == "Krones AG"
+        assert result["_ticker_rescue_original"] == "KRN"
+        assert result["_ticker_rescue_resolved"] == "KRN.DE"
+        assert result["_ticker_rescue_reason"] == "ibkr_original_probe_identity_vacuum"
+        fetcher._probe_ibkr_security.assert_awaited_once_with("KRN")
+        assert fetcher._fetch_all_sources_parallel.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_identity_vacuum_not_auto_adopted_when_ibkr_not_configured(
+        self, fetcher
+    ):
+        fetcher._resolve_ticker_via_search = AsyncMock(return_value=None)
+        fetcher._fetch_all_sources_parallel = AsyncMock(
+            return_value={
+                "yahooquery": {
+                    "marketCap": 123456789,
+                    "industry": "Machinery",
+                }
+            }
+        )
+        fetcher._fetch_tavily_gaps = AsyncMock(return_value={})
+        fetcher._probe_ibkr_security = AsyncMock(
+            return_value=SimpleNamespace(
+                configured=False,
+                identity_confidence="UNVERIFIED",
+                resolved_yf_ticker=None,
+                company_name=None,
+                currency=None,
+                market_data_availability=None,
+                last_price=None,
+                error_kind="NOT_CONFIGURED",
+            )
+        )
+
+        result = await fetcher.get_financial_metrics("KRN")
+
+        assert "_ticker_rescue_resolved" not in result
+        assert result["_ibkr_identity_confidence"] == "UNVERIFIED"
+        assert result["_ibkr_probe_error_kind"] == "NOT_CONFIGURED"
+        fetcher._probe_ibkr_security.assert_awaited_once_with("KRN")
+        fetcher._fetch_all_sources_parallel.assert_awaited_once_with("KRN")
+
+    @pytest.mark.asyncio
     async def test_ambiguous_ibkr_probe_sets_metadata_without_retry(self, fetcher):
         probe = SimpleNamespace(
             identity_confidence="AMBIGUOUS",
