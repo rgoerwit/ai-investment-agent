@@ -26,11 +26,18 @@ from src.ticker_corrections import apply_operator_override
 _US_EXCHANGES: frozenset[str] = frozenset(
     {"NASDAQ", "NYSE", "ARCA", "AMEX", "SMART", "IEXG", "CBOE", ""}
 )
+_MULTI_EXCHANGE_CURRENCIES: frozenset[str] = frozenset(
+    {"TWD", "KRW", "INR", "CNY", "CAD"}
+)
 
 logger = structlog.get_logger(__name__)
 
 
-def normalize_positions(raw_positions: list[dict]) -> list[NormalizedPosition]:
+def normalize_positions(
+    raw_positions: list[dict],
+    *,
+    client: IbkrClient | None = None,
+) -> list[NormalizedPosition]:
     """
     Convert raw IBKR position dicts to NormalizedPosition models.
 
@@ -39,6 +46,8 @@ def normalize_positions(raw_positions: list[dict]) -> list[NormalizedPosition]:
 
     Args:
         raw_positions: List of raw IBKR position dicts
+        client: Connected IBKR client. When available, held positions in
+            ambiguous multi-exchange markets are resolved from their conid.
 
     Returns:
         List of NormalizedPosition models (skips positions that can't be mapped)
@@ -65,6 +74,25 @@ def normalize_positions(raw_positions: list[dict]) -> list[NormalizedPosition]:
 
         # Build Ticker from IBKR fields — this is the authoritative conversion point.
         ticker_obj = Ticker.from_ibkr(raw_symbol, raw_exchange, raw_currency)
+
+        conid = _parse_conid(raw.get("conid"))
+        if (
+            conid is not None
+            and client is not None
+            and _should_resolve_position_conid(
+                ticker_obj,
+                raw_exchange=raw_exchange,
+                raw_currency=raw_currency,
+            )
+        ):
+            resolved_yf = _resolve_conid_to_yf(
+                conid,
+                client,
+                force_live=True,
+                context="position",
+            )
+            if resolved_yf:
+                ticker_obj = Ticker.from_yf(resolved_yf, currency=raw_currency)
 
         # Network fallback: for non-US positions where the exchange code is unknown
         # (not in IBKR_TO_YFINANCE), attempt a yfinance.Search to resolve the suffix.
@@ -109,7 +137,7 @@ def normalize_positions(raw_positions: list[dict]) -> list[NormalizedPosition]:
             )
 
         position = NormalizedPosition(
-            conid=raw.get("conid", 0),
+            conid=conid or 0,
             ticker=ticker_obj,
             quantity=float(raw.get("position", 0) or raw.get("qty", 0)),
             avg_cost_local=avg_cost_local,
@@ -126,6 +154,34 @@ def normalize_positions(raw_positions: list[dict]) -> list[NormalizedPosition]:
         skipped=len(raw_positions) - len(positions),
     )
     return positions
+
+
+def _parse_conid(raw_conid: object) -> int | None:
+    """Return a valid IBKR conid, or None when the raw payload is not usable."""
+    if isinstance(raw_conid, bool):
+        return None
+    try:
+        conid = int(raw_conid)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return conid if conid > 0 else None
+
+
+def _should_resolve_position_conid(
+    ticker_obj: Ticker,
+    *,
+    raw_exchange: str,
+    raw_currency: str,
+) -> bool:
+    """Whether a held position should ask IBKR contract details for its conid."""
+    exchange = raw_exchange.strip().upper()
+    currency = raw_currency.strip().upper()
+
+    if currency == "USD" and exchange in _US_EXCHANGES:
+        return False
+    if currency in _MULTI_EXCHANGE_CURRENCIES:
+        return True
+    return not ticker_obj.exchange_resolved
 
 
 def build_portfolio_summary(
@@ -183,8 +239,14 @@ def build_portfolio_summary(
     )
 
 
-def _resolve_watchlist_conid(conid: int, client: IbkrClient | None) -> str:
-    """Resolve a watchlist conid to a yfinance ticker.
+def _resolve_conid_to_yf(
+    conid: int,
+    client: IbkrClient | None,
+    *,
+    force_live: bool = False,
+    context: str = "watchlist",
+) -> str:
+    """Resolve an IBKR conid to a yfinance ticker.
 
     Checks the local conid cache first (instant, no API call).  On a miss,
     calls /iserver/contract/{conid}/info via the client, maps to a yfinance
@@ -199,13 +261,19 @@ def _resolve_watchlist_conid(conid: int, client: IbkrClient | None) -> str:
     # "SMART" and the currency was ambiguous.  If a client is available, bypass
     # the cache for bare entries so ibkr_symbol_to_yf can try the yfinance
     # search fallback (which is now enabled for SMART + non-USD currency).
-    cached = yf_ticker_from_conid(conid)
+    cached = None if force_live else yf_ticker_from_conid(conid)
     if cached and ("." in cached or client is None):
-        logger.debug("watchlist_conid_cache_hit", conid=conid, yf_ticker=cached)
+        logger.debug(
+            "conid_cache_hit",
+            context=context,
+            conid=conid,
+            yf_ticker=cached,
+        )
         return cached
     if cached:
         logger.debug(
-            "watchlist_conid_bare_cache_bypass",
+            "conid_bare_cache_bypass",
+            context=context,
             conid=conid,
             cached=cached,
             reason="retrying to resolve exchange suffix",
@@ -213,32 +281,72 @@ def _resolve_watchlist_conid(conid: int, client: IbkrClient | None) -> str:
 
     # Slow path: ask IBKR for contract details
     if client is None:
-        return ""
+        return cached or ""
 
-    info = client.get_contract_info(conid)
+    try:
+        info = client.get_contract_info(conid, compete=False)
+    except Exception as exc:
+        summary = summarize_exception(exc, operation="conid_contract_info")
+        summary.pop("message_preview", None)
+        logger.warning(
+            "conid_contract_info_failed",
+            context=context,
+            conid=conid,
+            **summary,
+        )
+        return cached or ""
+
     if not info:
-        logger.debug("watchlist_conid_no_info", conid=conid)
-        return cached or ""  # fall back to bare cached value if API fails
+        logger.debug("conid_no_contract_info", context=context, conid=conid)
+        try:
+            info = client.get_security_definition(conid)
+        except AttributeError:
+            info = {}
+        except Exception as exc:
+            summary = summarize_exception(exc, operation="conid_security_definition")
+            summary.pop("message_preview", None)
+            logger.warning(
+                "conid_security_definition_failed",
+                context=context,
+                conid=conid,
+                **summary,
+            )
+            info = {}
+        if not info:
+            return cached or ""  # fall back to bare cached value if API fails
 
-    symbol = info.get("symbol", "") or info.get("ticker", "")
-    exchange = info.get("listingExchange", "") or info.get("exchange", "")
-    currency = info.get("currency", "")
+    symbol = (info.get("symbol", "") or info.get("ticker", "") or "").strip()
+    exchange = (
+        info.get("primaryExch", "")
+        or info.get("listingExchange", "")
+        or info.get("exchange", "")
+        or info.get("allExchanges", "")
+        or ""
+    ).strip()
+    currency = (info.get("currency", "") or "").strip()
 
     if not symbol:
-        logger.debug("watchlist_conid_no_symbol", conid=conid, info=info)
+        logger.debug("conid_no_symbol", context=context, conid=conid)
         return cached or ""
 
     yf_ticker = ibkr_symbol_to_yf(symbol, exchange, currency)
     if yf_ticker:
         cache_conid_mapping(yf_ticker, conid, symbol, exchange)
         logger.info(
-            "watchlist_conid_resolved",
+            "conid_resolved",
+            context=context,
             conid=conid,
             symbol=symbol,
             exchange=exchange,
+            currency=currency,
             yf_ticker=yf_ticker,
         )
     return yf_ticker or cached or ""
+
+
+def _resolve_watchlist_conid(conid: int, client: IbkrClient | None) -> str:
+    """Resolve a watchlist conid to a yfinance ticker."""
+    return _resolve_conid_to_yf(conid, client, context="watchlist")
 
 
 def read_watchlist(
@@ -363,7 +471,7 @@ def read_portfolio(
         )
 
     raw_positions = client.get_positions(acct)
-    positions = normalize_positions(raw_positions)
+    positions = normalize_positions(raw_positions, client=client)
 
     ledger = client.get_ledger(acct)
     summary = build_portfolio_summary(ledger, positions, acct, cash_buffer_pct)

@@ -79,7 +79,14 @@ _KEYWORD_MAP: list[tuple[list[str], Sector]] = [
         Sector.CONSUMER_DISCRETIONARY,
     ),
     (
-        ["consumer staples", "grocery", "supermarket", "food", "beverage"],
+        [
+            "consumer staples",
+            "consumer defensive",
+            "grocery",
+            "supermarket",
+            "food",
+            "beverage",
+        ],
         Sector.CONSUMER_STAPLES,
     ),
     (

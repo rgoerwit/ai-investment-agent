@@ -608,7 +608,40 @@ class IbkrClient:
             data = result.data if hasattr(result, "data") else result
             return data if isinstance(data, dict) else {}
         except Exception as e:
-            logger.debug("contract_info_failed", conid=conid, error=str(e))
+            summary = summarize_exception(e, operation="contract_info_failed")
+            summary.pop("message_preview", None)
+            logger.debug("contract_info_failed", conid=conid, **summary)
+            return {}
+
+    def get_security_definition(self, conid: int) -> dict:
+        """
+        Get non-session security definition details for a conid.
+
+        This endpoint does not require a brokerage-session handoff and can still
+        expose listingExchange/allExchanges for held positions when
+        /iserver/contract/{conid}/info is unavailable under compete=False.
+        """
+        self._ensure_connected()
+        try:
+            result = self._throttle.call(
+                lambda: self._ibind_client.security_definition_by_conid([str(conid)])
+            )
+            data = result.data if hasattr(result, "data") else result
+            if isinstance(data, dict):
+                secdefs = data.get("secdef")
+                if isinstance(secdefs, list):
+                    for item in secdefs:
+                        if isinstance(item, dict):
+                            return item
+            return {}
+        except Exception as e:
+            summary = summarize_exception(e, operation="security_definition_failed")
+            summary.pop("message_preview", None)
+            logger.debug(
+                "security_definition_failed",
+                conid=conid,
+                **summary,
+            )
             return {}
 
     # ── Order Placement (brokerage session required) ──

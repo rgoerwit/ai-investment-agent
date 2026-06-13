@@ -1126,6 +1126,7 @@ SECTOR: Energy
             ("Shipping & Cyclical Commodities", Sector.MATERIALS),
             ("Technology & Software", Sector.INFORMATION_TECHNOLOGY),
             ("General/Diversified", Sector.INDUSTRIALS),
+            ("Consumer Defensive", Sector.CONSUMER_STAPLES),
         ]
         for old_name, expected in backward_compat:
             report = f"""
