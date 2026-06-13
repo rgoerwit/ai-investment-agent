@@ -554,6 +554,13 @@ jobs:
         with:
           # Fail if vulnerabilities are introduced with these severities
           fail-on-severity: critical
+          # Approved vulnerability exception (mirrors the pip-audit ignore):
+          # GHSA-f4j7-r4q5-qw2c (CVE-2026-45829) is a pre-auth code-injection in
+          # the ChromaDB *server*. This app only uses chromadb.PersistentClient
+          # (embedded, local-disk; see src/memory.py) and never starts the server,
+          # so the path is unreachable. No fixed release exists yet (1.5.9 latest).
+          # Drop once chromadb ships a patched version.
+          allow-ghsas: GHSA-f4j7-r4q5-qw2c
           # Broadly allow common permissive licenses used by the Python ecosystem.
           # Keep this list tighter than "disable license checks", but wide enough
           # to avoid failing on normal dual-license metadata.
