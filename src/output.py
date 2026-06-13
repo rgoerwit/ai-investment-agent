@@ -278,6 +278,9 @@ async def handle_article_generation(
             callbacks=tracing_callbacks,
             tracing_metadata=tracing_metadata,
         )
+        governance_card = (
+            analysis_result.get("entity_governance_card") if analysis_result else None
+        )
         draft_article = writer.write(
             ticker=ticker,
             company_name=company_name,
@@ -285,6 +288,7 @@ async def handle_article_generation(
             trade_date=trade_date,
             output_path=article_path,
             valuation_context=valuation_context,
+            governance_card=governance_card,
         )
 
         editor = ArticleEditor(
@@ -304,6 +308,9 @@ async def handle_article_generation(
                 data_block = analysis_result.get("fundamentals_report", "")
                 pm_block = analysis_result.get("final_trade_decision", "")
                 valuation_params = analysis_result.get("valuation_params", "")
+                consultant_review = analysis_result.get("consultant_review", "")
+            else:
+                consultant_review = ""
 
             try:
                 final_article, feedback = await editor.edit(
@@ -314,6 +321,10 @@ async def handle_article_generation(
                     data_block=data_block,
                     pm_block=pm_block,
                     valuation_params=valuation_params,
+                    consultant_review=consultant_review,
+                    governance_card=governance_card
+                    if isinstance(governance_card, dict)
+                    else None,
                 )
 
                 if feedback.get("skipped"):
@@ -381,7 +392,6 @@ def _load_company_name_for_output(
         from src.ticker_utils import (
             _company_name_lookup_candidates,
             _is_valid_company_name,
-            normalize_company_name,
         )
 
         executor = thread_pool_executor_cls(max_workers=1)
@@ -394,7 +404,9 @@ def _load_company_name_for_output(
                 continue
             raw_name = info.get("longName") or info.get("shortName")
             if _is_valid_company_name(raw_name, lookup_ticker):
-                return normalize_company_name(raw_name)
+                # Return canonical (un-normalized) — markdown report headers and
+                # the writer downstream both want the full legal name.
+                return raw_name.strip()
         return None
     except FuturesTimeoutError:
         return None
@@ -443,6 +455,33 @@ def _emit_start_banner(
     return str(welcome_banner)
 
 
+def _resolved_output_company_name(
+    result: dict,
+    ticker: str,
+    company_name_loader,
+) -> str | None:
+    """Return the canonical display name for reports and articles.
+
+    Runtime state is authoritative for identity. Fresh lookups are only a
+    fallback for legacy/test paths where the result lacks identity fields.
+    """
+
+    runtime_name = result.get("company_name")
+    if isinstance(runtime_name, str) and runtime_name.strip():
+        return runtime_name.strip()
+
+    governance_card = result.get("entity_governance_card")
+    if isinstance(governance_card, dict):
+        card_name = governance_card.get("canonical_name")
+        if isinstance(card_name, str) and card_name.strip():
+            return card_name.strip()
+
+    loaded_name = company_name_loader(ticker)
+    if isinstance(loaded_name, str) and loaded_name.strip():
+        return loaded_name.strip()
+    return None
+
+
 def _render_primary_output(
     result: dict,
     args,
@@ -475,7 +514,9 @@ def _render_primary_output(
         display_results_fn(result, args.ticker, console_obj=console_obj)
         return company_name, report, reporter
 
-    company_name = company_name_loader(args.ticker)
+    company_name = _resolved_output_company_name(
+        result, args.ticker, company_name_loader
+    )
     reporter = reporter_cls(
         args.ticker,
         company_name,
@@ -571,7 +612,10 @@ async def _maybe_generate_article(
 
     if report is None or reporter is None:
         if company_name is None:
-            company_name = company_name_loader(args.ticker) or args.ticker
+            company_name = (
+                _resolved_output_company_name(result, args.ticker, company_name_loader)
+                or args.ticker
+            )
         reporter = reporter_cls(
             args.ticker,
             company_name,

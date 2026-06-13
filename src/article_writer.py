@@ -6,7 +6,6 @@ while matching the author's distinctive voice from writing samples.
 """
 
 import json
-import os
 import random
 import warnings
 from contextlib import contextmanager
@@ -18,8 +17,13 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, Field
 
-from src.config import config
-from src.error_safety import summarize_exception
+from src.article_audit import (
+    audit_article_citations,
+    extract_source_confidence_context,
+    prepend_verification_caveats,
+)
+from src.config import config, get_env_value
+from src.error_safety import redact_sensitive_text, summarize_exception
 from src.llms import create_deep_thinking_llm, create_writer_llm
 from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import classify_failure, get_model_name, infer_provider
@@ -95,6 +99,17 @@ class EditorReviewResult(BaseModel):
     confidence: float = 0.5
 
 
+def _review_response_for_citation_errors(errors: list[dict[str, str]]) -> dict:
+    feedback = EditorReviewResult(
+        verdict="REVISE",
+        factual_errors=[EditorFactualError(**error) for error in errors],
+        confidence=1.0,
+    ).model_dump()
+    # Internal loop metadata; intentionally not part of the editor response schema.
+    feedback["deterministic_citation_audit"] = True
+    return feedback
+
+
 def _should_emit_editor_structured_output_warnings() -> bool:
     """Always suppress: these are known-benign Pydantic serializer warnings."""
     return False
@@ -160,11 +175,10 @@ def _extract_text_from_response(response) -> str:
     return "\n".join(text_parts)
 
 
-# GitHub raw URL base for the repository (configurable via env var)
+# GitHub raw URL base for the repository (configurable via env var or .env)
 # Users who want GitHub-hosted image links can set this to their repo
-GITHUB_RAW_BASE = os.environ.get(
-    "GITHUB_RAW_BASE",
-    "https://raw.githubusercontent.com/rgoerwit/ai-investment-agent/main",
+GITHUB_RAW_BASE = get_env_value("GITHUB_RAW_BASE") or (
+    "https://raw.githubusercontent.com/rgoerwit/ai-investment-agent/main"
 )
 
 
@@ -209,7 +223,7 @@ class ArticleWriter:
         self.llm = self._create_llm()
 
         logger.info(
-            "ArticleWriter initialized",
+            "articlewriter_initialized",
             prompts_dir=str(self.prompts_dir),
             samples_dir=str(self.samples_dir),
             images_dir=str(self.images_dir),
@@ -239,7 +253,7 @@ class ArticleWriter:
 
         if not prompt_file.exists():
             logger.warning(
-                "writer.json not found, using default prompt config",
+                "writer_json_not_found_using_default_prompt_config",
                 expected_path=str(prompt_file),
             )
             return DEFAULT_PROMPT_CONFIG
@@ -248,7 +262,7 @@ class ArticleWriter:
             with open(prompt_file) as f:
                 config_data = json.load(f)
             logger.debug(
-                "Loaded writer prompt config", version=config_data.get("version")
+                "loaded_writer_prompt_config", version=config_data.get("version")
             )
             return cast(dict, config_data)
         except json.JSONDecodeError as e:
@@ -274,7 +288,7 @@ class ArticleWriter:
         temperature = model_config.get("temperature", 0.7)
 
         logger.info(
-            "Creating ArticleWriter LLM",
+            "creating_articlewriter_llm",
             provider="claude" if config.get_claude_api_key() else "gemini-fallback",
             model=config.writer_model,
         )
@@ -315,7 +329,7 @@ class ArticleWriter:
 
         if not self.samples_dir.exists():
             logger.warning(
-                "Writing samples directory not found", path=str(self.samples_dir)
+                "writing_samples_directory_not_found", path=str(self.samples_dir)
             )
             return ""
 
@@ -329,7 +343,7 @@ class ArticleWriter:
         random.shuffle(sample_files)
 
         if not sample_files:
-            logger.warning("No writing samples found", path=str(self.samples_dir))
+            logger.warning("no_writing_samples_found", path=str(self.samples_dir))
             return ""
 
         for sample_file in sample_files:
@@ -349,11 +363,13 @@ class ArticleWriter:
 
             except Exception as e:
                 logger.warning(
-                    "Failed to read sample", file=str(sample_file), error=str(e)
+                    "failed_to_read_sample",
+                    file=str(sample_file),
+                    **summarize_exception(e, operation="failed_to_read_sample"),
                 )
 
         logger.info(
-            "Loaded writing samples",
+            "loaded_writing_samples",
             count=len(samples),
             total_chars=total_chars,
             files=[f.name for f in sample_files[: len(samples)]],
@@ -373,7 +389,7 @@ class ArticleWriter:
             Formatted manifest with image descriptions and URLs
         """
         if not self.images_dir.exists():
-            logger.warning("Images directory not found", path=str(self.images_dir))
+            logger.warning("images_directory_not_found", path=str(self.images_dir))
             return "No charts available."
 
         # Normalize ticker for filename matching (dots become underscores or dashes)
@@ -419,7 +435,7 @@ class ArticleWriter:
                     found_images.append((match, chart_type, description))
 
         if not found_images:
-            logger.info("No matching charts found", ticker=ticker, date=trade_date)
+            logger.info("no_matching_charts_found", ticker=ticker, date=trade_date)
             return "No charts available for this ticker."
 
         # Format manifest
@@ -447,7 +463,7 @@ class ArticleWriter:
             manifest_lines.append(f"  URL: {url}")
             manifest_lines.append("")
 
-        logger.info("Formatted image manifest", chart_count=len(found_images))
+        logger.info("formatted_image_manifest", chart_count=len(found_images))
         return "\n".join(manifest_lines)
 
     def _fetch_fact_check_context(
@@ -471,7 +487,7 @@ class ArticleWriter:
             # Single focused search query
             query = f"{company_name} {ticker} stock latest news financials 2025 2026"
 
-            logger.info("Fetching fact-check context", ticker=ticker, query=query[:50])
+            logger.info("fetching_fact_check_context", ticker=ticker, query=query[:50])
 
             response = search_tavily_sync_inspected(
                 query,
@@ -504,7 +520,7 @@ class ArticleWriter:
                 context = context[:max_chars] + "\n[...truncated]"
 
             logger.info(
-                "Fetched fact-check context",
+                "fetched_fact_check_context",
                 ticker=ticker,
                 chars=len(context),
                 results=len(response.get("results", [])),
@@ -514,9 +530,11 @@ class ArticleWriter:
 
         except Exception as e:
             logger.warning(
-                "Failed to fetch fact-check context",
+                "failed_to_fetch_fact_check_context",
                 ticker=ticker,
-                error=str(e),
+                **summarize_exception(
+                    e, operation="failed_to_fetch_fact_check_context"
+                ),
             )
             return ""
 
@@ -591,12 +609,12 @@ class ArticleWriter:
                 raise  # Not a Claude error — propagate
 
             logger.warning(
-                "Claude writer failed, falling back to Gemini",
+                "claude_writer_failed_falling_back_to_gemini",
                 failure_kind=primary_failure.kind,
                 host=primary_failure.host,
                 error_type=primary_failure.error_type,
                 root_cause_type=primary_failure.root_cause_type,
-                error=primary_failure.message,
+                reason=primary_failure.message,
             )
             fallback_llm = create_deep_thinking_llm()
             self.llm = fallback_llm  # Cache for subsequent calls (e.g., retry)
@@ -685,9 +703,9 @@ class ArticleWriter:
         for indicator in _REFUSAL_INDICATORS:
             if indicator.lower() in article.lower():
                 logger.error(
-                    "Writer LLM refused to generate article",
+                    "writer_llm_refused_to_generate_article",
                     indicator=indicator,
-                    response_preview=article[:200],
+                    response_preview=redact_sensitive_text(article, max_chars=200),
                 )
                 raise RuntimeError(
                     f"Writer LLM refused to generate financial content. "
@@ -703,7 +721,7 @@ class ArticleWriter:
         if stripped and not stripped.startswith("#"):
             header_idx = stripped.find("\n# ")
             if header_idx != -1:
-                logger.info("Stripped non-header preamble from writer response")
+                logger.info("stripped_non_header_preamble_from_writer_response")
                 article = stripped[header_idx + 1 :]  # +1 to skip the \n
             elif stripped.find("# ") != -1:
                 article = stripped[stripped.find("# ") :]
@@ -718,6 +736,7 @@ class ArticleWriter:
         trade_date: str,
         output_path: Path | None = None,
         valuation_context: str | None = None,
+        governance_card: dict[str, Any] | None = None,
     ) -> str:
         """
         Generate an article from the analysis report.
@@ -733,7 +752,7 @@ class ArticleWriter:
         Returns:
             Generated article as Markdown string
         """
-        logger.info("Generating article", ticker=ticker, company=company_name)
+        logger.info("generating_article", ticker=ticker, company=company_name)
 
         # Load voice samples
         voice_samples = self._load_voice_samples()
@@ -780,6 +799,38 @@ class ArticleWriter:
                 f"{fact_check_context}"
             )
 
+        # Prepend entity governance card so the writer never collapses identity
+        # back to a short-form name and discloses non-standard structures.
+        if isinstance(governance_card, dict) and governance_card.get("ticker"):
+            from src.validators.entity_governance_card import (
+                card_from_dict,
+                card_to_prompt_block,
+                requires_structure_disclosure,
+            )
+
+            card_obj = card_from_dict(governance_card)
+            if card_obj:
+                card_block = card_to_prompt_block(card_obj)
+                disclosure_directive = ""
+                if requires_structure_disclosure(card_obj):
+                    related = (
+                        "; ".join(
+                            f"{e.get('ticker','?')} ({e.get('relationship','?')})"
+                            for e in card_obj.related_listed
+                        )
+                        or "operating subsidiaries"
+                    )
+                    disclosure_directive = (
+                        "\n\nMANDATORY OPENING DISCLOSURE: The first body paragraph "
+                        f"after the headline must disclose that {ticker} ({card_obj.canonical_name}) "
+                        f"is a {card_obj.entity_role.replace('_', ' ').lower()}, and identify the "
+                        f"related entity(s): {related}. Do not refer to this ticker by an "
+                        "operating-subsidiary name. Do not skip this disclosure."
+                    )
+                user_message = (
+                    f"{card_block}{disclosure_directive}\n\n---\n\n{user_message}"
+                )
+
         # Generate article
         messages = [
             SystemMessage(content=system_message),
@@ -790,7 +841,7 @@ class ArticleWriter:
             article = self._invoke_writer(messages)
 
             logger.info(
-                "Article generated",
+                "article_generated",
                 ticker=ticker,
                 length=len(article),
                 word_count=len(article.split()),
@@ -801,7 +852,7 @@ class ArticleWriter:
                 output_path = Path(output_path)
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 output_path.write_text(article, encoding="utf-8")
-                logger.info("Article saved", path=str(output_path))
+                logger.info("article_saved", path=str(output_path))
 
             return article
 
@@ -819,6 +870,7 @@ class ArticleWriter:
         editor_feedback: dict,
         ticker: str,
         company_name: str,
+        governance_context: str | None = None,
     ) -> str:
         """
         Revise an article based on Editor-in-Chief feedback.
@@ -836,7 +888,7 @@ class ArticleWriter:
         original_charts = _extract_chart_references(original_draft)
 
         logger.info(
-            "Revising article based on editor feedback",
+            "revising_article_based_on_editor_feedback",
             ticker=ticker,
             errors=len(editor_feedback.get("factual_errors", [])),
             cuts=len(editor_feedback.get("cuts", [])),
@@ -883,6 +935,12 @@ class ArticleWriter:
             style_issues=json_module.dumps(style_issues),
             chart_list=chart_list,
         )
+        if governance_context:
+            revision_prompt = (
+                f"{governance_context}\n\n---\n\n"
+                "PRESERVE AND APPLY THE ENTITY GOVERNANCE CARD ABOVE WHEN REVISING.\n\n"
+                f"{revision_prompt}"
+            )
 
         # Get system message
         system_message = self.prompt_config.get(
@@ -902,7 +960,7 @@ class ArticleWriter:
                 article = _reinject_missing_charts(article, original_charts, logger)
 
             logger.info(
-                "Article revised",
+                "article_revised",
                 ticker=ticker,
                 length=len(article),
                 word_count=len(article.split()),
@@ -975,7 +1033,7 @@ def _reinject_missing_charts(
         return revised_article
 
     logger.warning(
-        "Re-injecting missing charts",
+        "re_injecting_missing_charts",
         count=len(missing_charts),
         charts=[c["alt_text"] for c in missing_charts],
     )
@@ -1126,9 +1184,9 @@ class ArticleEditor:
             self.llm_with_tools = None
 
         if self.llm:
-            logger.info("ArticleEditor initialized with GPT", tools=len(self.tools))
+            logger.info("articleeditor_initialized_with_gpt", tools=len(self.tools))
         else:
-            logger.info("ArticleEditor disabled (no OpenAI API key)")
+            logger.info("articleeditor_disabled")
 
     def _invoke_config(self, *, workflow: str) -> dict[str, object]:
         return {
@@ -1147,7 +1205,12 @@ class ArticleEditor:
         try:
             return self.llm.with_structured_output(EditorReviewResult, strict=True)
         except Exception as exc:
-            logger.warning("editor_structured_output_unavailable", error=str(exc))
+            logger.warning(
+                "editor_structured_output_unavailable",
+                **summarize_exception(
+                    exc, operation="editor_structured_output_unavailable"
+                ),
+            )
             return None
 
     def _load_prompt_config(self) -> dict:
@@ -1155,7 +1218,7 @@ class ArticleEditor:
         prompt_file = config.prompts_dir / "editor.json"
 
         if not prompt_file.exists():
-            logger.warning("editor.json not found, using minimal config")
+            logger.warning("editor_json_not_found_using_minimal_config")
             return {"system_message": "You are an Editor-in-Chief reviewing articles."}
 
         try:
@@ -1178,6 +1241,8 @@ class ArticleEditor:
         pm_block: str | None = None,
         valuation_params: str | None = None,
         voice_samples: str | None = None,
+        governance_context: str | None = None,
+        consultant_review: str | None = None,
     ) -> str:
         """
         Assemble fact-check context for the editor.
@@ -1201,6 +1266,16 @@ class ArticleEditor:
 
         if valuation_params:
             context_parts.append(f"=== VALUATION PARAMETERS ===\n{valuation_params}")
+
+        if governance_context:
+            context_parts.append(governance_context)
+
+        source_confidence_context = extract_source_confidence_context(
+            data_block,
+            consultant_review,
+        )
+        if source_confidence_context:
+            context_parts.append(source_confidence_context)
 
         if voice_samples:
             # Truncate voice samples to control token usage
@@ -1231,7 +1306,7 @@ class ArticleEditor:
         overflow_calls = tool_calls[self.MAX_TOOL_CALLS_PER_TURN :]
         if overflow_calls:
             logger.warning(
-                "Capping tool calls per turn",
+                "capping_tool_calls_per_turn",
                 requested=len(tool_calls),
                 cap=self.MAX_TOOL_CALLS_PER_TURN,
             )
@@ -1246,7 +1321,7 @@ class ArticleEditor:
             if tool_name == "fetch_reference_content":
                 cache_key = tool_args.get("url", "")
                 if cache_key in url_cache:
-                    logger.info("Editor URL cache hit", url=cache_key[:80])
+                    logger.info("editor_url_cache_hit", url=cache_key[:80])
                     results.append(
                         ToolMessage(content=url_cache[cache_key], tool_call_id=tool_id)
                     )
@@ -1254,7 +1329,7 @@ class ArticleEditor:
 
             tool_fn = self._tools_by_name.get(tool_name)
             if not tool_fn:
-                logger.warning("Unknown tool requested by editor", tool=tool_name)
+                logger.warning("unknown_tool_requested_by_editor", tool=tool_name)
                 results.append(
                     ToolMessage(
                         content=f"ERROR: Unknown tool '{tool_name}'",
@@ -1265,7 +1340,7 @@ class ArticleEditor:
 
             try:
                 logger.info(
-                    "Editor calling tool",
+                    "editor_calling_tool",
                     tool=tool_name,
                     args_preview=str(tool_args)[:100],
                 )
@@ -1290,7 +1365,11 @@ class ArticleEditor:
 
                 results.append(ToolMessage(content=content, tool_call_id=tool_id))
             except Exception as e:
-                logger.warning("Tool execution failed", tool=tool_name, error=str(e))
+                logger.warning(
+                    "tool_execution_failed",
+                    tool=tool_name,
+                    **summarize_exception(e, operation="tool_execution_failed"),
+                )
                 error_content = f"TOOL_ERROR: {e}"
 
                 # Cache errors too — no point retrying a broken URL
@@ -1332,7 +1411,7 @@ class ArticleEditor:
             Parsed feedback dict with verdict, errors, cuts, etc.
         """
         if not self.llm:
-            logger.warning("Editor not available, approving article by default")
+            logger.warning("editor_not_available_approving_article_by_default")
             return {"verdict": "APPROVED", "confidence": 1.0}
 
         system_message = self.prompt_config.get(
@@ -1390,7 +1469,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
                         break
 
                     logger.info(
-                        "Editor requesting tool calls",
+                        "editor_requesting_tool_calls",
                         iteration=iteration + 1,
                         num_calls=len(tool_calls),
                     )
@@ -1400,7 +1479,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
                     messages.extend(tool_messages)
                 else:
                     logger.warning(
-                        "Editor hit max tool iterations, forcing final review",
+                        "editor_hit_max_tool_iterations_forcing_final_review",
                         max_iterations=self.MAX_TOOL_ITERATIONS,
                     )
 
@@ -1462,7 +1541,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
         content = response.content
 
         logger.debug(
-            "Editor raw response",
+            "editor_raw_response",
             content_type=type(content).__name__,
             content_preview=str(content)[:200] if content else "EMPTY",
         )
@@ -1474,7 +1553,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
             )
 
         if not content or not content.strip():
-            logger.warning("Editor returned empty response")
+            logger.warning("editor_returned_empty_response")
             return {"verdict": "APPROVED", "confidence": 0.5, "empty_response": True}
 
         return self._parse_editor_response(content)
@@ -1515,9 +1594,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
                         "accurate",
                     ]
                 ):
-                    logger.info(
-                        "Editor response appears to approve (text-based inference)"
-                    )
+                    logger.info("editor_response_appears_to_approve")
                     return {
                         "verdict": "APPROVED",
                         "confidence": 0.7,
@@ -1525,8 +1602,8 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
                     }
 
                 logger.warning(
-                    "No JSON found in editor response",
-                    response_preview=content[:200],
+                    "no_json_found_in_editor_response",
+                    response_preview=redact_sensitive_text(content, max_chars=200),
                 )
                 return {"verdict": "APPROVED", "confidence": 0.5, "parse_error": True}
 
@@ -1540,7 +1617,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
                 feedback["confidence"] = 0.8
 
             logger.info(
-                "Editor feedback parsed successfully",
+                "editor_feedback_parsed_successfully",
                 verdict=feedback.get("verdict"),
                 num_errors=len(feedback.get("factual_errors", [])),
             )
@@ -1549,9 +1626,11 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
 
         except json.JSONDecodeError as e:
             logger.warning(
-                "Failed to parse editor JSON",
-                error=str(e),
-                json_preview=json_str[:200] if json_str else "EMPTY",
+                "failed_to_parse_editor_json",
+                **summarize_exception(e, operation="failed_to_parse_editor_json"),
+                json_preview=redact_sensitive_text(
+                    json_str[:200] if json_str else "EMPTY", max_chars=200
+                ),
             )
             return {"verdict": "APPROVED", "confidence": 0.5, "parse_error": True}
 
@@ -1565,6 +1644,8 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
         pm_block: str | None = None,
         valuation_params: str | None = None,
         voice_samples: str | None = None,
+        governance_card: dict[str, Any] | None = None,
+        consultant_review: str | None = None,
     ) -> tuple[str, dict]:
         """
         Run the full editorial loop: review -> revise -> review.
@@ -1583,8 +1664,16 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
             Tuple of (final_article, final_feedback)
         """
         if not self.is_available():
-            logger.info("Editor not available, returning original draft")
+            logger.info("editor_not_available_returning_original_draft")
             return article_draft, {"verdict": "APPROVED", "skipped": True}
+
+        governance_context = ""
+        if isinstance(governance_card, dict):
+            from src.validators.entity_governance_card import (
+                card_to_prompt_block_from_dict,
+            )
+
+            governance_context = card_to_prompt_block_from_dict(governance_card)
 
         # Build fact-check context
         fact_check_context = self.build_fact_check_context(
@@ -1592,6 +1681,8 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
             pm_block=pm_block,
             valuation_params=valuation_params,
             voice_samples=voice_samples,
+            governance_context=governance_context,
+            consultant_review=consultant_review,
         )
 
         current_draft = article_draft
@@ -1602,11 +1693,20 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
         self._url_cache = {}
         try:
             while revision_count < self.MAX_REVISIONS:
-                # Review the current draft
-                feedback = await self.review(current_draft, fact_check_context)
+                citation_errors = audit_article_citations(current_draft, data_block)
+                if citation_errors:
+                    feedback = _review_response_for_citation_errors(citation_errors)
+                    logger.warning(
+                        "article_citation_audit_failed",
+                        ticker=ticker,
+                        mismatch_count=len(citation_errors),
+                    )
+                else:
+                    # Review the current draft
+                    feedback = await self.review(current_draft, fact_check_context)
 
                 logger.info(
-                    "Editor review complete",
+                    "editor_review_complete",
                     ticker=ticker,
                     verdict=feedback.get("verdict"),
                     confidence=feedback.get("confidence"),
@@ -1621,7 +1721,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
                 # Revise based on feedback
                 revision_count += 1
                 logger.info(
-                    "Revising article",
+                    "revising_article",
                     ticker=ticker,
                     revision=revision_count,
                     max_revisions=self.MAX_REVISIONS,
@@ -1632,16 +1732,26 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
                     editor_feedback=feedback,
                     ticker=ticker,
                     company_name=company_name,
+                    governance_context=governance_context,
                 )
 
             # Max revisions reached, do final review
             final_feedback = await self.review(current_draft, fact_check_context)
+            final_citation_errors = audit_article_citations(current_draft, data_block)
+            if final_citation_errors:
+                current_draft = prepend_verification_caveats(
+                    current_draft,
+                    final_citation_errors,
+                )
+                final_feedback["verdict"] = "REVISE"
+                final_feedback["deterministic_citation_audit"] = True
+                final_feedback["factual_errors"] = final_citation_errors
 
             # Add revision count to feedback for caller logging
             final_feedback["revisions"] = revision_count
 
             logger.info(
-                "Editorial loop complete",
+                "editorial_loop_complete",
                 ticker=ticker,
                 revisions=revision_count,
                 final_verdict=final_feedback.get("verdict"),

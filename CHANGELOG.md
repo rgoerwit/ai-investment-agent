@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.11.0] - 2026-06-11
+
+### Added
+
+- **Korean Equities (KRX/KOSDAQ)** — Enabled end-to-end: config gate, 6-digit yfinance padding, KRW→`.KS` fallback, KSE alias in IBKR↔yfinance translation, and a screener P/E fallback (`marketCap / netIncomeToCommon`) so Korean rows survive yfinance's null `trailingPE`.
+- **Brazilian Equities (B3)** — Tickers/exchanges added with BDR filtering at the scraper (round-trip translation preserved) and a pagination fix for `.SA` listings.
+- **Special-Situation Exits** — Active tender offers surface as `SPECIAL_SITUATION_EXIT` with a market-vs-tender spread narrative and a PM event-driven override of the hard-fail framework; LOW/MODERATE screen rejects on held positions route to REVIEW (`SCREEN_REJECT`) instead of executable SELLs.
+- **Macro-Event Override Rebuild** — Correlated-sell detection now fires on three triggers (14d verdict window, 35% cumulative with stop-breach evidence, refresh-immune price drawdown breadth); demotions are sustained from stored events with rolling expiry; truthful per-trigger flag wording; extensive edge-case regression suite.
+- **Ticker-Override Registry & Data-Vacuum Gate** — Operator-curated `config/ticker_overrides.json` for confirmed listing migrations (applied on both analysis and IBKR position sides), `ticker_migration_suspected` logging, and a pre-LLM abort for total-data-vacuum tickers (`--force-data-vacuum` to bypass).
+- **Entity Governance Cards** — Canonical entity identity persisted and threaded across prompts, metrics, and serialization.
+- **Macro-Regime Threading** — Structured regime context across prompts, persistence, retrospectives, and DIP WATCH scoring.
+
+### Changed
+
+- **Prompt Corpus** — `prompts/*.json` is the single canonical prompt source with fail-loud loading; the stale 3,100-line inline fallback in `src/prompts.py` was removed.
+- **Thesis Constants** — Centralized in `src/thesis_constants.py` with prompt↔code parity tests (also corrected stale $500k liquidity documentation to the implemented $100k/$250k policy).
+- **Logging Standards** — Six statically-enforced invariants: structlog-only, snake_case events, no f-strings, sanitized exception summaries (`summarize_exception`), redacted content previews, kwargs-only calls; tool/LLM-visible errors are typed, never raw exception prose.
+- **PFIC Cross-Check #11** — High cash/asset ratio no longer overrides Legal Counsel; HIGH requires `pfic_status=PROBABLE` or ratio ≥50% with a passive-profile sector.
+- **Agent Input Hygiene** — Trader/risk/research prompt assembly reads valid artifacts only, so failure stubs never enter downstream prompts.
+
+### Fixed
+
+- **Cross-Exchange Ticker Matching** — Ambiguous base symbols (e.g. `AGS.SI` vs `AGS.BR`) are poisoned and base-symbol fallback requires currency agreement, ending wrong-exchange analysis attachment.
+- **Logger-Level Flattening** — `Settings` construction no longer force-levels every registered logger, which silently destroyed CLI noise suppression (httpx/ibind/genai chatter).
+- **Data-Hygiene Repairs** — Deterministic fixes for invalid 52-week ranges, nonsensical ADR routing, and low-P/E anomalies; ADR fields confined to a single canonical DATA_BLOCK source.
+- **pm_block Circular Import** — Chart extractors are importable standalone; fresh-subprocess import-order tests guard regressions.
+- **Privacy** — Personal portfolio exports untracked and the real IBKR account ID replaced with a synthetic placeholder across docs, scripts, and tests.
+
 ## [3.10.1] - 2026-05-22
 
 ### Added

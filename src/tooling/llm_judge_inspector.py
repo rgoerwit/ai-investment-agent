@@ -24,6 +24,7 @@ import structlog
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import BaseMessage
 
+from src.error_safety import summarize_exception
 from src.tooling.inspector import InspectionDecision, InspectionEnvelope
 
 logger = structlog.get_logger(__name__)
@@ -224,8 +225,7 @@ class LLMJudgeInspector:
                 "llm_judge_call_failed",
                 content_hash=content_hash,
                 source_kind=envelope.source_kind.value,
-                error=str(exc),
-                error_type=type(exc).__name__,
+                **summarize_exception(exc, operation="llm_judge_call"),
             )
             # Fail open — allow content through on judge failure.
             return InspectionDecision(
@@ -269,7 +269,7 @@ class LLMJudgeInspector:
                 "llm_judge_parse_failed",
                 content_hash=content_hash,
                 raw_response=raw[:200],
-                error=str(exc),
+                **summarize_exception(exc, operation="llm_judge_parse_failed"),
             )
             # Fail open on parse errors.
             return InspectionDecision(

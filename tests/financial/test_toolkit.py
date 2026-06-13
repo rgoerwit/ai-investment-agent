@@ -942,3 +942,34 @@ class TestIntegration:
                 "error" in sentiment_result.lower()
                 or "Rate limited" in sentiment_result
             )
+
+
+@pytest.mark.asyncio
+class TestToolErrorSanitization:
+    """Tool exceptions must surface as typed text, never raw exception prose."""
+
+    SECRET = "https://user:HUSH123@api.example.com/x?apikey=HUSH456"
+
+    async def test_financial_metrics_exception_is_typed(self, mock_fetcher):
+        mock_fetcher.get_financial_metrics = AsyncMock(
+            side_effect=RuntimeError(f"boom {self.SECRET}")
+        )
+
+        result = await toolkit.get_financial_metrics.ainvoke("AAPL")
+
+        parsed = json.loads(result)
+        assert "RuntimeError" in parsed["error"]
+        assert "HUSH123" not in result and "HUSH456" not in result
+
+    async def test_yfinance_data_exception_is_typed(self, mock_fetcher):
+        mock_fetcher.get_historical_prices = AsyncMock(
+            side_effect=ConnectionError(f"refused {self.SECRET}")
+        )
+
+        result = await toolkit.get_yfinance_data.ainvoke(
+            {"symbol": "AAPL", "start_date": "2026-01-01", "end_date": "2026-02-01"}
+        )
+
+        assert result.startswith("Error: ")
+        assert "ConnectionError" in result
+        assert "HUSH123" not in result and "HUSH456" not in result

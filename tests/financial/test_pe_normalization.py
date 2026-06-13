@@ -223,6 +223,75 @@ class TestPENormalizationSanityChecks:
             != "reconciled_most_recent_quarter"
         )
 
+    def test_quarantines_low_pe_when_identity_check_fails(self, fetcher):
+        """P/E below 3 is nulled when price/EPS cannot reproduce it."""
+        info = {
+            "currentPrice": 12.0,
+            "trailingEps": 1.0,
+            "trailingPE": 2.0,
+            "pegRatio": 0.4,
+        }
+
+        result = fetcher._normalize_data_integrity(info, "TEST")
+
+        assert result["trailingPE"] is None
+        assert result["pegRatio"] is None
+        assert result["_pe_low_anomaly_quarantined"] is True
+        assert any(
+            "failed price/EPS identity check" in note
+            for note in result["_data_quality_notes"]
+        )
+
+    def test_preserves_low_pe_when_identity_check_passes(self, fetcher):
+        """A real low P/E should be flagged for investigation, not nulled."""
+        info = {
+            "currentPrice": 12.0,
+            "trailingEps": 6.0,
+            "trailingPE": 2.0,
+            "pegRatio": 0.4,
+        }
+
+        result = fetcher._normalize_data_integrity(info, "TEST")
+
+        assert result["trailingPE"] == pytest.approx(2.0)
+        assert result["pegRatio"] == pytest.approx(0.4)
+        assert result["_pe_low_anomaly_flag"] == "LOW_PE_REQUIRES_INVESTIGATION"
+        assert result["_pe_low_anomaly_context"] == [
+            "low_multiple_confirmed_but_unexplained"
+        ]
+
+    def test_flags_low_pe_with_earnings_collapse_context(self, fetcher):
+        """Low but internally consistent P/E carries stress context."""
+        info = {
+            "currentPrice": 16.0,
+            "trailingEps": 4.0,
+            "trailingPE": 4.0,
+            "earningsGrowth_TTM": -0.30,
+            "profitMargins": 0.10,
+        }
+
+        result = fetcher._normalize_data_integrity(info, "TEST")
+
+        assert result["trailingPE"] == pytest.approx(4.0)
+        assert result["_pe_low_anomaly_flag"] == "LOW_PE_REQUIRES_INVESTIGATION"
+        assert "earnings_collapse" in result["_pe_low_anomaly_context"]
+
+    def test_low_pe_helper_composes_after_existing_unit_quarantine(self, fetcher):
+        """When trailing P/E is already null, low-P/E logic leaves it alone."""
+        info = {
+            "trailingPE": None,
+            "forwardPE": 12.0,
+            "pegRatio": 1.0,
+            "_pe_unit_error_quarantined": "trailing",
+        }
+
+        result = fetcher._normalize_data_integrity(info, "TEST")
+
+        assert result["trailingPE"] is None
+        assert result["forwardPE"] == pytest.approx(12.0)
+        assert result["pegRatio"] == pytest.approx(1.0)
+        assert "_pe_low_anomaly_quarantined" not in result
+
 
 class TestDataDivergenceDetection:
     """Test that extreme TTM vs statement divergence is detected and handled."""

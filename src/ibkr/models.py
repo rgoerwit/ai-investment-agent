@@ -67,7 +67,7 @@ GBP-denominated `mktValue` (before the ×100) so it is correct.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -183,6 +183,12 @@ class AnalysisRecord(BaseModel):
     exchange: str = ""  # Exchange suffix (e.g. "HK", "T"), inferred from ticker
     is_quick_mode: bool = False  # True if analysis was run with --quick (less thorough)
     capital_flag_types: tuple[str, ...] = ()
+    macro_regime: dict[str, Any] = Field(default_factory=dict)
+    data_quality: dict[str, Any] = Field(default_factory=dict)
+    # Special-situation routing (Senior promotes from Foreign Language M&A EVENT
+    # section). Empty string when no analysis ever set it or the analysis predates
+    # the field; otherwise one of ACTIVE_TENDER / RUMORED / NONE.
+    m_and_a_status: str = ""
 
     @property
     def age_days(self) -> int:

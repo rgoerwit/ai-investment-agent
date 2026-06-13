@@ -181,6 +181,13 @@ runtime/ibkr_dashboard/
 local_config.py
 config.local.py
 config/mcp_servers.json
+# Operator ticker-migration registry: reveals held positions (public repo);
+# see config/ticker_overrides.example.json for the shape
+config/ticker_overrides.json
+# Personal portfolio exports: real holdings and allocation weights
+examples/portfolio-*.csv
+examples/portfolio-*.xlsx
+examples/portfolio-*.pdf
 runtime/mcp_usage.db
 runtime/mcp_usage.db-*
 .aider*

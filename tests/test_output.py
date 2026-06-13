@@ -127,6 +127,93 @@ def test_render_primary_output_writes_report_without_banner(tmp_path):
     assert output_file.read_text() == "# TST Report\n\nBody"
 
 
+def test_render_primary_output_prefers_runtime_company_name(tmp_path):
+    from src.cli import OutputTargets
+    from src.output import _render_primary_output
+
+    args = SimpleNamespace(
+        ticker="009970.KS",
+        brief=False,
+        quiet=True,
+        quick=False,
+        svg=False,
+        transparent=False,
+    )
+    seen = {}
+
+    class StubReporter:
+        def __init__(self, ticker, company_name, **_kwargs):
+            seen["ticker"] = ticker
+            seen["company_name"] = company_name
+
+        def generate_report(self, result, brief_mode=False):
+            return "# report"
+
+    company_name, _report, _reporter = _render_primary_output(
+        {"company_name": "Youngone Holdings Co., Ltd."},
+        args,
+        OutputTargets(
+            output_file=tmp_path / "report.md",
+            image_dir=tmp_path / "images",
+            skip_charts=True,
+        ),
+        welcome_banner="# Banner",
+        reporter_cls=StubReporter,
+        company_name_loader=lambda _ticker: "Wrong Fresh Lookup",
+        cost_suffix_fn=lambda: "",
+    )
+
+    assert company_name == "Youngone Holdings Co., Ltd."
+    assert seen == {
+        "ticker": "009970.KS",
+        "company_name": "Youngone Holdings Co., Ltd.",
+    }
+
+
+def test_render_primary_output_falls_back_to_governance_card_name(tmp_path):
+    from src.cli import OutputTargets
+    from src.output import _render_primary_output
+
+    args = SimpleNamespace(
+        ticker="009970.KS",
+        brief=False,
+        quiet=True,
+        quick=False,
+        svg=False,
+        transparent=False,
+    )
+    seen = {}
+
+    class StubReporter:
+        def __init__(self, _ticker, company_name, **_kwargs):
+            seen["company_name"] = company_name
+
+        def generate_report(self, result, brief_mode=False):
+            return "# report"
+
+    company_name, _report, _reporter = _render_primary_output(
+        {
+            "entity_governance_card": {
+                "ticker": "009970.KS",
+                "canonical_name": "Youngone Holdings Co., Ltd.",
+            }
+        },
+        args,
+        OutputTargets(
+            output_file=tmp_path / "report.md",
+            image_dir=tmp_path / "images",
+            skip_charts=True,
+        ),
+        welcome_banner="# Banner",
+        reporter_cls=StubReporter,
+        company_name_loader=lambda _ticker: "Wrong Fresh Lookup",
+        cost_suffix_fn=lambda: "",
+    )
+
+    assert company_name == "Youngone Holdings Co., Ltd."
+    assert seen["company_name"] == "Youngone Holdings Co., Ltd."
+
+
 @pytest.mark.asyncio
 async def test_maybe_generate_article_skips_invalid_analysis():
     from src.cli import OutputTargets
@@ -162,6 +249,57 @@ async def test_maybe_generate_article_skips_invalid_analysis():
     assert generated is False
     handle_article_generation.assert_not_called()
     console.print.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_maybe_generate_article_uses_governance_card_name_when_missing():
+    from src.cli import OutputTargets
+    from src.output import _maybe_generate_article
+
+    handle_article_generation = AsyncMock()
+    args = SimpleNamespace(
+        ticker="009970.KS",
+        article=True,
+        quiet=True,
+        brief=False,
+        quick=False,
+        svg=False,
+        transparent=False,
+        imagedir=None,
+    )
+
+    class StubReporter:
+        def __init__(self, _ticker, company_name, **_kwargs):
+            self.company_name = company_name
+
+        def generate_report(self, result, brief_mode=False):
+            return f"# {self.company_name}"
+
+        def get_valuation_context(self):
+            return "VALUATION DATA: Not available."
+
+    await _maybe_generate_article(
+        {
+            "analysis_validity": {"publishable": True},
+            "entity_governance_card": {
+                "ticker": "009970.KS",
+                "canonical_name": "Youngone Holdings Co., Ltd.",
+            },
+        },
+        args,
+        OutputTargets(output_file=None, image_dir=Path("images"), skip_charts=True),
+        company_name=None,
+        report=None,
+        reporter=None,
+        handle_article_generation_fn=handle_article_generation,
+        reporter_cls=StubReporter,
+        company_name_loader=lambda _ticker: "Wrong Fresh Lookup",
+        publishable_analysis_fn=lambda _result: True,
+    )
+
+    call = handle_article_generation.await_args.kwargs
+    assert call["company_name"] == "Youngone Holdings Co., Ltd."
+    assert call["report_text"] == "# Youngone Holdings Co., Ltd."
 
 
 def test_report_analysis_failure_quiet_mode(capsys):

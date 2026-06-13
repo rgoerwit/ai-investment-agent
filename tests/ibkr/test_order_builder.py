@@ -142,6 +142,9 @@ class TestRoundToLotSize:
     def test_korea_1_lot(self):
         assert round_to_lot_size(3, "005930.KS") == 3
 
+    def test_kosdaq_1_lot(self):
+        assert round_to_lot_size(3, "035420.KQ") == 3
+
     def test_zero_quantity(self):
         assert round_to_lot_size(0, "7203.T") == 0
 
@@ -187,6 +190,18 @@ class TestCalculateQuantity:
         )
         # 5% of 100k = 5000 USD / (2000 * 0.0067) = 5000 / 13.4 ≈ 373 → round to 300
         assert qty == 300
+
+    def test_fx_conversion_krw(self):
+        qty = calculate_quantity(
+            available_cash_usd=10000,
+            entry_price_local=70000,
+            fx_rate_to_usd=0.00075,  # KRW
+            size_pct=5.0,
+            portfolio_value_usd=100000,
+            yf_ticker="005930.KS",
+        )
+        # 5% of 100k = 5000 USD / (70000 * 0.00075) = 95.2 shares.
+        assert qty == 95
 
     def test_zero_entry_price(self):
         assert calculate_quantity(10000, 0, 1.0, 5.0, 100000, "AAPL") == 0

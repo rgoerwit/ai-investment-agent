@@ -802,7 +802,7 @@ function renderSettings() {
       <h3 class="section-title">Dashboard Settings</h3>
       <p class="muted">These settings control the next data load. Use startup flags when you want a one-off session override.</p>
       <form id="settings-form" class="settings-form">
-        <label>IBKR account ID<input name="account_id" value="${escapeHtmlAttr(settings.account_id || "")}" placeholder="U20958465"></label>
+        <label>IBKR account ID<input name="account_id" value="${escapeHtmlAttr(settings.account_id || "")}" placeholder="U1234567"></label>
         <label>Watchlist name<input name="watchlist_name" value="${escapeHtmlAttr(settings.watchlist_name || "")}"></label>
         <label>Data source
           <select name="read_only">

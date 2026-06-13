@@ -401,6 +401,75 @@ class TestArticleGeneration:
             assert "Test Article" in article
 
     @patch("src.article_writer.create_writer_llm")
+    def test_writer_injects_governance_card(self, mock_create_llm):
+        from src.article_writer import ArticleWriter
+
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(content="# Test Article\n\nBody.")
+        mock_create_llm.return_value = mock_llm
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            writer = ArticleWriter(
+                samples_dir=Path(tmpdir),
+                images_dir=Path(tmpdir),
+                use_github_urls=False,
+            )
+
+            writer.write(
+                ticker="009970.KS",
+                company_name="Youngone Holdings Co., Ltd.",
+                report_text="Report",
+                trade_date="2026-01-01",
+                governance_card={
+                    "ticker": "009970.KS",
+                    "canonical_name": "Youngone Holdings Co., Ltd.",
+                    "entity_role": "INTERMEDIATE_HOLDCO",
+                    "confidence": "clean",
+                    "related_listed": [{"ticker": "111770.KS"}],
+                },
+            )
+
+            user_msg = mock_llm.invoke.call_args[0][0][1].content
+            assert "ENTITY GOVERNANCE CARD" in user_msg
+            assert "111770.KS" in user_msg
+            assert "MANDATORY OPENING DISCLOSURE" in user_msg
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_writer_disclosure_directive_requires_nonstandard_structure(
+        self, mock_create_llm
+    ):
+        from src.article_writer import ArticleWriter
+
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(content="# Test Article\n\nBody.")
+        mock_create_llm.return_value = mock_llm
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            writer = ArticleWriter(
+                samples_dir=Path(tmpdir),
+                images_dir=Path(tmpdir),
+                use_github_urls=False,
+            )
+
+            writer.write(
+                ticker="7203.T",
+                company_name="Toyota Motor Corporation",
+                report_text="Report",
+                trade_date="2026-01-01",
+                governance_card={
+                    "ticker": "7203.T",
+                    "canonical_name": "Toyota Motor Corporation",
+                    "entity_role": "STANDALONE",
+                    "confidence": "clean",
+                    "related_listed": [],
+                },
+            )
+
+            user_msg = mock_llm.invoke.call_args[0][0][1].content
+            assert "ENTITY GOVERNANCE CARD" in user_msg
+            assert "MANDATORY OPENING DISCLOSURE" not in user_msg
+
+    @patch("src.article_writer.create_writer_llm")
     def test_saves_article_to_file(self, mock_create_llm):
         """Test that article is saved to specified output path."""
         from src.article_writer import ArticleWriter

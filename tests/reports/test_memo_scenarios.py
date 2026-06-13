@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 
 from src.reporting.memo import (
     build_memo,
@@ -195,7 +196,8 @@ def test_pm_prompt_includes_scenario_rationale_hint() -> None:
     data = json.loads(
         pathlib.Path("prompts/portfolio_manager.json").read_text(encoding="utf-8")
     )
-    assert data["version"] == "9.7"
+    # Pin format, not value — version bumps are routine.
+    assert re.match(r"^\d+\.\d+$", data["version"])
     msg = data["system_message"]
     assert "SCENARIO VALUATION HINT" in msg
     assert "BEAR_IV" in msg
@@ -204,3 +206,32 @@ def test_pm_prompt_includes_scenario_rationale_hint() -> None:
     assert "CONSULTANT_RESOLUTION" in msg
     assert "APAC_RESOLUTION" in msg
     assert "AUDITOR_RESOLUTION" in msg
+
+
+def test_pm_growth_transition_exception_is_not_single_pe_cliff() -> None:
+    data = json.loads(
+        pathlib.Path("prompts/portfolio_manager.json").read_text(encoding="utf-8")
+    )
+    msg = data["system_message"]
+    match = re.search(
+        r"2\. \*\*Growth Transition Score\*\*:(?P<section>.*?)"
+        r"\n3\. \*\*Liquidity FAIL\*\*",
+        msg,
+        flags=re.S,
+    )
+    assert match is not None
+    section = match.group("section")
+
+    assert "P/E <= 13.0" in section or "P/E ≤ 13.0" in section
+    assert "Data-Vacuum Exception" in section
+    assert "P/E < 12.0" not in section
+
+
+def test_senior_prompt_requires_missing_growth_input_note() -> None:
+    data = json.loads(
+        pathlib.Path("prompts/fundamentals_analyst.json").read_text(encoding="utf-8")
+    )
+    msg = data["system_message"]
+
+    assert "Growth Transition Detail" in msg
+    assert "Missing growth inputs: <fields or NONE>" in msg

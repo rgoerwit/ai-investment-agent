@@ -153,7 +153,13 @@ def _normalize_verdict(raw: str) -> str:
     return normed
 
 
+def _normalize_zone(raw: str | None) -> str:
+    """Normalize a PM risk-zone string to its canonical uppercase token."""
+    return (raw or "").strip().upper()
+
+
 _REJECT_VERDICTS = frozenset({"DO_NOT_INITIATE", "SELL", "REJECT"})
+SCREEN_REVIEW_DNI_ZONES = frozenset({"LOW", "MODERATE"})
 _PROFIT_TAKE_MIN_GAIN_PCT = 25.0
 _PROFIT_TAKE_RISK_LARGE_GAIN_PCT = 50.0
 _PROFIT_TAKE_UNKNOWN_TAX_SEVERE_GAIN_PCT = 60.0
@@ -335,6 +341,10 @@ def _classify_sell_type(analysis: AnalysisRecord | None, stop_breached: bool) ->
         return "STOP_BREACH"
     if analysis is None:
         return "HARD_REJECT"
+    # M&A take-private is event-driven, not fundamental — surface the deal
+    # context to the operator regardless of zone/score routing below.
+    if analysis.m_and_a_status == "ACTIVE_TENDER":
+        return "SPECIAL_SITUATION_EXIT"
     health_ok = (analysis.health_adj or 0.0) >= 50.0
     growth_ok = (analysis.growth_adj or 0.0) >= 50.0
     return "SOFT_REJECT" if (health_ok and growth_ok) else "HARD_REJECT"

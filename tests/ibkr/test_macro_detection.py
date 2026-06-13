@@ -568,3 +568,200 @@ class TestStoreMacroEventIfDetected:
                 _store_macro_event_if_detected([flag_25pct], [])
         stored = mock_store.store_event.call_args[0][0]
         assert stored.severity == "MEDIUM"
+
+
+class TestMacroFlagParsingContract:
+    """The CORRELATED_SELL_EVENT flag is parsed by regex in
+    _store_macro_event_if_detected (and rendered in the report banner).
+    Wording drift silently kills event persistence — pin parseability for
+    every trigger's real output.
+    """
+
+    @staticmethod
+    def _flag_for_trigger(trigger: str) -> str:
+        """Produce a REAL flag via compute_portfolio_health for each trigger."""
+        from src.ibkr.portfolio_health import compute_portfolio_health
+        from tests.ibkr.reconciler_cases import (
+            _make_hold_item_for_health,
+            _make_portfolio,
+            _make_sell_item_on_date,
+        )
+
+        if trigger == "window":
+            items = [
+                _make_sell_item_on_date(f"S{i}.T", "2026-03-05", conid=100 + i)
+                for i in range(6)
+            ] + [_make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(4)]
+        elif trigger == "cumulative":
+            from datetime import date as _d
+            from datetime import timedelta as _td
+
+            items = [
+                _make_sell_item_on_date(
+                    f"S{i:02d}.T",
+                    (_d(2025, 6, 1) + _td(days=20 * i)).isoformat(),
+                    conid=100 + i,
+                )
+                for i in range(9)
+            ] + [
+                _make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(11)
+            ]
+        else:  # drawdown_breadth
+            items = [
+                _make_hold_item_for_health(f"H{i:02d}.T", conid=100 + i)
+                for i in range(20)
+            ]
+            for item in items[:8]:
+                item.ibkr_position.current_price_local = 1700.0
+        positions = [i.ibkr_position for i in items if i.ibkr_position]
+        portfolio = _make_portfolio(value=len(positions) * 1000, cash=0)
+        portfolio.exchange_weights = {}
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        event_flags = [f for f in flags if "CORRELATED_SELL_EVENT" in f]
+        assert event_flags, f"scenario for {trigger} did not fire: {flags}"
+        assert f"[{trigger}]" in event_flags[0]
+        return event_flags[0]
+
+    # Keep in sync with _store_macro_event_if_detected in scripts/portfolio_manager.py
+    _STORAGE_REGEX = (
+        r"CORRELATED_SELL_EVENT:\s*(\d+) positions"
+        r".*?(?:within (\d+)d of|as of) (\d{4}-\d{2}-\d{2})"
+        r".*?\((\d+\.?\d*)%"
+    )
+
+    @pytest.mark.parametrize("trigger", ["window", "cumulative", "drawdown_breadth"])
+    def test_every_trigger_flag_matches_storage_regex(self, trigger):
+        import re
+
+        flag = self._flag_for_trigger(trigger)
+        m = re.search(self._STORAGE_REGEX, flag)
+        assert m, f"{trigger} flag not parseable: {flag!r}"
+        count, window, anchor, pct = m.groups()
+        assert int(count) > 0
+        if trigger == "window":
+            assert int(window) == 14
+        else:
+            assert window is None  # cumulative/drawdown use "as of DATE"
+        date.fromisoformat(anchor)  # valid ISO date
+        assert 0 < float(pct) <= 100
+
+    @pytest.mark.parametrize(
+        ("trigger", "required", "forbidden"),
+        [
+            ("window", "within 14d of", "as of"),
+            ("cumulative", "across the held book as of", "within 14d of"),
+            ("drawdown_breadth", "below entry as of", "changed verdict"),
+        ],
+    )
+    def test_flag_wording_is_truthful_per_trigger(self, trigger, required, forbidden):
+        """Cumulative evidence spans months and drawdown is an instantaneous
+        breadth measure — neither may claim 'within 14d of' (June 2026 fix)."""
+        flag = self._flag_for_trigger(trigger)
+        assert required in flag, flag
+        assert forbidden not in flag, flag
+
+    def test_characterization_includes_demoted_items(self):
+        """Demotion runs BEFORE storage: region/sector characterization must
+        see the demoted (action REVIEW) soft-rejects, not just leftovers."""
+        from tests.ibkr.reconciler_cases import _make_sell_item_on_date
+
+        demoted = []
+        for i in range(6):
+            item = _make_sell_item_on_date(f"JP{i}.T", "2026-06-01", conid=100 + i)
+            item.action = "REVIEW"  # as _apply_macro_demotions leaves it
+            demoted.append(item)
+        flag = (
+            "CORRELATED_SELL_EVENT: 6 positions changed verdict within 14d of"
+            " 2026-06-01 (50% of held positions) — probable macro event [window]."
+        )
+        store = MagicMock()
+        store.available = True
+        captured = {}
+
+        def fake_characterize(event_date, sell_items, correlation_pct, peak_count=0):
+            captured["n_items"] = len(sell_items)
+            return ("REGIONAL", ".T", "", "STRUCTURAL", "GEOPOLITICAL", "h", "d")
+
+        with (
+            patch("src.memory.create_macro_events_store", return_value=store),
+            patch(
+                "scripts.portfolio_manager._characterize_macro_event",
+                side_effect=fake_characterize,
+            ),
+        ):
+            _store_macro_event_if_detected([flag], demoted)
+
+        assert captured["n_items"] == 6  # demoted REVIEWs included
+        event = store.store_event.call_args.args[0]
+        assert event.primary_region == ".T"
+
+    def _run_store(self, flag, items=None, characterize=None):
+        store = MagicMock()
+        store.available = True
+        char = characterize or (
+            "GLOBAL",
+            "GLOBAL",
+            "",
+            "STRUCTURAL",
+            "GEOPOLITICAL",
+            "headline",
+            "detail",
+        )
+        with (
+            patch("src.memory.create_macro_events_store", return_value=store),
+            patch(
+                "scripts.portfolio_manager._characterize_macro_event",
+                return_value=char,
+            ),
+        ):
+            _store_macro_event_if_detected([flag], items or [])
+        return store
+
+    @pytest.mark.parametrize("trigger", ["window", "cumulative", "drawdown_breadth"])
+    def test_round_trip_each_trigger_reaches_store(self, trigger):
+        flag = self._flag_for_trigger(trigger)
+        store = self._run_store(flag)
+        store.store_event.assert_called_once()
+        event = store.store_event.call_args.args[0]
+        assert event.peak_count > 0
+        assert 0 < event.correlation_pct <= 1.0
+
+    def test_severity_high_at_exactly_40pct(self):
+        flag = (
+            "CORRELATED_SELL_EVENT: 10 positions changed verdict within 14d of"
+            " 2026-06-01 (40% of held positions) — probable macro event [window]."
+        )
+        event = self._run_store(flag).store_event.call_args.args[0]
+        assert event.severity == "HIGH"
+
+    def test_severity_medium_just_below_40pct(self):
+        flag = (
+            "CORRELATED_SELL_EVENT: 10 positions changed verdict within 14d of"
+            " 2026-06-01 (39% of held positions) — probable macro event [window]."
+        )
+        event = self._run_store(flag).store_event.call_args.args[0]
+        assert event.severity == "MEDIUM"
+
+    def test_unparseable_flag_is_fail_safe(self):
+        store = MagicMock()
+        store.available = True
+        with patch("src.memory.create_macro_events_store", return_value=store):
+            _store_macro_event_if_detected(
+                ["CORRELATED_SELL_EVENT: weird wording with no numbers"], []
+            )
+        store.store_event.assert_not_called()
+
+    def test_rolling_expiry_anchors_on_detection_date_for_old_events(self):
+        """Ongoing-Hormuz fix: a 90-day-old event date must not pre-age expiry."""
+        old_anchor = (date.today() - timedelta(days=90)).isoformat()
+        flag = (
+            f"CORRELATED_SELL_EVENT: 10 positions changed verdict within 14d of"
+            f" {old_anchor} (45% of held positions) — probable macro event [cumulative]."
+        )
+        event = self._run_store(flag).store_event.call_args.args[0]
+        expected = (
+            date.today() + timedelta(days=_EXPIRY_DAYS["GEOPOLITICAL"])
+        ).isoformat()
+        assert event.expiry == expected

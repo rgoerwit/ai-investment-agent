@@ -469,3 +469,67 @@ class TestChromaDbNumericWhereClause:
                 op_value = list(condition[key].values())[0]
                 assert op_value == 20260101
                 assert isinstance(op_value, int)
+
+
+class TestStoreEventExpiryExtension:
+    """Re-detection within the dedup window extends expiry (June 2026 fix)."""
+
+    def _mock_store_with_existing(self, expiry: str):
+        mock_col = MagicMock()
+        mock_col.count.return_value = 0
+        mock_col.get.return_value = {
+            "ids": ["macro_2026-03-05_2026-03-07"],
+            "metadatas": [
+                {
+                    "event_date": "2026-03-05",
+                    "expiry": expiry,
+                    "expiry_ts": _date_to_int(expiry),
+                }
+            ],
+        }
+        store = MacroEventsStore.__new__(MacroEventsStore)
+        store.available = True
+        store.collection = mock_col
+        return store, mock_col
+
+    def test_later_expiry_extends_existing_event(self):
+        store, col = self._mock_store_with_existing(expiry="2026-04-02")
+        event = _make_event(event_date="2026-03-06", expiry="2026-06-30")
+        result = store.store_event(event)
+        assert result is False  # deduped, not re-added
+        col.add.assert_not_called()
+        col.update.assert_called_once()
+        meta = col.update.call_args.kwargs["metadatas"][0]
+        assert meta["expiry"] == "2026-06-30"
+        assert meta["expiry_ts"] == _date_to_int("2026-06-30")
+
+    def test_earlier_expiry_does_not_shorten_existing_event(self):
+        store, col = self._mock_store_with_existing(expiry="2026-06-30")
+        event = _make_event(event_date="2026-03-06", expiry="2026-04-02")
+        store.store_event(event)
+        col.update.assert_not_called()
+
+    def test_extension_failure_is_non_fatal(self):
+        store, col = self._mock_store_with_existing(expiry="2026-04-02")
+        col.update.side_effect = RuntimeError("chroma down")
+        event = _make_event(event_date="2026-03-06", expiry="2026-06-30")
+        result = store.store_event(event)  # must not raise
+        assert result is False
+
+
+class TestActiveEventsExpiryBoundary:
+    def test_active_filter_is_strictly_greater_than_today(self):
+        """expiry == today is EXCLUDED — the override ends the day it expires."""
+        mock_col = MagicMock()
+        mock_col.count.return_value = 0
+        mock_col.get.return_value = {"ids": [], "metadatas": []}
+        store = MacroEventsStore.__new__(MacroEventsStore)
+        store.available = True
+        store.collection = mock_col
+
+        store.get_active_events()
+
+        where = mock_col.get.call_args.kwargs.get("where") or {}
+        today_ts = _date_to_int(date.today().isoformat())
+        # Strict $gt (not $gte): an event expiring today no longer demotes.
+        assert where.get("expiry_ts") == {"$gt": today_ts}

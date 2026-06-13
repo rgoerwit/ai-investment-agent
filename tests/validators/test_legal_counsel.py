@@ -592,3 +592,74 @@ class TestWithholdingTaxRates:
 
         # China has 10%
         assert WITHHOLDING_TAX_RATES["china"] == "10%"
+
+
+class _RecordingLogger:
+    """Minimal structlog stand-in (repo idiom; capture_logs is config-sensitive)."""
+
+    def __init__(self):
+        self.events = []
+
+    def debug(self, event, **kwargs):
+        self.events.append((event, kwargs))
+
+    def warning(self, event, **kwargs):
+        self.events.append((event, kwargs))
+
+    def error(self, event, **kwargs):
+        self.events.append((event, kwargs))
+
+
+class TestLegalJsonFallbackVisibility:
+    """Malformed legal JSON must warn operators, then still extract via regex."""
+
+    def test_malformed_json_warns_and_extracts_fallback_fields(self, monkeypatch):
+        from src.validators import supplemental_extractors
+
+        recorder = _RecordingLogger()
+        monkeypatch.setattr(supplemental_extractors, "logger", recorder)
+
+        malformed = '{"pfic_status": "PROBABLE", "vie_structure": "YES",}'
+        risks = RedFlagDetector.extract_legal_risks(malformed)
+
+        assert risks["pfic_status"] == "PROBABLE"
+        assert risks["vie_structure"] == "YES"
+        warnings = [
+            kwargs
+            for event, kwargs in recorder.events
+            if event == "legal_report_json_parse_failed_using_regex_fallback"
+        ]
+        assert len(warnings) == 1
+        assert "report_prefix" in warnings[0]
+
+    def test_report_prefix_in_warning_is_redacted(self, monkeypatch):
+        from src.validators import supplemental_extractors
+
+        recorder = _RecordingLogger()
+        monkeypatch.setattr(supplemental_extractors, "logger", recorder)
+
+        malformed = '{"pfic_evidence": "see https://x.test/doc?apikey=TOPSECRET456",}'
+        RedFlagDetector.extract_legal_risks(malformed)
+
+        warnings = [
+            kwargs
+            for event, kwargs in recorder.events
+            if event == "legal_report_json_parse_failed_using_regex_fallback"
+        ]
+        assert len(warnings) == 1
+        assert "TOPSECRET456" not in warnings[0]["report_prefix"]
+
+    def test_valid_json_does_not_warn(self, monkeypatch):
+        from src.validators import supplemental_extractors
+
+        recorder = _RecordingLogger()
+        monkeypatch.setattr(supplemental_extractors, "logger", recorder)
+
+        valid = '{"pfic_status": "CLEAN", "vie_structure": "NO", "country": "Japan"}'
+        risks = RedFlagDetector.extract_legal_risks(valid)
+
+        assert risks["pfic_status"] == "CLEAN"
+        assert not any(
+            event == "legal_report_json_parse_failed_using_regex_fallback"
+            for event, _ in recorder.events
+        )

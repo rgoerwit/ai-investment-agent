@@ -535,6 +535,142 @@ class TestPanicMode:
         assert fetcher._fetch_all_sources_parallel.await_count == 2
 
     @pytest.mark.asyncio
+    async def test_sibling_suffix_rescue_accepts_taiwan_otc_candidate(self, fetcher):
+        fetcher._resolve_ticker_via_search = AsyncMock(return_value=None)
+        fetcher._fetch_all_sources_parallel = AsyncMock(
+            side_effect=[
+                {"yfinance": None, "yahooquery": None, "fmp": None},
+                {
+                    "yfinance": {
+                        "symbol": "1264.TWO",
+                        "currentPrice": 271.0,
+                        "currency": "TWD",
+                        "longName": "Tehmag Foods Corporation",
+                        "industry": "Packaged Foods",
+                        "sector": "Consumer Staples",
+                        "fiftyTwoWeekHigh": 300.0,
+                        "fiftyTwoWeekLow": 220.0,
+                    }
+                },
+            ]
+        )
+        fetcher._fetch_tavily_gaps = AsyncMock(return_value={})
+        fetcher._probe_ibkr_security = AsyncMock(
+            return_value=SimpleNamespace(
+                configured=True,
+                identity_confidence="VERIFIED",
+                resolved_yf_ticker="1264.TWO",
+                company_name="Tehmag Foods Corporation",
+                market_data_availability="R",
+                error_kind=None,
+            )
+        )
+
+        result = await fetcher.get_financial_metrics("1264.TW")
+
+        assert result["symbol"] == "1264.TWO"
+        assert result["currentPrice"] == 271.0
+        assert result["_ticker_rescue_original"] == "1264.TW"
+        assert result["_ticker_rescue_resolved"] == "1264.TWO"
+        assert result["_ticker_rescue_reason"] == "sibling_suffix_data_vacuum"
+        assert result["_ticker_rescue_ibkr_identity_confidence"] == "VERIFIED"
+        fetcher._probe_ibkr_security.assert_awaited_once_with("1264.TWO")
+        assert fetcher._fetch_all_sources_parallel.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_sibling_suffix_rescue_rejects_ibkr_unverified_company(self, fetcher):
+        probe = SimpleNamespace(
+            configured=True,
+            identity_confidence="UNVERIFIED",
+            resolved_yf_ticker=None,
+            company_name=None,
+            market_data_availability=None,
+            error_kind="NO_MATCH",
+        )
+        fetcher._resolve_ticker_via_search = AsyncMock(return_value=None)
+        fetcher._fetch_all_sources_parallel = AsyncMock(
+            side_effect=[
+                {"yfinance": None, "yahooquery": None, "fmp": None},
+                {
+                    "yfinance": {
+                        "symbol": "1264.TW",
+                        "currentPrice": 271.0,
+                        "currency": "TWD",
+                        "longName": "Different TWSE Company",
+                        "industry": "Electronics",
+                    }
+                },
+            ]
+        )
+        fetcher._fetch_tavily_gaps = AsyncMock(return_value={})
+        fetcher._probe_ibkr_security = AsyncMock(return_value=probe)
+
+        result = await fetcher.get_financial_metrics("1264.TWO")
+
+        assert "_ticker_rescue_resolved" not in result
+        assert fetcher._probe_ibkr_security.await_args_list[0].args == ("1264.TW",)
+
+    @pytest.mark.asyncio
+    async def test_sibling_suffix_rescue_not_attempted_when_original_has_basics(
+        self, fetcher
+    ):
+        fetcher._resolve_ticker_via_search = AsyncMock(return_value=None)
+        fetcher._fetch_all_sources_parallel = AsyncMock(
+            return_value={
+                "yfinance": {
+                    "symbol": "1264.TW",
+                    "currentPrice": 271.0,
+                    "currency": "TWD",
+                    "longName": "TWSE Listed Company",
+                    "industry": "Packaged Foods",
+                    "sector": "Consumer Staples",
+                    "fiftyTwoWeekHigh": 300.0,
+                    "fiftyTwoWeekLow": 220.0,
+                }
+            }
+        )
+        fetcher._fetch_tavily_gaps = AsyncMock(return_value={})
+        fetcher._probe_ibkr_security = AsyncMock()
+
+        result = await fetcher.get_financial_metrics("1264.TW")
+
+        assert "_ticker_rescue_resolved" not in result
+        assert fetcher._fetch_all_sources_parallel.await_count == 1
+        fetcher._probe_ibkr_security.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_sibling_suffix_rescue_rejects_candidate_without_price(self, fetcher):
+        probe = SimpleNamespace(
+            identity_confidence="UNVERIFIED",
+            resolved_yf_ticker=None,
+            company_name=None,
+            currency=None,
+            market_data_availability=None,
+            last_price=None,
+            error_kind="NO_MATCH",
+        )
+        fetcher._resolve_ticker_via_search = AsyncMock(return_value=None)
+        fetcher._fetch_all_sources_parallel = AsyncMock(
+            side_effect=[
+                {"yfinance": None, "yahooquery": None, "fmp": None},
+                {
+                    "yfinance": {
+                        "symbol": "1264.TWO",
+                        "currency": "TWD",
+                        "longName": "Tehmag Foods Corporation",
+                    }
+                },
+            ]
+        )
+        fetcher._fetch_tavily_gaps = AsyncMock(return_value={})
+        fetcher._probe_ibkr_security = AsyncMock(return_value=probe)
+
+        result = await fetcher.get_financial_metrics("1264.TW")
+
+        assert "_ticker_rescue_resolved" not in result
+        fetcher._probe_ibkr_security.assert_awaited_once_with("1264.TW")
+
+    @pytest.mark.asyncio
     async def test_ibkr_rescue_does_not_override_existing_statement_fields(
         self, fetcher
     ):
@@ -953,3 +1089,121 @@ class TestQuoteUnitNormalization:
         assert "currency_alias:GBp" in result["_unit_normalization"]["evidence"]
         assert "financial_currency_match" in result["_unit_normalization"]["evidence"]
         assert result["_sources_used"] == ["yfinance"]
+
+
+class TestMergePolicyConstantsCanonical:
+    """fetcher must consume merge_policy's field sets, not redefine them."""
+
+    def test_quote_price_fields_identity(self):
+        from src.data import fetcher, merge_policy
+
+        assert fetcher.QUOTE_PRICE_FIELDS is merge_policy.QUOTE_PRICE_FIELDS
+
+    def test_fetcher_does_not_shadow_merge_policy_constants(self):
+        import ast
+        import inspect
+
+        from src.data import fetcher, merge_policy
+
+        tree = ast.parse(inspect.getsource(fetcher))
+        module_level_names = {
+            target.id
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+        canonical = {
+            "PERCENT_LIKE_FIELDS",
+            "NON_FINANCIAL_METADATA_FIELDS",
+            "NON_ACTIONABLE_CONFLICT_FIELDS",
+            "CRITICAL_ANALYSIS_FIELDS",
+            "ANALYSIS_CRITICAL_CONFLICT_FIELDS",
+            "QUOTE_PRICE_FIELDS",
+            "SOURCE_QUALITY",
+            "FORWARD_PE_OUTLIER_THRESHOLD",
+            "FORWARD_PE_REFERENCE_MAX",
+            "FORWARD_PE_OUTLIER_RATIO",
+        }
+        shadowed = canonical & module_level_names
+        assert not shadowed, f"fetcher redefines merge_policy constants: {shadowed}"
+        assert canonical <= set(dir(merge_policy))
+
+
+class TestHistoryFetchFailureLogging:
+    """First failure per ticker is operator-visible; repeats demote to debug."""
+
+    @pytest.mark.asyncio
+    async def test_data_unavailable_warns_then_demotes(self, monkeypatch):
+        class _Recorder:
+            def __init__(self):
+                self.events = []
+
+            def debug(self, event, **kw):
+                self.events.append(("debug", event, kw))
+
+            def warning(self, event, **kw):
+                self.events.append(("warning", event, kw))
+
+            def error(self, event, **kw):
+                self.events.append(("error", event, kw))
+
+            def info(self, event, **kw):
+                self.events.append(("info", event, kw))
+
+        from src.data import fetcher as fetcher_module
+
+        recorder = _Recorder()
+        monkeypatch.setattr(fetcher_module, "logger", recorder)
+
+        f = SmartMarketDataFetcher()
+
+        class YFPricesMissingError(Exception):
+            pass
+
+        with patch("yfinance.Ticker") as mock_ticker:
+            mock_ticker.return_value.history.side_effect = YFPricesMissingError(
+                "$1264.TW: possibly delisted; no price data found"
+            )
+            await f.get_historical_prices("1264.TW")
+            await f.get_historical_prices("1264.TW")
+
+        history_events = [
+            (lvl, kw) for lvl, ev, kw in recorder.events if ev == "history_fetch_failed"
+        ]
+        assert len(history_events) == 2
+        assert history_events[0][0] == "warning"  # expected absence, not error
+        assert history_events[0][1]["failure_kind"] == "data_unavailable"
+        assert history_events[1][0] == "debug"  # repeat demoted
+        assert history_events[1][1]["repeated"] is True
+
+
+class TestSearchResolutionNumericGuard:
+    """Search-based ticker resolution is for ALPHA mnemonics only (June 2026:
+    delisted numeric 1264.TW was substituted with unrelated 8341.TW scraped
+    from a Tavily result page, producing a wrong-company analysis)."""
+
+    @pytest.mark.asyncio
+    async def test_numeric_base_never_search_resolved(self):
+        f = SmartMarketDataFetcher()
+        f.tavily_client = MagicMock()  # would be consulted if guard missing
+        resolved = await f._resolve_ticker_via_search("1264.TW")
+        assert resolved is None
+        f.tavily_client.search.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_alpha_mnemonic_still_search_resolved(self):
+        f = SmartMarketDataFetcher()
+        f.tavily_client = MagicMock()
+        f.tavily_client.search.return_value = {
+            "results": [{"content": "Padini Holdings trades as 7052.KL", "title": ""}]
+        }
+        resolved = await f._resolve_ticker_via_search("PADINI.KL")
+        assert resolved == "7052.KL"
+
+    @pytest.mark.asyncio
+    async def test_suffixless_input_never_search_resolved(self):
+        f = SmartMarketDataFetcher()
+        f.tavily_client = MagicMock()
+        resolved = await f._resolve_ticker_via_search("AAPL")
+        assert resolved is None

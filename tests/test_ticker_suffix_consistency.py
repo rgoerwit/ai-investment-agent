@@ -14,6 +14,11 @@ from src.exchange_metadata import (
     EXCHANGES_BY_SUFFIX,
     IBKR_EXCHANGE_ALIASES,
     IBKR_TO_YFINANCE,
+    ExchangeInfo,
+    format_ibkr_symbol,
+    format_yahoo_symbol,
+    padded_numeric_suffixes,
+    validate_exchange_metadata,
 )
 from src.ticker_policy import FRAGILE_EXCHANGE_SUFFIXES
 
@@ -45,7 +50,61 @@ class TestIbkrMapConsistency:
         assert bad == {}, f"IBKR aliases point to unknown suffixes: {bad}"
 
 
+class TestExchangeMetadataValidation:
+    def test_rejects_non_positive_numeric_width(self, monkeypatch):
+        monkeypatch.setitem(
+            EXCHANGES_BY_SUFFIX,
+            ".BAD",
+            ExchangeInfo(".BAD", "Bad Exchange", "Nowhere", "BADX", "BAD", 0),
+        )
+        with pytest.raises(ValueError, match="Numeric symbol width"):
+            validate_exchange_metadata()
+
+    def test_rejects_strip_mode_without_width(self, monkeypatch):
+        monkeypatch.setitem(
+            EXCHANGES_BY_SUFFIX,
+            ".BAD",
+            ExchangeInfo(
+                ".BAD",
+                "Bad Exchange",
+                "Nowhere",
+                "BADX",
+                "BAD",
+                ibkr_numeric_symbol_mode="strip_leading_zeroes",
+            ),
+        )
+        with pytest.raises(ValueError, match="strip mode requires numeric width"):
+            validate_exchange_metadata()
+
+
 class TestTickerNormalization:
+    def test_metadata_formats_verified_numeric_symbol_cases(self):
+        assert format_yahoo_symbol("5", ".HK") == "0005"
+        assert format_ibkr_symbol("0005", ".HK") == "5"
+        assert format_yahoo_symbol("5930", ".KS") == "005930"
+        assert format_ibkr_symbol("5930", ".KS") == "005930"
+        assert format_yahoo_symbol("35420", ".KQ") == "035420"
+        assert format_ibkr_symbol("35420", ".KQ") == "035420"
+
+    def test_metadata_leaves_mixed_and_unspecified_symbols_unchanged(self):
+        assert format_yahoo_symbol("ABC123", ".KS") == "ABC123"
+        assert format_ibkr_symbol("ABC123", ".KS") == "ABC123"
+        assert format_yahoo_symbol("ASML", ".AS") == "ASML"
+        assert format_ibkr_symbol("ASML", ".AS") == "ASML"
+
+    def test_padded_numeric_suffixes_match_metadata(self):
+        # Property test: the helper's output must agree with the underlying
+        # metadata. Hard-coding the expected set would force an unrelated edit
+        # every time a new padded exchange (e.g. China) is enabled.
+        derived = padded_numeric_suffixes()
+        from_metadata = {
+            suffix
+            for suffix, info in EXCHANGES_BY_SUFFIX.items()
+            if info.numeric_symbol_width is not None
+        }
+        assert derived == from_metadata
+        assert derived  # at minimum HK/KS/KQ are populated today
+
     @pytest.mark.parametrize(
         ("raw", "expected"),
         [
@@ -82,7 +141,12 @@ class TestIbkrRoundTrip:
             ("2330", "TWSE", "2330.TW"),
             ("7203", "TSE", "7203.T"),
             ("5", "SEHK", "0005.HK"),
-            ("5934", "KRX", "5934.KS"),
+            ("5934", "KRX", "005934.KS"),
+            ("005930", "KRX", "005930.KS"),
+            ("10130", "KRX", "010130.KS"),
+            ("001060", "KRX", "001060.KS"),
+            ("5930", "KSE", "005930.KS"),
+            ("35420", "KOSDAQ", "035420.KQ"),
             ("SAP", "IBIS2", "SAP.DE"),
             ("ANDR", "VSE", "ANDR.VI"),
         ],
@@ -92,6 +156,12 @@ class TestIbkrRoundTrip:
 
         ticker = Ticker.from_ibkr(symbol=symbol, exchange=exchange)
         assert ticker.yf == expected_yf
+
+    def test_krw_currency_fallback_defaults_to_ks(self):
+        from src.ibkr.ticker import Ticker
+
+        ticker = Ticker.from_ibkr(symbol="5930", exchange="", currency="KRW")
+        assert ticker.yf == "005930.KS"
 
 
 class TestRetrospectiveMapCoverage:

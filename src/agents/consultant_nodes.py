@@ -12,6 +12,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.types import RunnableConfig
 
 from src.config import config as settings_config
+from src.error_safety import redact_sensitive_text, summarize_exception
 from src.runtime_diagnostics import ArtifactStatus, failure_artifact, success_artifact
 from src.runtime_services import get_current_tool_service
 from src.tooling.runtime import ToolInvocation
@@ -27,6 +28,7 @@ from .forensic_repair import (
     canonicalize_forensic_auditor_output,
     repair_forensic_auditor_output,
 )
+from .governance_prompt import governance_block, governance_card
 from .output_validation import (
     log_output_diagnostics,
     log_truncation_diagnostic,
@@ -327,12 +329,26 @@ Pre-Screening Result: {state.get("pre_screening_result", "UNKNOWN")}
         company_warning = (
             "" if company_resolved else f"\n{support._UNRESOLVED_NAME_WARNING}"
         )
+
+        governance_directive = ""
+
+        card_obj = governance_card(state)
+        if card_obj:
+            if card_obj.confidence == "conflict":
+                governance_directive = (
+                    "\n\nGOVERNANCE RECONCILIATION DIRECTIVE: The governance card "
+                    "reports a conflict across sources on entity_role. Reconcile this "
+                    "explicitly before making any quantitative claim that depends on "
+                    "scope (consolidated vs separate), payout mechanics, or vehicle choice. "
+                    "Cite the primary source you trust and identify the source you reject."
+                )
+
         prompt = f"""{agent_prompt.system_message}
 
 ANALYSIS DATE: {support._format_date_with_fy_hint(current_date)}
 TICKER: {ticker}
 COMPANY: {company_name}{company_warning}
-{_CONSULTANT_QUICK_SCREENING_ADDENDUM if quick_mode else ""}
+{_CONSULTANT_QUICK_SCREENING_ADDENDUM if quick_mode else ""}{governance_block(state)}{governance_directive}
 
 {all_context}
 
@@ -468,12 +484,16 @@ Provide your independent consultant review."""
             return result
         except Exception as exc:
             if isinstance(exc, TimeoutError):
-                logger.error("consultant_node_timeout", ticker=ticker, error=str(exc))
+                logger.error(
+                    "consultant_node_timeout",
+                    ticker=ticker,
+                    **summarize_exception(exc, operation="consultant_node_timeout"),
+                )
             else:
                 logger.error(
                     "consultant_node_error",
                     ticker=ticker,
-                    error=str(exc),
+                    **summarize_exception(exc, operation="consultant_node_error"),
                     exc_info=True,
                 )
             result = failure_artifact(
@@ -548,7 +568,7 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
                 response = await _invoke_agent_loop_llm(
                     llm,
                     messages,
-                    context="legal_counsel",
+                    context=agent_prompt.agent_name,
                 )
                 tool_calls = getattr(response, "tool_calls", None)
 
@@ -589,7 +609,9 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
                                 "legal_counsel_tool_failed",
                                 ticker=ticker,
                                 tool=tool_call["name"],
-                                error=str(tool_err),
+                                **summarize_exception(
+                                    tool_err, operation="legal_counsel_tool_failed"
+                                ),
                             )
                             tool_output = f"TOOL_ERROR: {tool_err}"
                     else:
@@ -642,7 +664,7 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
                 logger.warning(
                     "legal_counsel_invalid_json",
                     ticker=ticker,
-                    response_preview=response_str[:200],
+                    response_preview=redact_sensitive_text(response_str, max_chars=200),
                 )
                 fallback_report = _build_legal_fallback_report(
                     ticker=ticker,
@@ -662,7 +684,7 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
             logger.error(
                 "legal_counsel_error",
                 ticker=ticker,
-                error=str(exc),
+                **summarize_exception(exc, operation="legal_counsel_error"),
                 exc_info=True,
             )
             fallback_report = _build_legal_fallback_report(
@@ -777,7 +799,7 @@ Perform a forensic audit using your tools."""
                 response = await _invoke_agent_loop_llm(
                     active_llm,
                     llm_input,
-                    context="global_forensic_auditor",
+                    context=agent_prompt.agent_name,
                 )
                 tool_calls = getattr(response, "tool_calls", None)
 
@@ -817,7 +839,9 @@ Perform a forensic audit using your tools."""
                                 "auditor_tool_failed",
                                 ticker=ticker,
                                 tool=tool_call["name"],
-                                error=str(tool_err),
+                                **summarize_exception(
+                                    tool_err, operation="auditor_tool_failed"
+                                ),
                             )
                             tool_output = f"TOOL_ERROR: {tool_err}"
                     else:
@@ -887,7 +911,9 @@ Perform a forensic audit using your tools."""
                     "auditor_invalid_structure",
                     ticker=ticker,
                     missing_sections=validation["missing"],
-                    output_preview=response_str[:400].replace("\n", " "),
+                    output_preview=redact_sensitive_text(
+                        response_str[:400].replace("\n", " "), max_chars=200
+                    ),
                 )
                 result = failure_artifact(
                     "auditor_report",
@@ -911,7 +937,7 @@ Perform a forensic audit using your tools."""
             logger.error(
                 "auditor_error",
                 ticker=ticker,
-                error=error_str,
+                reason=error_str,
                 exc_info=True,
             )
 
@@ -956,7 +982,7 @@ VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
                 logger.warning(
                     "auditor_param_error_retry",
                     ticker=ticker,
-                    error=error_str,
+                    reason=error_str,
                 )
                 try:
                     fallback_llm = _create_openai_responses_fallback_llm(llm)
@@ -980,7 +1006,7 @@ VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
                     logger.error(
                         "auditor_retry_failed",
                         ticker=ticker,
-                        error=str(retry_exc),
+                        reason=str(retry_exc),
                         exc_info=True,
                     )
 

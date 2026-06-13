@@ -1000,5 +1000,176 @@ class TestStrictGraphWiring:
         assert call_kwargs.get("strict_mode") is True
 
 
+class TestPostResearchSync:
+    """Regression coverage for the post-research fan-in before Trader."""
+
+    @pytest.mark.asyncio
+    async def test_trader_tail_runs_once_after_valuation_and_consultant_complete(
+        self, monkeypatch
+    ):
+        import src.graph.components as components
+        from src.runtime_diagnostics import success_artifact
+
+        calls: list[str] = []
+
+        def artifact_node(field: str, value: str):
+            async def _node(state, config):
+                calls.append(field)
+                return success_artifact(field, value, provider="test")
+
+            return _node
+
+        def analyst_node(_llm, _agent_key, _tools, output_field, **_kwargs):
+            return artifact_node(output_field, f"{output_field} done")
+
+        async def validator_node(state, config):
+            calls.append("validator")
+            return {"pre_screening_result": "PASS"}
+
+        def researcher_node(_llm, _memory, agent_key, round_num=1):
+            prefix = "bull" if agent_key == "bull_researcher" else "bear"
+            field = f"{prefix}_round{round_num}"
+
+            async def _node(state, config):
+                calls.append(field)
+                return {
+                    "investment_debate_state": {
+                        field: f"{field} done",
+                        "count": state.get("investment_debate_state", {}).get(
+                            "count", 0
+                        )
+                        + 1,
+                    }
+                }
+
+            return _node
+
+        async def research_manager_node(state, config):
+            calls.append("research_manager")
+            return {"investment_plan": "RECOMMENDATION: BUY"}
+
+        def risk_node(_llm, agent_key):
+            field = {
+                "risky_analyst": "current_risky_response",
+                "safe_analyst": "current_safe_response",
+                "neutral_analyst": "current_neutral_response",
+            }[agent_key]
+
+            async def _node(state, config):
+                calls.append(agent_key)
+                return {
+                    "risk_debate_state": {
+                        field: f"{agent_key} done",
+                        "latest_speaker": agent_key,
+                    }
+                }
+
+            return _node
+
+        monkeypatch.setattr(components, "_create_legacy_memories", lambda: (None,) * 5)
+        monkeypatch.setattr(components, "_is_auditor_enabled", lambda: True)
+        monkeypatch.setattr(components, "create_quick_thinking_llm", lambda **_: Mock())
+        monkeypatch.setattr(components, "create_deep_thinking_llm", lambda **_: Mock())
+        monkeypatch.setattr(components, "get_consultant_llm", lambda **_: Mock())
+        monkeypatch.setattr(components, "create_auditor_llm", lambda **_: Mock())
+        monkeypatch.setattr(
+            components, "create_apac_specialist_llm", lambda **_: Mock()
+        )
+        monkeypatch.setattr(components, "create_analyst_node", analyst_node)
+        monkeypatch.setattr(
+            components,
+            "create_legal_counsel_node",
+            lambda *_args, **_kwargs: artifact_node("legal_report", "legal done"),
+        )
+        monkeypatch.setattr(
+            components,
+            "create_auditor_node",
+            lambda *_args, **_kwargs: artifact_node("auditor_report", "auditor done"),
+        )
+        monkeypatch.setattr(
+            components,
+            "create_financial_health_validator_node",
+            lambda **_kwargs: validator_node,
+        )
+        monkeypatch.setattr(components, "create_researcher_node", researcher_node)
+        monkeypatch.setattr(
+            components,
+            "create_research_manager_node",
+            lambda *_args, **_kwargs: research_manager_node,
+        )
+        monkeypatch.setattr(
+            components,
+            "create_valuation_calculator_node",
+            lambda *_args, **_kwargs: artifact_node(
+                "valuation_params", "valuation done"
+            ),
+        )
+        monkeypatch.setattr(
+            components,
+            "create_apac_specialist_node",
+            lambda *_args, **_kwargs: artifact_node(
+                "apac_regional_report", "apac done"
+            ),
+        )
+        monkeypatch.setattr(
+            components,
+            "create_consultant_node",
+            lambda *_args, **_kwargs: artifact_node(
+                "consultant_review", "consultant done"
+            ),
+        )
+        monkeypatch.setattr(
+            components,
+            "create_trader_node",
+            lambda *_args, **_kwargs: artifact_node(
+                "trader_investment_plan", "trader done"
+            ),
+        )
+        monkeypatch.setattr(components, "create_risk_debater_node", risk_node)
+        monkeypatch.setattr(
+            components,
+            "create_portfolio_manager_node",
+            lambda *_args, **_kwargs: artifact_node("final_trade_decision", "pm done"),
+        )
+        monkeypatch.setattr(
+            components,
+            "create_chart_generator_node",
+            lambda *_args, **_kwargs: (
+                lambda _state, _config=None: {"chart_paths": {}}
+            ),
+        )
+        monkeypatch.setattr(
+            components,
+            "create_agent_tool_node",
+            lambda *_args, **_kwargs: (lambda _state, _config: {}),
+        )
+
+        for name in (
+            "get_market_tools",
+            "get_technical_tools",
+            "get_sentiment_tools",
+            "get_news_tools",
+            "get_junior_fundamental_tools",
+            "get_senior_fundamental_tools",
+            "get_foreign_language_tools",
+            "get_legal_tools",
+            "get_value_trap_tools",
+            "get_all_tools",
+        ):
+            monkeypatch.setattr(components.toolkit, name, lambda: [])
+
+        from src.graph import create_trading_graph
+
+        graph = create_trading_graph(enable_memory=False, ticker="TEST")
+        result = await graph.ainvoke({"company_of_interest": "TEST"})
+
+        assert result["final_trade_decision"] == "pm done"
+        assert calls.count("trader_investment_plan") == 1
+        assert calls.count("risky_analyst") == 1
+        assert calls.count("safe_analyst") == 1
+        assert calls.count("neutral_analyst") == 1
+        assert calls.count("final_trade_decision") == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

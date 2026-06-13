@@ -201,6 +201,53 @@ def test_create_refresh_job_enqueues_ticker_list(client):
     assert jobs[0]["scope"] == "ticker_list"
 
 
+def test_create_refresh_job_normalizes_korean_ticker_list(client):
+    response = client.post(
+        "/api/refresh/jobs",
+        json={
+            "scope": "ticker_list",
+            "tickers": [
+                "5930.KS",
+                "35420.KQ",
+                "5.HK",
+                "5930:KRX",
+                "005930.KS",
+                "10130.KS",
+                "001060.KS",
+            ],
+        },
+    )
+
+    assert response.status_code == 202
+    payload = response.get_json()
+    assert payload["tickers"] == [
+        "005930.KS",
+        "035420.KQ",
+        "0005.HK",
+        "010130.KS",
+        "001060.KS",
+    ]
+    job = client.get(f"/api/refresh/jobs/{payload['job_id']}").get_json()
+    assert [row["ticker"] for row in job["tickers"]] == [
+        "0005.HK",
+        "001060.KS",
+        "005930.KS",
+        "010130.KS",
+        "035420.KQ",
+    ]
+
+
+def test_create_refresh_job_preserves_unknown_suffix(client):
+    response = client.post(
+        "/api/refresh/jobs",
+        json={"scope": "ticker_list", "tickers": [" FOO.XX "]},
+    )
+
+    assert response.status_code == 202
+    payload = response.get_json()
+    assert payload["tickers"] == ["FOO.XX"]
+
+
 def test_create_refresh_job_requires_snapshot_for_scope(tmp_path: Path):
     client, _snapshot_service = _make_client(
         tmp_path,
@@ -266,7 +313,7 @@ def test_settings_round_trip(client):
     response = client.post(
         "/api/settings",
         json={
-            "account_id": "U20958465",
+            "account_id": "U1234567",
             "watchlist_name": "alpha",
             "read_only": True,
             "max_age_days": 21,
@@ -274,7 +321,7 @@ def test_settings_round_trip(client):
     )
     assert response.status_code == 200
     payload = client.get("/api/settings").get_json()
-    assert payload["account_id"] == "U20958465"
+    assert payload["account_id"] == "U1234567"
     assert payload["watchlist_name"] == "alpha"
     assert payload["read_only"] is True
     assert payload["max_age_days"] == 21
@@ -311,7 +358,7 @@ def test_settings_save_preserves_startup_overrides_on_partial_update(
             last_error=None,
         ),
         preferences_override={
-            "account_id": "U20958465",
+            "account_id": "U1234567",
             "read_only": True,
             "watchlist_name": "default watchlist",
         },
@@ -321,7 +368,7 @@ def test_settings_save_preserves_startup_overrides_on_partial_update(
     assert response.status_code == 200
     payload = response.get_json()
 
-    assert payload["account_id"] == "U20958465"
+    assert payload["account_id"] == "U1234567"
     assert payload["read_only"] is True
     assert payload["watchlist_name"] == "default watchlist"
     assert payload["notes"] == "operator note"

@@ -10,8 +10,9 @@ _NUMBER_TOKEN_PATTERN = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?")
 def _compile_named_block_pattern(block_name: str) -> re.Pattern[str]:
     escaped_name = re.escape(block_name)
     return re.compile(
-        rf"### --- START {escaped_name}[^\n]*---(.+?)### --- END {escaped_name} ---",
-        re.DOTALL,
+        rf"(?m)^[ \t]*#{{3,}}\s*---\s*START\s+{escaped_name}\b[^\n]*\s*$"
+        rf"(.+?)^[ \t]*#{{3,}}\s*---\s*END\s+{escaped_name}\b[^\n]*\s*$",
+        re.DOTALL | re.MULTILINE,
     )
 
 
@@ -20,6 +21,7 @@ _LEGACY_DATA_BLOCK_HEADER_PATTERN = re.compile(
     r"(?m)^### DATA_BLOCK(?:\s*\([^\n]*\))?\s*$"
 )
 _DASHED_DATA_BLOCK_HEADER_PATTERN = re.compile(r"(?m)^###\s*---\s*DATA_BLOCK\s*---\s*$")
+# Intentionally narrow: this pairs only with the legacy ### --- DATA_BLOCK --- opener.
 _EXPLICIT_DATA_BLOCK_END_PATTERN = re.compile(
     r"(?m)^###\s*---\s*END DATA_BLOCK\s*---\s*$"
 )
@@ -209,6 +211,16 @@ def extract_block_field_from_text(
     block_text: str | None, field_name: str
 ) -> str | None:
     """Extract a normalized field value from an already extracted block body."""
+    value = extract_block_field_from_text_raw(block_text, field_name)
+    if value is None:
+        return None
+    return None if value.upper() in _NULL_TOKENS else value
+
+
+def extract_block_field_from_text_raw(
+    block_text: str | None, field_name: str
+) -> str | None:
+    """Extract a literal field value from an already extracted block body."""
     if not block_text or not isinstance(block_text, str):
         return None
 
@@ -217,8 +229,33 @@ def extract_block_field_from_text(
     if not match:
         return None
 
-    value = match.group(1).strip()
-    return None if value.upper() in _NULL_TOKENS else value
+    return match.group(1).strip()
+
+
+def extract_block_text_value(block_text: str, field_name: str) -> str:
+    """Extract a literal field value; convenience wrapper for .upper() call sites."""
+    return extract_block_field_from_text_raw(block_text, field_name) or ""
+
+
+def replace_or_append_block_line(body: str, field_name: str, value: str) -> str:
+    """Replace a KEY: value line in a block body, or append it if missing."""
+    pattern = re.compile(rf"(?m)^{re.escape(field_name)}:\s*.*$")
+    replacement = f"{field_name}: {value}"
+    if pattern.search(body):
+        return pattern.sub(replacement, body, count=1)
+    suffix = "" if body.endswith("\n") else "\n"
+    return f"{body}{suffix}{replacement}"
+
+
+def has_block_field_value(block_text: str, field_name: str) -> bool:
+    """Return True when a field exists, including fields set to N/A."""
+    return bool(extract_block_text_value(block_text, field_name))
+
+
+def has_non_na_block_field_value(block_text: str, field_name: str) -> bool:
+    """Return True when a field exists and is not a null token."""
+    value = extract_block_text_value(block_text, field_name)
+    return bool(value) and value.upper() not in _NULL_TOKENS
 
 
 def extract_block_number_from_text(
@@ -288,7 +325,7 @@ def normalize_structured_block_boundaries(report: str | None) -> str | None:
     normalized = report
     for block_name in _STRUCTURED_BLOCK_BOUNDARY_NAMES:
         normalized = re.sub(
-            rf"(### --- END {re.escape(block_name)} ---)(?=###\s)",
+            rf"(#{{3,}}[ \t]*---[ \t]*END[ \t]+{re.escape(block_name)}[ \t]*---[ \t]*)(?=#{{3,}}[ \t])",
             r"\1\n\n",
             normalized,
         )

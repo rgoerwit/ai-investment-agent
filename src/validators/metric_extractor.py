@@ -77,6 +77,10 @@ def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
         "ocf_filing_reason": None,
         "segment_flag": None,
         "parent_company": None,
+        "listing_role": None,
+        "related_listed_tickers": None,
+        "metric_scope_payout": None,
+        "metric_scope_ocf": None,
         "analyst_coverage_total_est": None,
         "growth_trajectory": None,
         "revenue_growth_ttm": None,
@@ -84,6 +88,7 @@ def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
         "latest_quarter_date": None,
         "net_cash_to_market_cap": None,
         "cash_to_assets": None,
+        "net_debt_ebitda": None,
         "capex_to_da": None,
         "capex_to_da_status": None,
         "capital_plan_status": None,
@@ -212,6 +217,38 @@ def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
         if value.upper() not in ("NONE", "N/A"):
             metrics["parent_company"] = value
 
+    listing_role_match = re.search(
+        r"LISTING_ROLE:\s*(STANDALONE|PURE_HOLDCO|INTERMEDIATE_HOLDCO|LISTED_SUBSIDIARY|UNKNOWN)",
+        data_block,
+        re.IGNORECASE,
+    )
+    if listing_role_match:
+        metrics["listing_role"] = listing_role_match.group(1).upper()
+
+    related_listed_match = re.search(
+        r"RELATED_LISTED_TICKERS:\s*(.+?)(?:\n|$)", data_block
+    )
+    if related_listed_match:
+        value = related_listed_match.group(1).strip()
+        if value.upper() not in ("NONE", "N/A", "UNKNOWN", ""):
+            metrics["related_listed_tickers"] = value
+
+    payout_scope_match = re.search(
+        r"METRIC_SCOPE_PAYOUT:\s*(CONSOLIDATED|SEPARATE|UNKNOWN)",
+        data_block,
+        re.IGNORECASE,
+    )
+    if payout_scope_match:
+        metrics["metric_scope_payout"] = payout_scope_match.group(1).upper()
+
+    ocf_scope_match = re.search(
+        r"METRIC_SCOPE_OCF:\s*(CONSOLIDATED|SEPARATE|UNKNOWN)",
+        data_block,
+        re.IGNORECASE,
+    )
+    if ocf_scope_match:
+        metrics["metric_scope_ocf"] = ocf_scope_match.group(1).upper()
+
     total_est_match = re.search(
         r"ANALYST_COVERAGE_TOTAL_EST:\s*(.+?)(?:\n|$)",
         data_block,
@@ -269,6 +306,17 @@ def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
         metrics["cash_to_assets"] = parse_ratio_or_percent(
             cash_to_assets_match.group(1)
         )
+
+    net_debt_ebitda_match = re.search(
+        r"NET_DEBT_EBITDA:\s*([^\n]+)", data_block, re.IGNORECASE
+    )
+    if net_debt_ebitda_match:
+        raw_value = net_debt_ebitda_match.group(1).strip()
+        if raw_value.upper() != "N/A":
+            try:
+                metrics["net_debt_ebitda"] = float(raw_value.lstrip("~≈"))
+            except ValueError:
+                pass
 
     capex_to_da_match = re.search(r"CAPEX_TO_DA:\s*([^\n]+)", data_block, re.IGNORECASE)
     if capex_to_da_match:

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.ibkr.dip_watch import select_dip_watch_candidates
+from src.ibkr.dip_watch import (
+    collect_dip_watch_source_items,
+    select_dip_watch_candidates,
+)
 from src.ibkr.models import PortfolioSummary, ReconciliationItem
 from src.ibkr.refresh_service import AnalysisFreshnessSummary, RefreshActivity
 
@@ -13,6 +16,9 @@ SELL_TYPE_LABELS: dict[str | None, str] = {
     "STOP_BREACH": "STOP BREACH",
     "HARD_REJECT": "FUNDAMENTAL FAILURE",
     "SOFT_REJECT": "SOFT REJECTION",
+    "SCREEN_REJECT": "SCREEN REVIEW",
+    "DATA_QUALITY_REVIEW": "DATA REVIEW",
+    "SPECIAL_SITUATION_EXIT": "M&A EXIT",
     "PROFIT_TAKE": "PROFIT TAKE",
     None: "SELL",
 }
@@ -200,7 +206,7 @@ def group_portfolio_actions(
     )
     dip_candidates = tuple(
         select_dip_watch_candidates(
-            list(macro_reviews),
+            collect_dip_watch_source_items(items),
             limit=dip_watch_limit,
         )
     )
@@ -381,11 +387,16 @@ def build_cash_timeline(
 
 
 def _soft_sell_proceeds_usd(items: list[ReconciliationItem]) -> float:
-    """Total USD proceeds from SOFT_REJECT sells (conditional, not confirmed)."""
+    """Total USD proceeds from SOFT_REJECT sells (conditional, not confirmed).
+
+    Includes macro-demoted items (action REVIEW, sell_type SOFT_REJECT): the
+    operator still sees their potential proceeds in the conditional bucket —
+    that is what "soft-sell reviews" means in the report.
+    """
     return sum(
         item.cash_impact_usd
         for item in items
-        if item.action == "SELL"
+        if item.action in ("SELL", "REVIEW")
         and item.sell_type == "SOFT_REJECT"
         and item.cash_impact_usd > 0
     )

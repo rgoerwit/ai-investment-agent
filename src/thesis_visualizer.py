@@ -13,6 +13,8 @@ Color Support:
 import re
 from dataclasses import dataclass
 
+from src import thesis_constants
+
 
 class AnsiColors:
     """
@@ -94,16 +96,15 @@ class ThesisVisualizer:
     EMPTY = "░"
     BAR_WIDTH = 20
 
-    # Thresholds from thesis
-    HEALTH_MIN = 50.0
-    GROWTH_MIN = 50.0
-    PE_MAX = 18.0
-    PEG_MAX = 1.2
-    ANALYST_MAX = 15
-    US_REVENUE_MAX = 35.0
-    LIQUIDITY_MIN = 250_000  # $250k
-    RISK_HIGH = 2.0
-    RISK_MODERATE = 1.0
+    # Thresholds from thesis (canonical values in src/thesis_constants.py)
+    HEALTH_MIN = thesis_constants.HEALTH_MIN_PCT
+    GROWTH_MIN = thesis_constants.GROWTH_MIN_PCT
+    PE_MAX = thesis_constants.PE_MAX
+    PEG_MAX = thesis_constants.PEG_MAX
+    ANALYST_MAX = thesis_constants.ANALYST_COVERAGE_MAX
+    US_REVENUE_MAX = thesis_constants.US_REVENUE_MAX_PCT
+    RISK_HIGH = thesis_constants.RISK_ZONE_HIGH
+    RISK_MODERATE = thesis_constants.RISK_ZONE_MODERATE
 
     def __init__(self, final_decision_text: str):
         """
@@ -321,14 +322,16 @@ class ThesisVisualizer:
                 bar = self._bar(m.health_score, 100.0)
                 check = self._check(m.health_score >= self.HEALTH_MIN, c)
                 lines.append(
-                    f"Financial Health  {bar} {m.health_score:5.1f}% {check} (min 50%)"
+                    f"Financial Health  {bar} {m.health_score:5.1f}% {check} "
+                    f"(min {self.HEALTH_MIN:.0f}%)"
                 )
 
             if m.growth_score is not None:
                 bar = self._bar(m.growth_score, 100.0)
                 check = self._check(m.growth_score >= self.GROWTH_MIN, c)
                 lines.append(
-                    f"Growth Transition {bar} {m.growth_score:5.1f}% {check} (min 50%)"
+                    f"Growth Transition {bar} {m.growth_score:5.1f}% {check} "
+                    f"(min {self.GROWTH_MIN:.0f}%)"
                 )
 
             lines.append("")
@@ -346,7 +349,8 @@ class ThesisVisualizer:
                 )  # Scale to 27 for visibility
                 check = self._check(m.pe_ratio <= self.PE_MAX, c)
                 lines.append(
-                    f"P/E Ratio         {bar} {m.pe_ratio:5.1f}  {check} (max 18)"
+                    f"P/E Ratio         {bar} {m.pe_ratio:5.1f}  {check} "
+                    f"(max {self.PE_MAX:.0f})"
                 )
 
             if m.peg_ratio is not None:
@@ -355,7 +359,8 @@ class ThesisVisualizer:
                 )  # Scale to 2.4 for visibility
                 check = self._check(m.peg_ratio <= self.PEG_MAX, c)
                 lines.append(
-                    f"PEG Ratio         {bar} {m.peg_ratio:5.2f}  {check} (max 1.2)"
+                    f"PEG Ratio         {bar} {m.peg_ratio:5.2f}  {check} "
+                    f"(max {self.PEG_MAX:g})"
                 )
 
             lines.append("")

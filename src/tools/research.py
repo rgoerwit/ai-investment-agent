@@ -6,6 +6,7 @@ from typing import Annotated
 import structlog
 from langchain_core.tools import tool
 
+from src.error_safety import summarize_exception
 from src.runtime_services import get_current_inspection_service
 from src.ticker_utils import normalize_ticker
 from src.tooling.inspector import InspectionEnvelope, SourceKind
@@ -31,11 +32,13 @@ async def search_foreign_sources(
         normalized_symbol = normalize_ticker(ticker)
         company_name = await shared.extract_company_name_async(normalized_symbol)
         company_resolved = company_name != normalized_symbol
-        full_query = (
-            f"{search_query} {company_name} {ticker}"
-            if company_resolved
-            else f"{search_query} {ticker}"
+        # Agents often interpolate the ticker into search_query already; avoid
+        # degenerate queries like "1264.TW company name 1264.TW".
+        ticker_suffix = (
+            "" if ticker.casefold() in search_query.casefold() else f" {ticker}"
         )
+        name_part = f" {company_name}" if company_resolved else ""
+        full_query = f"{search_query}{name_part}{ticker_suffix}"
 
         logger.info("foreign_source_search", ticker=ticker, query=full_query[:100])
 
@@ -54,7 +57,7 @@ async def search_foreign_sources(
         )
 
         if isinstance(tavily_results, Exception):
-            logger.warning("tavily_gather_error", error=str(tavily_results))
+            logger.warning("tavily_gather_error", reason=str(tavily_results))
             tavily_results = None
         if isinstance(ddg_results, Exception):
             logger.debug("ddg_gather_error", error=str(ddg_results))
@@ -102,8 +105,12 @@ Note: Verify dates and currencies in the source data.
 
 {results_str}"""
     except Exception as exc:
-        logger.error(f"Foreign source search error: {exc}")
-        return f"Error searching foreign sources: {exc}"
+        summary = summarize_exception(exc, operation="search_foreign_sources")
+        logger.error("foreign_source_search_failed", ticker=ticker, **summary)
+        return (
+            f"Error searching foreign sources: {summary['error_type']} "
+            "(details in operator logs)"
+        )
 
 
 @tool

@@ -24,7 +24,7 @@ def test_group_portfolio_actions_matches_cli_buckets(sample_bundle):
     assert [item.ticker.yf for item in groups.holds_real] == ["MEGP.L"]
     assert [item.ticker.yf for item in groups.new_buys] == ["ASML.AS"]
     assert [item.ticker.yf for item in groups.watchlist_candidates] == ["BMW.DE"]
-    assert [item.ticker.yf for item in groups.dip_candidates] == ["5285.T"]
+    assert [item.ticker.yf for item in groups.dip_candidates] == ["MEGP.L"]
 
 
 def test_build_action_summary_counts_separates_buys_from_candidates(sample_bundle):
@@ -66,6 +66,25 @@ def test_profit_take_items_have_distinct_sell_and_review_buckets():
     assert counts["REVIEW"] == 1
 
 
+def test_screen_reject_review_routes_to_generic_reviews():
+    item = ReconciliationItem(
+        ticker=Ticker.from_yf("4396.T"),
+        action="REVIEW",
+        reason="Screen-threshold DNI",
+        urgency="MEDIUM",
+        sell_type="SCREEN_REJECT",
+    )
+
+    groups = group_portfolio_actions([item])
+    counts = build_action_summary_counts(groups)
+
+    assert groups.hard_sells == ()
+    assert groups.soft_sells == ()
+    assert groups.stop_sells == ()
+    assert groups.reviews == (item,)
+    assert counts["REVIEW"] == 1
+
+
 def test_aggregate_sector_weights_normalizes_equivalent_labels():
     weights = aggregate_sector_weights({"Healthcare": 12.5, "Health Care": 7.5})
     assert weights == {"Health Care": 20.0}
@@ -75,6 +94,9 @@ def test_get_sell_type_label_uses_shared_backend_labels():
     assert get_sell_type_label("STOP_BREACH") == "STOP BREACH"
     assert get_sell_type_label("HARD_REJECT") == "FUNDAMENTAL FAILURE"
     assert get_sell_type_label("SOFT_REJECT") == "SOFT REJECTION"
+    assert get_sell_type_label("SCREEN_REJECT") == "SCREEN REVIEW"
+    assert get_sell_type_label("DATA_QUALITY_REVIEW") == "DATA REVIEW"
+    assert get_sell_type_label("SPECIAL_SITUATION_EXIT") == "M&A EXIT"
     assert get_sell_type_label("PROFIT_TAKE") == "PROFIT TAKE"
     assert get_sell_type_label("UNKNOWN") == "SELL"
 
@@ -97,3 +119,39 @@ def test_build_action_display_sections_matches_cli_contract(sample_bundle):
     assert sections[1].title == SELL_RELATED_REVIEWS_TITLE
     assert [item.ticker.yf for item in sections[0].items] == ["7203.T"]
     assert [item.ticker.yf for item in sections[1].items] == ["5285.T"]
+
+
+class TestMacroDemotedItemBuckets:
+    """A macro-demoted item must leave the executable SELL plan but keep its
+    potential proceeds visible in the conditional ("soft-sell reviews") bucket.
+    """
+
+    @staticmethod
+    def _demoted_item():
+        from tests.ibkr.reconciler_cases import _make_sell_item_on_date
+
+        item = _make_sell_item_on_date("DEMO.T", "2026-03-05", conid=777)
+        item.action = "REVIEW"  # as _apply_macro_demotions leaves it
+        item.reason += "  [MACRO_WATCH: demoted from SELL — correlated event detected]"
+        item.cash_impact_usd = 1234.0
+        return item
+
+    def test_demoted_item_moves_to_macro_review_bucket(self):
+        from src.ibkr.portfolio_presentation import group_portfolio_actions
+
+        item = self._demoted_item()
+        groups = group_portfolio_actions([item])
+        assert item in groups.macro_reviews
+        assert item not in groups.soft_sells
+
+    def test_demoted_item_proceeds_stay_in_conditional_bucket(self):
+        from src.ibkr.models import PortfolioSummary
+        from src.ibkr.portfolio_presentation import build_cash_summary
+
+        item = self._demoted_item()
+        summary = build_cash_summary(
+            [item], PortfolioSummary(portfolio_value_usd=10_000)
+        )
+        assert summary.conditional_proceeds_usd == 1234.0
+        # And NOT in confirmed pending inflows
+        assert summary.pending_inflows_total_usd == 0.0

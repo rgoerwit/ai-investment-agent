@@ -1,6 +1,6 @@
 # Runtime Model
 
-Last updated: 2026-04-18
+Last updated: 2026-05-24
 
 This document defines the canonical runtime/control-plane model for the operator workbench roadmap.
 It is a design contract for future storage and orchestration work, not an implementation description.
@@ -22,8 +22,8 @@ Freeze the runtime state model before storage, scheduling, and observability wor
 | Concern | Current source of truth | Current writer | Current readers | Notes |
 | --- | --- | --- | --- | --- |
 | Analysis artifacts | `results/*_analysis.json` | `src.main.save_results_to_file()` | Reconciler, portfolio manager, dashboard drilldown/snapshot paths, retrospective/eval paths | Saved JSON artifact is the richest persisted analysis payload today; it now records macro-context execution metadata alongside run summary and token usage. |
-| Latest-per-ticker analysis view | `.{results_dir}.latest_analyses_index.json` | `src.ibkr.reconciler.update_latest_analyses_index()` and `load_latest_analyses()` rebuild path | Reconciler, recommendation service, portfolio manager via `load_latest_analyses()` | Current supported index baseline is `version = 2`. |
-| Cache/lock compatibility artifact | `.{results_dir}.latest_analyses_index.lock` | `src.ibkr.reconciler._analysis_index_lock()` | Reconciler incremental/full index writers | This is a concurrency artifact, not a migration data source. |
+| Latest-per-ticker analysis view | `.{results_dir}.latest_analyses_index.json` | `src.ibkr.analysis_index.update_latest_analyses_index()` and `load_latest_analyses()` rebuild path | Reconciler, recommendation service, portfolio manager via `load_latest_analyses()` | Current supported index baseline is `version = 3`. |
+| Cache/lock compatibility artifact | `.{results_dir}.latest_analyses_index.lock` | `src.ibkr.analysis_index._analysis_index_lock()` | Latest-analysis index writers | This is a concurrency artifact, not a migration data source. |
 | Dashboard refresh jobs | `runtime/ibkr_dashboard/jobs.sqlite` | `src.web.ibkr_dashboard.job_store.RefreshJobStore` | Dashboard API/UI, dashboard worker | Separate SQLite store today. |
 | Pipeline freshness marker | `results/.pipeline_last_run.json` | `scripts/run_pipeline.sh` | `src.ibkr.screening_freshness.load_screening_freshness()` | Marker-only programmatic API today. |
 | Regional macro context cache | `results/.macro_context_cache/*.json` | `src.macro_context.get_macro_context()` | `src.main.run_analysis()` prefetch path, News Analyst via `TradingContext` | Pre-graph cached regime brief; distinct from `MacroEventsStore`. |
@@ -96,9 +96,9 @@ Known boundary:
 
 ### Reconciler latest-analysis cache
 
-- Current supported baseline: `version = 2`
-- Source: `_ANALYSIS_INDEX_VERSION = 2` in `src/ibkr/reconciler.py`
-- Current behavior for non-v2 payloads: treat as invalid and rebuild from file scan
+- Current supported baseline: `version = 3`
+- Source: `_ANALYSIS_INDEX_VERSION = 3` in `src/ibkr/analysis_index.py`
+- Current behavior for non-v3 payloads: treat as invalid and rebuild from file scan
 
 Stage 1 may preserve this behavior. It is not required to add explicit import support for older cache payload versions unless real legacy payloads are discovered.
 
@@ -538,7 +538,7 @@ Stage 1 must add tests for:
 
 Existing tests that should become parity gates:
 
-- `tests/ibkr/test_reconciler.py`
+- `tests/ibkr/test_reconciler_orchestration.py`
 - `tests/web/test_job_store.py`
 - `tests/web/test_worker.py`
 - `tests/test_main_cli.py`
@@ -561,8 +561,8 @@ Stage 0 is not complete unless this document answers:
 ## Assumptions and Defaults
 
 - Stage 0 is docs-only.
-- Current supported reconciler cache baseline is `version = 2`.
-- Non-v2 cache payloads may be treated as invalid and rebuilt from file scan rather than explicitly migrated.
+- Current supported latest-analysis cache baseline is `version = 3`.
+- Non-v3 cache payloads may be treated as invalid and rebuilt from file scan rather than explicitly migrated.
 - Current path strings are not normalized consistently; future durable storage will normalize them relative to configured roots.
 - `analysis_id` is the future durable analysis identity.
 - `file_path` and current dashboard `output_path` are transitional locators, not durable identities.

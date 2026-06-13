@@ -5,6 +5,7 @@ from tests.factories.ibkr import make_analysis, make_portfolio, make_position
 from tests.ibkr.reconciler_cases import (
     TestAlphaBaseFallback,
     TestAlphaBaseLookup,
+    TestAmbiguousBaseGuards,
     TestIbkrSymbol,
 )
 

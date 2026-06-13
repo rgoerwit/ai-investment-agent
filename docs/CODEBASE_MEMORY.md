@@ -1,6 +1,6 @@
 # Codebase Memory
 
-Last updated: 2026-04-24
+Last updated: 2026-05-24
 
 This file is a durable orientation note, not the source of truth.
 Use it to get context quickly, then verify against the live tree.

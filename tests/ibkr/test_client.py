@@ -311,3 +311,22 @@ class TestGetMarketdataSnapshot:
             result = client.get_live_orders()
 
         assert result == []
+
+
+class TestMaskAccount:
+    def test_masks_standard_account_id(self):
+        from src.ibkr.client import mask_account
+
+        assert mask_account("U1234567") == "U1***567"
+
+    def test_short_and_empty_values(self):
+        from src.ibkr.client import mask_account
+
+        assert mask_account("U12") == "U***"
+        assert mask_account("") == "?"
+        assert mask_account(None) == "?"
+
+    def test_full_id_never_in_mask(self):
+        from src.ibkr.client import mask_account
+
+        assert "1234567" not in mask_account("U1234567")

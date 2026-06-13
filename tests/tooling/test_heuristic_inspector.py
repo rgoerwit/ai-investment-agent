@@ -22,6 +22,27 @@ def _envelope(
     )
 
 
+@pytest.mark.asyncio
+async def test_macro_regime_block_is_not_flagged(inspector):
+    text = """### MACRO REGIME SIGNAL
+Region: JAPAN
+### REGIME SUMMARY
+- Risk appetite is mixed; entry discipline matters.
+
+MACRO_REGIME_BLOCK:
+RISK_APPETITE: RISK_OFF
+SHOCK_TYPE: ENERGY
+SHOCK_PHASE: ACUTE
+EQUITY_TRANSMISSION: EARNINGS_PRESSURE
+DIP_POSTURE: WAIT_FOR_CONFIRMATION
+CONFIDENCE: MEDIUM"""
+
+    result = await inspector.inspect(_envelope(text, SourceKind.cached_context))
+
+    assert result.threat_level == "safe"
+    assert result.action == "allow"
+
+
 # ---------------------------------------------------------------------------
 # Override phrases
 # ---------------------------------------------------------------------------

@@ -59,6 +59,7 @@ from src.data.gap_fill import (
     merge_gap_fill_data as merge_gap_fill_data_impl,
 )
 from src.data.interfaces import FinancialFetcher
+from src.data.merge_policy import QUOTE_PRICE_FIELDS
 from src.data.merge_policy import (
     quarantine_forward_pe_outlier as quarantine_forward_pe_outlier_impl,
 )
@@ -123,6 +124,7 @@ from src.ticker_policy import (
     allows_search_resolution,
     get_ticker_suffix,
     normalize_exchange_specific_base,
+    sibling_ticker_candidates,
 )
 from src.ticker_utils import generate_strict_search_query
 from src.yfinance_runtime import configure_yfinance_defaults
@@ -164,115 +166,33 @@ except ImportError:
     logger.warning("tavily_python_not_available")
 
 
-# Constants
+# Constants (merge-policy field sets and source rankings live in
+# src/data/merge_policy.py — the canonical home; do not redefine here)
 # D/E > 10 (1000%) is extremely rare; values like 14.77 are percentages (14.77%)
 DEBT_EQUITY_PERCENTAGE_THRESHOLD = 10.0
-PRICE_TO_BOOK_CURRENCY_MISMATCH_THRESHOLD = 5.0
 FX_CACHE_TTL_SECONDS = 3600
 FETCH_RESULT_CACHE_TTL_SECONDS = 30
 PRICE_HISTORY_CACHE_TTL_SECONDS = 30
 PER_SOURCE_TIMEOUT = 15
-# These fields are safely comparable with the simple "fraction vs percent" heuristic
-# used in _normalize_percent_pair(). Growth/return metrics are intentionally excluded:
-# values > 1.0 can be legitimate in decimal form, so blind scaling creates false conflicts.
-PERCENT_LIKE_FIELDS = frozenset(
-    {
-        "dividendYield",
-        "trailingAnnualDividendYield",
-        "fiveYearAvgDividendYield",
-        "regularMarketChangePercent",
-    }
-)
-NON_FINANCIAL_METADATA_FIELDS = frozenset({"maxAge"})
-NON_ACTIONABLE_CONFLICT_FIELDS = frozenset(
-    {
-        "bidSize",
-        "askSize",
-        "bid",
-        "ask",
-        "regularMarketBidSize",
-        "regularMarketAskSize",
-    }
-)
-CRITICAL_ANALYSIS_FIELDS = (
-    "trailingPE",
-    "forwardPE",
-    "priceToBook",
-    "pegRatio",
-    "returnOnEquity",
-    "returnOnAssets",
-    "debtToEquity",
-    "currentRatio",
-    "operatingMargins",
-    "grossMargins",
-    "profitMargins",
-    "revenueGrowth",
-    "earningsGrowth",
-    "operatingCashflow",
-    "freeCashflow",
-    "numberOfAnalystOpinions",
-)
-ANALYSIS_CRITICAL_CONFLICT_FIELDS = frozenset(CRITICAL_ANALYSIS_FIELDS)
-QUOTE_PRICE_FIELDS = (
-    "currentPrice",
-    "regularMarketPrice",
-    "previousClose",
-    "regularMarketPreviousClose",
-    "open",
-    "regularMarketOpen",
-    "dayLow",
-    "dayHigh",
-    "regularMarketDayLow",
-    "regularMarketDayHigh",
-    "bid",
-    "ask",
-    "fiftyDayAverage",
-    "twoHundredDayAverage",
-    "fiftyTwoWeekLow",
-    "fiftyTwoWeekHigh",
-)
 
 RECENT_SPLIT_WINDOW_DAYS = 180
 SPLIT_RATIO_MATCH_TOLERANCE = 0.25
 QUARTER_DATE_RECONCILE_WINDOW_DAYS = 45
-FORWARD_PE_OUTLIER_THRESHOLD = 200.0
-FORWARD_PE_REFERENCE_MAX = 100.0
-FORWARD_PE_OUTLIER_RATIO = 5.0
-
-# Source quality rankings (higher = more reliable)
-SOURCE_QUALITY = {
-    "yfinance_statements": 10,  # Calculated directly from filings (Highest trust)
-    "calculated_from_statements": 10,  # Tag used by extraction logic
-    "eodhd": 9.5,  # Professional paid feed (High trust for Int'l)
-    "yfinance": 9,  # Standard feed
-    "yfinance_info": 9,  # Standard feed
-    "alpha_vantage": 9,  # High-quality fundamentals (Int'l)
-    "calculated": 8,  # Derived metrics
-    "fmp": 7,  # Good backup
-    "fmp_info": 7,
-    "yahooquery": 6,  # Scraped backup
-    "yahooquery_info": 6,
-    "tavily_extraction": 4,  # Web NLP extraction
-    "proxy": 2,  # Estimates
-}
+MAX_LOW_OVER_PRICE = 1.10
+MIN_HIGH_UNDER_PRICE = 0.90
+LOW_PE_QUARANTINE_THRESHOLD = 3.0
+LOW_PE_FLAG_THRESHOLD = 5.0
+PE_IDENTITY_TOLERANCE = 0.20
 
 MergeResult = namedtuple("MergeResult", ["data", "gaps_filled"])
 
 
-def _normalize_percent_pair(old_val: float, new_val: float) -> tuple[float, float]:
-    """Normalize decimal-vs-percent representations before comparison."""
-    candidates = [
-        (old_val, new_val),
-        (old_val * 100, new_val),
-        (old_val, new_val * 100),
-    ]
-
-    def relative_gap(pair: tuple[float, float]) -> float:
-        left, right = pair
-        baseline = max(abs(left), abs(right), 1e-9)
-        return abs(left - right) / baseline
-
-    return min(candidates, key=relative_gap)
+def _quality_notes(info: dict[str, Any]) -> list[str]:
+    notes = info.get("_data_quality_notes")
+    if not isinstance(notes, list):
+        notes = [] if notes in (None, "") else [str(notes)]
+        info["_data_quality_notes"] = notes
+    return notes
 
 
 def _coerce_positive_float(value: Any) -> float | None:
@@ -306,23 +226,6 @@ def _identity_match_from_price(
         return False
     expected = price_f / denom_f
     return abs(expected - ratio_f) / ratio_f <= tolerance
-
-
-def _conflict_field_class(field: str) -> str:
-    if field in NON_ACTIONABLE_CONFLICT_FIELDS:
-        return "microstructure"
-    if field in ANALYSIS_CRITICAL_CONFLICT_FIELDS:
-        return "valuation"
-    return "other"
-
-
-def _is_actionable_conflict(
-    field: str, left_quality: float, right_quality: float
-) -> bool:
-    if field not in ANALYSIS_CRITICAL_CONFLICT_FIELDS:
-        return False
-    quality_gap = abs(left_quality - right_quality)
-    return quality_gap <= 1.0 or (left_quality >= 9 and right_quality >= 9)
 
 
 def _normalize_history_bound(value: str | None) -> str | None:
@@ -440,6 +343,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         self._mnemonic_cache: dict[str, str] = self._load_mnemonic_cache()
         self._metrics_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._metrics_inflight: dict[str, asyncio.Task[dict[str, Any]]] = {}
+        self._history_failure_logged: set[str] = set()
         self._history_cache: dict[
             tuple[str, str, str | None, str | None], tuple[float, pd.DataFrame]
         ] = {}
@@ -522,6 +426,131 @@ class SmartMarketDataFetcher(FinancialFetcher):
         if not data:
             return False
         return any(data.get(field) for field in ("longName", "shortName", "industry"))
+
+    @staticmethod
+    def _has_price_anchor(data: dict[str, Any]) -> bool:
+        if not data:
+            return False
+        return any(
+            data.get(field) is not None
+            for field in ("currentPrice", "regularMarketPrice", "previousClose")
+        )
+
+    def _has_required_quote_identity(self, data: dict[str, Any]) -> bool:
+        return (
+            bool(data.get("currency"))
+            and self._has_price_anchor(data)
+            and self._has_safe_identity_anchor(data)
+        )
+
+    async def _ibkr_probe_allows_sibling_rescue(
+        self, original: str, candidate: str, candidate_merged: dict[str, Any]
+    ) -> bool:
+        """Use IBKR as a contract-level guardrail when it is configured."""
+        probe = await self._probe_ibkr_security(candidate)
+        if probe is None:
+            logger.info(
+                "ticker_sibling_rescue_rejected",
+                original=original,
+                candidate=candidate,
+                reason="ibkr_probe_missing",
+            )
+            return False
+
+        confidence = getattr(probe, "identity_confidence", None)
+        error_kind = getattr(probe, "error_kind", None)
+        resolved = getattr(probe, "resolved_yf_ticker", None)
+        candidate_merged["_ticker_rescue_ibkr_identity_confidence"] = confidence
+        if error_kind:
+            candidate_merged["_ticker_rescue_ibkr_probe_error_kind"] = error_kind
+
+        if (
+            getattr(probe, "configured", True) is False
+            or error_kind == "NOT_CONFIGURED"
+        ):
+            logger.info(
+                "ticker_sibling_rescue_ibkr_probe_unavailable",
+                original=original,
+                candidate=candidate,
+                reason=error_kind or "NOT_CONFIGURED",
+            )
+            return True
+
+        if confidence == "VERIFIED" and (not resolved or resolved == candidate):
+            candidate_merged["_ibkr_identity_confidence"] = confidence
+            if resolved:
+                candidate_merged["_ticker_rescue_ibkr_resolved"] = resolved
+            if getattr(probe, "company_name", None):
+                candidate_merged.setdefault("_ibkr_company_name", probe.company_name)
+            if getattr(probe, "market_data_availability", None):
+                candidate_merged["_ibkr_market_data_availability"] = (
+                    probe.market_data_availability
+                )
+            return True
+
+        logger.info(
+            "ticker_sibling_rescue_rejected",
+            original=original,
+            candidate=candidate,
+            reason="ibkr_probe_not_verified",
+            identity_confidence=confidence,
+            resolved=resolved,
+            error_kind=error_kind,
+        )
+        # The candidate had full market data but IBKR could not verify identity
+        # — the classic signature of a listing migration (e.g. TWSE→TPEx).
+        # Never auto-apply (the strict probe prevents cross-matching the wrong
+        # security); surface it for the operator instead.
+        logger.warning(
+            "ticker_migration_suspected",
+            original=original,
+            candidate=candidate,
+            action=(
+                "verify listing change; if confirmed, add to "
+                "config/ticker_overrides.json"
+            ),
+        )
+        return False
+
+    async def _try_sibling_suffix_rescue(
+        self, ticker: str
+    ) -> tuple[str, dict[str, Any], dict[str, Any]] | None:
+        """Return a verified sibling ticker payload for exchange-suffix vacuums."""
+        for candidate in sibling_ticker_candidates(ticker):
+            if candidate == ticker:
+                continue
+            logger.info(
+                "ticker_sibling_rescue_attempt",
+                original=ticker,
+                candidate=candidate,
+            )
+            source_results = await self._fetch_all_sources_parallel(candidate)
+            candidate_merged, candidate_metadata = self._smart_merge_with_quality(
+                source_results, candidate
+            )
+            if self._has_required_quote_identity(
+                candidate_merged
+            ) and await self._ibkr_probe_allows_sibling_rescue(
+                ticker, candidate, candidate_merged
+            ):
+                candidate_merged["_ticker_rescue_original"] = ticker
+                candidate_merged["_ticker_rescue_resolved"] = candidate
+                candidate_merged["_ticker_rescue_reason"] = "sibling_suffix_data_vacuum"
+                logger.info(
+                    "ticker_sibling_rescue_accepted",
+                    original=ticker,
+                    resolved=candidate,
+                )
+                return candidate, candidate_merged, candidate_metadata
+            logger.info(
+                "ticker_sibling_rescue_candidate_incomplete",
+                original=ticker,
+                candidate=candidate,
+                has_price=self._has_price_anchor(candidate_merged),
+                has_currency=bool(candidate_merged.get("currency")),
+                has_identity=self._has_safe_identity_anchor(candidate_merged),
+            )
+        return None
 
     def _history_cache_key(
         self,
@@ -1015,6 +1044,63 @@ class SmartMarketDataFetcher(FinancialFetcher):
         )
         return info
 
+    def _flag_low_pe_anomaly(self, info: dict[str, Any], symbol: str) -> None:
+        """Flag or quarantine abnormally low trailing P/E values.
+
+        This runs after the existing trailing-vs-forward reconciliation. If that
+        path already quarantined trailing P/E, this helper short-circuits.
+        """
+        pe = _safe_float(info.get("trailingPE"))
+        if pe is None or pe <= 0 or pe >= LOW_PE_FLAG_THRESHOLD:
+            return
+
+        price = _safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
+        eps = _safe_float(
+            info.get("trailingEps") or info.get("epsTrailingTwelveMonths")
+        )
+        identity_ok = (
+            price is not None
+            and price > 0
+            and eps is not None
+            and eps > 0
+            and abs((price / eps) - pe) / pe <= PE_IDENTITY_TOLERANCE
+        )
+
+        notes = _quality_notes(info)
+
+        if pe < LOW_PE_QUARANTINE_THRESHOLD and not identity_ok:
+            info["trailingPE"] = None
+            info["pegRatio"] = None
+            info["_pe_low_anomaly_quarantined"] = True
+            notes.append(
+                "Trailing P/E below 3 failed price/EPS identity check; quarantined."
+            )
+            logger.warning(
+                "pe_low_anomaly_quarantined",
+                symbol=symbol,
+                reported_pe=pe,
+            )
+            return
+
+        stress: list[str] = []
+        earnings_growth = _safe_float(info.get("earningsGrowth_TTM"))
+        revenue_growth = _safe_float(
+            info.get("revenueGrowth_TTM") or info.get("revenueGrowth")
+        )
+        profit_margins = _safe_float(info.get("profitMargins"))
+        if earnings_growth is not None and earnings_growth < -0.20:
+            stress.append("earnings_collapse")
+        if revenue_growth is not None and revenue_growth < -0.05:
+            stress.append("revenue_decline")
+        if profit_margins is not None and profit_margins < 0.03:
+            stress.append("thin_margins")
+
+        info["_pe_low_anomaly_flag"] = "LOW_PE_REQUIRES_INVESTIGATION"
+        info["_pe_low_anomaly_context"] = stress or [
+            "low_multiple_confirmed_but_unexplained"
+        ]
+        logger.info("pe_low_anomaly_flagged", symbol=symbol, reported_pe=pe)
+
     def _reconcile_latest_quarter_date(
         self, info: dict[str, Any], symbol: str
     ) -> dict[str, Any]:
@@ -1192,7 +1278,63 @@ class SmartMarketDataFetcher(FinancialFetcher):
 
         info = self._quarantine_recent_split_forward_metrics(info, symbol)
         info = self._reconcile_latest_quarter_date(info, symbol)
+        self._flag_low_pe_anomaly(info, symbol)
 
+        return info
+
+    async def _repair_quote_range_from_history(
+        self, info: dict[str, Any], symbol: str
+    ) -> dict[str, Any]:
+        price = _safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
+        low = _safe_float(info.get("fiftyTwoWeekLow"))
+        high = _safe_float(info.get("fiftyTwoWeekHigh"))
+
+        repair_low = (
+            low is None
+            or low <= 0
+            or (price is not None and low > price * MAX_LOW_OVER_PRICE)
+        )
+        repair_high = (
+            high is None
+            or high <= 0
+            or (price is not None and high < price * MIN_HIGH_UNDER_PRICE)
+        )
+        if not (repair_low or repair_high):
+            return info
+
+        notes = _quality_notes(info)
+        try:
+            hist = await self.get_price_history(symbol, period="1y")
+        except Exception as exc:
+            hist = None
+            logger.warning(
+                "quote_range_history_fetch_failed",
+                symbol=symbol,
+                **summarize_exception(
+                    exc,
+                    operation="get_price_history",
+                    provider="yfinance",
+                ),
+            )
+
+        if hist is not None and not hist.empty and {"Low", "High"} <= set(hist.columns):
+            if repair_low:
+                info["fiftyTwoWeekLow"] = float(hist["Low"].dropna().min())
+                info["_fiftyTwoWeekLow_source"] = "calculated_from_1y_history"
+            if repair_high:
+                info["fiftyTwoWeekHigh"] = float(hist["High"].dropna().max())
+                info["_fiftyTwoWeekHigh_source"] = "calculated_from_1y_history"
+            notes.append("52-week range repaired from 1y price history.")
+            logger.info("quote_range_repaired", symbol=symbol)
+        else:
+            if repair_low:
+                info["fiftyTwoWeekLow"] = None
+            if repair_high:
+                info["fiftyTwoWeekHigh"] = None
+            notes.append(
+                "Invalid or missing 52-week range blanked; history unavailable."
+            )
+            logger.warning("quote_range_blanked", symbol=symbol)
         return info
 
     def _validate_basics(self, data: dict, symbol: str) -> DataQuality:
@@ -1332,6 +1474,16 @@ class SmartMarketDataFetcher(FinancialFetcher):
         if not allows_search_resolution(symbol):
             return None
 
+        # ONLY alpha mnemonics may be search-resolved (PADINI.KL → 7052.KL):
+        # the mnemonic itself names the company, so the numeric result is the
+        # same entity by construction. A NUMERIC input (e.g. delisted 1264.TW)
+        # must never be substituted with whichever 4-digit ticker happens to
+        # appear in a search result — that produced a wrong-company analysis
+        # (1264.TW → 8341.TW, June 2026). Mirrors _pre_resolve_ticker's guard.
+        base, _, _suffix = symbol.rpartition(".")
+        if not base or base.isdigit():
+            return None
+
         try:
             # Construct a surgical query to find the numeric code
             query = f"{symbol} yahoo finance ticker numeric code"
@@ -1456,7 +1608,15 @@ class SmartMarketDataFetcher(FinancialFetcher):
                     msg=f"Triggering Panic Mode ({panic_reason})",
                 )
                 all_critical = self.IMPORTANT_FIELDS + self.REQUIRED_BASICS
-                probe = await self._probe_ibkr_security(ticker)
+                sibling_rescue = await self._try_sibling_suffix_rescue(ticker)
+                if sibling_rescue is not None:
+                    ticker, merged, merge_metadata = sibling_rescue
+
+                probe = (
+                    None
+                    if sibling_rescue is not None
+                    else await self._probe_ibkr_security(ticker)
+                )
                 if probe is not None:
                     merged.setdefault("_ibkr_probe_used", True)
                     merged["_ibkr_identity_confidence"] = probe.identity_confidence
@@ -1519,13 +1679,14 @@ class SmartMarketDataFetcher(FinancialFetcher):
                                 )
                                 ticker = resolved_ticker
 
-                tavily_rescue = await self._fetch_tavily_gaps(ticker, all_critical)
-                if tavily_rescue:
-                    merged = self._merge_gap_fill_data(
-                        merged, tavily_rescue, merge_metadata
-                    )
-                    if "currentPrice" not in merged and "price" in tavily_rescue:
-                        merged["currentPrice"] = tavily_rescue["price"]
+                if sibling_rescue is None:
+                    tavily_rescue = await self._fetch_tavily_gaps(ticker, all_critical)
+                    if tavily_rescue:
+                        merged = self._merge_gap_fill_data(
+                            merged, tavily_rescue, merge_metadata
+                        )
+                        if "currentPrice" not in merged and "price" in tavily_rescue:
+                            merged["currentPrice"] = tavily_rescue["price"]
 
             if not merged:
                 return {"error": "No data available", "symbol": ticker}
@@ -1550,6 +1711,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
                 merge_metadata["gaps_filled"] += result.gaps_filled
 
             merged = self._normalize_data_integrity(merged, ticker)
+            merged = await self._repair_quote_range_from_history(merged, ticker)
 
             # --- DATA HYGIENE PIPELINE ---
             # Run comprehensive validation including new integrity checks
@@ -1706,15 +1868,20 @@ class SmartMarketDataFetcher(FinancialFetcher):
                     )
             return hist
         except Exception as e:
-            logger.error(
-                "history_fetch_failed",
-                ticker=ticker,
-                **summarize_exception(
-                    e,
-                    operation="get_historical_prices",
-                    provider="unknown",
-                ),
+            summary = summarize_exception(
+                e, operation="get_historical_prices", provider="unknown"
             )
+            repeated = ticker in self._history_failure_logged
+            self._history_failure_logged.add(ticker)
+            if repeated:
+                log = logger.debug  # one operator-visible record per ticker per run
+            elif summary["failure_kind"] == "data_unavailable":
+                log = (
+                    logger.warning
+                )  # expected absence (delisted/migrated), not a fault
+            else:
+                log = logger.error
+            log("history_fetch_failed", ticker=ticker, repeated=repeated, **summary)
             return pd.DataFrame()
 
     async def get_price_history(

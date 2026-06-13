@@ -10,6 +10,7 @@ import yfinance as yf
 from langchain_core.tools import tool
 
 from src.async_utils import run_with_hard_timeout
+from src.error_safety import summarize_exception
 from src.ticker_utils import normalize_ticker
 
 logger = structlog.get_logger(__name__)
@@ -191,7 +192,11 @@ async def get_ownership_structure(
 
         return json.dumps(result, indent=2, default=str)
     except Exception as exc:
-        logger.error("ownership_structure_error", ticker=normalized, error=str(exc))
+        logger.error(
+            "ownership_structure_error",
+            ticker=normalized,
+            **summarize_exception(exc, operation="ownership_structure_error"),
+        )
         return json.dumps(
             {
                 "ticker": normalized,

@@ -143,6 +143,15 @@ class TestExtractSnapshot:
     def test_extract_snapshot_from_real_data(self):
         """Parse actual DATA_BLOCK/PM_BLOCK text."""
         result = _make_result()
+        result["macro_regime_block"] = {
+            "present": True,
+            "risk_appetite": "RISK_OFF",
+            "shock_type": "ENERGY",
+            "shock_phase": "ACUTE",
+            "equity_transmission": "EARNINGS_PRESSURE",
+            "dip_posture": "WAIT_FOR_CONFIRMATION",
+            "confidence": "MEDIUM",
+        }
         snapshot = extract_snapshot(result, "2767.T")
 
         assert snapshot["ticker"] == "2767.T"
@@ -158,6 +167,8 @@ class TestExtractSnapshot:
         assert snapshot["peg_ratio"] == 0.03
         assert snapshot["pb_ratio"] == 1.12
         assert snapshot["analyst_coverage"] == 4.0
+        assert snapshot["regime_at_decision"]["risk_appetite"] == "RISK_OFF"
+        assert snapshot["regime_confidence"] == "MEDIUM"
         assert snapshot["profitability_trend"] == "UNSTABLE"
         assert snapshot["exchange"] == "T"
         assert snapshot["currency"] == "JPY"
@@ -873,6 +884,129 @@ class TestLessonInjectionFormat:
 
         text = await format_lessons_for_injection(mock_memory, "7203.T", "Technology")
         assert text == ""  # 0.2 < 0.4 threshold
+
+    @pytest.mark.asyncio
+    async def test_current_regime_none_is_backward_compatible(self):
+        """Old callers can omit current_regime."""
+        mock_memory = MagicMock()
+        mock_memory.available = True
+        mock_memory.query_similar_situations = AsyncMock(
+            return_value=[
+                {
+                    "document": "Plain lesson",
+                    "metadata": {
+                        "confidence_weight": 0.7,
+                        "failure_mode": "CYCLICAL_PEAK",
+                        "sector": "Consumer Cyclical",
+                        "exchange": "T",
+                        "currency": "JPY",
+                    },
+                    "distance": 0.3,
+                }
+            ]
+        )
+
+        text = await format_lessons_for_injection(
+            mock_memory,
+            "7203.T",
+            "Consumer Cyclical",
+            current_regime=None,
+        )
+
+        assert "Plain lesson" in text
+
+    @pytest.mark.asyncio
+    async def test_empty_regime_fields_do_not_create_false_boost(self):
+        """Missing legacy metadata must not match missing current regime fields."""
+        mock_memory = MagicMock()
+        mock_memory.available = True
+        mock_memory.query_similar_situations = AsyncMock(
+            return_value=[
+                {
+                    "document": "No regime metadata",
+                    "metadata": {
+                        "confidence_weight": 0.41,
+                        "failure_mode": "CYCLICAL_PEAK",
+                        "sector": "Consumer Cyclical",
+                        "exchange": "HK",
+                        "currency": "HKD",
+                        "regime_risk_appetite": "",
+                        "regime_shock_type": "",
+                        "regime_dip_posture": "",
+                    },
+                    "distance": 0.3,
+                }
+            ]
+        )
+
+        text = await format_lessons_for_injection(
+            mock_memory,
+            "7203.T",
+            "Consumer Cyclical",
+            current_regime={
+                "present": True,
+                "confidence": "MEDIUM",
+                "risk_appetite": "",
+                "shock_type": "",
+                "dip_posture": "",
+            },
+        )
+
+        assert "conf: 0.41" in text
+
+    @pytest.mark.asyncio
+    async def test_same_regime_lesson_ranks_before_different_regime(self):
+        """Same-regime metadata gets a small relevance boost."""
+        mock_memory = MagicMock()
+        mock_memory.available = True
+        mock_memory.query_similar_situations = AsyncMock(
+            return_value=[
+                {
+                    "document": "Different regime lesson",
+                    "metadata": {
+                        "confidence_weight": 0.6,
+                        "failure_mode": "GOVERNANCE_BLEED",
+                        "sector": "Consumer Cyclical",
+                        "exchange": "HK",
+                        "currency": "HKD",
+                        "regime_risk_appetite": "RISK_ON",
+                        "regime_shock_type": "NONE",
+                        "regime_dip_posture": "BUYABLE",
+                    },
+                    "distance": 0.3,
+                },
+                {
+                    "document": "Same regime lesson",
+                    "metadata": {
+                        "confidence_weight": 0.52,
+                        "failure_mode": "CYCLICAL_PEAK",
+                        "sector": "Consumer Cyclical",
+                        "exchange": "HK",
+                        "currency": "HKD",
+                        "regime_risk_appetite": "RISK_OFF",
+                        "regime_shock_type": "ENERGY",
+                        "regime_dip_posture": "WAIT_FOR_CONFIRMATION",
+                    },
+                    "distance": 0.3,
+                },
+            ]
+        )
+
+        text = await format_lessons_for_injection(
+            mock_memory,
+            "7203.T",
+            "Consumer Cyclical",
+            current_regime={
+                "present": True,
+                "confidence": "MEDIUM",
+                "risk_appetite": "RISK_OFF",
+                "shock_type": "ENERGY",
+                "dip_posture": "WAIT_FOR_CONFIRMATION",
+            },
+        )
+
+        lines = text.strip().split("\n")
+        assert "Same regime lesson" in lines[1]
 
 
 # ══════════════════════════════════════════════════════════════════════════════

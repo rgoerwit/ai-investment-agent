@@ -17,6 +17,7 @@ from src.data_block_utils import (
     has_parseable_fenced_block,
     normalize_structured_block_boundaries,
 )
+from src.error_safety import summarize_exception
 from src.llms import quick_thinking_llm
 
 logger = structlog.get_logger(__name__)
@@ -237,7 +238,11 @@ class SignalProcessor:
             logger.error("llm_signal_extraction_failed_invalid_output", output=content)
             return "ERROR_UNPARSABLE_SIGNAL"
         except Exception as e:
-            logger.error("llm_signal_extraction_exception", error=str(e), exc_info=True)
+            logger.error(
+                "llm_signal_extraction_exception",
+                **summarize_exception(e, operation="llm_signal_extraction_exception"),
+                exc_info=True,
+            )
             return "ERROR_PROCESSING_SIGNAL"
 
 

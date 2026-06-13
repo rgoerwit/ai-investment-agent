@@ -53,6 +53,7 @@ def detect_red_flags(
     ticker: str = "UNKNOWN",
     sector: Sector = Sector.INDUSTRIALS,
     strict_mode: bool = False,
+    entity_role: str | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """Apply sector-aware threshold-based red-flag detection logic."""
     red_flags: list[dict[str, Any]] = []
@@ -81,27 +82,48 @@ def detect_red_flags(
             coverage_de_threshold = 100
 
     debt_to_equity = metrics.get("debt_to_equity")
+    role = str(entity_role or metrics.get("listing_role") or "").upper()
+    holdco_leverage_explained = role in {"PURE_HOLDCO", "INTERMEDIATE_HOLDCO"} and (
+        (
+            isinstance(metrics.get("net_debt_ebitda"), int | float)
+            and metrics["net_debt_ebitda"] <= 4.0
+        )
+        or (
+            isinstance(metrics.get("net_cash_to_market_cap"), int | float)
+            and metrics["net_cash_to_market_cap"] >= 0.25
+        )
+    )
     if (
         leverage_threshold is not None
         and debt_to_equity is not None
         and debt_to_equity > leverage_threshold
     ):
-        red_flags.append(
-            {
-                "type": "EXTREME_LEVERAGE",
-                "severity": "CRITICAL",
-                "detail": f"D/E ratio {debt_to_equity:.1f}% is extreme (>{leverage_threshold}% threshold for {sector.value})",
-                "action": "AUTO_REJECT",
-                "rationale": f"Leverage exceeds sector-appropriate threshold - bankruptcy risk (sector: {sector.value})",
-            }
-        )
-        logger.info(
-            "red_flag_extreme_leverage",
-            ticker=ticker,
-            debt_to_equity=debt_to_equity,
-            threshold=leverage_threshold,
-            sector=sector.value,
-        )
+        if holdco_leverage_explained:
+            logger.info(
+                "red_flag_extreme_leverage_suppressed_holdco",
+                ticker=ticker,
+                debt_to_equity=debt_to_equity,
+                net_debt_ebitda=metrics.get("net_debt_ebitda"),
+                net_cash_to_market_cap=metrics.get("net_cash_to_market_cap"),
+                entity_role=role,
+            )
+        else:
+            red_flags.append(
+                {
+                    "type": "EXTREME_LEVERAGE",
+                    "severity": "CRITICAL",
+                    "detail": f"D/E ratio {debt_to_equity:.1f}% is extreme (>{leverage_threshold}% threshold for {sector.value})",
+                    "action": "AUTO_REJECT",
+                    "rationale": f"Leverage exceeds sector-appropriate threshold - bankruptcy risk (sector: {sector.value})",
+                }
+            )
+            logger.info(
+                "red_flag_extreme_leverage",
+                ticker=ticker,
+                debt_to_equity=debt_to_equity,
+                threshold=leverage_threshold,
+                sector=sector.value,
+            )
 
     net_income = metrics.get("net_income")
     fcf = metrics.get("fcf")

@@ -15,6 +15,7 @@ from src.agents.decision_nodes import (
     _ensure_apac_resolution_block,
     _ensure_auditor_resolution_block,
     _extract_apac_verdict_line,
+    _normalize_pm_block_contract,
     _requires_apac_resolution,
 )
 
@@ -160,11 +161,54 @@ def test_ensure_auditor_idempotent_when_block_already_present() -> None:
 def test_pm_prompt_requests_new_resolution_blocks() -> None:
     path = pathlib.Path("prompts/portfolio_manager.json")
     data = json.loads(path.read_text(encoding="utf-8"))
-    assert (
-        data["version"] >= "9.6"
+    assert tuple(int(p) for p in data["version"].split(".")) >= (
+        9,
+        6,
     )  # Tranche 3 bumps to 9.7; floor is the introducing release.
     msg = data["system_message"]
     assert "APAC_RESOLUTION:" in msg
     assert "AUDITOR_RESOLUTION:" in msg
     # Original consultant resolution must still be intact.
     assert "CONSULTANT_RESOLUTION:" in msg
+
+
+def test_normalize_pm_block_contract_rewrites_no_initiation_size() -> None:
+    pm = (
+        "Rationale.\n\n"
+        "### --- START PM_BLOCK ---\n"
+        "VERDICT: HOLD\n"
+        "ZONE: MODERATE\n"
+        "POSITION_SIZE: 3.0\n"
+        "### --- END PM_BLOCK ---\n"
+    )
+    out = _normalize_pm_block_contract(pm)
+    assert "POSITION_SIZE: 0.0" in out
+    assert "POSITION_SIZE: 3.0" not in out
+
+
+def test_normalize_pm_block_contract_preserves_buy_size() -> None:
+    pm = (
+        "### --- START PM_BLOCK ---\n"
+        "VERDICT: BUY\n"
+        "ZONE: LOW\n"
+        "POSITION_SIZE: 3.0\n"
+        "### --- END PM_BLOCK ---\n"
+    )
+    assert _normalize_pm_block_contract(pm) == pm
+
+
+def test_normalize_pm_block_contract_rewrites_only_final_block() -> None:
+    pm = (
+        "### --- START PM_BLOCK ---\n"
+        "VERDICT: HOLD\n"
+        "POSITION_SIZE: 2.0\n"
+        "### --- END PM_BLOCK ---\n\n"
+        "### --- START PM_BLOCK ---\n"
+        "VERDICT: DO_NOT_INITIATE\n"
+        "POSITION_SIZE: 5.0\n"
+        "### --- END PM_BLOCK ---\n"
+    )
+    out = _normalize_pm_block_contract(pm)
+    assert "POSITION_SIZE: 2.0" in out
+    assert "POSITION_SIZE: 0.0" in out
+    assert "POSITION_SIZE: 5.0" not in out

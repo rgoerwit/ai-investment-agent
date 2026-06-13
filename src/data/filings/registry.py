@@ -4,6 +4,7 @@ import structlog
 
 from src.async_utils import run_with_hard_timeout
 from src.data.filings.base import FilingFetcher, FilingResult
+from src.error_safety import summarize_exception
 
 logger = structlog.get_logger(__name__)
 
@@ -49,7 +50,7 @@ class FilingRegistry:
                 "filing_fetch_error",
                 ticker=ticker,
                 source=fetcher.source_name,
-                error=str(e),
+                **summarize_exception(e, operation="filing_fetch_error"),
             )
             return None
 

@@ -94,7 +94,33 @@ VALUATION_CONTEXT: CONTEXTUAL_PASS
         assert result.verdict == "HOLD"
         assert result.zone == "MODERATE"
         assert result.valuation_discount == 0.9
+        assert result.position_size == 0.0
         assert result.should_show_targets() is True
+
+    def test_no_initiation_verdicts_force_zero_position_size(self):
+        for verdict in ("HOLD", "DO_NOT_INITIATE", "SELL"):
+            pm_output = f"""
+### --- START PM_BLOCK ---
+VERDICT: {verdict}
+ZONE: HIGH
+POSITION_SIZE: 5.0
+### --- END PM_BLOCK ---
+"""
+            result = extract_pm_block(pm_output)
+            assert result.verdict == verdict
+            assert result.position_size == 0.0
+
+    def test_buy_preserves_nonzero_position_size(self):
+        pm_output = """
+### --- START PM_BLOCK ---
+VERDICT: BUY
+ZONE: LOW
+POSITION_SIZE: 4.5
+### --- END PM_BLOCK ---
+"""
+        result = extract_pm_block(pm_output)
+        assert result.verdict == "BUY"
+        assert result.position_size == 4.5
 
     def test_missing_pm_block_returns_defaults(self):
         """Test that missing PM_BLOCK returns default values."""

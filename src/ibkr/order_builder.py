@@ -121,6 +121,7 @@ BOARD_LOT_SIZES: dict[str, int] = {
     ".HK": 100,  # Hong Kong: varies per stock, 100 is common minimum
     ".T": 100,  # Japan: 100 shares per unit (since 2018 standardization)
     ".KS": 1,  # Korea: 1 share minimum
+    ".KQ": 1,  # Korea KOSDAQ: 1 share minimum
     ".TW": 1000,  # Taiwan TWSE: 1000 shares per board lot
     ".TWO": 1000,  # Taiwan OTC (same board lot as TWSE)
     ".SS": 100,  # Shanghai: 100 shares

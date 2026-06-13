@@ -2,6 +2,7 @@
 
 import contextlib
 import json
+import math
 import signal
 import sys
 from pathlib import Path
@@ -467,19 +468,66 @@ class TestScrapeExchanges:
         assert len(result) == 1
         assert result.iloc[0]["YF_Ticker"] == "0001.HK"
 
+    def test_korea_clean_rule_pads_numeric_symbols_to_six_digits(self):
+        ex = self._make_exchange("South Korea", "KOSPI", suffix=".KS")
+        ex["params"]["clean_rule"] = "pad_6_digits"
+        config = self._make_config(ex)
+
+        df = pd.DataFrame(
+            {
+                "Code": ["5930", "000660", "10130", "001060", "ABC123"],
+                "Name": [
+                    "Samsung",
+                    "SK Hynix",
+                    "Korea Zinc",
+                    "JW Pharmaceutical",
+                    "Mixed Code",
+                ],
+            }
+        )
+        mock_handler = MagicMock(return_value=df)
+
+        with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
+            with patch.object(find_gems, "_check_deps"):
+                with patch("find_gems.time.sleep"):
+                    result = find_gems.scrape_exchanges(config, exclude_us=True)
+
+        assert result["YF_Ticker"].tolist() == [
+            "005930.KS",
+            "000660.KS",
+            "010130.KS",
+            "001060.KS",
+            "ABC123.KS",
+        ]
+
+    def test_kosdaq_enabled_exchange_outputs_kq_suffix(self):
+        ex = self._make_exchange("South Korea", "KOSDAQ", suffix=".KQ")
+        ex["params"]["clean_rule"] = "pad_6_digits"
+        config = self._make_config(ex)
+
+        df = pd.DataFrame({"Code": ["35420"], "Name": ["Naver"]})
+        mock_handler = MagicMock(return_value=df)
+
+        with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
+            with patch.object(find_gems, "_check_deps"):
+                with patch("find_gems.time.sleep"):
+                    result = find_gems.scrape_exchanges(config, exclude_us=True)
+
+        assert result.iloc[0]["YF_Ticker"] == "035420.KQ"
+
     def test_disabled_exchange_skipped(self):
         """Exchanges with enabled:false should be skipped entirely."""
         ex_enabled = self._make_exchange("Japan", "TSE")
-        ex_disabled = self._make_exchange("South Korea", "KOSPI", suffix=".KS")
+        ex_disabled = self._make_exchange("Atlantis", "ATX", suffix=".AT")
         ex_disabled["enabled"] = False
         config = self._make_config(ex_enabled, ex_disabled)
 
         jp_df = pd.DataFrame({"Code": ["7203"], "Name": ["Toyota"]})
-        kr_df = pd.DataFrame({"Code": ["005930"], "Name": ["Samsung"]})
+        at_df = pd.DataFrame({"Code": ["AT1"], "Name": ["Atlantis Corp"]})
 
         def side_effect(cfg, session):
-            if "KOSPI" in cfg["exchange_name"]:
-                return kr_df
+            if "ATX" in cfg["exchange_name"]:
+                return at_df
             return jp_df
 
         mock_handler = MagicMock(side_effect=side_effect)
@@ -491,7 +539,7 @@ class TestScrapeExchanges:
 
         assert len(result) == 1
         assert result.iloc[0]["YF_Ticker"] == "7203.T"
-        # Handler should only be called once (Korea skipped)
+        # Handler should only be called once (disabled exchange skipped)
         assert mock_handler.call_count == 1
 
     def test_filter_empty_result_skipped(self):
@@ -530,6 +578,236 @@ class TestScrapeExchanges:
                     result = find_gems.scrape_exchanges(config, exclude_us=True)
 
         assert len(result) == 1
+
+    def test_min_expected_rows_violation_raises(self):
+        # Backstory: 2026-05-30 — B3 source silently degraded to 23 real
+        # equities (vs 400+ expected) and the pipeline produced false-
+        # confidence runs. min_expected_rows was declared in config but
+        # never enforced. This test locks the runtime gate in.
+        ex = self._make_exchange("Brazil", "B3", suffix=".SA")
+        ex["min_expected_rows"] = 100
+        config = self._make_config(ex)
+
+        df = pd.DataFrame(
+            {"Code": ["PETR3", "PETR4"], "Name": ["Petrobras", "Petrobras"]}
+        )
+        mock_handler = MagicMock(return_value=df)
+
+        with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
+            with patch.object(find_gems, "_check_deps"):
+                with patch("find_gems.time.sleep"):
+                    with pytest.raises(RuntimeError) as exc_info:
+                        find_gems.scrape_exchanges(config, exclude_us=True)
+        msg = str(exc_info.value)
+        assert "min_expected_rows" in msg
+        assert "B3" in msg
+        assert "got 2" in msg
+        assert "100" in msg
+
+    def test_min_expected_rows_met_no_raise(self):
+        ex = self._make_exchange("Brazil", "B3", suffix=".SA")
+        ex["min_expected_rows"] = 2
+        config = self._make_config(ex)
+
+        df = pd.DataFrame(
+            {"Code": ["PETR3", "PETR4", "VALE3"], "Name": ["a", "b", "c"]}
+        )
+        mock_handler = MagicMock(return_value=df)
+
+        with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
+            with patch.object(find_gems, "_check_deps"):
+                with patch("find_gems.time.sleep"):
+                    result = find_gems.scrape_exchanges(config, exclude_us=True)
+
+        assert len(result) == 3
+
+    def test_min_expected_rows_zero_is_no_op(self):
+        # Backwards-compat: exchanges without the field set should not be gated.
+        ex = self._make_exchange("Japan", "TSE")
+        # No min_expected_rows key at all
+        config = self._make_config(ex)
+
+        df = pd.DataFrame({"Code": ["7203"], "Name": ["Toyota"]})
+        mock_handler = MagicMock(return_value=df)
+
+        with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
+            with patch.object(find_gems, "_check_deps"):
+                with patch("find_gems.time.sleep"):
+                    result = find_gems.scrape_exchanges(config, exclude_us=True)
+
+        assert len(result) == 1
+
+
+class TestBrazilBDRExclusion:
+    """Regression guard for Brazil's BDR-only .SA exclude_filter."""
+
+    @staticmethod
+    def _make_brazil_exchange():
+        """Build a Brazil exchange config matching production shape."""
+        return {
+            "country": "Brazil",
+            "exchange_name": "B3",
+            "yahoo_suffix": ".SA",
+            "source_url": "https://example.com/b3.csv",
+            "method": "download_csv",
+            "params": {
+                "ticker_col": "Symbol",
+                "name_col": "Company Name",
+                "exclude_filter": {"Symbol": "3[2-9]$"},
+            },
+        }
+
+    @staticmethod
+    def _scrape(df, ex):
+        config = {
+            "meta": {"description": "Test"},
+            "exchanges": [ex],
+        }
+        mock_handler = MagicMock(return_value=df)
+        with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
+            with patch.object(find_gems, "_check_deps"):
+                with patch("find_gems.time.sleep"):
+                    return find_gems.scrape_exchanges(config, exclude_us=True)
+
+    @pytest.mark.parametrize(
+        "symbols",
+        [
+            ["ADBE34", "GILD34", "INTU34"],
+            [
+                "XYZA32",
+                "XYZA33",
+                "XYZA34",
+                "XYZA35",
+                "XYZA36",
+                "XYZA37",
+                "XYZA38",
+                "XYZA39",
+            ],
+            ["A1GI34", "B1RF34", "M2RV34"],
+            [" ADBE34", "GILD34 ", " INTU34 "],
+            ["adbe34", "gild34"],
+        ],
+    )
+    def test_excludes_bdr_like_suffixes(self, symbols):
+        df = pd.DataFrame({"Symbol": symbols, "Company Name": ["x"] * len(symbols)})
+        result = self._scrape(df, self._make_brazil_exchange())
+        assert result.empty, result.get("YF_Ticker", pd.Series(dtype=str)).tolist()
+
+    @pytest.mark.parametrize(
+        "symbols",
+        [
+            ["PETR3", "PETR4", "VALE3", "ITUB4", "ABEV3", "B3SA3"],
+            ["XYZA5", "XYZA6", "XYZA7", "XYZA8"],
+            ["KNRI11", "BPAC11", "SAPR11"],
+            ["PETR1", "PETR2"],
+        ],
+    )
+    def test_preserves_native_b3_codes(self, symbols):
+        df = pd.DataFrame({"Symbol": symbols, "Company Name": ["x"] * len(symbols)})
+        result = self._scrape(df, self._make_brazil_exchange())
+        assert sorted(result["YF_Ticker"].tolist()) == sorted(
+            f"{symbol}.SA" for symbol in symbols
+        )
+
+    def test_realistic_b3_universe_partition(self):
+        df = pd.DataFrame(
+            {
+                "Symbol": [
+                    "ABEV3",
+                    "B3SA3",
+                    "PETR3",
+                    "PETR4",
+                    "SBSP3",
+                    "ADBE34",
+                    "GILD34",
+                    "A1GI34",
+                    "M2RV34",
+                ],
+                "Company Name": [
+                    "Ambev",
+                    "B3",
+                    "Petrobras ON",
+                    "Petrobras PN",
+                    "Sabesp",
+                    "Adobe",
+                    "Gilead",
+                    "Unsponsored A",
+                    "Unsponsored M",
+                ],
+            }
+        )
+        result = self._scrape(df, self._make_brazil_exchange())
+        tickers = sorted(result["YF_Ticker"].tolist())
+        assert tickers == [
+            "ABEV3.SA",
+            "B3SA3.SA",
+            "PETR3.SA",
+            "PETR4.SA",
+            "SBSP3.SA",
+        ]
+
+    def test_filter_does_not_apply_to_other_exchanges(self):
+        """Brazil's BDR filter must stay exchange-local."""
+        xetra_ex = {
+            "country": "Germany",
+            "exchange_name": "XETRA",
+            "yahoo_suffix": ".DE",
+            "source_url": "https://example.com/xetra.csv",
+            "method": "download_csv",
+            "params": {"ticker_col": "Symbol", "name_col": "Name"},
+        }
+        df = pd.DataFrame(
+            {
+                "Symbol": ["SAP", "BMW", "ABC34"],
+                "Name": ["SAP", "BMW", "Hypothetical Co"],
+            }
+        )
+        result = self._scrape(df, xetra_ex)
+        assert "ABC34.DE" in result["YF_Ticker"].tolist()
+
+
+# ============================================================
+# TestBrazilConfigInvariants — locks the production config shape
+# ============================================================
+class TestBrazilConfigInvariants:
+    """Lock the production B3 config shape."""
+
+    @staticmethod
+    def _load_brazil_entry():
+        with open(_CONFIG_PATH) as f:
+            cfg = json.load(f)
+        for ex in cfg["exchanges"]:
+            if ex.get("country") == "Brazil":
+                return ex
+        pytest.fail("Brazil entry missing from config/exchanges.json")
+
+    def test_brazil_entry_present_and_enabled(self):
+        ex = self._load_brazil_entry()
+        assert ex.get("enabled") is True
+
+    def test_brazil_uses_sa_suffix(self):
+        ex = self._load_brazil_entry()
+        assert ex["yahoo_suffix"] == ".SA"
+
+    def test_brazil_bdr_exclude_filter_present(self):
+        ex = self._load_brazil_entry()
+        params = ex.get("params", {})
+        exclude = params.get("exclude_filter", {})
+        ticker_col = params.get("ticker_col")
+        assert ticker_col in exclude
+        assert exclude[ticker_col] == "3[2-9]$"
+
+    def test_no_other_exchange_carries_brazil_bdr_filter(self):
+        with open(_CONFIG_PATH) as f:
+            cfg = json.load(f)
+        for ex in cfg["exchanges"]:
+            if ex.get("country") == "Brazil":
+                continue
+            exclude = ex.get("params", {}).get("exclude_filter", {})
+            for col in ("Symbol", "Papel"):
+                assert (
+                    exclude.get(col) != "3[2-9]$"
+                ), f"{ex['exchange_name']}: must not carry Brazil's BDR exclude_filter on {col!r}"
 
 
 # ============================================================
@@ -896,9 +1174,26 @@ class TestGenerateYfTicker:
         config = self._static_config(".L")
         assert find_gems._generate_yf_ticker(row, config) == "JD.L"
 
+    def test_trailing_dot_stripped_before_suffix(self):
+        """LSE SETS file emits mnemonics like 'NG.' → should produce 'NG.L'."""
+        row = self._row("NG.")
+        config = self._static_config(".L")
+        assert find_gems._generate_yf_ticker(row, config) == "NG.L"
+
+    def test_stacked_trailing_status_markers_stripped_before_suffix(self):
+        row = self._row("NG.-")
+        config = self._static_config(".L")
+        assert find_gems._generate_yf_ticker(row, config) == "NG.L"
+
     def test_trailing_dash_only_becomes_none(self):
         """A raw ticker that is nothing but a dash should return None."""
         row = self._row("-")
+        config = self._static_config(".L")
+        assert find_gems._generate_yf_ticker(row, config) is None
+
+    def test_trailing_dot_only_becomes_none(self):
+        """A raw ticker that is nothing but a dot should return None."""
+        row = self._row(".")
         config = self._static_config(".L")
         assert find_gems._generate_yf_ticker(row, config) is None
 
@@ -959,10 +1254,15 @@ class TestNormalizeTicker:
 
     def test_multi_dot_becomes_dash(self):
         assert to_yfinance("A.B.TO") == "A-B.TO"
+        assert to_yfinance("NIL.B.ST") == "NIL-B.ST"
 
     def test_single_char_suffix_becomes_dash(self):
         # e.g., "BRK.B" -> "BRK-B" (single char, not exchange suffix)
         assert to_yfinance("BRK.B") == "BRK-B"
+
+    def test_known_single_character_exchange_suffixes_stay_dotted(self):
+        assert to_yfinance("NG.L") == "NG.L"
+        assert to_yfinance("7203.T") == "7203.T"
 
     def test_non_string_converted(self):
         # find_gems._process_row always calls str() before to_yfinance; mirror that here.
@@ -1153,6 +1453,85 @@ class TestQuoteTypeGuard:
                 result = find_gems._process_row(row)
 
         assert result is None
+
+
+# ============================================================
+# TestTrailingPeFallback — marketCap / netIncomeToCommon proxy
+# ============================================================
+class TestTrailingPeFallback:
+    """Fallback P/E calculation for markets where Yahoo omits trailingPE."""
+
+    @staticmethod
+    def _make_info(**overrides):
+        base = {
+            "regularMarketPrice": 100,
+            "currentPrice": 100,
+            "trailingPE": None,
+            "netIncomeToCommon": 50_000_000,
+            "marketCap": 1_000_000_000,
+            "returnOnEquity": 0.15,
+            "returnOnAssets": 0.08,
+            "debtToEquity": 50,
+            "operatingCashflow": 1_000_000,
+            "currency": "USD",
+            "quoteType": "EQUITY",
+        }
+        base.update(overrides)
+        return base
+
+    def test_compute_market_cap_income_pe_from_positive_inputs(self):
+        assert find_gems._compute_market_cap_income_pe(self._make_info()) == 20.0
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"marketCap": None},
+            {"marketCap": 0},
+            {"marketCap": -1},
+            {"marketCap": "not-a-number"},
+            {"marketCap": math.inf},
+            {"marketCap": math.nan},
+            {"netIncomeToCommon": None},
+            {"netIncomeToCommon": 0},
+            {"netIncomeToCommon": -1},
+            {"netIncomeToCommon": "not-a-number"},
+            {"netIncomeToCommon": math.inf},
+            {"netIncomeToCommon": math.nan},
+        ],
+    )
+    def test_compute_market_cap_income_pe_rejects_invalid_inputs(self, overrides):
+        assert (
+            find_gems._compute_market_cap_income_pe(self._make_info(**overrides))
+            is None
+        )
+
+    def test_process_row_uses_fallback_without_default_stderr_noise(self, capsys):
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info()
+        mock_ticker.income_stmt = pd.DataFrame()
+        row = {"YF_Ticker": "7203.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(row)
+
+        assert result["P/E"] == 20.0
+        assert "trailingPE missing" not in capsys.readouterr().err
+
+    def test_process_row_logs_fallback_only_in_debug(self, capsys):
+        mock_ticker = MagicMock()
+        mock_ticker.info = self._make_info()
+        mock_ticker.income_stmt = pd.DataFrame()
+        row = {"YF_Ticker": "7203.T"}
+
+        with patch("find_gems.yf.Ticker", return_value=mock_ticker):
+            with patch("find_gems.time.sleep"):
+                result = find_gems._process_row(row, debug=True)
+
+        assert result["P/E"] == 20.0
+        stderr = capsys.readouterr().err
+        assert "[DEBUG] 7203.T: trailingPE missing" in stderr
+        assert "marketCap/netIncomeToCommon" in stderr
 
 
 # ============================================================
@@ -1687,6 +2066,127 @@ class TestExchangeScrapeIntegration:
                 "(filters may be misconfigured or source data format changed)"
             )
 
+    def test_b3_source_includes_known_midcaps(self):
+        """Catches the May 2026 regression where the B3 source URL returned
+        only mega-caps + BDRs, missing every real mid-cap. A non-empty scrape
+        passed `len > 0` but contained none of MGLU3/RENT3/HAPV3/LREN3/EQTL3.
+        Requires at least 4 of these 6 sentinels to be present.
+        """
+        import requests as _req
+
+        with open(_CONFIG_PATH) as f:
+            cfg = json.load(f)
+        brazil = next(
+            (ex for ex in cfg["exchanges"] if ex.get("country") == "Brazil"), None
+        )
+        if brazil is None or not brazil.get("enabled", True):
+            pytest.skip("Brazil entry missing or disabled")
+
+        handler = find_gems._HANDLERS.get(brazil["method"])
+        assert handler is not None
+
+        sentinels = {"MGLU3", "RENT3", "HAPV3", "LREN3", "EMBR3", "EQTL3"}
+        with _skip_on_wall_clock_timeout(20, "B3 mid-cap presence"):
+            try:
+                df = handler(brazil, self.session)
+            except _req.exceptions.RequestException as exc:
+                pytest.skip(f"B3 source unreachable: {exc}")
+            if df is None or df.empty:
+                pytest.skip("B3 handler returned empty (source may be down)")
+
+            df = find_gems._apply_filters(df, brazil)
+            ticker_col = brazil["params"]["ticker_col"]
+            found = sentinels & set(df[ticker_col].astype(str).str.strip().str.upper())
+            assert len(found) >= 4, (
+                f"B3 source missing real mid-caps: found {sorted(found) or 'none'} "
+                f"of {sorted(sentinels)}. Source may have regressed to a non-comprehensive "
+                "listing (e.g., 'top stocks' widget instead of full universe)."
+            )
+
+
+# ============================================================
+# TestExchangeMetricCanary — one known-liquid ticker per exchange
+# ============================================================
+# Catches the class of bug where scraping succeeds but yfinance returns
+# null for a field the screener gates on (e.g., trailingPE=None for KRX).
+# A scrape integration test won't see this; only a live metric fetch does.
+# ============================================================
+
+# One liquid, well-known ticker per enabled exchange. If yfinance can't
+# return basic financials for these blue-chip names, something is wrong
+# at the data-source layer — not in legitimate filter rejection territory.
+_EXCHANGE_CANARIES: dict[str, str] = {
+    ".T": "7203.T",  # Toyota (Japan TSE)
+    ".HK": "0005.HK",  # HSBC (Hong Kong)
+    ".TW": "2330.TW",  # TSMC (Taiwan)
+    ".KS": "005930.KS",  # Samsung Electronics (KOSPI)
+    ".KQ": "247540.KQ",  # EcoPro BM (KOSDAQ)
+    ".L": "HSBA.L",  # HSBC Holdings (LSE)
+    ".DE": "SAP.DE",  # SAP (XETRA)
+    ".SW": "NESN.SW",  # Nestlé (SIX Swiss)
+    ".AX": "BHP.AX",  # BHP (ASX)
+    ".SI": "D05.SI",  # DBS Group (SGX)
+    ".TO": "RY.TO",  # Royal Bank of Canada (TSX)
+    ".SA": "PETR4.SA",  # Petrobras (B3 Brazil) — state-controlled mega-cap
+    ".SA-WEGE3": "WEGE3.SA",  # WEG (industrial mid-cap, data-vacuum canary)
+    ".SA-RENT3": "RENT3.SA",  # Localiza (car rental, data-vacuum canary)
+    ".SA-EQTL3": "EQTL3.SA",  # Equatorial Energia (utility, data-vacuum canary)
+}
+
+
+@pytest.mark.integration
+@pytest.mark.slow
+class TestExchangeMetricCanary:
+    """Catches yfinance-data-vacuum bugs the scrape test can't see.
+
+    Backstory: 2026-05-23 — Korea was enabled in config and scraped 2624
+    rows successfully, but yfinance returns ``trailingPE=None`` for every
+    KRX listing, so the screener's missing-P/E gate rejected 100% of them.
+    The scrape-only integration test was green; this test, had it existed,
+    would have caught it at commit time.
+
+    Asserts that for one well-known liquid ticker per exchange, yfinance
+    returns enough data that ``_process_row`` produces a populated P/E
+    (raw or computed via the marketCap/netIncomeToCommon fallback).
+    """
+
+    @pytest.mark.parametrize(
+        ("suffix", "ticker"),
+        list(_EXCHANGE_CANARIES.items()),
+        ids=list(_EXCHANGE_CANARIES),
+    )
+    def test_canary_has_screenable_pe(self, suffix, ticker):
+        import requests as _req
+
+        row = {
+            "YF_Ticker": ticker,
+            "Ticker_Raw": ticker.split(".")[0],
+            "Country": "Canary",
+            "Exchange": f"Canary{suffix}",
+        }
+        try:
+            fx_rates = find_gems._fetch_fx_rates()
+            result = find_gems._process_row(
+                row,
+                fx_rates=fx_rates,
+                min_mcap=50_000_000,
+                min_volume=100_000,
+                debug=False,
+            )
+        except _req.exceptions.RequestException as exc:
+            pytest.skip(f"{ticker}: yfinance unreachable: {exc}")
+
+        if result is None:
+            pytest.fail(
+                f"{ticker}: _process_row returned None — yfinance may have lost "
+                f"data for this name, or {suffix} is fundamentally broken upstream"
+            )
+        assert result.get("P/E") is not None, (
+            f"{ticker}: P/E missing after _process_row (trailingPE null AND "
+            f"marketCap/netIncomeToCommon fallback failed). Every {suffix} "
+            f"listing will be silently rejected at the missing-P/E gate."
+        )
+
 
 # ============================================================
 # TestHandleScrapeHtmlPagination — unit tests (no network)
@@ -1762,6 +2262,26 @@ class TestHandleScrapeHtmlPagination:
 
         assert len(df) == 1000
         assert session.get.call_count == 3  # page 1, page 2, page 3 (stops)
+
+    def test_custom_page_param_used_for_pagination(self):
+        """Some sources use ?page=N rather than the default ?p=N pagination."""
+        base = self.BASE_CONFIG["source_url"]
+        page1_syms = [f"A{i}" for i in range(500)]
+        page2_syms = [f"B{i}" for i in range(300)]
+        pages = {
+            base: _make_html_table(page1_syms),
+            f"{base}?page=2": _make_html_table(page2_syms),
+        }
+        session = _make_mock_session(pages)
+        config = self._config(max_pages=5)
+        config["params"]["page_param"] = "page"
+
+        df = find_gems._handle_scrape_html(config, session)
+
+        assert len(df) == 800
+        fetched_urls = [call.args[0] for call in session.get.call_args_list]
+        assert f"{base}?page=2" in fetched_urls
+        assert f"{base}?p=2" not in fetched_urls
 
     def test_partial_last_page_stops_early(self):
         """When page N has fewer rows than page 1, it's the last page and is still collected."""

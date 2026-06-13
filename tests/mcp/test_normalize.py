@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from mcp.types import CallToolResult, TextContent
+
 from src.mcp.normalize import normalize_result
 
 

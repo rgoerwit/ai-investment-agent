@@ -50,6 +50,18 @@ class TestIbkrSymbolToYf:
     def test_korea(self):
         assert ibkr_symbol_to_yf("005930", "KRX") == "005930.KS"
 
+    def test_korea_short_numeric_zero_padding(self):
+        assert ibkr_symbol_to_yf("5930", "KRX", "KRW") == "005930.KS"
+
+    def test_korea_kse_alias_zero_padding(self):
+        assert ibkr_symbol_to_yf("5930", "KSE", "KRW") == "005930.KS"
+
+    def test_kosdaq_short_numeric_zero_padding(self):
+        assert ibkr_symbol_to_yf("35420", "KOSDAQ", "KRW") == "035420.KQ"
+
+    def test_korea_mixed_symbol_not_padded(self):
+        assert ibkr_symbol_to_yf("ABC123", "KRX", "KRW") == "ABC123.KS"
+
     def test_taiwan(self):
         assert ibkr_symbol_to_yf("2330", "TWSE") == "2330.TW"
 
@@ -107,6 +119,12 @@ class TestIbkrSymbolToYf:
     def test_currency_fallback_myr_scientx(self):
         # Another MYR stock; exchange absent
         assert ibkr_symbol_to_yf("SCIENTX", "", "MYR") == "SCIENTX.KL"
+
+    def test_currency_fallback_krw_defaults_to_ks(self):
+        assert ibkr_symbol_to_yf("5930", "", "KRW") == "005930.KS"
+
+    def test_exact_kosdaq_exchange_wins_over_krw_fallback(self):
+        assert ibkr_symbol_to_yf("35420", "KOSDAQ", "KRW") == "035420.KQ"
 
     def test_madrid_sibe_exchange(self):
         # SIBE is IBKR's code for Bolsa Madrid electronic order book
@@ -209,7 +227,7 @@ class TestYfToIbkrFormat:
     def test_hong_kong(self):
         symbol, exchange = yf_to_ibkr_format("0005.HK")
         assert exchange == "SEHK"
-        assert symbol == "0005"
+        assert symbol == "5"
 
     def test_tokyo(self):
         symbol, exchange = yf_to_ibkr_format("7203.T")
@@ -228,6 +246,31 @@ class TestYfToIbkrFormat:
     def test_london(self):
         symbol, exchange = yf_to_ibkr_format("HSBA.L")
         assert exchange == "LSE"
+
+    def test_korea_ks(self):
+        symbol, exchange = yf_to_ibkr_format("005930.KS")
+        assert symbol == "005930"
+        assert exchange == "KRX"
+
+    def test_korea_kq(self):
+        symbol, exchange = yf_to_ibkr_format("035420.KQ")
+        assert symbol == "035420"
+        assert exchange == "KOSDAQ"
+
+    def test_korea_ks_short_yf_normalizes_to_fixed_width_ibkr_symbol(self):
+        symbol, exchange = yf_to_ibkr_format("5930.KS")
+        assert symbol == "005930"
+        assert exchange == "KRX"
+
+    def test_korea_ks_five_digit_yf_normalizes_to_fixed_width_ibkr_symbol(self):
+        symbol, exchange = yf_to_ibkr_format("10130.KS")
+        assert symbol == "010130"
+        assert exchange == "KRX"
+
+    def test_korea_mixed_symbol_not_zero_stripped(self):
+        symbol, exchange = yf_to_ibkr_format("ABC123.KS")
+        assert symbol == "ABC123"
+        assert exchange == "KRX"
 
 
 class TestResolveConid:
@@ -286,6 +329,45 @@ class TestResolveConid:
         }
         result = resolve_conid("ASML.AS", client=mock_client)
         assert result == 222  # AEB match preferred over SMART
+
+    @patch("src.ibkr.ticker_mapper._save_cache")
+    @patch("src.ibkr.ticker_mapper._load_cache", return_value={})
+    def test_korean_yf_ticker_queries_fixed_width_ibkr_symbol(
+        self, mock_load, mock_save
+    ):
+        mock_client = MagicMock()
+        mock_client.stock_conid_by_symbol.return_value = {
+            "005930": [
+                {"conid": 111, "exchange": "KOSDAQ"},
+                {"conid": 222, "exchange": "KRX"},
+            ]
+        }
+
+        result = resolve_conid("005930.KS", client=mock_client)
+
+        assert result == 222
+        mock_client.stock_conid_by_symbol.assert_called_once_with(
+            "005930", default_filtering=False
+        )
+        mock_save.assert_called_once()
+
+    @patch("src.ibkr.ticker_mapper._save_cache")
+    @patch("src.ibkr.ticker_mapper._load_cache", return_value={})
+    def test_korean_five_digit_yf_ticker_queries_fixed_width_ibkr_symbol(
+        self, mock_load, mock_save
+    ):
+        mock_client = MagicMock()
+        mock_client.stock_conid_by_symbol.return_value = {
+            "010130": [{"conid": 333, "exchange": "KRX"}]
+        }
+
+        result = resolve_conid("10130.KS", client=mock_client)
+
+        assert result == 333
+        mock_client.stock_conid_by_symbol.assert_called_once_with(
+            "010130", default_filtering=False
+        )
+        mock_save.assert_called_once()
 
 
 class TestResolveYfTickerFromPosition:

@@ -30,6 +30,7 @@ import structlog
 
 from src.config import config
 from src.data.interfaces import FinancialFetcher
+from src.error_safety import redact_sensitive_text, summarize_exception
 
 logger = structlog.get_logger(__name__)
 
@@ -147,8 +148,10 @@ class FMPFetcher(FinancialFetcher):
                                 "fmp_malformed_json",
                                 endpoint=endpoint,
                                 status=response.status,
-                                error=str(e),
-                                preview=preview,
+                                **summarize_exception(
+                                    e, operation="fmp_malformed_json"
+                                ),
+                                preview=redact_sensitive_text(preview, max_chars=200),
                             )
                             return None
                         self._key_validated = True
@@ -163,7 +166,9 @@ class FMPFetcher(FinancialFetcher):
                                 endpoint=endpoint,
                                 status=response.status,
                                 key_state="unvalidated",
-                                preview=response_preview,
+                                preview=redact_sensitive_text(
+                                    response_preview, max_chars=200
+                                ),
                             )
                             raise ValueError(
                                 "FMP_API_KEY is invalid or expired. Check your configuration."
@@ -176,7 +181,9 @@ class FMPFetcher(FinancialFetcher):
                                 endpoint=endpoint,
                                 status=response.status,
                                 reason="possible_rate_limit_or_policy_change",
-                                preview=response_preview,
+                                preview=redact_sensitive_text(
+                                    response_preview, max_chars=200
+                                ),
                             )
                             return None
 
@@ -202,7 +209,9 @@ class FMPFetcher(FinancialFetcher):
                             endpoint=endpoint,
                             status=response.status,
                             reason="quota_or_rate_limit",
-                            preview=response_preview,
+                            preview=redact_sensitive_text(
+                                response_preview, max_chars=200
+                            ),
                         )
                         return None
 
@@ -230,12 +239,10 @@ class FMPFetcher(FinancialFetcher):
             )
             return None
         except Exception as e:
-            # Unexpected errors - log at debug level
             logger.warning(
                 "fmp_request_failed",
                 endpoint=endpoint,
-                error_type=type(e).__name__,
-                error=str(e),
+                **summarize_exception(e, operation="fmp_request"),
             )
             return None
 

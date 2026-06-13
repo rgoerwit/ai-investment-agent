@@ -61,6 +61,14 @@ def _baseline_result(extra: dict[str, Any] | None = None) -> dict[str, Any]:
             "current_neutral_response": "neutral view",
         },
         "company_of_interest": "TEST",
+        "company_name": "Test Corp",
+        "company_name_resolved": True,
+        "entity_governance_card": {
+            "ticker": "TEST",
+            "canonical_name": "Test Corp",
+            "entity_role": "STANDALONE",
+            "confidence": "clean",
+        },
     }
     if extra:
         result.update(extra)
@@ -132,6 +140,52 @@ def test_agent_attribution_risk_debate_absent_when_empty(tmp_path: Path) -> None
     row = saved["agent_attribution"]["risk_debate_state"]
     assert row["present"] is False
     assert row["char_count"] == 0
+
+
+def test_agent_attribution_governance_card_counts_structured_dict(
+    tmp_path: Path,
+) -> None:
+    saved = _save(tmp_path, _baseline_result())
+    row = saved["agent_attribution"]["entity_governance_card"]
+    assert row["agent"] == "financial_health_validator"
+    assert row["present"] is True
+    assert row["direct_pm_input"] is True
+    assert row["token_usage"] is None
+    assert row["char_count"] > 0
+
+
+def test_saved_json_persists_runtime_identity(tmp_path: Path) -> None:
+    saved = _save(tmp_path, _baseline_result())
+    assert "company_name" not in saved
+    assert "company_name_resolved" not in saved
+    assert saved["entity_governance_card"]["canonical_name"] == "Test Corp"
+    assert saved["metadata"]["company_name"] == "Test Corp"
+    assert saved["metadata"]["company_name_resolved"] is True
+
+
+def test_saved_json_uses_null_for_missing_governance_card(tmp_path: Path) -> None:
+    saved = _save(tmp_path, _baseline_result({"entity_governance_card": {}}))
+    assert saved["entity_governance_card"] is None
+
+
+def test_saved_json_persists_pm_source_artifacts(tmp_path: Path) -> None:
+    saved = _save(tmp_path, _baseline_result())
+    assert saved["source_artifacts"] == {
+        "raw_fundamentals_data": "junior raw json",
+        "foreign_language_report": "foreign text",
+        "legal_report": "legal text",
+        "value_trap_report": "value trap text",
+    }
+
+
+def test_saved_json_bounds_large_source_artifacts(tmp_path: Path) -> None:
+    saved = _save(
+        tmp_path,
+        _baseline_result({"raw_fundamentals_data": "x" * 50_100}),
+    )
+    raw = saved["source_artifacts"]["raw_fundamentals_data"]
+    assert len(raw) < 50_050
+    assert raw.endswith("\n[...truncated]")
 
 
 def test_agent_attribution_preserves_legacy_reports_map(tmp_path: Path) -> None:

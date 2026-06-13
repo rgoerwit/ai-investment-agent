@@ -249,6 +249,24 @@
       }
     },
     {
+      "country": "Brazil",
+      "exchange_name": "B3 (Brasil Bolsa Balcão)",
+      "enabled": true,
+      "method": "scrape_html",
+      "source_url": "https://www.fundamentus.com.br/resultado.php",
+      "note": "Fundamentus provides the B3 universe; uses latin-1 encoding and excludes BDR-like 3[2-9] suffixes.",
+      "yahoo_suffix": ".SA",
+      "min_expected_rows": 800,
+      "params": {
+        "ticker_col": "Papel",
+        "paginate_max_pages": 1,
+        "source_encoding": "latin-1",
+        "exclude_filter": {
+          "Papel": "3[2-9]$"
+        }
+      }
+    },
+    {
       "country": "Indonesia",
       "exchange_name": "Indonesia Stock Exchange",
       "enabled": true,
@@ -278,27 +296,35 @@
     {
       "country": "South Korea",
       "exchange_name": "Korea Stock Exchange (KOSPI)",
-      "enabled": false,
-      "note": "Not tradeable by US citizens via IBKR (restricted market)",
+      "enabled": true,
+      "note": "Enabled after IBKR launched KRX equity access for eligible clients on 2026-05-07; unavailable to Korea residents and IBIN/IBSJ clients.",
       "method": "scrape_html",
       "source_url": "https://stockanalysis.com/list/korea-stock-exchange/",
       "yahoo_suffix": ".KS",
+      "min_expected_rows": 600,
       "params": {
         "ticker_col": "Symbol",
-        "name_col": "Company Name"
+        "name_col": "Company Name",
+        "clean_rule": "pad_6_digits",
+        "page_param": "page",
+        "paginate_max_pages": 5
       }
     },
     {
       "country": "South Korea",
       "exchange_name": "KOSDAQ",
-      "enabled": false,
-      "note": "Not tradeable by US citizens via IBKR (restricted market)",
+      "enabled": true,
+      "note": "Enabled after IBKR launched KRX equity access for eligible clients on 2026-05-07; unavailable to Korea residents and IBIN/IBSJ clients.",
       "method": "scrape_html",
       "source_url": "https://stockanalysis.com/list/kosdaq-korea/",
       "yahoo_suffix": ".KQ",
+      "min_expected_rows": 1000,
       "params": {
         "ticker_col": "Symbol",
-        "name_col": "Company Name"
+        "name_col": "Company Name",
+        "clean_rule": "pad_6_digits",
+        "page_param": "page",
+        "paginate_max_pages": 5
       }
     },
     {

@@ -137,7 +137,7 @@ def extract_chart_data_from_data_block(fundamentals_report: str) -> ChartRawData
 
     data_block = extract_last_data_block(fundamentals_report)
     if not data_block:
-        logger.debug("No DATA_BLOCK found in fundamentals report")
+        logger.debug("no_data_block_found_in_fundamentals_report")
         return ChartRawData()
 
     # Extract each field
@@ -252,7 +252,7 @@ def extract_chart_data_from_data_block(fundamentals_report: str) -> ChartRawData
     )
 
     logger.debug(
-        "Extracted chart data from DATA_BLOCK",
+        "extracted_chart_data_from_data_block",
         current_price=result.current_price,
         health=result.adjusted_health_score,
         pe=result.pe_ratio_ttm,

@@ -12,9 +12,11 @@ import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
+import pandas as pd
 import pytest
 
 from src.data.eodhd_fetcher import EODHDFetcher
+from src.data.fetcher import SmartMarketDataFetcher
 from src.data.validator import FineGrainedValidator
 
 
@@ -579,3 +581,98 @@ class TestComprehensiveValidation:
         assert data["trailingPE"] is None
         assert data["_pe_capped"] is True
         assert "_data_quality_notes" in data
+
+
+class TestQuoteRangeRepair:
+    """Test 52-week range repair using existing price history."""
+
+    @pytest.fixture
+    def fetcher(self):
+        return SmartMarketDataFetcher()
+
+    @staticmethod
+    def _history() -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "Low": [9.5, 10.25, 11.0],
+                "High": [14.0, 15.5, 16.25],
+            }
+        )
+
+    @pytest.mark.asyncio
+    async def test_repairs_zero_low_from_history(self, fetcher):
+        fetcher.get_price_history = AsyncMock(return_value=self._history())
+        info = {
+            "currentPrice": 12.0,
+            "fiftyTwoWeekLow": 0.0,
+            "fiftyTwoWeekHigh": 16.0,
+        }
+
+        result = await fetcher._repair_quote_range_from_history(info, "TEST")
+
+        assert result["fiftyTwoWeekLow"] == pytest.approx(9.5)
+        assert result["fiftyTwoWeekHigh"] == pytest.approx(16.0)
+        assert result["_fiftyTwoWeekLow_source"] == "calculated_from_1y_history"
+        assert (
+            "52-week range repaired from 1y price history."
+            in result["_data_quality_notes"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_repairs_missing_range_from_history(self, fetcher):
+        fetcher.get_price_history = AsyncMock(return_value=self._history())
+        info = {"currentPrice": 12.0}
+
+        result = await fetcher._repair_quote_range_from_history(info, "TEST")
+
+        assert result["fiftyTwoWeekLow"] == pytest.approx(9.5)
+        assert result["fiftyTwoWeekHigh"] == pytest.approx(16.25)
+        assert result["_fiftyTwoWeekLow_source"] == "calculated_from_1y_history"
+        assert result["_fiftyTwoWeekHigh_source"] == "calculated_from_1y_history"
+
+    @pytest.mark.asyncio
+    async def test_repairs_invalid_high_from_history(self, fetcher):
+        fetcher.get_price_history = AsyncMock(return_value=self._history())
+        info = {
+            "currentPrice": 12.0,
+            "fiftyTwoWeekLow": 9.0,
+            "fiftyTwoWeekHigh": 10.0,
+        }
+
+        result = await fetcher._repair_quote_range_from_history(info, "TEST")
+
+        assert result["fiftyTwoWeekLow"] == pytest.approx(9.0)
+        assert result["fiftyTwoWeekHigh"] == pytest.approx(16.25)
+        assert result["_fiftyTwoWeekHigh_source"] == "calculated_from_1y_history"
+
+    @pytest.mark.asyncio
+    async def test_blanks_invalid_or_missing_range_when_history_empty(self, fetcher):
+        fetcher.get_price_history = AsyncMock(return_value=pd.DataFrame())
+        info = {
+            "currentPrice": 12.0,
+            "fiftyTwoWeekLow": 0.0,
+            "_data_quality_notes": "preexisting note",
+        }
+
+        result = await fetcher._repair_quote_range_from_history(info, "TEST")
+
+        assert result["fiftyTwoWeekLow"] is None
+        assert result["fiftyTwoWeekHigh"] is None
+        assert result["_data_quality_notes"][0] == "preexisting note"
+        assert any(
+            "history unavailable" in note for note in result["_data_quality_notes"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_blanks_range_when_history_fetch_raises(self, fetcher):
+        fetcher.get_price_history = AsyncMock(side_effect=RuntimeError("boom"))
+        info = {
+            "currentPrice": 12.0,
+            "fiftyTwoWeekLow": 0.0,
+            "fiftyTwoWeekHigh": 10.0,
+        }
+
+        result = await fetcher._repair_quote_range_from_history(info, "TEST")
+
+        assert result["fiftyTwoWeekLow"] is None
+        assert result["fiftyTwoWeekHigh"] is None

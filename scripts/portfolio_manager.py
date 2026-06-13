@@ -44,7 +44,7 @@ from src.ibkr.cli_options import (
     portfolio_request_kwargs_from_args,
     validate_common_portfolio_request_args,
 )
-from src.ibkr.dip_watch import compute_dip_score
+from src.ibkr.dip_watch import dip_watch_source, score_dip_watch_item
 from src.ibkr.exceptions import IBKRAuthError, IBKRError
 from src.ibkr.models import (
     AnalysisRecord,
@@ -902,8 +902,11 @@ def _store_macro_event_if_detected(
     if not correlated_flag:
         return
 
+    # Tolerant of the three trigger phrasings: "within Nd of DATE" (window)
+    # and "as of DATE" (cumulative / drawdown_breadth).
     m = _re.search(
-        r"CORRELATED_SELL_EVENT:\s*(\d+) positions.*?(\d+)d of (\d{4}-\d{2}-\d{2})"
+        r"CORRELATED_SELL_EVENT:\s*(\d+) positions"
+        r".*?(?:within (\d+)d of|as of) (\d{4}-\d{2}-\d{2})"
         r".*?\((\d+\.?\d*)%",
         correlated_flag,
     )
@@ -919,17 +922,27 @@ def _store_macro_event_if_detected(
     total_held = sum(
         1 for item in reconciliation_items if item.ibkr_position is not None
     )
+    # Event evidence for region/sector characterization. Demotion has ALREADY
+    # run by the time this executes, so the dominant soft-rejects are action
+    # REVIEW — restricting to action SELL would characterize the event from
+    # leftovers (or nothing). Include the demoted items.
     sell_items = [
         item
         for item in reconciliation_items
-        if item.action == "SELL" and item.ibkr_position is not None
+        if item.ibkr_position is not None
+        and item.action in ("SELL", "REVIEW")
+        and item.sell_type in ("HARD_REJECT", "SOFT_REJECT", "STOP_BREACH")
     ]
 
     scope, primary_region, primary_sector, impact, event_type, headline, detail = (
         _characterize_macro_event(event_date, sell_items, correlation_pct, peak_count)
     )
 
-    anchor = _date.fromisoformat(event_date)
+    # Anchor expiry on the LATER of event date and detection date: for an
+    # ongoing situation (e.g. a months-long strait closure) each re-detection
+    # rolls the override window forward instead of letting it expire while
+    # the event is still live.
+    anchor = max(_date.fromisoformat(event_date), _date.today())
     expiry = (anchor + _td(days=_EXPIRY_DAYS.get(event_type, 60))).isoformat()
 
     try:
@@ -1023,7 +1036,7 @@ def _bar_chart(pct: float, limit: float, width: int = 14) -> str:
 
 def _compute_dip_score(item: ReconciliationItem) -> float:
     """Backward-compatible alias for the shared dip-watch scorer."""
-    return compute_dip_score(item)
+    return score_dip_watch_item(item)
 
 
 def _display_ticker(item: ReconciliationItem) -> str:
@@ -1554,10 +1567,13 @@ def format_report(
         (f for f in (portfolio_health_flags or []) if "CORRELATED_SELL_EVENT" in f),
         None,
     )
+    _active_flag = next(
+        (f for f in (portfolio_health_flags or []) if "ACTIVE_MACRO_EVENT" in f),
+        None,
+    )
     if _correlated_flag:
-        # Parse "CORRELATED_SELL_EVENT: N positions changed verdict within Xd of DATE (P% …"
-        # Flag format (from compute_portfolio_health):
-        #   "CORRELATED_SELL_EVENT: 30 positions changed verdict within 7d of 2026-02-28 (61% …"
+        # Parse the flag from compute_portfolio_health. Tolerant of all three
+        # trigger phrasings: "within Nd of DATE" and "as of DATE".
         import re as _re
 
         _bm = _re.search(
@@ -1567,11 +1583,13 @@ def format_report(
             _cnt, _dt, _pct = _bm.group(1), _bm.group(2), f"{_bm.group(3)}%"
         else:
             _cnt, _dt, _pct = "?", "?", "?%"
+        # Truthful summary line: the trigger may be verdict-flip evidence OR a
+        # current price-drawdown breadth — "impacted" covers both.
         _W = 52  # inner text width (54 inner box chars minus 2-space left indent)
         _banner_lines = [
             "╔" + "═" * 54 + "╗",
             f"║  {'!! MACRO ALERT':<{_W}}║",
-            f"║  {f'{_cnt} positions changed verdict on {_dt}':<{_W}}║",
+            f"║  {f'{_cnt} positions impacted (as of {_dt})':<{_W}}║",
             f"║  {f'({_pct} of held positions) — probable macro event':<{_W}}║",
             f"║  {'Likely macro event, not individual thesis failure.':<{_W}}║",
             f"║  {'Execute stops (weak only); review strong stops first.':<{_W}}║",
@@ -1601,6 +1619,26 @@ def format_report(
         except Exception:
             pass
         for bl in _banner_lines:
+            lines.append(bl)
+        lines.append("")
+    elif _active_flag:
+        # Sustained override from a stored, unexpired event — the demotions are
+        # still active; the operator must see WHY sells became reviews.
+        import re as _re
+
+        _am = _re.search(
+            r"ACTIVE_MACRO_EVENT:\s*(\S+) event active until (\S+)\s*—\s*(\d+)",
+            _active_flag,
+        )
+        _type, _until, _n = _am.groups() if _am else ("MACRO", "?", "?")
+        _W = 52
+        for bl in (
+            "╔" + "═" * 54 + "╗",
+            f"║  {'!! MACRO OVERRIDE ACTIVE':<{_W}}║",
+            f"║  {f'{_type} event active until {_until}':<{_W}}║",
+            f"║  {f'{_n} SELL(s) held in REVIEW (sustained override)':<{_W}}║",
+            "╚" + "═" * 54 + "╝",
+        ):
             lines.append(bl)
         lines.append("")
 
@@ -1838,8 +1876,14 @@ def format_report(
 
     # ── DIP WATCH ────────────────────────────────────────────────────────────
     dip_candidates: list[ReconciliationItem] = list(action_groups.dip_candidates)
-    if _correlated_flag and dip_candidates:
-        _render_dip_watch_section(dip_candidates)
+    display_dip_candidates = [
+        item
+        for item in dip_candidates
+        if dip_watch_source(item) == "held_buy_pullback"
+        or (_correlated_flag and dip_watch_source(item) == "macro_review")
+    ]
+    if display_dip_candidates:
+        _render_dip_watch_section(display_dip_candidates)
 
     # ── TRIMS ────────────────────────────────────────────────────────────────
     if trims:
@@ -2223,7 +2267,7 @@ def format_report(
     if (
         action_today
         or funded_today
-        or dip_candidates
+        or display_dip_candidates
         or settle_groups
         or settle_conditional
         or _cands_deduped
@@ -2317,10 +2361,10 @@ def format_report(
                 )
             lines.append("")
 
-        if dip_candidates:
+        if display_dip_candidates:
             lines.append(f"  DIP OPPORTUNITIES ({today_str}):")
             _dips_in_flight: list[str] = []
-            for _di in dip_candidates:
+            for _di in display_dip_candidates:
                 _dexisting = _find_live_order(_di)
                 if _dexisting and _dexisting[1] == "BUY":
                     _dips_in_flight.append(_display_ticker(_di))
@@ -2407,8 +2451,10 @@ def format_report(
                 lines.append(
                     "    → No confirmed proceeds — review soft sells before counting on this cash"
                 )
-            if dip_candidates:
-                top_tickers = "  ".join(_display_ticker(i) for i in dip_candidates[:3])
+            if display_dip_candidates:
+                top_tickers = "  ".join(
+                    _display_ticker(i) for i in display_dip_candidates[:3]
+                )
                 lines.append(
                     f"    → Top dip candidates for deployment: {top_tickers}"
                     "  (see DIP OPPORTUNITIES above)"

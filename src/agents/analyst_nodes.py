@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import re
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
@@ -14,11 +12,13 @@ from langgraph.types import RunnableConfig
 from src.config import config as settings_config
 from src.data_block_utils import (
     detect_legacy_data_block_shape,
+    extract_block_text_value,
     extract_last_data_block,
     has_parseable_data_block,
     has_parseable_fenced_block,
     normalize_legacy_data_block_report,
     normalize_structured_block_boundaries,
+    replace_or_append_block_line,
 )
 from src.error_safety import summarize_exception
 from src.runtime_config import get_runtime_config
@@ -27,6 +27,12 @@ from src.tooling.text_boundary import format_untrusted_block
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .fundamentals_reconciler import (
+    HORIZON_FIELD_RAW_KEYS,
+    append_analyst_coverage_data_quality_note,
+    extract_raw_metrics_payload,
+    reconcile_high_risk_fields,
+)
 from .output_limits import cap_state_value
 from .output_validation import (
     log_output_diagnostics,
@@ -50,39 +56,97 @@ Do NOT use markdown tables inside DATA_BLOCK.
 """
 
 _QUARANTINED_FORWARD_KEYS = ("PE_RATIO_FORWARD", "PEG_RATIO")
-_HORIZON_FIELD_RAW_KEYS = (
-    ("REVENUE_GROWTH_TTM", "revenueGrowth_TTM"),
-    ("REVENUE_GROWTH_MRQ", "revenueGrowth_MRQ"),
-    ("EARNINGS_GROWTH_TTM", "earningsGrowth_TTM"),
-    ("EARNINGS_GROWTH_MRQ", "earningsGrowth_MRQ"),
-    ("GROWTH_TRAJECTORY", "growth_trajectory"),
+_VALID_ADR_EXCHANGES = {
+    "NYSE",
+    "NASDAQ",
+    "AMEX",
+    "OTC",
+    "OTC-OTCQX",
+    "OTC-OTCQB",
+    "OTC-OTCPK",
+    "PINK",
+}
+_AUTHORITATIVE_ADR_DOMAINS = (
+    "sec.gov",
+    "adr.db.com",
+    "adrbny.com",
+    "depositaryreceipts.citi.com",
+    "citiadr.factsetdigitalsolutions.com",
+    "adr.com",
+    "jpmadr",
+    "markitdigital.com/jpmadr",
+    "otcmarkets.com",
+)
+_UNSPONSORED_ADR_MARKERS = (
+    "unsponsored adr",
+    "unsp/adr",
+    "sponsorship level: unsponsored",
+    "unsponsored adr program",
+    "multi unsponsored",
+)
+_SPONSORED_ADR_MARKERS = (
+    "sponsorship level: sponsored",
+    "sponsored level i adr",
+    "sponsored level ii adr",
+    "sponsored level iii adr",
+    "sponsored level 1 adr",
+    "sponsored level 2 adr",
+    "sponsored level 3 adr",
+    "sponsored adr program",
+    "sponsored depositary receipt program",
 )
 
 
-def _replace_or_append_datablock_line(body: str, key: str, value: str) -> str:
-    pattern = re.compile(rf"(?m)^{re.escape(key)}:\s*.*$")
-    replacement = f"{key}: {value}"
-    if pattern.search(body):
-        return pattern.sub(replacement, body, count=1)
-    suffix = "" if body.endswith("\n") else "\n"
-    return f"{body}{suffix}{replacement}"
+def _home_suffix(ticker: str) -> str:
+    return ticker[ticker.rfind(".") :].upper() if "." in ticker else ""
+
+
+def _invalid_adr_routing(body: str, ticker: str) -> bool:
+    if extract_block_text_value(body, "ADR_EXISTS").upper() != "YES":
+        return False
+
+    adr_ticker = extract_block_text_value(body, "ADR_TICKER").upper()
+    adr_exchange = extract_block_text_value(body, "ADR_EXCHANGE").upper()
+    suffix = _home_suffix(ticker)
+    ticker_root = ticker.upper().split(".", 1)[0]
+    ticker_bad = adr_ticker not in {"", "NONE", "N/A"} and (
+        adr_ticker == ticker.upper()
+        or adr_ticker == ticker_root
+        or (suffix and adr_ticker.endswith(suffix))
+    )
+    exchange_bad = (
+        adr_exchange not in {"", "NONE", "N/A"}
+        and adr_exchange not in _VALID_ADR_EXCHANGES
+    )
+    return ticker_bad or exchange_bad
+
+
+def _classify_otc_adr_evidence(raw_text: str) -> str | None:
+    """Classify OTC ADR sponsorship only from explicit authoritative evidence."""
+    text = raw_text.lower()
+    if any(marker in text for marker in _UNSPONSORED_ADR_MARKERS):
+        return "UNSPONSORED"
+    has_authoritative_source = any(
+        domain in text for domain in _AUTHORITATIVE_ADR_DOMAINS
+    )
+    if has_authoritative_source and any(
+        marker in text for marker in _SPONSORED_ADR_MARKERS
+    ):
+        return "SPONSORED"
+    return None
 
 
 def _sanitize_fundamentals_output(
     content: str,
     raw_data: str,
     ticker: str,
+    foreign_data: str = "",
 ) -> str:
     if not raw_data or not has_parseable_data_block(content):
         return content
 
-    try:
-        payload = json.loads(raw_data)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return content
-
-    if not isinstance(payload, dict):
-        return content
+    payload = extract_raw_metrics_payload(raw_data)
+    has_structured_payload = bool(payload)
 
     block_body = extract_last_data_block(content, include_markers=False)
     block_with_markers = extract_last_data_block(content, include_markers=True)
@@ -90,29 +154,100 @@ def _sanitize_fundamentals_output(
         return content
 
     updated_body = block_body
-    if payload.get("_split_sensitive_metrics_quarantined") is True:
-        for key in _QUARANTINED_FORWARD_KEYS:
-            updated_body = _replace_or_append_datablock_line(updated_body, key, "N/A")
+    if has_structured_payload:
+        updated_body = reconcile_high_risk_fields(updated_body, payload)
 
-    for datablock_key, raw_key in _HORIZON_FIELD_RAW_KEYS:
-        if payload.get(raw_key) is None:
-            updated_body = _replace_or_append_datablock_line(
-                updated_body,
-                datablock_key,
-                "N/A",
-            )
+    updated_body = append_analyst_coverage_data_quality_note(
+        updated_body,
+        foreign_data,
+    )
+
+    if (
+        has_structured_payload
+        and payload.get("_split_sensitive_metrics_quarantined") is True
+    ):
+        for key in _QUARANTINED_FORWARD_KEYS:
+            updated_body = replace_or_append_block_line(updated_body, key, "N/A")
+
+    if has_structured_payload and payload.get("_pe_low_anomaly_quarantined") is True:
+        updated_body = replace_or_append_block_line(updated_body, "PE_RATIO_TTM", "N/A")
+        updated_body = replace_or_append_block_line(updated_body, "PEG_RATIO", "N/A")
+
+    if has_structured_payload:
+        for datablock_key, raw_key in HORIZON_FIELD_RAW_KEYS:
+            if payload.get(raw_key) is None:
+                updated_body = replace_or_append_block_line(
+                    updated_body,
+                    datablock_key,
+                    "N/A",
+                )
 
     latest_quarter_date = payload.get("latest_quarter_date")
+    latest_quarter_date_reconciled = (
+        has_structured_payload
+        and payload.get("_latest_quarter_date_source")
+        == "reconciled_most_recent_quarter"
+    )
     if (
-        payload.get("_latest_quarter_date_source") == "reconciled_most_recent_quarter"
+        latest_quarter_date_reconciled
         and isinstance(latest_quarter_date, str)
         and latest_quarter_date
     ):
-        updated_body = _replace_or_append_datablock_line(
+        updated_body = replace_or_append_block_line(
             updated_body,
             "LATEST_QUARTER_DATE",
             latest_quarter_date,
         )
+
+    if _invalid_adr_routing(updated_body, ticker):
+        for key, value in {
+            "ADR_TICKER": "None",
+            "ADR_EXCHANGE": "None",
+            "ADR_THESIS_IMPACT": "UNCERTAIN",
+            "ADR_DATA_QUALITY_NOTE": (
+                "Invalid ADR routing fields removed; ADR status unresolved."
+            ),
+        }.items():
+            updated_body = replace_or_append_block_line(
+                updated_body,
+                key,
+                value,
+            )
+        logger.warning("adr_routing_invalidated", ticker=ticker)
+
+    adr_exchange = extract_block_text_value(updated_body, "ADR_EXCHANGE").upper()
+    adr_type = extract_block_text_value(updated_body, "ADR_TYPE").upper()
+    if adr_exchange.startswith("OTC") and adr_type == "SPONSORED":
+        evidence = _classify_otc_adr_evidence(raw_data)
+        replacements: dict[str, str] | None = None
+        if evidence == "UNSPONSORED":
+            replacements = {
+                "ADR_TYPE": "UNSPONSORED",
+                "ADR_THESIS_IMPACT": "EMERGING_INTEREST",
+                "ADR_DATA_QUALITY_NOTE": (
+                    "OTC ADR sponsorship corrected from explicit unsponsored "
+                    "evidence."
+                ),
+            }
+            logger.warning("adr_sponsorship_corrected_to_unsponsored", ticker=ticker)
+        elif evidence is None:
+            replacements = {
+                "ADR_TYPE": "UNCERTAIN",
+                "ADR_THESIS_IMPACT": "UNCERTAIN",
+                "ADR_DATA_QUALITY_NOTE": (
+                    "OTC sponsorship claim lacked authoritative evidence; loose "
+                    "source language ignored."
+                ),
+            }
+            logger.warning("adr_sponsorship_downgraded_to_uncertain", ticker=ticker)
+
+        if replacements:
+            for key, value in replacements.items():
+                updated_body = replace_or_append_block_line(
+                    updated_body,
+                    key,
+                    value,
+                )
 
     if updated_body == block_body:
         return content
@@ -139,6 +274,7 @@ def _normalize_structured_output(
     ticker: str,
     *,
     raw_data: str = "",
+    foreign_data: str = "",
 ) -> str:
     """Apply narrow deterministic output repairs for known model-format drift."""
     if agent_key != "fundamentals_analyst":
@@ -168,7 +304,12 @@ def _normalize_structured_output(
             repaired_has_datablock=has_parseable_data_block(boundary_normalized),
         )
     normalized = boundary_normalized or normalized
-    normalized = _sanitize_fundamentals_output(normalized, raw_data, ticker)
+    normalized = _sanitize_fundamentals_output(
+        normalized,
+        raw_data,
+        ticker,
+        foreign_data=foreign_data,
+    )
     return normalized
 
 
@@ -232,12 +373,7 @@ def _build_portfolio_macro_event_context(ticker: str) -> str:
 
 def _build_regional_macro_context_block(context: Any | None, ticker: str) -> str:
     """Return the cached regional macro brief block for News Analyst."""
-    macro_report = getattr(context, "macro_context_report", "") if context else ""
-    if not macro_report:
-        return ""
-
-    macro_region = getattr(context, "macro_context_region", "GLOBAL") or "GLOBAL"
-    return "### REGIONAL MACRO CONTEXT\n" f"Region: {macro_region}\n" f"{macro_report}"
+    return support.format_macro_context_for_agent(context, audience="news")
 
 
 def _build_news_macro_extra_context(ticker: str, context: Any | None) -> str:
@@ -519,6 +655,9 @@ def create_analyst_node(
                 content_str,
                 ticker,
                 raw_data=raw_data if agent_key == "fundamentals_analyst" else "",
+                foreign_data=foreign_data
+                if agent_key == "fundamentals_analyst"
+                else "",
             )
 
             if (
@@ -569,6 +708,9 @@ def create_analyst_node(
                         raw_data=raw_data
                         if agent_key == "fundamentals_analyst"
                         else "",
+                        foreign_data=foreign_data
+                        if agent_key == "fundamentals_analyst"
+                        else "",
                     )
                     retry_tool_calls = getattr(retry_response, "tool_calls", None)
                     retry_has_tool_calls = (
@@ -600,7 +742,9 @@ def create_analyst_node(
                         "analyst_retry_failed",
                         agent_key=agent_key,
                         ticker=ticker,
-                        error=str(retry_error),
+                        **summarize_exception(
+                            retry_error, operation="analyst_retry_failed"
+                        ),
                     )
 
             from src.utils import detect_truncation
@@ -663,7 +807,9 @@ def create_analyst_node(
             return new_state
         except Exception as exc:
             logger.error(
-                "analyst_node_error", output_field=output_field, error=str(exc)
+                "analyst_node_error",
+                output_field=output_field,
+                **summarize_exception(exc, operation="analyst_node_error"),
             )
             error_message = AIMessage(content=f"Error: {str(exc)}")
             error_message.name = agent_key

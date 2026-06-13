@@ -8,11 +8,13 @@ import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.types import RunnableConfig
 
+from src.error_safety import summarize_exception
 from src.runtime_diagnostics import failure_artifact, success_artifact
 from src.tooling.text_boundary import format_untrusted_block
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .governance_prompt import rendered_governance_card
 from .output_limits import cap_state_value
 from .state import AgentState
 
@@ -36,6 +38,10 @@ def build_apac_specialist_payload(state: AgentState) -> dict[str, str]:
         "ticker": state.get("company_of_interest", ""),
         "company": state.get("company_name", ""),
         "trade_date": state.get("trade_date", ""),
+        "entity_governance_card": _clip(
+            rendered_governance_card(state),
+            2200,
+        ),
         "investment_plan": _clip(state.get("investment_plan"), 6000),
         "fundamentals_report": _clip(state.get("fundamentals_report"), 5000),
         "foreign_language_report": _clip(state.get("foreign_language_report"), 3000),
@@ -107,7 +113,7 @@ def create_apac_specialist_node(llm) -> Callable:
             logger.warning(
                 "apac_specialist_failed",
                 ticker=ticker,
-                error=str(exc),
+                **summarize_exception(exc, operation="apac_specialist_failed"),
                 exc_info=True,
             )
             result = failure_artifact(

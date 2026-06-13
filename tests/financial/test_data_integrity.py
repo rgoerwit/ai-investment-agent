@@ -152,8 +152,9 @@ class TestTickerPolicy:
         assert is_safe_symbol_crossmatch_base("CEK") is True
         assert is_safe_symbol_crossmatch_base("2628") is False
 
-    def test_exchange_specific_normalization_only_pads_hk(self):
+    def test_exchange_specific_normalization_uses_metadata_policy(self):
         assert normalize_exchange_specific_base("5", ".HK") == "0005"
+        assert normalize_exchange_specific_base("10130", ".KS") == "010130"
         assert normalize_exchange_specific_base("262A", ".T") == "262A"
         assert normalize_exchange_specific_base("2330", ".TW") == "2330"
 

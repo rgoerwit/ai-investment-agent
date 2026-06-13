@@ -45,6 +45,12 @@ class TestIsValidCompanyName:
         """Reject if name is just the ticker base without exchange suffix."""
         assert _is_valid_company_name("2154", "2154.HK") is False
 
+    def test_identifier_csv_blob_rejected(self):
+        """Reject Yahoo/Refinitiv identifier bundles masquerading as names."""
+        assert (
+            _is_valid_company_name("206640.KS,0P000155DR,176967", "206640.KS") is False
+        )
+
 
 class TestResolveCompanyName:
     """Test the multi-source resolution chain."""
@@ -111,6 +117,24 @@ class TestResolveCompanyName:
         assert result.is_resolved is True
         assert result.source == "yahooquery"
         assert "Linklogis" in result.name
+
+    @pytest.mark.asyncio
+    async def test_identifier_blob_falls_through_to_next_source(self):
+        """Bad canonical source names must not enter state/search prompts."""
+        with (
+            patch("src.ticker_utils._try_yfinance", new_callable=AsyncMock) as mock_yf,
+            patch(
+                "src.ticker_utils._try_yahooquery", new_callable=AsyncMock
+            ) as mock_yq,
+        ):
+            mock_yf.return_value = "206640.KS,0P000155DR,176967"
+            mock_yq.return_value = "Boditech Med Inc."
+            result = await resolve_company_name("206640.KS")
+
+        assert result.is_resolved is True
+        assert result.source == "yahooquery"
+        assert result.name == "Boditech Med"
+        assert result.preferred_display_name == "Boditech Med Inc."
 
     @pytest.mark.asyncio
     async def test_all_free_fail_fmp_resolves(self):
@@ -271,6 +295,8 @@ class TestResolveCompanyName:
         assert result.is_resolved is True
         # "Corporation" suffix should be stripped by normalize_company_name
         assert result.name == "Toyota Motor"
+        assert result.canonical_name == "Toyota Motor Corporation"
+        assert result.preferred_display_name == "Toyota Motor Corporation"
 
     @pytest.mark.asyncio
     async def test_exception_in_source_continues_chain(self):

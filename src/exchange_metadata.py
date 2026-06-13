@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal, get_args
+
+IBKRNumericSymbolMode = Literal["same_as_yahoo", "strip_leading_zeroes"]
+_VALID_IBKR_MODES: frozenset[str] = frozenset(get_args(IBKRNumericSymbolMode))
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,6 +18,8 @@ class ExchangeInfo:
     country: str
     ibkr_code: str
     currency: str
+    numeric_symbol_width: int | None = None
+    ibkr_numeric_symbol_mode: IBKRNumericSymbolMode = "same_as_yahoo"
 
 
 EXCHANGES_BY_SUFFIX: dict[str, ExchangeInfo] = {
@@ -28,11 +34,33 @@ EXCHANGES_BY_SUFFIX: dict[str, ExchangeInfo] = {
     ".MC": ExchangeInfo(".MC", "Bolsa de Madrid", "Spain", "BM", "EUR"),
     ".L": ExchangeInfo(".L", "London Stock Exchange", "UK", "LSE", "GBP"),
     ".T": ExchangeInfo(".T", "Tokyo Stock Exchange", "Japan", "TSE", "JPY"),
-    ".HK": ExchangeInfo(".HK", "Hong Kong Stock Exchange", "Hong Kong", "SEHK", "HKD"),
+    ".HK": ExchangeInfo(
+        ".HK",
+        "Hong Kong Stock Exchange",
+        "Hong Kong",
+        "SEHK",
+        "HKD",
+        numeric_symbol_width=4,
+        ibkr_numeric_symbol_mode="strip_leading_zeroes",
+    ),
     ".SS": ExchangeInfo(".SS", "Shanghai Stock Exchange", "China", "SSE", "CNY"),
     ".SZ": ExchangeInfo(".SZ", "Shenzhen Stock Exchange", "China", "SZSE", "CNY"),
-    ".KS": ExchangeInfo(".KS", "Korea Stock Exchange", "South Korea", "KRX", "KRW"),
-    ".KQ": ExchangeInfo(".KQ", "KOSDAQ", "South Korea", "KOSDAQ", "KRW"),
+    ".KS": ExchangeInfo(
+        ".KS",
+        "Korea Stock Exchange",
+        "South Korea",
+        "KRX",
+        "KRW",
+        numeric_symbol_width=6,
+    ),
+    ".KQ": ExchangeInfo(
+        ".KQ",
+        "KOSDAQ",
+        "South Korea",
+        "KOSDAQ",
+        "KRW",
+        numeric_symbol_width=6,
+    ),
     ".TW": ExchangeInfo(".TW", "Taiwan Stock Exchange", "Taiwan", "TWSE", "TWD"),
     ".SI": ExchangeInfo(".SI", "Singapore Exchange", "Singapore", "SGX", "SGD"),
     ".BO": ExchangeInfo(".BO", "Bombay Stock Exchange", "India", "BSE", "INR"),
@@ -72,6 +100,7 @@ IBKR_EXCHANGE_ALIASES: dict[str, str] = {
     "IBIS2": ".DE",
     "FWB2": ".F",
     "EBS": ".SW",
+    "KSE": ".KS",  # Candidate KRX/KOSDAQ family alias; verify with live metadata.
     "SIBE": ".MC",
     "ENEXT.BE": ".BR",
     "LSEETF": ".L",
@@ -134,7 +163,45 @@ def canonical_suffix_for_reuters_exchange(
     )
 
 
-def _validate_exchange_metadata() -> None:
+def format_yahoo_symbol(base: str, suffix: str) -> str:
+    """Return the canonical Yahoo symbol for this exchange suffix.
+
+    Case-preserving: non-digit symbols pass through unchanged. Only purely
+    numeric symbols are zero-padded to the suffix's canonical width.
+    Empty input is returned as empty.
+    """
+    cleaned = base.strip()
+    normalized_suffix = suffix.strip().upper()
+    info = EXCHANGES_BY_SUFFIX.get(normalized_suffix)
+    if info is None or info.numeric_symbol_width is None or not cleaned.isdigit():
+        return cleaned
+    return cleaned.zfill(info.numeric_symbol_width)
+
+
+def format_ibkr_symbol(base: str, suffix: str) -> str:
+    """Return the symbol IBKR expects for this exchange suffix."""
+    normalized_suffix = suffix.strip().upper()
+    info = EXCHANGES_BY_SUFFIX.get(normalized_suffix)
+    yahoo_symbol = format_yahoo_symbol(base, normalized_suffix)
+    if (
+        info is not None
+        and info.ibkr_numeric_symbol_mode == "strip_leading_zeroes"
+        and yahoo_symbol.isdigit()
+    ):
+        return yahoo_symbol.lstrip("0") or "0"
+    return yahoo_symbol
+
+
+def padded_numeric_suffixes() -> frozenset[str]:
+    """Return suffixes whose Yahoo symbol form has fixed-width numerics."""
+    return frozenset(
+        suffix
+        for suffix, info in EXCHANGES_BY_SUFFIX.items()
+        if info.numeric_symbol_width is not None
+    )
+
+
+def validate_exchange_metadata() -> None:
     canonical_codes = [info.ibkr_code for info in EXCHANGES_BY_SUFFIX.values()]
     if len(canonical_codes) != len(set(canonical_codes)):
         raise ValueError("Duplicate canonical ibkr_code values")
@@ -150,6 +217,18 @@ def _validate_exchange_metadata() -> None:
             raise ValueError(f"Canonical ibkr_code must be uppercase: {info.ibkr_code}")
         if not info.currency:
             raise ValueError(f"Missing currency for canonical exchange {suffix}")
+        if info.numeric_symbol_width is not None and info.numeric_symbol_width <= 0:
+            raise ValueError(f"Numeric symbol width must be positive: {suffix}")
+        if info.ibkr_numeric_symbol_mode not in _VALID_IBKR_MODES:
+            raise ValueError(
+                f"Invalid IBKR numeric symbol mode for {suffix}: "
+                f"{info.ibkr_numeric_symbol_mode}"
+            )
+        if (
+            info.ibkr_numeric_symbol_mode == "strip_leading_zeroes"
+            and info.numeric_symbol_width is None
+        ):
+            raise ValueError(f"IBKR strip mode requires numeric width: {suffix}")
 
     overlap = set(IBKR_EXCHANGE_ALIASES) & set(canonical_codes)
     if overlap:
@@ -174,4 +253,4 @@ def _validate_exchange_metadata() -> None:
             raise ValueError(f"US IBKR exchange {key} must map to empty suffix")
 
 
-_validate_exchange_metadata()
+validate_exchange_metadata()

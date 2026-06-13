@@ -56,6 +56,23 @@ class TestNormalizePositions:
         positions = normalize_positions(raw)
         assert positions[0].yf_ticker == "0005.HK"
 
+    def test_korean_position_preserves_fixed_width_ibkr_symbol(self):
+        raw = [
+            {
+                "conid": 1060,
+                "contractDesc": "010130",
+                "listingExchange": "KRX",
+                "position": 3,
+                "mktValue": 3_000_000,
+                "currency": "KRW",
+                "mktPrice": 1_429_000,
+            }
+        ]
+        positions = normalize_positions(raw)
+
+        assert positions[0].ticker.ibkr == "010130"
+        assert positions[0].yf_ticker == "010130.KS"
+
     def test_empty_symbol_skipped(self):
         raw = [{"conid": 0, "contractDesc": "", "listingExchange": ""}]
         positions = normalize_positions(raw)

@@ -92,6 +92,17 @@ Examples:
     )
 
     parser.add_argument(
+        "--force-data-vacuum",
+        action="store_true",
+        default=False,
+        help=(
+            "Run the full analysis even when the pre-flight probe finds a total "
+            "data vacuum (company name unresolved AND no source has price/"
+            "currency/identity). Default behavior aborts before any LLM cost."
+        ),
+    )
+
+    parser.add_argument(
         "--strict",
         action="store_true",
         default=False,

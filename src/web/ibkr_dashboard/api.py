@@ -7,6 +7,7 @@ from typing import Any
 from flask import Blueprint, current_app, jsonify, request
 
 from src.error_safety import format_error_message, summarize_exception
+from src.ticker_utils import to_yfinance
 from src.web.ibkr_dashboard.drilldown_service import (
     DrilldownLoadError,
     find_markdown_artifacts,
@@ -344,9 +345,7 @@ def _resolve_refresh_tickers(scope: str, payload: dict[str, Any]) -> tuple[str, 
         raw_tickers = payload.get("tickers") or []
         if not isinstance(raw_tickers, list):
             raise ValueError("tickers must be a list for ticker_list jobs")
-        return tuple(
-            str(ticker).strip() for ticker in raw_tickers if str(ticker).strip()
-        )
+        return _normalize_refresh_ticker_list(raw_tickers)
 
     bundle = _snapshot_service().get_cached_snapshot()
     if bundle is None:
@@ -362,3 +361,22 @@ def _resolve_refresh_tickers(scope: str, payload: dict[str, Any]) -> tuple[str, 
     if scope == "due_soon":
         return tuple(dict.fromkeys(row.run_ticker for row in freshness.due_soon))
     return ()
+
+
+def _normalize_refresh_ticker_list(raw_tickers: list[Any]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_tickers:
+        ticker = _normalize_refresh_ticker(raw)
+        if not ticker or ticker in seen:
+            continue
+        seen.add(ticker)
+        normalized.append(ticker)
+    return tuple(normalized)
+
+
+def _normalize_refresh_ticker(raw_ticker: Any) -> str:
+    ticker = str(raw_ticker).strip()
+    if not ticker:
+        return ""
+    return to_yfinance(ticker)

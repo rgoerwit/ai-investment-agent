@@ -9,7 +9,7 @@
 #   ./scripts/run_ibkr_dashboard.sh
 #   ./scripts/run_ibkr_dashboard.sh --no-worker
 #   ./scripts/run_ibkr_dashboard.sh -- --host 127.0.0.1 --port 5051
-#   ./scripts/run_ibkr_dashboard.sh -- --account-id U20958465 --watchlist-name "default watchlist"
+#   ./scripts/run_ibkr_dashboard.sh -- --account-id U1234567 --watchlist-name "default watchlist"
 
 set -euo pipefail
 
@@ -56,7 +56,7 @@ Examples:
   ./scripts/run_ibkr_dashboard.sh
   ./scripts/run_ibkr_dashboard.sh --no-worker
   ./scripts/run_ibkr_dashboard.sh -- --host 127.0.0.1 --port 5051
-  ./scripts/run_ibkr_dashboard.sh -- --account-id U20958465 --watchlist-name "default watchlist"
+  ./scripts/run_ibkr_dashboard.sh -- --account-id U1234567 --watchlist-name "default watchlist"
 EOF
 }
 

@@ -19,6 +19,7 @@ import structlog
 
 from src.config import config
 from src.data.filings.base import FilingFetcher, FilingResult
+from src.error_safety import summarize_exception
 
 logger = structlog.get_logger(__name__)
 
@@ -115,7 +116,11 @@ class EdinetFetcher(FilingFetcher):
         try:
             parsed = await asyncio.to_thread(doc.parse)
         except Exception as e:
-            logger.warning("edinet_parse_error", ticker=ticker, error=str(e))
+            logger.warning(
+                "edinet_parse_error",
+                ticker=ticker,
+                **summarize_exception(e, operation="edinet_parse_error"),
+            )
             result.data_gaps.append(f"Parse error: {str(e)[:100]}")
             return result
 

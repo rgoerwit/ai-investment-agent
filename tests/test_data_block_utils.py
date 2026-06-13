@@ -32,6 +32,54 @@ ADJUSTED_HEALTH_SCORE: 82%
     assert "ADJUSTED_HEALTH_SCORE: 82%" in extract_last_data_block(report)
 
 
+def test_extract_last_data_block_accepts_four_hash_marker():
+    report = """
+#### --- START DATA_BLOCK ---
+NET_DEBT_EBITDA: -0.01
+#### --- END DATA_BLOCK ---
+"""
+
+    assert has_parseable_data_block(report) is True
+    assert "NET_DEBT_EBITDA: -0.01" in extract_last_data_block(report)
+
+
+def test_extract_last_data_block_accepts_five_and_six_hash_markers():
+    report = """
+##### --- START DATA_BLOCK ---
+NET_DEBT_EBITDA: 1.95
+##### --- END DATA_BLOCK ---
+
+###### --- START DATA_BLOCK ---
+CASH_TO_ASSETS: 3.3%
+###### --- END DATA_BLOCK ---
+"""
+
+    assert has_parseable_data_block(report) is True
+    assert "CASH_TO_ASSETS: 3.3%" in extract_last_data_block(report)
+
+
+def test_extract_last_data_block_accepts_tabs_and_mixed_end_marker():
+    report = """
+###\t--- START DATA_BLOCK ---
+NET_DEBT_EBITDA: 1.95
+### --- END DATA_BLOCK ###
+"""
+
+    assert has_parseable_data_block(report) is True
+    assert "NET_DEBT_EBITDA: 1.95" in extract_last_data_block(report)
+
+
+def test_extract_last_data_block_accepts_indented_fenced_markers():
+    report = """
+        ### --- START DATA_BLOCK ---
+        CURRENT_PRICE: 145.00
+        ### --- END DATA_BLOCK ---
+"""
+
+    assert has_parseable_data_block(report) is True
+    assert "CURRENT_PRICE: 145.00" in extract_last_data_block(report)
+
+
 def test_generic_fenced_block_helper_requires_real_markers():
     report = "VALUATION_PARAMS:\nMETHOD: P/E_NORMALIZATION"
 
@@ -179,6 +227,50 @@ def test_normalize_structured_block_boundaries_repairs_glued_datablock_heading()
 
     assert normalized is not None
     assert "### --- END DATA_BLOCK ---\n\n### FINANCIAL HEALTH DETAIL" in normalized
+
+
+def test_normalize_structured_block_boundaries_repairs_four_hash_glued_heading():
+    report = (
+        "#### --- START DATA_BLOCK ---\n"
+        "SECTOR: Energy\n"
+        "#### --- END DATA_BLOCK ---#### FINANCIAL HEALTH DETAIL\n"
+        "**Score**: 9/12\n"
+    )
+
+    normalized = normalize_structured_block_boundaries(report)
+
+    assert normalized is not None
+    assert "#### --- END DATA_BLOCK ---\n\n#### FINANCIAL HEALTH DETAIL" in normalized
+
+
+def test_normalize_structured_block_boundaries_repairs_mixed_hash_glued_heading():
+    report = (
+        "### --- START DATA_BLOCK ---\n"
+        "SECTOR: Energy\n"
+        "### --- END DATA_BLOCK ---#### FINANCIAL HEALTH DETAIL\n"
+        "**Score**: 9/12\n"
+    )
+
+    normalized = normalize_structured_block_boundaries(report)
+
+    assert normalized is not None
+    assert "### --- END DATA_BLOCK ---\n\n#### FINANCIAL HEALTH DETAIL" in normalized
+
+
+def test_normalize_structured_block_boundaries_repairs_tabbed_end_marker():
+    report = (
+        "### --- START DATA_BLOCK ---\n"
+        "SECTOR: Energy\n"
+        "###\t---\tEND\tDATA_BLOCK\t---\t#### FINANCIAL HEALTH DETAIL\n"
+        "**Score**: 9/12\n"
+    )
+
+    normalized = normalize_structured_block_boundaries(report)
+
+    assert normalized is not None
+    assert (
+        "###\t---\tEND\tDATA_BLOCK\t---\t\n\n#### FINANCIAL HEALTH DETAIL" in normalized
+    )
 
 
 def test_normalize_structured_block_boundaries_repairs_glued_pm_block_heading():

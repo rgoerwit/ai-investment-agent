@@ -96,3 +96,21 @@ class TestLiquidityThresholdAlignment:
         result = await _run("TEST.US", mean_price=6.0, volume=50_000)
         assert "$250,000" in result
         assert "$500,000" not in result
+
+
+class TestThesisConstantsAreCanonical:
+    """Code sites must consume src/thesis_constants.py, not local literals."""
+
+    def test_canonical_values(self):
+        from src import thesis_constants as tc
+
+        assert tc.LIQUIDITY_MIN_USD == 100_000
+        assert tc.LIQUIDITY_PASS_USD == 250_000
+
+    def test_thesis_visualizer_imports_canonical_thresholds(self):
+        from src import thesis_constants as tc
+        from src.thesis_visualizer import ThesisVisualizer
+
+        assert ThesisVisualizer.PE_MAX == tc.PE_MAX
+        assert ThesisVisualizer.ANALYST_MAX == tc.ANALYST_COVERAGE_MAX
+        assert ThesisVisualizer.RISK_HIGH == tc.RISK_ZONE_HIGH

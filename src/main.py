@@ -54,7 +54,9 @@ console = Console()
 CLI_APP_DEBUG_LOGGERS = ("__main__", "src")
 CLI_NOISY_DEPENDENCY_LOGGERS: dict[str, int] = {
     "anthropic": logging.WARNING,
+    "ddgs": logging.WARNING,  # search-engine "response: <url> 200" lines
     "google": logging.INFO,
+    "google.genai": logging.WARNING,  # "AFC is enabled..." SDK chatter
     "google_genai": logging.WARNING,
     "hpack": logging.WARNING,
     "httpcore": logging.WARNING,
@@ -62,6 +64,7 @@ CLI_NOISY_DEPENDENCY_LOGGERS: dict[str, int] = {
     "langchain": logging.INFO,
     "langgraph": logging.INFO,
     "openai": logging.WARNING,
+    "primp": logging.WARNING,  # ddgs HTTP client
     "urllib3": logging.WARNING,
 }
 HTTP_TRACE_LOGGERS = ("openai", "httpx", "httpcore", "hpack")
@@ -185,6 +188,8 @@ def configure_content_inspection_from_config(*, provider_runtime=None):
 
 def _resolve_langfuse_session_id(default_session_id: str) -> str:
     """Resolve the session ID, honoring batch/session overrides."""
+    # Deliberate raw os.getenv: per-invocation shell export set by batch
+    # scripts, not a .env-defined key (those must use get_env_value).
     return os.getenv("LANGFUSE_SESSION_ID") or default_session_id
 
 
@@ -241,6 +246,7 @@ def configure_cli_logging(args) -> dict[str, dict[str, str]]:
     for name, level in CLI_NOISY_DEPENDENCY_LOGGERS.items():
         logging.getLogger(name).setLevel(level)
 
+    # Deliberate raw os.getenv: one-off debug toggle, shell export only.
     if mode == "debug" and os.getenv("INVESTMENT_AGENT_TRACE_HTTP") == "1":
         for name in HTTP_TRACE_LOGGERS:
             logging.getLogger(name).setLevel(logging.DEBUG)
@@ -324,6 +330,8 @@ async def _prefetch_macro_context(
     callbacks: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Load macro context with a deterministic failed fallback."""
+    from src.macro_regime import MacroRegime
+
     default_result = {
         "report": "",
         "region": "GLOBAL",
@@ -331,6 +339,8 @@ async def _prefetch_macro_context(
         "generated_at": None,
         "llm_invoked": False,
         "prompt_used": None,
+        "regime_block_dict": MacroRegime().to_dict(),
+        "regime_raw": "",
     }
 
     try:
@@ -341,6 +351,7 @@ async def _prefetch_macro_context(
             trade_date,
             callbacks=callbacks,
         )
+        regime = getattr(macro_context, "regime", MacroRegime())
         result = {
             "report": macro_context.report,
             "region": macro_context.region,
@@ -348,6 +359,8 @@ async def _prefetch_macro_context(
             "generated_at": macro_context.generated_at,
             "llm_invoked": macro_context.llm_invoked,
             "prompt_used": macro_context.prompt_used,
+            "regime_block_dict": regime.to_dict(),
+            "regime_raw": regime.raw_block,
         }
         logger.info(
             "macro_context_prefetch_complete",
@@ -373,6 +386,33 @@ async def _prefetch_macro_context(
         return default_result
 
 
+async def _is_total_data_vacuum(ticker: str) -> bool:
+    """Cheap no-LLM probe: True when no source has price, currency, or identity.
+
+    Fail-open: probe errors return False so a transient probe failure never
+    blocks an otherwise healthy analysis.
+    """
+    from src.error_safety import summarize_exception
+    from src.runtime_services import get_current_market_data_fetcher
+
+    try:
+        metrics = await get_current_market_data_fetcher().get_financial_metrics(ticker)
+    except Exception as exc:
+        logger.warning(
+            "data_vacuum_preflight_probe_failed",
+            ticker=ticker,
+            **summarize_exception(exc, operation="data_vacuum_preflight"),
+        )
+        return False
+
+    if not isinstance(metrics, dict):
+        return True
+    has_price = bool(metrics.get("currentPrice") or metrics.get("regularMarketPrice"))
+    has_currency = bool(metrics.get("currency"))
+    has_identity = bool(metrics.get("longName") or metrics.get("shortName"))
+    return not (has_price or has_currency or has_identity)
+
+
 async def run_analysis(
     ticker: str,
     quick_mode: bool,
@@ -381,6 +421,7 @@ async def run_analysis(
     transparent_charts: bool = False,
     image_dir: Path | None = None,
     skip_charts: bool = False,
+    force_data_vacuum: bool = False,
     baseline_capture: BaselineCaptureManager | None = None,
     capture_args: argparse.Namespace | None = None,
     node_observer: Any | None = None,
@@ -433,7 +474,10 @@ async def run_analysis(
             )
 
             name_result = await resolve_company_name(ticker)
-            company_name = name_result.name
+            # Use canonical (un-normalized) name for state and prompts; the normalized
+            # form drops legal suffixes like "Holdings" which collapses holdco/opco identity.
+            # `normalize_company_name()` remains the right call for building search queries.
+            company_name = name_result.preferred_display_name
 
             if not name_result.is_resolved:
                 logger.warning(
@@ -446,6 +490,37 @@ async def run_analysis(
                     ],
                     message="No source could resolve company name — LLM hallucination risk",
                 )
+                # Pre-LLM gate: an unresolved name plus a total data vacuum is
+                # the delisted/migrated-ticker signature (e.g. 1264.TW after
+                # its TWSE→TPEx move). Abort BEFORE any LLM cost; the cheap
+                # probe only runs when name resolution already failed.
+                if not force_data_vacuum and await _is_total_data_vacuum(ticker):
+                    from src.ticker_policy import sibling_ticker_candidates
+
+                    siblings = sibling_ticker_candidates(ticker)
+                    logger.warning(
+                        "analysis_aborted_data_vacuum",
+                        ticker=ticker,
+                        sibling_candidates=list(siblings),
+                        action=(
+                            "verify the listing (possible delisting/migration); "
+                            "if migrated, add to config/ticker_overrides.json; "
+                            "use --force-data-vacuum to analyze anyway"
+                        ),
+                    )
+                    print(
+                        f"\n⚠ Aborted before LLM analysis: {ticker} is a total "
+                        "data vacuum (no source has price/currency/identity).\n"
+                        + (
+                            f"  Sibling listing(s) to verify: {', '.join(siblings)}\n"
+                            if siblings
+                            else ""
+                        )
+                        + "  If the listing migrated, record it in "
+                        "config/ticker_overrides.json.\n"
+                        "  Use --force-data-vacuum to run the analysis anyway."
+                    )
+                    return None
 
             # Fetch benchmark context once (non-blocking) before graph starts.
             # Prepended to the HumanMessage so every agent receives it as session context.
@@ -463,6 +538,8 @@ async def run_analysis(
             macro_context_generated_at = macro_context["generated_at"]
             macro_context_llm_invoked = macro_context["llm_invoked"]
             macro_context_prompt_used = macro_context["prompt_used"]
+            macro_regime_block = macro_context.get("regime_block_dict") or {}
+            macro_regime_raw = macro_context.get("regime_raw", "")
 
             session_id = _resolve_langfuse_session_id(
                 session_id or f"{ticker}-{real_date}-{uuid.uuid4().hex[:8]}"
@@ -567,6 +644,7 @@ async def run_analysis(
                 macro_context_report=macro_context_report,
                 macro_context_region=macro_context_region,
                 macro_context_status=macro_context_status,
+                macro_regime=macro_regime_block,
             )
 
             logger.info(
@@ -646,6 +724,8 @@ async def run_analysis(
                 result["macro_context_status"] = macro_context_status
                 result["macro_context_generated_at"] = macro_context_generated_at
                 result["macro_context_llm_invoked"] = macro_context_llm_invoked
+                result["macro_regime_block"] = macro_regime_block
+                result["macro_regime_raw"] = macro_regime_raw
                 result["macro_context_injected_into_news"] = bool(
                     result.get("macro_context_injected_into_news", False)
                 )
@@ -971,6 +1051,7 @@ async def _execute_analysis(
         args.ticker,
         args.quick,
         strict_mode=args.strict,
+        force_data_vacuum=getattr(args, "force_data_vacuum", False),
         chart_format="svg" if args.svg else "png",
         transparent_charts=args.transparent,
         image_dir=output_targets.image_dir,

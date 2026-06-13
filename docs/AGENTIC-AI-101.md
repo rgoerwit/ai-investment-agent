@@ -192,7 +192,7 @@ regime brief used as News Analyst background.
 2. **Adversarial debate** - Bull/Bear researchers catch each other's blind spots
 3. **Multi-perspective risk** - Conservative/neutral/aggressive analysts represent different risk tolerances
 4. **Deterministic gates** - Financial Validator uses hard thresholds (D/E > 500% = auto-reject, no rationalization)
-5. **Thesis enforcement** - Portfolio Manager applies quantitative criteria (growth score ≥ 50%, liquidity ≥ $500k)
+5. **Thesis enforcement** - Portfolio Manager applies quantitative criteria (growth score ≥ 50%, liquidity ≥ $100k hard floor / $250k full pass)
 
 ### Real-World Example: Red-Flag Detection
 
@@ -236,7 +236,7 @@ This system isn't a black box. It enforces a specific investment strategy: **GAR
 
 - Financial Health Score ≥ 50% (profitable, positive cash flow, manageable debt)
 - Growth Score ≥ 50% (revenue/EPS growth, margin expansion, turnaround trajectory)
-- Liquidity ≥ $500k USD daily volume (tradeable without slippage)
+- Liquidity ≥ $100k USD daily turnover, $250k for a full pass (tradeable without slippage)
 - Analyst Coverage < 15 (undiscovered by mainstream US research)
 
 **Soft factors** (influence risk scoring):
@@ -390,8 +390,8 @@ The solution isn't to avoid AI—it's to use it **responsibly**:
 
 2. **Clone and install**
    ```bash
-   git clone https://github.com/rgoerwit/investment-agent-public.git
-   cd investment-agent-public
+   git clone https://github.com/rgoerwit/ai-investment-agent.git
+   cd ai-investment-agent
    poetry install
    ```
 
@@ -414,11 +414,11 @@ The solution isn't to avoid AI—it's to use it **responsibly**:
 
 ### Next Steps
 
-- **Read the architecture** - See [CLAUDE.md](../CLAUDE.md) for file-by-file breakdown
+- **Read the architecture** - Start with [README.md](../README.md), then `docs/CODEBASE_MEMORY.md`, then the live tree
 - **Run tests** - `poetry run pytest tests/ -v`
-- **Try batch analysis** - `./scripts/run_tickers.sh` (see [README.md](../README.md))
+- **Try batch analysis** - `./scripts/run_pipeline.sh` (see [README.md](../README.md))
 - **Modify the thesis** - Edit `prompts/portfolio_manager.json` to change criteria
-- **Add a new agent** - Follow patterns in `src/agents.py`
+- **Add a new agent** - Follow the package patterns under `src/agents/` and `src/graph/`
 
 ---
 
@@ -440,7 +440,7 @@ The solution isn't to avoid AI—it's to use it **responsibly**:
 ### This Project
 
 - [README.md](../README.md) - Project overview, quick start, architecture
-- [CLAUDE.md](../CLAUDE.md) - Developer guide with file-by-file breakdown
+- [docs/CODEBASE_MEMORY.md](CODEBASE_MEMORY.md) - Short orientation note for the current code layout
 - [CONTRIBUTING.md](../CONTRIBUTING.md) - How to contribute
 - [examples/analyze_single_ticker.sh](../examples/analyze_single_ticker.sh) - Minimal example script
 

@@ -69,31 +69,31 @@ OUTER_WRAPPED_ALLOWLIST: dict[str, str] = {
     # EDINET fetcher: wrapped by run_with_hard_timeout in
     # FilingRegistry.fetch (src/data/filings/registry.py); all internal
     # to_thread calls inherit the 30s outer timeout.
-    "src/data/filings/edinet_fetcher.py:76": (
+    "src/data/filings/edinet_fetcher.py:77": (
         "wrapped by run_with_hard_timeout in FilingRegistry.fetch"
     ),
-    "src/data/filings/edinet_fetcher.py:91": (
+    "src/data/filings/edinet_fetcher.py:92": (
         "wrapped by run_with_hard_timeout in FilingRegistry.fetch"
     ),
-    "src/data/filings/edinet_fetcher.py:97": (
+    "src/data/filings/edinet_fetcher.py:98": (
         "wrapped by run_with_hard_timeout in FilingRegistry.fetch"
     ),
-    "src/data/filings/edinet_fetcher.py:116": (
+    "src/data/filings/edinet_fetcher.py:117": (
         "wrapped by run_with_hard_timeout in FilingRegistry.fetch"
     ),
-    "src/data/filings/edinet_fetcher.py:158": (
+    "src/data/filings/edinet_fetcher.py:163": (
         "wrapped by run_with_hard_timeout in FilingRegistry.fetch"
     ),
-    "src/data/filings/edinet_fetcher.py:164": (
+    "src/data/filings/edinet_fetcher.py:169": (
         "wrapped by run_with_hard_timeout in FilingRegistry.fetch"
     ),
-    "src/data/filings/edinet_fetcher.py:214": (
+    "src/data/filings/edinet_fetcher.py:219": (
         "wrapped by run_with_hard_timeout in FilingRegistry.fetch"
     ),
-    "src/data/filings/edinet_fetcher.py:237": (
+    "src/data/filings/edinet_fetcher.py:242": (
         "wrapped by run_with_hard_timeout in FilingRegistry.fetch"
     ),
-    "src/data/filings/edinet_fetcher.py:286": (
+    "src/data/filings/edinet_fetcher.py:291": (
         "wrapped by run_with_hard_timeout in FilingRegistry.fetch"
     ),
 }

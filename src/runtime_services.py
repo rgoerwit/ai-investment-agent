@@ -233,7 +233,7 @@ def build_runtime_services_from_config(
             if logger is not None:
                 logger.warning(
                     "mcp_runtime_init_failed",
-                    error=redact_sensitive_text(str(exc), max_chars=120),
+                    reason=redact_sensitive_text(str(exc), max_chars=120),
                 )
             mcp_runtime = None
 

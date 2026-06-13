@@ -176,7 +176,7 @@ def test_apply_preferences_clears_cached_snapshot(
 
     invalidated = service.apply_preferences(
         DashboardPreferences(
-            account_id="U20958465",
+            account_id="U1234567",
             read_only=True,
             watchlist_name="default watchlist",
             max_age_days=21,
@@ -188,7 +188,7 @@ def test_apply_preferences_clears_cached_snapshot(
     assert invalidated is True
     assert service.get_cached_snapshot() is None
     preferences = service.current_preferences()
-    assert preferences.account_id == "U20958465"
+    assert preferences.account_id == "U1234567"
     assert preferences.read_only is True
     assert preferences.watchlist_name == "default watchlist"
 
@@ -215,7 +215,7 @@ def test_apply_preferences_preserves_cached_snapshot_for_non_bundle_fields(
     invalidated = service.apply_preferences(
         DashboardPreferences(
             account_id=None,
-            read_only=False,
+            read_only=True,  # matches the settings-seeded default (non-bundle change)
             watchlist_name=None,
             max_age_days=14,
             quick_mode_default=False,
@@ -288,7 +288,7 @@ def test_inflight_invalidating_preference_change_discards_stale_loaded_bundle(
 
     invalidated = service.apply_preferences(
         DashboardPreferences(
-            account_id="U20958465",
+            account_id="U1234567",
             read_only=True,
             watchlist_name="default watchlist",
             max_age_days=21,
@@ -310,7 +310,7 @@ def test_inflight_invalidating_preference_change_discards_stale_loaded_bundle(
     bundle, meta = service.load_snapshot_sync()
     assert bundle == "fresh-bundle"
     assert meta.status == "ready"
-    assert calls == [None, "U20958465"]
+    assert calls == [None, "U1234567"]
 
 
 def test_background_load_binds_runtime_services(tmp_path: Path, monkeypatch):

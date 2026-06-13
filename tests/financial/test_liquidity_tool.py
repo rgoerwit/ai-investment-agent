@@ -550,3 +550,49 @@ async def test_liquidity_network_intermittent():
 
     # Depending on retry logic, might succeed or fail
     assert isinstance(result, str)
+
+
+# ==================== ERROR SANITIZATION ====================
+
+
+@pytest.mark.asyncio
+async def test_liquidity_error_output_redacts_secrets():
+    """Exception details with URLs/keys must not leak into the tool output."""
+    secret = "https://user:SUPERSECRET123@api.example.com/x?apikey=TOPSECRET456"
+
+    with patch("yfinance.Ticker") as mock_ticker:
+        mock_ticker.return_value.history.side_effect = RuntimeError(
+            f"fetch failed for {secret}"
+        )
+        result = await calculate_liquidity_metrics.ainvoke({"ticker": "LEAKY"})
+
+    assert "Status: ERROR" in result
+    assert "SUPERSECRET123" not in result
+    assert "TOPSECRET456" not in result
+    assert "RuntimeError" in result
+    # Free-text exception prose stays in operator logs, not agent-visible output
+    assert "fetch failed" not in result
+
+
+@pytest.mark.asyncio
+async def test_liquidity_timeout_error_is_typed():
+    """TimeoutError surfaces as a typed ERROR status, not an empty string."""
+    with patch("yfinance.Ticker") as mock_ticker:
+        mock_ticker.return_value.history.side_effect = TimeoutError("hung socket")
+        result = await calculate_liquidity_metrics.ainvoke({"ticker": "SLOW"})
+
+    assert "Status: ERROR" in result
+    assert "TimeoutError" in result
+
+
+@pytest.mark.asyncio
+async def test_liquidity_happy_path_unchanged_by_sanitization():
+    """Successful runs still produce the standard threshold-bearing report."""
+    mock_data = pd.DataFrame({"Close": [50.0] * 60, "Volume": [200000] * 60})
+
+    with patch("yfinance.Ticker") as mock_ticker:
+        mock_ticker.return_value.history.return_value = mock_data
+        result = await calculate_liquidity_metrics.ainvoke({"ticker": "AAPL"})
+
+    assert "Status: ERROR" not in result
+    assert "Avg Daily Turnover (USD)" in result

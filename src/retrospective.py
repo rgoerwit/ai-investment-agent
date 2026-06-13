@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +32,7 @@ from src.data_block_utils import (
     extract_data_block_field,
     extract_data_block_number,
 )
+from src.error_safety import summarize_exception
 from src.exchange_metadata import SUFFIX_TO_CURRENCY_CODE
 from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import classify_failure
@@ -359,6 +360,9 @@ def extract_snapshot(
     # TRADE_BLOCK extraction from trader plan (zero LLM cost — pure regex)
     trader_plan = result.get("investment_analysis", {}).get("trader_plan", "") or ""
     trade_block_fields = _extract_trade_block_fields(trader_plan)
+    macro_regime_raw = result.get("macro_regime_block") or {}
+    macro_regime = macro_regime_raw if isinstance(macro_regime_raw, dict) else {}
+    regime_at_decision = macro_regime if macro_regime.get("present") else None
 
     snapshot = {
         # Core verdict
@@ -388,6 +392,11 @@ def extract_snapshot(
         ),
         "52w_high": _extract_data_block_float(fundamentals, "52W_HIGH"),
         "52w_low": _extract_data_block_float(fundamentals, "52W_LOW"),
+        # Special-situation routing: Senior promotes the FLA M&A EVENT section
+        # into M_AND_A_STATUS so the IBKR reconciler can route held positions
+        # as M&A EXIT rather than FUNDAMENTAL FAILURE. Empty/missing when no
+        # active deal; values are ACTIVE_TENDER, RUMORED, or NONE.
+        "m_and_a_status": _extract_data_block_field(fundamentals, "M_AND_A_STATUS"),
         # TRADE_BLOCK fields (structured for portfolio reconciliation)
         **trade_block_fields,
         # Bear thesis excerpt
@@ -411,6 +420,10 @@ def extract_snapshot(
         # rejections.
         "is_strict_mode": is_strict_mode,
         "trace_id": trace_id,
+        "regime_at_decision": regime_at_decision,
+        "regime_confidence": macro_regime.get("confidence")
+        if regime_at_decision
+        else None,
     }
 
     logger.info(
@@ -555,10 +568,8 @@ def load_past_snapshots(
             logger.warning(
                 "snapshot_load_error",
                 file=filepath.name,
-                error=str(e),
-                error_type=type(e).__name__,
-                root_cause_type=type(e.__cause__ or e.__context__ or e).__name__,
                 exc_info=True,
+                **summarize_exception(e, operation="snapshot_load"),
             )
             emit_progress()
 
@@ -1258,6 +1269,17 @@ async def store_lesson(
         "confidence_weight": float(confidence),
         "timestamp": datetime.now().isoformat(),
     }
+    regime = comparison.get("regime_at_decision") or {}
+    if isinstance(regime, dict):
+        metadata.update(
+            {
+                "regime_risk_appetite": regime.get("risk_appetite", ""),
+                "regime_shock_type": regime.get("shock_type", ""),
+                "regime_shock_phase": regime.get("shock_phase", ""),
+                "regime_dip_posture": regime.get("dip_posture", ""),
+                "regime_confidence": comparison.get("regime_confidence", "") or "",
+            }
+        )
 
     stored = await lessons_memory.add_situations([lesson], [metadata])
     if stored:
@@ -1350,9 +1372,10 @@ async def format_lessons_for_injection(
     lessons_memory: Any,
     ticker: str,
     sector: str,
+    current_regime: Mapping[str, Any] | None = None,
 ) -> str:
     """
-    Query global lessons collection, rank by confidence + geographic boost,
+    Query global lessons collection, rank by confidence + geographic/regime boost,
     return formatted text for injection into researcher prompts.
 
     Called from agents.py researcher_node (2-line integration).
@@ -1361,6 +1384,7 @@ async def format_lessons_for_injection(
         lessons_memory: FinancialSituationMemory for lessons_learned collection
         ticker: Current ticker being analyzed
         sector: Sector of current ticker
+        current_regime: Optional parsed MACRO_REGIME_BLOCK for relevance boosting
 
     Returns:
         Formatted string for prompt injection, or "" if no lessons available
@@ -1442,6 +1466,20 @@ async def format_lessons_for_injection(
                 boost += 0.15
             if meta.get("currency") == current_currency:
                 boost += 0.10
+
+            if current_regime and current_regime.get("confidence") in {
+                "HIGH",
+                "MEDIUM",
+            }:
+                appetite = current_regime.get("risk_appetite")
+                if appetite and meta.get("regime_risk_appetite") == appetite:
+                    boost += 0.06
+                shock_type = current_regime.get("shock_type")
+                if shock_type and meta.get("regime_shock_type") == shock_type:
+                    boost += 0.06
+                dip_posture = current_regime.get("dip_posture")
+                if dip_posture and meta.get("regime_dip_posture") == dip_posture:
+                    boost += 0.03
 
         effective_score = base_confidence + boost
 
@@ -1584,10 +1622,8 @@ async def run_retrospective(
         except Exception as e:
             logger.error(
                 "lessons_memory_init_failed",
-                error=str(e),
-                error_type=type(e).__name__,
-                root_cause_type=type(e.__cause__ or e.__context__ or e).__name__,
                 exc_info=True,
+                **summarize_exception(e, operation="lessons_memory_init"),
             )
             return []
 

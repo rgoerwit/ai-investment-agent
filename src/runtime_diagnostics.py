@@ -21,6 +21,7 @@ FailureKind = Literal[
     "model_not_found",
     "bad_request",
     "application_error",
+    "data_unavailable",
     "provider_partial_response",
     "unknown_provider_error",
 ]
@@ -176,6 +177,21 @@ def classify_failure(
     ):
         kind = "timeout"
         retryable = True
+    elif type(root).__name__ in {"YFPricesMissingError", "YFTzMissingError"} or any(
+        marker in combined
+        for marker in (
+            "possibly delisted",
+            "no price data found",
+            "no timezone found",
+            # yfinance/urllib phrasing for a dead symbol; provider 404s use
+            # different wording ("model not found", "is not found for api").
+            "http error 404",
+            "quote not found for symbol",
+        )
+    ):
+        # Expected data absence (delisted/migrated tickers), not a system fault.
+        kind = "data_unavailable"
+        retryable = False
     elif isinstance(
         root,
         TypeError | AttributeError | ImportError | NotImplementedError | AssertionError,

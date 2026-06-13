@@ -2664,14 +2664,41 @@ class TestCorrelatedSellDetection:
         )
         assert not any("CORRELATED_SELL_EVENT" in f for f in flags)
 
-    def test_stop_breach_not_counted_in_correlation(self):
-        """10 stop-breach SELLs should NOT trigger correlated-sell flag."""
+    def test_stop_breaches_count_toward_correlation(self):
+        """10 stop-breach SELLs ARE event evidence (June 2026 Hormuz fix).
+
+        A burst of breached stops is the purest same-time price-shock signal;
+        the old behavior excluded them, which let a 29-sell macro event miss
+        the cumulative trigger by one position.
+        """
         positions, analyses, portfolio = _make_multi_sell_scenario(
             n_soft_sells=0, n_stop_breaches=10, n_hard_rejects=0, n_holds=2
         )
         items = reconcile(positions, analyses, portfolio)
         flags = compute_portfolio_health(
             positions, analyses, portfolio, reconciliation_items=items
+        )
+        assert any("CORRELATED_SELL_EVENT" in f for f in flags)
+        # Fixture stops have intact fundamentals (70/65) → demoted to REVIEW
+        demoted_stops = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "REVIEW"
+        ]
+        assert len(demoted_stops) == 10
+        assert all("MACRO_STOP" in i.reason for i in demoted_stops)
+
+    def test_profit_take_not_counted_in_correlation(self):
+        """PROFIT_TAKE exits stay excluded from event evidence."""
+        items = [
+            _make_hold_item_for_health(f"H{i}.T", conid=200 + i) for i in range(10)
+        ]
+        for item in items[:6]:
+            item.action = "SELL"
+            item.sell_type = "PROFIT_TAKE"
+        portfolio = _make_portfolio(value=10_000, cash=0)
+        portfolio.exchange_weights = {}
+        positions = [i.ibkr_position for i in items if i.ibkr_position]
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
         )
         assert not any("CORRELATED_SELL_EVENT" in f for f in flags)
 
@@ -3620,6 +3647,7 @@ class TestAlphaBaseLookup:
             entry_price=200.0,
             stop_price=150.0,
         )
+        a.currency = "GBX"  # realistic: records carry the local currency
         analyses = {"MEGP": a}
         portfolio = _make_portfolio()
         items = reconcile([pos], analyses, portfolio)
@@ -3712,3 +3740,713 @@ class TestAlphaBaseLookup:
         assert (
             cek_items[0].ticker.yf == "CEK.DE"
         ), f"Expected ticker.yf='CEK.DE', got '{cek_items[0].ticker.yf}'"
+
+
+class TestMacroEventTriggersJune2026:
+    """Regression suite for the June 2026 Hormuz-event detector fixes:
+    stop-breach counting, 35% cumulative fallback, drawdown-breadth trigger,
+    and sustained demotion from stored active events.
+    """
+
+    @staticmethod
+    def _spread_date(i: int) -> str:
+        from datetime import date, timedelta
+
+        return (date(2025, 6, 1) + timedelta(days=20 * i)).isoformat()
+
+    def _hormuz_shape(self):
+        """29 event sells (27 soft + 2 strong-fundamentals stops) + 39 holds = 68.
+
+        Analysis dates spread 20 days apart — the refresh throttle smear that
+        kept the old detector blind (peak 14d window count = 1).
+        """
+        items = []
+        for i in range(27):
+            items.append(
+                _make_sell_item_on_date(
+                    f"SOFT{i:02d}.T", self._spread_date(i), conid=100 + i
+                )
+            )
+        for i in range(2):
+            stop = _make_sell_item_on_date(
+                f"STOP{i}.T",
+                self._spread_date(27 + i),
+                conid=400 + i,
+                sell_type="STOP_BREACH",
+            )
+            stop.analysis.health_adj = 87.0  # HERDEZ-like: fundamentals intact
+            stop.analysis.growth_adj = 83.0
+            items.append(stop)
+        items += [
+            _make_hold_item_for_health(f"H{i:02d}.T", conid=600 + i) for i in range(39)
+        ]
+        positions = [i.ibkr_position for i in items if i.ibkr_position]
+        portfolio = _make_portfolio(value=len(positions) * 1000, cash=0)
+        portfolio.exchange_weights = {}
+        return items, positions, portfolio
+
+    def test_hormuz_shape_fires_cumulative_trigger(self):
+        items, positions, portfolio = self._hormuz_shape()
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        event_flags = [f for f in flags if "CORRELATED_SELL_EVENT" in f]
+        assert event_flags, flags
+        assert "[cumulative]" in event_flags[0]
+        # 29/68 = 43% — readable in the flag for the operator banner regex
+        assert "43%" in event_flags[0] or "42%" in event_flags[0]
+
+    def test_hormuz_shape_demotes_softs_and_strong_stops(self):
+        items, positions, portfolio = self._hormuz_shape()
+        compute_portfolio_health(positions, {}, portfolio, reconciliation_items=items)
+        soft_sells_left = [
+            i for i in items if i.sell_type == "SOFT_REJECT" and i.action == "SELL"
+        ]
+        assert not soft_sells_left
+        demoted_stops = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "REVIEW"
+        ]
+        assert len(demoted_stops) == 2
+
+    def test_cumulative_boundary_just_below_35pct_does_not_fire(self):
+        # 8 spread-out sells / 23 held = 34.8% < 35%
+        items = [
+            _make_sell_item_on_date(f"S{i}.T", self._spread_date(i), conid=100 + i)
+            for i in range(8)
+        ] + [_make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(15)]
+        positions = [i.ibkr_position for i in items if i.ibkr_position]
+        portfolio = _make_portfolio(value=len(positions) * 1000, cash=0)
+        portfolio.exchange_weights = {}
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        assert not any("CORRELATED_SELL_EVENT" in f for f in flags)
+
+    def test_drawdown_breadth_fires_without_any_sells(self):
+        """Price evidence alone: 10 of 24 holds trade 14% below entry."""
+        items = [
+            _make_hold_item_for_health(f"H{i:02d}.T", conid=100 + i) for i in range(24)
+        ]
+        for item in items[:10]:
+            item.ibkr_position.current_price_local = 1800.0  # entry 2100 → -14.3%
+        positions = [i.ibkr_position for i in items if i.ibkr_position]
+        portfolio = _make_portfolio(value=len(positions) * 1000, cash=0)
+        portfolio.exchange_weights = {}
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        event_flags = [f for f in flags if "CORRELATED_SELL_EVENT" in f]
+        assert event_flags, flags
+        assert "[drawdown_breadth]" in event_flags[0]
+        assert "below entry" in event_flags[0]
+
+    def test_active_stored_event_sustains_demotion(self):
+        """No fresh detection, but an unexpired stored event keeps demoting."""
+        from types import SimpleNamespace
+
+        items = [
+            _make_sell_item_on_date(f"S{i}.T", self._spread_date(i), conid=100 + i)
+            for i in range(2)
+        ] + [_make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(18)]
+        positions = [i.ibkr_position for i in items if i.ibkr_position]
+        portfolio = _make_portfolio(value=len(positions) * 1000, cash=0)
+        portfolio.exchange_weights = {}
+
+        event = SimpleNamespace(event_type="GEOPOLITICAL", expiry="2026-12-01")
+        flags = compute_portfolio_health(
+            positions,
+            {},
+            portfolio,
+            reconciliation_items=items,
+            active_macro_events=[event],
+        )
+
+        assert any("ACTIVE_MACRO_EVENT" in f for f in flags)
+        demoted = [i for i in items if i.action == "REVIEW"]
+        assert len(demoted) == 2
+        assert all("active GEOPOLITICAL event" in i.reason for i in demoted)
+
+    def test_no_active_event_no_fresh_detection_no_demotion(self):
+        items = [
+            _make_sell_item_on_date(f"S{i}.T", self._spread_date(i), conid=100 + i)
+            for i in range(2)
+        ] + [_make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(18)]
+        positions = [i.ibkr_position for i in items if i.ibkr_position]
+        portfolio = _make_portfolio(value=len(positions) * 1000, cash=0)
+        portfolio.exchange_weights = {}
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        assert not any("ACTIVE_MACRO_EVENT" in f for f in flags)
+        assert all(i.action == "SELL" for i in items[:2])
+
+
+class TestAmbiguousBaseGuards:
+    """June 2026 AGS fix: base-symbol cross-matching must never attach a
+    different exchange's analysis to a suffixed position."""
+
+    @staticmethod
+    def _pos(yf: str, currency: str, conid: int = 555001) -> NormalizedPosition:
+        return NormalizedPosition(
+            conid=conid,
+            ticker=Ticker.from_yf(yf, currency=currency),
+            quantity=10,
+            avg_cost_local=68.0,
+            market_value_usd=400,
+            currency=currency,
+            current_price_local=66.0,
+        )
+
+    def test_suffixed_position_does_not_borrow_other_exchange_analysis(self):
+        """AGS.BR (EUR) + only AGS.SI (SGD) analysis → no cross-match."""
+        ags_si = _make_analysis(ticker="AGS.SI")
+        ags_si.currency = "SGD"
+        items = reconcile(
+            positions=[self._pos("AGS.BR", "EUR")],
+            analyses={"AGS.SI": ags_si},
+            portfolio=_make_portfolio(),
+        )
+        held = [i for i in items if i.ibkr_position is not None]
+        assert len(held) == 1
+        assert held[0].ticker.yf == "AGS.BR"
+        assert items[0].analysis is None or items[0].analysis.ticker != "AGS.SI"
+
+    def test_ambiguous_base_poisoned_each_position_gets_own_analysis(self):
+        """Both AGS.SI and AGS.BR analyzed → base poisoned, direct matches only."""
+        ags_si = _make_analysis(ticker="AGS.SI")
+        ags_si.currency = "SGD"
+        ags_br = _make_analysis(ticker="AGS.BR")
+        ags_br.currency = "EUR"
+        items = reconcile(
+            positions=[
+                self._pos("AGS.SI", "SGD", conid=555001),
+                self._pos("AGS.BR", "EUR", conid=555002),
+            ],
+            analyses={"AGS.SI": ags_si, "AGS.BR": ags_br},
+            portfolio=_make_portfolio(),
+        )
+        by_yf = {i.ticker.yf: i for i in items}
+        assert by_yf["AGS.SI"].analysis.ticker == "AGS.SI"
+        assert by_yf["AGS.BR"].analysis.ticker == "AGS.BR"
+
+    def test_suffixed_position_borrows_bare_analysis_when_currency_agrees(self):
+        """KRN.DE (EUR) + bare 'KRN' analysis with EUR currency → match allowed."""
+        bare = _make_analysis(ticker="KRN")
+        bare.currency = "EUR"
+        items = reconcile(
+            positions=[self._pos("KRN.DE", "EUR")],
+            analyses={"KRN": bare},
+            portfolio=_make_portfolio(),
+        )
+        held = [i for i in items if i.ibkr_position is not None]
+        assert len(held) == 1
+        assert held[0].analysis is not None
+        assert held[0].analysis.ticker == "KRN"
+
+    def test_suffixed_position_blocks_bare_analysis_on_currency_mismatch(self):
+        bare = _make_analysis(ticker="KRN")
+        bare.currency = "CHF"
+        items = reconcile(
+            positions=[self._pos("KRN.DE", "EUR")],
+            analyses={"KRN": bare},
+            portfolio=_make_portfolio(),
+        )
+        held = [i for i in items if i.ibkr_position is not None]
+        assert len(held) == 1
+        assert held[0].analysis is None or held[0].analysis.ticker != "KRN"
+
+
+class TestMacroDetectorInputRobustness:
+    """Malformed/missing inputs must never crash or silently mask detection."""
+
+    @staticmethod
+    def _spread_date(i: int) -> str:
+        from datetime import date, timedelta
+
+        return (date(2025, 6, 1) + timedelta(days=20 * i)).isoformat()
+
+    @staticmethod
+    def _book(items):
+        positions = [i.ibkr_position for i in items if i.ibkr_position]
+        portfolio = _make_portfolio(value=max(len(positions), 1) * 1000, cash=0)
+        portfolio.exchange_weights = {}
+        return positions, portfolio
+
+    def test_malformed_dates_dont_crash_or_mask_detection(self):
+        items = [
+            _make_sell_item_on_date(f"S{i}.T", "2026-03-05", conid=100 + i)
+            for i in range(5)
+        ]
+        bad_dates = [None, "", "not-a-date", "2026-13-45"]
+        for i, bad in enumerate(bad_dates):
+            item = _make_sell_item_on_date(f"B{i}.T", "2026-03-05", conid=200 + i)
+            item.analysis.analysis_date = bad
+            items.append(item)
+        items += [
+            _make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(7)
+        ]
+        positions, portfolio = self._book(items)
+
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        # 5 valid clustered / 16 held = 31% >= 25% with count 5 — still fires
+        assert any("CORRELATED_SELL_EVENT" in f for f in flags)
+
+    def test_all_malformed_dates_fall_through_to_drawdown(self):
+        items = []
+        for i in range(9):
+            item = _make_sell_item_on_date(f"S{i}.T", "2026-03-05", conid=100 + i)
+            item.analysis.analysis_date = "garbage"
+            items.append(item)
+        items += [
+            _make_hold_item_for_health(f"H{i:02d}.T", conid=300 + i) for i in range(31)
+        ]
+        for item in items[9 : 9 + 14]:
+            item.ibkr_position.current_price_local = 1800.0  # entry 2100 → -14.3%
+        positions, portfolio = self._book(items)
+
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        event_flags = [f for f in flags if "CORRELATED_SELL_EVENT" in f]
+        assert event_flags and "[drawdown_breadth]" in event_flags[0]
+
+    def test_none_analysis_and_none_position_items_skipped_safely(self):
+        items = [
+            _make_sell_item_on_date(f"S{i}.T", "2026-03-05", conid=100 + i)
+            for i in range(6)
+        ] + [_make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(4)]
+        no_analysis = _make_hold_item_for_health("NA.T", conid=400)
+        no_analysis.analysis = None
+        no_position = _make_hold_item_for_health("NP.T", conid=401)
+        no_position.ibkr_position = None
+        items += [no_analysis, no_position]
+        positions, portfolio = self._book(items)
+
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        assert any("CORRELATED_SELL_EVENT" in f for f in flags)  # no crash, fires
+
+    def test_zero_negative_none_entry_prices_no_division_error(self):
+        items = [
+            _make_hold_item_for_health(f"H{i:02d}.T", conid=100 + i) for i in range(12)
+        ]
+        items[0].analysis.entry_price = 0.0
+        items[1].analysis.entry_price = -5.0
+        items[2].analysis.entry_price = None
+        items[2].analysis.current_price = None  # fallback also absent
+        items[3].ibkr_position.current_price_local = 0.0
+        positions, portfolio = self._book(items)
+
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        assert not any("CORRELATED_SELL_EVENT" in f for f in flags)
+
+    def test_entry_price_none_falls_back_to_analysis_current_price(self):
+        items = [
+            _make_hold_item_for_health(f"H{i:02d}.T", conid=100 + i) for i in range(20)
+        ]
+        for item in items[:8]:
+            item.analysis.entry_price = None
+            item.analysis.current_price = 2100.0  # fallback entry
+            item.ibkr_position.current_price_local = 1800.0  # -14.3%
+        positions, portfolio = self._book(items)
+
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        event_flags = [f for f in flags if "CORRELATED_SELL_EVENT" in f]
+        assert event_flags and "[drawdown_breadth]" in event_flags[0]
+
+    def test_future_dated_analyses_no_crash(self):
+        from datetime import date, timedelta
+
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        items = [
+            _make_sell_item_on_date(f"S{i}.T", tomorrow, conid=100 + i)
+            for i in range(6)
+        ] + [_make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(4)]
+        positions, portfolio = self._book(items)
+
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        assert any("CORRELATED_SELL_EVENT" in f for f in flags)
+
+    def test_year_boundary_window_grouping(self):
+        items = (
+            [
+                _make_sell_item_on_date(f"S{i}.T", "2025-12-28", conid=100 + i)
+                for i in range(3)
+            ]
+            + [
+                _make_sell_item_on_date(f"T{i}.T", "2026-01-04", conid=200 + i)
+                for i in range(3)
+            ]
+            + [_make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(2)]
+        )
+        positions, portfolio = self._book(items)
+
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        assert any("CORRELATED_SELL_EVENT" in f for f in flags)
+
+    def test_empty_reconciliation_items_no_flags_no_errors(self):
+        holds = [_make_hold_item_for_health(f"H{i}.T", conid=100 + i) for i in range(3)]
+        positions, portfolio = self._book(holds)
+
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=[]
+        )
+        assert not any("CORRELATED_SELL_EVENT" in f for f in flags)
+
+    def test_all_position_none_items_zero_held_no_division_error(self):
+        holds = [_make_hold_item_for_health(f"H{i}.T", conid=100 + i) for i in range(3)]
+        positions, portfolio = self._book(holds)
+        orphan = _make_sell_item_on_date("S0.T", "2026-03-05", conid=200)
+        orphan.ibkr_position = None
+
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=[orphan]
+        )
+        assert not any("CORRELATED_SELL_EVENT" in f for f in flags)
+
+    def test_tiny_book_never_fires(self):
+        items = [_make_sell_item_on_date("S0.T", "2026-03-05", conid=100)]
+        positions, portfolio = self._book(items)
+
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        # 1/1 = 100% but count floors (>=5 window, >=8 cumulative/drawdown) hold
+        assert not any("CORRELATED_SELL_EVENT" in f for f in flags)
+
+    def test_duplicate_ticker_items_counted_per_item(self):
+        # The AGS-dup shape: same ticker appears as two SELL items. Current
+        # contract counts per ITEM (not per ticker) in both numerator and
+        # denominator — pinned deliberately.
+        items = []
+        for i in range(4):
+            for dup in range(2):
+                items.append(
+                    _make_sell_item_on_date(
+                        f"DUP{i}.T",
+                        self._spread_date(i * 2 + dup),
+                        conid=100 + i * 2 + dup,
+                    )
+                )
+        items += [
+            _make_hold_item_for_health(f"H{i:02d}.T", conid=300 + i) for i in range(12)
+        ]
+        positions, portfolio = self._book(items)
+
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        # 8 evidence items / 20 held = 40% >= 35%, count 8 >= 8 → cumulative fires
+        event_flags = [f for f in flags if "CORRELATED_SELL_EVENT" in f]
+        assert event_flags and "[cumulative]" in event_flags[0]
+
+    def test_trim_and_untyped_items_are_not_evidence_nor_demoted(self):
+        items = []
+        for i in range(9):
+            item = _make_hold_item_for_health(f"T{i}.T", conid=100 + i)
+            item.action = "TRIM"
+            item.sell_type = None
+            items.append(item)
+        untyped_sell = _make_hold_item_for_health("U0.T", conid=200)
+        untyped_sell.action = "SELL"
+        untyped_sell.sell_type = None
+        items.append(untyped_sell)
+        items += [
+            _make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(2)
+        ]
+        positions, portfolio = self._book(items)
+
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        assert not any("CORRELATED_SELL_EVENT" in f for f in flags)
+        assert all(i.action == "TRIM" for i in items[:9])  # untouched
+        assert untyped_sell.action == "SELL"
+
+
+class TestMacroDetectorBoundaries:
+    """Exact threshold edges for all three triggers."""
+
+    @staticmethod
+    def _spread_date(i: int) -> str:
+        from datetime import date, timedelta
+
+        return (date(2025, 6, 1) + timedelta(days=20 * i)).isoformat()
+
+    @staticmethod
+    def _book(items):
+        positions = [i.ibkr_position for i in items if i.ibkr_position]
+        portfolio = _make_portfolio(value=max(len(positions), 1) * 1000, cash=0)
+        portfolio.exchange_weights = {}
+        return positions, portfolio
+
+    def _window_case(self, holds: int) -> list[str]:
+        items = [
+            _make_sell_item_on_date(f"S{i}.T", "2026-03-05", conid=100 + i)
+            for i in range(5)
+        ] + [
+            _make_hold_item_for_health(f"H{i:02d}.T", conid=300 + i)
+            for i in range(holds)
+        ]
+        positions, portfolio = self._book(items)
+        return compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+
+    def test_window_ratio_exact_25pct_fires(self):
+        assert any("CORRELATED_SELL_EVENT" in f for f in self._window_case(15))  # 5/20
+
+    def test_window_ratio_just_below_25pct_does_not_fire(self):
+        flags = self._window_case(16)  # 5/21 = 23.8%
+        assert not any("CORRELATED_SELL_EVENT" in f for f in flags)
+
+    def test_cumulative_exact_35pct_fires(self):
+        items = [
+            _make_sell_item_on_date(f"S{i:02d}.T", self._spread_date(i), conid=100 + i)
+            for i in range(14)
+        ] + [
+            _make_hold_item_for_health(f"H{i:02d}.T", conid=300 + i) for i in range(26)
+        ]
+        positions, portfolio = self._book(items)
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        event_flags = [f for f in flags if "CORRELATED_SELL_EVENT" in f]
+        assert event_flags and "[cumulative]" in event_flags[0]  # 14/40 = 35.0%
+
+    def test_cumulative_ratio_passes_but_count_floor_blocks(self):
+        items = [
+            _make_sell_item_on_date(f"S{i}.T", self._spread_date(i), conid=100 + i)
+            for i in range(7)
+        ] + [
+            _make_hold_item_for_health(f"H{i:02d}.T", conid=300 + i) for i in range(13)
+        ]
+        positions, portfolio = self._book(items)
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        # 7/20 = 35% but count 7 < 8
+        assert not any("CORRELATED_SELL_EVENT" in f for f in flags)
+
+    def _drawdown_case(self, current: float, n_down: int, n_total: int) -> list[str]:
+        items = [
+            _make_hold_item_for_health(f"H{i:02d}.T", conid=100 + i)
+            for i in range(n_total)
+        ]
+        for item in items[:n_down]:
+            item.ibkr_position.current_price_local = current  # entry 2100
+        positions, portfolio = self._book(items)
+        return compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+
+    def test_drawdown_exact_10pct_counts(self):
+        flags = self._drawdown_case(
+            current=1890.0, n_down=8, n_total=22
+        )  # 10.0%, 36.4%
+        assert any("drawdown_breadth" in f for f in flags)
+
+    def test_drawdown_just_below_10pct_does_not_count(self):
+        flags = self._drawdown_case(current=1892.0, n_down=8, n_total=22)  # 9.90%
+        assert not any("CORRELATED_SELL_EVENT" in f for f in flags)
+
+    def test_drawdown_breadth_just_below_35pct_does_not_fire(self):
+        flags = self._drawdown_case(current=1800.0, n_down=8, n_total=23)  # 34.8%
+        assert not any("CORRELATED_SELL_EVENT" in f for f in flags)
+
+    def test_drawdown_count_floor_blocks_high_ratio(self):
+        flags = self._drawdown_case(
+            current=1800.0, n_down=7, n_total=10
+        )  # 70%, count 7
+        assert not any("CORRELATED_SELL_EVENT" in f for f in flags)
+
+    def test_gbx_consistent_units_no_phantom_drawdown(self):
+        # .L positions store BOTH entry and current in GBX (normalized
+        # upstream): a 5% dip must not be misread as a -99% GBP/GBX phantom.
+        items = []
+        for i in range(8):
+            item = _make_hold_item_for_health(f"LON{i}.L", conid=100 + i)
+            item.analysis.entry_price = 200.0  # GBX
+            item.ibkr_position.current_price_local = 190.0  # GBX, -5%
+            items.append(item)
+        items += [
+            _make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(2)
+        ]
+        positions, portfolio = self._book(items)
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        assert not any("CORRELATED_SELL_EVENT" in f for f in flags)
+
+
+class TestMacroTriggerPrecedence:
+    """Trigger ordering, idempotency, and path exclusivity."""
+
+    @staticmethod
+    def _book(items):
+        positions = [i.ibkr_position for i in items if i.ibkr_position]
+        portfolio = _make_portfolio(value=max(len(positions), 1) * 1000, cash=0)
+        portfolio.exchange_weights = {}
+        return positions, portfolio
+
+    def _all_triggers_scenario(self):
+        # 8 same-day sells / 12 held: window (67%), cumulative (67%), AND
+        # broad drawdown all satisfied — window must win the label.
+        items = [
+            _make_sell_item_on_date(f"S{i}.T", "2026-03-05", conid=100 + i)
+            for i in range(8)
+        ] + [_make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(4)]
+        for item in items:
+            if item.ibkr_position is not None:
+                item.ibkr_position.current_price_local = 1700.0  # -19%
+        return items
+
+    def test_window_label_wins_when_all_triggers_satisfied(self):
+        items = self._all_triggers_scenario()
+        positions, portfolio = self._book(items)
+        flags = compute_portfolio_health(
+            positions, {}, portfolio, reconciliation_items=items
+        )
+        event_flags = [f for f in flags if "CORRELATED_SELL_EVENT" in f]
+        assert len(event_flags) == 1
+        assert "[window]" in event_flags[0]
+
+    def test_second_invocation_does_not_double_tag(self):
+        items = self._all_triggers_scenario()
+        positions, portfolio = self._book(items)
+        compute_portfolio_health(positions, {}, portfolio, reconciliation_items=items)
+        compute_portfolio_health(positions, {}, portfolio, reconciliation_items=items)
+        for item in items:
+            assert item.reason.count("[MACRO_WATCH") <= 1
+
+    def test_fresh_detection_suppresses_sustained_path(self):
+        from types import SimpleNamespace
+
+        items = self._all_triggers_scenario()
+        positions, portfolio = self._book(items)
+        event = SimpleNamespace(event_type="GEOPOLITICAL", expiry="2026-12-01")
+        flags = compute_portfolio_health(
+            positions,
+            {},
+            portfolio,
+            reconciliation_items=items,
+            active_macro_events=[event],
+        )
+        assert any("CORRELATED_SELL_EVENT" in f for f in flags)
+        assert not any("ACTIVE_MACRO_EVENT" in f for f in flags)
+        demoted = [i for i in items if i.action == "REVIEW"]
+        assert demoted
+        assert all("correlated event detected" in i.reason for i in demoted)
+
+    def test_weak_fundamentals_stop_survives_both_paths(self):
+        from types import SimpleNamespace
+
+        def weak_stop(conid):
+            item = _make_sell_item_on_date(
+                f"W{conid}.T", "2026-03-05", conid=conid, sell_type="STOP_BREACH"
+            )
+            item.analysis.health_adj = 35.0
+            item.analysis.growth_adj = 40.0
+            return item
+
+        # Path 1: fresh detection (8 soft same-day + weak stop / 12 held)
+        items = [
+            _make_sell_item_on_date(f"S{i}.T", "2026-03-05", conid=100 + i)
+            for i in range(8)
+        ] + [weak_stop(900)]
+        items += [
+            _make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(3)
+        ]
+        positions, portfolio = self._book(items)
+        compute_portfolio_health(positions, {}, portfolio, reconciliation_items=items)
+        assert items[8].action == "SELL"  # weak stop still executable
+
+        # Path 2: sustained-only override
+        items2 = [weak_stop(901)] + [
+            _make_hold_item_for_health(f"H{i}.T", conid=400 + i) for i in range(9)
+        ]
+        positions2, portfolio2 = self._book(items2)
+        event = SimpleNamespace(event_type="GEOPOLITICAL", expiry="2026-12-01")
+        compute_portfolio_health(
+            positions2,
+            {},
+            portfolio2,
+            reconciliation_items=items2,
+            active_macro_events=[event],
+        )
+        assert items2[0].action == "SELL"
+
+
+class TestSustainedOverrideEdgeCases:
+    @staticmethod
+    def _book(items):
+        positions = [i.ibkr_position for i in items if i.ibkr_position]
+        portfolio = _make_portfolio(value=max(len(positions), 1) * 1000, cash=0)
+        portfolio.exchange_weights = {}
+        return positions, portfolio
+
+    def test_degenerate_event_object_uses_defaults(self):
+        from types import SimpleNamespace
+
+        items = [_make_sell_item_on_date("S0.T", "2026-03-05", conid=100)] + [
+            _make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(9)
+        ]
+        positions, portfolio = self._book(items)
+        flags = compute_portfolio_health(
+            positions,
+            {},
+            portfolio,
+            reconciliation_items=items,
+            active_macro_events=[SimpleNamespace()],  # no event_type / expiry
+        )
+        active = [f for f in flags if "ACTIVE_MACRO_EVENT" in f]
+        assert active and "MACRO" in active[0] and "?" in active[0]
+        assert items[0].action == "REVIEW"
+
+    def test_multiple_active_events_first_wins(self):
+        from types import SimpleNamespace
+
+        items = [_make_sell_item_on_date("S0.T", "2026-03-05", conid=100)] + [
+            _make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(9)
+        ]
+        positions, portfolio = self._book(items)
+        events = [
+            SimpleNamespace(event_type="COMMODITY_SHOCK", expiry="2026-09-01"),
+            SimpleNamespace(event_type="GEOPOLITICAL", expiry="2026-12-01"),
+        ]
+        compute_portfolio_health(
+            positions,
+            {},
+            portfolio,
+            reconciliation_items=items,
+            active_macro_events=events,
+        )
+        assert "COMMODITY_SHOCK" in items[0].reason
+
+    def test_nothing_to_demote_appends_no_flag(self):
+        from types import SimpleNamespace
+
+        items = [
+            _make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(10)
+        ]
+        positions, portfolio = self._book(items)
+        event = SimpleNamespace(event_type="GEOPOLITICAL", expiry="2026-12-01")
+        flags = compute_portfolio_health(
+            positions,
+            {},
+            portfolio,
+            reconciliation_items=items,
+            active_macro_events=[event],
+        )
+        assert not any("ACTIVE_MACRO_EVENT" in f for f in flags)

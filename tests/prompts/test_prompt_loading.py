@@ -230,6 +230,165 @@ class TestSpecificPromptFiles:
             "DATA_BLOCK" in system_message
         ), "fundamentals_analyst should have DATA_BLOCK instructions"
 
+    def test_fundamentals_governance_fields(self):
+        """`prompts/fundamentals_analyst.json` (the canonical source) must list
+        the GOVERNANCE_BLOCK fields the validators and downstream agents parse.
+        """
+        prompt_file = Path("prompts/fundamentals_analyst.json")
+        if not prompt_file.exists():
+            pytest.skip("fundamentals_analyst.json not found")
+
+        with open(prompt_file) as f:
+            json_sm = json.load(f).get("system_message", "")
+
+        for field in (
+            "LISTING_ROLE:",
+            "RELATED_LISTED_TICKERS:",
+            "METRIC_SCOPE_PAYOUT:",
+            "METRIC_SCOPE_OCF:",
+            "Shareholder-return or Value-Up plans",
+        ):
+            assert field in json_sm, f"{field} missing from fundamentals_analyst.json"
+
+    def test_fundamentals_pfic_corroboration_rule(self):
+        """PFIC Cross-Check #11 must require corroboration before escalating
+        PFIC_RISK to HIGH.
+
+        Locks the 2371.T-class fix: a high cash/asset ratio alone should not
+        force a PFIC HIGH classification when the sector is operating and a
+        capital plan is in place. The old text said "OVERRIDES Legal
+        Counsel's qualitative assessment" — the prompt must not still say that.
+        """
+        prompt_file = Path("prompts/fundamentals_analyst.json")
+        if not prompt_file.exists():
+            pytest.skip("fundamentals_analyst.json not found")
+
+        with open(prompt_file) as f:
+            json_sm = json.load(f).get("system_message", "")
+
+        required_phrases = (
+            "Corroboration Required for HIGH",
+            "PFIC_RISK = HIGH if EITHER",
+            "Legal Counsel pfic_status = PROBABLE",
+            "inherently passive profile",
+            "PFIC_RISK = LOW otherwise",
+            "[PFIC ASSET-TEST SIGNAL]",
+        )
+        for phrase in required_phrases:
+            assert (
+                phrase in json_sm
+            ), f"{phrase!r} missing from fundamentals_analyst.json"
+
+        # The prompt must not describe the asset test as an unconditional
+        # override of Legal Counsel.
+        forbidden = "This quantitative test OVERRIDES Legal Counsel"
+        assert (
+            forbidden not in json_sm
+        ), f"fundamentals_analyst.json still contains stale override framing: {forbidden!r}"
+
+    def test_foreign_language_governance_fields(self):
+        """The FLA prompt must require explicit ownership role fields."""
+        prompt_file = Path("prompts/foreign_language_analyst.json")
+        if not prompt_file.exists():
+            pytest.skip("foreign_language_analyst.json not found")
+
+        with open(prompt_file) as f:
+            json_sm = json.load(f).get("system_message", "")
+
+        for field in ("ENTITY_ROLE_OBSERVED:", "Related Listed Tickers:"):
+            assert (
+                field in json_sm
+            ), f"{field} missing from foreign_language_analyst.json"
+
+    def test_foreign_language_active_tender_search(self):
+        """FLA must have a structured M&A / tender-offer search step, so the
+        downstream PM event-driven override and the IBKR `M&A EXIT` sell-type
+        label have data to act on.
+        """
+        prompt_file = Path("prompts/foreign_language_analyst.json")
+        if not prompt_file.exists():
+            pytest.skip("foreign_language_analyst.json not found")
+
+        with open(prompt_file) as f:
+            json_sm = json.load(f).get("system_message", "")
+
+        required = (
+            "**Search I: Active M&A / Tender Offer Disclosures**",
+            "公開買付け",  # JP TOB search term
+            "공개매수",  # KR tender offer
+            "**M&A EVENT** (if found)",
+            "Active Tender Offer: [YES / NO]",
+            "Tender Price:",
+            "No active M&A event detected.",
+        )
+        for needle in required:
+            assert (
+                needle in json_sm
+            ), f"{needle!r} missing from foreign_language_analyst.json"
+
+    def test_fundamentals_m_and_a_data_block_fields(self):
+        """Senior promotes the FLA M&A EVENT section into DATA_BLOCK as
+        M_AND_A_STATUS and M_AND_A_TENDER_PRICE; the prompt must specify the
+        field shapes and the spread-narrative rule.
+        """
+        prompt_file = Path("prompts/fundamentals_analyst.json")
+        if not prompt_file.exists():
+            pytest.skip("fundamentals_analyst.json not found")
+
+        with open(prompt_file) as f:
+            json_sm = json.load(f).get("system_message", "")
+
+        for needle in (
+            "M_AND_A_STATUS: [ACTIVE_TENDER / RUMORED / NONE]",
+            "M_AND_A_TENDER_PRICE:",
+            "9. **M&A Event from Foreign Language Analyst**",
+            "Market {currency}{current} vs. tender",
+        ):
+            assert (
+                needle in json_sm
+            ), f"{needle!r} missing from fundamentals_analyst.json"
+
+    def test_portfolio_manager_event_driven_override_parity(self):
+        """The PM must treat `M_AND_A_STATUS: ACTIVE_TENDER` as a
+        special-situation override of the standard hard-fail / risk-tally
+        framework, in both the JSON override and the in-code fallback.
+
+        Locks the 2371.T fix: a held tender-offer position should be evaluated
+        on the market-vs-tender spread, not on trailing P/E or Growth.
+        """
+        prompt_file = Path("prompts/portfolio_manager.json")
+        if not prompt_file.exists():
+            pytest.skip("portfolio_manager.json not found")
+
+        with open(prompt_file) as f:
+            json_sm = json.load(f).get("system_message", "")
+
+        for needle in (
+            "**0) EVENT-DRIVEN OVERRIDE (M&A Active Tender)**",
+            "M_AND_A_STATUS: ACTIVE_TENDER",
+            "spread > +3%",
+        ):
+            assert needle in json_sm, f"{needle!r} missing from portfolio_manager.json"
+
+    def test_macro_regime_policy_in_decision_prompts(self):
+        """All decision prompts must carry the macro regime signal policy."""
+        prompt_files = (
+            "bear_researcher.json",
+            "trader.json",
+            "risky_analyst.json",
+            "safe_analyst.json",
+            "neutral_analyst.json",
+            "portfolio_manager.json",
+        )
+
+        for filename in prompt_files:
+            prompt_file = Path("prompts") / filename
+            if not prompt_file.exists():
+                pytest.skip(f"{filename} not found")
+            with open(prompt_file) as f:
+                json_sm = json.load(f).get("system_message", "")
+            assert "## MACRO REGIME SIGNAL POLICY" in json_sm
+
     def test_portfolio_manager_has_thesis_criteria(self):
         """Verify portfolio_manager.json has investment thesis criteria."""
         prompt_file = Path("prompts/portfolio_manager.json")
@@ -244,6 +403,7 @@ class TestSpecificPromptFiles:
         assert (
             "Financial Health" in system_message or "HEALTH" in system_message
         ), "portfolio_manager should reference Financial Health criteria"
+        assert "Entity Governance Card metric scope is Senior-derived" in system_message
 
     def test_writer_json_has_valuation_reconciliation_section(self):
         """Verify writer.json has VALUATION-DECISION RECONCILIATION section."""
@@ -445,3 +605,42 @@ class TestPromptVersionTracking:
         assert (
             len(documented_prompts) > 0
         ), "At least one prompt should have change documentation in metadata"
+
+
+class TestCatalystGuardrails:
+    """Stage 3+4 guardrails preventing fabricated country-level catalysts from
+    propagating through Value Trap -> Bull -> RM -> PM."""
+
+    def _load(self, name: str) -> str:
+        path = Path("prompts") / name
+        if not path.exists():
+            pytest.skip(f"{name} not found")
+        return json.loads(path.read_text())["system_message"]
+
+    def test_value_trap_detector_has_catalyst_verification_rule(self):
+        sm = self._load("value_trap_detector.json")
+        assert "## CATALYST VERIFICATION RULE" in sm
+        # Specific protections
+        assert "Korea Value-Up" in sm or "Value-Up" in sm
+        assert "RESTRUCTURING: NONE" in sm
+        assert "MID_TERM_PLAN: NONE" in sm
+        assert "UNVERIFIED" in sm
+
+    def test_research_manager_has_catalyst_provenance_rule(self):
+        sm = self._load("research_manager.json")
+        assert "## CATALYST PROVENANCE RULE" in sm
+        assert "Foreign Language / Local Filings" in sm
+        assert "UNVERIFIED" in sm
+
+    def test_bull_researcher_has_catalyst_sourcing_rule(self):
+        sm = self._load("bull_researcher.json")
+        assert "## CATALYST SOURCING RULE" in sm
+        assert "Foreign Language / Local Filings" in sm
+
+    def test_portfolio_manager_has_catalyst_fabrication_discipline(self):
+        sm = self._load("portfolio_manager.json")
+        assert "## CATALYST FABRICATION DISCIPLINE" in sm
+        # PM must explicitly tie removal to Consultant/APAC confirmation
+        assert "Consultant" in sm
+        assert "APAC" in sm
+        assert "no-catalyst" in sm.lower()

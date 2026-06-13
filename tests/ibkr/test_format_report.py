@@ -147,8 +147,10 @@ class TestFormatReportPanicDay:
     def test_macro_banner_shows_count_date_and_pct(self):
         """MACRO ALERT banner must show the count, date, and percentage parsed from the flag."""
         report = self._report_with_flag()
-        # All three parsed values must appear in the banner
-        assert "8 positions changed verdict on 2026-03-05" in report
+        # All three parsed values must appear in the banner. Wording is
+        # trigger-neutral ("impacted") because the flag may be verdict-flip
+        # or drawdown-breadth evidence.
+        assert "8 positions impacted (as of 2026-03-05)" in report
         assert "80% of held positions" in report
 
     def test_macro_banner_absent_when_no_flag(self):
@@ -432,6 +434,10 @@ def _make_dip_item(
     stop: float,
     target: float,
     currency: str = "JPY",
+    verdict: str = "BUY",
+    zone: str = "MODERATE",
+    action: str = "REVIEW",
+    sell_type: str | None = "SOFT_REJECT",
 ) -> ReconciliationItem:
     """Create a demoted SOFT_REJECT REVIEW item with a full analysis record."""
     from datetime import datetime, timedelta
@@ -440,16 +446,16 @@ def _make_dip_item(
     analysis = AnalysisRecord(
         ticker=ticker,
         analysis_date=analysis_date,
-        verdict="DO_NOT_INITIATE",
+        verdict=verdict,
         health_adj=health,
         growth_adj=growth,
-        zone="MODERATE",
+        zone=zone,
         entry_price=entry,
         stop_price=stop,
         target_1_price=target,
         currency=currency,
         trade_block=TradeBlockData(
-            action="DO_NOT_INITIATE",
+            action=verdict,
             entry_price=entry,
             stop_price=stop,
             target_1_price=target,
@@ -462,15 +468,15 @@ def _make_dip_item(
     )
     return ReconciliationItem(
         ticker=ticker,
-        action="REVIEW",
+        action=action,
         urgency="MEDIUM",
         reason=(
-            f"Verdict → DO_NOT_INITIATE  ({analysis_date})"
+            f"Verdict → {verdict}  ({analysis_date})"
             "  [MACRO_WATCH: demoted from SELL — correlated event detected]"
         ),
         ibkr_position=pos,
         analysis=analysis,
-        sell_type="SOFT_REJECT",
+        sell_type=sell_type,
     )
 
 
@@ -611,6 +617,23 @@ class TestDipWatch:
         )
         assert "DIP WATCH" not in report
 
+    def test_dip_watch_held_buy_pullback_shows_without_correlated_event(self):
+        """Held BUY pullbacks do not require a correlated-sell event."""
+        item = _make_dip_item(
+            "HELD.T",
+            health=80,
+            growth=78,
+            entry=2000,
+            current_price=1800,
+            stop=1700,
+            target=2600,
+            action="HOLD",
+            sell_type=None,
+        )
+        report = format_report([item], _make_portfolio(), portfolio_health_flags=[])
+        assert "DIP WATCH" in report
+        assert "HELD.T" in report
+
     def test_dip_watch_items_ranked_by_score(self):
         """Higher-scoring items appear before lower-scoring items in DIP WATCH."""
         high_score = _make_dip_item(
@@ -627,7 +650,7 @@ class TestDipWatch:
             health=58,
             growth=56,
             entry=2000,
-            current_price=1980,
+            current_price=1880,
             stop=1900,
             target=2100,
         )
@@ -686,6 +709,26 @@ class TestDipWatch:
         assert "LGRW.T" not in section
         assert "GOOD.T" in section
 
+    def test_dip_watch_excludes_rejected_analysis(self):
+        """A fresh, high-scoring DNI macro review is not a dip-buy candidate."""
+        rejected = _make_dip_item(
+            "DNI.T",
+            health=95,
+            growth=88,
+            entry=2000,
+            current_price=1700,
+            stop=1600,
+            target=2800,
+            verdict="DO_NOT_INITIATE",
+            zone="HIGH",
+        )
+        report = format_report(
+            [rejected],
+            _make_portfolio(),
+            portfolio_health_flags=[_CORR_FLAG],
+        )
+        assert "DIP WATCH" not in report
+
     def test_dip_watch_absent_when_no_scoreable_items(self):
         """CORRELATED_SELL_EVENT but all macro_reviews have health < 55 → no DIP WATCH."""
         items = [
@@ -721,9 +764,10 @@ class TestDipWatch:
         analysis = AnalysisRecord(
             ticker="BARE.L",  # canonical yfinance ticker found via _alpha_base_lookup
             analysis_date=analysis_date,
-            verdict="DO_NOT_INITIATE",
+            verdict="BUY",
             health_adj=75.0,  # >= 55 → passes DIP WATCH quality filter
             growth_adj=70.0,  # >= 55 → passes
+            zone="MODERATE",
             entry_price=200.0,
             stop_price=170.0,
             target_1_price=250.0,
@@ -744,7 +788,7 @@ class TestDipWatch:
             action="REVIEW",
             urgency="MEDIUM",
             reason=(
-                f"Verdict → DO_NOT_INITIATE  ({analysis_date})"
+                f"Verdict → BUY  ({analysis_date})"
                 "  [MACRO_WATCH: demoted from SELL — correlated event detected]"
             ),
             ibkr_position=pos,
@@ -1021,14 +1065,15 @@ class TestScoreLine:
             current_price=2700,
             stop=2600,
             target=3200,
+            verdict="DO_NOT_INITIATE",
         )
         report = format_report(
             [item], _make_portfolio(), portfolio_health_flags=[_CORR_FLAG]
         )
-        # Health/Growth appear (via _display_data_line), but not the analysis date
-        # that _score_line would add (since _display_data_line doesn't add it)
-        assert "Health:75" in report
-        assert "Growth:68" in report
+        # Health/Growth appear through the compact macro-review detail path, not
+        # the dated _score_line path.
+        assert "H:75%" in report
+        assert "G:68%" in report
 
 
 # ── Order annotation helpers ──────────────────────────────────────────────────
@@ -1616,6 +1661,14 @@ class TestIbkrDisplaySymbol:
         holds_block = report.split("HOLDS")[1] if "HOLDS" in report else report
         assert "5     " in holds_block or "5  " in holds_block  # IBKR symbol
 
+    def test_holds_section_korean_symbol_keeps_fixed_width(self):
+        """Korean positions display IBKR fixed-width symbol, not stripped base."""
+        item = self._held_hold("010130.KS", "010130")
+        report = format_report([item], _make_portfolio())
+        holds_block = report.split("HOLDS")[1] if "HOLDS" in report else report
+        assert "010130" in holds_block
+        assert "10130" not in holds_block.split("010130", 1)[0]
+
     def test_reviews_run_cmd_uses_yf_ticker(self):
         """REVIEWS run command must use yf ticker (with exchange suffix) for --ticker arg."""
         item = self._held_review("7203.T", "7203")
@@ -2189,7 +2242,7 @@ class TestAnalysisFreshnessReporting:
 class TestCashHeaderWording:
     def test_cash_total_notes_when_unsettled_proceeds_are_present(self):
         portfolio = PortfolioSummary(
-            account_id="U20958465",
+            account_id="U1234567",
             portfolio_value_usd=52_436,
             cash_balance_usd=1_323,
             settled_cash_usd=500,
@@ -2206,7 +2259,7 @@ class TestCashHeaderWording:
 
     def test_cash_total_omits_unsettled_warning_when_all_cash_is_settled(self):
         portfolio = PortfolioSummary(
-            account_id="U20958465",
+            account_id="U1234567",
             portfolio_value_usd=52_436,
             cash_balance_usd=1_323,
             settled_cash_usd=1_323,
@@ -2258,7 +2311,7 @@ class TestCliUiSharedPresentationAlignment:
 
     def test_shared_cash_summary_matches_report_pending_inflows(self):
         portfolio = PortfolioSummary(
-            account_id="U20958465",
+            account_id="U1234567",
             portfolio_value_usd=52_436,
             cash_balance_usd=1_323,
             settled_cash_usd=1_323,
@@ -2305,7 +2358,7 @@ class TestCliUiSharedPresentationAlignment:
     def test_soft_sell_excluded_from_pending_inflows(self):
         """SOFT_REJECT sells should not appear in pending_inflows."""
         portfolio = PortfolioSummary(
-            account_id="U20958465",
+            account_id="U1234567",
             portfolio_value_usd=50_000,
             cash_balance_usd=500,
             settled_cash_usd=500,
@@ -2351,7 +2404,7 @@ class TestCliUiSharedPresentationAlignment:
     def test_hard_sells_and_stops_included_in_pending(self):
         """HARD_REJECT and STOP_BREACH sells appear in pending_inflows."""
         portfolio = PortfolioSummary(
-            account_id="U20958465",
+            account_id="U1234567",
             portfolio_value_usd=50_000,
             cash_balance_usd=500,
             settled_cash_usd=500,
@@ -2389,7 +2442,7 @@ class TestCliUiSharedPresentationAlignment:
     def test_conditional_proceeds_shown_in_report(self):
         """When soft sells exist, report shows conditional proceeds line."""
         portfolio = PortfolioSummary(
-            account_id="U20958465",
+            account_id="U1234567",
             portfolio_value_usd=50_000,
             cash_balance_usd=500,
             settled_cash_usd=500,

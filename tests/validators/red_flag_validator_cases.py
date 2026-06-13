@@ -254,6 +254,7 @@ Net Income: -£100M
 ADJUSTED_HEALTH_SCORE: 62%
 NET_CASH_TO_MARKET_CAP: 27%
 CASH_TO_ASSETS: 21%
+NET_DEBT_EBITDA: 0.78
 CAPEX_TO_DA: 0.70
 CAPEX_TO_DA_STATUS: UNDERINVESTING
 CAPITAL_PLAN_STATUS: NONE
@@ -265,10 +266,69 @@ REVENUE_BACKLOG_COVERAGE: 0.8 yrs
 
         assert metrics["net_cash_to_market_cap"] == pytest.approx(0.27, rel=0.01)
         assert metrics["cash_to_assets"] == pytest.approx(0.21, rel=0.01)
+        assert metrics["net_debt_ebitda"] == pytest.approx(0.78, rel=0.01)
         assert metrics["capex_to_da"] == pytest.approx(0.70, rel=0.01)
         assert metrics["capex_to_da_status"] == "UNDERINVESTING"
         assert metrics["capital_plan_status"] == "NONE"
         assert metrics["revenue_backlog_coverage"] == pytest.approx(0.8, rel=0.01)
+
+    def test_extract_governance_fields_populated(self):
+        """Holdco-style DATA_BLOCK: all four new GOVERNANCE fields parse."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 70%
+PARENT_COMPANY: YMSA (29.09%)
+LISTING_ROLE: INTERMEDIATE_HOLDCO
+RELATED_LISTED_TICKERS: 111770.KS:operating_subsidiary:50.5
+METRIC_SCOPE_PAYOUT: SEPARATE
+METRIC_SCOPE_OCF: CONSOLIDATED
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["listing_role"] == "INTERMEDIATE_HOLDCO"
+        assert (
+            metrics["related_listed_tickers"] == "111770.KS:operating_subsidiary:50.5"
+        )
+        assert metrics["metric_scope_payout"] == "SEPARATE"
+        assert metrics["metric_scope_ocf"] == "CONSOLIDATED"
+        # The legacy PARENT_COMPANY extractor must still work alongside.
+        assert metrics["parent_company"] == "YMSA (29.09%)"
+
+    def test_extract_governance_fields_unknown_preserved(self):
+        """Explicit UNKNOWN values must survive parsing as the literal string.
+
+        Distinguishes "field present, value unknown" (UNKNOWN) from "field
+        absent / parse failed" (None) — downstream confidence logic relies on
+        this distinction.
+        """
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 60%
+LISTING_ROLE: UNKNOWN
+METRIC_SCOPE_PAYOUT: UNKNOWN
+METRIC_SCOPE_OCF: UNKNOWN
+RELATED_LISTED_TICKERS: UNKNOWN
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["listing_role"] == "UNKNOWN"
+        assert metrics["metric_scope_payout"] == "UNKNOWN"
+        assert metrics["metric_scope_ocf"] == "UNKNOWN"
+        # RELATED_LISTED_TICKERS=UNKNOWN collapses to None (no edges to act on).
+        assert metrics["related_listed_tickers"] is None
+
+    def test_extract_governance_fields_absent(self):
+        """Standalone DATA_BLOCK without governance fields → all keys default None."""
+        report = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 75%
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        assert metrics["listing_role"] is None
+        assert metrics["related_listed_tickers"] is None
+        assert metrics["metric_scope_payout"] is None
+        assert metrics["metric_scope_ocf"] is None
 
 
 class TestRedFlagValidatorNode:
@@ -3445,6 +3505,36 @@ class TestStrictDetectRedFlags:
         assert normal == "REJECT"
         assert strict == "REJECT"
 
+    def test_holdco_de_945_suppressed_when_net_debt_ebitda_safe(self):
+        """Pure holdco raw D/E is not an auto-reject when net debt/EBITDA is safe."""
+        from src.validators.red_flag_detector import Sector
+
+        m = self._make_metrics(
+            debt_to_equity=945.0,
+            net_debt_ebitda=0.78,
+            listing_role="PURE_HOLDCO",
+        )
+        flags, result = RedFlagDetector.detect_red_flags(
+            m, sector=Sector.MATERIALS, entity_role="PURE_HOLDCO"
+        )
+        assert result == "PASS"
+        assert "EXTREME_LEVERAGE" not in {flag["type"] for flag in flags}
+
+    def test_holdco_de_still_rejected_when_net_debt_ebitda_extreme(self):
+        """The holdco exception is not a blanket waiver for genuine leverage."""
+        from src.validators.red_flag_detector import Sector
+
+        m = self._make_metrics(
+            debt_to_equity=945.0,
+            net_debt_ebitda=5.5,
+            listing_role="PURE_HOLDCO",
+        )
+        flags, result = RedFlagDetector.detect_red_flags(
+            m, sector=Sector.MATERIALS, entity_role="PURE_HOLDCO"
+        )
+        assert result == "REJECT"
+        assert "EXTREME_LEVERAGE" in {flag["type"] for flag in flags}
+
     def test_coverage_20x_rejected_strict_passes_normal(self):
         """Interest coverage 2.0x = normal threshold (just passing); strict needs >2.5x."""
         from src.validators.red_flag_detector import Sector
@@ -3640,6 +3730,26 @@ PFIC_RISK: CLEAN
         result = await node(state, {})
         assert result["pre_screening_result"] == "REJECT"
         assert any(f["type"] == "STRICT_PFIC_ESCALATED" for f in result["red_flags"])
+
+    @pytest.mark.asyncio
+    async def test_governance_card_failure_does_not_erase_validator_result(
+        self, monkeypatch
+    ):
+        """Governance-card construction is advisory; red-flag output survives failure."""
+        from src.validators import entity_governance_card
+
+        def boom(**_kwargs):
+            raise ValueError("card failed")
+
+        monkeypatch.setattr(entity_governance_card, "build_card", boom)
+        node = create_financial_health_validator_node(strict_mode=True)
+        state = self._make_state(self._CLEAN_DATA_BLOCK, self._VIE_LEGAL_JSON)
+
+        result = await node(state, {})
+
+        assert result["pre_screening_result"] == "REJECT"
+        assert any(f["type"] == "STRICT_VIE_ESCALATED" for f in result["red_flags"])
+        assert "entity_governance_card" not in result
 
     @pytest.mark.asyncio
     async def test_pfic_probable_is_warning_in_normal_mode(self):
@@ -3940,3 +4050,41 @@ REVENUE_GROWTH_TTM: 124%
         flags, _ = RedFlagDetector.detect_red_flags(metrics, "CADLR.OL")
         peg_flags = [f for f in flags if f["type"] == "UNRELIABLE_PEG"]
         assert len(peg_flags) == 0
+
+
+class TestConsultantVerdictVariants:
+    """Verdict markers must tolerate hyphen/underscore/singular variants."""
+
+    @pytest.mark.parametrize(
+        ("marker", "expected"),
+        [
+            ("MAJOR CONCERNS", "MAJOR_CONCERNS"),
+            ("MAJOR_CONCERNS", "MAJOR_CONCERNS"),
+            ("Major-Concerns", "MAJOR_CONCERNS"),
+            ("major concern", "MAJOR_CONCERNS"),
+            ("CONDITIONAL APPROVAL", "CONDITIONAL_APPROVAL"),
+            ("Conditional-Approval", "CONDITIONAL_APPROVAL"),
+            ("APPROVED", "APPROVED"),
+        ],
+    )
+    def test_variant_markers_classified(self, marker, expected):
+        review = f"### CONSULTANT REVIEW\n\n**Overall Assessment**: {marker}\n"
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["verdict"] == expected
+
+    def test_most_severe_verdict_wins_when_multiple_present(self):
+        review = "Earlier draft said APPROVED, but final assessment: MAJOR CONCERNS.\n"
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["verdict"] == "MAJOR_CONCERNS"
+
+    def test_hyphenated_breach_and_stop_markers(self):
+        review = "MANDATE-BREACH: PFIC.\nHARD-STOP: restricted entity.\n"
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["has_mandate_breach"] is True
+        assert conditions["has_hard_stop"] is True
+
+    def test_garbage_input_returns_unknown_without_error(self):
+        for garbage in ("", "no verdict markers here", "12345 ###"):
+            conditions = RedFlagDetector.parse_consultant_conditions(garbage)
+            assert conditions["verdict"] == "UNKNOWN"
+            assert conditions["has_mandate_breach"] is False

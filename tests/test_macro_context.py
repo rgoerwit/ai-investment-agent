@@ -186,8 +186,41 @@ class TestGetMacroContext:
 
         assert result.status == "cached"
         assert result.report == "cached brief"
+        assert result.regime.present is False
         fetch.assert_not_awaited()
         summarize.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_populates_macro_regime(self, tmp_path):
+        report = (
+            "### REGIME SUMMARY\n- Stress rising.\n\n"
+            "MACRO_REGIME_BLOCK:\n"
+            "RISK_APPETITE: RISK_OFF\n"
+            "SHOCK_TYPE: ENERGY\n"
+            "SHOCK_PHASE: ACUTE\n"
+            "EQUITY_TRANSMISSION: EARNINGS_PRESSURE\n"
+            "DIP_POSTURE: WAIT_FOR_CONFIRMATION\n"
+            "CONFIDENCE: MEDIUM\n"
+        )
+        with (
+            patch("src.macro_context._CACHE_DIR", tmp_path),
+            patch("src.macro_context._compute_fingerprint", return_value="fp123"),
+            patch("src.macro_context._fetch_macro_raw", new_callable=AsyncMock),
+            patch("src.macro_context._summarize", new_callable=AsyncMock),
+        ):
+            _write_cache(
+                "JAPAN",
+                trade_date="2026-04-18",
+                fingerprint="fp123",
+                report=report,
+                status="generated",
+            )
+            result = await get_macro_context("7203.T", "2026-04-18")
+
+        assert result.status == "cached"
+        assert result.regime.present is True
+        assert result.regime.risk_appetite == "RISK_OFF"
+        assert result.regime.raw_block.startswith("MACRO_REGIME_BLOCK:")
 
     @pytest.mark.asyncio
     async def test_regional_thin_triggers_global_fallback(self, tmp_path):
@@ -204,7 +237,7 @@ class TestGetMacroContext:
                 "src.macro_context._summarize",
                 new=AsyncMock(
                     return_value=(
-                        "summarized brief",
+                        "MACRO_REGIME_BLOCK:\nCONFIDENCE: HIGH",
                         True,
                         {"agent_name": "Macro Context Analyst", "version": "1.0"},
                     )
@@ -214,7 +247,9 @@ class TestGetMacroContext:
             result = await get_macro_context("7203.T", "2026-04-18")
 
         assert result.status == "generated_fallback"
-        assert result.report == "summarized brief"
+        assert result.report == "MACRO_REGIME_BLOCK:\nCONFIDENCE: HIGH"
+        assert result.regime.present is True
+        assert result.regime.confidence == "HIGH"
         assert fetch.await_count == 2
 
     @pytest.mark.asyncio

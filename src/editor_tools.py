@@ -119,7 +119,7 @@ async def fetch_reference_content(url: str) -> str:
 
         if len(text) < 100:
             logger.warning(
-                "Reference content too short",
+                "reference_content_too_short",
                 url=_safe_url_preview(url),
                 chars=len(text),
             )
@@ -130,7 +130,7 @@ async def fetch_reference_content(url: str) -> str:
             text = text[:MAX_REFERENCE_CHARS] + "...[truncated]"
 
         logger.info(
-            "Fetched reference content",
+            "fetched_reference_content",
             url=_safe_url_preview(url),
             chars=len(text),
         )

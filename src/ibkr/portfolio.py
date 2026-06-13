@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import structlog
 
+from src.error_safety import summarize_exception
 from src.fx_normalization import FALLBACK_RATES_TO_USD
-from src.ibkr.client import IbkrClient
+from src.ibkr.client import IbkrClient, mask_account
 from src.ibkr.models import NormalizedPosition, PortfolioSummary
 from src.ibkr.ticker import Ticker
 from src.ibkr.ticker_mapper import (
@@ -19,6 +20,7 @@ from src.ibkr.ticker_mapper import (
     ibkr_symbol_to_yf,
     yf_ticker_from_conid,
 )
+from src.ticker_corrections import apply_operator_override
 
 # IBKR exchange codes for US venues — these never need a yfinance suffix search
 _US_EXCHANGES: frozenset[str] = frozenset(
@@ -75,6 +77,13 @@ def normalize_positions(raw_positions: list[dict]) -> list[NormalizedPosition]:
             yf_str = _yf_search_ticker(raw_symbol, raw_exchange, raw_currency)
             if yf_str:
                 ticker_obj = Ticker.from_yf(yf_str, currency=raw_currency)
+
+        # Operator-confirmed listing migrations (config/ticker_overrides.json):
+        # keep position keys aligned with the analysis side until IBKR's own
+        # exchange metadata catches up with the move.
+        overridden_yf, was_overridden = apply_operator_override(ticker_obj.yf)
+        if was_overridden:
+            ticker_obj = Ticker.from_yf(overridden_yf, currency=raw_currency)
 
         raw_market_value = float(raw.get("mktValue", 0) or raw.get("marketValue", 0))
         currency = raw_currency or ("GBP" if ticker_obj.suffix == ".L" else "USD")
@@ -348,7 +357,10 @@ def read_portfolio(
     try:
         client.get_accounts()
     except Exception as e:
-        logger.warning("portfolio_accounts_preflight_failed", error=str(e))
+        logger.warning(
+            "portfolio_accounts_preflight_failed",
+            **summarize_exception(e, operation="portfolio_accounts_preflight_failed"),
+        )
 
     raw_positions = client.get_positions(acct)
     positions = normalize_positions(raw_positions)
@@ -358,7 +370,7 @@ def read_portfolio(
 
     logger.info(
         "portfolio_read",
-        account=acct,
+        account=mask_account(acct),
         positions=summary.position_count,
         value=f"${summary.portfolio_value_usd:,.0f}",
         cash=f"${summary.cash_balance_usd:,.0f}",

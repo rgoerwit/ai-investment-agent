@@ -1,0 +1,129 @@
+from __future__ import annotations
+
+import re
+from typing import Any
+
+import structlog
+
+from src.data_block_utils import (
+    extract_block_field_from_text,
+    extract_block_field_from_text_raw,
+    extract_last_data_block,
+)
+
+logger = structlog.get_logger(__name__)
+
+_ARTICLE_CITATION_PATTERN = re.compile(r"`\(([A-Z][A-Z0-9_]+):\s*([^)]+?)\)`")
+_SOURCE_CONFIDENCE_FIELDS = (
+    "OPERATING_CASH_FLOW_SOURCE",
+    "OCF_FILING_REASON",
+    "ANALYST_COVERAGE_DATA_QUALITY_NOTE",
+    "BALANCE_SHEET_DATA_QUALITY_NOTE",
+    "GROWTH_DATA_QUALITY_NOTE",
+    "PFIC_ASSET_NOTE",
+)
+
+
+def _normalize_citation_value(value: str) -> str:
+    text = value.strip().strip("`").replace(",", "")
+    text = re.sub(r"\s+", "", text)
+    if text.endswith("%"):
+        text = text[:-1]
+    try:
+        return f"{float(text):.10f}".rstrip("0").rstrip(".")
+    except ValueError:
+        return text.upper()
+
+
+def _citation_values_match(cited: str, actual: str) -> bool:
+    return _normalize_citation_value(cited) == _normalize_citation_value(actual)
+
+
+def audit_article_citations(
+    article: str,
+    data_block_text: str | None,
+) -> list[dict[str, str]]:
+    """Return deterministic factual errors for article DATA_BLOCK citation drift."""
+    block_text = extract_last_data_block(data_block_text)
+    if not article or not data_block_text:
+        return []
+    if block_text is None:
+        logger.warning("article_citation_audit_no_parseable_datablock")
+        return []
+
+    errors: list[dict[str, str]] = []
+    for match in _ARTICLE_CITATION_PATTERN.finditer(article):
+        key = match.group(1)
+        cited = match.group(2).strip()
+        actual = extract_block_field_from_text(block_text, key)
+        if actual is None:
+            actual = extract_block_field_from_text_raw(block_text, key)
+        if actual is None:
+            errors.append(
+                {
+                    "location": "DATA_BLOCK citation audit",
+                    "claim": f"Article cites ({key}: {cited})",
+                    "ground_truth": f"No `{key}` field exists in DATA_BLOCK.",
+                    "action": "Remove this citation or replace it with a real DATA_BLOCK key.",
+                }
+            )
+        elif not _citation_values_match(cited, actual):
+            errors.append(
+                {
+                    "location": "DATA_BLOCK citation audit",
+                    "claim": f"Article cites ({key}: {cited})",
+                    "ground_truth": f"DATA_BLOCK shows {key}: {actual}",
+                    "action": "Correct the cited value and any narrative built on it.",
+                }
+            )
+    return errors
+
+
+def prepend_verification_caveats(
+    article: str,
+    factual_errors: list[dict[str, Any]],
+) -> str:
+    if not factual_errors or article.lstrip().startswith("## Verification Caveats"):
+        return article
+
+    lines = [
+        "## Verification Caveats",
+        "",
+        "The following deterministic citation checks were still unresolved after editorial revision:",
+    ]
+    for error in factual_errors:
+        lines.append(
+            f"- {error.get('claim', 'Citation mismatch')}: "
+            f"{error.get('ground_truth', 'No ground truth available')}"
+        )
+    return "\n".join(lines) + "\n\n" + article
+
+
+def extract_source_confidence_context(
+    data_block: str | None,
+    consultant_review: str | None,
+) -> str:
+    block_text = extract_last_data_block(data_block)
+    lines: list[str] = []
+
+    if block_text:
+        for field_name in _SOURCE_CONFIDENCE_FIELDS:
+            value = extract_block_field_from_text(block_text, field_name)
+            if value:
+                lines.append(f"{field_name}: {value}")
+
+    if consultant_review:
+        for raw_line in consultant_review.splitlines():
+            line = raw_line.strip()
+            if re.search(r"\b(?:SPOT_CHECK|COVERAGE_GAP)\b", line, re.IGNORECASE):
+                lines.append(line)
+
+    if not lines:
+        return ""
+
+    lines.append(
+        "Editor instruction: Do not describe weak-source or coverage-gap metrics as "
+        "company-reported or filing-confirmed. Use qualified wording such as "
+        "'aggregator-indicated' unless filing/IR support is explicit."
+    )
+    return "=== SOURCE CONFIDENCE ===\n" + "\n".join(lines)

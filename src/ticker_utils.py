@@ -20,6 +20,8 @@ from src.exchange_metadata import (
     IBKR_TO_YFINANCE,
     canonical_suffix_for_reuters_exchange,
     canonical_suffix_for_token,
+    format_ibkr_symbol,
+    format_yahoo_symbol,
 )
 
 logger = structlog.get_logger(__name__)
@@ -127,6 +129,12 @@ class TickerFormatter:
         "ibkr": re.compile(r"^([A-Z0-9]+):([A-Z]+)$"),
     }
 
+    @staticmethod
+    def _format_symbol_for_target(symbol: str, suffix: str, target_format: str) -> str:
+        if target_format == "ibkr":
+            return format_ibkr_symbol(symbol, suffix)
+        return format_yahoo_symbol(symbol, suffix)
+
     @classmethod
     def normalize_ticker(
         cls, ticker: str, target_format: str = "yfinance"
@@ -163,7 +171,7 @@ class TickerFormatter:
         _parts = ticker.split(".")
         if len(_parts) > 2 and canonical_suffix_for_token(_parts[-1]):
             _rejoined = "-".join(_parts[:-1]) + "." + _parts[-1]
-            logger.info(
+            logger.debug(
                 "multi_dot_ticker_normalised", original=ticker, normalised=_rejoined
             )
             ticker = _rejoined
@@ -184,16 +192,19 @@ class TickerFormatter:
 
             if canonical_suffix:
                 exchange_info = EXCHANGES_BY_SUFFIX[canonical_suffix]
+                formatted_symbol = cls._format_symbol_for_target(
+                    symbol, exchange_info.yf_suffix, target_format
+                )
                 if target_format == "yfinance":
-                    normalized = f"{symbol}{exchange_info.yf_suffix}"
+                    normalized = f"{formatted_symbol}{exchange_info.yf_suffix}"
                 elif target_format == "ibkr":
-                    normalized = f"{symbol}:{exchange_info.ibkr_code}"
+                    normalized = f"{formatted_symbol}:{exchange_info.ibkr_code}"
                 else:
                     normalized = ticker
 
                 metadata = {
                     "original": original_ticker,
-                    "symbol": symbol,
+                    "symbol": formatted_symbol,
                     "exchange_suffix": exchange_info.yf_suffix,
                     "exchange_name": exchange_info.exchange_name,
                     "country": exchange_info.country,
@@ -210,17 +221,20 @@ class TickerFormatter:
             canonical_suffix = canonical_suffix_for_token(suffix)
             if canonical_suffix:
                 exchange_info = EXCHANGES_BY_SUFFIX[canonical_suffix]
+                formatted_symbol = cls._format_symbol_for_target(
+                    symbol, exchange_info.yf_suffix, target_format
+                )
 
                 if target_format == "yfinance":
-                    normalized = f"{symbol}{exchange_info.yf_suffix}"
+                    normalized = f"{formatted_symbol}{exchange_info.yf_suffix}"
                 elif target_format == "ibkr":
-                    normalized = f"{symbol}:{exchange_info.ibkr_code}"
+                    normalized = f"{formatted_symbol}:{exchange_info.ibkr_code}"
                 else:
                     normalized = ticker
 
                 metadata = {
                     "original": original_ticker,
-                    "symbol": symbol,
+                    "symbol": formatted_symbol,
                     "exchange_suffix": exchange_info.yf_suffix,
                     "exchange_name": exchange_info.exchange_name,
                     "country": exchange_info.country,
@@ -299,14 +313,17 @@ class TickerFormatter:
         suffix = IBKR_TO_YFINANCE.get(exchange)
         if suffix:
             info = EXCHANGES_BY_SUFFIX[suffix]
+            formatted_symbol = cls._format_symbol_for_target(
+                symbol, info.yf_suffix, target_format
+            )
             if target_format == "yfinance":
-                normalized = f"{symbol}{info.yf_suffix}"
+                normalized = f"{formatted_symbol}{info.yf_suffix}"
             else:
-                normalized = f"{symbol}:{exchange}"
+                normalized = f"{formatted_symbol}:{exchange}"
 
             metadata = {
                 "original": original_ticker,
-                "symbol": symbol,
+                "symbol": formatted_symbol,
                 "exchange_suffix": info.yf_suffix,
                 "exchange_name": info.exchange_name,
                 "country": info.country,
@@ -411,9 +428,19 @@ def get_ticker_info(ticker: str) -> dict[str, str]:
 class CompanyNameResult:
     """Result of multi-source company name resolution."""
 
-    name: str  # Resolved name or ticker as fallback
+    name: str  # Normalized form (legal suffixes stripped) — suitable for search queries
     source: str  # Which source resolved it ("yfinance", "yahooquery", "fmp", "eodhd", "unresolved")
     is_resolved: bool  # True if a real name was found (not just ticker echoed back)
+    canonical_name: str | None = None  # Raw resolved name, suffixes preserved.
+    # Why canonical_name exists: state and prompts must carry the legal entity identity
+    # ("Youngone Holdings Co., Ltd."), not the search-stripped form ("Youngone"). Without
+    # this, downstream agents lose the holdco/opco distinction at the writer boundary.
+
+    @property
+    def preferred_display_name(self) -> str:
+        """Canonical name for reports/prompts, falling back to normalized name."""
+
+        return self.canonical_name or self.name
 
 
 def _company_name_lookup_candidates(ticker: str) -> list[tuple[str, str]]:
@@ -442,6 +469,23 @@ def _company_name_lookup_candidates(ticker: str) -> list[tuple[str, str]]:
     return candidates
 
 
+_MARKET_IDENTIFIER_PART_RE = re.compile(r"^[A-Z0-9][A-Z0-9._-]+$", re.IGNORECASE)
+
+
+def _looks_like_market_identifier_part(value: str) -> bool:
+    """True for ticker/PID/vendor-id fragments, not human company names."""
+
+    part = value.strip()
+    return bool(
+        part.isdigit()
+        or (
+            any(ch.isdigit() for ch in part)
+            and " " not in part
+            and _MARKET_IDENTIFIER_PART_RE.fullmatch(part)
+        )
+    )
+
+
 def _is_valid_company_name(name: str | None, ticker: str) -> bool:
     """Check if a resolved name is valid (not empty, not just the ticker echoed back)."""
     if not name or not name.strip():
@@ -453,6 +497,13 @@ def _is_valid_company_name(name: str | None, ticker: str) -> bool:
     # Reject if name is just the ticker base (without exchange suffix)
     ticker_base = ticker.split(".")[0]
     if cleaned.upper() == ticker_base.upper():
+        return False
+    # Some Yahoo/Refinitiv responses return an identifier tuple as the name,
+    # e.g. "206640.KS,0P000155DR,176967". Treat all-identifier CSVs as failure.
+    parts = [part.strip() for part in cleaned.split(",") if part.strip()]
+    if len(parts) > 1 and all(
+        _looks_like_market_identifier_part(part) for part in parts
+    ):
         return False
     return True
 
@@ -582,7 +633,8 @@ async def resolve_company_name(
                 if isinstance(raw_name, str) and _is_valid_company_name(
                     raw_name, lookup_ticker
                 ):
-                    normalized = normalize_company_name(raw_name)
+                    canonical = raw_name.strip()
+                    normalized = normalize_company_name(canonical)
                     logger.debug(
                         "company_name_resolved",
                         ticker=ticker,
@@ -590,10 +642,14 @@ async def resolve_company_name(
                         lookup_ticker=lookup_ticker,
                         lookup_strategy=lookup_strategy,
                         name=normalized,
+                        canonical_name=canonical,
                         source=source_name,
                     )
                     return CompanyNameResult(
-                        name=normalized, source=source_name, is_resolved=True
+                        name=normalized,
+                        source=source_name,
+                        is_resolved=True,
+                        canonical_name=canonical,
                     )
                 if raw_name:
                     logger.debug(
@@ -621,7 +677,8 @@ async def resolve_company_name(
         try:
             raw_name = await _try_ibkr(ticker)
             if isinstance(raw_name, str) and _is_valid_company_name(raw_name, ticker):
-                normalized = normalize_company_name(raw_name)
+                canonical = raw_name.strip()
+                normalized = normalize_company_name(canonical)
                 logger.debug(
                     "company_name_resolved",
                     ticker=ticker,
@@ -629,10 +686,14 @@ async def resolve_company_name(
                     lookup_ticker=ticker,
                     lookup_strategy="ibkr_probe",
                     name=normalized,
+                    canonical_name=canonical,
                     source="ibkr",
                 )
                 return CompanyNameResult(
-                    name=normalized, source="ibkr", is_resolved=True
+                    name=normalized,
+                    source="ibkr",
+                    is_resolved=True,
+                    canonical_name=canonical,
                 )
             if raw_name:
                 logger.debug(

@@ -14,6 +14,7 @@ from typing import Literal
 
 import structlog
 
+from src.error_safety import summarize_exception
 from src.tooling.inspector import (
     ContentInspector,
     InspectionDecision,
@@ -119,7 +120,7 @@ class EscalatingInspector:
             logger.warning(
                 "llm_judge_escalation_failed",
                 source_kind=envelope.source_kind.value,
-                error=str(exc),
+                **summarize_exception(exc, operation="llm_judge_escalation_failed"),
             )
             return heuristic_result
 

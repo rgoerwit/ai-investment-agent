@@ -1183,3 +1183,25 @@ class TestLangSmithAutoDetection:
                 os.environ["LANGSMITH_TRACING"] = original_tracing
             else:
                 os.environ.pop("LANGSMITH_TRACING", None)
+
+
+class TestSettingsLoggingSideEffects:
+    """Settings construction must not flatten explicit third-party logger levels.
+
+    Regression for the June 2026 portfolio-run noise: model_post_init used to
+    setLevel(LOG_LEVEL) on every logger in loggerDict, wiping the WARNING
+    suppression CLI entrypoints apply to httpx/ibind/google_genai/ddgs.
+    """
+
+    def test_settings_construction_preserves_explicit_logger_levels(self):
+        import logging
+
+        from src.config import Settings
+
+        probe = logging.getLogger("test_noisy_dependency_probe")
+        probe.setLevel(logging.WARNING)
+        try:
+            Settings()
+            assert probe.level == logging.WARNING
+        finally:
+            probe.setLevel(logging.NOTSET)

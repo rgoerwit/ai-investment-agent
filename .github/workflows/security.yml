@@ -450,12 +450,22 @@ jobs:
           # yfinance with ticker symbols and Yahoo-managed endpoints, not
           # attacker-controlled URLs, so the internal-IP/redirect exposure in
           # curl_cffi is not currently a reachable path here.
+          # GHSA-f4j7-r4q5-qw2c (alias CVE-2026-45829) is a pre-authentication
+          # code injection in the ChromaDB *server*. This app only uses
+          # chromadb.PersistentClient (embedded, local-disk; see src/memory.py)
+          # and never starts the network server, so the pre-auth server path is
+          # not reachable. No fixed release exists yet (1.5.9 is latest). pip-audit
+          # keys on the GHSA primary ID, not the CVE alias — both are listed so the
+          # ignore matches regardless of which source (OSV/PyPI) reports it. Revisit
+          # and drop once chromadb ships a patched version.
           pip-audit -r /tmp/requirements.txt \
             --format json \
             --output pip-audit-results.json \
             --strict \
             --ignore-vuln CVE-2026-33752 \
             --ignore-vuln CVE-2026-4539 \
+            --ignore-vuln GHSA-f4j7-r4q5-qw2c \
+            --ignore-vuln CVE-2026-45829 \
             || (echo "⚠️  pip-audit found vulnerabilities — see pip-audit-results.json" && exit 1)
 
       - name: Display audit summary
@@ -544,6 +554,13 @@ jobs:
         with:
           # Fail if vulnerabilities are introduced with these severities
           fail-on-severity: critical
+          # Approved vulnerability exception (mirrors the pip-audit ignore):
+          # GHSA-f4j7-r4q5-qw2c (CVE-2026-45829) is a pre-auth code-injection in
+          # the ChromaDB *server*. This app only uses chromadb.PersistentClient
+          # (embedded, local-disk; see src/memory.py) and never starts the server,
+          # so the path is unreachable. No fixed release exists yet (1.5.9 latest).
+          # Drop once chromadb ships a patched version.
+          allow-ghsas: GHSA-f4j7-r4q5-qw2c
           # Broadly allow common permissive licenses used by the Python ecosystem.
           # Keep this list tighter than "disable license checks", but wide enough
           # to avoid failing on normal dual-license metadata.
@@ -555,7 +572,10 @@ jobs:
           #   an explicit reviewed exception rather than disabling license checks.
           # - Several packages publish mixed/legacy SPDX fragments or scancode refs
           #   despite permissive package metadata.
-          allow-dependencies-licenses: pkg:pypi/aiohappyeyeballs, pkg:pypi/et-xmlfile, pkg:pypi/frozendict, pkg:pypi/lxml, pkg:pypi/matplotlib, pkg:pypi/parso, pkg:pypi/pycryptodome, pkg:pypi/python-dateutil, pkg:pypi/structlog, pkg:pypi/typing-extensions, pkg:pypi/xlrd
+          # - regex: Apache-2.0 licensed, but reports "CNRI-Python AND Apache-2.0"
+          #   because it incorporates CPython regex code. CNRI-Python is an
+          #   OSI-approved permissive license; treat as a reviewed exception.
+          allow-dependencies-licenses: pkg:pypi/aiohappyeyeballs, pkg:pypi/et-xmlfile, pkg:pypi/frozendict, pkg:pypi/lxml, pkg:pypi/matplotlib, pkg:pypi/parso, pkg:pypi/pycryptodome, pkg:pypi/python-dateutil, pkg:pypi/regex, pkg:pypi/structlog, pkg:pypi/typing-extensions, pkg:pypi/xlrd
           # Comment on PR with dependency changes
           comment-summary-in-pr: always
           # GitHub can lag when producing dependency graph snapshots for the PR

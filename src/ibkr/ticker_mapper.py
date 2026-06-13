@@ -4,7 +4,7 @@ Ticker mapping between IBKR conid/symbol and yfinance ticker format.
 Wraps the existing TickerFormatter from src/ticker_utils.py with:
 - IBKR API calls for conid resolution
 - Local JSON cache with TTL
-- HK zero-padding normalization
+- Exchange-specific numeric symbol normalization
 """
 
 from __future__ import annotations
@@ -16,10 +16,14 @@ from typing import Any
 
 import structlog
 
+from src.error_safety import summarize_exception
 from src.exchange_metadata import IBKR_TO_YFINANCE
 from src.ibkr.exceptions import IBKRTickerResolutionError
 from src.ibkr.order_builder import parse_price
-from src.ibkr.ticker import _CURRENCY_TO_SUFFIX  # noqa: F401 — re-exported for compat
+from src.ibkr.ticker import (  # noqa: F401 — _CURRENCY_TO_SUFFIX re-exported for compat
+    _CURRENCY_TO_SUFFIX,
+    _pad_numeric_symbol_for_suffix,
+)
 from src.ticker_utils import TickerFormatter
 
 logger = structlog.get_logger(__name__)
@@ -67,7 +71,10 @@ def _save_cache(cache: dict) -> None:
         with open(CACHE_FILE, "w") as f:
             json.dump(cache, f, indent=2)
     except OSError as e:
-        logger.warning("conid_cache_save_failed", error=str(e))
+        logger.warning(
+            "conid_cache_save_failed",
+            **summarize_exception(e, operation="conid_cache_save_failed"),
+        )
 
 
 # Venues that should be excluded from yfinance.Search fallback results
@@ -79,7 +86,8 @@ def ibkr_symbol_to_yf(symbol: str, exchange: str, currency: str = "") -> str:
     Convert an IBKR symbol + exchange to yfinance ticker format.
 
     Uses the canonical IBKR_TO_YFINANCE mapping.
-    Handles HK zero-padding (e.g., IBKR "5" on SEHK → "0005.HK").
+    Handles exchange-specific numeric padding (e.g., IBKR "5" on SEHK →
+    "0005.HK"; "5930" on KRX → "005930.KS").
 
     Args:
         symbol: IBKR symbol (e.g., "5", "7203", "ASML")
@@ -90,11 +98,15 @@ def ibkr_symbol_to_yf(symbol: str, exchange: str, currency: str = "") -> str:
     Returns:
         yfinance ticker string (e.g., "0005.HK", "7203.T", "ASML.AS")
     """
-    suffix = IBKR_TO_YFINANCE.get(exchange, "")
+    exchange_code = exchange.upper() if exchange else ""
+    currency_code = currency.upper() if currency else ""
+    suffix = IBKR_TO_YFINANCE.get(exchange_code)
 
     # Fallback: derive suffix from unambiguous currency when exchange is unknown
-    if not suffix and currency:
-        suffix = _CURRENCY_TO_SUFFIX.get(currency.upper(), "")
+    if suffix is None or (
+        suffix == "" and exchange_code in ("", "SMART") and currency_code != "USD"
+    ):
+        suffix = _CURRENCY_TO_SUFFIX.get(currency_code, "")
         if suffix:
             logger.debug(
                 "exchange_suffix_from_currency",
@@ -104,13 +116,12 @@ def ibkr_symbol_to_yf(symbol: str, exchange: str, currency: str = "") -> str:
                 suffix=suffix,
             )
 
-    if suffix == ".HK":
-        # HK stocks: pad to 4 digits (IBKR strips leading zeros)
-        symbol = symbol.lstrip("0") or "0"
-        symbol = symbol.zfill(4)
-
     if suffix:
-        return f"{symbol}{suffix}"
+        from src.ticker_corrections import apply_operator_override
+
+        candidate = f"{_pad_numeric_symbol_for_suffix(symbol, suffix)}{suffix}"
+        overridden, _ = apply_operator_override(candidate)
+        return overridden
 
     # Returning bare symbol — try yfinance search as a last resort.
     #
@@ -122,11 +133,15 @@ def ibkr_symbol_to_yf(symbol: str, exchange: str, currency: str = "") -> str:
     #    /iserver/contract/{conid}/info endpoint, so we cannot rely on the
     #    exchange field to determine the real listing exchange.  yfinance
     #    search is the reliable fallback here.
-    _is_known_us = exchange in ("", "NASDAQ", "NYSE", "ARCA", "AMEX")
+    _is_known_us = exchange_code in ("", "NASDAQ", "NYSE", "ARCA", "AMEX")
     _is_smart_non_usd = (
-        exchange == "SMART" and bool(currency) and currency.upper() not in ("USD", "")
+        exchange_code == "SMART" and bool(currency_code) and currency_code != "USD"
     )
-    if exchange and (not _is_known_us) and (exchange != "SMART" or _is_smart_non_usd):
+    if (
+        exchange_code
+        and not _is_known_us
+        and (exchange_code != "SMART" or _is_smart_non_usd)
+    ):
         yf_ticker = _yf_search_ticker(symbol, exchange, currency)
         if yf_ticker:
             return yf_ticker
@@ -250,8 +265,11 @@ def yf_to_ibkr_format(yf_ticker: str) -> tuple[str, str]:
     Returns:
         Tuple of (symbol, ibkr_exchange_code)
     """
+    normalized_yf, _ = TickerFormatter.normalize_ticker(
+        yf_ticker, target_format="yfinance"
+    )
     normalized, metadata = TickerFormatter.normalize_ticker(
-        yf_ticker, target_format="ibkr"
+        normalized_yf, target_format="ibkr"
     )
     symbol = metadata.get("symbol", yf_ticker.split(".")[0])
     ibkr_exchange = metadata.get("ibkr_exchange", "SMART")
@@ -332,7 +350,11 @@ def resolve_conid(yf_ticker: str, client: Any | None = None) -> int | None:
     except IBKRTickerResolutionError:
         raise
     except Exception as e:
-        logger.warning("conid_resolution_failed", ticker=yf_ticker, error=str(e))
+        logger.warning(
+            "conid_resolution_failed",
+            ticker=yf_ticker,
+            **summarize_exception(e, operation="conid_resolution_failed"),
+        )
         raise IBKRTickerResolutionError(yf_ticker, str(e)) from e
 
 

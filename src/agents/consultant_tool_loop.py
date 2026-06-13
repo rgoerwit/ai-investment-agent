@@ -10,6 +10,7 @@ from typing import Any
 import structlog
 from langchain_core.messages import HumanMessage, ToolMessage
 
+from src.error_safety import summarize_exception
 from src.runtime_services import get_current_tool_service
 from src.tooling.runtime import ToolInvocation
 
@@ -163,7 +164,9 @@ async def run_bounded_consultant_loop(
                             "consultant_tool_failed",
                             ticker=ticker,
                             tool=tool_call["name"],
-                            error=str(tool_err),
+                            **summarize_exception(
+                                tool_err, operation="consultant_tool_failed"
+                            ),
                         )
                         result = f"TOOL_ERROR: {tool_err}"
             else:

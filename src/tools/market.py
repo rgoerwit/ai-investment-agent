@@ -4,9 +4,11 @@ import json
 from typing import Annotated, cast
 
 import pandas as pd
+import structlog
 from langchain_core.tools import tool
 from stockstats import wrap as stockstats_wrap
 
+from src.error_safety import summarize_exception
 from src.runtime_services import (
     get_current_inspection_service,
     get_current_market_data_fetcher,
@@ -14,6 +16,16 @@ from src.runtime_services import (
 from src.ticker_utils import normalize_ticker
 from src.tooling.inspector import InspectionEnvelope, SourceKind
 from src.tools import shared
+
+logger = structlog.get_logger(__name__)
+
+
+def _tool_error_text(exc: Exception, operation: str) -> str:
+    """Typed error string for LLM-visible tool output; details stay in logs."""
+    summary = summarize_exception(exc, operation=operation)
+    logger.warning("market_tool_failed", **summary)
+    return f"{summary['error_type']} (details in operator logs)"
+
 
 _FINANCIAL_TEXT_FIELDS = frozenset(
     {
@@ -136,7 +148,7 @@ async def get_financial_metrics(
         )
         return json.dumps(sanitized_data, indent=2)
     except Exception as exc:
-        return json.dumps({"error": str(exc)})
+        return json.dumps({"error": _tool_error_text(exc, "get_financial_metrics")})
 
 
 @tool
@@ -166,7 +178,7 @@ async def get_yfinance_data(
             ticker=normalized,
         )
     except Exception as exc:
-        return f"Error: {exc}"
+        return f"Error: {_tool_error_text(exc, 'get_yfinance_data')}"
 
 
 @tool
@@ -226,7 +238,7 @@ async def get_technical_indicators(
             f"Bollinger Lower: {fmt(boll_lb)}"
         )
     except Exception as exc:
-        return f"Error: {exc}"
+        return f"Error: {_tool_error_text(exc, 'get_technical_indicators')}"
 
 
 @tool
@@ -253,7 +265,11 @@ async def get_fundamental_analysis(
         company_name = await shared.extract_company_name_async(normalized_symbol)
         company_resolved = company_name != normalized_symbol
 
-        ticker_query = f"{ticker} stock analyst coverage count consensus rating American Depositary Receipt exchange listing ADR status"
+        ticker_query = (
+            f"{ticker} stock analyst coverage count consensus rating "
+            "American Depositary Receipt depositary bank sponsored unsponsored "
+            "OTCQX OTCQB OTCPK sponsorship level Form F-6 exchange listing ADR status"
+        )
         ticker_results = await shared._tavily_search_with_timeout(
             {"query": ticker_query}
         )
@@ -293,7 +309,8 @@ async def get_fundamental_analysis(
 
         if not found_adr_info and company_resolved:
             adr_query = (
-                f'"{company_name}" American Depositary Receipt ADR ticker status'
+                f'"{company_name}" American Depositary Receipt ADR depositary bank '
+                "sponsored unsponsored sponsorship level Form F-6 ticker status"
             )
             adr_results = await shared._tavily_search_with_timeout({"query": adr_query})
             adr_results_str = (
@@ -315,4 +332,7 @@ async def get_fundamental_analysis(
 
         return f"Fundamental Search Results for {ticker}:\n{ticker_results_str}"
     except Exception as exc:
-        return f"Error searching for fundamentals: {exc}"
+        return (
+            "Error searching for fundamentals: "
+            f"{_tool_error_text(exc, 'get_fundamental_analysis')}"
+        )

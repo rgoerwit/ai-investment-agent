@@ -210,6 +210,55 @@ def sync_check_router(
     return ["Bull Researcher R1", "Bear Researcher R1"]
 
 
+def post_research_sync_router(
+    state: AgentState,
+    config: RunnableConfig,
+    *,
+    apac_required: bool,
+    consultant_required: bool,
+) -> Literal["Trader", "__end__"]:
+    """Wait for post-research artifacts before releasing Trader.
+
+    Valuation and the optional APAC/Consultant branch run in parallel. Without
+    this barrier, the faster valuation branch can trigger Trader and the entire
+    risk/PM tail before Consultant finishes, then trigger it again afterward.
+    """
+    valuation_done = is_artifact_complete(state, "valuation_params")
+    consultant_done = (
+        is_artifact_complete(state, "consultant_review")
+        if consultant_required
+        else True
+    )
+    apac_done = (
+        is_artifact_complete(state, "apac_regional_report")
+        if apac_required and not consultant_required
+        else True
+    )
+    all_done = valuation_done and consultant_done and apac_done
+
+    logger.debug(
+        "post_research_sync_status",
+        valuation_done=valuation_done,
+        consultant_done=consultant_done,
+        apac_done=apac_done,
+        consultant_required=consultant_required,
+        apac_required=apac_required,
+        valuation_error=get_artifact_status(state, "valuation_params").error_kind,
+        consultant_error=get_artifact_status(state, "consultant_review").error_kind,
+        apac_error=get_artifact_status(state, "apac_regional_report").error_kind,
+        all_done=all_done,
+    )
+
+    if not all_done:
+        return "__end__"
+
+    logger.info(
+        "post_research_sync_complete",
+        message="Valuation and optional post-research reviews complete - proceeding to Trader",
+    )
+    return "Trader"
+
+
 # --- Consultant bypass gate (P0-2) ------------------------------------------
 
 CONSULTANT_SKIP_SENTINEL = (

@@ -14,8 +14,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
 from mcp.types import CallToolResult, TextContent
+
 from src.consultant_tools import spot_check_metric_mcp_fmp
 from src.mcp.budget import MCPBudgetHook
 from src.mcp.client import MCPRuntime

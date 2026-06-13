@@ -29,7 +29,7 @@ def test_registry_loads_defaults_and_env_override(monkeypatch):
 
 
 def test_export_and_roundtrip(tmp_path):
-    reg = PromptRegistry(prompts_dir=str(tmp_path))
+    reg = PromptRegistry()
     # Create a sample custom prompt and export
     reg.prompts["custom_agent"] = AgentPrompt(
         agent_key="custom_agent",
@@ -45,16 +45,34 @@ def test_export_and_roundtrip(tmp_path):
     ).exists()
 
 
-def test_load_malformed_json_skipped(tmp_path, monkeypatch):
-    # Create a malformed JSON file in prompts dir
+def test_load_malformed_extra_json_skipped(tmp_path):
+    # A malformed non-required JSON file is skipped; required corpus loads
+    import shutil
+
     pdir = tmp_path / "prompts"
-    pdir.mkdir()
-    bad = pdir / "bad_prompt.json"
-    bad.write_text("{ not: valid json }")
-    # Should not crash when creating registry
+    shutil.copytree("prompts", pdir)
+    (pdir / "bad_prompt.json").write_text("{ not: valid json }")
+
     reg = PromptRegistry(prompts_dir=str(pdir))
-    # bad_prompt should not be loaded
+
     assert "bad_prompt" not in reg.prompts
+    assert "market_analyst" in reg.prompts
+
+
+def test_missing_required_prompt_fails_loudly(tmp_path):
+    # Deleting a required prompt file must fail startup and name the key
+    import shutil
+
+    import pytest
+
+    from src.prompts import PromptLoadError
+
+    pdir = tmp_path / "prompts"
+    shutil.copytree("prompts", pdir)
+    (pdir / "portfolio_manager.json").unlink()
+
+    with pytest.raises(PromptLoadError, match="portfolio_manager"):
+        PromptRegistry(prompts_dir=str(pdir))
 
 
 def test_registry_keeps_local_prompt_when_langfuse_fetch_disabled(monkeypatch):

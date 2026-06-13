@@ -206,3 +206,42 @@ async def test_missing_explicit_watchlist_raises_value_error():
         ValueError, match="watchlist 'watchlist-2026' not found in IBKR"
     ):
         await service.build_bundle(_make_request())
+
+
+@pytest.mark.asyncio
+async def test_active_macro_events_reach_health_fn():
+    """The loader's events must arrive at compute_portfolio_health."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    captured = {}
+
+    def fake_health(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    event = SimpleNamespace(event_type="GEOPOLITICAL", expiry="2026-12-01")
+    service = PortfolioRecommendationService(
+        load_analyses_fn=lambda path: {"7203.T": _make_analysis(ticker="7203.T")},
+        reconcile_fn=lambda **kwargs: [],
+        compute_portfolio_health_fn=fake_health,
+    )
+    with patch(
+        "src.ibkr.recommendation_service._load_active_macro_events",
+        return_value=[event],
+    ):
+        await service.build_bundle(_make_request(read_only=True))
+
+    assert captured.get("active_macro_events") == [event]
+
+
+def test_active_macro_events_loader_fails_open():
+    from unittest.mock import patch
+
+    from src.ibkr.recommendation_service import _load_active_macro_events
+
+    with patch(
+        "src.memory.create_macro_events_store",
+        side_effect=RuntimeError("chroma exploded"),
+    ):
+        assert _load_active_macro_events() == []

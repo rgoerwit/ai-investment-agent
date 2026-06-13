@@ -19,6 +19,7 @@ import argparse
 import io
 import json
 import logging
+import math
 import multiprocessing as mp
 import random
 import sys
@@ -32,6 +33,7 @@ import requests
 import yfinance as yf
 
 from src.fx_normalization import normalize_minor_unit_amount
+from src.thesis_constants import LIQUIDITY_MIN_USD, PE_MAX
 from src.ticker_utils import to_yfinance
 from src.yfinance_runtime import YFRateLimitError, configure_yfinance_defaults
 
@@ -44,14 +46,16 @@ configure_yfinance_defaults()
 DEFAULT_CONFIG_PATH = "config/exchanges.json"
 DEFAULT_WORKERS = 4
 BATCH_SIZE = 50
-DEFAULT_MAX_PE = 18.0
+DEFAULT_MAX_PE = PE_MAX  # thesis P/E ceiling (src/thesis_constants.py)
 DEFAULT_MAX_PE_CONTEXTUAL = 24.0
 DEFAULT_MIN_ROE = 13.0
 DEFAULT_MIN_ROA = 6.0
 DEFAULT_MAX_DE = 150.0
 DEFAULT_MIN_MCAP = 50_000_000
-DEFAULT_MIN_VOLUME = 100_000
-DEFAULT_MAX_COVERAGE = 30
+DEFAULT_MIN_VOLUME = LIQUIDITY_MIN_USD  # thesis hard floor; analysis applies $250k pass
+DEFAULT_MAX_COVERAGE = (
+    30  # deliberately looser than thesis 15: screener pre-filter only
+)
 DEFAULT_MIN_OCF_NI_RATIO = 0.8
 DEFAULT_MIN_REVENUE_YEARS = 3
 
@@ -99,6 +103,11 @@ SCRAPE_COLUMNS = [
     "Lot_Size",
     "Listing_Code",
 ]
+
+PAD_CLEAN_RULE_WIDTHS = {
+    "pad_4_digits": 4,
+    "pad_6_digits": 6,
+}
 
 ENRICHED_COLUMNS = [
     "YF_Ticker",
@@ -358,11 +367,11 @@ def _generate_yf_ticker(row, config):
     raw = str(row["Ticker_Raw"]).strip()
     suffix = config["yahoo_suffix"]
 
-    if config.get("params", {}).get("clean_rule") == "pad_4_digits":
-        try:
-            raw = raw.split(".")[0].zfill(4)
-        except Exception:
-            pass
+    pad_width = PAD_CLEAN_RULE_WIDTHS.get(config.get("params", {}).get("clean_rule"))
+    if pad_width:
+        raw_base = raw.split(".")[0]
+        if raw_base.isdigit():
+            raw = raw_base.zfill(pad_width)
 
     if suffix == "dynamic":
         suffix_map = config["params"].get("suffix_map", {})
@@ -375,10 +384,10 @@ def _generate_yf_ticker(row, config):
         # No market match → drop rather than emit unsuffixed ticker (guaranteed 404)
         return None
 
-    # Strip trailing dashes from raw mnemonics before appending suffix.
+    # Strip trailing status markers from raw mnemonics before appending suffix.
     # Some exchange files (e.g. LSE SETS) tag special-status securities with a
-    # trailing dash (e.g. "JD-", "RM-"). Yahoo Finance uses the plain ticker.
-    raw = raw.rstrip("-")
+    # trailing dash/dot (e.g. "JD-", "NG."). Yahoo Finance uses the plain ticker.
+    raw = raw.rstrip("-.")
     if not raw:
         return None
 
@@ -437,14 +446,16 @@ def _handle_scrape_html(config, session):
     params = config["params"]
     base_url = config["source_url"]
     max_pages = params.get("paginate_max_pages", 1)
+    page_param = params.get("page_param", "p")
     idx = params.get("table_index", 0)
     target_col = params.get("ticker_col")
+    source_encoding = params.get("source_encoding")
 
     all_frames = []
     first_page_len = None
 
     for page_num in range(1, max_pages + 1):
-        url = base_url if page_num == 1 else f"{base_url}?p={page_num}"
+        url = base_url if page_num == 1 else f"{base_url}?{page_param}={page_num}"
         try:
             response = session.get(url)
             response.raise_for_status()
@@ -452,6 +463,9 @@ def _handle_scrape_html(config, session):
             if page_num == 1:
                 raise
             break  # Stop on HTTP error for pages 2+
+
+        if source_encoding:
+            response.encoding = source_encoding
 
         if "<table" not in response.text.lower():
             if page_num == 1:
@@ -484,7 +498,7 @@ def _handle_scrape_html(config, session):
             break  # Partial page = last page
 
         if max_pages > 1 and page_num < max_pages:
-            time.sleep(0.5)  # Be polite to stockanalysis.com
+            time.sleep(0.5)  # Throttle paginated sources.
 
     if not all_frames:
         raise ValueError(f"Table containing '{target_col}' not found")
@@ -526,9 +540,13 @@ def _apply_filters(df, config):
                 if isinstance(values, list):
                     df = df[~df[actual_col].astype(str).str.strip().isin(values)]
                 else:
+                    # Strip before regex match so anchored patterns (e.g. "3[2-9]$")
+                    # tolerate padded cells from HTML/Excel scrapers — matches the
+                    # list-branch behavior above.
                     df = df[
                         ~df[actual_col]
                         .astype(str)
+                        .str.strip()
                         .str.contains(str(values), case=False, na=False)
                     ]
 
@@ -543,6 +561,7 @@ def scrape_exchanges(config: dict, *, exclude_us: bool = True) -> pd.DataFrame:
     _check_deps()
     session = _get_session()
     all_dfs = []
+    degraded_exchanges: list[tuple[str, int, int]] = []
 
     print(f"Loaded {config['meta']['description']}", file=sys.stderr)
 
@@ -588,7 +607,16 @@ def scrape_exchanges(config: dict, *, exclude_us: bool = True) -> pd.DataFrame:
             final_df = df[SCRAPE_COLUMNS].dropna(subset=["YF_Ticker"])
             all_dfs.append(final_df)
 
-            if len(final_df) > 0:
+            min_expected = int(ex.get("min_expected_rows") or 0)
+            if min_expected and len(final_df) < min_expected:
+                degraded_exchanges.append(
+                    (ex["exchange_name"], min_expected, len(final_df))
+                )
+                print(
+                    f"DEGRADED ({len(final_df)} rows; expected >= {min_expected})",
+                    file=sys.stderr,
+                )
+            elif len(final_df) > 0:
                 print(f"OK ({len(final_df)} rows)", file=sys.stderr)
             else:
                 print(
@@ -608,6 +636,19 @@ def scrape_exchanges(config: dict, *, exclude_us: bool = True) -> pd.DataFrame:
     master = pd.concat(all_dfs, ignore_index=True)
     master = master.drop_duplicates(subset=["YF_Ticker"])
     print(f"\nScraped {len(master)} unique tickers", file=sys.stderr)
+
+    if degraded_exchanges:
+        lines = "\n".join(
+            f"  - {name}: got {actual}, expected >= {expected}"
+            for name, expected, actual in degraded_exchanges
+        )
+        raise RuntimeError(
+            "Scrape produced row counts below `min_expected_rows` floor for "
+            f"{len(degraded_exchanges)} exchange(s):\n{lines}\n"
+            "Source URL likely degraded or restructured. Fix the source "
+            "(or disable the exchange in config/exchanges.json) before retrying."
+        )
+
     return master
 
 
@@ -712,7 +753,16 @@ def _process_row(row, *, fx_rates=None, min_mcap=None, min_volume=None, debug=Fa
 
             # --- Populate standard fields ---
             row["Company_YF"] = info.get("longName") or info.get("shortName")
-            row["P/E"] = info.get("trailingPE")
+            pe = info.get("trailingPE")
+            if pe is None:
+                pe = _compute_market_cap_income_pe(info)
+                if pe is not None and debug:
+                    print(
+                        f"[DEBUG] {yf_symbol}: trailingPE missing — computed "
+                        f"P/E={pe:.2f} from marketCap/netIncomeToCommon",
+                        file=sys.stderr,
+                    )
+            row["P/E"] = pe
             row["Forward_PE"] = info.get("forwardPE")
             row["ROE"] = info.get("returnOnEquity")
             row["ROA"] = info.get("returnOnAssets")
@@ -969,6 +1019,22 @@ def _safe_float(val):
         return None
 
 
+def _positive_finite_float(val):
+    num = _safe_float(val)
+    if num is None or not math.isfinite(num) or num <= 0:
+        return None
+    return num
+
+
+def _compute_market_cap_income_pe(info):
+    """Approximate trailing P/E from Yahoo market cap and net income fields."""
+    market_cap = _positive_finite_float(info.get("marketCap"))
+    net_income = _positive_finite_float(info.get("netIncomeToCommon"))
+    if market_cap is None or net_income is None:
+        return None
+    return market_cap / net_income
+
+
 def _has_required_profitability(row, *, min_roe, min_roa):
     roe = _safe_float(row.get("ROE"))
     roa = _safe_float(row.get("ROA"))
@@ -1100,6 +1166,16 @@ def _passes_revenue_history(row, *, min_revenue_years, ticker, debug=False):
     return True
 
 
+def _reject(row, reason: str) -> bool:
+    """Tag row with a reject reason category and return False.
+
+    Categories drive the per-exchange aggregate at end of run, so an audit
+    can spot "0/N passed because all rejected for <reason>" without --debug.
+    """
+    row["_reject_reason"] = reason
+    return False
+
+
 def _passes_filters(row, *, criteria: ScreenCriteria, debug=False):
     """Apply hard financial filters to an enriched row."""
     if not row:
@@ -1110,7 +1186,7 @@ def _passes_filters(row, *, criteria: ScreenCriteria, debug=False):
     if pe is None:
         if debug:
             print(f"[SKIP] {ticker}: Missing P/E", file=sys.stderr)
-        return False
+        return _reject(row, "missing_pe")
 
     if pe > criteria.max_pe_contextual:
         if debug:
@@ -1118,7 +1194,7 @@ def _passes_filters(row, *, criteria: ScreenCriteria, debug=False):
                 f"[SKIP] {ticker}: P/E {pe} > contextual max {criteria.max_pe_contextual}",
                 file=sys.stderr,
             )
-        return False
+        return _reject(row, "pe_too_high")
 
     profitability_ok, roe, roa = _has_required_profitability(
         row, min_roe=criteria.min_roe, min_roa=criteria.min_roa
@@ -1129,23 +1205,23 @@ def _passes_filters(row, *, criteria: ScreenCriteria, debug=False):
                 f"[SKIP] {ticker}: Low Profit (ROE={roe}, ROA={roa})",
                 file=sys.stderr,
             )
-        return False
+        return _reject(row, "low_profitability")
 
     leverage_ok, de = _has_acceptable_leverage(
         row, max_de=criteria.max_de, ticker=ticker, debug=debug
     )
     if not leverage_ok:
-        return False
+        return _reject(row, "high_leverage")
 
     if not _within_coverage_limit(
         row, max_coverage=criteria.max_coverage, ticker=ticker, debug=debug
     ):
-        return False
+        return _reject(row, "high_analyst_coverage")
 
     if not _passes_ocf_gate(
         row, ticker=ticker, ocf_waiver=criteria.ocf_waiver, debug=debug
     ):
-        return False
+        return _reject(row, "ocf_gate")
 
     if not _has_required_earnings_quality(
         row,
@@ -1153,7 +1229,7 @@ def _passes_filters(row, *, criteria: ScreenCriteria, debug=False):
         ticker=ticker,
         debug=debug,
     ):
-        return False
+        return _reject(row, "earnings_quality")
 
     if not _passes_revenue_history(
         row,
@@ -1161,7 +1237,7 @@ def _passes_filters(row, *, criteria: ScreenCriteria, debug=False):
         ticker=ticker,
         debug=debug,
     ):
-        return False
+        return _reject(row, "revenue_history")
 
     if criteria.uses_contextual_valuation(pe):
         contextual_profitability_ok, _, _ = _has_required_profitability(
@@ -1175,7 +1251,7 @@ def _passes_filters(row, *, criteria: ScreenCriteria, debug=False):
                     f"[SKIP] {ticker}: P/E {pe} requires stronger profitability",
                     file=sys.stderr,
                 )
-            return False
+            return _reject(row, "contextual_profitability")
 
         contextual_leverage_ok, _ = _has_acceptable_leverage(
             row,
@@ -1184,7 +1260,7 @@ def _passes_filters(row, *, criteria: ScreenCriteria, debug=False):
             debug=debug,
         )
         if not contextual_leverage_ok:
-            return False
+            return _reject(row, "contextual_leverage")
 
         if not _within_coverage_limit(
             row,
@@ -1192,7 +1268,7 @@ def _passes_filters(row, *, criteria: ScreenCriteria, debug=False):
             ticker=ticker,
             debug=debug,
         ):
-            return False
+            return _reject(row, "contextual_coverage")
 
         if not _has_required_earnings_quality(
             row,
@@ -1200,7 +1276,7 @@ def _passes_filters(row, *, criteria: ScreenCriteria, debug=False):
             ticker=ticker,
             debug=debug,
         ):
-            return False
+            return _reject(row, "contextual_earnings_quality")
 
     if debug:
         print(f"[KEEP] {ticker}: P/E={pe}, D/E={de}%, ROE={roe}", file=sys.stderr)
@@ -1309,7 +1385,38 @@ def fetch_and_filter(
         file=sys.stderr,
     )
 
+    _log_per_exchange_pass_rates(enriched_df, passing_df)
+
     return passing_df, enriched_df
+
+
+def _log_per_exchange_pass_rates(enriched_df, passing_df) -> None:
+    """Per-exchange pass-rate summary so an audit can spot 0% exchanges.
+
+    Always-on (not gated by --debug). A 0% pass rate on an enabled exchange
+    is almost always a data-source bug (missing field upstream, vendor feed
+    broken) rather than legitimate filter behavior — surface it loudly.
+    """
+    if enriched_df is None or enriched_df.empty or "Exchange" not in enriched_df:
+        return
+
+    passing_set: set[str] = (
+        set(passing_df["YF_Ticker"].dropna())
+        if passing_df is not None and not passing_df.empty
+        else set()
+    )
+
+    print("\nPass-rate by exchange (enriched → kept):", file=sys.stderr)
+    for exchange, group in enriched_df.groupby("Exchange"):
+        n_enriched = len(group)
+        n_passed = sum(1 for t in group["YF_Ticker"] if t in passing_set)
+        pct = 100.0 * n_passed / n_enriched if n_enriched else 0.0
+        line = f"  {exchange[:42]:<42} {n_passed:>5}/{n_enriched:<5} ({pct:>5.1f}%)"
+        if n_enriched >= 20 and n_passed == 0 and "_reject_reason" in group:
+            reasons = group["_reject_reason"].dropna().value_counts().head(2)
+            top = ", ".join(f"{r}={n}" for r, n in reasons.items())
+            line += f"  ⚠ all rejected — top: {top}"
+        print(line, file=sys.stderr)
 
 
 # ============================================================

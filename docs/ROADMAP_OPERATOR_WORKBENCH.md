@@ -20,14 +20,14 @@ The implementation sequence is:
 
 Stage 0 is the design freeze for runtime/control-plane state.
 
-- Runtime model document: [docs/RUNTIME_MODEL.md](/Users/richard3/Documents/Git-Repositories/investment-agent-public/docs/RUNTIME_MODEL.md)
+- Runtime model document: [docs/RUNTIME_MODEL.md](RUNTIME_MODEL.md)
 - Goal: define canonical entities, identifiers, status enums, path policy, migration inputs, and producer/consumer ownership before storage work starts
 - Output: no runtime code changes, only a decision-complete design contract for Stage 1
 
 ## Later Stages
 
 - Stage 1: unified SQLite storage for analyses, pipeline runs, refresh jobs, notifications, and metrics
-  - Detailed implementation spec: [docs/STAGE1_UNIFIED_STORAGE_PLAN.md](/Users/richard3/Documents/Git-Repositories/investment-agent-public/docs/STAGE1_UNIFIED_STORAGE_PLAN.md)
+  - Detailed implementation spec: [docs/STAGE1_UNIFIED_STORAGE_PLAN.md](STAGE1_UNIFIED_STORAGE_PLAN.md)
 - Stage 2: config normalization and fast health checks
 - Stage 3: operator command family
 - Stage 4: DB-backed pipeline lifecycle
@@ -37,6 +37,7 @@ Stage 0 is the design freeze for runtime/control-plane state.
 - Stage 8: security boundary formalization
 - Stage 9: cloud-portable packaging
 
-## Current Focus
+## Current Status
 
-The current implementation focus is Stage 0. Later stages should use [docs/RUNTIME_MODEL.md](/Users/richard3/Documents/Git-Repositories/investment-agent-public/docs/RUNTIME_MODEL.md) as the source of truth for runtime entity design.
+Stage 0 has been written down. Stage 1 is still a plan, not live code. Later
+storage work should use [docs/RUNTIME_MODEL.md](RUNTIME_MODEL.md) as the design reference, but must still verify every claim against the live tree before implementation.

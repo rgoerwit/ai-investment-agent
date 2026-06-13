@@ -48,6 +48,16 @@ _CONSULTANT_TRANSIENT_STRENGTH_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(?:restructuring gain|restructuring charge)\b", re.IGNORECASE),
 )
 
+# Consultant verdict markers, most severe first (first match wins). Tolerant of
+# space/underscore/hyphen separators and singular "CONCERN".
+_CONSULTANT_VERDICT_PATTERNS = (
+    (re.compile(r"MAJOR[\s_-]CONCERNS?", re.IGNORECASE), "MAJOR_CONCERNS"),
+    (re.compile(r"CONDITIONAL[\s_-]APPROVAL", re.IGNORECASE), "CONDITIONAL_APPROVAL"),
+    (re.compile(r"\bAPPROVED\b", re.IGNORECASE), "APPROVED"),
+)
+_CONSULTANT_MANDATE_BREACH_PATTERN = re.compile(r"MANDATE[\s_-]BREACH", re.IGNORECASE)
+_CONSULTANT_HARD_STOP_PATTERN = re.compile(r"HARD[\s_-]STOP", re.IGNORECASE)
+
 
 def extract_legal_risks(legal_report: str) -> dict[str, Any]:
     """Extract legal/tax risk data from Legal Counsel output."""
@@ -99,8 +109,16 @@ def extract_legal_risks(legal_report: str) -> dict[str, Any]:
             cmic_status=risks["cmic_status"],
         )
         return risks
-    except json.JSONDecodeError:
-        logger.debug("legal_report_not_json_falling_back_to_regex")
+    except json.JSONDecodeError as exc:
+        from src.error_safety import redact_sensitive_text
+
+        # Operator-visible: the Legal Counsel prompt promises JSON output, so a
+        # parse failure means format drift — the regex fallback may miss fields.
+        logger.warning(
+            "legal_report_json_parse_failed_using_regex_fallback",
+            reason=str(exc.msg)[:120],
+            report_prefix=redact_sensitive_text(json_str, max_chars=80),
+        )
 
     pfic_match = re.search(
         r'"?pfic_status"?\s*:\s*"?(CLEAN|UNCERTAIN|PROBABLE|N/A)"?',
@@ -408,20 +426,17 @@ def parse_consultant_conditions(consultant_review: str) -> dict[str, Any]:
         except Exception:
             return result
 
-    upper_review = consultant_review.upper()
-    if "MAJOR CONCERNS" in upper_review or "MAJOR_CONCERNS" in upper_review:
-        result["verdict"] = "MAJOR_CONCERNS"
-    elif (
-        "CONDITIONAL APPROVAL" in upper_review or "CONDITIONAL_APPROVAL" in upper_review
-    ):
-        result["verdict"] = "CONDITIONAL_APPROVAL"
-    elif "APPROVED" in upper_review:
-        result["verdict"] = "APPROVED"
+    for pattern, verdict in _CONSULTANT_VERDICT_PATTERNS:
+        if pattern.search(consultant_review):
+            result["verdict"] = verdict
+            break
 
-    if "MANDATE BREACH" in upper_review or "MANDATE_BREACH" in upper_review:
-        result["has_mandate_breach"] = True
-    if "HARD STOP" in upper_review or "HARD_STOP" in upper_review:
-        result["has_hard_stop"] = True
+    result["has_mandate_breach"] = bool(
+        _CONSULTANT_MANDATE_BREACH_PATTERN.search(consultant_review)
+    )
+    result["has_hard_stop"] = bool(
+        _CONSULTANT_HARD_STOP_PATTERN.search(consultant_review)
+    )
 
     discrepancy_matches = re.findall(
         r"SPOT_CHECK.*?→\s*DISCREPANCY.*",

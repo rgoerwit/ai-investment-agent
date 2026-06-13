@@ -1,5 +1,7 @@
 # tests/test_ticker_utils.py
 
+from unittest.mock import call, patch
+
 import pytest
 
 from src.ticker_utils import (
@@ -93,6 +95,26 @@ def test_normalize_does_not_leave_trailing_comma():
 def test_generate_strict_search_query(ticker, raw_name, topic, expected):
     result = generate_strict_search_query(ticker, raw_name, topic)
     assert result == expected, f"Expected '{expected}', got '{result}'"
+
+
+def test_multi_dot_ticker_normalisation_logs_at_debug():
+    with patch("src.ticker_utils.logger") as mock_logger:
+        normalized, _ = TickerFormatter.normalize_ticker("NIL.B.ST")
+
+    assert normalized == "NIL-B.ST"
+    mock_logger.debug.assert_has_calls(
+        [
+            call(
+                "multi_dot_ticker_normalised",
+                original="NIL.B.ST",
+                normalised="NIL-B.ST",
+            )
+        ]
+    )
+    assert all(
+        args != ("multi_dot_ticker_normalised",)
+        for args, _ in mock_logger.info.call_args_list
+    )
 
 
 @pytest.mark.parametrize(
@@ -287,6 +309,13 @@ def test_normalize_ticker_multidot(
         ("NOVN.N-CH", "NOVN.SW"),
         ("AAPL", "AAPL"),
         ("7203.T", "7203.T"),
+        ("5.HK", "0005.HK"),
+        ("5930.KS", "005930.KS"),
+        ("10130.KS", "010130.KS"),
+        ("1060.KS", "001060.KS"),
+        ("35420.KQ", "035420.KQ"),
+        ("ABC123.KS", "ABC123.KS"),
+        ("FOO.XX", "FOO.XX"),
         ("INVALID", "INVALID"),
         # Scandinavian multi-dot normalisation
         ("NIL.B.ST", "NIL-B.ST"),
@@ -318,6 +347,11 @@ def test_to_yfinance(input_ticker, expected):
         ("NOVN.N-CH", "NOVN:SWX"),
         ("AAPL", "AAPL:SMART"),
         ("7203.T", "7203:TSE"),
+        ("0005.HK", "5:SEHK"),
+        ("5.HK", "5:SEHK"),
+        ("5930.KS", "005930:KRX"),
+        ("10130.KS", "010130:KRX"),
+        ("005930.KS", "005930:KRX"),
         ("INVALID", "INVALID:SMART"),
     ],
 )
