@@ -179,7 +179,15 @@ def classify_failure(
         retryable = True
     elif type(root).__name__ in {"YFPricesMissingError", "YFTzMissingError"} or any(
         marker in combined
-        for marker in ("possibly delisted", "no price data found", "no timezone found")
+        for marker in (
+            "possibly delisted",
+            "no price data found",
+            "no timezone found",
+            # yfinance/urllib phrasing for a dead symbol; provider 404s use
+            # different wording ("model not found", "is not found for api").
+            "http error 404",
+            "quote not found for symbol",
+        )
     ):
         # Expected data absence (delisted/migrated tickers), not a system fault.
         kind = "data_unavailable"

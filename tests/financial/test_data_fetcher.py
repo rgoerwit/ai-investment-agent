@@ -1176,3 +1176,34 @@ class TestHistoryFetchFailureLogging:
         assert history_events[0][1]["failure_kind"] == "data_unavailable"
         assert history_events[1][0] == "debug"  # repeat demoted
         assert history_events[1][1]["repeated"] is True
+
+
+class TestSearchResolutionNumericGuard:
+    """Search-based ticker resolution is for ALPHA mnemonics only (June 2026:
+    delisted numeric 1264.TW was substituted with unrelated 8341.TW scraped
+    from a Tavily result page, producing a wrong-company analysis)."""
+
+    @pytest.mark.asyncio
+    async def test_numeric_base_never_search_resolved(self):
+        f = SmartMarketDataFetcher()
+        f.tavily_client = MagicMock()  # would be consulted if guard missing
+        resolved = await f._resolve_ticker_via_search("1264.TW")
+        assert resolved is None
+        f.tavily_client.search.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_alpha_mnemonic_still_search_resolved(self):
+        f = SmartMarketDataFetcher()
+        f.tavily_client = MagicMock()
+        f.tavily_client.search.return_value = {
+            "results": [{"content": "Padini Holdings trades as 7052.KL", "title": ""}]
+        }
+        resolved = await f._resolve_ticker_via_search("PADINI.KL")
+        assert resolved == "7052.KL"
+
+    @pytest.mark.asyncio
+    async def test_suffixless_input_never_search_resolved(self):
+        f = SmartMarketDataFetcher()
+        f.tavily_client = MagicMock()
+        resolved = await f._resolve_ticker_via_search("AAPL")
+        assert resolved is None

@@ -11,7 +11,7 @@ import structlog
 
 from src.error_safety import summarize_exception
 from src.fx_normalization import FALLBACK_RATES_TO_USD
-from src.ibkr.client import IbkrClient
+from src.ibkr.client import IbkrClient, mask_account
 from src.ibkr.models import NormalizedPosition, PortfolioSummary
 from src.ibkr.ticker import Ticker
 from src.ibkr.ticker_mapper import (
@@ -370,7 +370,7 @@ def read_portfolio(
 
     logger.info(
         "portfolio_read",
-        account=acct,
+        account=mask_account(acct),
         positions=summary.position_count,
         value=f"${summary.portfolio_value_usd:,.0f}",
         cash=f"${summary.cash_balance_usd:,.0f}",

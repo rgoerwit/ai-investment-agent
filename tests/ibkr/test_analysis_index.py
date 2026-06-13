@@ -296,3 +296,23 @@ def test_build_analysis_record_does_not_repair_bare_apr():
     assert record is not None
     assert record.currency == "USD"
     assert record.currency_repaired is False
+
+
+class TestTickerKeySanitizer:
+    """Historical runs invoked with trailing colons saved malformed keys
+    ('GUD.AX:') that self-collide with the clean ticker in the ambiguity guard."""
+
+    def test_trailing_punctuation_stripped(self):
+        from src.ibkr.analysis_index import _sanitize_ticker_key
+
+        assert _sanitize_ticker_key("GUD.AX:") == "GUD.AX"
+        assert _sanitize_ticker_key(" cta.jo; ") == "CTA.JO"
+        assert _sanitize_ticker_key("7203.T") == "7203.T"
+
+    def test_deserialized_record_ticker_sanitized(self):
+        from src.ibkr.analysis_index import _deserialize_analysis_record
+
+        record = _deserialize_analysis_record(
+            {"ticker": "GUD.AX:", "analysis_date": "2026-01-10", "file_path": "x"}
+        )
+        assert record.ticker == "GUD.AX"

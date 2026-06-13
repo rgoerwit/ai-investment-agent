@@ -84,6 +84,19 @@ def _parse_ibkr_error(raw: str) -> str:
     return cleaned.strip() or raw
 
 
+def mask_account(account_id: str | None) -> str:
+    """Mask an IBKR account ID for operator logs (e.g. 'U2***465').
+
+    The full ID is identifying (not a credential); logs shared in issues or
+    pasted for debugging shouldn't carry it verbatim.
+    """
+    if not account_id:
+        return "?"
+    if len(account_id) <= 5:
+        return account_id[0] + "***"
+    return f"{account_id[:2]}***{account_id[-3:]}"
+
+
 class IbkrClient:
     """
     Wrapper around IBind's IbkrClient with rate limiting and error handling.
@@ -164,7 +177,7 @@ class IbkrClient:
             )
             logger.info(
                 "ibkr_connected",
-                account=self._settings.ibkr_account_id,
+                account=mask_account(self._settings.ibkr_account_id),
                 brokerage_session=brokerage_session,
             )
         except Exception as e:

@@ -110,3 +110,17 @@ def test_classify_failure_recognizes_yfinance_data_absence():
     # Unrelated errors keep their existing classification
     details = classify_failure(RuntimeError("connection reset by peer"))
     assert details.kind != "data_unavailable"
+
+
+def test_classify_failure_treats_dead_symbol_404_as_data_unavailable():
+    from src.runtime_diagnostics import classify_failure
+
+    details = classify_failure(RuntimeError("HTTP Error 404:"))
+    assert details.kind == "data_unavailable"
+
+    details = classify_failure(RuntimeError("Quote not found for symbol: 1264.TW"))
+    assert details.kind == "data_unavailable"
+
+    # Provider model-404 phrasing must keep its own classification
+    details = classify_failure(RuntimeError("model gpt-x is not found for api v2"))
+    assert details.kind == "model_not_found"

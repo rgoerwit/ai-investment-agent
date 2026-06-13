@@ -95,6 +95,7 @@ def _deserialize_analysis_record(data: dict[str, Any]) -> AnalysisRecord:
     """Deserialize an AnalysisRecord from the latest-analyses cache."""
     record = AnalysisRecord.model_validate(data)
     record.sector = normalize_sector_label(record.sector)
+    record.ticker = _sanitize_ticker_key(record.ticker)
     return record
 
 
@@ -222,6 +223,19 @@ def _should_emit_analysis_progress(processed_files: int, total_files: int) -> bo
     else:
         step = 250
     return processed_files == total_files or processed_files % step == 0
+
+
+def _sanitize_ticker_key(ticker: str) -> str:
+    """Strip stray punctuation from historical run artifacts (e.g. 'GUD.AX:').
+
+    January 2026 runs were invoked with trailing colons; their saved snapshots
+    carry the malformed key, which then self-collides with the clean ticker in
+    the base-symbol ambiguity guard.
+    """
+    cleaned = ticker.strip().rstrip(":;,").upper()
+    if cleaned != ticker:
+        logger.debug("analysis_ticker_key_sanitized", original=ticker, cleaned=cleaned)
+    return cleaned
 
 
 def _extract_filename_analysis_key(filename: str) -> str | None:
@@ -402,6 +416,7 @@ def _build_analysis_record_from_data(
             ticker = filename_ticker.replace("_", ".")
         if not ticker:
             return None
+    ticker = _sanitize_ticker_key(ticker)
 
     trader_plan = data.get("investment_analysis", {}).get("trader_plan", "") or ""
     trade_block = parse_trade_block(trader_plan) or TradeBlockData()
@@ -576,7 +591,13 @@ def _load_latest_analyses_from_index(
                 total_files=int(payload.get("total_files") or 0),
             )
             return None
-        analyses[ticker] = record
+        # Key by the (sanitized) record ticker, not the raw cache key: legacy
+        # caches may hold malformed keys like "GUD.AX:" alongside the clean
+        # twin — keep whichever analysis is fresher when they merge.
+        key = record.ticker
+        existing = analyses.get(key)
+        if existing is None or record.analysis_date >= existing.analysis_date:
+            analyses[key] = record
     total_files = int(payload.get("total_files") or len(analyses))
 
     if progress is not None:

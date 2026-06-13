@@ -57,11 +57,10 @@ def _build_alpha_base_lookup(
                 ambiguous.add(base)
                 alpha_base_lookup.pop(base, None)
                 alpha_base_to_key.pop(base, None)
-                logger.warning(
+                logger.debug(
                     "alpha_base_ambiguous",
                     base=base,
                     tickers=sorted([existing_key, yf_ticker]),
-                    action="base-symbol cross-matching disabled for this base",
                 )
                 continue
             alpha_base_lookup[base] = record
@@ -69,6 +68,16 @@ def _build_alpha_base_lookup(
         else:
             alpha_base_lookup.setdefault(base, record)
             alpha_base_to_key.setdefault(base, yf_ticker)
+    if ambiguous:
+        # Dozens of legitimate collisions exist across a large index (BHP.AX
+        # vs BHP.L, ...) — one operator-visible summary, per-base at debug.
+        sample = sorted(ambiguous)[:8]
+        logger.info(
+            "alpha_base_ambiguous_summary",
+            count=len(ambiguous),
+            sample=sample,
+            action="base-symbol cross-matching disabled for these bases",
+        )
     return alpha_base_lookup, alpha_base_to_key
 
 

@@ -1474,6 +1474,16 @@ class SmartMarketDataFetcher(FinancialFetcher):
         if not allows_search_resolution(symbol):
             return None
 
+        # ONLY alpha mnemonics may be search-resolved (PADINI.KL → 7052.KL):
+        # the mnemonic itself names the company, so the numeric result is the
+        # same entity by construction. A NUMERIC input (e.g. delisted 1264.TW)
+        # must never be substituted with whichever 4-digit ticker happens to
+        # appear in a search result — that produced a wrong-company analysis
+        # (1264.TW → 8341.TW, June 2026). Mirrors _pre_resolve_ticker's guard.
+        base, _, _suffix = symbol.rpartition(".")
+        if not base or base.isdigit():
+            return None
+
         try:
             # Construct a surgical query to find the numeric code
             query = f"{symbol} yahoo finance ticker numeric code"
