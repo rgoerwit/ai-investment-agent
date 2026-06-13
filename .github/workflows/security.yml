@@ -450,18 +450,21 @@ jobs:
           # yfinance with ticker symbols and Yahoo-managed endpoints, not
           # attacker-controlled URLs, so the internal-IP/redirect exposure in
           # curl_cffi is not currently a reachable path here.
-          # CVE-2026-45829 is a pre-authentication code injection in the ChromaDB
-          # *server*. This app only uses chromadb.PersistentClient (embedded,
-          # local-disk; see src/memory.py) and never starts the network server,
-          # so the pre-auth server path is not reachable. No fixed release exists
-          # yet (1.5.9 is latest). Revisit and drop this ignore once chromadb
-          # ships a patched version.
+          # GHSA-f4j7-r4q5-qw2c (alias CVE-2026-45829) is a pre-authentication
+          # code injection in the ChromaDB *server*. This app only uses
+          # chromadb.PersistentClient (embedded, local-disk; see src/memory.py)
+          # and never starts the network server, so the pre-auth server path is
+          # not reachable. No fixed release exists yet (1.5.9 is latest). pip-audit
+          # keys on the GHSA primary ID, not the CVE alias — both are listed so the
+          # ignore matches regardless of which source (OSV/PyPI) reports it. Revisit
+          # and drop once chromadb ships a patched version.
           pip-audit -r /tmp/requirements.txt \
             --format json \
             --output pip-audit-results.json \
             --strict \
             --ignore-vuln CVE-2026-33752 \
             --ignore-vuln CVE-2026-4539 \
+            --ignore-vuln GHSA-f4j7-r4q5-qw2c \
             --ignore-vuln CVE-2026-45829 \
             || (echo "⚠️  pip-audit found vulnerabilities — see pip-audit-results.json" && exit 1)
 
