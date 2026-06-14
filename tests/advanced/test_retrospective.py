@@ -384,9 +384,15 @@ class TestExchangeBenchmarkMapping:
             ".TO": "^GSPTSE",
             ".AX": "^AXJO",
             ".SI": "^STI",
+            ".SA": "^BVSP",
         }
         for suffix, benchmark in expected.items():
             assert EXCHANGE_BENCHMARK.get(suffix) == benchmark, f"Failed for {suffix}"
+
+    def test_brazil_uses_bovespa_benchmark(self):
+        snapshot = extract_snapshot({}, "B3SA3.SA")
+
+        assert snapshot["benchmark_index"] == "^BVSP"
 
     def test_fallback_benchmark(self):
         assert EXCHANGE_BENCHMARK.get(".XX") is None

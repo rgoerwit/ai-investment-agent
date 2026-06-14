@@ -98,6 +98,16 @@ def test_prompt_matches_canonical_threshold(fname: str, pattern: str, label: str
     )
 
 
+@pytest.mark.parametrize(("sector", "median"), sorted(tc.SECTOR_MEDIAN_PE.items()))
+def test_valuation_prompt_sector_pe_table_matches_constants(sector: str, median: float):
+    msg = _system_message("valuation_calculator.json")
+    pattern = rf"{re.escape(sector)}\s*:?\s+{median:g}"
+    assert re.search(pattern, msg), (
+        f"valuation_calculator.json: sector median P/E for {sector} drifted — "
+        f"expected /{pattern}/ derived from src/thesis_constants.py"
+    )
+
+
 @pytest.mark.parametrize("fname", sorted(p.name for p in PROMPTS_DIR.glob("*.json")))
 def test_no_retired_threshold_values(fname: str):
     msg = _system_message(fname)

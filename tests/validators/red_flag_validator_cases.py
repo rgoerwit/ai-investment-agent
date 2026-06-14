@@ -2629,6 +2629,23 @@ HARD STOP: RESTRICTED — NS-CMIC listed entity.
         assert len(themed) == 1
         assert themed[0]["risk_penalty"] == 0.5
 
+    def test_consultant_growth_quality_patterns_do_not_overfire_on_negation(self):
+        """Benign consultant statements should not match widened keyword patterns."""
+        review = """
+### CONSULTANT REVIEW: APPROVED
+
+- Buybacks are supported by cash generation and board authorization.
+- Dilution is not excessive, and return on invested capital remains adequate.
+
+**Overall Assessment**: APPROVED
+"""
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["growth_quality_unproven"] is False
+        flags = RedFlagDetector.detect_consultant_flags(conditions, "TEST.T")
+        assert not any(
+            flag["type"] == "CONSULTANT_GROWTH_QUALITY_UNPROVEN" for flag in flags
+        )
+
     def test_consultant_transient_strength_theme_flag(self):
         """Named one-time distortion concerns should add one targeted consultant flag."""
         review = """

@@ -1732,9 +1732,15 @@ class SmartMarketDataFetcher(FinancialFetcher):
             # Derived & Normalize
             calculated = self._calculate_derived_metrics(merged, ticker)
             if calculated:
+                existing_fields = set(merged)
                 result = self._merge_data(merged, calculated)
                 merged = result.data
                 merge_metadata["gaps_filled"] += result.gaps_filled
+                for key in calculated:
+                    if not key.startswith("_") and key not in existing_fields:
+                        merge_metadata["field_sources"][key] = calculated.get(
+                            f"_{key}_source", "calculated"
+                        )
 
             merged = self._normalize_data_integrity(merged, ticker)
             merged = await self._repair_quote_range_from_history(merged, ticker)

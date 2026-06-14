@@ -18,6 +18,10 @@ class PMVerdictMetadata(BaseModel):
     verdict: PMVerdict
 
 
+class PMVerdictRecovery(BaseModel):
+    verdict: Literal["BUY", "HOLD", "SELL", "DO_NOT_INITIATE"]
+
+
 def canonicalize_pm_verdict(raw: str | None) -> PMVerdict:
     """Return the canonical PM verdict label for free-text or block values."""
     cleaned = (raw or "").strip().upper().replace("-", "_").replace(" ", "_")

@@ -15,6 +15,20 @@ LIQUIDITY_PASS_USD = (
 PE_MAX = 18.0
 PEG_MAX = 1.2
 PB_MAX = 1.4
+SECTOR_MEDIAN_PE: dict[str, float] = {
+    "Energy": 12.0,
+    "Materials": 14.0,
+    "Industrials": 17.0,
+    "Consumer Discretionary": 18.0,
+    "Consumer Staples": 20.0,
+    "Health Care": 22.0,
+    "Financials": 12.0,
+    "Information Technology": 25.0,
+    "Communication Services": 20.0,
+    "Utilities": 16.0,
+    "Real Estate": 18.0,
+}
+PE_VS_SECTOR_RICH = 1.30
 
 # Quality floors (percent scores from Senior Fundamentals DATA_BLOCK)
 HEALTH_MIN_PCT = 50.0

@@ -7,6 +7,7 @@ from typing import Any
 
 import structlog
 
+from src.thesis_constants import PE_MAX, PE_VS_SECTOR_RICH
 from src.validators.sector_classifier import (
     CAPITAL_INTENSIVE_SECTORS,
     FINANCIALS_SECTORS,
@@ -80,6 +81,37 @@ def detect_red_flags(
             leverage_threshold = 500
             coverage_threshold = 2.0
             coverage_de_threshold = 100
+
+    pe_ratio = metrics.get("pe_ratio")
+    pe_vs_sector = metrics.get("pe_vs_sector")
+    sector_median_pe = metrics.get("sector_median_pe")
+    if (
+        isinstance(pe_ratio, int | float)
+        and isinstance(pe_vs_sector, int | float)
+        and pe_ratio <= PE_MAX
+        and pe_vs_sector >= PE_VS_SECTOR_RICH
+    ):
+        median_detail = (
+            f" sector median P/E {sector_median_pe:.1f},"
+            if isinstance(sector_median_pe, int | float)
+            else ""
+        )
+        red_flags.append(
+            {
+                "type": "SECTOR_RELATIVE_VALUATION_RICH",
+                "severity": "WARNING",
+                "detail": (
+                    f"P/E {pe_ratio:.1f} passes the absolute {PE_MAX:.0f}x gate but is "
+                    f"{pe_vs_sector:.2f}x{median_detail} making valuation dear vs peers"
+                ),
+                "action": "RISK_PENALTY",
+                "risk_penalty": 0.5,
+                "rationale": (
+                    "Sector-relative valuation catches names that look cheap on the "
+                    "flat thesis threshold but are expensive against GICS peers."
+                ),
+            }
+        )
 
     debt_to_equity = metrics.get("debt_to_equity")
     role = str(entity_role or metrics.get("listing_role") or "").upper()

@@ -1,0 +1,40 @@
+{
+  "company_of_interest": "B3SA3.SA",
+  "company_name": "B3 S.A. - Brasil, Bolsa, Balcao",
+  "raw_metrics": {
+    "sector": "Financial Services",
+    "trailingPE": 16.554346
+  },
+  "market_report": "MARKET: current price 15.23 BRL.",
+  "sentiment_report": "SENTIMENT: local coverage is high.",
+  "news_report": "NEWS: Brazil macro backdrop remains mixed.",
+  "fundamentals_report": "### --- START DATA_BLOCK ---\nSECTOR: Financials\nPE_RATIO_TTM: 16.55\nSECTOR_MEDIAN_PE: 12\nPE_VS_SECTOR: 1.38\n### --- END DATA_BLOCK ---",
+  "investment_debate_state": {
+    "history": "Bull and Bear debate B3 valuation."
+  },
+  "investment_plan": "Research Manager cites Foreign Language Analyst and Value Trap Detector.",
+  "foreign_language_report": "FOREIGN LANGUAGE REPORT: B3 native-source filings confirm high local coverage.",
+  "value_trap_report": "VALUE TRAP REPORT: TRAP_RISK LOW and capital allocation GOOD.",
+  "consultant_review": "CONSULTANT REVIEW: CONDITIONAL APPROVAL.",
+  "valuation_params": "WEIGHTED_IV: 13.79\nCURRENT_PRICE: 15.23",
+  "trader_investment_plan": "TRADER: no entry until margin of safety improves.",
+  "red_flags": [],
+  "pre_screening_result": "PASS",
+  "artifact_statuses": {
+    "fundamentals_report": {
+      "complete": true,
+      "ok": true,
+      "content": "### --- START DATA_BLOCK ---\nSECTOR: Financials\nPE_RATIO_TTM: 16.55\nSECTOR_MEDIAN_PE: 12\nPE_VS_SECTOR: 1.38\n### --- END DATA_BLOCK ---"
+    },
+    "foreign_language_report": {
+      "complete": true,
+      "ok": true,
+      "content": "FOREIGN LANGUAGE REPORT: B3 native-source filings confirm high local coverage."
+    },
+    "value_trap_report": {
+      "complete": true,
+      "ok": true,
+      "content": "VALUE TRAP REPORT: TRAP_RISK LOW and capital allocation GOOD."
+    }
+  }
+}

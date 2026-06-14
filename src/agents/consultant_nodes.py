@@ -58,6 +58,8 @@ _CONSULTANT_CONTEXT_BUDGETS = {
         "fundamentals": 5000,
         "debate": 4000,
         "research": 4000,
+        "foreign_language": 2500,
+        "value_trap": 2500,
         "auditor": 3000,
         "apac": 2500,
     },
@@ -68,6 +70,8 @@ _CONSULTANT_CONTEXT_BUDGETS = {
         "fundamentals": 2500,
         "debate": 1400,
         "research": 1400,
+        "foreign_language": 900,
+        "value_trap": 900,
         "auditor": 1200,
         "apac": 1200,
     },
@@ -78,6 +82,8 @@ _CONSULTANT_CONTEXT_BUDGETS = {
         "fundamentals": 3600,
         "debate": 2000,
         "research": 2200,
+        "foreign_language": 1400,
+        "value_trap": 1400,
         "auditor": 1800,
         "apac": 1600,
     },
@@ -281,6 +287,8 @@ def create_consultant_node(
         news = state.get("news_report", "N/A")
         fundamentals = state.get("fundamentals_report", "N/A")
         investment_plan = state.get("investment_plan", "N/A")
+        foreign_language = state.get("foreign_language_report", "N/A")
+        value_trap = state.get("value_trap_report", "N/A")
         auditor = state.get("auditor_report", "N/A")
         apac = state.get("apac_regional_report", "N/A")
         consultant_profile = (
@@ -313,6 +321,14 @@ FUNDAMENTALS ANALYST REPORT:
 === RESEARCH MANAGER SYNTHESIS ===
 
 {support.summarize_for_pm(investment_plan, "research", _consultant_context_budget("research", profile=consultant_profile)) if investment_plan != "N/A" else "N/A"}
+
+=== FOREIGN-LANGUAGE / NATIVE-SOURCE ANALYST ===
+
+{support.summarize_for_pm(foreign_language, "foreign_language", _consultant_context_budget("foreign_language", profile=consultant_profile)) if foreign_language != "N/A" else "N/A"}
+
+=== VALUE TRAP DETECTOR ===
+
+{support.summarize_for_pm(value_trap, "value_trap", _consultant_context_budget("value_trap", profile=consultant_profile)) if value_trap != "N/A" else "N/A"}
 
 === RED FLAGS (Pre-Screening Results) ===
 

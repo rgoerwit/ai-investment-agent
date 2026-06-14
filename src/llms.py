@@ -820,6 +820,11 @@ def create_apac_specialist_llm(
     return llm
 
 
+def _is_claude_opus_adaptive_thinking_model(model_name: str) -> bool:
+    match = re.search(r"opus-4-(\d+)", model_name)
+    return bool(match and int(match.group(1)) >= 6)
+
+
 def create_writer_llm(
     temperature: float = 0.7,
     timeout: int | None = None,
@@ -875,8 +880,8 @@ def create_writer_llm(
     }
 
     # Thinking configuration — model-dependent
-    if "opus-4-6" in model_name:
-        # Opus 4.6: adaptive thinking (Claude decides when/how much to think)
+    if _is_claude_opus_adaptive_thinking_model(model_name):
+        # Opus 4.6+: adaptive thinking (Claude decides when/how much to think)
         kwargs["thinking"] = {"type": "adaptive"}
         kwargs["effort"] = "high"
         # CRITICAL: Anthropic returns 400 if temperature != 1.0 with thinking.

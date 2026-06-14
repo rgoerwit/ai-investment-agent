@@ -1368,6 +1368,44 @@ class TestCreateWriterLLM:
                 "wrapping it in output_config for the API call"
             )
 
+    @pytest.mark.parametrize(
+        "model_name",
+        [
+            "claude-opus-4-6",
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-opus-4-8-20260601",
+        ],
+    )
+    def test_opus_4_6_plus_uses_adaptive_thinking(self, model_name):
+        from src.llms import create_writer_llm
+
+        with patch("src.llms.config") as mock_config:
+            mock_config.get_claude_api_key.return_value = "fake-key"
+            mock_config.writer_model = model_name
+            mock_config.api_timeout = 300
+            mock_config.api_retry_attempts = 3
+
+            llm = create_writer_llm()
+
+        assert llm.thinking == {"type": "adaptive"}
+        assert llm.effort == "high"
+        assert llm.thinking.get("type") != "enabled"
+
+    def test_opus_4_5_keeps_manual_thinking(self):
+        from src.llms import create_writer_llm
+
+        with patch("src.llms.config") as mock_config:
+            mock_config.get_claude_api_key.return_value = "fake-key"
+            mock_config.writer_model = "claude-opus-4-5"
+            mock_config.api_timeout = 300
+            mock_config.api_retry_attempts = 3
+
+            llm = create_writer_llm()
+
+        assert llm.thinking == {"type": "enabled", "budget_tokens": 8192}
+        assert getattr(llm, "effort", None) is None
+
     def test_opus_effort_serialized_into_output_config_payload(self):
         """Wire-format regression: effort must appear in output_config in the API payload.
 

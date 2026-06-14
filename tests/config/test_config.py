@@ -152,6 +152,12 @@ class TestLangSmithConfiguration:
         assert "langsmith_tracing_enabled" in fields
         assert fields["langsmith_tracing_enabled"].default
 
+    def test_settings_does_not_expose_unconsumed_peer_percentile_flag(self):
+        """Peer-percentile fetching must stay absent until downstream consumers exist."""
+        from src.config import Settings
+
+        assert "enable_peer_percentiles" not in Settings.model_fields
+
 
 class TestValidateEnvironmentVariables:
     """Test environment variable validation.

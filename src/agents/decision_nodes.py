@@ -15,6 +15,8 @@ from src.agents.pm_inputs import (
     risk_debate_present,
 )
 from src.agents.pm_verdict_metadata import (
+    PMVerdictMetadata,
+    PMVerdictRecovery,
     canonicalize_pm_verdict,
     pm_verdict_metadata_from_text,
 )
@@ -23,7 +25,7 @@ from src.agents.pm_verdict_metadata import (
 # imports src.agents.pm_verdict_metadata, which triggers this package's
 # __init__ and circles back here. Import it inside functions (same pattern
 # as pm_verdict_metadata.pm_verdict_metadata_from_text).
-from src.data_block_utils import has_parseable_data_block
+from src.data_block_utils import extract_data_block_field, has_parseable_data_block
 from src.error_safety import summarize_exception
 from src.runtime_diagnostics import (
     failure_artifact,
@@ -47,6 +49,47 @@ from .state import AgentState
 logger = structlog.get_logger(__name__)
 
 
+async def _recover_pm_verdict_metadata(
+    pm_output: str,
+    llm: Any,
+) -> PMVerdictMetadata | None:
+    """Recover final PM verdict from prose when PM_BLOCK/text regex parsing fails."""
+    if not hasattr(llm, "with_structured_output"):
+        return None
+    try:
+        structured_llm = llm.with_structured_output(PMVerdictRecovery, strict=True)
+        response = await agent_runtime.invoke_with_rate_limit_handling(
+            structured_llm,
+            [
+                HumanMessage(
+                    content=(
+                        "Extract only the final Portfolio Manager verdict from this "
+                        "analysis. Return the structured verdict. Valid values are "
+                        "BUY, HOLD, SELL, DO_NOT_INITIATE.\n\n"
+                        f"{pm_output[:8000]}"
+                    )
+                )
+            ],
+            context="pm_verdict_recovery",
+            provider=support.infer_provider_name(llm),
+            model_name=support.get_model_name(llm),
+            max_attempts=1,
+            max_transient_attempts=1,
+        )
+    except Exception as exc:
+        logger.warning(
+            "pm_verdict_recovery_failed",
+            **summarize_exception(exc, operation="pm_verdict_recovery"),
+        )
+        return None
+
+    verdict = getattr(response, "verdict", None)
+    canonical = canonicalize_pm_verdict(verdict)
+    if canonical == "UNPARSEABLE":
+        return None
+    return PMVerdictMetadata(verdict=canonical)
+
+
 def _present_pm_inputs(state: AgentState) -> tuple[list[str], list[str]]:
     """Return (present, missing) lists of direct PM inputs by validity.
 
@@ -64,6 +107,18 @@ def _present_pm_inputs(state: AgentState) -> tuple[list[str], list[str]]:
     else:
         missing.append(RISK_DEBATE_FIELD)
     return present, missing
+
+
+def _parse_price_value(raw: str | None) -> float | None:
+    if not raw:
+        return None
+    match = re.search(r"[-+]?\d[\d,]*(?:\.\d+)?", str(raw))
+    if not match:
+        return None
+    try:
+        return float(match.group(0).replace(",", ""))
+    except ValueError:
+        return None
 
 
 _STRICT_PM_ADDENDUM = """
@@ -596,6 +651,7 @@ def create_portfolio_manager_node(
         sentiment = get_valid_artifact_content(state, "sentiment_report")
         news = get_valid_artifact_content(state, "news_report")
         fundamentals = get_valid_artifact_content(state, "fundamentals_report")
+        foreign_language = get_valid_artifact_content(state, "foreign_language_report")
         value_trap = get_valid_artifact_content(state, "value_trap_report")
         inv_plan = get_valid_artifact_content(state, "investment_plan")
         consultant = get_valid_artifact_content(state, "consultant_review")
@@ -776,6 +832,29 @@ NEUTRAL ANALYST (Balanced):
                 )
                 scenarios = None
         if scenarios is not None:
+            current_price = _parse_price_value(
+                extract_data_block_field(fundamentals, "CURRENT_PRICE")
+            )
+            weighted_upside_text = ""
+            downside_probability_text = ""
+            if current_price and current_price > 0 and scenarios.weighted_iv:
+                weighted_upside = (scenarios.weighted_iv / current_price) - 1.0
+                downside_probability = sum(
+                    scenario.probability
+                    for scenario, intrinsic_value in (
+                        (scenarios.bear, scenarios.bear_iv),
+                        (scenarios.base, scenarios.base_iv),
+                        (scenarios.bull, scenarios.bull_iv),
+                    )
+                    if intrinsic_value < current_price
+                )
+                weighted_upside_text = (
+                    f", implied upside {weighted_upside * 100:.1f}% vs current price "
+                    f"{current_price:.2f}"
+                )
+                downside_probability_text = (
+                    f", downside probability {downside_probability:.0f}%"
+                )
             valuation_section = (
                 "\n\nVALUATION SCENARIOS (Python-computed IVs from "
                 f"{scenarios.methodology}; sufficiency {scenarios.data_sufficiency}; "
@@ -786,7 +865,8 @@ NEUTRAL ANALYST (Balanced):
                 f"({scenarios.base.probability:.0f}%) — {scenarios.base.drivers}\n"
                 f"- BULL_IV: {scenarios.bull_iv} "
                 f"({scenarios.bull.probability:.0f}%) — {scenarios.bull.drivers}\n"
-                f"- WEIGHTED_IV: {scenarios.weighted_iv}"
+                f"- WEIGHTED_IV: {scenarios.weighted_iv}{weighted_upside_text}"
+                f"{downside_probability_text}"
             )
         else:
             valuation_section = ""
@@ -817,6 +897,9 @@ NEWS ANALYST REPORT:
 
 FUNDAMENTALS ANALYST REPORT:
 {support.summarize_for_pm(fundamentals, "fundamentals", 4000) if fundamentals else "N/A"}{attribution_table}{conflict_table}
+
+FOREIGN LANGUAGE / NATIVE-SOURCE ANALYST REPORT:
+{support.summarize_for_pm(foreign_language, "foreign_language", 2500) if foreign_language else "N/A"}
 
 VALUE TRAP ANALYSIS:
 {support.extract_value_trap_verdict(value_trap)}{support.summarize_for_pm(value_trap, "value_trap", 2500) if value_trap else "N/A"}{red_flag_section}{macro_section}
@@ -930,15 +1013,22 @@ RISK TEAM DEBATE:
                     fallback_content=content_str,
                 )
 
-            from src.charts.extractors.pm_block import extract_verdict_from_text
-
             content_str = _normalize_pm_block_contract(content_str)
             present_inputs, missing_inputs = _present_pm_inputs(state)
             pm_metadata = pm_verdict_metadata_from_text(content_str)
+            pm_verdict_recovered = False
+            if pm_metadata.verdict == "UNPARSEABLE":
+                recovered_metadata = await _recover_pm_verdict_metadata(
+                    content_str, llm
+                )
+                if recovered_metadata is not None:
+                    pm_metadata = recovered_metadata
+                    pm_verdict_recovered = True
             logger.info(
                 "final_verdict_formed",
                 ticker=ticker,
-                verdict=extract_verdict_from_text(content_str) or "UNPARSEABLE",
+                verdict=pm_metadata.verdict,
+                pm_verdict_recovered=pm_verdict_recovered,
                 pm_verdict_metadata=pm_metadata.model_dump(exclude_none=True),
                 pre_screening_result=state.get("pre_screening_result"),
                 direct_pm_inputs_present=present_inputs,

@@ -90,6 +90,13 @@ class TestConsultantNodeCreation:
         assert callable(node_func)
         mock_llm.bind_tools.assert_not_called()
 
+    def test_consultant_context_budgets_cover_native_and_value_trap_reports(self):
+        from src.agents.consultant_nodes import _CONSULTANT_CONTEXT_BUDGETS
+
+        for profile in ("full", "quick_standard", "quick_expanded"):
+            assert _CONSULTANT_CONTEXT_BUDGETS[profile]["foreign_language"] > 0
+            assert _CONSULTANT_CONTEXT_BUDGETS[profile]["value_trap"] > 0
+
 
 class TestConsultantNodeExecution:
     """Test suite for consultant node execution logic."""
@@ -137,6 +144,58 @@ class TestConsultantNodeExecution:
 
                 assert "consultant_review" in result
                 assert result["consultant_review"] == mock_response.content
+
+    @pytest.mark.asyncio
+    async def test_consultant_context_includes_native_source_and_value_trap_reports(
+        self,
+    ):
+        mock_llm = Mock()
+        mock_response = Mock()
+        mock_response.content = "CONSULTANT REVIEW: APPROVED"
+        captured: dict[str, str] = {}
+
+        async def mock_invoke(_llm, messages, **_kwargs):
+            captured["prompt"] = str(messages[0].content)
+            return mock_response
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                mock_prompt = Mock()
+                mock_prompt.system_message = "You are a consultant."
+                mock_prompt.agent_name = "External Consultant"
+                mock_get_prompt.return_value = mock_prompt
+
+                consultant_node = create_consultant_node(mock_llm, "consultant")
+                state = {
+                    "company_of_interest": "B3SA3.SA",
+                    "company_name": "B3",
+                    "market_report": "Market report",
+                    "sentiment_report": "Sentiment report",
+                    "news_report": "News report",
+                    "fundamentals_report": "Fundamentals report",
+                    "investment_debate_state": {"history": "Debate"},
+                    "investment_plan": (
+                        "Research Manager cites Foreign Language Analyst and "
+                        "Value Trap Detector."
+                    ),
+                    "foreign_language_report": "NATIVE SOURCE BODY",
+                    "value_trap_report": "VALUE TRAP BODY",
+                    "red_flags": [],
+                    "pre_screening_result": "PASS",
+                }
+
+                config = RunnableConfig(
+                    configurable={"context": Mock(trade_date="2026-06-13")}
+                )
+
+                await consultant_node(state, config)
+
+        assert "FOREIGN-LANGUAGE / NATIVE-SOURCE ANALYST" in captured["prompt"]
+        assert "NATIVE SOURCE BODY" in captured["prompt"]
+        assert "VALUE TRAP DETECTOR" in captured["prompt"]
+        assert "VALUE TRAP BODY" in captured["prompt"]
 
     @pytest.mark.asyncio
     async def test_consultant_node_handles_missing_prompt(self):

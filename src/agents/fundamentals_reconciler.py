@@ -140,6 +140,30 @@ def reconcile_high_risk_fields(
             updated = replace_or_append_block_line(updated, datablock_key, "N/A")
             changed_growth = True
 
+    for datablock_key, raw_key, formatter, threshold in (
+        ("SECTOR_MEDIAN_PE", "sectorMedianPE", format_ratio, 0.01),
+        ("PE_VS_SECTOR", "peVsSector", format_ratio, 0.01),
+        ("REVENUE_CAGR_3Y", "revenue_cagr_3y", format_percent_from_ratio, 0.1),
+        ("FCF_CAGR_3Y", "fcf_cagr_3y", format_percent_from_ratio, 0.1),
+    ):
+        updated, changed = _reconcile_numeric_field(
+            updated,
+            datablock_key,
+            as_float(payload.get(raw_key)),
+            threshold=threshold,
+            formatter=formatter,
+        )
+        changed_growth = changed_growth or changed
+
+    cycle_position = str(payload.get("cycle_position") or "").upper()
+    if cycle_position in {"PEAK", "MID", "TROUGH"} and (
+        extract_block_text_value(updated, "CYCLE_POSITION").upper() != cycle_position
+    ):
+        updated = replace_or_append_block_line(
+            updated, "CYCLE_POSITION", cycle_position
+        )
+        changed_growth = True
+
     total_debt = as_float(payload.get("totalDebt"))
     cash_and_short_term = as_float(payload.get("cashAndShortTermInvestments"))
     ebitda = as_float(payload.get("ebitda"))

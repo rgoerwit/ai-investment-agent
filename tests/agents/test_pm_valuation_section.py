@@ -48,6 +48,7 @@ def _build_valuation_section(valuation_params: str, fundamentals: str) -> str:
         extract_valuation_scenarios,
         resolve_eps_ttm,
     )
+    from src.data_block_utils import extract_data_block_field
 
     if not (valuation_params and fundamentals):
         return ""
@@ -55,6 +56,17 @@ def _build_valuation_section(valuation_params: str, fundamentals: str) -> str:
     scenarios = extract_valuation_scenarios(valuation_params, eps_ttm)
     if scenarios is None:
         return ""
+    current_price = float(extract_data_block_field(fundamentals, "CURRENT_PRICE") or 0)
+    weighted_upside = (scenarios.weighted_iv / current_price) - 1.0
+    downside_probability = sum(
+        scenario.probability
+        for scenario, intrinsic_value in (
+            (scenarios.bear, scenarios.bear_iv),
+            (scenarios.base, scenarios.base_iv),
+            (scenarios.bull, scenarios.bull_iv),
+        )
+        if intrinsic_value < current_price
+    )
     return (
         "\n\nVALUATION SCENARIOS (Python-computed IVs from "
         f"{scenarios.methodology}; sufficiency {scenarios.data_sufficiency}; "
@@ -65,7 +77,9 @@ def _build_valuation_section(valuation_params: str, fundamentals: str) -> str:
         f"({scenarios.base.probability:.0f}%) — {scenarios.base.drivers}\n"
         f"- BULL_IV: {scenarios.bull_iv} "
         f"({scenarios.bull.probability:.0f}%) — {scenarios.bull.drivers}\n"
-        f"- WEIGHTED_IV: {scenarios.weighted_iv}"
+        f"- WEIGHTED_IV: {scenarios.weighted_iv}, implied upside "
+        f"{weighted_upside * 100:.1f}% vs current price {current_price:.2f}, "
+        f"downside probability {downside_probability:.0f}%"
     )
 
 
@@ -74,6 +88,8 @@ def test_valuation_section_emitted_when_scenarios_parse() -> None:
     assert "VALUATION SCENARIOS" in section
     assert "BEAR_IV:" in section
     assert "WEIGHTED_IV:" in section
+    assert "implied upside" in section
+    assert "downside probability" in section
     assert "anchor stop-loss to BEAR_IV" in section
     # Drivers carried through, not just numbers.
     assert "Cyclical trough" in section

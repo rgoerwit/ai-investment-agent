@@ -22,7 +22,7 @@ _CONSULTANT_GROWTH_QUALITY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bacquisition-led growth\b", re.IGNORECASE),
     re.compile(r"\bm&a illusion\b", re.IGNORECASE),
     re.compile(
-        r"\b(?:incremental roic|incremental return(?:s)?|synerg(?:y|ies))\b.*\b(?:unknown|unproven|not proven|not demonstrated|missing)\b",
+        r"\b(?:incremental roic|incremental return(?:s)?|return on invested capital|synerg(?:y|ies))\b.*\b(?:unknown|unproven|not proven|not demonstrated|missing|weak|poor)\b",
         re.IGNORECASE,
     ),
     re.compile(
@@ -31,6 +31,10 @@ _CONSULTANT_GROWTH_QUALITY_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
     re.compile(
         r"\b(?:recurring revenue|service mix|maintenance-as-a-service)\b.*\b(?:not evidenced|unsupported|unverified|unverifiable|not proven)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:buybacks?|repurchases?|shareholder returns?|payouts?|dilution)\b.*\b(?:unsupported|unverified|unverifiable|not proven|(?<!not )weak|(?<!not )poor|(?<!not )excessive)\b",
         re.IGNORECASE,
     ),
 )

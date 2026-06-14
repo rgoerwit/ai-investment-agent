@@ -61,6 +61,8 @@ def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
         "fcf": None,
         "interest_coverage": None,
         "pe_ratio": None,
+        "sector_median_pe": None,
+        "pe_vs_sector": None,
         "pb_ratio": None,
         "adjusted_health_score": None,
         "payout_ratio": None,
@@ -83,6 +85,9 @@ def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
         "metric_scope_ocf": None,
         "analyst_coverage_total_est": None,
         "growth_trajectory": None,
+        "revenue_cagr_3y": None,
+        "fcf_cagr_3y": None,
+        "cycle_position": None,
         "revenue_growth_ttm": None,
         "revenue_backlog_coverage": None,
         "latest_quarter_date": None,
@@ -112,6 +117,14 @@ def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
     pe_match = re.search(r"PE_RATIO_TTM:\s*([0-9.]+)", data_block)
     if pe_match:
         metrics["pe_ratio"] = float(pe_match.group(1))
+
+    sector_median_pe_match = re.search(r"SECTOR_MEDIAN_PE:\s*([0-9.]+)", data_block)
+    if sector_median_pe_match:
+        metrics["sector_median_pe"] = float(sector_median_pe_match.group(1))
+
+    pe_vs_sector_match = re.search(r"PE_VS_SECTOR:\s*([0-9.]+)", data_block)
+    if pe_vs_sector_match:
+        metrics["pe_vs_sector"] = float(pe_vs_sector_match.group(1))
 
     pb_match = re.search(r"PB_RATIO:\s*([0-9.]+)", data_block)
     if pb_match:
@@ -274,6 +287,24 @@ def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
         value = trajectory_match.group(1).upper()
         if value != "N/A":
             metrics["growth_trajectory"] = value
+
+    revenue_cagr_match = re.search(r"REVENUE_CAGR_3Y:\s*(-?\d+(?:\.\d+)?)%", data_block)
+    if revenue_cagr_match:
+        metrics["revenue_cagr_3y"] = float(revenue_cagr_match.group(1))
+
+    fcf_cagr_match = re.search(r"FCF_CAGR_3Y:\s*(-?\d+(?:\.\d+)?)%", data_block)
+    if fcf_cagr_match:
+        metrics["fcf_cagr_3y"] = float(fcf_cagr_match.group(1))
+
+    cycle_position_match = re.search(
+        r"CYCLE_POSITION:\s*(PEAK|MID|TROUGH|N/A)",
+        data_block,
+        re.IGNORECASE,
+    )
+    if cycle_position_match:
+        value = cycle_position_match.group(1).upper()
+        if value != "N/A":
+            metrics["cycle_position"] = value
 
     rev_ttm_match = re.search(r"REVENUE_GROWTH_TTM:\s*(-?\d+(?:\.\d+)?)%", data_block)
     if rev_ttm_match:

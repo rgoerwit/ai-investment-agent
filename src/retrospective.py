@@ -99,6 +99,7 @@ EXCHANGE_BENCHMARK: dict[str, str] = {
     ".SI": "^STI",
     ".MI": "^FTSEMIB",
     ".ST": "^OMX",
+    ".SA": "^BVSP",  # B3 / Bovespa
 }
 FALLBACK_BENCHMARK = "^GSPC"
 

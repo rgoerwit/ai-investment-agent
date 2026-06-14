@@ -180,6 +180,12 @@ class TestRetrospectiveMapCoverage:
         assert EXCHANGE_BENCHMARK[".TWO"] == "^TWII"
         assert EXCHANGE_CURRENCY[".TWO"] == "TWD"
 
+    def test_brazil_benchmark_and_currency_exist(self):
+        from src.retrospective import EXCHANGE_BENCHMARK, EXCHANGE_CURRENCY
+
+        assert EXCHANGE_BENCHMARK[".SA"] == "^BVSP"
+        assert EXCHANGE_CURRENCY[".SA"] == "BRL"
+
     def test_korea_and_china_suffixes_covered(self):
         from src.retrospective import EXCHANGE_CURRENCY
 

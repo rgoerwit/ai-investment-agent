@@ -11,6 +11,8 @@ import structlog
 
 from src.config import config
 from src.error_safety import summarize_exception
+from src.sector_normalization import normalize_sector_label
+from src.thesis_constants import SECTOR_MEDIAN_PE
 
 logger = structlog.get_logger(__name__)
 
@@ -53,6 +55,62 @@ def statement_value(df: pd.DataFrame, key: str, col: int = 0) -> float | None:
         if label in df.index:
             return _safe_float(df.loc[label].iloc[col])
     return None
+
+
+def _canonical_sector(value: Any) -> str | None:
+    normalized = normalize_sector_label(str(value) if value is not None else None)
+    return normalized if normalized in SECTOR_MEDIAN_PE else None
+
+
+def _statement_series(df: pd.DataFrame, key: str, max_years: int = 4) -> list[float]:
+    values: list[float] = []
+    if df.empty or key not in STATEMENT_ROW_ALIASES:
+        return values
+    for col in range(min(len(df.columns), max_years)):
+        value = statement_value(df, key, col=col)
+        if value is None:
+            continue
+        values.append(value)
+    return values
+
+
+def _statement_sum_series(
+    df: pd.DataFrame,
+    left_key: str,
+    right_key: str,
+    max_years: int = 4,
+) -> list[float]:
+    values: list[float] = []
+    if df.empty:
+        return values
+    for col in range(min(len(df.columns), max_years)):
+        left = statement_value(df, left_key, col=col)
+        right = statement_value(df, right_key, col=col)
+        if left is None or right is None:
+            continue
+        values.append(left + right)
+    return values
+
+
+def calculate_cagr_from_latest_series(values_latest_first: list[float]) -> float | None:
+    """Return CAGR from annual values ordered newest to oldest."""
+    if len(values_latest_first) < 4:
+        return None
+    latest = values_latest_first[0]
+    oldest = values_latest_first[3]
+    if latest <= 0 or oldest <= 0:
+        return None
+    return (latest / oldest) ** (1 / 3) - 1
+
+
+def classify_cycle_position(current_roa: float, average_roa: float) -> str:
+    if average_roa <= 0:
+        return "MID"
+    if current_roa > 1.5 * average_roa:
+        return "PEAK"
+    if current_roa < 0.6 * average_roa:
+        return "TROUGH"
+    return "MID"
 
 
 def _log_statement_field_extraction_failed(
@@ -103,6 +161,15 @@ def extract_from_financial_statements(
                     _log_statement_field_extraction_failed(
                         symbol, "revenue_growth", exc
                     )
+            try:
+                revenue_cagr = calculate_cagr_from_latest_series(
+                    _statement_series(financials, "total_revenue")
+                )
+                if revenue_cagr is not None:
+                    extracted["revenue_cagr_3y"] = revenue_cagr
+                    extracted["_revenue_cagr_3y_source"] = "calculated_from_statements"
+            except Exception as exc:
+                _log_statement_field_extraction_failed(symbol, "revenue_cagr_3y", exc)
 
             try:
                 revenue = statement_value(financials, "total_revenue")
@@ -140,6 +207,16 @@ def extract_from_financial_statements(
                     extracted["_freeCashflow_source"] = "calculated_from_statements"
             except Exception as exc:
                 _log_statement_field_extraction_failed(symbol, "cashflow", exc)
+            try:
+                fcf_values = _statement_sum_series(
+                    cashflow, "operating_cash_flow", "capital_expenditure"
+                )
+                fcf_cagr = calculate_cagr_from_latest_series(fcf_values)
+                if fcf_cagr is not None:
+                    extracted["fcf_cagr_3y"] = fcf_cagr
+                    extracted["_fcf_cagr_3y_source"] = "calculated_from_statements"
+            except Exception as exc:
+                _log_statement_field_extraction_failed(symbol, "fcf_cagr_3y", exc)
 
         if not balance_sheet.empty:
             statement_date = balance_sheet.columns[0]
@@ -692,6 +769,7 @@ def calculate_return_trends(
                 avg_roa = statistics.mean(roas)
                 signals["roa_5y_avg"] = round(avg_roa * 100, 2)
                 signals["_roa_5y_years"] = len(roas)
+                signals["cycle_position"] = classify_cycle_position(roas[0], avg_roa)
                 signals["profitability_trend"] = compute_trend_regression(
                     list(reversed(roas)), avg_roa
                 )
@@ -710,9 +788,11 @@ def calculate_return_trends(
         equity_key = (
             "Stockholders Equity"
             if "Stockholders Equity" in balance_sheet.index
-            else "Total Stockholder Equity"
-            if "Total Stockholder Equity" in balance_sheet.index
-            else None
+            else (
+                "Total Stockholder Equity"
+                if "Total Stockholder Equity" in balance_sheet.index
+                else None
+            )
         )
         if "Net Income" in financials.index and equity_key:
             roes: list[float] = []
@@ -808,6 +888,14 @@ def calculate_derived_metrics(data: dict[str, Any], symbol: str) -> dict[str, An
                 if 0 < calculated_peg < 10:
                     calculated["pegRatio"] = calculated_peg
                     calculated["_pegRatio_source"] = "calculated_from_ttm_aligned"
+
+        sector = _canonical_sector(data.get("sector"))
+        pe = _safe_float(data.get("trailingPE"))
+        sector_median_pe = SECTOR_MEDIAN_PE[sector] if sector else None
+        if pe and sector_median_pe:
+            calculated["sectorMedianPE"] = sector_median_pe
+            calculated["peVsSector"] = round(pe / sector_median_pe, 2)
+            calculated["_peVsSector_source"] = "static_gics_sector_median"
 
         if data.get("growth_trajectory") is None:
             mrq = data.get("revenueGrowth_MRQ")

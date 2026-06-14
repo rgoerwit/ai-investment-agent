@@ -337,7 +337,6 @@ class Settings(BaseSettings):
         validation_alias="ENABLE_CONSULTANT",
         description="Enable OpenAI consultant for cross-validation",
     )
-
     # --- Consultant Configuration ---
     consultant_model: str = Field(
         default="gpt-5.4",
