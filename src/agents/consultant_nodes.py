@@ -877,7 +877,17 @@ Perform a forensic audit using your tools."""
         logger.debug("auditor_start", ticker=ticker)
 
         try:
-            response_str = await _run_auditor_loop(llm, agent_prompt.system_message)
+            # Bind the tool schemas onto the LLM so it can actually emit tool_calls.
+            # Without this the model never sees the tools, the loop below is dead code,
+            # and the auditor returns INSUFFICIENT_DATA claiming it has no tools. Kept
+            # inside the try so a bind_tools failure is contained as a failure-artifact
+            # (the auditor is optional) rather than escaping the node. The unbound
+            # ``llm`` is retained below for provider/diagnostic introspection and the
+            # repair path, which must operate on the base model, not the binding.
+            llm_with_tools = llm.bind_tools(tools) if tools else llm
+            response_str = await _run_auditor_loop(
+                llm_with_tools, agent_prompt.system_message
+            )
             response_str = canonicalize_forensic_auditor_output(response_str)
             validation = validate_required_output(
                 "global_forensic_auditor", response_str

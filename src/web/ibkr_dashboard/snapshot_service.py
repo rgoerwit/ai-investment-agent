@@ -134,6 +134,10 @@ class DashboardSnapshotService:
             )
 
     def wait_until_idle(self, timeout: float | None = None) -> bool:
+        # Default to the configured snapshot timeout (IBKR_DASHBOARD_SNAPSHOT_TIMEOUT_SECONDS)
+        # so a synchronous first-load wait is bounded rather than blocking forever.
+        if timeout is None:
+            timeout = self._settings.snapshot_timeout_seconds
         return self._load_done.wait(timeout)
 
     async def _load_snapshot(self) -> PortfolioRecommendationBundle:

@@ -14,6 +14,11 @@ from src.ibkr.models import (
     ReconciliationItem,
 )
 from src.ibkr.portfolio_data_service import IbkrPortfolioDataService, PortfolioSnapshot
+from src.ibkr.portfolio_defaults import (
+    DEFAULT_OVERWEIGHT_PCT,
+    DEFAULT_REFRESH_LIMIT,
+    DEFAULT_UNDERWEIGHT_PCT,
+)
 from src.ibkr.portfolio_health import compute_portfolio_health
 from src.ibkr.reconciler import ReconciliationDiagnostics, reconcile
 from src.ibkr.refresh_service import (
@@ -61,13 +66,13 @@ class PortfolioRecommendationRequest:
     drift_pct: float
     sector_limit_pct: float
     exchange_limit_pct: float
-    overweight_pct: float = 20.0
-    underweight_pct: float = 20.0
+    overweight_pct: float = DEFAULT_OVERWEIGHT_PCT
+    underweight_pct: float = DEFAULT_UNDERWEIGHT_PCT
     recommend: bool = False
     read_only: bool = False
     quick_mode: bool = False
     refresh_policy: RefreshPolicy = "off"
-    refresh_limit: int = 10
+    refresh_limit: int = DEFAULT_REFRESH_LIMIT
 
 
 @dataclass

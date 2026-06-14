@@ -99,6 +99,17 @@ def test_no_quick_mode_does_not_clamp() -> None:
     assert runtime_config.quick_mode_active is False
 
 
+def test_quick_mode_active_ignores_environment(monkeypatch) -> None:
+    """QUICK_MODE_ACTIVE is a run-scoped runtime flag, not base Settings config."""
+    from src.config import Settings
+
+    monkeypatch.setenv("QUICK_MODE_ACTIVE", "true")
+
+    runtime_config = RuntimeConfig.from_config(Settings(_env_file=None))
+
+    assert runtime_config.quick_mode_active is False
+
+
 def test_clamp_change_summary_only_reports_lowered_values() -> None:
     base = _config()
     runtime_config = build_runtime_config(_args(quick=True), base)

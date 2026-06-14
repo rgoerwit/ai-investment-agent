@@ -58,11 +58,11 @@ OUTER_WRAPPED_ALLOWLIST: dict[str, str] = {
     "src/ibkr/account_service.py:50": "ib_async has its own request timeout",
     "src/ibkr/account_service.py:53": "ib_async has its own request timeout",
     "src/ibkr/account_service.py:61": "ib_async has its own request timeout",
-    "src/ibkr/portfolio_data_service.py:76": "ib_async has its own request timeout",
-    "src/ibkr/portfolio_data_service.py:88": "ib_async has its own request timeout",
-    "src/ibkr/portfolio_data_service.py:100": "ib_async has its own request timeout",
-    "src/ibkr/portfolio_data_service.py:111": "ib_async has its own request timeout",
-    "src/ibkr/portfolio_data_service.py:140": "ib_async has its own request timeout",
+    "src/ibkr/portfolio_data_service.py:77": "ib_async has its own request timeout",
+    "src/ibkr/portfolio_data_service.py:89": "ib_async has its own request timeout",
+    "src/ibkr/portfolio_data_service.py:101": "ib_async has its own request timeout",
+    "src/ibkr/portfolio_data_service.py:112": "ib_async has its own request timeout",
+    "src/ibkr/portfolio_data_service.py:141": "ib_async has its own request timeout",
     "src/ibkr/security_data_service.py:76": (
         "ib_async + yfinance probe; wrapped by caller-side bounds"
     ),

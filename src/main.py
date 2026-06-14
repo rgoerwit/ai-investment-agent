@@ -594,8 +594,7 @@ async def run_analysis(
             graph = create_trading_graph(
                 ticker=ticker,  # BUG FIX #1: Pass ticker for isolation
                 cleanup_previous=True,  # BUG FIX #1: Cleanup to prevent contamination
-                max_debate_rounds=1 if quick_mode else 2,
-                max_risk_discuss_rounds=1,
+                max_debate_rounds=1 if quick_mode else config.max_debate_rounds,
                 enable_memory=runtime_config.enable_memory,
                 recursion_limit=100,
                 quick_mode=quick_mode,  # Pass quick_mode for consultant LLM selection
@@ -670,8 +669,7 @@ async def run_analysis(
                 trade_date=real_date,
                 quick_mode=quick_mode,
                 enable_memory=runtime_config.enable_memory,
-                max_debate_rounds=1 if quick_mode else 2,
-                max_risk_rounds=1,
+                max_debate_rounds=1 if quick_mode else config.max_debate_rounds,
                 macro_context_report=macro_context_report,
                 macro_context_region=macro_context_region,
                 macro_context_status=macro_context_status,

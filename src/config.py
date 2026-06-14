@@ -310,15 +310,10 @@ class Settings(BaseSettings):
     # --- Debate & Risk Configuration ---
     max_debate_rounds: int = Field(
         default=2,
-        ge=0,
+        ge=1,
+        le=2,
         validation_alias="MAX_DEBATE_ROUNDS",
-        description="Maximum rounds of bull/bear debate",
-    )
-    max_risk_discuss_rounds: int = Field(
-        default=1,
-        ge=0,
-        validation_alias="MAX_RISK_DISCUSS_ROUNDS",
-        description="Maximum rounds of risk discussion",
+        description="Maximum rounds of bull/bear debate (1 or 2; graph supports R1/R2 only)",
     )
 
     # --- Feature Flags ---
@@ -417,32 +412,6 @@ class Settings(BaseSettings):
         default="claude-opus-4-6",
         validation_alias="WRITER_MODEL",
         description="Claude model for article writing",
-    )
-
-    # --- Trading Parameters ---
-    max_position_size: float = Field(
-        default=0.1,
-        ge=0.0,
-        le=1.0,
-        validation_alias="MAX_POSITION_SIZE",
-        description="Maximum position size as fraction of portfolio",
-    )
-    max_daily_trades: int = Field(
-        default=5,
-        ge=0,
-        validation_alias="MAX_DAILY_TRADES",
-        description="Maximum number of trades per day",
-    )
-    risk_free_rate: float = Field(
-        default=0.03,
-        ge=0.0,
-        validation_alias="RISK_FREE_RATE",
-        description="Risk-free rate for calculations",
-    )
-    default_ticker: str = Field(
-        default="AAPL",
-        validation_alias="DEFAULT_TICKER",
-        description="Default ticker symbol for analysis",
     )
 
     # --- Capital Efficiency Thresholds ---
@@ -645,12 +614,6 @@ class Settings(BaseSettings):
             "Hard wall-clock cap (seconds) for cleanup_async_resources at "
             "process shutdown; on timeout the process forces os._exit()."
         ),
-    )
-    # Base default; CLI runs use src.runtime_config for run-scoped overrides.
-    quick_mode_active: bool = Field(
-        default=False,
-        validation_alias="QUICK_MODE_ACTIVE",
-        description="True when the current run was started with --quick.",
     )
     llm_base_output_tokens: int = Field(
         default=32768,

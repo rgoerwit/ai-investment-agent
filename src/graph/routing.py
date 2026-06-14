@@ -289,20 +289,34 @@ _GATE_BLOCKING_RED_FLAGS = frozenset(
 _AUDITOR_CLEAN_STATUSES = frozenset({"CLEAN", "INSUFFICIENT_DATA", "UNAVAILABLE"})
 
 
+def parse_auditor_status(auditor_report: object) -> str | None:
+    """Return the auditor report's declared STATUS token (upper-case), or None.
+
+    Shared by the Consultant-gate cleanliness check and the run-summary success
+    flag so both read the auditor's `STATUS:` line through one regex.
+    """
+    if not isinstance(auditor_report, str):
+        return None
+    text = auditor_report.strip()
+    if not text or text.upper() == "N/A":
+        return "N/A"
+    import re
+
+    match = re.search(r"(?im)^\s*STATUS\s*[:=]\s*([A-Z_]+)", text)
+    return match.group(1).upper() if match else None
+
+
 def _auditor_status_clean(auditor_report: object) -> bool:
     """True when the auditor produced no actionable problem."""
     if auditor_report is None:
         return True
     if not isinstance(auditor_report, str):
         return False
-    text = auditor_report.strip()
-    if not text or text.upper() == "N/A":
+    status = parse_auditor_status(auditor_report)
+    if status == "N/A":
         return True
-    import re
-
-    match = re.search(r"(?im)^\s*STATUS\s*[:=]\s*([A-Z_]+)", text)
-    if match:
-        return match.group(1).upper() in _AUDITOR_CLEAN_STATUSES
+    if status is not None:
+        return status in _AUDITOR_CLEAN_STATUSES
     # No explicit status field — fall back to a conservative "keep Consultant"
     # decision so a misformatted auditor output never silently disables it.
     return False

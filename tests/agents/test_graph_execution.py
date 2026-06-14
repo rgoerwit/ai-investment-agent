@@ -794,7 +794,6 @@ class TestTradingContext:
         assert context.ticker == "AAPL"
         assert context.trade_date == "2024-01-01"
         assert context.max_debate_rounds == 2
-        assert context.max_risk_rounds == 1
 
     def test_trading_context_quick_mode(self):
         """Test TradingContext in quick mode."""
@@ -839,9 +838,7 @@ class TestGraphCompilation:
         # Mock create_agent_tool_node to return a dummy function
         mock_tool_node.return_value = lambda s, c: {}
 
-        graph = create_trading_graph(
-            max_debate_rounds=2, max_risk_discuss_rounds=1, enable_memory=True
-        )
+        graph = create_trading_graph(max_debate_rounds=2, enable_memory=True)
 
         assert graph is not None
         # Graph should be compiled and ready to invoke

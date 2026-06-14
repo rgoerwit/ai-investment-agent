@@ -83,38 +83,33 @@ console.log(JSON.stringify(result));
 
 
 def test_escape_html_attr_encodes_quotes_without_overescaping_text_context():
-    result = _run_dashboard_js(
-        """
+    result = _run_dashboard_js("""
 const { escapeHtmlText, escapeHtmlAttr } = __dashboardTest;
 return {
   text: escapeHtmlText('A "quote" & <tag>'),
   attr: escapeHtmlAttr('A "quote" & <tag>'),
 };
-"""
-    )
+""")
 
     assert result["text"] == 'A "quote" &amp; &lt;tag&gt;'
     assert result["attr"] == "A &quot;quote&quot; &amp; &lt;tag&gt;"
 
 
 def test_render_ticker_link_escapes_data_attribute_quotes():
-    html = _run_dashboard_js(
-        """
+    html = _run_dashboard_js("""
 const { renderTickerLink } = __dashboardTest;
 return renderTickerLink({
   ticker_yf: 'BMW.DE" data-pwned="1',
   ticker_ibkr: "BMW",
 });
-"""
-    )
+""")
 
     assert 'data-ticker="BMW.DE&quot; data-pwned=&quot;1"' in html
     assert 'data-ticker="BMW.DE" data-pwned="1"' not in html
 
 
 def test_render_settings_escapes_input_value_attributes():
-    html = _run_dashboard_js(
-        """
+    html = _run_dashboard_js("""
 const { renderSettings, state } = __dashboardTest;
 state.settings = {
   account_id: 'U123" autofocus onfocus="alert(1)',
@@ -126,21 +121,49 @@ state.settings = {
   notes: 'notes " stay in textarea text',
 };
 return renderSettings();
-"""
-    )
+""")
 
     assert 'value="U123&quot; autofocus onfocus=&quot;alert(1)' in html
     assert 'value="U123" autofocus onfocus="alert(1)' not in html
     assert 'value="watchlist&quot; data-extra=&quot;1"' in html
 
 
+def test_render_settings_uses_loaded_values_not_fallback_literals():
+    html = _run_dashboard_js("""
+const { renderSettings, state } = __dashboardTest;
+state.settings = {
+  read_only: false,
+  max_age_days: 37,
+  refresh_limit: 4,
+  quick_mode_default: false,
+};
+return renderSettings();
+""")
+
+    assert '<input name="max_age_days" type="number" value="37">' in html
+    assert '<input name="refresh_limit" type="number" value="4">' in html
+    assert '<input name="max_age_days" type="number" value="14">' not in html
+    assert '<input name="refresh_limit" type="number" value="10">' not in html
+
+
+def test_render_settings_falls_back_only_when_settings_values_absent():
+    html = _run_dashboard_js("""
+const { renderSettings, state } = __dashboardTest;
+state.settings = {
+  read_only: true,
+};
+return renderSettings();
+""")
+
+    assert '<input name="max_age_days" type="number" value="14">' in html
+    assert '<input name="refresh_limit" type="number" value="10">' in html
+
+
 def test_render_concentration_header_escapes_attribute_contexts():
-    html = _run_dashboard_js(
-        """
+    html = _run_dashboard_js("""
 const { renderConcentrationHeader } = __dashboardTest;
 return renderConcentrationHeader('sector" data-breakout="1', 'weight', 'Top "Weight"');
-"""
-    )
+""")
 
     assert 'data-sort-section="sector&quot; data-breakout=&quot;1"' in html
     assert (
@@ -151,8 +174,7 @@ return renderConcentrationHeader('sector" data-breakout="1', 'weight', 'Top "Wei
 
 
 def test_update_macro_alert_escapes_headline_markup():
-    result = _run_dashboard_js(
-        """
+    result = _run_dashboard_js("""
 const { updateMacroAlert, state, elements } = __dashboardTest;
 const alert = {
   classList: { add() {}, remove() {} },
@@ -169,16 +191,14 @@ state.snapshot = {
 };
 updateMacroAlert();
 return alert.innerHTML;
-"""
-    )
+""")
 
     assert "<img" not in result
     assert "&lt;img src=x onerror=alert(1)&gt;" in result
 
 
 def test_update_mode_alert_uses_configured_results_dir():
-    result = _run_dashboard_js(
-        """
+    result = _run_dashboard_js("""
 const { updateModeAlert, state, elements } = __dashboardTest;
 const alert = {
   classList: { add() {}, remove() {} },
@@ -193,8 +213,7 @@ state.settings = {
 };
 updateModeAlert();
 return alert.innerHTML;
-"""
-    )
+""")
 
     assert "scratch/results-custom" in result
     assert "<code>results/</code>" not in result

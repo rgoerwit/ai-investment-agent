@@ -13,6 +13,7 @@ from src.error_safety import summarize_exception
 from src.fx_normalization import FALLBACK_RATES_TO_USD
 from src.ibkr.client import IbkrClient, mask_account
 from src.ibkr.models import NormalizedPosition, PortfolioSummary
+from src.ibkr.portfolio_defaults import DEFAULT_CASH_BUFFER_PCT
 from src.ibkr.ticker import Ticker
 from src.ibkr.ticker_mapper import (
     _yf_search_ticker,
@@ -188,7 +189,7 @@ def build_portfolio_summary(
     ledger: dict,
     positions: list[NormalizedPosition],
     account_id: str = "",
-    cash_buffer_pct: float = 0.05,
+    cash_buffer_pct: float = DEFAULT_CASH_BUFFER_PCT,
 ) -> PortfolioSummary:
     """
     Build portfolio summary from IBKR ledger and normalized positions.
@@ -440,7 +441,7 @@ def read_watchlist(
 def read_portfolio(
     client: IbkrClient,
     account_id: str | None = None,
-    cash_buffer_pct: float = 0.05,
+    cash_buffer_pct: float = DEFAULT_CASH_BUFFER_PCT,
 ) -> tuple[list[NormalizedPosition], PortfolioSummary]:
     """
     Read and normalize portfolio from IBKR.

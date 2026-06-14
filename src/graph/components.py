@@ -42,7 +42,6 @@ class TradingContext:
     quick_mode: bool = False
     enable_memory: bool = True
     max_debate_rounds: int = 2
-    max_risk_rounds: int = 1
     ticker_memories: dict[str, Any] | None = None
     cleanup_previous_memories: bool = True
     macro_context_report: str = ""

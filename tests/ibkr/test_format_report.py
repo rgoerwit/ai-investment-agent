@@ -1862,7 +1862,9 @@ class TestWatchlistCandidatesInFlight:
         )
 
         assert "WATCHLIST CANDIDATES" in report
-        assert "available cash is insufficient" in report
+        # Default portfolio has deployable cash > 0, so the message explains that no
+        # candidate fit the deployable-after-buffer amount (not a bare "insufficient").
+        assert "deployable after the cash buffer" in report
         assert "[not on watchlist" not in report
 
     def test_in_flight_candidate_excluded_from_watchlist_moves(self):
@@ -2473,3 +2475,79 @@ class TestCliUiSharedPresentationAlignment:
             "Conditional (soft-sell reviews)" in report
             or "No confirmed sale proceeds" in report
         )
+
+
+class TestReadOnlyDataNotLoaded:
+    """format_report() must not assert own/watchlist status when no IBKR data loaded."""
+
+    def _offwatch_buy(self) -> ReconciliationItem:
+        """An off-watchlist BUY candidate sourced from a saved analysis."""
+        return ReconciliationItem(
+            ticker="7203.T",
+            action="BUY",
+            urgency="MEDIUM",
+            reason="Analysis says BUY",
+            ibkr_position=None,
+            is_watchlist=False,
+            analysis=_make_analysis(ticker="7203.T", verdict="BUY"),
+            suggested_price=2100.0,
+        )
+
+    def test_read_only_says_status_unknown_not_new_position(self):
+        """portfolio_data_loaded=False → banner shown, no 'new position' assertion."""
+        report = format_report(
+            [self._offwatch_buy()],
+            _make_portfolio(),
+            show_recommendations=True,
+            portfolio_data_loaded=False,
+        )
+        assert "READ-ONLY" in report
+        assert "UNKNOWN" in report
+        assert "[own/watchlist status unknown]" in report
+        assert "[not on watchlist — new position]" not in report
+        # Header/cash relabeled to "not loaded" rather than a misleading $0/N/A.
+        assert "Account:          not loaded (read-only)" in report
+        assert "Net liquidation:  not loaded" in report
+        # Subtitle no longer implies the watchlist is known.
+        assert "own/watchlist status is UNKNOWN" in report
+        assert "inspect and add to watchlist before acting" not in report
+
+    def test_loaded_default_keeps_new_position_wording(self):
+        """Default (data loaded) → accurate live wording preserved, no banner."""
+        report = format_report(
+            [self._offwatch_buy()],
+            _make_portfolio(),
+            show_recommendations=True,
+        )
+        assert "[not on watchlist — new position]" in report
+        assert "[own/watchlist status unknown]" not in report
+        assert "READ-ONLY — no IBKR connection" not in report
+        assert "not loaded (read-only)" not in report
+        assert "inspect and add to watchlist before acting" in report
+
+    def test_format_json_surfaces_portfolio_data_loaded(self):
+        """format_json exposes the flag both ways for machine consumers."""
+        offline = json.loads(
+            format_json(
+                [self._offwatch_buy()],
+                _make_portfolio(),
+                show_recommendations=True,
+                portfolio_data_loaded=False,
+            )
+        )
+        online = json.loads(format_json([self._offwatch_buy()], _make_portfolio()))
+        assert offline["portfolio_data_loaded"] is False
+        assert online["portfolio_data_loaded"] is True
+
+    def test_read_only_empty_candidates_does_not_imply_loaded_cash(self):
+        """Empty-candidate branch must not claim '$0 settled cash within the buffer'
+        in read-only mode (cash was never loaded)."""
+        report = format_report(
+            [],
+            _make_portfolio(),
+            show_recommendations=True,
+            watchlist_candidates_blocked_by_cash=2,
+            portfolio_data_loaded=False,
+        )
+        assert "holdings and cash were not loaded" in report
+        assert "within the cash buffer" not in report

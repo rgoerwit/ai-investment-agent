@@ -27,7 +27,6 @@ logger = structlog.get_logger(__name__)
 
 def create_trading_graph(
     max_debate_rounds: int = 2,
-    max_risk_discuss_rounds: int = 1,
     enable_memory: bool = True,
     recursion_limit: int = 100,
     ticker: str | None = None,

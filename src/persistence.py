@@ -229,6 +229,27 @@ def build_run_summary(
     providers_used = _collect_used_providers()
     runtime_config = get_runtime_config(config)
 
+    # "Successful" must mean the auditor completed a verified audit, not merely that it
+    # emitted well-formed prose. Caveated statuses are no data (INSUFFICIENT_DATA/
+    # UNAVAILABLE/N/A) or an incomplete/unverified audit (PARTIAL_DATA). A missing or
+    # unparseable STATUS line (parse → None) is *also* not a clean pass — we must not
+    # let malformed output read as HIGH confidence. So success requires an explicitly
+    # parsed, non-caveated status; everything else reads as "ran with caveats" (MEDIUM).
+    from src.graph.routing import parse_auditor_status
+
+    _AUDITOR_CAVEATED_STATUSES = {
+        "INSUFFICIENT_DATA",
+        "UNAVAILABLE",
+        "N/A",
+        "PARTIAL_DATA",
+    }
+    auditor_report_status = parse_auditor_status(auditor_status.get("content"))
+    auditor_successful = (
+        bool(auditor_status.get("ok"))
+        and auditor_report_status is not None
+        and auditor_report_status not in _AUDITOR_CAVEATED_STATUSES
+    )
+
     summary = {
         "quick_mode": quick_mode,
         "quick_model": runtime_config.quick_think_llm,
@@ -241,7 +262,8 @@ def build_run_summary(
         "consultant_finished": consultant_finished,
         "auditor_finished": auditor_finished,
         "consultant_successful": bool(consultant_status.get("ok")),
-        "auditor_successful": bool(auditor_status.get("ok")),
+        "auditor_successful": auditor_successful,
+        "auditor_status": auditor_report_status,
         "apac_specialist_completed": apac_finished,
         "apac_specialist_successful": bool(apac_status.get("ok")),
         "apac_specialist_status": (

@@ -510,8 +510,8 @@ class TestBuildPortfolioSummary:
         assert summary.portfolio_value_usd == 125430.0
         assert summary.cash_balance_usd == 18200.0
         assert summary.position_count == 1
-        # Available cash = 18200 - (125430 * 0.05) = 18200 - 6271.5 = 11928.5
-        assert summary.available_cash_usd == pytest.approx(11928.5, rel=0.01)
+        # Available cash = 18200 - (125430 * 0.03) = 18200 - 3762.9 = 14437.1
+        assert summary.available_cash_usd == pytest.approx(14437.1, rel=0.01)
 
     def test_fallback_to_positions_sum(self):
         ledger = {}  # No ledger data

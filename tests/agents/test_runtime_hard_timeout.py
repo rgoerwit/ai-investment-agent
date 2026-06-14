@@ -578,27 +578,13 @@ class TestCircuitBreakerIntegration:
         runnable.ainvoke = AsyncMock(side_effect=always_hangs)
 
         with patch.object(settings_config, "llm_call_hard_timeout_seconds", 0.05):
-            with patch.object(settings_config, "quick_mode_active", False):
-                with patch.object(settings_config, "llm_circuit_breaker_enabled", True):
-                    # Three attempts: each hangs to hard-timeout and counts
-                    # as a breaker-eligible failure. The hard-timeout wrap
-                    # surfaces TimeoutError (asyncio.TimeoutError aliases to
-                    # builtin TimeoutError on 3.11+).
-                    for _ in range(3):
-                        with pytest.raises(TimeoutError):
-                            await invoke_with_rate_limit_handling(
-                                runnable,
-                                {"input": "x"},
-                                max_attempts=1,
-                                context="BreakerAgent",
-                                provider="google",
-                                model_name="gemini-3.1-flash-lite",
-                            )
-
-                    # Fourth call: breaker is open, must raise
-                    # CircuitOpenError immediately without invoking ainvoke.
-                    before_calls = runnable.ainvoke.call_count
-                    with pytest.raises(CircuitOpenError):
+            with patch.object(settings_config, "llm_circuit_breaker_enabled", True):
+                # Three attempts: each hangs to hard-timeout and counts as a
+                # breaker-eligible failure. The hard-timeout wrap surfaces
+                # TimeoutError (asyncio.TimeoutError aliases to builtin TimeoutError
+                # on 3.11+).
+                for _ in range(3):
+                    with pytest.raises(TimeoutError):
                         await invoke_with_rate_limit_handling(
                             runnable,
                             {"input": "x"},
@@ -607,7 +593,20 @@ class TestCircuitBreakerIntegration:
                             provider="google",
                             model_name="gemini-3.1-flash-lite",
                         )
-                    assert runnable.ainvoke.call_count == before_calls
+
+                # Fourth call: breaker is open, must raise CircuitOpenError
+                # immediately without invoking ainvoke.
+                before_calls = runnable.ainvoke.call_count
+                with pytest.raises(CircuitOpenError):
+                    await invoke_with_rate_limit_handling(
+                        runnable,
+                        {"input": "x"},
+                        max_attempts=1,
+                        context="BreakerAgent",
+                        provider="google",
+                        model_name="gemini-3.1-flash-lite",
+                    )
+                assert runnable.ainvoke.call_count == before_calls
 
         attempts = tracker.get_total_stats()["call_attempts"]
         # Last attempt was the fast-fail; record_call_attempt tagged it

@@ -998,7 +998,7 @@ FAILURE_MODE: CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_BLEED | OPERATIONAL_MISS | 
         details = classify_failure(
             e,
             provider="google",
-            model_name=getattr(config, "quick_thinking_llm", None),
+            model_name=getattr(config, "quick_think_llm", None),
             class_name="RetrospectiveLessonLLM",
         )
         logger.error(

@@ -10,6 +10,7 @@ import structlog
 from src.exchange_metadata import IBKR_TO_YFINANCE
 from src.fx_normalization import get_fx_rate_fallback
 from src.ibkr.models import AnalysisRecord, NormalizedPosition
+from src.ibkr.portfolio_defaults import DEFAULT_DRIFT_PCT, DEFAULT_MAX_AGE_DAYS
 
 logger = structlog.get_logger(__name__)
 
@@ -178,8 +179,8 @@ class ProfitTakeDecision:
 def check_staleness(
     analysis: AnalysisRecord,
     current_price_local: float | None = None,
-    max_age_days: int = 14,
-    drift_threshold_pct: float = 15.0,
+    max_age_days: int = DEFAULT_MAX_AGE_DAYS,
+    drift_threshold_pct: float = DEFAULT_DRIFT_PCT,
     structural_macro_events: list | None = None,
 ) -> tuple[bool, str]:
     """Check if an analysis is stale and should be reviewed."""

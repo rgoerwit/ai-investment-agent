@@ -29,7 +29,12 @@ def test_build_run_summary_tracks_finished_successful_artifacts(monkeypatch):
         },
         "artifact_statuses": {
             "consultant_review": {"complete": True, "ok": False},
-            "auditor_report": {"complete": True, "ok": True},
+            # ok=True AND a parseable non-caveated STATUS → a genuine successful audit.
+            "auditor_report": {
+                "complete": True,
+                "ok": True,
+                "content": "STATUS: CLEAN\nNo anomalies detected.",
+            },
             "apac_regional_report": {"complete": True, "ok": True},
         },
         "messages": [ToolMessage(content="done", tool_call_id="call_1", name="tool")],
@@ -53,6 +58,69 @@ def test_build_run_summary_tracks_finished_successful_artifacts(monkeypatch):
     assert summary["optional_failures"] == ["consultant_review"]
     assert summary["llm_attempts"] == 5
     assert summary["llm_failures"] == 2
+
+
+@pytest.mark.parametrize(
+    "report, expected_successful, expected_status",
+    [
+        (
+            "## FORENSIC AUDITOR REPORT\n\nSTATUS: INSUFFICIENT_DATA\n\nReason: ...",
+            False,
+            "INSUFFICIENT_DATA",
+        ),
+        (
+            "## FORENSIC AUDITOR REPORT\n\nSTATUS: UNAVAILABLE\n",
+            False,
+            "UNAVAILABLE",
+        ),
+        (
+            # Filings retrieved but audit opinion unverified → caveated, not a clean pass.
+            "## FORENSIC AUDITOR REPORT\n\nSTATUS: PARTIAL_DATA\n\nFY2025 20-F located.",
+            False,
+            "PARTIAL_DATA",
+        ),
+        (
+            "## FORENSIC AUDITOR REPORT\n\nSTATUS: CLEAN\n\nNo anomalies detected.",
+            True,
+            "CLEAN",
+        ),
+        (
+            # No parseable STATUS line → unknown, must NOT read as a clean pass.
+            "## FORENSIC AUDITOR REPORT\n\nSome prose without a status field.",
+            False,
+            None,
+        ),
+    ],
+)
+def test_build_run_summary_auditor_success_requires_data(
+    monkeypatch, report, expected_successful, expected_status
+):
+    """A well-formed but data-less auditor report must not count as successful."""
+    from src.persistence import build_run_summary
+
+    class StubTracker:
+        def get_total_stats(self):
+            return {"failed_attempts": 0, "total_calls": 1}
+
+    monkeypatch.setattr("src.token_tracker.get_tracker", lambda: StubTracker())
+
+    result = {
+        "pre_screening_result": "PASS",
+        "investment_debate_state": {"count": 1},
+        "artifact_statuses": {
+            # ok=True because the prose is structurally valid; content drives success.
+            "auditor_report": {"complete": True, "ok": True, "content": report},
+        },
+        "messages": [],
+    }
+
+    summary = build_run_summary(
+        result, quick_mode=False, article_requested=False, provider_preflight={}
+    )
+
+    assert summary["auditor_finished"] is True
+    assert summary["auditor_successful"] is expected_successful
+    assert summary["auditor_status"] == expected_status
 
 
 def test_save_results_to_file_preserves_macro_context_metadata(tmp_path, monkeypatch):

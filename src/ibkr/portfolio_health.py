@@ -5,6 +5,7 @@ from __future__ import annotations
 import structlog
 
 from src.ibkr.models import AnalysisRecord, NormalizedPosition, PortfolioSummary
+from src.ibkr.portfolio_defaults import DEFAULT_MAX_AGE_DAYS
 from src.ibkr.reconciliation_rules import _EXCHANGE_LONG_NAMES
 
 logger = structlog.get_logger(__name__)
@@ -46,7 +47,7 @@ def compute_portfolio_health(
     positions: list[NormalizedPosition],
     analyses: dict[str, AnalysisRecord],
     portfolio: PortfolioSummary,
-    max_age_days: int = 14,
+    max_age_days: int = DEFAULT_MAX_AGE_DAYS,
     reconciliation_items: list | None = None,
     correlated_window_days: int = 14,
     drawdown_pct: float = 10.0,

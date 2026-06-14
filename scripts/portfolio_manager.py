@@ -52,6 +52,7 @@ from src.ibkr.models import (
     PortfolioSummary,
     ReconciliationItem,
 )
+from src.ibkr.portfolio_defaults import DEFAULT_MAX_AGE_DAYS
 from src.ibkr.portfolio_presentation import (
     SELL_RECOMMENDATIONS_TITLE,
     SELL_RELATED_REVIEWS_TITLE,
@@ -374,7 +375,18 @@ def _preflight_ibkr_requirements() -> None:
     _check_config(ibkr_config)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(
+    argv: list[str] | None = None,
+    *,
+    analyzer_config: Any | None = None,
+    ibkr_settings: Any | None = None,
+) -> argparse.Namespace:
+    from src.config import config as default_analyzer_config
+    from src.ibkr_config import ibkr_config as default_ibkr_settings
+
+    analyzer_config = analyzer_config or default_analyzer_config
+    ibkr_settings = ibkr_settings or default_ibkr_settings
+
     parser = argparse.ArgumentParser(
         description="Reconcile IBKR portfolio against evaluator recommendations",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -403,21 +415,25 @@ def parse_args() -> argparse.Namespace:
         help="Verify IBKR credentials and connection, then exit",
     )
 
-    # Options
+    # Options. Sector/exchange/refresh defaults come from src.ibkr.portfolio_defaults
+    # via add_common_portfolio_request_args. The three knobs that ALSO have an env
+    # override (IbkrSettings) are sourced from ibkr_config here so that
+    # IBKR_CASH_BUFFER_PCT / IBKR_MAX_ANALYSIS_AGE_DAYS / IBKR_DRIFT_THRESHOLD_PCT
+    # actually take effect, with the matching CLI flag still overriding the env value.
     add_common_portfolio_request_args(
         parser,
         mode_flag_style="single",
-        results_dir_default="results/",
-        max_age_default=14,
-        cash_buffer_default=0.05,
-        drift_pct_default=15.0,
-        refresh_limit_default=10,
-        sector_limit_default=30.0,
-        exchange_limit_default=40.0,
+        max_age_default=ibkr_settings.ibkr_max_analysis_age_days,
+        cash_buffer_default=ibkr_settings.ibkr_cash_buffer_pct,
+        drift_pct_default=ibkr_settings.ibkr_drift_threshold_pct,
+        # Follow the analyzer's RESULTS_DIR so portfolio_manager reads from the same
+        # directory the analyzer writes analyses to (the dashboard keeps its own
+        # IBKR_DASHBOARD_RESULTS_DIR surface for process isolation).
+        results_dir_default=str(analyzer_config.results_dir),
         read_only_default=False,
         read_only_help="Never create IBKR connection (offline mode)",
         account_id_help="Override IBKR account ID",
-        results_dir_help="Override results directory (default: results/)",
+        results_dir_help="Override results directory (default: RESULTS_DIR or ./results)",
         watchlist_help=(
             "Name of the IBKR watchlist to evaluate "
             "(case-insensitive substring match). "
@@ -448,7 +464,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--json", action="store_true", help="Structured JSON output")
     parser.add_argument("--debug", action="store_true", help="Debug output")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # --recommend and --execute override --report-only
     if args.recommend or args.execute:
@@ -1054,7 +1070,7 @@ def format_report(
     portfolio: PortfolioSummary,
     show_recommendations: bool = False,
     portfolio_health_flags: list[str] | None = None,
-    max_age_days: int = 14,
+    max_age_days: int = DEFAULT_MAX_AGE_DAYS,
     live_orders: list[dict] | None = None,
     watchlist_name: str | None = None,
     watchlist_total: int | None = None,
@@ -1063,14 +1079,30 @@ def format_report(
     freshness_summary: AnalysisFreshnessSummary | None = None,
     refresh_activity: RefreshActivity | None = None,
     screening_freshness: ScreeningFreshnessSummary | None = None,
+    portfolio_data_loaded: bool = True,
 ) -> str:
-    """Format reconciliation results as sectioned human-readable text."""
+    """Format reconciliation results as sectioned human-readable text.
+
+    ``portfolio_data_loaded`` is False in read-only/offline runs where no IBKR
+    connection was made — so holdings, watchlist, and cash are unknown rather
+    than zero. The report avoids asserting own/watchlist status in that case.
+    """
     lines: list[str] = []
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     # ── Header ──────────────────────────────────────────────────────────────
     lines.append(f"=== IBKR Portfolio Reconciliation  {now} ===")
     lines.append("")
+    if not portfolio_data_loaded:
+        lines.append(
+            "⚠ READ-ONLY — no IBKR connection; holdings, watchlist, and cash were "
+            "NOT loaded."
+        )
+        lines.append(
+            "  BUYs below come from saved analyses; whether you already own/watch "
+            "them is UNKNOWN."
+        )
+        lines.append("")
     nlv = portfolio.portfolio_value_usd
     cash = portfolio.cash_balance_usd
     settled = portfolio.settled_cash_usd
@@ -1079,36 +1111,44 @@ def format_report(
     buffer_amt = cash_summary.buffer_reserve_usd
     unsettled_amt = cash_summary.unsettled_cash_usd
 
-    lines.append(f"  Account:          {portfolio.account_id or 'N/A'}")
-    lines.append(f"  Net liquidation:  ${nlv:>10,.0f}")
-    if nlv > 0:
-        if unsettled_amt > 0:
-            cash_note = (
-                f"  includes ${unsettled_amt:,.0f} of unsettled sale proceeds "
-                "(not yet spendable)"
+    if not portfolio_data_loaded:
+        # Read-only run: no IBKR connection, so these are unknown, not zero.
+        lines.append("  Account:          not loaded (read-only)")
+        lines.append("  Net liquidation:  not loaded")
+        lines.append("  Cash (total):     not loaded")
+        lines.append("  Settled cash:     not loaded")
+        lines.append("  Available:        not loaded")
+    else:
+        lines.append(f"  Account:          {portfolio.account_id or 'N/A'}")
+        lines.append(f"  Net liquidation:  ${nlv:>10,.0f}")
+        if nlv > 0:
+            if unsettled_amt > 0:
+                cash_note = (
+                    f"  includes ${unsettled_amt:,.0f} of unsettled sale proceeds "
+                    "(not yet spendable)"
+                )
+            else:
+                cash_note = "  all shown cash is settled"
+            lines.append(
+                f"  Cash (total):     ${cash:>10,.0f}   ({cash / nlv * 100:.1f}%)"
+                f"{cash_note}"
+            )
+            lines.append(
+                f"  Settled cash:     ${settled:>10,.0f}   ({settled / nlv * 100:.1f}%)"
+                "  fully settled"
+            )
+            lines.append(
+                f"  Buffer reserve:   ${buffer_amt:>10,.0f}   ({buffer_amt / nlv * 100:.1f}%)"
+                "  cash buffer — not deployed into new buys"
+            )
+            lines.append(
+                f"  Available:        ${available:>10,.0f}"
+                "           deployable into new buys (settled − buffer)"
             )
         else:
-            cash_note = "  all shown cash is settled"
-        lines.append(
-            f"  Cash (total):     ${cash:>10,.0f}   ({cash / nlv * 100:.1f}%)"
-            f"{cash_note}"
-        )
-        lines.append(
-            f"  Settled cash:     ${settled:>10,.0f}   ({settled / nlv * 100:.1f}%)"
-            "  spend this today"
-        )
-        lines.append(
-            f"  Buffer reserve:   ${buffer_amt:>10,.0f}   ({buffer_amt / nlv * 100:.1f}%)"
-            "  held back"
-        )
-        lines.append(
-            f"  Available:        ${available:>10,.0f}"
-            "           see cash summary — buys consume this"
-        )
-    else:
-        lines.append(f"  Cash (total):     ${cash:,.0f}")
-        lines.append(f"  Settled cash:     ${settled:,.0f}")
-        lines.append(f"  Available:        ${available:,.0f}")
+            lines.append(f"  Cash (total):     ${cash:,.0f}")
+            lines.append(f"  Settled cash:     ${settled:,.0f}")
+            lines.append(f"  Available:        ${available:,.0f}")
     lines.append("")
 
     action_groups = group_portfolio_actions(
@@ -1359,7 +1399,8 @@ def format_report(
     def _as_of_date(r: str) -> str:
         """Extract just the analysis date from a reason string, e.g. 'analyzed 2026-03-05'.
         Used in sections where the section header already explains the action — the date
-        tells the user when this recommendation was generated so they can judge staleness."""
+        tells the user when this recommendation was generated so they can judge staleness.
+        """
         normed = _norm_reason(r)
         paren = normed.rfind("(")
         if paren != -1 and normed.endswith(")"):
@@ -1999,7 +2040,10 @@ def format_report(
         )[:10]
         _hidden = len(_cands_actionable) - len(_top_candidates)
         _cand_subtitle = (
-            "analysis says BUY — inspect and add to watchlist before acting"
+            "analysis says BUY — holdings/watchlist not loaded, so own/watchlist "
+            "status is UNKNOWN"
+            if not portfolio_data_loaded
+            else "analysis says BUY — inspect and add to watchlist before acting"
         )
         if _hidden:
             _cand_subtitle += f"  (showing top 10 of {len(_cands_actionable)})"
@@ -2020,7 +2064,9 @@ def format_report(
                     _cand_parts.append(f"  {item.suggested_order_type}")
                 if not item.suggested_quantity:
                     _cand_parts.append(
-                        "  (quantity unavailable — inspect before placing order)"
+                        "  (portfolio/cash not loaded — inspect before placing order)"
+                        if not portfolio_data_loaded
+                        else "  (quantity unavailable — inspect before placing order)"
                     )
                 if not item.suggested_price:
                     _cand_parts.append("  (no entry price — re-run analysis)")
@@ -2035,7 +2081,11 @@ def format_report(
                     offwatch_parts.append(
                         f"target {size_pct:.1f}% (${target_usd:,.0f})"
                     )
-                offwatch_parts.append("[not on watchlist — new position]")
+                offwatch_parts.append(
+                    "[own/watchlist status unknown]"
+                    if not portfolio_data_loaded
+                    else "[not on watchlist — new position]"
+                )
                 if a.is_quick_mode:
                     offwatch_parts.append("⚠ quick mode — re-run full before adding")
                 lines.append(f"             {'  ·  '.join(offwatch_parts)}")
@@ -2044,10 +2094,24 @@ def format_report(
                 lines.append(cl)
             lines.append("")
         if not _top_candidates and not _cands_in_flight:
-            lines.append(
-                "  No off-watch BUY candidates shown — available cash is insufficient"
-                " for new watchlist additions this run."
-            )
+            if not portfolio_data_loaded:
+                lines.append(
+                    "  No candidates shown — holdings and cash were not loaded"
+                    " (read-only run), so deployable cash is unknown. Re-run without"
+                    " --read-only to size against live cash."
+                )
+            elif available <= 0:
+                lines.append(
+                    f"  No new positions this run — all settled cash (${settled:,.0f})"
+                    " is within the cash buffer, so $0 is deployable into buys."
+                    " Lower --cash-buffer or free cash via the SELL reviews above to"
+                    " deploy."
+                )
+            else:
+                lines.append(
+                    f"  No off-watch BUY candidates fit the ${available:,.0f}"
+                    " deployable after the cash buffer this run."
+                )
             lines.append("")
         if _cands_in_flight:
             _if_syms = ", ".join(_display_ticker(i) for i in _cands_in_flight)
@@ -2178,7 +2242,14 @@ def format_report(
             and (i.action != "BUY" or i.is_watchlist)  # exclude unvetted candidates
         ]
         lines.append(
-            f"  Already-settled cash (spend now):            ${settled:>7,.0f}"
+            f"  Settled cash:                                ${settled:>7,.0f}"
+        )
+        if buffer_amt > 0:
+            lines.append(
+                f"  Cash buffer (held back, not for new buys):  -${buffer_amt:>7,.0f}"
+            )
+        lines.append(
+            f"  Deployable into new buys:                    ${available:>7,.0f}"
         )
 
         total_cost = 0.0
@@ -2348,7 +2419,11 @@ def format_report(
                 qty_note = (
                     ""
                     if i.suggested_quantity
-                    else "  [quantity unavailable — inspect before placing order]"
+                    else (
+                        "  [portfolio/cash not loaded — inspect before placing order]"
+                        if not portfolio_data_loaded
+                        else "  [quantity unavailable — inspect before placing order]"
+                    )
                 )
                 lines.append(
                     f"    → {i.action}  {_display_ticker(i)}{qty_str}{price_str}{cost_str}"
@@ -2511,11 +2586,16 @@ def format_json(
     *,
     freshness_summary: AnalysisFreshnessSummary | None = None,
     refresh_activity: RefreshActivity | None = None,
-    max_age_days: int = 14,
+    max_age_days: int = DEFAULT_MAX_AGE_DAYS,
     show_recommendations: bool = False,
     screening_freshness: ScreeningFreshnessSummary | None = None,
+    portfolio_data_loaded: bool = True,
 ) -> str:
-    """Format reconciliation results as JSON."""
+    """Format reconciliation results as JSON.
+
+    ``portfolio_data_loaded`` is False in read-only/offline runs (no IBKR
+    connection): account/cash/positions reflect an empty default, not live data.
+    """
     freshness_summary = freshness_summary or _refresh_service.classify(
         items,
         max_age_days=max_age_days,
@@ -2526,6 +2606,7 @@ def format_json(
     )
     data = {
         "timestamp": datetime.now().isoformat(),
+        "portfolio_data_loaded": portfolio_data_loaded,
         "portfolio": portfolio.model_dump(),
         "items": [item.model_dump() for item in items],
         "screening_freshness": {
@@ -2963,6 +3044,7 @@ def main() -> None:
             max_age_days=args.max_age,
             show_recommendations=show_recs,
             screening_freshness=screening_freshness,
+            portfolio_data_loaded=not args.read_only,
         )
     else:
         output = format_report(
@@ -2979,6 +3061,7 @@ def main() -> None:
             freshness_summary=freshness_summary,
             refresh_activity=refresh_activity,
             screening_freshness=screening_freshness,
+            portfolio_data_loaded=not args.read_only,
         )
 
     if args.output:

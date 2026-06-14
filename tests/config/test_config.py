@@ -233,8 +233,6 @@ class TestConfigDataclass:
         config = Config()
 
         assert config.max_debate_rounds == 2
-        assert config.max_risk_discuss_rounds == 1
-        assert config.max_daily_trades == 5
         assert isinstance(config.api_timeout, int)
         assert config.api_timeout > 0
         assert Settings.model_fields["api_retry_attempts"].default == 2
@@ -246,8 +244,8 @@ class TestConfigDataclass:
 
         config = Config()
 
-        assert config.max_position_size == 0.1
-        assert config.risk_free_rate == 0.03
+        assert isinstance(config.roic_hurdle_rate, float)
+        assert isinstance(config.langfuse_sample_rate, float)
 
     def test_config_boolean_case_insensitive(self):
         """Test that boolean parsing is case-insensitive."""
@@ -432,9 +430,7 @@ class TestPydanticSettingsValidation:
         """Test that non-float value for float field raises ValidationError."""
         from pydantic import ValidationError
 
-        with patch.dict(
-            os.environ, {"MAX_POSITION_SIZE": "invalid_float"}, clear=False
-        ):
+        with patch.dict(os.environ, {"ROIC_HURDLE_RATE": "invalid_float"}, clear=False):
             from src.config import Settings
 
             with pytest.raises(ValidationError) as exc_info:
@@ -442,7 +438,7 @@ class TestPydanticSettingsValidation:
 
             error_str = str(exc_info.value)
             assert (
-                "max_position_size" in error_str.lower()
+                "roic_hurdle_rate" in error_str.lower()
                 or "validation error" in error_str.lower()
             )
 
@@ -463,11 +459,11 @@ class TestPydanticSettingsValidation:
                 or "greater than" in error_str.lower()
             )
 
-    def test_position_size_exceeds_max_raises_validation_error(self):
+    def test_bounded_float_exceeds_max_raises_validation_error(self):
         """Test that position size > 1.0 violates le=1.0 constraint."""
         from pydantic import ValidationError
 
-        with patch.dict(os.environ, {"MAX_POSITION_SIZE": "1.5"}, clear=False):
+        with patch.dict(os.environ, {"ROIC_HURDLE_RATE": "1.5"}, clear=False):
             from src.config import Settings
 
             with pytest.raises(ValidationError) as exc_info:
@@ -475,15 +471,15 @@ class TestPydanticSettingsValidation:
 
             error_str = str(exc_info.value)
             assert (
-                "max_position_size" in error_str.lower()
+                "roic_hurdle_rate" in error_str.lower()
                 or "less than" in error_str.lower()
             )
 
-    def test_negative_position_size_raises_validation_error(self):
+    def test_negative_bounded_float_raises_validation_error(self):
         """Test that negative position size violates ge=0.0 constraint."""
         from pydantic import ValidationError
 
-        with patch.dict(os.environ, {"MAX_POSITION_SIZE": "-0.1"}, clear=False):
+        with patch.dict(os.environ, {"ROIC_HURDLE_RATE": "-0.1"}, clear=False):
             from src.config import Settings
 
             with pytest.raises(ValidationError) as exc_info:
@@ -491,7 +487,7 @@ class TestPydanticSettingsValidation:
 
             error_str = str(exc_info.value)
             assert (
-                "max_position_size" in error_str.lower()
+                "roic_hurdle_rate" in error_str.lower()
                 or "greater than" in error_str.lower()
             )
 
@@ -573,13 +569,25 @@ class TestBooleanParsing:
 class TestValidConstraintValues:
     """Test that valid edge-case values within constraints are accepted."""
 
-    def test_zero_debate_rounds_allowed(self):
-        """Test that zero debate rounds is allowed (ge=0)."""
+    @pytest.mark.parametrize("value, expected", [("1", 1), ("2", 2)])
+    def test_supported_debate_rounds_allowed(self, value, expected):
+        """The graph has R1 and optional R2, so only 1 or 2 are valid."""
         from src.config import Settings
 
-        with patch.dict(os.environ, {"MAX_DEBATE_ROUNDS": "0"}, clear=False):
+        with patch.dict(os.environ, {"MAX_DEBATE_ROUNDS": value}, clear=False):
             settings = Settings()
-            assert settings.max_debate_rounds == 0
+            assert settings.max_debate_rounds == expected
+
+    @pytest.mark.parametrize("value", ["0", "3"])
+    def test_unsupported_debate_rounds_rejected(self, value):
+        """Reject values the graph cannot faithfully execute."""
+        from pydantic import ValidationError
+
+        from src.config import Settings
+
+        with patch.dict(os.environ, {"MAX_DEBATE_ROUNDS": value}, clear=False):
+            with pytest.raises(ValidationError):
+                Settings()
 
     def test_minimum_timeout_allowed(self):
         """Test that timeout of 1 second is allowed (ge=1)."""
@@ -599,21 +607,21 @@ class TestValidConstraintValues:
             settings = Settings()
             assert settings.quick_llm_api_timeout_seconds == 1
 
-    def test_zero_position_size_allowed(self):
+    def test_zero_bounded_float_allowed(self):
         """Test that zero position size is allowed (ge=0.0)."""
         from src.config import Settings
 
-        with patch.dict(os.environ, {"MAX_POSITION_SIZE": "0.0"}, clear=False):
+        with patch.dict(os.environ, {"ROIC_HURDLE_RATE": "0.0"}, clear=False):
             settings = Settings()
-            assert settings.max_position_size == 0.0
+            assert settings.roic_hurdle_rate == 0.0
 
-    def test_max_position_size_allowed(self):
+    def test_max_bounded_float_allowed(self):
         """Test that position size of 1.0 is allowed (le=1.0)."""
         from src.config import Settings
 
-        with patch.dict(os.environ, {"MAX_POSITION_SIZE": "1.0"}, clear=False):
+        with patch.dict(os.environ, {"ROIC_HURDLE_RATE": "1.0"}, clear=False):
             settings = Settings()
-            assert settings.max_position_size == 1.0
+            assert settings.roic_hurdle_rate == 1.0
 
     def test_minimum_rpm_limit_allowed(self):
         """Test that RPM limit of 1 is allowed (ge=1)."""

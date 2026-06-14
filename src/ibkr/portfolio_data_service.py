@@ -8,6 +8,7 @@ from typing import Any
 from src.ibkr.client import IbkrClient
 from src.ibkr.models import NormalizedPosition, PortfolioSummary
 from src.ibkr.portfolio import read_portfolio, read_watchlist
+from src.ibkr.portfolio_defaults import DEFAULT_CASH_BUFFER_PCT
 from src.ibkr.types import ProgressCallback
 
 
@@ -71,7 +72,7 @@ class IbkrPortfolioDataService:
         self,
         *,
         account_id: str | None = None,
-        cash_buffer_pct: float = 0.05,
+        cash_buffer_pct: float = DEFAULT_CASH_BUFFER_PCT,
     ) -> list[NormalizedPosition]:
         return await asyncio.to_thread(
             self._fetch_holdings_sync,
@@ -83,7 +84,7 @@ class IbkrPortfolioDataService:
         self,
         *,
         account_id: str | None = None,
-        cash_buffer_pct: float = 0.05,
+        cash_buffer_pct: float = DEFAULT_CASH_BUFFER_PCT,
     ) -> PortfolioSummary:
         return await asyncio.to_thread(
             self._fetch_portfolio_summary_sync,
@@ -114,7 +115,7 @@ class IbkrPortfolioDataService:
         self,
         *,
         account_id: str | None = None,
-        cash_buffer_pct: float = 0.05,
+        cash_buffer_pct: float = DEFAULT_CASH_BUFFER_PCT,
     ) -> CashSnapshot:
         summary = await self.fetch_portfolio_summary(
             account_id=account_id,
