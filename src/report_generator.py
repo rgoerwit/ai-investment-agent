@@ -175,8 +175,8 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
             )
             from src.charts.extractors.valuation import (
                 calculate_valuation_targets,
-                extract_valuation_scenarios,
-                resolve_eps_ttm,
+                extract_valuation_scenarios_for_fundamentals,
+                scenario_valuation_caveat,
             )
             from src.charts.generators.football_field import generate_football_field
             from src.config import config
@@ -200,8 +200,9 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
             scenarios = None
             if valuation_params and fundamentals_report:
                 try:
-                    eps_ttm = resolve_eps_ttm(fundamentals_report)
-                    scenarios = extract_valuation_scenarios(valuation_params, eps_ttm)
+                    scenarios = extract_valuation_scenarios_for_fundamentals(
+                        valuation_params, fundamentals_report
+                    )
                 except Exception as exc:  # pragma: no cover — defense-in-depth
                     from src.error_safety import summarize_exception
 
@@ -240,6 +241,14 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
 
             # Limit to 2 warnings to prevent visual occlusion
             quality_warnings = quality_warnings[:2]
+            footnote_parts = []
+            if targets.methodology:
+                footnote_parts.append("Targets based on P/E normalization")
+            scenario_caveat = scenario_valuation_caveat(scenarios)
+            if scenarios and scenarios.normalization_required:
+                footnote_parts.append(f"Scenario EPS: {scenarios.earnings_basis}")
+            if scenario_caveat:
+                footnote_parts.append(scenario_caveat)
 
             football_data = FootballFieldData(
                 ticker=self.ticker,
@@ -252,15 +261,13 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
                 external_target_high=chart_data.external_target_high,
                 external_target_low=chart_data.external_target_low,
                 external_target_mean=chart_data.external_target_mean,
-                our_target_low=targets.low,
-                our_target_high=targets.high,
+                our_target_low=None if scenario_caveat else targets.low,
+                our_target_high=None if scenario_caveat else targets.high,
                 target_methodology=targets.methodology,
                 target_confidence=targets.confidence,
                 quality_warnings=quality_warnings if quality_warnings else None,
-                footnote="Targets based on P/E normalization"
-                if targets.methodology
-                else None,
-                scenarios=scenarios,
+                footnote=" | ".join(footnote_parts) if footnote_parts else None,
+                scenarios=None if scenario_caveat else scenarios,
             )
 
             # Store valuation context for article writer (D1 implementation)

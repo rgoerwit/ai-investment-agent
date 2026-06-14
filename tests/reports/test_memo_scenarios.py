@@ -113,6 +113,25 @@ def test_scenario_summary_derives_eps_when_field_absent() -> None:
     assert "Bear" in out and "Base" in out and "Bull" in out
 
 
+def test_scenario_summary_warns_when_valuation_is_conditional() -> None:
+    fundamentals = (
+        "#### CROSS-CHECK FLAGS\n"
+        "- [CYCLICAL PEAK — LOW P/E MAY BE PEAK-DISTORTED]: returns above history.\n"
+        "### --- START DATA_BLOCK ---\n"
+        "SECTOR: Industrials\n"
+        "PE_RATIO_TTM: 10.0\n"
+        "PE_RATIO_FORWARD: 8.0\n"
+        "CURRENT_PRICE: 100.00\n"
+        "### --- END DATA_BLOCK ---\n"
+    )
+    out = format_scenario_summary(
+        {"fundamentals_report": fundamentals, "valuation_params": _VALUATION_PARAMS}
+    )
+    assert out is not None
+    assert "Warning: peak/distorted earnings flagged" in out
+    assert "conditional, not normalized fair value" in out
+
+
 def test_scenario_summary_none_when_eps_unresolvable() -> None:
     """Without EPS_TTM AND without (CURRENT_PRICE + PE_RATIO_TTM) → fallback."""
     fundamentals_no_inputs = (

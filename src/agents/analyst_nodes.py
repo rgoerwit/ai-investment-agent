@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
@@ -9,6 +10,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.types import RunnableConfig
 
+from src.charts.extractors.valuation_signals import VALUATION_CONTEXT_TOKENS
 from src.config import config as settings_config
 from src.data_block_utils import (
     detect_legacy_data_block_shape,
@@ -84,6 +86,25 @@ _UNSPONSORED_ADR_MARKERS = (
     "unsponsored adr program",
     "multi unsponsored",
 )
+
+
+def _extract_valuation_context(report: str | None) -> str:
+    """Return compact valuation-relevant flags that sit outside DATA_BLOCK."""
+    if not report:
+        return "None"
+    lines: list[str] = []
+    for raw_line in report.splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if not line:
+            continue
+        upper = line.upper()
+        if any(keyword in upper for keyword in VALUATION_CONTEXT_TOKENS):
+            lines.append(line[:300])
+        if len(lines) >= 8:
+            break
+    return "\n".join(lines) if lines else "None"
+
+
 _SPONSORED_ADR_MARKERS = (
     "sponsorship level: sponsored",
     "sponsored level i adr",
@@ -865,10 +886,15 @@ def create_valuation_calculator_node(llm) -> Callable:
                 provider=support.infer_provider_name(llm),
             )
 
+        valuation_context = _extract_valuation_context(fundamentals_report)
+
         prompt = f"""{agent_prompt.system_message}
 
 TICKER: {ticker}
 COMPANY: {company_name}
+
+VALUATION_CONTEXT:
+{valuation_context}
 
 DATA_BLOCK:
 {data_block}

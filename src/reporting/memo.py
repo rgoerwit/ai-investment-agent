@@ -26,7 +26,10 @@ import structlog
 
 from src.agents.pm_verdict_metadata import canonicalize_pm_verdict
 from src.agents.support import extract_kill_criteria, get_bear_history
-from src.charts.extractors.valuation import extract_valuation_scenarios, resolve_eps_ttm
+from src.charts.extractors.valuation import (
+    extract_valuation_scenarios_for_fundamentals,
+    scenario_valuation_caveat,
+)
 from src.data_block_utils import extract_data_block_field
 from src.reporting.source_confidence import (
     SourceRow,
@@ -208,9 +211,10 @@ def format_scenario_summary(state: dict) -> str | None:
         return None
 
     fundamentals = get_fundamentals_report(state)
-    eps_ttm = resolve_eps_ttm(fundamentals)
 
-    scenarios = extract_valuation_scenarios(valuation_params, eps_ttm)
+    scenarios = extract_valuation_scenarios_for_fundamentals(
+        valuation_params, fundamentals
+    )
     if scenarios is None:
         return None
 
@@ -220,12 +224,21 @@ def format_scenario_summary(state: dict) -> str | None:
     def _fmt(value: float) -> str:
         return f"{prefix}{value:,.2f}"
 
+    caveat = scenario_valuation_caveat(scenarios)
+    warning = (
+        " Warning: peak/distorted earnings flagged; weighted IV is conditional, "
+        "not normalized fair value."
+        if caveat
+        else ""
+    )
+
     return (
         f"Bear {_fmt(scenarios.bear_iv)} ({scenarios.bear.probability:.0f}%) / "
         f"Base {_fmt(scenarios.base_iv)} ({scenarios.base.probability:.0f}%) / "
         f"Bull {_fmt(scenarios.bull_iv)} ({scenarios.bull.probability:.0f}%); "
         f"weighted {_fmt(scenarios.weighted_iv)} "
-        f"({scenarios.methodology}, sufficiency {scenarios.data_sufficiency})."
+        f"({scenarios.methodology}, sufficiency {scenarios.data_sufficiency}; "
+        f"earnings basis {scenarios.earnings_basis}).{warning}"
     )
 
 

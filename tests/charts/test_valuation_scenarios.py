@@ -57,13 +57,15 @@ def test_valuation_calculator_prompt_extended() -> None:
     data = json.loads(
         pathlib.Path("prompts/valuation_calculator.json").read_text(encoding="utf-8")
     )
-    assert data["version"] == "1.3"
+    assert data["version"] == "1.4"
     msg = data["system_message"]
     assert "VALUATION_SCENARIOS" in msg
+    assert "VALUATION_CONTEXT" in msg
     assert "BEAR_MULTIPLE" in msg
     assert "BULL_PROBABILITY" in msg
     assert "DATA_SUFFICIENCY" in msg
     assert "DO NOT COMPUTE IVs" in msg
+    assert "Respect earnings-quality flags" in msg
     # Original VALUATION_PARAMS contract preserved.
     assert "VALUATION_PARAMS" in msg
     assert "DO NOT CALCULATE" in msg

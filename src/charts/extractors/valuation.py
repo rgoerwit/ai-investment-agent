@@ -11,7 +11,17 @@ from dataclasses import dataclass
 
 import structlog
 
-from src.data_block_utils import extract_last_fenced_block
+from src.charts.extractors.valuation_signals import (
+    VALUATION_NORMALIZE_TOKENS,
+    VALUATION_PEAK_TOKENS,
+    has_valuation_signal,
+)
+from src.data_block_utils import (
+    extract_data_block_field as _extract_data_block_field,
+)
+from src.data_block_utils import (
+    extract_last_fenced_block,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -307,9 +317,6 @@ def extract_valuation_targets(research_manager_report: str) -> ValuationTargets:
 # ---------------------------------------------------------------------------
 
 
-from src.data_block_utils import extract_data_block_field as _extract_data_block_field
-
-
 def _try_float(raw: str | None) -> float | None:
     if not raw:
         return None
@@ -317,6 +324,16 @@ def _try_float(raw: str | None) -> float | None:
         return float(str(raw).replace(",", "").strip())
     except (TypeError, ValueError):
         return None
+
+
+@dataclass(frozen=True)
+class EarningsBase:
+    """EPS baseline used for scenario valuation, with disclosure metadata."""
+
+    eps: float
+    basis: str
+    normalized: bool = False
+    normalization_required: bool = False
 
 
 def resolve_eps_ttm(fundamentals: str | None) -> float | None:
@@ -343,6 +360,65 @@ def resolve_eps_ttm(fundamentals: str | None) -> float | None:
     pe = _try_float(_extract_data_block_field(fundamentals, "PE_RATIO_TTM"))
     if price and pe and price > 0 and pe > 0:
         return round(price / pe, 4)
+    return None
+
+
+def _resolve_forward_eps(fundamentals: str) -> tuple[float, str] | None:
+    direct = _try_float(
+        _extract_data_block_field(fundamentals, "FORWARD_EPS")
+    ) or _try_float(_extract_data_block_field(fundamentals, "EPS_FORWARD"))
+    if direct and direct > 0:
+        return direct, "forward EPS"
+
+    price = _try_float(_extract_data_block_field(fundamentals, "CURRENT_PRICE"))
+    forward_pe = _try_float(
+        _extract_data_block_field(fundamentals, "PE_RATIO_FORWARD")
+    ) or _try_float(_extract_data_block_field(fundamentals, "FORWARD_PE"))
+    if price and forward_pe and price > 0 and forward_pe > 0:
+        return round(
+            price / forward_pe, 4
+        ), "forward EPS from CURRENT_PRICE / PE_RATIO_FORWARD"
+    return None
+
+
+def resolve_scenario_earnings_base(fundamentals: str | None) -> EarningsBase | None:
+    """Return the EPS baseline to use for scenario IVs.
+
+    When the report flags one-off or peak earnings, prefer a lower forward EPS
+    baseline if available. If no defensible normalized baseline is available,
+    keep trailing EPS but mark the scenario IV as conditional so downstream
+    text does not present it as clean normalized fair value.
+    """
+    if not fundamentals:
+        return None
+
+    eps_ttm = resolve_eps_ttm(fundamentals)
+    normalize_required = has_valuation_signal(fundamentals, VALUATION_NORMALIZE_TOKENS)
+    peak_required = has_valuation_signal(fundamentals, VALUATION_PEAK_TOKENS)
+    normalization_required = normalize_required or peak_required
+
+    if normalization_required:
+        forward = _resolve_forward_eps(fundamentals)
+        if forward:
+            forward_eps, basis = forward
+            if eps_ttm is None or forward_eps < eps_ttm:
+                return EarningsBase(
+                    eps=forward_eps,
+                    basis=basis,
+                    normalized=True,
+                    normalization_required=True,
+                )
+        if eps_ttm and eps_ttm > 0:
+            return EarningsBase(
+                eps=eps_ttm,
+                basis="TTM EPS; normalization flagged but no lower forward EPS available",
+                normalized=False,
+                normalization_required=True,
+            )
+        return None
+
+    if eps_ttm and eps_ttm > 0:
+        return EarningsBase(eps=eps_ttm, basis="TTM EPS")
     return None
 
 
@@ -374,6 +450,9 @@ class ValuationScenarios:
     base_iv: float
     bull_iv: float
     weighted_iv: float
+    earnings_basis: str = "TTM EPS"
+    normalized_earnings: bool = False
+    normalization_required: bool = False
 
 
 def _scenario_iv(eps_ttm: float, scenario: ScenarioAssumption) -> float:
@@ -420,6 +499,10 @@ def _parse_scenario(block: str, label: str) -> ScenarioAssumption | None:
 def extract_valuation_scenarios(
     valuation_params_report: str,
     eps_ttm: float | None,
+    *,
+    earnings_basis: str | None = None,
+    normalized_earnings: bool = False,
+    normalization_required: bool = False,
 ) -> ValuationScenarios | None:
     """Parse VALUATION_SCENARIOS and compute IVs in Python.
 
@@ -508,4 +591,38 @@ def extract_valuation_scenarios(
         base_iv=base_iv,
         bull_iv=bull_iv,
         weighted_iv=weighted_iv,
+        earnings_basis=earnings_basis or "TTM EPS",
+        normalized_earnings=normalized_earnings,
+        normalization_required=normalization_required,
     )
+
+
+def extract_valuation_scenarios_for_fundamentals(
+    valuation_params_report: str,
+    fundamentals: str | None,
+) -> ValuationScenarios | None:
+    """Parse scenario IVs using the best EPS baseline available in fundamentals."""
+    earnings_base = resolve_scenario_earnings_base(fundamentals)
+    return extract_valuation_scenarios(
+        valuation_params_report,
+        earnings_base.eps if earnings_base else None,
+        earnings_basis=earnings_base.basis if earnings_base else None,
+        normalized_earnings=earnings_base.normalized if earnings_base else False,
+        normalization_required=(
+            earnings_base.normalization_required if earnings_base else False
+        ),
+    )
+
+
+def scenario_valuation_caveat(scenarios: object | None) -> str | None:
+    """Return a disclosure string for unresolved peak/distorted EPS scenarios."""
+    if not scenarios:
+        return None
+    if bool(getattr(scenarios, "normalization_required", False)) and not bool(
+        getattr(scenarios, "normalized_earnings", False)
+    ):
+        return (
+            "Scenario valuation suppressed: peak/distorted earnings were flagged, "
+            "but no lower normalized EPS baseline was available."
+        )
+    return None

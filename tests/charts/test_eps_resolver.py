@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import pytest
 
-from src.charts.extractors.valuation import resolve_eps_ttm
+from src.charts.extractors.valuation import (
+    resolve_eps_ttm,
+    resolve_scenario_earnings_base,
+)
 
 
 def _data_block(**fields: str) -> str:
@@ -85,3 +88,72 @@ def test_handles_commas_in_numerics() -> None:
 def test_empty_or_none_inputs_return_none() -> None:
     assert resolve_eps_ttm("") is None
     assert resolve_eps_ttm(None) is None
+
+
+def test_scenario_earnings_base_uses_lower_forward_eps_when_normalization_flagged() -> (
+    None
+):
+    fundamentals = (
+        "#### CROSS-CHECK FLAGS\n"
+        "- [NORMALIZE EARNINGS — RECURRING PROFIT LOWER THAN REPORTED]: one-time gains.\n"
+        "### --- START DATA_BLOCK ---\n"
+        "CURRENT_PRICE: 3950.00\n"
+        "PE_RATIO_TTM: 6.13\n"
+        "PE_RATIO_FORWARD: 12.08\n"
+        "### --- END DATA_BLOCK ---\n"
+    )
+    base = resolve_scenario_earnings_base(fundamentals)
+    assert base is not None
+    assert base.normalization_required is True
+    assert base.normalized is True
+    assert base.eps == 326.9868
+    assert "forward EPS" in base.basis
+
+
+def test_scenario_earnings_base_uses_shared_one_off_signal() -> None:
+    fundamentals = (
+        "#### CROSS-CHECK FLAGS\n"
+        "- [ONE-OFF]: asset sale inflated current-year earnings.\n"
+        "### --- START DATA_BLOCK ---\n"
+        "CURRENT_PRICE: 100.00\n"
+        "PE_RATIO_TTM: 10.0\n"
+        "PE_RATIO_FORWARD: 20.0\n"
+        "### --- END DATA_BLOCK ---\n"
+    )
+    base = resolve_scenario_earnings_base(fundamentals)
+    assert base is not None
+    assert base.normalization_required is True
+    assert base.normalized is True
+    assert base.eps == 5.0
+
+
+def test_scenario_earnings_base_does_not_use_higher_forward_eps_as_normalized() -> None:
+    fundamentals = (
+        "#### CROSS-CHECK FLAGS\n"
+        "- [CYCLICAL PEAK — LOW P/E MAY BE PEAK-DISTORTED]: returns above history.\n"
+        "### --- START DATA_BLOCK ---\n"
+        "CURRENT_PRICE: 2473.00\n"
+        "PE_RATIO_TTM: 11.93\n"
+        "PE_RATIO_FORWARD: 8.39\n"
+        "### --- END DATA_BLOCK ---\n"
+    )
+    base = resolve_scenario_earnings_base(fundamentals)
+    assert base is not None
+    assert base.normalization_required is True
+    assert base.normalized is False
+    assert base.eps == 207.2925
+    assert "no lower forward EPS available" in base.basis
+
+
+def test_scenario_earnings_base_ignores_forward_eps_without_distortion_flag() -> None:
+    fundamentals = _data_block(
+        CURRENT_PRICE="100.00",
+        PE_RATIO_TTM="10.0",
+        PE_RATIO_FORWARD="20.0",
+    )
+    base = resolve_scenario_earnings_base(fundamentals)
+    assert base is not None
+    assert base.normalization_required is False
+    assert base.normalized is False
+    assert base.eps == 10.0
+    assert base.basis == "TTM EPS"

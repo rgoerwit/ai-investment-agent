@@ -302,8 +302,8 @@ def _generate_football_field(
     from src.charts.base import FootballFieldData
     from src.charts.extractors.valuation import (
         calculate_valuation_targets,
-        extract_valuation_scenarios,
-        resolve_eps_ttm,
+        extract_valuation_scenarios_for_fundamentals,
+        scenario_valuation_caveat,
     )
     from src.charts.generators.football_field import generate_football_field
 
@@ -324,8 +324,9 @@ def _generate_football_field(
     scenarios = None
     if valuation_params and fundamentals_raw:
         try:
-            eps_ttm = resolve_eps_ttm(fundamentals_raw)
-            scenarios = extract_valuation_scenarios(valuation_params, eps_ttm)
+            scenarios = extract_valuation_scenarios_for_fundamentals(
+                valuation_params, fundamentals_raw
+            )
         except Exception as exc:  # pragma: no cover — defense-in-depth
             from src.error_safety import summarize_exception
 
@@ -356,6 +357,13 @@ def _generate_football_field(
         our_target_low = None
         our_target_high = None
 
+    scenario_caveat = scenario_valuation_caveat(scenarios)
+    chart_scenarios = scenarios
+    if scenario_caveat:
+        our_target_low = None
+        our_target_high = None
+        chart_scenarios = None
+
     # Extract quality warnings from red flags
     quality_warnings = []
     red_flags = state.get("red_flags", [])
@@ -370,6 +378,10 @@ def _generate_football_field(
     footnote_parts = []
     if targets.methodology:
         footnote_parts.append(targets.methodology)
+    if scenarios and scenarios.normalization_required:
+        footnote_parts.append(f"Scenario EPS: {scenarios.earnings_basis}")
+    if scenario_caveat:
+        footnote_parts.append(scenario_caveat)
     if pm_block.valuation_discount and pm_block.valuation_discount < 1.0:
         footnote_parts.append(
             f"Risk-adjusted ({pm_block.zone or 'N/A'} zone, {pm_block.valuation_discount:.0%} discount)"
@@ -400,7 +412,7 @@ def _generate_football_field(
         target_confidence=targets.confidence,
         quality_warnings=quality_warnings if quality_warnings else None,
         footnote=" | ".join(footnote_parts) if footnote_parts else None,
-        scenarios=scenarios,
+        scenarios=chart_scenarios,
     )
 
     return generate_football_field(football_data, chart_config)

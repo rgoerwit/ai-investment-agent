@@ -89,6 +89,101 @@ class TestAnalystNode:
         assert result["sender"] == "market_analyst"
 
     @pytest.mark.asyncio
+    async def test_valuation_calculator_receives_cross_check_context(self):
+        """Valuation node must see earnings-quality flags outside DATA_BLOCK."""
+        from src.agents import create_valuation_calculator_node
+
+        mock_llm = MagicMock()
+        captured_inputs = []
+        mock_response = SimpleNamespace(
+            content=(
+                "### --- START VALUATION_PARAMS ---\n"
+                "METHOD: P/E_NORMALIZATION\n"
+                "CURRENT_PRICE: 100.00\n"
+                "CONFIDENCE: HIGH\n"
+                "### --- END VALUATION_PARAMS ---"
+            ),
+            tool_calls=None,
+        )
+
+        async def _capture_invoke(_runnable, input_data, **_kwargs):
+            captured_inputs.append(input_data)
+            return mock_response
+
+        fundamentals_report = (
+            "#### CROSS-CHECK FLAGS\n"
+            "- [NORMALIZE EARNINGS — RECURRING PROFIT LOWER THAN REPORTED]: one-time gains.\n"
+            "### --- START DATA_BLOCK ---\n"
+            "SECTOR: Industrials\n"
+            "PE_RATIO_TTM: 6.13\n"
+            "PE_RATIO_FORWARD: 12.08\n"
+            "CURRENT_PRICE: 3950.00\n"
+            "### --- END DATA_BLOCK ---\n"
+        )
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling",
+            new=AsyncMock(side_effect=_capture_invoke),
+        ):
+            node = create_valuation_calculator_node(mock_llm)
+            result = await node(
+                {
+                    "company_of_interest": "1964.T",
+                    "company_name": "Chugai Ro",
+                    "fundamentals_report": fundamentals_report,
+                },
+                {},
+            )
+
+        assert result["valuation_params"]
+        prompt = captured_inputs[0][0].content
+        assert "VALUATION_CONTEXT:" in prompt
+        assert "NORMALIZE EARNINGS" in prompt
+        assert "DATA_BLOCK:" in prompt
+        assert "PE_RATIO_FORWARD: 12.08" in prompt
+
+    @pytest.mark.asyncio
+    async def test_valuation_calculator_context_uses_shared_one_off_signal(self):
+        """Context extraction must stay aligned with EPS normalization tokens."""
+        from src.agents import create_valuation_calculator_node
+
+        mock_llm = MagicMock()
+        captured_inputs = []
+        mock_response = SimpleNamespace(content="ok", tool_calls=None)
+
+        async def _capture_invoke(_runnable, input_data, **_kwargs):
+            captured_inputs.append(input_data)
+            return mock_response
+
+        fundamentals_report = (
+            "#### CROSS-CHECK FLAGS\n"
+            "- [ONE-OFF]: asset sale inflated current-year earnings.\n"
+            "### --- START DATA_BLOCK ---\n"
+            "CURRENT_PRICE: 100.00\n"
+            "PE_RATIO_TTM: 10.0\n"
+            "PE_RATIO_FORWARD: 20.0\n"
+            "### --- END DATA_BLOCK ---\n"
+        )
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling",
+            new=AsyncMock(side_effect=_capture_invoke),
+        ):
+            node = create_valuation_calculator_node(mock_llm)
+            await node(
+                {
+                    "company_of_interest": "TEST",
+                    "company_name": "Test Co",
+                    "fundamentals_report": fundamentals_report,
+                },
+                {},
+            )
+
+        prompt = captured_inputs[0][0].content
+        assert "VALUATION_CONTEXT:" in prompt
+        assert "ONE-OFF" in prompt
+
+    @pytest.mark.asyncio
     async def test_fundamentals_analyst_caps_news_highlights_in_context(self):
         """Senior fundamentals should request a bounded news highlight payload."""
         from src.agents import create_analyst_node

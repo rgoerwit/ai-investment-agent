@@ -45,15 +45,15 @@ _VAL_PARAMS_NO_SCENARIOS = (
 def _build_valuation_section(valuation_params: str, fundamentals: str) -> str:
     """Reproduce the PM-node logic from src/agents/decision_nodes.py."""
     from src.charts.extractors.valuation import (
-        extract_valuation_scenarios,
-        resolve_eps_ttm,
+        extract_valuation_scenarios_for_fundamentals,
     )
     from src.data_block_utils import extract_data_block_field
 
     if not (valuation_params and fundamentals):
         return ""
-    eps_ttm = resolve_eps_ttm(fundamentals)
-    scenarios = extract_valuation_scenarios(valuation_params, eps_ttm)
+    scenarios = extract_valuation_scenarios_for_fundamentals(
+        valuation_params, fundamentals
+    )
     if scenarios is None:
         return ""
     current_price = float(extract_data_block_field(fundamentals, "CURRENT_PRICE") or 0)
@@ -70,6 +70,7 @@ def _build_valuation_section(valuation_params: str, fundamentals: str) -> str:
     return (
         "\n\nVALUATION SCENARIOS (Python-computed IVs from "
         f"{scenarios.methodology}; sufficiency {scenarios.data_sufficiency}; "
+        f"earnings basis {scenarios.earnings_basis}; "
         "anchor stop-loss to BEAR_IV, reference WEIGHTED_IV in rationale):\n"
         f"- BEAR_IV: {scenarios.bear_iv} "
         f"({scenarios.bear.probability:.0f}%) — {scenarios.bear.drivers}\n"
@@ -80,6 +81,13 @@ def _build_valuation_section(valuation_params: str, fundamentals: str) -> str:
         f"- WEIGHTED_IV: {scenarios.weighted_iv}, implied upside "
         f"{weighted_upside * 100:.1f}% vs current price {current_price:.2f}, "
         f"downside probability {downside_probability:.0f}%"
+        + (
+            "\n- NORMALIZATION WARNING: Earnings normalization was flagged, but no "
+            "lower forward EPS baseline was available; treat WEIGHTED_IV as "
+            "conditional, not normalized fair value."
+            if scenarios.normalization_required and not scenarios.normalized_earnings
+            else ""
+        )
     )
 
 
@@ -124,3 +132,38 @@ def test_valuation_section_includes_drivers_as_rationale_anchors() -> None:
     # Each scenario row carries probability% AND driver text.
     pattern = re.compile(r"BEAR_IV: \S+ \(30%\) — Cyclical trough")
     assert pattern.search(section), section
+
+
+def test_valuation_section_discloses_normalized_forward_eps_basis() -> None:
+    fundamentals = (
+        "#### CROSS-CHECK FLAGS\n"
+        "- [NORMALIZE EARNINGS — RECURRING PROFIT LOWER THAN REPORTED]: one-time gains.\n"
+        "### --- START DATA_BLOCK ---\n"
+        "SECTOR: Industrials\n"
+        "PE_RATIO_TTM: 6.13\n"
+        "PE_RATIO_FORWARD: 12.08\n"
+        "CURRENT_PRICE: 3950.00\n"
+        "### --- END DATA_BLOCK ---\n"
+    )
+    section = _build_valuation_section(_VAL_PARAMS_WITH_SCENARIOS, fundamentals)
+    assert "earnings basis forward EPS from CURRENT_PRICE / PE_RATIO_FORWARD" in section
+    assert "NORMALIZATION WARNING" not in section
+
+
+def test_valuation_section_warns_when_normalization_flag_has_no_lower_forward_eps() -> (
+    None
+):
+    fundamentals = (
+        "#### CROSS-CHECK FLAGS\n"
+        "- [CYCLICAL PEAK — LOW P/E MAY BE PEAK-DISTORTED]: returns above history.\n"
+        "### --- START DATA_BLOCK ---\n"
+        "SECTOR: Industrials\n"
+        "PE_RATIO_TTM: 11.93\n"
+        "PE_RATIO_FORWARD: 8.39\n"
+        "CURRENT_PRICE: 2473.00\n"
+        "### --- END DATA_BLOCK ---\n"
+    )
+    section = _build_valuation_section(_VAL_PARAMS_WITH_SCENARIOS, fundamentals)
+    assert "no lower forward EPS available" in section
+    assert "NORMALIZATION WARNING" in section
+    assert "conditional, not normalized fair value" in section

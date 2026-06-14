@@ -8,6 +8,7 @@ import structlog
 from langchain_core.messages import HumanMessage
 from langgraph.types import RunnableConfig
 
+from src.agents.context_flags import format_pm_context_flags
 from src.agents.pm_inputs import (
     DIRECT_PM_INPUT_FIELDS,
     RISK_DEBATE_FIELD,
@@ -814,16 +815,16 @@ NEUTRAL ANALYST (Balanced):
         # WEIGHTED_IV; that hint is only useful if PM actually sees the
         # values, which is exactly what this section provides.
         from src.charts.extractors.valuation import (
-            extract_valuation_scenarios,
-            resolve_eps_ttm,
+            extract_valuation_scenarios_for_fundamentals,
         )
 
         valuation_params = get_valid_artifact_content(state, "valuation_params")
         scenarios = None
         if valuation_params and fundamentals:
-            eps_ttm = resolve_eps_ttm(fundamentals)
             try:
-                scenarios = extract_valuation_scenarios(valuation_params, eps_ttm)
+                scenarios = extract_valuation_scenarios_for_fundamentals(
+                    valuation_params, fundamentals
+                )
             except Exception as exc:  # pragma: no cover — defense-in-depth
                 logger.warning(
                     "pm_scenario_extraction_failed",
@@ -858,6 +859,7 @@ NEUTRAL ANALYST (Balanced):
             valuation_section = (
                 "\n\nVALUATION SCENARIOS (Python-computed IVs from "
                 f"{scenarios.methodology}; sufficiency {scenarios.data_sufficiency}; "
+                f"earnings basis {scenarios.earnings_basis}; "
                 "anchor stop-loss to BEAR_IV, reference WEIGHTED_IV in rationale):\n"
                 f"- BEAR_IV: {scenarios.bear_iv} "
                 f"({scenarios.bear.probability:.0f}%) — {scenarios.bear.drivers}\n"
@@ -868,8 +870,24 @@ NEUTRAL ANALYST (Balanced):
                 f"- WEIGHTED_IV: {scenarios.weighted_iv}{weighted_upside_text}"
                 f"{downside_probability_text}"
             )
+            if scenarios.normalization_required and not scenarios.normalized_earnings:
+                valuation_section += (
+                    "\n- NORMALIZATION WARNING: Earnings normalization was flagged, "
+                    "but no lower forward EPS baseline was available; treat "
+                    "WEIGHTED_IV as conditional, not normalized fair value."
+                )
         else:
             valuation_section = ""
+
+        supplemental_flags_section = format_pm_context_flags(
+            fundamentals,
+            market,
+            news,
+            foreign_language,
+            inv_plan,
+            apac,
+            consultant,
+        )
 
         red_flag_section = (
             "\n\nRED-FLAG PRE-SCREENING:\n"
@@ -905,7 +923,7 @@ VALUE TRAP ANALYSIS:
 {support.extract_value_trap_verdict(value_trap)}{support.summarize_for_pm(value_trap, "value_trap", 2500) if value_trap else "N/A"}{red_flag_section}{macro_section}
 
 RESEARCH MANAGER RECOMMENDATION:
-{support.summarize_for_pm(inv_plan, "research", 3000) if inv_plan else "N/A"}{apac_section}{consultant_section}{kill_criteria_section}{valuation_section}
+{support.summarize_for_pm(inv_plan, "research", 3000) if inv_plan else "N/A"}{apac_section}{consultant_section}{kill_criteria_section}{valuation_section}{supplemental_flags_section}
 
 TRADER PROPOSAL:
 {support.summarize_for_pm(trader, "trader", 2000) if trader else "N/A"}
