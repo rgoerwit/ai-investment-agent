@@ -17,6 +17,7 @@ from src.validators.supplemental_flags import (
     detect_consultant_flags,
     detect_legal_flags,
     detect_moat_flags,
+    detect_shareholder_return_execution_flags,
     detect_value_trap_flags,
 )
 
@@ -38,6 +39,9 @@ class RedFlagDetector:
         extract_capital_efficiency_signals
     )
     detect_capital_efficiency_flags = staticmethod(detect_capital_efficiency_flags)
+    detect_shareholder_return_execution_flags = staticmethod(
+        detect_shareholder_return_execution_flags
+    )
     parse_consultant_conditions = staticmethod(parse_consultant_conditions)
     detect_consultant_flags = staticmethod(detect_consultant_flags)
 

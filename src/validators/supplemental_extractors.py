@@ -407,6 +407,26 @@ def extract_capital_efficiency_signals(fundamentals_report: str) -> dict[str, An
         if value != "N/A":
             signals["capital_plan_status"] = value
 
+    plan_strength_match = re.search(
+        r"VALUE_UP_PLAN_STRENGTH:\s*(STRONG|MODERATE|WEAK|NONE|UNKNOWN|N/A)",
+        data_block,
+        re.IGNORECASE,
+    )
+    if plan_strength_match:
+        value = plan_strength_match.group(1).upper()
+        if value != "N/A":
+            signals["value_up_plan_strength"] = value
+
+    execution_match = re.search(
+        r"SHAREHOLDER_RETURN_EXECUTION:\s*(PROVEN|PARTIAL|ANNOUNCED_ONLY|NONE|UNKNOWN|N/A)",
+        data_block,
+        re.IGNORECASE,
+    )
+    if execution_match:
+        value = execution_match.group(1).upper()
+        if value != "N/A":
+            signals["shareholder_return_execution"] = value
+
     return signals
 
 

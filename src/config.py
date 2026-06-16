@@ -743,6 +743,18 @@ class Settings(BaseSettings):
         description="Path to the SQLite database for MCP usage tracking",
     )
 
+    # --- Optional IBKR market-data source (analysis pipeline) ---
+    ibkr_data_source_enabled: bool = Field(
+        default=False,
+        validation_alias="IBKR_DATA_SOURCE_ENABLED",
+        description=(
+            "Opt in to using the IBKR market-data snapshot as an advisory source in the "
+            "analysis data merge (requires IBKR creds). Supplies point-in-time ratios + "
+            "price only; overrides Yahoo/FMP but defers to EODHD/filings. Default off so "
+            "non-IBKR users and latency-sensitive batches are unaffected."
+        ),
+    )
+
     # --- Telemetry & System Overrides ---
     # These settings are exported to os.environ for third-party libraries
     # that read directly from environment variables (ChromaDB, gRPC).

@@ -11,6 +11,7 @@ from langgraph.types import RunnableConfig
 from src.error_safety import summarize_exception
 from src.runtime_diagnostics import failure_artifact, success_artifact
 from src.tooling.text_boundary import format_untrusted_block
+from src.validators.supplemental_extractors import extract_capital_efficiency_signals
 
 from . import message_utils, support
 from . import runtime as agent_runtime
@@ -32,6 +33,24 @@ def _clip(value: object, limit: int) -> str:
     return text[:limit] + "\n[...truncated]"
 
 
+def _shareholder_return_signal(state: AgentState) -> str:
+    """Surface the Value-Up plan-strength + execution markers verbatim.
+
+    Senior Fundamentals promotes ``VALUE_UP_PLAN_STRENGTH`` and
+    ``SHAREHOLDER_RETURN_EXECUTION`` into the DATA_BLOCK, but those lines can be
+    clipped out of the larger ``fundamentals_report`` / ``foreign_language_report``
+    payload slices. The APAC specialist needs them intact to adjudicate
+    ``VALUE_UP_EXECUTION_CREDIT``, so pass them as a dedicated short key.
+    """
+    signals = extract_capital_efficiency_signals(state.get("fundamentals_report") or "")
+    strength = signals.get("value_up_plan_strength") or "UNKNOWN"
+    execution = signals.get("shareholder_return_execution") or "UNKNOWN"
+    return (
+        f"VALUE_UP_PLAN_STRENGTH: {strength}\n"
+        f"SHAREHOLDER_RETURN_EXECUTION: {execution}"
+    )
+
+
 def build_apac_specialist_payload(state: AgentState) -> dict[str, str]:
     """Build the allowlisted dossier sent to the APAC specialist."""
     return {
@@ -46,6 +65,7 @@ def build_apac_specialist_payload(state: AgentState) -> dict[str, str]:
         "fundamentals_report": _clip(state.get("fundamentals_report"), 5000),
         "foreign_language_report": _clip(state.get("foreign_language_report"), 3000),
         "value_trap_report": _clip(state.get("value_trap_report"), 2500),
+        "shareholder_return_signal": _shareholder_return_signal(state),
         "news_report": _clip(state.get("news_report"), 2000),
         "sentiment_report": _clip(state.get("sentiment_report"), 1200),
         "red_flags": _clip(state.get("red_flags"), 1800),

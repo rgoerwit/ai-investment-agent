@@ -71,6 +71,10 @@ SOURCE_QUALITY = {
     "yfinance_statements": 10,
     "calculated_from_statements": 10,
     "eodhd": 9.5,
+    # Exchange-direct IBKR snapshot: more reliable than the Yahoo/FMP point-in-time
+    # values, so it overrides them — but stays below the paid EODHD feed and the
+    # filing-derived statements (10), which it never supplies. Gated on opt-in + creds.
+    "ibkr": 9.4,
     "yfinance": 9,
     "yfinance_info": 9,
     "alpha_vantage": 9,
@@ -184,7 +188,9 @@ def smart_merge_with_quality(
     sources_used: set[str] = set()
     gaps_filled = 0
 
-    source_order = ["yahooquery", "fmp", "alpha_vantage", "eodhd", "yfinance"]
+    # IBKR is processed last (its quality, not its position, governs overrides) so any
+    # >20% IBKR-vs-best-other-source disagreement is captured in source_conflicts.
+    source_order = ["yahooquery", "fmp", "alpha_vantage", "eodhd", "yfinance", "ibkr"]
     for source_name in source_order:
         source_data = source_results.get(source_name)
         if not source_data:
@@ -342,6 +348,28 @@ def smart_merge_with_quality(
         gaps_filled=gaps_filled,
     )
     return merged, metadata
+
+
+def collect_ibkr_advisory_conflicts(merged: dict[str, Any]) -> None:
+    """Surface IBKR-party source conflicts as a flat advisory list (mutates ``merged``).
+
+    Reuses the merge's already-normalized ``_source_conflicts`` (scaling/percent handled)
+    rather than re-comparing — any conflict where IBKR is a party is copied into
+    ``merged['_ibkr_advisory_conflicts']`` with ``advisory=True``, so the analyst sees a
+    cross-check whenever the exchange-direct IBKR value differs substantially (>20%) from
+    the best other source. Never mutates a merged winner.
+    """
+    conflicts = merged.get("_source_conflicts")
+    if not isinstance(conflicts, dict):
+        return
+    advisory = [
+        {"field": field, "advisory": True, **value}
+        for field, value in conflicts.items()
+        if isinstance(value, dict)
+        and "ibkr" in (value.get("new_source"), value.get("old_source"))
+    ]
+    if advisory:
+        merged["_ibkr_advisory_conflicts"] = advisory
 
 
 def quarantine_forward_pe_outlier(

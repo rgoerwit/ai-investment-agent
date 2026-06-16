@@ -72,8 +72,8 @@ async def fetch_yfinance_enhanced(fetcher: Any, symbol: str) -> dict | None:
             ratio = abs(fcf_ttm / fcf_stmt)
             if ratio > 1.5 or ratio < 0.67:
                 info["fcf_data_note"] = (
-                    f"FCF DATA QUALITY UNCERTAIN: TTM ({fcf_ttm/1e9:.2f}B) vs "
-                    f"statement ({fcf_stmt/1e9:.2f}B) = {ratio:.1f}x divergence"
+                    f"FCF DATA QUALITY UNCERTAIN: TTM ({fcf_ttm / 1e9:.2f}B) vs "
+                    f"statement ({fcf_stmt / 1e9:.2f}B) = {ratio:.1f}x divergence"
                 )
 
         for key, value in statement_data.items():
@@ -257,6 +257,15 @@ async def fetch_all_sources_parallel(
         "eodhd": lambda: fetcher._fetch_eodhd_fallback(symbol),
         "alpha_vantage": lambda: fetcher._fetch_av_fallback(symbol),
     }
+    # Optional advisory source — registered ONLY when opted in, so the default pipeline
+    # (including the source-outcome classification below) is byte-for-byte unchanged and
+    # nothing depends on IBKR being present. Already async (probe_security owns its
+    # to_thread), so call it directly. Still a no-op unless IBKR is configured and the
+    # identity probe resolves VERIFIED with at least one usable field.
+    from src.config import config as _runtime_config
+
+    if getattr(_runtime_config, "ibkr_data_source_enabled", False):
+        builders["ibkr"] = lambda: fetcher._fetch_ibkr_fallback(symbol)
 
     async def _run_one(name: str) -> tuple[str, dict | None, str]:
         try:

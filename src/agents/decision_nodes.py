@@ -724,6 +724,24 @@ NEUTRAL ANALYST (Balanced):
                     ),
                 )
 
+            value_up_bonuses = (
+                RedFlagDetector.detect_shareholder_return_execution_flags(
+                    fundamentals,
+                    value_trap_report=value_trap,
+                    ticker=ticker,
+                )
+            )
+            if value_up_bonuses:
+                red_flags.extend(value_up_bonuses)
+                logger.info(
+                    "value_up_executed_bonus_detected",
+                    ticker=ticker,
+                    bonus_types=[bonus["type"] for bonus in value_up_bonuses],
+                    total_risk_bonus=sum(
+                        bonus.get("risk_penalty", 0) for bonus in value_up_bonuses
+                    ),
+                )
+
         consultant_review = get_valid_artifact_content(state, "consultant_review")
         if consultant_review:
             if not isinstance(consultant_review, str):

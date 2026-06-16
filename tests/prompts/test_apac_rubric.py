@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 
 
 def _load() -> dict:
@@ -13,14 +14,26 @@ def _load() -> dict:
 
 
 def test_apac_prompt_version_bumped() -> None:
-    data = _load()
-    assert data["version"] == "1.2"
+    version = _load()["version"]
+    assert re.match(r"^\d+\.\d+$", version), version
+    major, minor = (int(part) for part in version.split("."))
+    assert (major, minor) >= (1, 3)
 
 
 def test_apac_prompt_metadata_updated() -> None:
     md = _load()["metadata"]
-    assert md["last_updated"] == "2026-05-24"
-    assert "v1.2" in md["changes"]
+    assert md["last_updated"] == "2026-06-14"
+    assert "v1.3" in md["changes"]
+
+
+def test_apac_value_up_credit_is_narrowly_scoped() -> None:
+    """The Value-Up execution credit must stay scoped to the narrow Korean / APAC
+    family-control slice and must NOT displace the core transmission-channel audit
+    for non-Korean names (including non-APAC names with APAC supply chains)."""
+    msg = _load()["system_message"]
+    assert "VALUE_UP_EXECUTION_CREDIT" in msg
+    assert "must never displace" in msg
+    assert "non-APAC names with APAC supply chains" in msg
 
 
 def test_apac_prompt_verdict_rubric_present() -> None:

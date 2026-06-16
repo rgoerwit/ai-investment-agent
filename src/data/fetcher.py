@@ -59,7 +59,7 @@ from src.data.gap_fill import (
     merge_gap_fill_data as merge_gap_fill_data_impl,
 )
 from src.data.interfaces import FinancialFetcher
-from src.data.merge_policy import QUOTE_PRICE_FIELDS
+from src.data.merge_policy import QUOTE_PRICE_FIELDS, collect_ibkr_advisory_conflicts
 from src.data.merge_policy import (
     quarantine_forward_pe_outlier as quarantine_forward_pe_outlier_impl,
 )
@@ -350,7 +350,6 @@ class SmartMarketDataFetcher(FinancialFetcher):
         self._history_inflight: dict[
             tuple[str, str, str | None, str | None], asyncio.Task[pd.DataFrame]
         ] = {}
-        self._ibkr_security_service = None
 
         self.fmp_fetcher = get_fmp_fetcher() if FMP_AVAILABLE else None
         self.eodhd_fetcher = get_eodhd_fetcher() if EODHD_AVAILABLE else None
@@ -374,6 +373,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
                 "fmp": 0,
                 "eodhd": 0,
                 "alpha_vantage": 0,
+                "ibkr": 0,
                 "web_search": 0,
                 "calculated": 0,
             },
@@ -400,11 +400,11 @@ class SmartMarketDataFetcher(FinancialFetcher):
         )
 
     def _get_ibkr_security_service(self):
-        if self._ibkr_security_service is None:
-            from src.ibkr.security_data_service import IbkrSecurityDataService
+        # Delegate to the process-wide shared service (one instance, one probe cache
+        # shared with ticker_utils name-resolution and the IBKR market source).
+        from src.ibkr.security_data_service import get_security_data_service
 
-            self._ibkr_security_service = IbkrSecurityDataService()
-        return self._ibkr_security_service
+        return get_security_data_service()
 
     async def _probe_ibkr_security(self, ticker: str):
         try:
@@ -732,6 +732,74 @@ class SmartMarketDataFetcher(FinancialFetcher):
     async def _fetch_av_fallback(self, symbol: str) -> dict | None:
         """Fallback: Alpha Vantage."""
         return await fetch_av_fallback_impl(self, symbol)
+
+    async def _fetch_ibkr_fallback(self, symbol: str) -> dict | None:
+        """Optional advisory source: IBKR exchange snapshot ratios + price.
+
+        No-op (returns None) unless opted in via ``IBKR_DATA_SOURCE_ENABLED`` AND IBKR is
+        configured AND the identity probe resolves VERIFIED with at least one usable
+        ratio. Supplies point-in-time values only — never statements. Field codes/units
+        are pending live verification (see plan); the advisory layer flags any large
+        divergence so unit/period issues surface during verification.
+        """
+        if not config.ibkr_data_source_enabled:
+            return None
+        try:
+            from src.ibkr_config import ibkr_config
+
+            if not ibkr_config.is_configured():
+                return None
+            probe = await self._get_ibkr_security_service().probe_security(symbol)
+            if probe is None or probe.identity_confidence != "VERIFIED":
+                return None
+            # dividendYield is intentionally omitted: its fraction-vs-percent convention
+            # is ambiguous and a raw override could mis-scale the PM's payout view.
+            metrics = {
+                "currentPrice": probe.last_price,
+                "trailingPE": probe.trailing_pe,
+                "marketCap": probe.market_cap,
+                "trailingEps": probe.eps,
+                "fiftyTwoWeekHigh": probe.fifty_two_week_high,
+                "fiftyTwoWeekLow": probe.fifty_two_week_low,
+            }
+            metrics = {key: val for key, val in metrics.items() if val is not None}
+            if not metrics:
+                return None
+            self.stats["sources"]["ibkr"] += 1
+            return metrics
+        except Exception as exc:
+            logger.warning(
+                "ibkr_source_fetch_error",
+                symbol=symbol,
+                **summarize_exception(
+                    exc,
+                    operation="fetching IBKR market metrics",
+                    provider="unknown",
+                ),
+            )
+            return None
+
+    def _apply_ibkr_advisory(
+        self, merged: dict[str, Any], source_results: dict[str, dict | None]
+    ) -> None:
+        """PHASE 6: attach the optional IBKR advisory layer (opt-in only).
+
+        Gap-fill/override already happened in the merge (quality 9.4); this only retains
+        the full exchange-sourced set in ``_ibkr_metrics`` and surfaces any substantial
+        divergence. Adds NO keys for default (opted-out) users. This is the branch that
+        first executes when an account's IBKR entitlement changes from inert to serving.
+        """
+        if not config.ibkr_data_source_enabled:
+            return
+        ibkr_raw = source_results.get("ibkr")
+        if ibkr_raw:
+            merged["_ibkr_metrics"] = {
+                key: val for key, val in ibkr_raw.items() if val is not None
+            }
+            merged["_ibkr_advisory_status"] = "OK"
+            collect_ibkr_advisory_conflicts(merged)
+        else:
+            merged["_ibkr_advisory_status"] = "UNAVAILABLE"
 
     async def _fetch_all_sources_parallel(self, symbol: str) -> dict[str, dict | None]:
         """PHASE 1: Launch all data sources in parallel."""
@@ -1809,6 +1877,8 @@ class SmartMarketDataFetcher(FinancialFetcher):
                     },
                 }
             )
+
+            self._apply_ibkr_advisory(merged, source_results)
 
             return merged
 

@@ -209,6 +209,69 @@ def detect_value_trap_flags(
     return flags
 
 
+def detect_shareholder_return_execution_flags(
+    fundamentals_report: str,
+    value_trap_report: str | None = None,
+    ticker: str = "UNKNOWN",
+) -> list[dict]:
+    """Credit a strong, company-specific Value-Up plan that is PROVEN executed.
+
+    Fires a single bounded RISK_BONUS only when BOTH gates hold:
+      * the Foreign Language Analyst-sourced DATA_BLOCK marks the plan STRONG and
+        its execution PROVEN (realized payouts/buybacks/cancellations met or
+        exceeded targets), AND
+      * the Value-Trap signal is not a hard fail (verdict != TRAP and
+        score >= 40), so the credit can never partially offset a hard-fail tally.
+
+    Announced-only / weak plans, and genuine traps, receive nothing. This is the
+    symmetric counterpart to the value-trap governance penalties (Korea-discount
+    right-sizing) and is intentionally capped at the moat-bonus scale. It lives in
+    its own detector — not inside ``detect_capital_efficiency_flags`` — so the
+    Financials-sector early-return there cannot suppress it for credit-bureau or
+    holding-company names.
+    """
+    flags: list[dict[str, Any]] = []
+
+    signals = extract_capital_efficiency_signals(fundamentals_report)
+    plan_strength = signals.get("value_up_plan_strength")
+    execution = signals.get("shareholder_return_execution")
+
+    if plan_strength != "STRONG" or execution != "PROVEN":
+        return flags
+
+    vt_metrics = extract_value_trap_score(value_trap_report or "")
+    verdict = vt_metrics.get("verdict")
+    score = vt_metrics.get("score")
+    if verdict == "TRAP" or (score is not None and score < 40):
+        logger.info(
+            "value_up_executed_bonus_withheld_hard_fail",
+            ticker=ticker,
+            verdict=verdict,
+            score=score,
+        )
+        return flags
+
+    flags.append(
+        {
+            "type": "KOREA_VALUE_UP_EXECUTED",
+            "severity": "POSITIVE",
+            "detail": "Strong company-specific Value-Up plan with PROVEN execution (realized shareholder returns met or exceeded targets).",
+            "action": "RISK_BONUS",
+            "risk_penalty": -0.5,
+            "rationale": "Controlling shareholder has a concrete shareholder-return plan AND has demonstrably executed it (dividends raised, buybacks completed, or treasury shares cancelled per filings). This right-sizes the governance/Korea discount. Bounded credit: does not apply to announced-only or weak plans and cannot rescue a value-trap hard fail.",
+        }
+    )
+    logger.info(
+        "value_up_executed_bonus_detected",
+        ticker=ticker,
+        plan_strength=plan_strength,
+        execution=execution,
+        verdict=verdict,
+        score=score,
+    )
+    return flags
+
+
 def detect_moat_flags(fundamentals_report: str, ticker: str = "UNKNOWN") -> list[dict]:
     """Detect economic moat indicators and create bonus flags."""
     flags: list[dict[str, Any]] = []
