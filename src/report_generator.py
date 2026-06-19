@@ -20,6 +20,7 @@ import structlog
 
 from src.agents.pm_verdict_metadata import canonicalize_pm_verdict
 from src.charts.extractors.pm_block import extract_pm_block
+from src.charts.extractors.valuation import format_iv
 from src.data_block_utils import normalize_structured_block_boundaries
 from src.error_safety import summarize_exception
 from src.runtime_diagnostics import is_publishable_analysis
@@ -99,12 +100,34 @@ class QuietModeReporter:
         target_high: float | None,
         methodology: str | None,
         confidence: str | None,
+        unanchored_caveat: str | None = None,
     ) -> None:
         """Store valuation context for article writer to use.
 
         This enables the article writer to address discrepancies between
         the football field chart visuals and the investment decision.
+
+        When ``unanchored_caveat`` is set the scenario valuation was suppressed
+        (peak/distorted earnings, no normalized EPS baseline), so no point fair
+        value is handed downstream — the writer is told the anchor is unavailable
+        rather than a confident midpoint it could launder into a price target.
         """
+        if unanchored_caveat:
+            price_line = (
+                f"- Current Price: {format_iv(current_price)}\n"
+                if current_price
+                else ""
+            )
+            self.valuation_context = (
+                "VALUATION DATA (scenario target suppressed):\n"
+                f"- Fair Value: UNANCHORED — {unanchored_caveat}\n"
+                f"{price_line}"
+                "NOTE: Do not present a precise point fair value as normalized. "
+                "Discuss valuation as a range or as explicitly unanchored, and do "
+                "not describe the chart as showing a target range (it was suppressed)."
+            )
+            return
+
         if not current_price or not target_low or not target_high:
             self.valuation_context = (
                 "VALUATION DATA: Insufficient data for target calculation."
@@ -270,13 +293,17 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
                 scenarios=None if scenario_caveat else scenarios,
             )
 
-            # Store valuation context for article writer (D1 implementation)
+            # Store valuation context for article writer (D1 implementation).
+            # When the scenario caveat fired the chart suppressed its target
+            # range above; mirror that here so the writer is not handed a
+            # confident midpoint the chart deliberately withheld.
             self._store_valuation_context(
                 current_price=chart_data.current_price,
                 target_low=targets.low,
                 target_high=targets.high,
                 methodology=targets.methodology,
                 confidence=targets.confidence,
+                unanchored_caveat=scenario_caveat,
             )
 
             # Configure chart generation

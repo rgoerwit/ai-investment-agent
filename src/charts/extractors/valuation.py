@@ -626,3 +626,17 @@ def scenario_valuation_caveat(scenarios: object | None) -> str | None:
             "but no lower normalized EPS baseline was available."
         )
     return None
+
+
+def format_iv(value: float) -> str:
+    """Human/LLM-facing intrinsic-value string.
+
+    Display-only: internal IV math stays full-precision, but two decimals is
+    false precision on large-nominal currencies (a KRW/JPY IV runs to thousands,
+    so a hundredth of a unit is noise). Drop the cents once the integer part
+    dominates. Single seam reused by the memo and the PM input so every consumer
+    shows the same figure.
+    """
+    if abs(value) >= 1000:
+        return f"{value:,.0f}"
+    return f"{value:,.2f}"

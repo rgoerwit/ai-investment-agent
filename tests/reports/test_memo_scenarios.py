@@ -132,6 +132,35 @@ def test_scenario_summary_warns_when_valuation_is_conditional() -> None:
     assert "conditional, not normalized fair value" in out
 
 
+def test_scenario_summary_drops_cents_on_large_nominal_values() -> None:
+    """KRW/JPY-scale IVs run to thousands; two decimals there is false precision."""
+    fundamentals = (
+        "### --- START DATA_BLOCK ---\n"
+        "SECTOR: Industrials\n"
+        "REPORTING_CURRENCY: KRW\n"
+        "PE_RATIO_TTM: 12.0\n"
+        "EPS_TTM: 3000.0\n"
+        "CURRENT_PRICE: 36000.00\n"
+        "### --- END DATA_BLOCK ---\n"
+    )
+    out = format_scenario_summary(
+        {"fundamentals_report": fundamentals, "valuation_params": _VALUATION_PARAMS}
+    )
+    assert out is not None
+    assert "KRW" in out
+    # No thousands-grouped value carries cents (e.g. "38,880.00").
+    assert not re.search(r"\d,\d{3}\.\d", out)
+
+
+def test_scenario_summary_keeps_cents_on_small_nominal_values() -> None:
+    """USD-scale IVs (< 1000) keep two decimals — cents are meaningful there."""
+    out = format_scenario_summary(
+        {"fundamentals_report": _FUNDAMENTALS, "valuation_params": _VALUATION_PARAMS}
+    )
+    assert out is not None
+    assert re.search(r"\d\.\d{2}", out)
+
+
 def test_scenario_summary_none_when_eps_unresolvable() -> None:
     """Without EPS_TTM AND without (CURRENT_PRICE + PE_RATIO_TTM) → fallback."""
     fundamentals_no_inputs = (

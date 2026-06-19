@@ -155,6 +155,7 @@ Thumbs.db
 secrets/
 credentials/
 ibkr_*.*
+!scripts/ibkr_snapshot_probe.py
 *.pem
 *.key
 *.crt

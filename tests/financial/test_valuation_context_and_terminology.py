@@ -245,3 +245,46 @@ class TestPromptVersionsUpdated:
             data = json.load(f)
         version = float(data["version"])
         assert version >= 4.7, f"RM version should be >= 4.7, got {data['version']}"
+
+
+class TestUnanchoredValuationContext:
+    """The article-writer valuation context must not present a confident fair
+    value when the scenario valuation was suppressed (peak/distorted earnings,
+    no normalized EPS baseline) — mirroring the chart's target suppression.
+    """
+
+    def test_unanchored_caveat_suppresses_midpoint(self):
+        from src.report_generator import QuietModeReporter
+
+        reporter = QuietModeReporter("001060.KS")
+        reporter._store_valuation_context(
+            current_price=28050.0,
+            target_low=25000.0,
+            target_high=35000.0,
+            methodology="P/E Normalization",
+            confidence="MEDIUM",
+            unanchored_caveat="Scenario valuation suppressed: peak/distorted "
+            "earnings were flagged, but no lower normalized EPS baseline was "
+            "available.",
+        )
+        ctx = reporter.get_valuation_context()
+        assert "UNANCHORED" in ctx
+        assert "suppressed" in ctx
+        # No confident midpoint or target range is handed downstream.
+        assert "Fair Value (midpoint)" not in ctx
+        assert "Target Range" not in ctx
+
+    def test_normal_path_still_emits_midpoint(self):
+        from src.report_generator import QuietModeReporter
+
+        reporter = QuietModeReporter("AAPL")
+        reporter._store_valuation_context(
+            current_price=150.0,
+            target_low=140.0,
+            target_high=180.0,
+            methodology="P/E Normalization",
+            confidence="HIGH",
+        )
+        ctx = reporter.get_valuation_context()
+        assert "Fair Value (midpoint)" in ctx
+        assert "Target Range" in ctx

@@ -28,6 +28,7 @@ from src.agents.pm_verdict_metadata import canonicalize_pm_verdict
 from src.agents.support import extract_kill_criteria, get_bear_history
 from src.charts.extractors.valuation import (
     extract_valuation_scenarios_for_fundamentals,
+    format_iv,
     scenario_valuation_caveat,
 )
 from src.data_block_utils import extract_data_block_field
@@ -222,7 +223,7 @@ def format_scenario_summary(state: dict) -> str | None:
     prefix = f"{ccy} " if ccy else ""
 
     def _fmt(value: float) -> str:
-        return f"{prefix}{value:,.2f}"
+        return f"{prefix}{format_iv(value)}"
 
     caveat = scenario_valuation_caveat(scenarios)
     warning = (

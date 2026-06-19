@@ -46,6 +46,7 @@ def _build_valuation_section(valuation_params: str, fundamentals: str) -> str:
     """Reproduce the PM-node logic from src/agents/decision_nodes.py."""
     from src.charts.extractors.valuation import (
         extract_valuation_scenarios_for_fundamentals,
+        format_iv,
     )
     from src.data_block_utils import extract_data_block_field
 
@@ -72,14 +73,14 @@ def _build_valuation_section(valuation_params: str, fundamentals: str) -> str:
         f"{scenarios.methodology}; sufficiency {scenarios.data_sufficiency}; "
         f"earnings basis {scenarios.earnings_basis}; "
         "anchor stop-loss to BEAR_IV, reference WEIGHTED_IV in rationale):\n"
-        f"- BEAR_IV: {scenarios.bear_iv} "
+        f"- BEAR_IV: {format_iv(scenarios.bear_iv)} "
         f"({scenarios.bear.probability:.0f}%) — {scenarios.bear.drivers}\n"
-        f"- BASE_IV: {scenarios.base_iv} "
+        f"- BASE_IV: {format_iv(scenarios.base_iv)} "
         f"({scenarios.base.probability:.0f}%) — {scenarios.base.drivers}\n"
-        f"- BULL_IV: {scenarios.bull_iv} "
+        f"- BULL_IV: {format_iv(scenarios.bull_iv)} "
         f"({scenarios.bull.probability:.0f}%) — {scenarios.bull.drivers}\n"
-        f"- WEIGHTED_IV: {scenarios.weighted_iv}, implied upside "
-        f"{weighted_upside * 100:.1f}% vs current price {current_price:.2f}, "
+        f"- WEIGHTED_IV: {format_iv(scenarios.weighted_iv)}, implied upside "
+        f"{weighted_upside * 100:.1f}% vs current price {format_iv(current_price)}, "
         f"downside probability {downside_probability:.0f}%"
         + (
             "\n- NORMALIZATION WARNING: Earnings normalization was flagged, but no "

@@ -834,6 +834,7 @@ NEUTRAL ANALYST (Balanced):
         # values, which is exactly what this section provides.
         from src.charts.extractors.valuation import (
             extract_valuation_scenarios_for_fundamentals,
+            format_iv,
         )
 
         valuation_params = get_valid_artifact_content(state, "valuation_params")
@@ -869,7 +870,7 @@ NEUTRAL ANALYST (Balanced):
                 )
                 weighted_upside_text = (
                     f", implied upside {weighted_upside * 100:.1f}% vs current price "
-                    f"{current_price:.2f}"
+                    f"{format_iv(current_price)}"
                 )
                 downside_probability_text = (
                     f", downside probability {downside_probability:.0f}%"
@@ -879,13 +880,13 @@ NEUTRAL ANALYST (Balanced):
                 f"{scenarios.methodology}; sufficiency {scenarios.data_sufficiency}; "
                 f"earnings basis {scenarios.earnings_basis}; "
                 "anchor stop-loss to BEAR_IV, reference WEIGHTED_IV in rationale):\n"
-                f"- BEAR_IV: {scenarios.bear_iv} "
+                f"- BEAR_IV: {format_iv(scenarios.bear_iv)} "
                 f"({scenarios.bear.probability:.0f}%) — {scenarios.bear.drivers}\n"
-                f"- BASE_IV: {scenarios.base_iv} "
+                f"- BASE_IV: {format_iv(scenarios.base_iv)} "
                 f"({scenarios.base.probability:.0f}%) — {scenarios.base.drivers}\n"
-                f"- BULL_IV: {scenarios.bull_iv} "
+                f"- BULL_IV: {format_iv(scenarios.bull_iv)} "
                 f"({scenarios.bull.probability:.0f}%) — {scenarios.bull.drivers}\n"
-                f"- WEIGHTED_IV: {scenarios.weighted_iv}{weighted_upside_text}"
+                f"- WEIGHTED_IV: {format_iv(scenarios.weighted_iv)}{weighted_upside_text}"
                 f"{downside_probability_text}"
             )
             if scenarios.normalization_required and not scenarios.normalized_earnings:
