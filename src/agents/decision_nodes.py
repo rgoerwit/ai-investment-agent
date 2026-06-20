@@ -742,6 +742,27 @@ NEUTRAL ANALYST (Balanced):
                     ),
                 )
 
+        # Scan narrative artifacts (not the structured DATA_BLOCK) for a large,
+        # unverified operating decline that must block BUY pending verification.
+        narrative_text = "\n\n".join(
+            str(part)
+            for part in (news, value_trap, foreign_language)
+            if isinstance(part, str) and part
+        )
+        if narrative_text:
+            material_signal_flags = (
+                RedFlagDetector.detect_material_operating_signal_flags(
+                    narrative_text, ticker
+                )
+            )
+            if material_signal_flags:
+                red_flags.extend(material_signal_flags)
+                logger.info(
+                    "material_operating_signal_flags_detected",
+                    ticker=ticker,
+                    flag_types=[flag["type"] for flag in material_signal_flags],
+                )
+
         consultant_review = get_valid_artifact_content(state, "consultant_review")
         if consultant_review:
             if not isinstance(consultant_review, str):

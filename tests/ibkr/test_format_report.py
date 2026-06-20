@@ -157,6 +157,37 @@ class TestFormatReportPanicDay:
         """Empty health_flags → no MACRO ALERT banner, even if items are present."""
         assert "MACRO ALERT" not in self._report_without_flag()
 
+    def test_macro_banner_uses_current_event_over_store(self):
+        """Fix B: banner reflects the event detected THIS run (current_macro_event),
+        not a stale/unrelated stored active event, and needs no Chroma round-trip."""
+        from src.memory import MacroEvent
+
+        current = MacroEvent(
+            event_date="2026-03-05",
+            detected_date="2026-03-05",
+            expiry="2026-04-02",
+            impact="STRUCTURAL",
+            event_type="CONTAGION_SPREAD",
+            scope="GLOBAL",
+            primary_region="GLOBAL",
+            primary_sector="",
+            severity="HIGH",
+            correlation_pct=0.80,
+            peak_count=8,
+            total_held=10,
+            news_headline="Regional bank contagion spreads",
+            news_detail="detail",
+            forced_reanalysis=True,
+        )
+        report = format_report(
+            _panic_items(),
+            _make_portfolio(),
+            portfolio_health_flags=[_CORR_FLAG],
+            current_macro_event=current,
+        )
+        assert "Macro driver: CONTAGION_SPREAD" in report
+        assert "Impact: STRUCTURAL" in report
+
     def test_stop_breached_section_present(self):
         """STOP_BREACH item is labelled inside unified sell recommendations."""
         report = self._report_with_flag()

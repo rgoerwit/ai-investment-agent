@@ -77,6 +77,8 @@ def _make_analysis(
     size_pct: float = 5.0,
     current_price: float = 2100.0,
     capital_flag_types: tuple[str, ...] = (),
+    risk_tally: float | None = None,
+    quality_flag_types: tuple[str, ...] = (),
 ) -> AnalysisRecord:
     from datetime import datetime, timedelta
 
@@ -104,6 +106,8 @@ def _make_analysis(
             target_2_price=target_2,
         ),
         capital_flag_types=capital_flag_types,
+        risk_tally=risk_tally,
+        quality_flag_types=quality_flag_types,
     )
 
 

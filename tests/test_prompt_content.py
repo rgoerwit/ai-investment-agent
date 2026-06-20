@@ -110,6 +110,35 @@ class TestPortfolioManagerPromptContent:
         prompt = get_prompt("portfolio_manager")
         assert "UNVERIFIABLE consultant-resolution claims" in prompt.system_message
 
+    def test_portfolio_manager_prompt_separates_data_quality_from_thesis_risk(self):
+        """Internal-pipeline disagreements must be DATA_QUALITY_REVIEW (0.0 tally), not thesis risk.
+
+        Guards the fix for the over-rejection failure mode where moving-average /
+        price-feed / extractor mismatches were scored as Tier C1/C2 investment risk.
+        """
+        msg = get_prompt("portfolio_manager").system_message
+        assert "DATA-QUALITY REVIEW vs THESIS RISK" in msg
+        assert "DATA_QUALITY_REVIEW" in msg
+        assert "never Tier C2" in msg
+
+    def test_portfolio_manager_prompt_suppresses_moat_bonus_under_peak(self):
+        """Moat/capital-efficiency bonuses must be scored 0.0 under a peak/transient flag."""
+        msg = get_prompt("portfolio_manager").system_message
+        assert "MOAT_BONUS_SUPPRESSED_PEAK_TRANSIENT" in msg
+        assert "do NOT re-introduce the negative bonus" in msg
+
+    def test_portfolio_manager_prompt_enforces_distortion_before_catalyst(self):
+        """One-time items must be classified as distortions before being credited as catalysts."""
+        msg = get_prompt("portfolio_manager").system_message
+        assert "Distortion-before-catalyst" in msg
+        assert "NORMALIZED_EARNINGS_REQUIRED" in msg
+
+    def test_portfolio_manager_prompt_blocks_buy_on_material_unverified_signal(self):
+        """A large unverified operating decline must block BUY pending verification (not auto-SELL)."""
+        msg = get_prompt("portfolio_manager").system_message
+        assert "MATERIAL_UNVERIFIED_OPERATING_SIGNAL" in msg
+        assert "BLOCK BUY" in msg
+
 
 class TestFundamentalsEbitdaAnnualization:
     """Guard EBITDA annualization rule (v9.10+).

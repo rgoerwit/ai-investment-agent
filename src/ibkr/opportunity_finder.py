@@ -4,11 +4,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import structlog
+
+from src.config import config
 from src.ibkr.models import (
     AnalysisRecord,
     PortfolioSummary,
     ReconciliationItem,
 )
+
+logger = structlog.get_logger(__name__)
 from src.ibkr.order_builder import calculate_quantity
 from src.ibkr.reconciliation_rules import (
     _MIN_ORDER_USD,
@@ -46,6 +51,41 @@ def find_opportunities(
             continue
         if _normalize_verdict(analysis.verdict or "") != "BUY":
             continue
+
+        # Opt-in BUY stability gate (default OFF). Withhold a fresh BUY that is
+        # either contradicted by recent same-ticker runs (verdict-noise defense)
+        # or marginal (risk_tally >= margin) with an unresolved peak/transient
+        # quality flag. Lazy import keeps the default (disabled) path free of the
+        # agents package. risk_tally + quality_flag_types are persisted on
+        # AnalysisRecord by the analysis index, so both branches are live.
+        if getattr(config, "buy_stability_enabled", False):
+            from src.agents.buy_stability import (
+                BuyStabilityConfig,
+                assess_buy_stability,
+                load_recent_same_ticker_verdicts,
+            )
+
+            stability_cfg = BuyStabilityConfig.from_config(config)
+            prior_verdicts = load_recent_same_ticker_verdicts(
+                ticker,
+                lookback_days=stability_cfg.lookback_days,
+                results_dir=config.results_dir,
+                exclude_path=analysis.file_path or None,
+            )
+            withhold_reason = assess_buy_stability(
+                analysis.verdict,
+                prior_verdicts,
+                risk_tally=analysis.risk_tally,
+                active_flags=analysis.quality_flag_types,
+                cfg=stability_cfg,
+            )
+            if withhold_reason:
+                logger.info(
+                    "offwatch_buy_withheld_unstable",
+                    ticker=ticker,
+                    reason=withhold_reason,
+                )
+                continue
 
         is_stale, _stale_reason = check_staleness(
             analysis,

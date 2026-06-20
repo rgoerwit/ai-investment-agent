@@ -85,6 +85,7 @@ from src.sector_normalization import (
 
 if TYPE_CHECKING:
     from src.ibkr.analysis_index import AnalysisLoadProgress
+    from src.memory import MacroEvent
 
 _IBKR_OAUTH_PORTAL = (
     "https://ndcdyn.interactivebrokers.com/sso/Login?action=OAUTH&RL=1&ip2loc=US"
@@ -907,16 +908,23 @@ def _characterize_macro_event(
 def _store_macro_event_if_detected(
     health_flags: list[str],
     reconciliation_items: list,
-) -> None:
-    """Parse CORRELATED_SELL_EVENT, characterize it, store in ChromaDB. Fail-safe."""
+) -> MacroEvent | None:
+    """Parse CORRELATED_SELL_EVENT, characterize it, store in ChromaDB. Fail-safe.
+
+    Returns the characterized event (or None when no event was detected). The
+    event is returned even when ChromaDB storage is unavailable or fails, so the
+    caller's alert banner reflects the current detection regardless of Chroma.
+    """
     from datetime import date as _date
     from datetime import timedelta as _td
+
+    from src.memory import MacroEvent, create_macro_events_store
 
     correlated_flag = next(
         (f for f in health_flags if "CORRELATED_SELL_EVENT" in f), None
     )
     if not correlated_flag:
-        return
+        return None
 
     # Tolerant of the three trigger phrasings: "within Nd of DATE" (window)
     # and "as of DATE" (cumulative / drawdown_breadth).
@@ -928,7 +936,7 @@ def _store_macro_event_if_detected(
     )
     if not m:
         logger.warning("macro_event_flag_parse_failed", flag=correlated_flag)
-        return
+        return None
 
     peak_count = int(m.group(1))
     event_date = m.group(3)
@@ -961,33 +969,34 @@ def _store_macro_event_if_detected(
     anchor = max(_date.fromisoformat(event_date), _date.today())
     expiry = (anchor + _td(days=_EXPIRY_DAYS.get(event_type, 60))).isoformat()
 
-    try:
-        from src.memory import MacroEvent, create_macro_events_store
+    event = MacroEvent(
+        event_date=event_date,
+        detected_date=_date.today().isoformat(),
+        expiry=expiry,
+        impact=impact,
+        event_type=event_type,
+        scope=scope,
+        primary_region=primary_region,
+        primary_sector=primary_sector,
+        severity=severity,
+        correlation_pct=correlation_pct,
+        peak_count=peak_count,
+        total_held=total_held,
+        news_headline=headline,
+        news_detail=detail,
+        forced_reanalysis=(impact == "STRUCTURAL" and correlation_pct >= 0.40),
+    )
 
+    # Storage is best-effort: the returned event drives the caller's banner even
+    # when Chroma is unavailable or store_event raises.
+    try:
         store = create_macro_events_store()
-        if not store.available:
-            return
-        store.store_event(
-            MacroEvent(
-                event_date=event_date,
-                detected_date=_date.today().isoformat(),
-                expiry=expiry,
-                impact=impact,
-                event_type=event_type,
-                scope=scope,
-                primary_region=primary_region,
-                primary_sector=primary_sector,
-                severity=severity,
-                correlation_pct=correlation_pct,
-                peak_count=peak_count,
-                total_held=total_held,
-                news_headline=headline,
-                news_detail=detail,
-                forced_reanalysis=(impact == "STRUCTURAL" and correlation_pct >= 0.40),
-            )
-        )
+        if store.available:
+            store.store_event(event)
     except Exception as e:
         logger.warning("macro_event_storage_failed", error=str(e))
+
+    return event
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1080,6 +1089,7 @@ def format_report(
     refresh_activity: RefreshActivity | None = None,
     screening_freshness: ScreeningFreshnessSummary | None = None,
     portfolio_data_loaded: bool = True,
+    current_macro_event: MacroEvent | None = None,
 ) -> str:
     """Format reconciliation results as sectioned human-readable text.
 
@@ -1637,26 +1647,33 @@ def format_report(
             "╚" + "═" * 54 + "╝",
         ]
         try:
-            from src.memory import create_macro_events_store as _cms
+            # Prefer the event detected in THIS run (passed in by the caller) over
+            # whatever the store returns — the stored copy can be a stale or
+            # unrelated active event, which made the banner's event_type diverge
+            # from the freshly-logged classification. Fall back to the store only
+            # when nothing was detected this run.
+            _ev = current_macro_event
+            if _ev is None:
+                from src.memory import create_macro_events_store as _cms
 
-            _mstore = _cms()
-            if _mstore.available:
-                _active_events = _mstore.get_active_events()
-                _ev = _active_events[0] if _active_events else None
-                if _ev and _ev.news_headline != "unknown":
-                    _banner_fields = [
-                        f"Macro driver: {_ev.event_type}",
-                        f"Impact: {_ev.impact}",
-                    ]
-                    for _field in _banner_fields:
-                        _banner_lines.insert(-1, f"║  {_field:<{_W}}║")
-                    for _wline in _wrap_banner_value(
-                        "Headline: ",
-                        _ev.news_headline,
-                        width=_W,
-                        max_lines=2,
-                    ):
-                        _banner_lines.insert(-1, f"║  {_wline:<{_W}}║")
+                _mstore = _cms()
+                if _mstore.available:
+                    _active_events = _mstore.get_active_events()
+                    _ev = _active_events[0] if _active_events else None
+            if _ev and _ev.news_headline != "unknown":
+                _banner_fields = [
+                    f"Macro driver: {_ev.event_type}",
+                    f"Impact: {_ev.impact}",
+                ]
+                for _field in _banner_fields:
+                    _banner_lines.insert(-1, f"║  {_field:<{_W}}║")
+                for _wline in _wrap_banner_value(
+                    "Headline: ",
+                    _ev.news_headline,
+                    width=_W,
+                    max_lines=2,
+                ):
+                    _banner_lines.insert(-1, f"║  {_wline:<{_W}}║")
         except Exception:
             pass
         for bl in _banner_lines:
@@ -3029,8 +3046,10 @@ def main() -> None:
     _watchlist_candidates_blocked_by_cash = bundle.watchlist_candidates_blocked_by_cash
     _live_orders_data = bundle.live_orders
 
-    # Detect and store macro events (fail-safe — errors caught internally).
-    _store_macro_event_if_detected(health_flags, items)
+    # Detect and store macro events (fail-safe — errors caught internally). The
+    # returned event drives the report banner so it reflects THIS run's
+    # classification rather than a stale/unrelated stored active event.
+    _current_macro_event = _store_macro_event_if_detected(health_flags, items)
 
     # Output
     show_recs = args.recommend
@@ -3062,6 +3081,7 @@ def main() -> None:
             refresh_activity=refresh_activity,
             screening_freshness=screening_freshness,
             portfolio_data_loaded=not args.read_only,
+            current_macro_event=_current_macro_event,
         )
 
     if args.output:

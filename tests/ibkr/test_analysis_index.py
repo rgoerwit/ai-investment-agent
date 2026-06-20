@@ -1,15 +1,154 @@
 """Collected analysis-index tests extracted from reconciler cases."""
 
+import subprocess
+import sys
 from pathlib import Path
 
 from src.ibkr.analysis_index import (
     _build_analysis_record_from_data,
+    _extract_flag_types,
     _extract_tool1_financial_metrics,
+    _parse_scores_from_final_decision,
 )
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 from tests.ibkr.reconciler_cases import (
     TestLoadLatestAnalyses,
     TestParseScoresFromFinalDecision,
 )
+
+_PEAK_FUNDAMENTALS = (
+    "### --- START DATA_BLOCK ---\n"
+    "ROA_PERCENT: 18.0%\nROA_5Y_AVG: 8.0%\nPROFITABILITY_TREND: UNSTABLE\n"
+    "### --- END DATA_BLOCK ---"
+)
+
+
+def test_build_analysis_record_populates_risk_tally_and_quality_flags():
+    record = _build_analysis_record_from_data(
+        Path("TEST.T_20260601_000000_analysis.json"),
+        {
+            "prediction_snapshot": {
+                "ticker": "TEST.T",
+                "analysis_date": "2026-06-01",
+                "verdict": "BUY",
+                "currency": "JPY",
+                "health_adj": 70.0,
+                "risk_tally": 0.75,
+            },
+            "reports": {"fundamentals_report": _PEAK_FUNDAMENTALS},
+            "investment_analysis": {"trader_plan": ""},
+        },
+    )
+    assert record is not None
+    assert record.risk_tally == 0.75
+    assert "CYCLICAL_PEAK_WARNING" in record.quality_flag_types
+
+
+def test_build_analysis_record_parses_risk_tally_from_decision_fallback():
+    # Snapshot missing risk_tally + verdict → fallback parses from the PM decision.
+    record = _build_analysis_record_from_data(
+        Path("TEST.T_20260601_000000_analysis.json"),
+        {
+            "prediction_snapshot": {"ticker": "TEST.T", "currency": "JPY"},
+            "final_decision": {
+                "decision": (
+                    "### --- START PM_BLOCK ---\nVERDICT: BUY\nRISK_TALLY: 1.25\n"
+                    "### --- END PM_BLOCK ---"
+                )
+            },
+            "investment_analysis": {"trader_plan": ""},
+        },
+    )
+    assert record is not None
+    assert record.risk_tally == 1.25
+
+
+def test_build_analysis_record_quality_flags_empty_without_fundamentals():
+    record = _build_analysis_record_from_data(
+        Path("TEST.T_20260601_000000_analysis.json"),
+        {
+            "prediction_snapshot": {
+                "ticker": "TEST.T",
+                "verdict": "BUY",
+                "health_adj": 70.0,
+                "currency": "JPY",
+            },
+            "investment_analysis": {"trader_plan": ""},
+        },
+    )
+    assert record is not None
+    assert record.quality_flag_types == ()
+
+
+def test_extract_flag_types_partitions_in_one_pass():
+    """Single pass returns (capital_flag_types, quality_flag_types)."""
+    capital, quality = _extract_flag_types(
+        {"reports": {"fundamentals_report": _PEAK_FUNDAMENTALS}}, "TEST.T"
+    )
+    assert "CYCLICAL_PEAK_WARNING" in quality
+    assert capital == ()  # peak-only report has no idle-cash flags
+
+
+def test_extract_flag_types_empty_without_fundamentals():
+    assert _extract_flag_types({}, "TEST.T") == ((), ())
+
+
+def test_parse_scores_handles_signed_risk_tally():
+    """Negative tallies (bonuses below zero) must parse with their sign intact."""
+    assert _parse_scores_from_final_decision("RISK_TALLY: -0.5")["risk_tally"] == -0.5
+    assert (
+        _parse_scores_from_final_decision("TOTAL RISK COUNT: -1.0 (Effective 0.0)")[
+            "risk_tally"
+        ]
+        == -1.0
+    )
+
+
+def test_parse_scores_positive_risk_tally_regression():
+    assert _parse_scores_from_final_decision("RISK_TALLY: 2.25")["risk_tally"] == 2.25
+    assert (
+        _parse_scores_from_final_decision("**TOTAL RISK COUNT**: 3.5")["risk_tally"]
+        == 3.5
+    )
+
+
+def test_parse_scores_malformed_risk_tally_safe():
+    # No usable number → key absent, no crash.
+    assert "risk_tally" not in _parse_scores_from_final_decision("RISK_TALLY: --")
+
+
+def test_indexing_does_not_import_agents_package():
+    """IBKR analysis indexing must not pull in the heavy src.agents stack.
+
+    Runs in a fresh interpreter (sys.modules is polluted by other tests in-process)
+    and asserts that importing analysis_index + building a record imports no
+    src.agents module — guards the quality-flag constant ownership boundary.
+    """
+    code = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from src.ibkr.analysis_index import _build_analysis_record_from_data as build\n"
+        "build(Path('T.T_20260601_000000_analysis.json'), {\n"
+        "  'prediction_snapshot': {'ticker':'T.T','verdict':'BUY','health_adj':70.0,"
+        "'currency':'JPY','risk_tally':0.5},\n"
+        "  'reports': {'fundamentals_report':"
+        "'### --- START DATA_BLOCK ---\\nROA_PERCENT: 18.0%\\nROA_5Y_AVG: 8.0%\\n"
+        "PROFITABILITY_TREND: UNSTABLE\\n### --- END DATA_BLOCK ---'},\n"
+        "  'investment_analysis': {'trader_plan':''}})\n"
+        "bad = sorted(m for m in sys.modules if m.startswith('src.agents'))\n"
+        "print('AGENTS:' + ','.join(bad))\n"
+        "sys.exit(1 if bad else 0)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        cwd=str(_REPO_ROOT),
+    )
+    assert (
+        result.returncode == 0
+    ), f"IBKR indexing imported src.agents: {result.stdout.strip()} {result.stderr.strip()}"
 
 
 def test_build_analysis_record_normalizes_legacy_healthcare_sector():

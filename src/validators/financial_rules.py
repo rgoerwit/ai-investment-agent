@@ -46,7 +46,57 @@ _TRANSIENT_STRENGTH_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             re.IGNORECASE,
         ),
     ),
+    (
+        "deconsolidation, disposal, or spin-off",
+        re.compile(
+            r"\b(?:deconsolidat\w*|desincorporat\w*|spin[- ]off|divestit\w*|"
+            r"disposal of|bargain purchase|acquisition accounting)\b",
+            re.IGNORECASE,
+        ),
+    ),
 )
+
+# Language indicating the analysis already reconciled normalized (ex-one-time)
+# economics — the "bridge" that must exist before a one-time item may be framed
+# as a catalyst rather than a distortion.
+_NORMALIZED_EARNINGS_BRIDGE_RE = re.compile(
+    r"\b(?:normaliz\w+\s+(?:eps|earnings|revenue|margin|ocf|net income|profit)|"
+    r"ex[- ]one[- ]time|excluding the (?:gain|disposal|sale|settlement|deconsolidation)|"
+    r"adjusted for the (?:gain|disposal|sale|deconsolidation|divestiture)|"
+    r"underlying (?:earnings|eps|profit)|organic (?:revenue|growth)|"
+    r"like[- ]for[- ]like|recurring (?:earnings|revenue|profit))\b",
+    re.IGNORECASE,
+)
+
+
+def requires_normalized_earnings_bridge(report: str | None) -> bool:
+    """True if a one-time event is present but no normalized-earnings bridge is.
+
+    Distortion-before-catalyst discipline: a disposal, deconsolidation,
+    acquisition-accounting benefit, settlement, or subsidy must be reconciled
+    to normalized (ex-one-time) revenue/margin/EPS/OCF before it may be treated
+    as a catalyst. Reuses the canonical one-time-event pattern set.
+    """
+    if not report:
+        return False
+    return contains_transient_strength_marker(report) and not bool(
+        _NORMALIZED_EARNINGS_BRIDGE_RE.search(report)
+    )
+
+
+def contains_transient_strength_marker(report: str | None) -> bool:
+    """Return True if the report names a non-recurring strength driver.
+
+    Shared, public entry point over ``_TRANSIENT_STRENGTH_PATTERNS`` (asset
+    sale, M&A-led consolidation, settlement, restructuring/one-time gain,
+    subsidy windfall) so other validators can reuse the canonical pattern set
+    without re-authoring it.
+    """
+    if not report:
+        return False
+    return any(
+        pattern.search(report) for _label, pattern in _TRANSIENT_STRENGTH_PATTERNS
+    )
 
 
 def detect_red_flags(
@@ -425,6 +475,22 @@ def detect_red_flags(
             drivers=transient_strength_labels,
             revenue_growth_ttm=revenue_growth_ttm,
         )
+
+    # Fire only when a one-time item coincides with reported strength — that is
+    # the catalyst-framing risk. Distressed companies merely discussing e.g.
+    # "asset sale options" have no strength to normalize, so they are excluded.
+    if has_current_strength and requires_normalized_earnings_bridge(raw_report):
+        red_flags.append(
+            {
+                "type": "NORMALIZED_EARNINGS_REQUIRED",
+                "severity": "WARNING",
+                "detail": "One-time event (disposal/deconsolidation/M&A/settlement/subsidy) credited alongside current strength without a normalized-earnings bridge.",
+                "action": "REVIEW",
+                "risk_penalty": 0.0,
+                "rationale": "Distortion-before-catalyst discipline: classify the one-time item as an earnings/cash-flow distortion first. It may be credited as a catalyst only after normalized (ex-one-time) revenue, margin, EPS, and OCF are reconciled. Cap/withhold BUY until then; carries 0.0 tally weight to avoid double-counting TRANSIENT_STRENGTH_DISTORTION.",
+            }
+        )
+        logger.info("red_flag_normalized_earnings_required", ticker=ticker)
 
     ocf = metrics.get("ocf")
     ni_for_ocf = metrics.get("net_income")

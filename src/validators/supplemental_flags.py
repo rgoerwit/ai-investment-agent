@@ -6,15 +6,89 @@ from typing import Any
 
 import structlog
 
+from src.validators.financial_rules import contains_transient_strength_marker
 from src.validators.metric_extractor import extract_metrics
 from src.validators.sector_classifier import FINANCIALS_SECTORS, Sector, detect_sector
 from src.validators.supplemental_extractors import (
     extract_capital_efficiency_signals,
+    extract_material_unverified_operating_signal,
     extract_moat_signals,
     extract_value_trap_score,
 )
 
 logger = structlog.get_logger(__name__)
+
+
+def _peak_or_transient_blocker(fundamentals_report: str) -> str | None:
+    """Return a reason string if durable-quality bonuses should be suppressed.
+
+    Moat and capital-efficiency bonuses are computed from margin stability,
+    cash conversion, and current ROIC — the same metrics a cyclical peak or a
+    one-time event inflates. When the earnings base is flagged suspect we
+    suppress the bonus (set it to 0.0) rather than letting it net against a
+    concurrent peak/transient warning. The conditions mirror the existing
+    ``CYCLICAL_PEAK_WARNING`` / ``TRANSIENT_STRENGTH_DISTORTION`` semantics in
+    ``financial_rules`` so suppression fires exactly when the earnings base is
+    already questioned.
+    """
+    metrics = extract_metrics(fundamentals_report)
+    if metrics.get("cycle_position") == "PEAK":
+        return "DATA_BLOCK CYCLE_POSITION: PEAK"
+    roa_current = metrics.get("roa_current")
+    roa_5y_avg = metrics.get("roa_5y_avg")
+    trend = metrics.get("profitability_trend")
+    if (
+        roa_current is not None
+        and roa_5y_avg
+        and roa_5y_avg > 0
+        and roa_current / roa_5y_avg > 1.5
+        and trend in {"UNSTABLE", "DECLINING"}
+    ):
+        return (
+            f"peak-cycle distortion (ROA {roa_current:.1f}% vs 5Y avg "
+            f"{roa_5y_avg:.1f}% with {trend} trend)"
+        )
+    if contains_transient_strength_marker(fundamentals_report):
+        return "transient-strength / one-time event marker present"
+    return None
+
+
+def detect_material_operating_signal_flags(
+    report: str, ticker: str = "UNKNOWN"
+) -> list[dict]:
+    """Flag a large, unverified operating decline as BUY-blocking until verified.
+
+    A narrative claim such as "operating profit down 53% YoY" is price-relevant
+    even before it is confirmed in structured data. It must not become a generic
+    low-weight UNVERIFIABLE item, nor an auto-SELL: it blocks BUY and forces
+    primary-source verification (0.0 tally weight — unverified is not confirmed
+    risk).
+    """
+    flags: list[dict[str, Any]] = []
+    signal = extract_material_unverified_operating_signal(report)
+    if not signal:
+        return flags
+    flags.append(
+        {
+            "type": "MATERIAL_UNVERIFIED_OPERATING_SIGNAL",
+            "severity": "WARNING",
+            "detail": (
+                f"Narrative reports {signal['metric']} down {signal['decline_pct']:.1f}% "
+                "— not yet verified against a primary source."
+            ),
+            "action": "REVIEW",
+            "risk_penalty": 0.0,
+            "blocks_buy": True,
+            "rationale": "A large operating-profit/earnings decline is material even when unverified. Do not score it as confirmed risk (0.0 tally — unverified is not confirmed), but BLOCK BUY and require primary-source verification before initiating. Never auto-SELL/REJECT on this signal alone.",
+        }
+    )
+    logger.info(
+        "material_unverified_operating_signal",
+        ticker=ticker,
+        metric=signal["metric"],
+        decline_pct=signal["decline_pct"],
+    )
+    return flags
 
 
 def detect_legal_flags(
@@ -275,11 +349,37 @@ def detect_shareholder_return_execution_flags(
 def detect_moat_flags(fundamentals_report: str, ticker: str = "UNKNOWN") -> list[dict]:
     """Detect economic moat indicators and create bonus flags."""
     flags: list[dict[str, Any]] = []
+
     metrics = extract_moat_signals(fundamentals_report)
     margin_stability = metrics.get("margin_stability")
     cash_conversion = metrics.get("cash_conversion")
     margin_cv = metrics.get("margin_cv")
     cfo_ni_avg = metrics.get("cfo_ni_avg")
+
+    # A moat bonus only exists when margins are stable OR cash conversion is
+    # strong. Suppress (rather than net) it under a peak/transient earnings base
+    # — but only when a bonus would actually have fired, so we never emit a
+    # spurious "suppressed" flag for a name that had no moat bonus to begin with.
+    would_emit_bonus = margin_stability == "HIGH" or cash_conversion == "STRONG"
+    if would_emit_bonus:
+        suppression_reason = _peak_or_transient_blocker(fundamentals_report)
+        if suppression_reason:
+            flags.append(
+                {
+                    "type": "MOAT_BONUS_SUPPRESSED_PEAK_TRANSIENT",
+                    "severity": "INFO",
+                    "detail": f"Moat bonus suppressed: {suppression_reason}",
+                    "action": "RISK_BONUS",
+                    "risk_penalty": 0.0,
+                    "rationale": "Moat bonuses derive from margin stability and cash conversion, which a cyclical peak or one-time event inflates. The bonus is suppressed (not netted against the peak/transient warning) while the earnings base is flagged suspect.",
+                }
+            )
+            logger.info(
+                "moat_bonus_suppressed_peak_transient",
+                ticker=ticker,
+                reason=suppression_reason,
+            )
+            return flags
 
     if margin_stability == "HIGH" and cash_conversion == "STRONG":
         detail_parts: list[str] = []
@@ -441,23 +541,41 @@ def detect_capital_efficiency_flags(
         logger.info("capital_flag_below_hurdle", ticker=ticker, roic=roic)
 
     if roic_quality == "STRONG" and leverage_quality in ("GENUINE", "CONSERVATIVE"):
-        roic_str = f"ROIC: {roic:.1%}" if roic is not None else ""
-        flags.append(
-            {
-                "type": "CAPITAL_EFFICIENT",
-                "severity": "POSITIVE",
-                "detail": f"Strong genuine capital efficiency. {roic_str}",
-                "action": "RISK_BONUS",
-                "risk_penalty": -0.5,
-                "rationale": "High ROIC (>15%) with ROE/ROIC ratio below 2x indicates returns driven by operational excellence rather than financial leverage. Suggests sustainable competitive advantage.",
-            }
-        )
-        logger.info(
-            "capital_flag_efficient",
-            ticker=ticker,
-            roic=roic,
-            leverage_quality=leverage_quality,
-        )
+        suppression_reason = _peak_or_transient_blocker(fundamentals_report)
+        if suppression_reason:
+            flags.append(
+                {
+                    "type": "CAPITAL_EFFICIENCY_BONUS_SUPPRESSED",
+                    "severity": "INFO",
+                    "detail": f"Capital-efficiency bonus suppressed: {suppression_reason}",
+                    "action": "RISK_BONUS",
+                    "risk_penalty": 0.0,
+                    "rationale": "Current ROIC strength may reflect a cyclical peak or one-time event. The capital-efficiency bonus is suppressed (not netted against the peak/transient warning) until the earnings base is verified.",
+                }
+            )
+            logger.info(
+                "capital_efficiency_bonus_suppressed_peak_transient",
+                ticker=ticker,
+                reason=suppression_reason,
+            )
+        else:
+            roic_str = f"ROIC: {roic:.1%}" if roic is not None else ""
+            flags.append(
+                {
+                    "type": "CAPITAL_EFFICIENT",
+                    "severity": "POSITIVE",
+                    "detail": f"Strong genuine capital efficiency. {roic_str}",
+                    "action": "RISK_BONUS",
+                    "risk_penalty": -0.5,
+                    "rationale": "High ROIC (>15%) with ROE/ROIC ratio below 2x indicates returns driven by operational excellence rather than financial leverage. Suggests sustainable competitive advantage.",
+                }
+            )
+            logger.info(
+                "capital_flag_efficient",
+                ticker=ticker,
+                roic=roic,
+                leverage_quality=leverage_quality,
+            )
 
     excess_cash = (
         net_cash_to_mc is not None

@@ -1279,25 +1279,42 @@ class MacroEventsStore:
                 }
             )
             if existing and existing.get("ids"):
-                # Re-detection of an ongoing event: extend the stored expiry
-                # instead of dropping the signal, so the macro override keeps
-                # rolling forward while the situation persists.
+                # Re-detection of an ongoing event: refresh the stored
+                # characterization AND extend the expiry, instead of dropping the
+                # signal. Classification can change as the event develops (e.g.
+                # COMMODITY_SHOCK -> CONTAGION_SPREAD); without refreshing it the
+                # alert banner (which reads the stored event) would surface a
+                # stale event_type while the log shows the freshly-classified one.
                 new_expiry_ts = _date_to_int(event.expiry)
                 for event_id, meta in zip(
                     existing["ids"], existing.get("metadatas") or [], strict=False
                 ):
+                    meta = dict(meta)
+                    meta["impact"] = event.impact
+                    meta["event_type"] = event.event_type
+                    meta["scope"] = event.scope
+                    meta["primary_region"] = event.primary_region
+                    meta["primary_sector"] = event.primary_sector
+                    meta["severity"] = event.severity
+                    meta["correlation_pct"] = float(event.correlation_pct)
+                    meta["peak_count"] = int(event.peak_count)
+                    meta["total_held"] = int(event.total_held)
+                    meta["forced_reanalysis"] = event.forced_reanalysis
+                    meta["news_headline"] = event.news_headline[:120]
+                    meta["news_detail"] = event.news_detail[:300]
+                    meta["detected_date"] = event.detected_date
+                    # Extend the override window only when the new expiry is later
+                    # — never shorten a live window.
                     if new_expiry_ts > int(meta.get("expiry_ts", 0)):
-                        meta = dict(meta)
                         meta["expiry"] = event.expiry
                         meta["expiry_ts"] = new_expiry_ts
-                        meta["detected_date"] = event.detected_date
-                        self.collection.update(ids=[event_id], metadatas=[meta])
-                        logger.info(
-                            "macro_event_expiry_extended",
-                            event_date=meta.get("event_date"),
-                            new_expiry=event.expiry,
-                        )
-                logger.debug("macro_event_dedup_skipped", event_date=event.event_date)
+                    self.collection.update(ids=[event_id], metadatas=[meta])
+                logger.info(
+                    "macro_event_dedup_refreshed",
+                    event_date=event.event_date,
+                    event_type=event.event_type,
+                    new_expiry=event.expiry,
+                )
                 return False
 
             event_id = f"macro_{event.event_date}_{event.detected_date}"

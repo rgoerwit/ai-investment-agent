@@ -13,6 +13,70 @@ from src.validators.metric_extractor import parse_ratio_or_percent
 
 logger = structlog.get_logger(__name__)
 
+# A large operating-metric decline stated in narrative text. Deliberately
+# limited to operating metrics + decline language so share-price drawdowns and
+# small moves do not match. Threshold applied in the extractor below.
+#
+# Pattern A: English prose with an explicit decline verb
+#   ("operating profit was down 53%", "OP collapsed 53%").
+_MATERIAL_OPERATING_MOVE_RE = re.compile(
+    r"\b(operating profit|operating income|operating earnings|OP|ordinary profit|"
+    r"recurring profit|ebit|ebitda|net (?:income|profit)|pre-?tax profit|earnings)\b"
+    r"[^\n]{0,80}?\b(?:down|declin\w*|decreas\w*|fell|fall|drop\w*|collaps\w*|"
+    r"plunge\w*|slump\w*|sank|tumbl\w*)\b"
+    r"[^\n]{0,15}?(\d{2,3}(?:\.\d+)?)\s*%",
+    re.IGNORECASE,
+)
+# Pattern B: terse earnings-table / abbreviation / Japanese forms with an
+# explicit negative marker (-, unicode minus, JP ▲/△) or the JP suffix 減
+#   ("operating profit -53.2% YoY", "OP -53.2%", "営業利益 ▲53.2%", "営業利益 53.2%減").
+_MATERIAL_OPERATING_TERSE_RE = re.compile(
+    r"(?P<metric>\bOP\b|op\.?\s*profit|operating profit|operating income|"
+    r"net (?:income|profit)|recurring profit|ordinary profit|"
+    r"営業利益|経常利益|純利益|当期純利益)"
+    r"[^\n]{0,20}?"
+    r"(?:[-−▲△]\s*(?P<pct_sign>\d{2,3}(?:\.\d+)?)\s*%"
+    r"|(?P<pct_jp>\d{2,3}(?:\.\d+)?)\s*%\s*減)",
+    re.IGNORECASE,
+)
+_MATERIAL_OPERATING_MIN_DECLINE_PCT = 30.0
+
+
+def extract_material_unverified_operating_signal(
+    text: str | None,
+) -> dict[str, Any] | None:
+    """Detect a large operating-metric decline mentioned in narrative text.
+
+    Returns ``{"metric", "decline_pct"}`` for a >=30% decline of an operating
+    metric (operating profit/income, EBIT(DA), net income, earnings), else None.
+    Matches both English prose (pattern A) and terse table / abbreviation /
+    Japanese forms with an explicit negative marker or 減 suffix (pattern B).
+    Restricted to operating metrics + decline markers so share-price drawdowns,
+    positive moves, and sub-30% moves do not match.
+    """
+    if not text:
+        return None
+
+    match = _MATERIAL_OPERATING_MOVE_RE.search(text)
+    if match:
+        decline_pct = float(match.group(2))
+        if decline_pct >= _MATERIAL_OPERATING_MIN_DECLINE_PCT:
+            return {"metric": match.group(1).lower(), "decline_pct": decline_pct}
+
+    terse = _MATERIAL_OPERATING_TERSE_RE.search(text)
+    if terse:
+        raw_pct = terse.group("pct_sign") or terse.group("pct_jp")
+        if raw_pct:
+            decline_pct = float(raw_pct)
+            if decline_pct >= _MATERIAL_OPERATING_MIN_DECLINE_PCT:
+                return {
+                    "metric": terse.group("metric").strip().lower(),
+                    "decline_pct": decline_pct,
+                }
+
+    return None
+
+
 _CONSULTANT_GROWTH_QUALITY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\borganic\s+vs\.?\s+acquired\b", re.IGNORECASE),
     re.compile(

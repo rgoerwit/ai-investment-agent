@@ -504,10 +504,29 @@ class TestStoreEventExpiryExtension:
         assert meta["expiry_ts"] == _date_to_int("2026-06-30")
 
     def test_earlier_expiry_does_not_shorten_existing_event(self):
+        # Re-detection now refreshes classification unconditionally, so update IS
+        # called — but an earlier expiry must NOT shorten the live window.
         store, col = self._mock_store_with_existing(expiry="2026-06-30")
         event = _make_event(event_date="2026-03-06", expiry="2026-04-02")
         store.store_event(event)
-        col.update.assert_not_called()
+        col.update.assert_called_once()
+        meta = col.update.call_args.kwargs["metadatas"][0]
+        assert meta["expiry"] == "2026-06-30"
+        assert meta["expiry_ts"] == _date_to_int("2026-06-30")
+
+    def test_dedup_refreshes_classification_even_without_expiry_extension(self):
+        # Banner/log mismatch fix: a re-detection that reclassifies the event must
+        # overwrite the stored event_type even when the expiry is unchanged.
+        store, col = self._mock_store_with_existing(expiry="2026-06-30")
+        col.get.return_value["metadatas"][0]["event_type"] = "COMMODITY_SHOCK"
+        event = _make_event(
+            event_date="2026-03-06", expiry="2026-04-02", event_type="CONTAGION_SPREAD"
+        )
+        store.store_event(event)
+        col.update.assert_called_once()
+        meta = col.update.call_args.kwargs["metadatas"][0]
+        assert meta["event_type"] == "CONTAGION_SPREAD"
+        assert meta["expiry"] == "2026-06-30"  # not shortened
 
     def test_extension_failure_is_non_fatal(self):
         store, col = self._mock_store_with_existing(expiry="2026-04-02")

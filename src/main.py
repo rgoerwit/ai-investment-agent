@@ -553,6 +553,32 @@ async def run_analysis(
                     )
                     return None
 
+                # Proceeding despite an unresolved name (data is present, or
+                # --force-data-vacuum). On a dual-market suffix this is the
+                # wrong/secondary-listing signature — e.g. 145020.KS pulling a
+                # divergent feed while the canonical Hugel listing is KOSDAQ
+                # 145020.KQ. Flag it so the operator can verify the canonical
+                # exchange (and add a config/ticker_overrides.json remap).
+                from src.ticker_policy import (
+                    CHINA_SUFFIXES,
+                    KOREA_SUFFIXES,
+                    TAIWAN_SUFFIXES,
+                    get_ticker_suffix,
+                )
+
+                _suffix = get_ticker_suffix(ticker)
+                if _suffix in (KOREA_SUFFIXES | CHINA_SUFFIXES | TAIWAN_SUFFIXES):
+                    logger.warning(
+                        "secondary_listing_name_unresolved",
+                        ticker=ticker,
+                        suffix=_suffix,
+                        message=(
+                            "Name unresolved on a dual-market listing but data is "
+                            "present — possible wrong/secondary listing; verify the "
+                            "canonical exchange (consider config/ticker_overrides.json)"
+                        ),
+                    )
+
             # Fetch benchmark context once (non-blocking) before graph starts.
             # Prepended to the HumanMessage so every agent receives it as session context.
             market_context = await _fetch_market_context(ticker, real_date)

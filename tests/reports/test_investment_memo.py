@@ -106,6 +106,26 @@ def test_extract_pm_thesis_pulls_first_sentence() -> None:
     assert len(thesis.split()) <= 31
 
 
+def test_extract_pm_thesis_skips_numbered_list_marker() -> None:
+    """Real PMs render DECISION RATIONALE as a numbered list ("1. **Lead-in**: ...").
+
+    Regression: the extractor must skip the bare "1." enumerator and return the real
+    sentence, not render the thesis as "1." (systemic memo bug).
+    """
+    numbered = (
+        "#### PORTFOLIO MANAGER VERDICT: DO NOT INITIATE\n\n"
+        "### DECISION RATIONALE\n\n"
+        "1. **Elite but Uninvestable Quality**: Hugel is a control trap under private "
+        "equity ownership despite a 15.15% ROIC. More text follows.\n"
+    )
+    thesis = extract_pm_thesis(numbered)
+    assert thesis != "1."
+    assert "Hugel" in thesis and "control trap" in thesis
+    # Hashed-enumerator variant ("#### 1.") must behave the same.
+    hashed = "### DECISION RATIONALE\n\n#### 1. **Macro Headwind**: Margins compress here. Next.\n"
+    assert extract_pm_thesis(hashed).startswith("**Macro Headwind**")
+
+
 def test_extract_pm_thesis_caps_long_rationale() -> None:
     long_rationale = (
         "### DECISION RATIONALE\n\n" + " ".join(["word"] * 80) + ". Trailing sentence."

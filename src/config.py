@@ -332,6 +332,27 @@ class Settings(BaseSettings):
         validation_alias="ENABLE_CONSULTANT",
         description="Enable OpenAI consultant for cross-validation",
     )
+    # --- BUY stability / hysteresis gate (off-watchlist new BUYs) ---
+    # Default OFF: this changes verdict→action behavior, so it is opt-in. When
+    # enabled, a fresh BUY contradicted by a recent same-ticker run (or marginal
+    # with an unresolved peak/transient flag) is withheld pending stability.
+    buy_stability_enabled: bool = Field(
+        default=False,
+        validation_alias="BUY_STABILITY_ENABLED",
+        description="Withhold unstable/marginal off-watchlist BUYs (reproducibility gate)",
+    )
+    buy_stability_lookback_days: int = Field(
+        default=7,
+        ge=1,
+        validation_alias="BUY_STABILITY_LOOKBACK_DAYS",
+        description="Lookback window (days) for same-ticker verdict stability checks",
+    )
+    buy_stability_margin_tally: float = Field(
+        default=0.5,
+        ge=0.0,
+        validation_alias="BUY_STABILITY_MARGIN_TALLY",
+        description="Risk-tally at/above which a BUY is 'marginal' for the stability gate",
+    )
     # --- Consultant Configuration ---
     consultant_model: str = Field(
         default="gpt-5.4",

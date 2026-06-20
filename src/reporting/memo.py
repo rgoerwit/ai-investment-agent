@@ -105,10 +105,23 @@ def extract_pm_thesis(pm_text: str, max_words: int = 30) -> str:
     if not match:
         return "Thesis unavailable."
     body = match.group(1).strip()
-    # First sentence-ish (cope with markdown bullets and bold prefixes).
-    body = re.sub(r"^[*\-•\s]+", "", body)
-    sentence_break = re.search(r"(.+?[.!?])\s", body + " ")
-    sentence = sentence_break.group(1) if sentence_break else body.split("\n", 1)[0]
+    # Strip leading markdown noise that precedes the rationale prose: header
+    # hashes ("#### 1."), list enumerators ("1.", "2)"), and bullets. The PM
+    # almost always renders DECISION RATIONALE as a numbered list, so without
+    # this the first-sentence regex latched onto a bare "1." marker and rendered
+    # the thesis as "1." (systemic memo bug). Bold "**" prefixes are left intact
+    # so the captured sentence keeps balanced markdown.
+    body = re.sub(r"^(?:#+\s*|\d+[.)]\s+|[-•]\s+)+", "", body)
+    # First sentence-ish, but never a degenerate marker-only capture (e.g. a
+    # stray "1." an enumerator strip missed): require at least one letter.
+    sentence = ""
+    for candidate in re.finditer(r"(.+?[.!?])(?:\s|$)", body + " "):
+        text = candidate.group(1).strip()
+        if re.search(r"[A-Za-z]", text) and len(text) > 3:
+            sentence = text
+            break
+    if not sentence:
+        sentence = body.split("\n", 1)[0]
     words = sentence.split()
     if len(words) > max_words:
         sentence = " ".join(words[:max_words]).rstrip(",;:") + "…"

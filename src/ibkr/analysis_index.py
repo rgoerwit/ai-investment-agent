@@ -26,10 +26,18 @@ from src.ibkr.models import AnalysisRecord, TradeBlockData
 from src.ibkr.order_builder import parse_trade_block
 from src.ibkr.reconciliation_rules import _exchange_from_ticker, _normalize_verdict
 from src.sector_normalization import normalize_sector_label
-from src.validators.supplemental_flags import detect_capital_efficiency_flags
+from src.validators.financial_rules import detect_red_flags
+from src.validators.metric_extractor import extract_metrics
+from src.validators.quality_flags import PEAK_OR_TRANSIENT_FLAGS
+from src.validators.supplemental_flags import (
+    detect_capital_efficiency_flags,
+    detect_moat_flags,
+)
 
 logger = structlog.get_logger(__name__)
-_ANALYSIS_INDEX_VERSION = 4
+# Bump when the parsed AnalysisRecord schema changes so cached indexes rebuild.
+# v5: added risk_tally + quality_flag_types (BUY stability gate inputs).
+_ANALYSIS_INDEX_VERSION = 5
 _DATA_VACUUM_COVERAGE_THRESHOLD_PCT = 40.0
 
 
@@ -169,7 +177,11 @@ _FILENAME_TIMESTAMP_RE = re.compile(r"^(?P<ticker>.+?)_(\d{8})_(\d{6})_analysis\
 
 
 def _parse_scores_from_final_decision(text: str) -> dict:
-    """Extract health_adj, growth_adj, verdict, zone from a PM final_decision narrative."""
+    """Extract health_adj, growth_adj, verdict, zone, risk_tally from a PM decision.
+
+    Best-effort parse fallback (the prediction_snapshot is preferred when present);
+    risk_tally allows a leading sign and is consumed only by the BUY stability gate.
+    """
     result: dict = {}
 
     m = re.search(r"\bHEALTH_ADJ[:\s]+([0-9.]+)", text, re.IGNORECASE)
@@ -204,6 +216,17 @@ def _parse_scores_from_final_decision(text: str) -> dict:
     m = re.search(r"\bZONE[:\s]+(HIGH|MODERATE|LOW)\b", text, re.IGNORECASE)
     if m:
         result["zone"] = m.group(1).upper()
+
+    # Allow a leading sign — bonuses can drive the tally below zero (e.g. -0.5).
+    # The fallback gap excludes '-' so the sign is captured, not consumed.
+    m = re.search(r"\bRISK_TALLY[:\s]+(-?[0-9.]+)", text, re.IGNORECASE)
+    if not m:
+        m = re.search(r"TOTAL RISK COUNT[^-0-9\n]*(-?[0-9.]+)", text, re.IGNORECASE)
+    if m:
+        try:
+            result["risk_tally"] = float(m.group(1))
+        except ValueError:
+            pass
 
     return result
 
@@ -259,30 +282,61 @@ _PROFIT_TAKE_CAPITAL_FLAGS = frozenset(
 )
 
 
-def _extract_capital_flag_types(data: dict[str, Any], ticker: str) -> tuple[str, ...]:
-    """Derive capital-allocation flags from the saved fundamentals report."""
+def _extract_flag_types(
+    data: dict[str, Any], ticker: str
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Single validator pass → (capital_flag_types, quality_flag_types).
+
+    Runs the validators once over the saved fundamentals/value-trap reports and
+    partitions the result into:
+      - capital_flag_types: idle-cash capital flags (_PROFIT_TAKE_CAPITAL_FLAGS)
+      - quality_flag_types: peak/transient markers (PEAK_OR_TRANSIENT_FLAGS) —
+        CYCLICAL_PEAK_WARNING, TRANSIENT_STRENGTH_DISTORTION, and the
+        moat/capital-efficiency bonus-suppression flags — for the BUY stability gate.
+
+    Re-derivation is deterministic; any failure degrades both to ().
+    """
+    reports = data.get("reports") or {}
     fundamentals_report = (
-        (data.get("reports") or {}).get("fundamentals_report")
-        or data.get("fundamentals_report")
-        or ""
+        reports.get("fundamentals_report") or data.get("fundamentals_report") or ""
     )
     if not fundamentals_report:
-        return ()
+        return (), ()
+    value_trap_report = (
+        reports.get("value_trap_report") or data.get("value_trap_report") or ""
+    )
     try:
-        flags = detect_capital_efficiency_flags(fundamentals_report, ticker=ticker)
+        metrics = extract_metrics(fundamentals_report)
+        red_flags, _ = detect_red_flags(metrics, ticker=ticker)
+        moat = detect_moat_flags(fundamentals_report, ticker=ticker)
+        capital = detect_capital_efficiency_flags(
+            fundamentals_report,
+            ticker=ticker,
+            value_trap_report=value_trap_report or None,
+        )
     except Exception as exc:
         logger.warning(
-            "capital_flag_extraction_failed",
+            "flag_extraction_failed",
             ticker=ticker,
-            **_safe_exception_fields(exc, operation="extracting capital flags"),
+            **_safe_exception_fields(exc, operation="extracting analysis flags"),
         )
-        return ()
-    filtered = (
-        flag_type
-        for flag in flags
-        if (flag_type := flag.get("type")) in _PROFIT_TAKE_CAPITAL_FLAGS
+        return (), ()
+
+    capital_types = tuple(
+        dict.fromkeys(
+            flag_type
+            for flag in capital
+            if (flag_type := flag.get("type")) in _PROFIT_TAKE_CAPITAL_FLAGS
+        )
     )
-    return tuple(dict.fromkeys(filtered))
+    quality_types = tuple(
+        dict.fromkeys(
+            flag_type
+            for flag in (*red_flags, *moat, *capital)
+            if (flag_type := flag.get("type")) in PEAK_OR_TRANSIENT_FLAGS
+        )
+    )
+    return capital_types, quality_types
 
 
 def _extract_tool1_financial_metrics(data: dict[str, Any]) -> dict[str, Any]:
@@ -408,6 +462,8 @@ def _build_analysis_record_from_data(
                 }
             if not snapshot.get("zone"):
                 snapshot = {**snapshot, "zone": fallback.get("zone") or ""}
+            if snapshot.get("risk_tally") is None:
+                snapshot = {**snapshot, "risk_tally": fallback.get("risk_tally")}
 
     ticker = snapshot.get("ticker") or data.get("ticker", "")
     if not ticker:
@@ -436,6 +492,7 @@ def _build_analysis_record_from_data(
     )
     macro_regime = macro_regime_raw if isinstance(macro_regime_raw, dict) else {}
     data_quality = _extract_analysis_data_quality(data, snapshot)
+    capital_flag_types, quality_flag_types = _extract_flag_types(data, ticker)
 
     return AnalysisRecord(
         ticker=ticker,
@@ -462,7 +519,9 @@ def _build_analysis_record_from_data(
         sector=normalize_sector_label(snapshot.get("sector")),
         exchange=snapshot.get("exchange") or _exchange_from_ticker(ticker),
         is_quick_mode=bool(snapshot.get("is_quick_mode", False)),
-        capital_flag_types=_extract_capital_flag_types(data, ticker),
+        capital_flag_types=capital_flag_types,
+        risk_tally=snapshot.get("risk_tally"),
+        quality_flag_types=quality_flag_types,
         macro_regime=macro_regime,
         data_quality=data_quality,
         m_and_a_status=(snapshot.get("m_and_a_status") or "").strip().upper(),

@@ -908,3 +908,57 @@ class TestConfigThresholds:
 
         assert config.leverage_suspect_ratio == 2.0
         assert config.leverage_engineered_ratio == 3.0
+
+
+class TestCapitalEfficiencyBonusSuppression:
+    """The -0.5 CAPITAL_EFFICIENT bonus must be suppressed under peak/transient.
+
+    Penalty flags (value destruction, engineered returns, below hurdle, idle
+    cash) must be unaffected — only the durable-quality bonus is gated.
+    """
+
+    def _block(self, *extra: str) -> str:
+        base = [
+            "ROIC_PERCENT: 20.00",
+            "ROIC_QUALITY: STRONG",
+            "LEVERAGE_QUALITY: GENUINE",
+            "ROE_ROIC_RATIO: 1.30",
+        ]
+        lines = "\n".join((*base, *extra))
+        return f"### --- START DATA_BLOCK ---\n{lines}\n### --- END DATA_BLOCK ---"
+
+    def test_bonus_fires_without_peak(self):
+        """Happy path: STRONG + GENUINE with benign cycle still earns -0.5."""
+        flags = RedFlagDetector.detect_capital_efficiency_flags(
+            self._block("CYCLE_POSITION: MID"), "OK"
+        )
+        types = [f["type"] for f in flags]
+        assert "CAPITAL_EFFICIENT" in types
+        assert "CAPITAL_EFFICIENCY_BONUS_SUPPRESSED" not in types
+
+    def test_cycle_peak_suppresses_bonus(self):
+        """Edge: CYCLE_POSITION: PEAK replaces the -0.5 bonus with a 0.0 suppression flag."""
+        flags = RedFlagDetector.detect_capital_efficiency_flags(
+            self._block("CYCLE_POSITION: PEAK"), "PEAK"
+        )
+        types = [f["type"] for f in flags]
+        assert "CAPITAL_EFFICIENCY_BONUS_SUPPRESSED" in types
+        assert "CAPITAL_EFFICIENT" not in types
+        assert sum(f["risk_penalty"] for f in flags) == 0.0
+
+    def test_transient_marker_suppresses_bonus(self):
+        """Edge: acquisition-led consolidation marker suppresses the bonus."""
+        report = (
+            self._block()
+            + "\nReturns were flattered by an acquisition-led consolidation this year."
+        )
+        types = [
+            f["type"]
+            for f in RedFlagDetector.detect_capital_efficiency_flags(report, "MNA")
+        ]
+        assert "CAPITAL_EFFICIENCY_BONUS_SUPPRESSED" in types
+        assert "CAPITAL_EFFICIENT" not in types
+
+    def test_empty_report_safe(self):
+        """Error handling: empty input yields no flags, no crash."""
+        assert RedFlagDetector.detect_capital_efficiency_flags("", "E") == []
