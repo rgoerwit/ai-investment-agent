@@ -58,6 +58,7 @@ Do NOT use markdown tables inside DATA_BLOCK.
 """
 
 _QUARANTINED_FORWARD_KEYS = ("PE_RATIO_FORWARD", "PEG_RATIO")
+_VALUATION_RELIABILITY_FIELD = "VALUATION_INPUT_RELIABILITY"
 _VALID_ADR_EXCHANGES = {
     "NYSE",
     "NASDAQ",
@@ -157,6 +158,29 @@ def _classify_otc_adr_evidence(raw_text: str) -> str | None:
     return None
 
 
+def _valuation_input_reliability(payload: dict[str, Any]) -> str:
+    """Classify whether DATA_BLOCK valuation multiples can be trusted, from markers the
+    fetcher/merge layer already set on the raw metrics payload.
+
+    QUARANTINED = a forward OR trailing valuation input was actively distrusted (split
+    sensitivity, low-P/E anomaly, unit/decimal/currency error, or forward-P/E quarantine);
+    UNAVAILABLE = no forward valuation input present; USABLE otherwise. Conservative on an
+    empty/malformed payload (UNAVAILABLE) — never raises.
+    """
+    if not payload:
+        return "UNAVAILABLE"
+    if (
+        payload.get("_split_sensitive_metrics_quarantined") is True
+        or payload.get("_pe_low_anomaly_quarantined") is True
+        or payload.get("_pe_unit_error_quarantined") in {"forward", "trailing"}
+        or bool(payload.get("_forwardPE_quarantine_reason"))
+    ):
+        return "QUARANTINED"
+    if all(payload.get(key) is None for key in ("forwardPE", "forwardEps", "pegRatio")):
+        return "UNAVAILABLE"
+    return "USABLE"
+
+
 def _sanitize_fundamentals_output(
     content: str,
     raw_data: str,
@@ -202,6 +226,13 @@ def _sanitize_fundamentals_output(
                     datablock_key,
                     "N/A",
                 )
+
+    if has_structured_payload:
+        updated_body = replace_or_append_block_line(
+            updated_body,
+            _VALUATION_RELIABILITY_FIELD,
+            _valuation_input_reliability(payload),
+        )
 
     latest_quarter_date = payload.get("latest_quarter_date")
     latest_quarter_date_reconciled = (

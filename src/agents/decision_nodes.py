@@ -26,7 +26,7 @@ from src.error_safety import summarize_exception
 # Verdict canonicalization lives in the neutral, dependency-free parser (it used
 # to live on src.agents.pm_verdict_metadata, which created a charts circular
 # import: pm_block -> pm_verdict_metadata -> agents/__init__ -> decision_nodes).
-from src.pm_decision_parser import canonicalize_pm_verdict
+from src.pm_decision_parser import canonicalize_pm_verdict, parse_final_decision_scores
 from src.runtime_diagnostics import (
     failure_artifact,
     get_artifact_status,
@@ -632,6 +632,84 @@ def create_risk_debater_node(llm, agent_key: str) -> Callable:
     return risk_node
 
 
+def _log_risk_tally_reconciliation(
+    content_str: str, code_subtotal: float, ticker: str
+) -> float | None:
+    """Warn when the PM's narrated TOTAL RISK COUNT falls below the deterministic
+    code-computed floor — a dropped, weighted pre-screen penalty.
+
+    Best-effort, no verdict override (surface + log only). Returns the shortfall (the
+    amount dropped) when the floor is breached, else ``None``. A missing/unparseable
+    narrated tally yields ``None`` (cannot reconcile, do not warn).
+    """
+    narrated = parse_final_decision_scores(content_str).get("risk_tally")
+    if narrated is None or narrated >= code_subtotal - 0.01:
+        return None
+    dropped = round(code_subtotal - narrated, 2)
+    logger.warning(
+        "pm_risk_tally_below_code_floor",
+        ticker=ticker,
+        narrated=narrated,
+        code_subtotal=round(code_subtotal, 2),
+        dropped=dropped,
+    )
+    return dropped
+
+
+# Pre-screen flags whose unresolved presence forbids a Zone-2 BUY override (prompt rule).
+_OVERRIDE_BLOCKING_FLAGS = {"GROWTH_QUALITY_UNPROVEN", "TRANSIENT_STRENGTH_DISTORTION"}
+
+
+def _log_pm_discipline_checks(
+    content_str: str,
+    red_flags: list[dict[str, Any]],
+    valuation_reliability: str,
+    ticker: str,
+) -> None:
+    """Log-only reconciliation of the PM override path against the prompt's stated
+    thresholds (no verdict/zone mutation — surface + log only).
+
+    Fires only on unambiguous, deterministically-parseable misses. The blocking-flag check
+    is load-bearing: it catches the dropped-penalty + override combo where a weaker model
+    drops a +0.75 penalty (so ``risk_tally`` looks clean) yet the flag is still present.
+    Best-effort; missing scores/verdict/zone yield no warning. Non-raising by construction.
+    """
+    scores = parse_final_decision_scores(content_str)
+    verdict = canonicalize_pm_verdict(scores.get("verdict"))
+    zone = str(scores.get("zone") or "").upper()
+    health = scores.get("health_adj")
+    growth = scores.get("growth_adj")
+    risk = scores.get("risk_tally")
+    flag_types = {str(flag.get("type", "")).upper() for flag in red_flags}
+
+    if verdict == "BUY" and zone == "MODERATE":
+        reasons = []
+        if health is not None and health < 50:
+            reasons.append("health_below_50")
+        if risk is not None and risk > 1.5:
+            reasons.append("risk_above_1_5")
+        if flag_types & _OVERRIDE_BLOCKING_FLAGS:
+            reasons.append("blocking_growth_quality_flag")
+        if reasons:
+            logger.warning(
+                "pm_override_threshold_unmet", ticker=ticker, reasons=reasons
+            )
+
+    if verdict == "HOLD" and zone == "HIGH":
+        reasons = []
+        if health is not None and health < 80:
+            reasons.append("health_below_80")
+        if growth is not None and growth < 80:
+            reasons.append("growth_below_80")
+        if reasons:
+            logger.warning(
+                "pm_hold_override_threshold_unmet", ticker=ticker, reasons=reasons
+            )
+
+    if verdict == "BUY" and valuation_reliability == "QUARANTINED":
+        logger.warning("pm_buy_on_quarantined_valuation_inputs", ticker=ticker)
+
+
 def create_portfolio_manager_node(
     llm, memory: Any | None, strict_mode: bool = False
 ) -> Callable:
@@ -928,20 +1006,31 @@ NEUTRAL ANALYST (Balanced):
             consultant,
         )
 
-        red_flag_section = (
-            "\n\nRED-FLAG PRE-SCREENING:\n"
-            f"Pre-Screening Result: {pre_screening_result}"
-        )
-        if red_flags:
-            red_flag_list = "\n".join(
-                [
-                    f"  - {flag.get('type', 'Unknown')}: {flag.get('detail', 'No detail')}"
-                    for flag in red_flags
-                ]
+        # Surface distrusted valuation inputs to the PM as a zero-penalty (data-quality)
+        # warning. Assigned unconditionally so it is in scope for the discipline log below.
+        valuation_reliability = (
+            extract_data_block_field(fundamentals, "VALUATION_INPUT_RELIABILITY") or ""
+        ).upper()
+        if valuation_reliability == "QUARANTINED":
+            red_flags.append(
+                {
+                    "type": "VALUATION_INPUT_QUARANTINED",
+                    "severity": "WARNING",
+                    "detail": (
+                        "Forward/trailing valuation multiples were quarantined by "
+                        "structured data checks; they cannot independently support a BUY."
+                    ),
+                    "action": "REVIEW",
+                    "risk_penalty": 0.0,
+                    "rationale": (
+                        "Distrusted valuation inputs — verify before using as BUY support."
+                    ),
+                }
             )
-            red_flag_section += f"\nRed Flags/Warnings Detected:\n{red_flag_list}"
-        else:
-            red_flag_section += "\nRed Flags Detected: None"
+
+        red_flag_section, code_risk_subtotal = support.format_red_flag_section(
+            pre_screening_result, red_flags
+        )
 
         all_context = f"""MARKET ANALYST REPORT:
 {support.summarize_for_pm(market, "market", 2500) if market else "N/A"}
@@ -1071,6 +1160,10 @@ RISK TEAM DEBATE:
                 )
 
             content_str = _normalize_pm_block_contract(content_str)
+            _log_risk_tally_reconciliation(content_str, code_risk_subtotal, ticker)
+            _log_pm_discipline_checks(
+                content_str, red_flags, valuation_reliability, ticker
+            )
             present_inputs, missing_inputs = _present_pm_inputs(state)
             pm_metadata = pm_verdict_metadata_from_text(content_str)
             pm_verdict_recovered = False

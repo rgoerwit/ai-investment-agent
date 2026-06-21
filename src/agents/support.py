@@ -661,6 +661,51 @@ def format_conflict_table(messages: list) -> str:
     return "\n".join(lines) + "\n"
 
 
+def format_red_flag_section(
+    pre_screening_result: str, red_flags: list[dict[str, Any]]
+) -> tuple[str, float]:
+    """Render pre-screen flags WITH their numeric penalties + a deterministic subtotal.
+
+    Code-computed flags (``src/validators/supplemental_flags.py``) already carry a
+    weighted ``risk_penalty``. Surfacing the number + a running subtotal removes the
+    synthesis model's burden of recalling each weight from the rubric and summing by
+    hand — the failure mode behind silently dropped penalties on weaker models.
+
+    Returns ``(section_text, code_subtotal)``. The subtotal is the deterministic floor
+    the PM must build on; ``decision_nodes`` logs a reconciliation warning when the PM's
+    narrated TOTAL RISK COUNT falls below it.
+    """
+    section = (
+        "\n\nRED-FLAG PRE-SCREENING:\n" f"Pre-Screening Result: {pre_screening_result}"
+    )
+    if not red_flags:
+        return section + "\nRed Flags Detected: None", 0.0
+
+    lines = []
+    code_subtotal = 0.0
+    for flag in red_flags:
+        penalty = flag.get("risk_penalty")
+        if isinstance(penalty, int | float) and not isinstance(penalty, bool):
+            code_subtotal += float(penalty)
+            tag = f" [risk_penalty {float(penalty):+.2f}]"
+        else:
+            tag = ""
+        lines.append(
+            f"  - {flag.get('type', 'Unknown')}{tag}: {flag.get('detail', 'No detail')}"
+        )
+
+    section += "\nRed Flags/Warnings Detected:\n" + "\n".join(lines)
+    section += (
+        f"\n\nCODE-COMPUTED RISK SUBTOTAL (deterministic, already weighted): "
+        f"{code_subtotal:+.2f}. These flags are ALREADY scored — do NOT re-score them "
+        f"from the rubric and do NOT omit them. Your TOTAL RISK COUNT = this subtotal "
+        f"+ any qualitative risks NOT listed above that the rubric requires (e.g. "
+        f"jurisdiction risk, family-control concentration, turnaround-exception "
+        f"penalty, ADR/data-integrity tiers)."
+    )
+    return section, code_subtotal
+
+
 def _is_output_insufficient(content: str, agent_key: str) -> bool:
     """Check whether an agent output is empty or clearly insufficient."""
     if not content or len(content) < 50:

@@ -299,7 +299,7 @@ def _generate_football_field(
     chart_config: Any,
 ) -> Path | None:
     """Generate football field chart with PM-adjusted targets."""
-    from src.charts.base import FootballFieldData
+    from src.charts.base import FootballFieldData, is_thin_outlier_target
     from src.charts.extractors.valuation import (
         calculate_valuation_targets,
         extract_valuation_scenarios_for_fundamentals,
@@ -372,6 +372,18 @@ def _generate_football_field(
         if severity in ["CRITICAL", "WARNING"]:
             detail = str(flag.get("detail", ""))
             quality_warnings.append(detail[:50] + "..." if len(detail) > 50 else detail)
+    # Explain a suppressed single-source outlier analyst target (see has_external_targets);
+    # prepend so it survives the 2-warning cap.
+    if is_thin_outlier_target(
+        data_block.external_target_low,
+        data_block.external_target_high,
+        data_block.current_price,
+    ):
+        quality_warnings.insert(
+            0,
+            f"Analyst target {data_block.external_target_high:.0f} suppressed "
+            f"(single-source outlier vs {data_block.current_price:.0f} price)",
+        )
     quality_warnings = quality_warnings[:2]  # Limit to 2
 
     # Build footnote with methodology and PM adjustment note

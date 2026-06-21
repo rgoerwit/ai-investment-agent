@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 
-from src.agents.analyst_nodes import _sanitize_fundamentals_output
+from src.agents.analyst_nodes import (
+    _sanitize_fundamentals_output,
+    _valuation_input_reliability,
+)
 
 
 def test_sanitize_fundamentals_output_forces_missing_horizons_to_na() -> None:
@@ -358,7 +361,17 @@ ADR_THESIS_IMPACT: MODERATE_CONCERN
 
     sanitized = _sanitize_fundamentals_output(content, raw_data, "ABEV3.SA")
 
-    assert sanitized == content
+    # Valid ADR routing is preserved untouched.
+    for line in (
+        "ADR_EXISTS: YES",
+        "ADR_TYPE: SPONSORED",
+        "ADR_TICKER: ABEV",
+        "ADR_EXCHANGE: NYSE",
+        "ADR_THESIS_IMPACT: MODERATE_CONCERN",
+    ):
+        assert line in sanitized
+    # The only added line is the reliability contract (no forward fields -> UNAVAILABLE).
+    assert "VALUATION_INPUT_RELIABILITY: UNAVAILABLE" in sanitized
 
 
 def test_sanitize_downgrades_loose_otc_sponsored_claim() -> None:
@@ -488,4 +501,90 @@ PEG_RATIO: 0.70
 
     sanitized = _sanitize_fundamentals_output(content, raw_data, "TEST.SA")
 
-    assert sanitized == content
+    # The low-PE *flag* (not a quarantine marker) must not blank the valuation lines.
+    assert "PE_RATIO_TTM: 4.20" in sanitized
+    assert "PEG_RATIO: 0.70" in sanitized
+    # Reliability contract appended; no forward fields present -> UNAVAILABLE.
+    assert "VALUATION_INPUT_RELIABILITY: UNAVAILABLE" in sanitized
+
+
+# --------------------------------------------------------------------------- #
+# VALUATION_INPUT_RELIABILITY classifier + DATA_BLOCK contract
+# --------------------------------------------------------------------------- #
+def test_valuation_input_reliability_usable_when_forward_present_and_clean() -> None:
+    assert _valuation_input_reliability({"forwardPE": 12.0}) == "USABLE"
+
+
+def test_valuation_input_reliability_quarantined_markers() -> None:
+    # Every distrust marker the fetcher/merge layer can set → QUARANTINED.
+    assert (
+        _valuation_input_reliability({"_split_sensitive_metrics_quarantined": True})
+        == "QUARANTINED"
+    )
+    assert (
+        _valuation_input_reliability({"_pe_low_anomaly_quarantined": True})
+        == "QUARANTINED"
+    )
+    assert (
+        _valuation_input_reliability({"_pe_unit_error_quarantined": "forward"})
+        == "QUARANTINED"
+    )
+    # Trailing P/E is also a valuation input — contract is valuation-input, not forecast.
+    assert (
+        _valuation_input_reliability({"_pe_unit_error_quarantined": "trailing"})
+        == "QUARANTINED"
+    )
+    assert (
+        _valuation_input_reliability({"_forwardPE_quarantine_reason": "recent split"})
+        == "QUARANTINED"
+    )
+
+
+def test_valuation_input_reliability_unavailable_cases() -> None:
+    assert _valuation_input_reliability({}) == "UNAVAILABLE"
+    assert (
+        _valuation_input_reliability(
+            {
+                "trailingPE": 10.0,
+                "forwardPE": None,
+                "forwardEps": None,
+                "pegRatio": None,
+            }
+        )
+        == "UNAVAILABLE"
+    )
+
+
+def test_valuation_input_reliability_unit_error_only_matches_known_values() -> None:
+    # A stray truthy (non-"forward"/"trailing") marker must NOT trip the quarantine
+    # branch; with a present forward field the result is USABLE.
+    assert (
+        _valuation_input_reliability(
+            {"_pe_unit_error_quarantined": True, "forwardPE": 9.0}
+        )
+        == "USABLE"
+    )
+
+
+def test_sanitize_appends_valuation_input_reliability_usable() -> None:
+    content = """### --- START DATA_BLOCK ---
+PE_RATIO_FORWARD: 10.0
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps({"forwardPE": 10.0, "forwardEps": 1.0})
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "TEST.T")
+    assert "VALUATION_INPUT_RELIABILITY: USABLE" in sanitized
+
+
+def test_sanitize_appends_valuation_input_reliability_quarantined() -> None:
+    content = """### --- START DATA_BLOCK ---
+PE_RATIO_FORWARD: 10.0
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps(
+        {"_split_sensitive_metrics_quarantined": True, "forwardPE": 10.0}
+    )
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "TEST.T")
+    assert "VALUATION_INPUT_RELIABILITY: QUARANTINED" in sanitized
+    # Appears exactly once (replace-or-append, never duplicated).
+    assert sanitized.count("VALUATION_INPUT_RELIABILITY:") == 1
