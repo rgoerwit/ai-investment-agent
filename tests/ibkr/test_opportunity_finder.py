@@ -66,7 +66,24 @@ class TestBuyStabilityGateSeam:
             {"7203.T": _make_analysis(verdict="BUY", age_days=3)},
             _make_portfolio(cash=15000),
         )
-        assert self._buy_count(items) == 1  # default-OFF: behavior unchanged
+        assert self._buy_count(items) == 1  # explicit opt-out restores prior behavior
+
+    def test_default_on_withholds_contradicted_buy_without_explicit_flag(
+        self, tmp_path, monkeypatch
+    ):
+        # Phase 2: the gate is default-ON. With BUY_STABILITY_ENABLED unset, a
+        # contradicted off-watchlist BUY must be withheld without any opt-in.
+        assert config.buy_stability_enabled is True  # the flipped default
+        _write_prior(tmp_path, "7203.T", "HOLD")
+        monkeypatch.setattr(config, "results_dir", str(tmp_path), raising=False)
+        # buy_stability_enabled intentionally NOT patched — relies on the default.
+
+        items = reconcile(
+            [],
+            {"7203.T": _make_analysis(verdict="BUY", age_days=3)},
+            _make_portfolio(cash=15000),
+        )
+        assert self._buy_count(items) == 0  # withheld by default-on gate
 
     def test_marginal_peak_flag_withholds_buy_without_history(
         self, tmp_path, monkeypatch

@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from pathlib import Path
 
-from src.agents.buy_stability import (
+import pytest
+
+from src.ibkr.analysis_index import _build_analysis_record_from_data
+from src.ibkr.buy_stability import (
     BuyStabilityConfig,
     assess_buy_stability,
     load_recent_same_ticker_verdicts,
 )
+from tests.import_boundary import assert_no_offenders
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 _CFG = BuyStabilityConfig(enabled=True, lookback_days=7, margin_tally=0.5)
 
 
@@ -148,3 +154,54 @@ class TestLoadRecentSameTickerVerdicts:
             now=self._NOW,
         )
         assert verdicts == []
+
+
+class TestImportBoundary:
+    def test_enabled_gate_module_imports_no_agents_package(self):
+        """The default-on gate path must stay agents-free.
+
+        Runs in a fresh interpreter (in-process sys.modules is polluted by other
+        tests) and asserts importing the gate pulls in no src.agents module — and
+        thus none of the heavy LangGraph/LLM surface that agents/__init__ loads.
+        """
+        assert_no_offenders(
+            "import sys\n"
+            "import src.ibkr.buy_stability  # noqa\n"
+            "bad = sorted(m for m in sys.modules "
+            "if m == 'src.agents' or m.startswith('src.agents.'))\n"
+            "print('AGENTS:' + ','.join(bad))\n",
+            sentinel="AGENTS",
+            cwd=str(_REPO_ROOT),
+            message="src.ibkr.buy_stability imported src.agents",
+        )
+
+
+class TestParserCoherenceWithAnalysisIndex:
+    """The gate's prior-verdict reading must agree with the verdict the IBKR
+    analysis index records for the same saved decision (both share the neutral
+    parse_final_decision_scores; they differ only in final canonicalization,
+    which agrees for the canonical PM verdicts)."""
+
+    @pytest.mark.parametrize("verdict", ["BUY", "HOLD", "SELL", "DO_NOT_INITIATE"])
+    def test_gate_history_matches_analysis_record_verdict(self, tmp_path, verdict):
+        decision = (
+            f"### --- START PM_BLOCK ---\nVERDICT: {verdict}\n### --- END PM_BLOCK ---"
+        )
+        data = {
+            "prediction_snapshot": {"ticker": "TEST.T", "currency": "JPY"},
+            "final_decision": {"decision": decision},
+            "investment_analysis": {"trader_plan": ""},
+        }
+        record = _build_analysis_record_from_data(
+            Path("TEST.T_20260601_000000_analysis.json"), data
+        )
+        path = tmp_path / "TEST.T_20260601_000000_analysis.json"
+        path.write_text(json.dumps(data))
+        gate_verdicts = load_recent_same_ticker_verdicts(
+            "TEST.T",
+            lookback_days=3650,
+            results_dir=str(tmp_path),
+            now=datetime(2026, 6, 2),
+        )
+        assert record is not None
+        assert gate_verdicts == [record.verdict]

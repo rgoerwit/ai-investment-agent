@@ -25,6 +25,7 @@ from src.fx_normalization import FALLBACK_RATES_TO_USD, normalize_minor_unit_cur
 from src.ibkr.models import AnalysisRecord, TradeBlockData
 from src.ibkr.order_builder import parse_trade_block
 from src.ibkr.reconciliation_rules import _exchange_from_ticker, _normalize_verdict
+from src.pm_decision_parser import parse_final_decision_scores
 from src.sector_normalization import normalize_sector_label
 from src.validators.financial_rules import detect_red_flags
 from src.validators.metric_extractor import extract_metrics
@@ -179,56 +180,13 @@ _FILENAME_TIMESTAMP_RE = re.compile(r"^(?P<ticker>.+?)_(\d{8})_(\d{6})_analysis\
 def _parse_scores_from_final_decision(text: str) -> dict:
     """Extract health_adj, growth_adj, verdict, zone, risk_tally from a PM decision.
 
-    Best-effort parse fallback (the prediction_snapshot is preferred when present);
-    risk_tally allows a leading sign and is consumed only by the BUY stability gate.
+    Thin delegate to the neutral src.pm_decision_parser so the parser stays
+    agents-free and is shared with the BUY stability gate. The verdict is returned
+    RAW; the AnalysisRecord call site canonicalizes via _normalize_verdict (so a
+    verdict like "REJECT" is preserved verbatim, not collapsed to DO_NOT_INITIATE).
+    Private name retained as the existing test surface.
     """
-    result: dict = {}
-
-    m = re.search(r"\bHEALTH_ADJ[:\s]+([0-9.]+)", text, re.IGNORECASE)
-    if not m:
-        m = re.search(r"Financial Health[^0-9\n]+([\d.]+)%", text, re.IGNORECASE)
-    if m:
-        try:
-            result["health_adj"] = float(m.group(1))
-        except ValueError:
-            pass
-
-    m = re.search(r"\bGROWTH_ADJ[:\s]+([0-9.]+)", text, re.IGNORECASE)
-    if not m:
-        m = re.search(r"Growth Transition[^0-9\n]+([\d.]+)%", text, re.IGNORECASE)
-    if m:
-        try:
-            result["growth_adj"] = float(m.group(1))
-        except ValueError:
-            pass
-
-    verdict_token = r"[A-Z_]+(?:[ \t][A-Z_]+)*"
-    for pattern in (
-        rf"\bVERDICT[:\s]+({verdict_token})",
-        rf"PORTFOLIO MANAGER VERDICT:\s*({verdict_token})",
-        r"\*\*Action\*\*:\s*\*\*(\w[\w_ ]*)\*\*",
-    ):
-        m = re.search(pattern, text)
-        if m:
-            result["verdict"] = m.group(1).strip().replace(" ", "_").upper()
-            break
-
-    m = re.search(r"\bZONE[:\s]+(HIGH|MODERATE|LOW)\b", text, re.IGNORECASE)
-    if m:
-        result["zone"] = m.group(1).upper()
-
-    # Allow a leading sign — bonuses can drive the tally below zero (e.g. -0.5).
-    # The fallback gap excludes '-' so the sign is captured, not consumed.
-    m = re.search(r"\bRISK_TALLY[:\s]+(-?[0-9.]+)", text, re.IGNORECASE)
-    if not m:
-        m = re.search(r"TOTAL RISK COUNT[^-0-9\n]*(-?[0-9.]+)", text, re.IGNORECASE)
-    if m:
-        try:
-            result["risk_tally"] = float(m.group(1))
-        except ValueError:
-            pass
-
-    return result
+    return parse_final_decision_scores(text)
 
 
 def _should_emit_analysis_progress(processed_files: int, total_files: int) -> bool:

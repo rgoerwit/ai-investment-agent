@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from src.config import config
 from src.ibkr.models import (
     AnalysisRecord,
     NormalizedPosition,
@@ -11,6 +12,21 @@ from src.ibkr.models import (
     TradeBlockData,
 )
 from src.ibkr.ticker import Ticker
+
+
+@pytest.fixture(autouse=True)
+def _isolate_results_dir(tmp_path, monkeypatch):
+    """Point config.results_dir at an empty per-test dir.
+
+    The BUY stability gate (default ON) scans config.results_dir for recent
+    same-ticker verdicts. Without isolation the reconciler tests would couple to
+    the developer's real results/ history and withhold BUYs nondeterministically.
+    Tests that need priors override this (e.g. monkeypatch results_dir to their
+    own tmp_path) — that override wins because it runs inside the test body.
+    """
+    isolated = tmp_path / "_isolated_results"
+    isolated.mkdir(exist_ok=True)
+    monkeypatch.setattr(config, "results_dir", str(isolated), raising=False)
 
 
 @pytest.fixture

@@ -13,6 +13,17 @@ import structlog
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# macOS fork-safety: apply the same mitigation the app uses, but at test-session
+# import time (before any test forks). Several tests + scripts/find_gems.py use
+# multiprocessing "spawn"; spawning a worker does fork()+exec(), and on macOS the
+# child can SIGSEGV in Apple's Network.framework atfork handler before exec once
+# the gRPC/proxy stack is active — a benign but dialog-popping forked-child crash.
+# Guarded: no-op off macOS and when a proxy is configured (so proxied CI keeps
+# working); only sets no_proxy='*' on clean machines. See src/config.py.
+from src.config import _apply_macos_fork_safety_env  # noqa: E402
+
+_apply_macos_fork_safety_env(enabled=True, platform=sys.platform)
+
 # Capture real API key if present (for integration tests)
 _REAL_GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 

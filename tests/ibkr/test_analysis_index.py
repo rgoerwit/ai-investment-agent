@@ -1,7 +1,5 @@
 """Collected analysis-index tests extracted from reconciler cases."""
 
-import subprocess
-import sys
 from pathlib import Path
 
 from src.ibkr.analysis_index import (
@@ -10,6 +8,7 @@ from src.ibkr.analysis_index import (
     _extract_tool1_financial_metrics,
     _parse_scores_from_final_decision,
 )
+from tests.import_boundary import assert_no_offenders
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 from tests.ibkr.reconciler_cases import (
@@ -62,6 +61,23 @@ def test_build_analysis_record_parses_risk_tally_from_decision_fallback():
     )
     assert record is not None
     assert record.risk_tally == 1.25
+
+
+def test_build_analysis_record_preserves_raw_reject_verdict():
+    # Regression for the neutral-parser decouple: the shared
+    # parse_final_decision_scores must return the RAW verdict so the
+    # analysis-index call-site _normalize_verdict keeps "REJECT" verbatim
+    # (canonicalize_pm_verdict would have collapsed it to DO_NOT_INITIATE).
+    record = _build_analysis_record_from_data(
+        Path("TEST.T_20260601_000000_analysis.json"),
+        {
+            "prediction_snapshot": {"ticker": "TEST.T", "currency": "JPY"},
+            "final_decision": {"decision": "PORTFOLIO MANAGER VERDICT: REJECT"},
+            "investment_analysis": {"trader_plan": ""},
+        },
+    )
+    assert record is not None
+    assert record.verdict == "REJECT"
 
 
 def test_build_analysis_record_quality_flags_empty_without_fundamentals():
@@ -125,7 +141,7 @@ def test_indexing_does_not_import_agents_package():
     and asserts that importing analysis_index + building a record imports no
     src.agents module — guards the quality-flag constant ownership boundary.
     """
-    code = (
+    assert_no_offenders(
         "import sys\n"
         "from pathlib import Path\n"
         "from src.ibkr.analysis_index import _build_analysis_record_from_data as build\n"
@@ -137,18 +153,11 @@ def test_indexing_does_not_import_agents_package():
         "PROFITABILITY_TREND: UNSTABLE\\n### --- END DATA_BLOCK ---'},\n"
         "  'investment_analysis': {'trader_plan':''}})\n"
         "bad = sorted(m for m in sys.modules if m.startswith('src.agents'))\n"
-        "print('AGENTS:' + ','.join(bad))\n"
-        "sys.exit(1 if bad else 0)\n"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True,
-        text=True,
+        "print('AGENTS:' + ','.join(bad))\n",
+        sentinel="AGENTS",
         cwd=str(_REPO_ROOT),
+        message="IBKR indexing imported src.agents",
     )
-    assert (
-        result.returncode == 0
-    ), f"IBKR indexing imported src.agents: {result.stdout.strip()} {result.stderr.strip()}"
 
 
 def test_build_analysis_record_normalizes_legacy_healthcare_sector():

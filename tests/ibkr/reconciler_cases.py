@@ -1,13 +1,17 @@
 """Shared reconciler test cases and helpers for IBKR split test modules."""
 
 import json
-import multiprocessing
+import os
+import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 from src.ibkr.analysis_index import (
     AnalysisLoadProgress,
@@ -36,7 +40,6 @@ from src.ibkr.reconciliation_rules import (
     check_target_hit,
 )
 from src.ibkr.ticker import Ticker
-from tests.ibkr.lock_helpers import hold_analysis_index_lock
 
 # ── Fixtures ──
 
@@ -1714,27 +1717,48 @@ CAPITAL_PLAN_STATUS: NONE
         record = _build_analysis_record_from_data(second_path, second)
         assert record is not None
 
-        ctx = multiprocessing.get_context("spawn")
-        ready = ctx.Event()
-        proc = ctx.Process(
-            target=hold_analysis_index_lock,
-            args=(str(tmp_path), 0.4, ready),
+        # Launch the lock-holder as a posix_spawn subprocess (close_fds=False, no
+        # cwd=) rather than a multiprocessing "spawn" Process: the latter calls
+        # fork(), which SIGSEGVs in Apple's Network.framework atfork handler on
+        # macOS once the gRPC stack is loaded. Readiness is signaled via a marker
+        # file. See CLAUDE.md (macOS-Specific Issues).
+        ready_path = tmp_path / ".lock_holder_ready"
+        child_env = {**os.environ}
+        child_env["PYTHONPATH"] = (
+            str(_REPO_ROOT) + os.pathsep + child_env["PYTHONPATH"]
+            if child_env.get("PYTHONPATH")
+            else str(_REPO_ROOT)
         )
-        proc.start()
-        assert ready.wait(2.0)
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "tests.ibkr.lock_helpers",
+                str(tmp_path),
+                "0.4",
+                str(ready_path),
+            ],
+            env=child_env,
+            close_fds=False,
+        )
+        try:
+            deadline = time.time() + 2.0
+            while not ready_path.exists() and time.time() < deadline:
+                time.sleep(0.01)
+            assert ready_path.exists(), "lock holder did not signal readiness"
 
-        start = time.perf_counter()
-        with patch("src.ibkr.analysis_index.logger") as mock_logger:
-            updated = update_latest_analyses_index(
-                tmp_path,
-                record,
-                previous_dir_mtime_ns=previous_dir_mtime_ns,
-                analysis_file_count_before_save=1,
-            )
-        elapsed = time.perf_counter() - start
-
-        proc.join(timeout=2.0)
-        assert proc.exitcode == 0
+            start = time.perf_counter()
+            with patch("src.ibkr.analysis_index.logger") as mock_logger:
+                updated = update_latest_analyses_index(
+                    tmp_path,
+                    record,
+                    previous_dir_mtime_ns=previous_dir_mtime_ns,
+                    analysis_file_count_before_save=1,
+                )
+            elapsed = time.perf_counter() - start
+        finally:
+            proc.wait(timeout=2.0)
+        assert proc.returncode == 0
         assert updated is True
         assert elapsed >= 0.25
         mock_logger.debug.assert_any_call(

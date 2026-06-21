@@ -18,16 +18,15 @@ from src.agents.pm_inputs import (
 from src.agents.pm_verdict_metadata import (
     PMVerdictMetadata,
     PMVerdictRecovery,
-    canonicalize_pm_verdict,
     pm_verdict_metadata_from_text,
 )
-
-# NOTE: do not import src.charts.extractors.pm_block at module level — it
-# imports src.agents.pm_verdict_metadata, which triggers this package's
-# __init__ and circles back here. Import it inside functions (same pattern
-# as pm_verdict_metadata.pm_verdict_metadata_from_text).
 from src.data_block_utils import extract_data_block_field, has_parseable_data_block
 from src.error_safety import summarize_exception
+
+# Verdict canonicalization lives in the neutral, dependency-free parser (it used
+# to live on src.agents.pm_verdict_metadata, which created a charts circular
+# import: pm_block -> pm_verdict_metadata -> agents/__init__ -> decision_nodes).
+from src.pm_decision_parser import canonicalize_pm_verdict
 from src.runtime_diagnostics import (
     failure_artifact,
     get_artifact_status,

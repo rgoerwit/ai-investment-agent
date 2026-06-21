@@ -19,7 +19,7 @@ def test_verdict_consumers_use_shared_canonicalizer() -> None:
         tree = ast.parse(source)
         imports_canonicalizer = any(
             isinstance(node, ast.ImportFrom)
-            and node.module == "src.agents.pm_verdict_metadata"
+            and node.module == "src.pm_decision_parser"
             and any(alias.name == "canonicalize_pm_verdict" for alias in node.names)
             for node in ast.walk(tree)
         )
@@ -27,8 +27,8 @@ def test_verdict_consumers_use_shared_canonicalizer() -> None:
             missing_imports.append(rel)
 
     assert not missing_imports, (
-        "PM verdict consumers must import canonicalize_pm_verdict from "
-        f"src.agents.pm_verdict_metadata: {missing_imports}"
+        "PM verdict consumers must import canonicalize_pm_verdict from the neutral "
+        f"src.pm_decision_parser (agents-free, breaks the pm_block cycle): {missing_imports}"
     )
 
 
@@ -48,6 +48,5 @@ def test_no_local_pm_verdict_alias_maps_or_normalizers() -> None:
                 violations.append(f"{rel}:{node.lineno} defines verdict alias map")
 
     assert not violations, (
-        "Use src.agents.pm_verdict_metadata.canonicalize_pm_verdict instead: "
-        f"{violations}"
+        "Use src.pm_decision_parser.canonicalize_pm_verdict instead: " f"{violations}"
     )

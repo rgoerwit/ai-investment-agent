@@ -212,6 +212,40 @@ def _check_env_overrides() -> None:
                 )
 
 
+def _apply_macos_fork_safety_env(*, enabled: bool, platform: str) -> None:
+    """Export env vars that prevent benign macOS fork-safety crashes.
+
+    The gRPC/Gemini stack loads Apple Network.framework and makes the process
+    multi-threaded; a later ``fork()+exec()`` (subprocess / multiprocessing-spawn
+    from a transitive dep) crashes in Network's atfork handler before ``exec`` —
+    a SIGSEGV in a short-lived forked child that is harmless but pops a macOS
+    crash dialog. Disabling proxy auto-discovery short-circuits the
+    SystemConfiguration/Network.framework lookup that trips the handler;
+    ``OBJC_DISABLE_INITIALIZE_FORK_SAFETY`` covers the ObjC +initialize variant.
+
+    No-op off macOS, when disabled, when a proxy is configured (proxy users must
+    keep proxying), or when the user already set the relevant vars.
+    """
+    if not enabled or platform != "darwin":
+        return
+    proxy_vars = (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    )
+    if (
+        not any(os.environ.get(v) for v in proxy_vars)
+        and "no_proxy" not in os.environ
+        and "NO_PROXY" not in os.environ
+    ):
+        os.environ["no_proxy"] = "*"
+        os.environ["NO_PROXY"] = "*"
+    os.environ.setdefault("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES")
+
+
 def validate_environment_variables() -> None:
     """Validate required environment variables.
 
@@ -333,11 +367,13 @@ class Settings(BaseSettings):
         description="Enable OpenAI consultant for cross-validation",
     )
     # --- BUY stability / hysteresis gate (off-watchlist new BUYs) ---
-    # Default OFF: this changes verdict→action behavior, so it is opt-in. When
-    # enabled, a fresh BUY contradicted by a recent same-ticker run (or marginal
-    # with an unresolved peak/transient flag) is withheld pending stability.
+    # Default ON since the gate was decoupled from src.agents (the enabled path is
+    # now agents-free — src/ibkr/buy_stability.py + the neutral pm_decision_parser).
+    # A fresh off-watchlist BUY contradicted by a recent same-ticker run (or
+    # marginal with an unresolved peak/transient flag) is withheld pending
+    # stability. Set BUY_STABILITY_ENABLED=false to opt out.
     buy_stability_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias="BUY_STABILITY_ENABLED",
         description="Withhold unstable/marginal off-watchlist BUYs (reproducibility gate)",
     )
@@ -794,6 +830,14 @@ class Settings(BaseSettings):
         validation_alias="GRPC_POLL_STRATEGY",
         description="gRPC poll strategy (poll is most compatible)",
     )
+    macos_fork_safety_mitigation: bool = Field(
+        default=True,
+        validation_alias="MACOS_FORK_SAFETY_MITIGATION",
+        description=(
+            "On macOS, disable proxy auto-discovery + ObjC fork-init to prevent "
+            "benign Network.framework atfork SIGSEGV crash dialogs"
+        ),
+    )
 
     # --- Prompts ---
     prompts_dir: Path = Field(
@@ -1015,6 +1059,12 @@ class Settings(BaseSettings):
             os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "1"
         if self.grpc_poll_strategy:
             os.environ["GRPC_POLL_STRATEGY"] = self.grpc_poll_strategy
+
+        # macOS fork-safety: prevent benign Network.framework atfork SIGSEGV
+        # crash dialogs in forked children (see _apply_macos_fork_safety_env).
+        _apply_macos_fork_safety_env(
+            enabled=self.macos_fork_safety_mitigation, platform=sys.platform
+        )
 
         return self
 

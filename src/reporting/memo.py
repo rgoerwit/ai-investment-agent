@@ -24,7 +24,6 @@ from dataclasses import dataclass, field
 
 import structlog
 
-from src.agents.pm_verdict_metadata import canonicalize_pm_verdict
 from src.agents.support import extract_kill_criteria, get_bear_history
 from src.charts.extractors.valuation import (
     extract_valuation_scenarios_for_fundamentals,
@@ -32,6 +31,7 @@ from src.charts.extractors.valuation import (
     scenario_valuation_caveat,
 )
 from src.data_block_utils import extract_data_block_field
+from src.pm_decision_parser import canonicalize_pm_verdict
 from src.reporting.source_confidence import (
     SourceRow,
     build_source_confidence_rows,

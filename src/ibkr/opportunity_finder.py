@@ -52,14 +52,15 @@ def find_opportunities(
         if _normalize_verdict(analysis.verdict or "") != "BUY":
             continue
 
-        # Opt-in BUY stability gate (default OFF). Withhold a fresh BUY that is
-        # either contradicted by recent same-ticker runs (verdict-noise defense)
-        # or marginal (risk_tally >= margin) with an unresolved peak/transient
-        # quality flag. Lazy import keeps the default (disabled) path free of the
-        # agents package. risk_tally + quality_flag_types are persisted on
+        # Opt-in BUY stability gate. Withhold a fresh BUY that is either
+        # contradicted by recent same-ticker runs (verdict-noise defense) or
+        # marginal (risk_tally >= margin) with an unresolved peak/transient
+        # quality flag. The gate is agents-free (src.ibkr.buy_stability +
+        # neutral parser); the lazy import keeps it off the import path entirely
+        # when disabled. risk_tally + quality_flag_types are persisted on
         # AnalysisRecord by the analysis index, so both branches are live.
         if getattr(config, "buy_stability_enabled", False):
-            from src.agents.buy_stability import (
+            from src.ibkr.buy_stability import (
                 BuyStabilityConfig,
                 assess_buy_stability,
                 load_recent_same_ticker_verdicts,

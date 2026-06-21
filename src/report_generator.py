@@ -18,11 +18,11 @@ from typing import Any
 
 import structlog
 
-from src.agents.pm_verdict_metadata import canonicalize_pm_verdict
 from src.charts.extractors.pm_block import extract_pm_block
 from src.charts.extractors.valuation import format_iv
 from src.data_block_utils import normalize_structured_block_boundaries
 from src.error_safety import summarize_exception
+from src.pm_decision_parser import canonicalize_pm_verdict
 from src.runtime_diagnostics import is_publishable_analysis
 from src.thesis_constants import ANALYST_COVERAGE_MAX
 from src.ticker_policy import CHINA_SUFFIXES, KOREA_SUFFIXES, ticker_in_group

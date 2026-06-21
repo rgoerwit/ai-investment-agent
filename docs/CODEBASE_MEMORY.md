@@ -201,6 +201,22 @@ Ownership is now split across:
 - `src/ibkr/watchlist_evaluator.py` for watchlist routing
 - `src/ibkr/opportunity_finder.py` for off-watchlist BUY discovery
 - `src/ibkr/portfolio_health.py` for portfolio-health and correlated-sell handling
+- `src/ibkr/buy_stability.py` for the BUY stability / hysteresis gate
+
+**Agents-free invariant (load-bearing):** the IBKR reconciliation path must not
+import `src.agents` (importing any `src.agents.*` submodule runs the heavy
+`agents/__init__`, pulling in the whole LangGraph/LLM surface). The BUY stability
+gate (`src/ibkr/buy_stability.py`) is **default-on** (`BUY_STABILITY_ENABLED`,
+flipped June 2026) and runs on every reconcile, so it — and the analysis index —
+parse PM verdicts via the neutral, stdlib-only `src/pm_decision_parser.py`
+(`canonicalize_pm_verdict`, `parse_final_decision_scores`), never via
+`src.agents.pm_verdict_metadata`. That neutral module is also the single home for
+`canonicalize_pm_verdict` shared by charts/report/memo, which dissolves the old
+`pm_block → src.agents.pm_verdict_metadata → agents/__init__ → decision_nodes →
+pm_block` circular import. Boundary tests in `tests/ibkr/test_buy_stability.py`,
+`tests/ibkr/test_analysis_index.py`, and `tests/test_pm_decision_parser.py`
+enforce that these paths import no `src.agents`; do not reintroduce such an import
+or move the parser back under `src.agents`.
 
 ## Testing Guidance
 

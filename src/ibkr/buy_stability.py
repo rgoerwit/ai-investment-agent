@@ -9,6 +9,11 @@ an unresolved peak/transient flag.
 It is intentionally pure + side-effect free (except the file-scanning history
 helper) so it can be unit-tested in isolation and wired as an advisory at the
 action layer WITHOUT rewriting the Portfolio Manager's narrative verdict.
+
+Lives under src.ibkr (its only consumer is the off-watchlist opportunity
+finder) and depends only on the neutral src.pm_decision_parser + the
+dependency-free validators flag set — so the enabled gate path never imports
+src.agents (and its heavy LangGraph/LLM surface). A boundary test enforces this.
 """
 
 from __future__ import annotations
@@ -23,7 +28,7 @@ from typing import Any
 
 import structlog
 
-from src.agents.pm_verdict_metadata import pm_verdict_metadata_from_text
+from src.pm_decision_parser import canonicalize_pm_verdict, parse_final_decision_scores
 
 # Canonical set lives in the dependency-free validators module so lightweight
 # callers (e.g. IBKR indexing) need not import the agents package. Re-exported
@@ -131,6 +136,10 @@ def load_recent_same_ticker_verdicts(
     Scans ``{results_dir}/{ticker}_YYYYMMDD_HHMMSS_analysis.json``. Malformed or
     unreadable files are skipped (logged at debug), never raised. The current
     analysis (``exclude_path``) is excluded so a BUY is not compared to itself.
+
+    Prior verdicts are parsed with the same neutral final-decision parser the
+    IBKR analysis index uses to produce ``AnalysisRecord.verdict``, so the gate's
+    history reading is coherent with the verdicts it gates against.
     """
     if not ticker or lookback_days <= 0 or not results_dir:
         return []
@@ -156,7 +165,9 @@ def load_recent_same_ticker_verdicts(
             with open(path) as fh:
                 data = json.load(fh)
             decision = (data.get("final_decision") or {}).get("decision", "")
-            verdict = pm_verdict_metadata_from_text(str(decision)).verdict
+            verdict = canonicalize_pm_verdict(
+                parse_final_decision_scores(str(decision)).get("verdict")
+            )
         except (OSError, json.JSONDecodeError, ValueError, AttributeError) as exc:
             # debug-level raw error= is permitted by the logging standard; log
             # only the filename, not the full local path.

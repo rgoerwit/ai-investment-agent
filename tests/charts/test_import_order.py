@@ -30,6 +30,10 @@ def test_chart_module_imports_cleanly_first(module: str):
         capture_output=True,
         text=True,
         timeout=60,
+        # Keep fds open so CPython uses posix_spawn instead of fork()+exec(): a
+        # fork() in this gRPC/Network.framework-loaded test process SIGSEGVs in
+        # Apple's atfork handler on macOS. See CLAUDE.md (macOS-Specific Issues).
+        close_fds=False,
     )
     assert (
         proc.returncode == 0

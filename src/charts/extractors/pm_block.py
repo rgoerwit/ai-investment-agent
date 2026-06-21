@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 import structlog
 
-from src.agents.pm_verdict_metadata import canonicalize_pm_verdict
+from src.pm_decision_parser import canonicalize_pm_verdict
 
 logger = structlog.get_logger(__name__)
 
