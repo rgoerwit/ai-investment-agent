@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import statistics
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Any
 
 import pandas as pd
@@ -30,6 +30,8 @@ STATEMENT_ROW_ALIASES: dict[str, tuple[str, ...]] = {
     "gross_profit": ("Gross Profit",),
     "operating_income": ("Operating Income", "Operating Income Loss"),
     "net_income": ("Net Income", "Net Income Common Stockholders"),
+    "eps_diluted": ("Diluted EPS",),
+    "eps_basic": ("Basic EPS",),
     "operating_cash_flow": (
         "Operating Cash Flow",
         "Cash Flow From Continuing Operating Activities",
@@ -146,6 +148,19 @@ def extract_from_financial_statements(
         fetcher.stats["sources"]["statements"] += 1
 
         if not financials.empty:
+            # Annual statements can lag a full fiscal year for some ex-US names
+            # (yfinance carries only through the prior FY). Flag when the latest
+            # annual column is older than a normal reporting lag, so a stale FY
+            # growth figure is surfaced rather than silently trusted (consumed by
+            # the GROWTH_DATA over-interpretation guard downstream).
+            latest_col = financials.columns[0]
+            if hasattr(latest_col, "to_pydatetime"):
+                age_days = (date.today() - latest_col.date()).days
+                extracted["_income_statement_date"] = latest_col.date().isoformat()
+                extracted["_statements_age_days"] = age_days
+                if age_days > 457:  # ~15 months: a completed FY is likely missing
+                    extracted["statements_stale"] = True
+                    extracted["_statements_stale_source"] = "calculated_from_statements"
             if len(financials.columns) >= 2:
                 try:
                     current = statement_value(financials, "total_revenue", col=0)
@@ -160,6 +175,33 @@ def extract_from_financial_statements(
                 except Exception as exc:
                     _log_statement_field_extraction_failed(
                         symbol, "revenue_growth", exc
+                    )
+                # FY EPS growth from the filed EPS rows (diluted > basic). Net-income
+                # growth is only a last-resort proxy (NI != EPS once share count moves
+                # via buybacks/dilution/splits), and is tagged as such so its lower
+                # reliability is visible to the merge and downstream.
+                try:
+                    eps_cur = statement_value(financials, "eps_diluted", col=0)
+                    eps_prev = statement_value(financials, "eps_diluted", col=1)
+                    eps_src = "calculated_from_statement_diluted_eps"
+                    if eps_cur is None or eps_prev is None:
+                        eps_cur = statement_value(financials, "eps_basic", col=0)
+                        eps_prev = statement_value(financials, "eps_basic", col=1)
+                        eps_src = "calculated_from_statement_basic_eps"
+                    if eps_cur is None or eps_prev is None:
+                        eps_cur = statement_value(financials, "net_income", col=0)
+                        eps_prev = statement_value(financials, "net_income", col=1)
+                        eps_src = "calculated_from_statement_net_income_proxy"
+                    # A non-positive prior base makes a YoY % meaningless; leave N/A
+                    # rather than fabricate a growth figure from a loss year.
+                    if eps_cur is not None and eps_prev is not None and eps_prev > 0:
+                        eps_growth = (eps_cur - eps_prev) / eps_prev
+                        if -1.0 < eps_growth < 5.0:
+                            extracted["earningsGrowth"] = eps_growth
+                            extracted["_earningsGrowth_source"] = eps_src
+                except Exception as exc:
+                    _log_statement_field_extraction_failed(
+                        symbol, "earnings_growth", exc
                     )
             try:
                 revenue_cagr = calculate_cagr_from_latest_series(

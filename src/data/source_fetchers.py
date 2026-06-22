@@ -76,12 +76,47 @@ async def fetch_yfinance_enhanced(fetcher: Any, symbol: str) -> dict | None:
                     f"statement ({fcf_stmt / 1e9:.2f}B) = {ratio:.1f}x divergence"
                 )
 
+        # Statement-derived FY growth is filing-authoritative and must override the
+        # stale Yahoo `info` scalar. The historical bug kept the scalar but copied
+        # the statement `_source` tag regardless, inflating the scalar's merge
+        # quality to 10 (see merge_policy.SOURCE_QUALITY) so it beat even paid
+        # feeds. Margins are deliberately NOT in this set: Yahoo margins are
+        # TTM-style vs annual FY statements, with unproven period semantics.
+        # The override is suppressed when the statements are themselves stale (a
+        # missing latest FY): there the `info` scalar may be the fresher figure, so
+        # we keep it and let the statements_stale flag surface the uncertainty
+        # rather than overwrite with an out-of-date FY value.
+        authoritative_growth = (
+            {"revenueGrowth", "earningsGrowth"}
+            if not statement_data.get("statements_stale")
+            else set()
+        )
         for key, value in statement_data.items():
-            if key.startswith("_"):
+            if key.startswith("_") or value is None:
+                continue
+            if key in authoritative_growth or info.get(key) is None:
+                if (
+                    key in authoritative_growth
+                    and info.get(key) is not None
+                    and info.get(key) != value
+                ):
+                    info.setdefault("_statement_overrides", {})[key] = {
+                        "scalar": info[key],
+                        "statement": value,
+                    }
                 info[key] = value
-            elif key not in info or info.get(key) is None:
-                if value is not None:
-                    info[key] = value
+                # The provenance tag rides with the accepted value only — never
+                # stamp a statement source on a scalar we kept.
+                source_tag = f"_{key}_source"
+                if source_tag in statement_data:
+                    info[source_tag] = statement_data[source_tag]
+        # Metadata-only underscore keys (e.g. _statements_date, _income_statement_date)
+        # with no accepted value counterpart still flow through.
+        for key, value in statement_data.items():
+            if key.startswith("_") and not (
+                key.endswith("_source") and key[1 : -len("_source")] in statement_data
+            ):
+                info[key] = value
 
         if not info or (not has_price and len(info) < 5):
             return None

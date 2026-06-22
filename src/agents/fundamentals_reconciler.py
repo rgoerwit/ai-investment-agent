@@ -249,6 +249,21 @@ def reconcile_high_risk_fields(
             "GROWTH_DATA_QUALITY_NOTE",
             "TTM growth unavailable in raw payload; FY/MRQ values were not reused.",
         )
+    # yfinance can lag a full fiscal year for some ex-US names: the latest annual
+    # statements predate the most recent completed FY, so any FY-based growth may be
+    # out of date. Surface it deterministically (the data layer sets statements_stale)
+    # rather than let a stale FY figure read as current.
+    if payload.get("statements_stale"):
+        as_of = payload.get("_income_statement_date") or "unknown date"
+        updated = replace_or_append_block_line(
+            updated,
+            "GROWTH_DATA_STALE",
+            (
+                f"Latest annual statements (as of {as_of}) predate the most recent "
+                "completed fiscal year; reported FY growth may not reflect the latest "
+                "year — treat the growth read as data-limited."
+            ),
+        )
     if changed_balance_sheet:
         updated = replace_or_append_block_line(
             updated,

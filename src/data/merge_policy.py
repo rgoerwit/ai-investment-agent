@@ -70,6 +70,12 @@ QUOTE_PRICE_FIELDS = (
 SOURCE_QUALITY = {
     "yfinance_statements": 10,
     "calculated_from_statements": 10,
+    # FY EPS growth derived from the filed EPS rows is filing-authoritative (tier 10).
+    # The net-income proxy is filing-derived but less precise than real EPS, so it sits
+    # below EODHD's actual EPS-TTM YoY (9.5) yet still beats raw Yahoo/info scalars (9).
+    "calculated_from_statement_diluted_eps": 10,
+    "calculated_from_statement_basic_eps": 10,
+    "calculated_from_statement_net_income_proxy": 9.3,
     "eodhd": 9.5,
     # Exchange-direct IBKR snapshot: more reliable than the Yahoo/FMP point-in-time
     # values, so it overrides them — but stays below the paid EODHD feed and the

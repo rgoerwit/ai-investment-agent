@@ -197,6 +197,45 @@ NET_DEBT_EBITDA: -0.01
     assert "NET_DEBT_EBITDA: 1.95" in sanitized
 
 
+def test_sanitize_fundamentals_output_flags_stale_annual_statements() -> None:
+    content = """### --- START DATA_BLOCK ---
+REVENUE_GROWTH_FY: 9.9%
+EARNINGS_GROWTH_FY: 8.9%
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps(
+        {
+            "revenueGrowth": 0.099,
+            "earningsGrowth": 0.089,
+            "statements_stale": True,
+            "_income_statement_date": "2024-12-31",
+        }
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "FRAGUAB.MX")
+
+    assert "GROWTH_DATA_STALE:" in sanitized
+    assert "2024-12-31" in sanitized
+
+
+def test_sanitize_fundamentals_output_no_stale_flag_when_current() -> None:
+    content = """### --- START DATA_BLOCK ---
+REVENUE_GROWTH_FY: 22.3%
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps(
+        {
+            "revenueGrowth": 0.223,
+            "earningsGrowth": 0.198,
+            "_income_statement_date": "2025-06-30",
+        }
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "4396.T")
+
+    assert "GROWTH_DATA_STALE:" not in sanitized
+
+
 def test_sanitize_fundamentals_output_reconciles_b3_balance_sheet_fields() -> None:
     content = """### --- START DATA_BLOCK ---
 NET_CASH_TO_MARKET_CAP: 1.8%
