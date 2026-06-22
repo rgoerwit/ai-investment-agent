@@ -41,7 +41,7 @@ def mock_ibkr_client():
         {
             "conid": 123456,
             "contractDesc": "7203",
-            "listingExchange": "TSE",
+            "listingExchange": "TSEJ",
             "position": 100,
             "avgCost": 2000.0,
             "mktValue": 1400.0,

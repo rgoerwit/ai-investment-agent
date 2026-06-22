@@ -49,6 +49,43 @@ class TestIbkrMapConsistency:
         }
         assert bad == {}, f"IBKR aliases point to unknown suffixes: {bad}"
 
+    # Ground truth: IBKR Client Portal exchange codes, human-verified against live
+    # `conid_resolved` logs. Hardcoded on purpose — NOT derived from the metadata —
+    # so a silent swap (e.g. Tokyo/Toronto) fails here even though it stays
+    # self-consistent and passes test_canonical_ibkr_codes_round_trip above.
+    # Tokyo=TSEJ, Toronto=TSE (these were swapped with .T=TSE / .TO=TSX historically).
+    GROUND_TRUTH_IBKR_CODES = {
+        ".T": "TSEJ",
+        ".TO": "TSE",
+        ".V": "VENTURE",
+        ".HK": "SEHK",
+        ".KS": "KRX",
+        ".KQ": "KOSDAQ",
+        ".TW": "TWSE",
+        ".TWO": "TPEX",
+        ".L": "LSE",
+        ".AX": "ASX",
+        ".SI": "SGX",
+        ".KL": "KLSE",
+        ".MX": "MEXI",
+        ".SA": "BVMF",
+        ".WA": "WSE",
+        ".AS": "AEB",
+        ".PA": "SBF",
+        ".DE": "IBIS",
+        ".BR": "EBR",
+        ".SW": "SWX",
+    }
+
+    def test_ground_truth_ibkr_codes(self):
+        for suffix, expected in self.GROUND_TRUTH_IBKR_CODES.items():
+            assert suffix in EXCHANGES_BY_SUFFIX, f"canonical suffix {suffix} removed"
+            actual = EXCHANGES_BY_SUFFIX[suffix].ibkr_code
+            assert actual == expected, (
+                f"{suffix}: ibkr_code is {actual!r}, expected {expected!r} "
+                "(IBKR Client Portal ground truth — Tokyo=TSEJ, Toronto=TSE)"
+            )
+
 
 class TestExchangeMetadataValidation:
     def test_rejects_non_positive_numeric_width(self, monkeypatch):
@@ -139,7 +176,12 @@ class TestIbkrRoundTrip:
             ("3217", "TPEX", "3217.TWO"),
             ("3217", "TPEx", "3217.TWO"),
             ("2330", "TWSE", "2330.TW"),
-            ("7203", "TSE", "7203.T"),
+            ("7203", "TSEJ", "7203.T"),  # Tokyo: IBKR Client Portal code is TSEJ
+            (
+                "PEY",
+                "TSE",
+                "PEY.TO",
+            ),  # Toronto: IBKR Client Portal code is TSE (not TSEJ)
             ("5", "SEHK", "0005.HK"),
             ("5934", "KRX", "005934.KS"),
             ("005930", "KRX", "005930.KS"),
@@ -204,6 +246,12 @@ class TestFragileExchangeList:
 
     def test_korea_fragile(self):
         assert ".KS" in FRAGILE_EXCHANGE_SUFFIXES
+
+    def test_canada_fragile(self):
+        # Thin yfinance coverage for Canadian listings (esp. TSXV); warrants the
+        # same Panic-Mode/sibling-rescue caution as JP/HK/KR/TW/UK.
+        assert ".TO" in FRAGILE_EXCHANGE_SUFFIXES
+        assert ".V" in FRAGILE_EXCHANGE_SUFFIXES
 
 
 _TICKER_TOOLS = [

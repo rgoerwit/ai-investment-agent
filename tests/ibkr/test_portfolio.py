@@ -24,7 +24,7 @@ class TestNormalizePositions:
             {
                 "conid": 123456,
                 "contractDesc": "7203",
-                "listingExchange": "TSE",
+                "listingExchange": "TSEJ",
                 "position": 100,
                 "avgCost": 2000.0,
                 "mktValue": 1400.0,
@@ -85,7 +85,7 @@ class TestNormalizePositions:
             {
                 "conid": 1,
                 "contractDesc": "7203",
-                "listingExchange": "TSE",
+                "listingExchange": "TSEJ",
                 "position": 100,
                 "mktPrice": 2100,
             },
@@ -127,7 +127,7 @@ class TestNormalizePositions:
             {
                 "conid": 1,
                 "contractDesc": "7203",
-                "listingExchange": "TSE",
+                "listingExchange": "TSEJ",
                 "position": 100,
                 "mktValue": 210_000.0,  # ¥210,000
                 "currency": "JPY",

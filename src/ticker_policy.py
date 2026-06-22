@@ -13,7 +13,9 @@ KOREA_SUFFIXES = frozenset({".KS", ".KQ"})
 TAIWAN_SUFFIXES = frozenset({".TW", ".TWO"})
 INDIA_SUFFIXES = frozenset({".NS", ".BO"})
 SEARCH_RESOLUTION_SUFFIXES = frozenset({".HK", ".KL", ".TW", ".TWO"})
-FRAGILE_EXCHANGE_SUFFIXES = frozenset({".HK", ".TW", ".TWO", ".KS", ".T", ".L"})
+FRAGILE_EXCHANGE_SUFFIXES = frozenset(
+    {".HK", ".TW", ".TWO", ".KS", ".T", ".L", ".TO", ".V"}
+)
 SIBLING_SUFFIXES: dict[str, tuple[str, ...]] = {
     ".TW": (".TWO",),
     ".TWO": (".TW",),

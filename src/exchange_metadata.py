@@ -33,7 +33,7 @@ EXCHANGES_BY_SUFFIX: dict[str, ExchangeInfo] = {
     ".MI": ExchangeInfo(".MI", "Borsa Italiana", "Italy", "BVME", "EUR"),
     ".MC": ExchangeInfo(".MC", "Bolsa de Madrid", "Spain", "BM", "EUR"),
     ".L": ExchangeInfo(".L", "London Stock Exchange", "UK", "LSE", "GBP"),
-    ".T": ExchangeInfo(".T", "Tokyo Stock Exchange", "Japan", "TSE", "JPY"),
+    ".T": ExchangeInfo(".T", "Tokyo Stock Exchange", "Japan", "TSEJ", "JPY"),
     ".HK": ExchangeInfo(
         ".HK",
         "Hong Kong Stock Exchange",
@@ -67,7 +67,7 @@ EXCHANGES_BY_SUFFIX: dict[str, ExchangeInfo] = {
     ".NS": ExchangeInfo(
         ".NS", "National Stock Exchange of India", "India", "NSE", "INR"
     ),
-    ".TO": ExchangeInfo(".TO", "Toronto Stock Exchange", "Canada", "TSX", "CAD"),
+    ".TO": ExchangeInfo(".TO", "Toronto Stock Exchange", "Canada", "TSE", "CAD"),
     ".V": ExchangeInfo(".V", "TSX Venture Exchange", "Canada", "VENTURE", "CAD"),
     ".AX": ExchangeInfo(
         ".AX", "Australian Securities Exchange", "Australia", "ASX", "AUD"

@@ -2053,10 +2053,15 @@ class TestExchangeFromPosition:
         pos = self._pos("MEGP", ibkr_exchange="KLSE", currency="MYR")
         assert _exchange_from_position(pos) == "KL"
 
-    def test_ibkr_tse_maps_to_t(self):
-        """IBKR TSE (Tokyo Stock Exchange) → 'T'."""
-        pos = self._pos("7203", ibkr_exchange="TSE", currency="JPY")
+    def test_ibkr_tsej_maps_to_t(self):
+        """IBKR Client Portal Tokyo code 'TSEJ' → 'T'."""
+        pos = self._pos("7203", ibkr_exchange="TSEJ", currency="JPY")
         assert _exchange_from_position(pos) == "T"
+
+    def test_ibkr_tse_maps_to_to(self):
+        """IBKR Client Portal Toronto code 'TSE' → 'TO' (not Tokyo's 'T')."""
+        pos = self._pos("PEY", ibkr_exchange="TSE", currency="CAD")
+        assert _exchange_from_position(pos) == "TO"
 
     def test_ibkr_wse_maps_to_wa(self):
         """IBKR WSE (Warsaw Stock Exchange) → 'WA'."""
