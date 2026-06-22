@@ -391,15 +391,32 @@ class IbkrClient:
         status = self._brokerage_auth_status()
         if status is not None and status.get("authenticated") is True:
             return
+        connected = bool(status and status.get("connected"))
+        competing = bool(status and status.get("competing"))
         logger.warning(
             "brokerage_session_not_authenticated",
             operation=operation,
-            connected=bool(status and status.get("connected")),
-            competing=bool(status and status.get("competing")),
+            connected=connected,
+            competing=competing,
         )
+        if competing:
+            hint = (
+                "another live session bumped yours — close the other session "
+                "(TWS / mobile / another API client), then re-run"
+            )
+        else:
+            # connected-but-unauthenticated with nothing competing is the classic
+            # stale-OAuth-credentials state: ssodh/init can't authenticate against an
+            # expired key. Regenerating the key (the OAuth self-service invalidates
+            # the old one) is the fix re-login alone won't provide.
+            hint = (
+                "regenerate your IBKR OAuth key in the OAuth self-service config "
+                "(IBKR Client Portal → Settings → API → OAuth) and update "
+                ".env, or re-login to the Client Portal gateway"
+            )
         raise IBKRAuthError(
-            f"IBKR brokerage session not authenticated for {operation} — re-login to "
-            "the Client Portal gateway; another session may have bumped yours"
+            f"IBKR brokerage session not authenticated for {operation} "
+            f"(connected={connected}, competing={competing}): {hint}."
         )
 
     def _call_iserver_accounts(self) -> bool:
