@@ -307,6 +307,36 @@ def build_run_summary(
     return summary
 
 
+def attach_run_summary(
+    result: dict[str, Any],
+    *,
+    quick_mode: bool,
+    article_requested: bool = False,
+    provider_preflight: dict[str, dict[str, str]] | None = None,
+) -> None:
+    """Attach ``analysis_validity`` + the compact ``run_summary`` onto ``result``.
+
+    Single source of truth for run-summary enrichment, shared by the main analyzer
+    (``src.main._attach_run_summary``) and the portfolio_manager refresh save path.
+    Without this, refresh-saved analyses carried a bare ``run_summary`` missing the
+    macro-context provenance fields, which made the macro self-check in
+    ``save_results_to_file`` fire a spurious ``analysis_artifact_macro_mismatch``
+    on every refreshed ticker.
+
+    ``build_analysis_validity`` is imported lazily to avoid a module-level import
+    cycle (``runtime_diagnostics`` imports from this module at call time).
+    """
+    from src.runtime_diagnostics import build_analysis_validity
+
+    result["analysis_validity"] = build_analysis_validity(result)
+    result["run_summary"] = build_run_summary(
+        result,
+        quick_mode=quick_mode,
+        article_requested=article_requested,
+        provider_preflight=provider_preflight or {},
+    )
+
+
 def _normalize_macro_context_metadata(
     result: dict[str, Any],
     *,

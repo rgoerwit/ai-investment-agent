@@ -12,6 +12,7 @@ import structlog
 from src.error_safety import summarize_exception
 from src.fx_normalization import FALLBACK_RATES_TO_USD
 from src.ibkr.client import IbkrClient, mask_account
+from src.ibkr.exceptions import IBKRError
 from src.ibkr.models import NormalizedPosition, PortfolioSummary
 from src.ibkr.portfolio_defaults import DEFAULT_CASH_BUFFER_PCT
 from src.ibkr.ticker import Ticker
@@ -370,12 +371,26 @@ def read_watchlist(
     Returns:
         Set of yfinance ticker strings (e.g. {"0005.HK", "7203.T"}).
         None if the named watchlist was not found (distinct from an empty watchlist).
-        Empty set if client is None, watchlist exists but is empty, or API error.
+        Empty set if client is None, the watchlist exists but is empty, or a
+        *default* (unnamed) discovery hit an API error.
+
+    Raises:
+        IBKRError: when an *explicitly named* watchlist fetch fails (API/auth
+            error) — fail closed so the caller does not act on a phantom-empty list.
     """
     if client is None:
         return set()
 
-    rows = client.get_watchlist(name_hint)
+    try:
+        rows = client.get_watchlist(name_hint)
+    except IBKRError:
+        if name_hint:
+            # Explicitly requested watchlist: fail closed rather than silently
+            # degrade to "empty" and produce a misleading zero-candidate report.
+            raise
+        # Default (unnamed) discovery is best-effort — soft-fail to empty.
+        logger.warning("watchlist_default_fetch_failed", reason="api_error")
+        return set()
     if rows is None:
         return None  # watchlist not found
     if not rows:

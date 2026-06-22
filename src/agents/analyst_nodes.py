@@ -199,6 +199,12 @@ def _sanitize_fundamentals_output(
         return content
 
     updated_body = block_body
+    # `corrective` marks a sanitization that *fixed something suspect* (quarantine,
+    # invalid ADR routing, ADR sponsorship correction) vs. routine additive
+    # annotation (coverage data-quality note, valuation-reliability field, N/A
+    # backfills) that happens on essentially every run. The final log fires at
+    # WARNING only when corrective, else INFO — so the WARNING keeps signal value.
+    corrective = False
     if has_structured_payload:
         updated_body = reconcile_high_risk_fields(updated_body, payload)
 
@@ -211,10 +217,12 @@ def _sanitize_fundamentals_output(
         has_structured_payload
         and payload.get("_split_sensitive_metrics_quarantined") is True
     ):
+        corrective = True
         for key in _QUARANTINED_FORWARD_KEYS:
             updated_body = replace_or_append_block_line(updated_body, key, "N/A")
 
     if has_structured_payload and payload.get("_pe_low_anomaly_quarantined") is True:
+        corrective = True
         updated_body = replace_or_append_block_line(updated_body, "PE_RATIO_TTM", "N/A")
         updated_body = replace_or_append_block_line(updated_body, "PEG_RATIO", "N/A")
 
@@ -252,6 +260,7 @@ def _sanitize_fundamentals_output(
         )
 
     if _invalid_adr_routing(updated_body, ticker):
+        corrective = True
         for key, value in {
             "ADR_TICKER": "None",
             "ADR_EXCHANGE": "None",
@@ -294,6 +303,7 @@ def _sanitize_fundamentals_output(
             logger.warning("adr_sponsorship_downgraded_to_uncertain", ticker=ticker)
 
         if replacements:
+            corrective = True
             for key, value in replacements.items():
                 updated_body = replace_or_append_block_line(
                     updated_body,
@@ -304,7 +314,10 @@ def _sanitize_fundamentals_output(
     if updated_body == block_body:
         return content
 
-    logger.warning("fundamentals_datablock_sanitized", ticker=ticker)
+    # WARNING only when a corrective fix was applied; routine additive annotation
+    # (which changes the block on nearly every run) logs at INFO.
+    log = logger.warning if corrective else logger.info
+    log("fundamentals_datablock_sanitized", ticker=ticker, corrective=corrective)
     updated_block = (
         "### --- START DATA_BLOCK ---\n"
         f"{updated_body.rstrip()}\n"

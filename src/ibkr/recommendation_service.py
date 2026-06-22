@@ -85,6 +85,9 @@ class PortfolioRecommendationBundle:
     watchlist_total: int | None = None
     watchlist_candidates_blocked_by_cash: int = 0
     live_orders: list[dict] = field(default_factory=list)
+    # Non-fatal data-source failures (e.g. {"live_orders": "..."}) surfaced from the
+    # snapshot so the report/JSON can flag degraded sections (e.g. order-dedup off).
+    errors: dict[str, str] = field(default_factory=dict)
     items: list[ReconciliationItem] = field(default_factory=list)
     health_flags: list[str] = field(default_factory=list)
     freshness_summary: AnalysisFreshnessSummary = field(
@@ -140,6 +143,7 @@ class PortfolioRecommendationService:
         watchlist_name: str | None = None
         watchlist_total: int | None = None
         live_orders: list[dict] = []
+        errors: dict[str, str] = {}
 
         if not request.read_only:
             if self._portfolio_data_service is None:
@@ -161,6 +165,7 @@ class PortfolioRecommendationService:
             watchlist_name = snapshot.watchlist.loaded_name
             watchlist_total = snapshot.watchlist.total
             live_orders = snapshot.live_orders
+            errors = dict(snapshot.errors)
 
         (
             items,
@@ -224,6 +229,7 @@ class PortfolioRecommendationService:
             watchlist_total=watchlist_total,
             watchlist_candidates_blocked_by_cash=watchlist_candidates_blocked_by_cash,
             live_orders=live_orders,
+            errors=errors,
             items=items,
             health_flags=health_flags,
             freshness_summary=freshness_summary,

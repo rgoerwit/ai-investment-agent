@@ -1180,8 +1180,10 @@ CAPITAL_PLAN_STATUS: NONE
             second = load_latest_analyses(tmp_path)
 
         assert second["7203.T"].ticker == "7203.T"
-        info_events = [call.args[0] for call in mock_logger.info.call_args_list]
-        assert "analysis_index_mtime_mismatch_accepted" in info_events
+        # The accept is logged at debug (intentionally quiet — it fires on every
+        # load given full-ns dir mtime never matches second-granular reads).
+        debug_events = [call.args[0] for call in mock_logger.debug.call_args_list]
+        assert "analysis_index_mtime_mismatch_accepted" in debug_events
 
     def test_load_latest_analyses_rebuilds_when_analysis_file_count_changes(
         self, tmp_path
@@ -1819,7 +1821,9 @@ CAPITAL_PLAN_STATUS: NONE
             )
 
         assert updated is True
-        mock_logger.info.assert_any_call(
+        # The accept is logged at debug (intentionally quiet); the index still
+        # updates incrementally because the pre-save file count proves it current.
+        mock_logger.debug.assert_any_call(
             "analysis_index_incremental_update_mtime_mismatch_accepted",
             ticker="6758.T",
             path=str(index_path),

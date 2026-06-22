@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from src.ibkr.client import IbkrClient
+from src.ibkr.exceptions import IBKRAPIError, IBKRAuthError
 from src.ibkr.throttle import IBKRThrottle
 from src.ibkr_config import IbkrSettings
 
@@ -23,6 +24,11 @@ def _make_client() -> IbkrClient:
     client = IbkrClient.__new__(IbkrClient)
     client._settings = settings
     client._ibind_client = MagicMock()
+    # Default: brokerage session is authenticated so /iserver preflight passes.
+    # Tests exercising the unauthenticated path override this return_value.
+    client._ibind_client.authentication_status.return_value = _response(
+        {"authenticated": True, "connected": True, "competing": False}
+    )
 
     # Passthrough throttle: no rate delays, but still calls through correctly.
     mock_throttle = MagicMock(spec=IBKRThrottle)
@@ -288,17 +294,38 @@ class TestGetMarketdataSnapshot:
     # Error handling
     # ------------------------------------------------------------------ #
 
-    def test_api_exception_returns_empty_list(self):
-        """Any exception from ibind is caught and returns [] (non-fatal)."""
+    def test_api_exception_raises_typed_error(self):
+        """A fetch failure raises IBKRAPIError (was: silently returned []).
+
+        Surfacing the failure lets the snapshot layer record a non-fatal
+        ``errors["live_orders"]`` and flag degraded order-dedup, instead of
+        masquerading as "no open orders".
+        """
         client = _make_client()
         client._ibind_client.live_orders.side_effect = RuntimeError(
             "IBKR connection timeout"
         )
 
-        with patch(self._PATCH_ENSURE), patch(self._PATCH_SESSION):
-            result = client.get_live_orders()
+        with (
+            patch(self._PATCH_ENSURE),
+            patch(self._PATCH_SESSION),
+            pytest.raises(IBKRAPIError),
+        ):
+            client.get_live_orders()
 
-        assert result == []
+    def test_unauthenticated_session_raises(self):
+        """Brokerage session not authenticated → IBKRAuthError before the orders call.
+
+        The snapshot service catches this and records a non-fatal
+        ``errors["live_orders"]`` so the report flags degraded order-dedup.
+        """
+        client = _make_client()
+        client._ibind_client.authentication_status.return_value = _response(
+            {"authenticated": False, "connected": True, "competing": False}
+        )
+        with patch(self._PATCH_ENSURE), pytest.raises(IBKRAuthError):
+            client.get_live_orders()
+        client._ibind_client.live_orders.assert_not_called()
 
     def test_unexpected_response_type_returns_empty_list(self):
         """Completely unexpected response type (not list/dict) is handled gracefully."""
@@ -311,6 +338,69 @@ class TestGetMarketdataSnapshot:
             result = client.get_live_orders()
 
         assert result == []
+
+
+class TestEnsureBrokerageSession:
+    """Tests for the status-first /iserver brokerage-session preflight."""
+
+    _PATCH_ENSURE = "src.ibkr.client.IbkrClient._ensure_connected"
+
+    def test_authenticated_session_skips_init(self):
+        """Already authenticated → no ssodh/init call (status-first, avoids churn)."""
+        client = _make_client()  # fixture default: authenticated
+        with patch(self._PATCH_ENSURE):
+            client._ensure_brokerage_session(operation="watchlist_fetch")
+        client._ibind_client.initialize_brokerage_session.assert_not_called()
+        client._ibind_client.authentication_status.assert_called_once()
+
+    def test_unauthenticated_then_reauth_succeeds(self):
+        """connected-but-unauthenticated → ssodh/init once → re-check authenticated."""
+        client = _make_client()
+        client._ibind_client.authentication_status.side_effect = [
+            _response({"authenticated": False, "connected": True, "competing": False}),
+            _response({"authenticated": True, "connected": True, "competing": False}),
+        ]
+        with patch(self._PATCH_ENSURE):
+            client._ensure_brokerage_session(operation="watchlist_fetch")
+        client._ibind_client.initialize_brokerage_session.assert_called_once()
+        assert client._ibind_client.authentication_status.call_count == 2
+
+    def test_still_unauthenticated_raises(self):
+        """Unauthenticated after the single re-auth → actionable IBKRAuthError."""
+        client = _make_client()
+        client._ibind_client.authentication_status.return_value = _response(
+            {"authenticated": False, "connected": True, "competing": True}
+        )
+        with patch(self._PATCH_ENSURE), pytest.raises(IBKRAuthError):
+            client._ensure_brokerage_session(operation="watchlist_fetch")
+
+    def test_status_check_error_treated_as_unauthenticated(self):
+        """A raising authentication_status is treated as not-authenticated, not crash."""
+        client = _make_client()
+        client._ibind_client.authentication_status.side_effect = RuntimeError("boom")
+        with patch(self._PATCH_ENSURE), pytest.raises(IBKRAuthError):
+            client._ensure_brokerage_session(operation="live_orders")
+
+
+class TestGetWatchlistFailClosed:
+    """get_watchlist raises (rather than returning []) on API error."""
+
+    _PATCH_ENSURE = "src.ibkr.client.IbkrClient._ensure_connected"
+
+    def test_api_error_raises_typed_error(self):
+        client = _make_client()  # authenticated
+        client._ibind_client.get_all_watchlists.side_effect = RuntimeError("503")
+        with patch(self._PATCH_ENSURE), pytest.raises(IBKRAPIError):
+            client.get_watchlist("watchlist-2026")
+
+    def test_unauthenticated_session_raises_before_fetch(self):
+        client = _make_client()
+        client._ibind_client.authentication_status.return_value = _response(
+            {"authenticated": False, "connected": True, "competing": False}
+        )
+        with patch(self._PATCH_ENSURE), pytest.raises(IBKRAuthError):
+            client.get_watchlist("watchlist-2026")
+        client._ibind_client.get_all_watchlists.assert_not_called()
 
 
 class TestMaskAccount:

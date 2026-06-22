@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any
 # Ensure project root is on path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.error_safety import summarize_exception
 from src.ibkr.cli_options import (
     add_common_portfolio_request_args,
     portfolio_request_kwargs_from_args,
@@ -1081,6 +1082,7 @@ def format_report(
     portfolio_health_flags: list[str] | None = None,
     max_age_days: int = DEFAULT_MAX_AGE_DAYS,
     live_orders: list[dict] | None = None,
+    errors: dict[str, str] | None = None,
     watchlist_name: str | None = None,
     watchlist_total: int | None = None,
     watchlist_tickers: set[str] | None = None,
@@ -1111,6 +1113,13 @@ def format_report(
         lines.append(
             "  BUYs below come from saved analyses; whether you already own/watch "
             "them is UNKNOWN."
+        )
+        lines.append("")
+    if show_recommendations and (errors or {}).get("live_orders"):
+        lines.append(
+            "⚠ LIVE ORDERS UNAVAILABLE — open-order dedup is disabled; an order you "
+            "already have working may be re-suggested. Verify in IBKR before placing "
+            "orders."
         )
         lines.append("")
     nlv = portfolio.portfolio_value_usd
@@ -2607,6 +2616,7 @@ def format_json(
     show_recommendations: bool = False,
     screening_freshness: ScreeningFreshnessSummary | None = None,
     portfolio_data_loaded: bool = True,
+    errors: dict[str, str] | None = None,
 ) -> str:
     """Format reconciliation results as JSON.
 
@@ -2624,6 +2634,9 @@ def format_json(
     data = {
         "timestamp": datetime.now().isoformat(),
         "portfolio_data_loaded": portfolio_data_loaded,
+        # Non-fatal data-source failures (e.g. {"live_orders": "..."}) so JSON
+        # consumers see degraded sections (order-dedup off) rather than assume "none".
+        "errors": dict(errors or {}),
         "portfolio": portfolio.model_dump(),
         "items": [item.model_dump() for item in items],
         "screening_freshness": {
@@ -2980,7 +2993,21 @@ def main() -> None:
         )
 
     def _save_refresh_result(result, ticker: str, *, quick_mode: bool) -> Path:
-        from src.persistence import save_results_to_file
+        from src.persistence import attach_run_summary, save_results_to_file
+
+        # Parity with the main analyzer (src.main._attach_run_summary): enrich
+        # run_summary (macro provenance, providers, analysis_validity) BEFORE saving
+        # so refreshed artifacts match main-path artifacts and the macro self-check
+        # in save_results_to_file does not fire a spurious mismatch. Defensive: a
+        # failure here must not abort the refresh save.
+        try:
+            attach_run_summary(result, quick_mode=quick_mode)
+        except Exception as exc:
+            logger.warning(
+                "refresh_run_summary_attach_failed",
+                ticker=ticker,
+                **summarize_exception(exc, operation="attach_run_summary"),
+            )
 
         return save_results_to_file(
             result,
@@ -3064,6 +3091,7 @@ def main() -> None:
             show_recommendations=show_recs,
             screening_freshness=screening_freshness,
             portfolio_data_loaded=not args.read_only,
+            errors=bundle.errors,
         )
     else:
         output = format_report(
@@ -3073,6 +3101,7 @@ def main() -> None:
             portfolio_health_flags=health_flags,
             max_age_days=args.max_age,
             live_orders=_live_orders_data,
+            errors=bundle.errors,
             watchlist_name=_loaded_watchlist_name,
             watchlist_total=_loaded_watchlist_total,
             watchlist_tickers=watchlist_tickers if watchlist_tickers else None,

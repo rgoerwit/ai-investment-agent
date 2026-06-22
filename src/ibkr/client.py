@@ -15,6 +15,7 @@ from src.error_safety import summarize_exception
 from src.ibkr.exceptions import (
     IBKRAPIError,
     IBKRAuthError,
+    IBKRError,
     IBKRSessionConflictError,
 )
 from src.ibkr.throttle import IBKRThrottle
@@ -340,6 +341,67 @@ class IbkrClient:
             )
             return False
 
+    def _brokerage_auth_status(self) -> dict | None:
+        """Return the parsed ``/iserver/auth/status`` dict, or None if it errored.
+
+        ``/iserver/auth/status`` is IBKR's source of truth for whether the brokerage
+        session is authenticated (``connected``/``authenticated``/``competing``).
+        """
+        try:
+            result = self._throttle.call(
+                lambda: self._ibind_client.authentication_status(log=False)
+            )
+        except Exception as e:
+            logger.warning(
+                "brokerage_session_status_check_failed",
+                **summarize_exception(e, operation="authentication_status"),
+            )
+            return None
+        data = result.data if hasattr(result, "data") else result
+        return data if isinstance(data, dict) else None
+
+    def _ensure_brokerage_session(self, *, operation: str) -> None:
+        """Verify (and only if needed re-initialize) the /iserver brokerage session.
+
+        Status-first: check ``/iserver/auth/status`` and call ``ssodh/init`` ONLY when
+        the session is not authenticated. ``initialize_brokerage_session()`` returns
+        True whenever ``ssodh/init`` does not *raise* — but a 200 with
+        ``authenticated=false`` does not raise, so it cannot be trusted on its own.
+        Calling ``ssodh/init`` unconditionally (with ``compete=True``) would also risk
+        bumping a healthy session and causing the competing-session churn this guards
+        against — hence we re-init at most once, only after a failed status check.
+
+        Raises:
+            IBKRAuthError: with an actionable message naming ``operation`` when the
+                brokerage session cannot be authenticated (e.g. the gateway needs
+                re-login, or a competing session bumped this one).
+        """
+        self._ensure_connected()
+        status = self._brokerage_auth_status()
+        if status is not None and status.get("authenticated") is True:
+            return
+        # Not authenticated (timed out / competing / unknown) — (re)init once.
+        logger.info(
+            "brokerage_session_reauth_attempt",
+            operation=operation,
+            connected=bool(status and status.get("connected")),
+            competing=bool(status and status.get("competing")),
+        )
+        self.initialize_brokerage_session()  # POST iserver/auth/ssodh/init
+        status = self._brokerage_auth_status()
+        if status is not None and status.get("authenticated") is True:
+            return
+        logger.warning(
+            "brokerage_session_not_authenticated",
+            operation=operation,
+            connected=bool(status and status.get("connected")),
+            competing=bool(status and status.get("competing")),
+        )
+        raise IBKRAuthError(
+            f"IBKR brokerage session not authenticated for {operation} — re-login to "
+            "the Client Portal gateway; another session may have bumped yours"
+        )
+
     def _call_iserver_accounts(self) -> bool:
         """Best-effort /iserver/accounts priming for market-data endpoints."""
         self._ensure_connected()
@@ -438,12 +500,18 @@ class IbkrClient:
         Returns:
             List of raw watchlist row dicts (may be empty if watchlist exists but
             has no rows).  Returns None when the named watchlist was not found.
-            Returns [] on API error (treated as transient failure, not "not found").
+
+        Raises:
+            IBKRAuthError: brokerage session could not be authenticated.
+            IBKRAPIError: watchlist fetch failed (API/transport error) — callers
+                decide whether to fail closed (explicit request) or soft-fail.
         """
         self._ensure_connected()
-        # /iserver/ endpoints require a brokerage session on top of the OAuth
-        # live session token.  Initialize it here; this is a no-op if already active.
-        self.initialize_brokerage_session()
+        # /iserver/ endpoints require an *authenticated* brokerage session on top of
+        # the OAuth live session token.  Verify it (re-auth once) so a connected-but-
+        # unauthenticated session surfaces as an actionable error rather than an
+        # opaque downstream auth_error.
+        self._ensure_brokerage_session(operation="watchlist_fetch")
         try:
             result = self._throttle.call(
                 lambda: self._ibind_client.get_all_watchlists(sc="USER_WATCHLIST")
@@ -536,27 +604,44 @@ class IbkrClient:
                 rows = []
             logger.info("watchlist_loaded", name=wl_name, count=len(rows))
             return rows
+        except IBKRError:
+            # Brokerage-session / typed IBKR failures (incl. the preflight's
+            # IBKRAuthError) propagate unchanged so callers can distinguish a fetch
+            # failure from a genuinely empty/not-found watchlist.
+            raise
         except Exception as e:
             logger.warning(
                 "watchlist_fetch_failed",
                 **summarize_exception(e, operation="watchlist_fetch_failed"),
             )
-            return []  # API error — transient failure, distinct from "not found" (None)
+            # API/transport error — raise (was: return []) so an explicitly requested
+            # watchlist fails closed instead of silently degrading to "empty".
+            raise IBKRAPIError("IBKR watchlist fetch failed") from e
 
     def get_live_orders(self, account_id: str | None = None) -> list[dict]:
         """
         Fetch open/pending orders from IBKR.
 
-        Returns list of raw order dicts (may be empty).
-        Requires a brokerage session — initializes one if not already active.
+        Returns list of raw order dicts (may be empty when there are genuinely no
+        open orders). Requires an authenticated brokerage session.
 
         IBKR's /iserver/account/orders endpoint requires a "pre-flight" call:
         the first request always returns an empty list while the server wakes
         up the orders engine.  A second request made shortly after returns the
         actual orders.  This method makes both calls automatically.
+
+        Raises:
+            IBKRAuthError: brokerage session could not be authenticated.
+            IBKRAPIError: the orders fetch itself failed (API/transport error). The
+                snapshot service catches this and records it as a non-fatal
+                ``errors["live_orders"]`` so the report flags degraded order-dedup
+                rather than silently treating it as "no open orders".
         """
         self._ensure_connected()
-        self.initialize_brokerage_session()
+        # Verify the brokerage session (re-auth once); raises IBKRAuthError if it
+        # can't be authenticated. Callers (snapshot service) catch and record this as
+        # a non-fatal error so the report can flag that order-dedup is degraded.
+        self._ensure_brokerage_session(operation="live_orders")
         acct = account_id or self._settings.ibkr_account_id
 
         def _extract(result: Any) -> list[dict[str, Any]]:
@@ -580,12 +665,16 @@ class IbkrClient:
             orders = _extract(raw)
             logger.info("live_orders_fetched", count=len(orders))
             return orders
+        except IBKRError:
+            raise
         except Exception as e:
             logger.warning(
                 "live_orders_fetch_failed",
                 **summarize_exception(e, operation="live_orders_fetch_failed"),
             )
-            return []
+            # Raise (was: return []) so a fetch failure is distinguishable from
+            # "no open orders" and surfaces as a non-fatal degraded-dedup banner.
+            raise IBKRAPIError("IBKR live orders fetch failed") from e
 
     def get_contract_info(self, conid: int, *, compete: bool = True) -> dict:
         """

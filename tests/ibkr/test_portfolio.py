@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.ibkr.exceptions import IBKRAPIError
 from src.ibkr.models import NormalizedPosition, PortfolioSummary
 from src.ibkr.portfolio import (
     _resolve_watchlist_conid,
@@ -562,6 +563,40 @@ def _contract_info_client(payload: dict | Exception) -> MagicMock:
 
 
 _RESOLVE = "src.ibkr.portfolio._resolve_watchlist_conid"
+
+
+class TestReadWatchlistFailClosed:
+    """read_watchlist fails closed for an explicit watchlist, soft-fails for default."""
+
+    def test_explicit_name_fetch_error_propagates(self):
+        """Explicit --watchlist-name + API error → propagate (no phantom-empty list)."""
+        client = MagicMock()
+        client.get_watchlist.side_effect = IBKRAPIError("IBKR watchlist fetch failed")
+        with pytest.raises(IBKRAPIError):
+            read_watchlist(client, "watchlist-2026")
+
+    def test_default_fetch_error_soft_fails_to_empty(self, caplog):
+        """Default (unnamed) discovery + API error → best-effort empty set, logged."""
+        client = MagicMock()
+        client.get_watchlist.side_effect = IBKRAPIError("IBKR watchlist fetch failed")
+        with caplog.at_level(logging.WARNING, logger="src.ibkr.portfolio"):
+            result = read_watchlist(client, "")
+        assert result == set()
+        assert any(
+            "watchlist_default_fetch_failed" in r.message for r in caplog.records
+        )
+
+    def test_not_found_returns_none(self):
+        """A genuinely-missing watchlist (get_watchlist → None) stays None, not error."""
+        client = MagicMock()
+        client.get_watchlist.return_value = None
+        assert read_watchlist(client, "watchlist-2026") is None
+
+    def test_empty_watchlist_returns_empty_set(self):
+        """An existing-but-empty watchlist (get_watchlist → []) is empty, not failure."""
+        client = MagicMock()
+        client.get_watchlist.return_value = []
+        assert read_watchlist(client, "watchlist-2026") == set()
 
 
 class TestReadWatchlistRowParsing:

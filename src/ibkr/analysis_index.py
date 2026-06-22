@@ -63,6 +63,16 @@ def _analysis_index_lock_path(results_dir: Path) -> Path:
     return results_dir.parent / f".{results_dir.name}.latest_analyses_index.lock"
 
 
+# Note: directory mtime is an unreliable freshness signal — it is second-granular
+# on some filesystems (APFS reports `st_mtime_ns` ending in `000000000` for
+# directories) while the index persists full-precision ns, and two files written
+# in the same wall-clock second leave it unchanged. So the mtime check is kept only
+# as a cheap *hint*; the authoritative staleness guard is the analysis-file COUNT
+# comparison below. Do NOT gate the count check behind an mtime match (a same-second
+# addition would evade detection). The `*_mtime_mismatch_accepted` logs are emitted
+# at debug to avoid per-load/per-save noise.
+
+
 @contextmanager
 def _analysis_index_lock(results_dir: Path):
     """Serialize index updates across concurrent processes."""
@@ -590,7 +600,7 @@ def _load_latest_analyses_from_index(
         if indexed_total_files != current_analysis_file_count:
             emit_rebuild_notice(f"{index_path.name}:stale_directory_state")
             return None
-        logger.info(
+        logger.debug(
             "analysis_index_mtime_mismatch_accepted",
             path=str(index_path),
             indexed_total_files=indexed_total_files,
@@ -725,7 +735,7 @@ def update_latest_analyses_index(
                     analysis_file_count_before_save is not None
                     and indexed_total_files == analysis_file_count_before_save
                 ):
-                    logger.info(
+                    logger.debug(
                         "analysis_index_incremental_update_mtime_mismatch_accepted",
                         ticker=record.ticker,
                         path=str(index_path),

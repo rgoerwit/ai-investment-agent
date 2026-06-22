@@ -1234,10 +1234,8 @@ def _attach_run_summary(
     provider_preflight: dict[str, dict[str, str]],
 ) -> None:
     """Attach the compact run summary before any persistence/output steps."""
-    result.setdefault("run_summary", {})
-    result["run_summary"]["quick_mode"] = bool(args.quick)
-    result["analysis_validity"] = build_analysis_validity(result)
-    result["run_summary"] = persistence.build_run_summary(
+    result.setdefault("run_summary", {})["quick_mode"] = bool(args.quick)
+    persistence.attach_run_summary(
         result,
         quick_mode=args.quick,
         article_requested=bool(args.article),
