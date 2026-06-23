@@ -3055,7 +3055,11 @@ def main() -> None:
         raise
     except IBKRAuthError as e:
         print(f"IBKR auth error: {e}", file=sys.stderr)
-        print("Check IBKR credentials in .env or use --read-only", file=sys.stderr)
+        print(
+            "Quick fix: close other IBKR logins (especially the IBKR Mobile app), "
+            "or run with --read-only for offline mode.",
+            file=sys.stderr,
+        )
         sys.exit(1)
     except IBKRError as e:
         print(f"IBKR error: {e}", file=sys.stderr)

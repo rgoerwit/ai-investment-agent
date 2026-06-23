@@ -7,6 +7,7 @@ Two-tiered session: read-only (portfolio data) vs brokerage (orders).
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import structlog
@@ -22,6 +23,13 @@ from src.ibkr.throttle import IBKRThrottle
 from src.ibkr_config import IbkrSettings
 
 logger = structlog.get_logger(__name__)
+
+# After ssodh/init the brokerage session often takes a beat to flip to
+# authenticated (the "errored once, worked on re-run" symptom), so poll the
+# status a few times before giving up. Status-only — never re-inits, so it can't
+# bump a healthy or competing session.
+_BROKERAGE_AUTH_POLL_ATTEMPTS = 3
+_BROKERAGE_AUTH_POLL_INTERVAL_S = 1.0
 
 # Known IBKR error payloads → human-readable hint
 _IBKR_ERROR_HINTS: dict[str, str] = {
@@ -388,9 +396,17 @@ class IbkrClient:
             competing=bool(status and status.get("competing")),
         )
         self.initialize_brokerage_session()  # POST iserver/auth/ssodh/init
-        status = self._brokerage_auth_status()
-        if status is not None and status.get("authenticated") is True:
-            return
+        # The session can take a beat to authenticate after ssodh/init, so poll
+        # the status briefly (status-only — no further re-init) before raising.
+        # This auto-recovers the common transient case that previously errored
+        # and only worked on a manual re-run.
+        status = None
+        for attempt in range(_BROKERAGE_AUTH_POLL_ATTEMPTS):
+            status = self._brokerage_auth_status()
+            if status is not None and status.get("authenticated") is True:
+                return
+            if attempt + 1 < _BROKERAGE_AUTH_POLL_ATTEMPTS:
+                time.sleep(_BROKERAGE_AUTH_POLL_INTERVAL_S)
         connected = bool(status and status.get("connected"))
         competing = bool(status and status.get("competing"))
         logger.warning(
@@ -402,17 +418,26 @@ class IbkrClient:
         if competing:
             hint = (
                 "another live session bumped yours — close the other session "
-                "(TWS / mobile / another API client), then re-run"
+                "(IBKR Mobile / TWS / another API client), then re-run"
             )
         else:
-            # connected-but-unauthenticated with nothing competing is the classic
-            # stale-OAuth-credentials state: ssodh/init can't authenticate against an
-            # expired key. Regenerating the key (the OAuth self-service invalidates
-            # the old one) is the fix re-login alone won't provide.
+            # connected-but-unauthenticated with competing=False does NOT reliably
+            # mean stale credentials. IBKR's competing flag is unreliable: the IBKR
+            # Mobile app in particular silently reclaims the brokerage session while
+            # /iserver/auth/status still reports competing=False, and ssodh/init's
+            # compete=True does not always bump it. So lead with closing other
+            # sessions (the common, verified cause); a stale OAuth key is the
+            # fallback only after every other session is confirmed closed.
             hint = (
-                "regenerate your IBKR OAuth key in the OAuth self-service config "
-                "(IBKR Client Portal → Settings → API → OAuth) and update "
-                ".env, or re-login to the Client Portal gateway"
+                "this is often transient — re-run first (the session usually "
+                "authenticates on a fresh attempt). If it recurs, another live "
+                "IBKR login is most likely still holding the brokerage session "
+                "even though the API reports none competing — force-quit / log "
+                "out of the IBKR Mobile app (it silently reclaims the session), "
+                "then close TWS, Client Portal web, and any other API client. "
+                "Only if it persists after every other session is closed is the "
+                "OAuth key likely stale (regenerate it in IBKR Client Portal → "
+                "Settings → API → OAuth and update .env)"
             )
         raise IBKRAuthError(
             f"IBKR brokerage session not authenticated for {operation} "

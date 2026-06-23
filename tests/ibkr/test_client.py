@@ -10,6 +10,14 @@ from src.ibkr.throttle import IBKRThrottle
 from src.ibkr_config import IbkrSettings
 
 
+@pytest.fixture(autouse=True)
+def _no_auth_poll_sleep():
+    """The brokerage-session reauth poll sleeps between status checks; neutralize
+    it so failure-path tests don't incur real wall-clock delays."""
+    with patch("src.ibkr.client.time.sleep"):
+        yield
+
+
 def _make_client() -> IbkrClient:
     """Return an IbkrClient with mocked internals (bypasses __init__ / connect).
 
@@ -366,13 +374,29 @@ class TestEnsureBrokerageSession:
         assert client._ibind_client.authentication_status.call_count == 2
 
     def test_still_unauthenticated_raises(self):
-        """Unauthenticated after the single re-auth → actionable IBKRAuthError."""
+        """Unauthenticated after re-auth + poll → actionable IBKRAuthError."""
         client = _make_client()
         client._ibind_client.authentication_status.return_value = _response(
             {"authenticated": False, "connected": True, "competing": True}
         )
         with patch(self._PATCH_ENSURE), pytest.raises(IBKRAuthError):
             client._ensure_brokerage_session(operation="watchlist_fetch")
+
+    def test_delayed_auth_recovered_by_poll(self):
+        """Transient: not-authenticated right after ssodh/init, then authenticates
+        on a later poll → no error (auto-recovery, no manual re-run needed)."""
+        client = _make_client()
+        client._ibind_client.authentication_status.side_effect = [
+            _response({"authenticated": False, "connected": True, "competing": False}),
+            _response({"authenticated": False, "connected": True, "competing": False}),
+            _response({"authenticated": True, "connected": True, "competing": False}),
+        ]
+        with patch(self._PATCH_ENSURE), patch("src.ibkr.client.time.sleep") as sleep:
+            client._ensure_brokerage_session(operation="watchlist_fetch")
+        client._ibind_client.initialize_brokerage_session.assert_called_once()
+        # 1 pre-init check + 2 poll checks (2nd poll authenticates).
+        assert client._ibind_client.authentication_status.call_count == 3
+        sleep.assert_called_once()  # one wait between the two poll checks
 
     def test_status_check_error_treated_as_unauthenticated(self):
         """A raising authentication_status is treated as not-authenticated, not crash."""
