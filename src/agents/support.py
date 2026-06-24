@@ -646,19 +646,62 @@ def extract_source_conflicts_from_messages(messages: list) -> dict[str, Any]:
 
 
 def format_conflict_table(messages: list) -> str:
-    """Format source conflicts for Consultant or PM adjudication."""
+    """Format source conflicts for Consultant or PM adjudication.
+
+    Conflicts the merge already adjudicated by source quality (``resolved_by_quality``,
+    set in ``src/data/merge_policy.py``) are surfaced in a separate RESOLVED section so
+    the PM does not levy a Tier C2 investment-risk penalty on a value that was already
+    decided in favor of the higher-quality source (e.g. statement-derived growth winning
+    over a flaky provider scalar).
+    """
     conflicts = extract_source_conflicts_from_messages(messages)
     if not conflicts:
         return ""
 
-    lines = ["\n### DATA SOURCE CONFLICTS (>20% variance between providers)"]
-    for field, conflict in conflicts.items():
+    actionable = {
+        field: conflict
+        for field, conflict in conflicts.items()
+        if not conflict.get("resolved_by_quality")
+    }
+    resolved = {
+        field: conflict
+        for field, conflict in conflicts.items()
+        if conflict.get("resolved_by_quality")
+    }
+
+    lines: list[str] = []
+    if actionable:
+        lines.append("\n### DATA SOURCE CONFLICTS (>20% variance — UNRESOLVED)")
+        for field, conflict in actionable.items():
+            lines.append(
+                f"  - {field}: {conflict.get('old_source', '?')}={conflict.get('old', '?')}"
+                f", {conflict.get('new_source', '?')}={conflict.get('new', '?')}"
+                f" (delta {conflict.get('variance_pct', '?')}%)"
+            )
+    if resolved:
         lines.append(
-            f"  - {field}: {conflict.get('old_source', '?')}={conflict.get('old', '?')}"
-            f", {conflict.get('new_source', '?')}={conflict.get('new', '?')}"
-            f" (delta {conflict.get('variance_pct', '?')}%)"
+            "\n### RESOLVED BY DATA QUALITY "
+            "(do NOT apply a Tier C2 conflict penalty — already adjudicated)"
         )
-    return "\n".join(lines) + "\n"
+        for field, conflict in resolved.items():
+            # Prefer the merge's explicit winner/loser fields; the ``new`` side is NOT
+            # always the kept winner (it isn't when should_use was False). Fall back to
+            # new/old only for legacy payloads that predate those fields.
+            winner_source = conflict.get("winner_source") or conflict.get(
+                "new_source", "?"
+            )
+            winner_value = conflict.get("winner_value", conflict.get("new", "?"))
+            loser_source = conflict.get("loser_source") or conflict.get(
+                "old_source", "?"
+            )
+            loser_value = conflict.get("loser_value", conflict.get("old", "?"))
+            lines.append(
+                f"  - {field}: kept {winner_source}={winner_value}"
+                f" (quality {conflict.get('winner_quality', '?')}) over "
+                f"{loser_source}={loser_value}"
+                f" (quality {conflict.get('loser_quality', '?')})"
+            )
+    return ("\n".join(lines) + "\n") if lines else ""
 
 
 def format_red_flag_section(

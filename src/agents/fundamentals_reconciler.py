@@ -58,15 +58,25 @@ def format_percent_from_ratio(value: float) -> str:
     return f"{value * 100:.1f}%"
 
 
+def format_percent(value: float) -> str:
+    """Format an already-percent number (e.g. 36.85 -> '36.9%')."""
+    return f"{value:.1f}%"
+
+
 def material_diff(
     body: str,
     key: str,
     expected: float,
     *,
     threshold: float,
+    rel_threshold: float | None = None,
 ) -> bool:
     current = extract_block_number_from_text(body, key)
-    return current is None or abs(current - expected) > threshold
+    if current is None:
+        return True
+    if rel_threshold is not None and expected:
+        return abs(current - expected) / abs(expected) > rel_threshold
+    return abs(current - expected) > threshold
 
 
 def extract_raw_metrics_payload(raw_data: str) -> dict[str, Any]:
@@ -121,6 +131,34 @@ def _reconcile_numeric_field(
     return body, False
 
 
+def _reconcile_when_present(
+    body: str,
+    key: str,
+    value: float | None,
+    *,
+    rel_threshold: float,
+    formatter: Callable[[float], str],
+) -> tuple[str, bool]:
+    """Correct a DATA_BLOCK scalar only when the raw value exists AND diverges.
+
+    Unlike ``_reconcile_numeric_field``, this never erases a field to ``N/A`` when the
+    raw payload lacks it — valuation/margin/payout values may be legitimately
+    filing-derived by the Senior Fundamentals agent, so a missing raw value is not
+    evidence the DATA_BLOCK value is wrong.
+    """
+    if value is None:
+        return body, False
+    if has_block_field_value(body, key) and material_diff(
+        body,
+        key,
+        value,
+        threshold=0.0,
+        rel_threshold=rel_threshold,
+    ):
+        return replace_or_append_block_line(body, key, formatter(value)), True
+    return body, False
+
+
 def reconcile_high_risk_fields(
     body: str,
     payload: dict[str, Any],
@@ -128,6 +166,7 @@ def reconcile_high_risk_fields(
     updated = body
     changed_growth = False
     changed_balance_sheet = False
+    changed_valuation = False
 
     for datablock_key, raw_key in (
         ("REVENUE_GROWTH_TTM", "revenueGrowth_TTM"),
@@ -163,6 +202,43 @@ def reconcile_high_risk_fields(
             updated, "CYCLE_POSITION", cycle_position
         )
         changed_growth = True
+
+    # Valuation/margin scalars: the Senior Fundamentals LLM can emit a value that
+    # contradicts the fetched raw metrics (e.g. a fabricated PE_RATIO_TTM copied from
+    # EV/EBITDA). Reconcile against the raw payload when present — never erase a value
+    # the agent may have legitimately filing-derived (raw missing -> leave intact).
+    # ``scale`` brings ratio-valued raw fields into the DATA_BLOCK's display units so
+    # ``material_diff`` compares like-for-like (percent vs percent, ratio vs ratio).
+    # NOTE on authority: PE_RATIO_TTM/FORWARD and PB_RATIO are pure market-price ratios
+    # the aggregator computes authoritatively, so this is straight integrity hardening.
+    # PAYOUT_RATIO and NET_MARGIN are *raw-metric* reconciliations (the policy here is
+    # "DATA_BLOCK scalars must match fetched metrics"), NOT filing-authority
+    # reconciliations — a wide tolerance (20%) is used so only egregious divergence
+    # overrides a possibly period-mismatched filing-derived value.
+    valuation_specs: tuple[
+        tuple[str, str, float, Callable[[float], str], float, bool], ...
+    ] = (
+        ("PE_RATIO_TTM", "trailingPE", 1.0, format_ratio, 0.15, True),
+        ("PE_RATIO_FORWARD", "forwardPE", 1.0, format_ratio, 0.15, False),
+        ("PB_RATIO", "priceToBook", 1.0, format_ratio, 0.15, False),
+        ("PAYOUT_RATIO", "payoutRatio", 100.0, format_percent, 0.20, False),
+        ("NET_MARGIN", "profitMargins", 100.0, format_percent, 0.20, False),
+    )
+    pe_quarantined = bool(payload.get("_pe_low_anomaly_quarantined"))
+    for datablock_key, raw_key, scale, formatter, rel, is_pe in valuation_specs:
+        if is_pe and pe_quarantined:
+            # Leave PE_RATIO_TTM to the downstream quarantine -> N/A path.
+            continue
+        raw_value = as_float(payload.get(raw_key))
+        value = raw_value * scale if raw_value is not None else None
+        updated, changed = _reconcile_when_present(
+            updated,
+            datablock_key,
+            value,
+            rel_threshold=rel,
+            formatter=formatter,
+        )
+        changed_valuation = changed_valuation or changed
 
     total_debt = as_float(payload.get("totalDebt"))
     cash_and_short_term = as_float(payload.get("cashAndShortTermInvestments"))
@@ -269,6 +345,12 @@ def reconcile_high_risk_fields(
             updated,
             "BALANCE_SHEET_DATA_QUALITY_NOTE",
             "High-risk balance-sheet fields reconciled to raw get_financial_metrics basis.",
+        )
+    if changed_valuation:
+        updated = replace_or_append_block_line(
+            updated,
+            "VALUATION_DATA_QUALITY_NOTE",
+            "Valuation/margin scalars reconciled to fetched raw metrics.",
         )
 
     return updated

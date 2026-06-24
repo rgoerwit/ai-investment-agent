@@ -284,11 +284,20 @@ def smart_merge_with_quality(
                         old_quality = field_quality.get(key, quality)
                         winner_quality = quality if should_use else old_quality
                         loser_quality = old_quality if should_use else quality
+                        # ``should_use`` decides which side becomes the merged winner;
+                        # surface it explicitly so downstream formatters never have to
+                        # assume ``new`` won (it does not when should_use is False).
                         source_conflicts[key] = {
                             "old": round(old_val, 4),
                             "old_source": old_source,
                             "new": round(new_val, 4),
                             "new_source": source_name,
+                            "winner_source": source_name if should_use else old_source,
+                            "winner_value": round(
+                                new_val if should_use else old_val, 4
+                            ),
+                            "loser_source": old_source if should_use else source_name,
+                            "loser_value": round(old_val if should_use else new_val, 4),
                             "variance_pct": round(
                                 abs(new_val - old_val) / abs(old_val) * 100, 1
                             ),

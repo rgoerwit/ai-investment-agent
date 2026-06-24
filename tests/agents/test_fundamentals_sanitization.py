@@ -627,3 +627,98 @@ PE_RATIO_FORWARD: 10.0
     assert "VALUATION_INPUT_RELIABILITY: QUARANTINED" in sanitized
     # Appears exactly once (replace-or-append, never duplicated).
     assert sanitized.count("VALUATION_INPUT_RELIABILITY:") == 1
+
+
+def test_sanitize_corrects_fabricated_pe_ratio_ttm() -> None:
+    """A PE_RATIO_TTM that contradicts fetched trailingPE is reconciled to the raw value."""
+    content = """### --- START DATA_BLOCK ---
+PE_RATIO_TTM: 8.20
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps({"trailingPE": 11.473684})
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "BEC.SI")
+
+    assert "PE_RATIO_TTM: 11.47" in sanitized
+    assert "PE_RATIO_TTM: 8.20" not in sanitized
+    # The correction is carried by the distinct valuation note (own changed_valuation
+    # flag), not the growth-data note.
+    assert (
+        "VALUATION_DATA_QUALITY_NOTE: Valuation/margin scalars reconciled "
+        "to fetched raw metrics." in sanitized
+    )
+
+
+def test_sanitize_corrects_payout_and_margin_scalars() -> None:
+    content = """### --- START DATA_BLOCK ---
+PAYOUT_RATIO: 50.0%
+NET_MARGIN: 25.0%
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps({"payoutRatio": 0.3685, "profitMargins": 0.05894})
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "BEC.SI")
+
+    # 50% vs 36.9% (35.7% rel) and 25% vs 5.9% (>3x) both exceed tolerance.
+    assert "PAYOUT_RATIO: 36.9%" in sanitized
+    assert "NET_MARGIN: 5.9%" in sanitized
+    assert "VALUATION_DATA_QUALITY_NOTE:" in sanitized
+
+
+def test_sanitize_leaves_small_margin_divergence_within_tolerance() -> None:
+    """A sub-threshold margin gap (5.57 vs 5.89) is left to the agent, not over-corrected."""
+    content = """### --- START DATA_BLOCK ---
+NET_MARGIN: 5.57%
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps({"profitMargins": 0.05894})
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "BEC.SI")
+
+    assert "NET_MARGIN: 5.57%" in sanitized
+    assert "VALUATION_DATA_QUALITY_NOTE:" not in sanitized
+
+
+def test_sanitize_leaves_valuation_within_tolerance_untouched() -> None:
+    content = """### --- START DATA_BLOCK ---
+PE_RATIO_TTM: 11.60
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps({"trailingPE": 11.473684})
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "BEC.SI")
+
+    assert "PE_RATIO_TTM: 11.60" in sanitized
+    assert "VALUATION_DATA_QUALITY_NOTE:" not in sanitized
+
+
+def test_sanitize_does_not_erase_valuation_when_raw_absent() -> None:
+    """A filing-derived value must survive when the raw payload lacks the field."""
+    content = """### --- START DATA_BLOCK ---
+PE_RATIO_TTM: 8.20
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps({"totalDebt": 100, "ebitda": 50})  # no trailingPE
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "BEC.SI")
+
+    assert "PE_RATIO_TTM: 8.20" in sanitized
+    assert "PE_RATIO_TTM: N/A" not in sanitized
+    assert "VALUATION_DATA_QUALITY_NOTE:" not in sanitized
+
+
+def test_sanitize_skips_pe_reconciliation_when_quarantined() -> None:
+    """The low-PE quarantine path wins: PE goes to N/A, not the raw value."""
+    content = """### --- START DATA_BLOCK ---
+PE_RATIO_TTM: 8.20
+PEG_RATIO: 0.46
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps(
+        {"trailingPE": 11.473684, "_pe_low_anomaly_quarantined": True}
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "BEC.SI")
+
+    assert "PE_RATIO_TTM: N/A" in sanitized
+    assert "PE_RATIO_TTM: 11.47" not in sanitized
