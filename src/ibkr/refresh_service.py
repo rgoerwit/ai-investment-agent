@@ -156,11 +156,12 @@ class AnalysisRefreshService:
 
         candidates: list[str] = []
         candidates.extend(row.run_ticker for row in summary.blocking_now)
-        candidates.extend(
-            row.run_ticker
-            for row in summary.stale_in_queue
-            if row.action in {"SELL", "TRIM"}
-        )
+        # Every stale_in_queue row is already past max_age_days. Refresh them all,
+        # including SOFT_REJECT reviews that a CORRELATED_SELL_EVENT demoted from
+        # SELL to REVIEW: the staleness is real regardless of the macro demotion.
+        # (Previously the SELL/TRIM-only filter let a macro event silently suppress
+        # refresh of stale demoted positions.)
+        candidates.extend(row.run_ticker for row in summary.stale_in_queue)
         if options.show_recommendations:
             candidates.extend(row.run_ticker for row in summary.candidate_blocked)
         if options.policy == "proactive":

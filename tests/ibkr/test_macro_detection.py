@@ -631,19 +631,25 @@ class TestMacroFlagParsingContract:
             _make_sell_item_on_date,
         )
 
+        # Recent dates: the override (and the CORRELATED_SELL_EVENT flag it emits)
+        # only fires within macro_override_max_age_days of onset. First-detection
+        # onset = the fresh peak_anchor, so these must be recent to exercise the
+        # CORRELATED path (the lapsed/old-onset path is tested separately).
+        _recent = (date.today() - timedelta(days=5)).isoformat()
         if trigger == "window":
             items = [
-                _make_sell_item_on_date(f"S{i}.T", "2026-03-05", conid=100 + i)
+                _make_sell_item_on_date(f"S{i}.T", _recent, conid=100 + i)
                 for i in range(6)
             ] + [_make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(4)]
         elif trigger == "cumulative":
-            from datetime import date as _d
             from datetime import timedelta as _td
 
+            # Spread ≥13d apart (no 14d window reaches 5 → forces the cumulative
+            # path) but anchored to today so the latest sell (peak_anchor) is recent.
             items = [
                 _make_sell_item_on_date(
                     f"S{i:02d}.T",
-                    (_d(2025, 6, 1) + _td(days=20 * i)).isoformat(),
+                    (date.today() - _td(days=13 * i)).isoformat(),
                     conid=100 + i,
                 )
                 for i in range(9)

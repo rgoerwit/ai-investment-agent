@@ -55,15 +55,15 @@ OUTER_WRAPPED_ALLOWLIST: dict[str, str] = {
     # IBKR services: the ib_async client has its own per-request timeouts and
     # an outer connection-level timeout; sync wrappers are short and CPU-bound
     # rather than blocking on a remote socket read with no library timeout.
-    "src/ibkr/account_service.py:50": "ib_async has its own request timeout",
-    "src/ibkr/account_service.py:53": "ib_async has its own request timeout",
-    "src/ibkr/account_service.py:61": "ib_async has its own request timeout",
-    "src/ibkr/portfolio_data_service.py:77": "ib_async has its own request timeout",
-    "src/ibkr/portfolio_data_service.py:89": "ib_async has its own request timeout",
-    "src/ibkr/portfolio_data_service.py:101": "ib_async has its own request timeout",
-    "src/ibkr/portfolio_data_service.py:112": "ib_async has its own request timeout",
-    "src/ibkr/portfolio_data_service.py:141": "ib_async has its own request timeout",
-    "src/ibkr/security_data_service.py:116": (
+    "src/ibkr/account_service.py:51": "ib_async has its own request timeout",
+    "src/ibkr/account_service.py:54": "ib_async has its own request timeout",
+    "src/ibkr/account_service.py:62": "ib_async has its own request timeout",
+    "src/ibkr/portfolio_data_service.py:94": "ib_async has its own request timeout",
+    "src/ibkr/portfolio_data_service.py:106": "ib_async has its own request timeout",
+    "src/ibkr/portfolio_data_service.py:118": "ib_async has its own request timeout",
+    "src/ibkr/portfolio_data_service.py:129": "ib_async has its own request timeout",
+    "src/ibkr/portfolio_data_service.py:158": "ib_async has its own request timeout",
+    "src/ibkr/security_data_service.py:117": (
         "ib_async + yfinance probe; wrapped by caller-side bounds"
     ),
     # EDINET fetcher: wrapped by run_with_hard_timeout in

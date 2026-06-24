@@ -382,21 +382,37 @@ class TestEnsureBrokerageSession:
         with patch(self._PATCH_ENSURE), pytest.raises(IBKRAuthError):
             client._ensure_brokerage_session(operation="watchlist_fetch")
 
-    def test_delayed_auth_recovered_by_poll(self):
-        """Transient: not-authenticated right after ssodh/init, then authenticates
-        on a later poll → no error (auto-recovery, no manual re-run needed)."""
+    def test_delayed_auth_recovered_by_reinit(self):
+        """Transient: first ssodh/init doesn't authenticate, a later re-init does →
+        no error (auto-recovery, no manual re-run needed)."""
         client = _make_client()
         client._ibind_client.authentication_status.side_effect = [
             _response({"authenticated": False, "connected": True, "competing": False}),
             _response({"authenticated": False, "connected": True, "competing": False}),
             _response({"authenticated": True, "connected": True, "competing": False}),
         ]
-        with patch(self._PATCH_ENSURE), patch("src.ibkr.client.time.sleep") as sleep:
+        with patch(self._PATCH_ENSURE), patch("src.ibkr.client.time.sleep"):
             client._ensure_brokerage_session(operation="watchlist_fetch")
-        client._ibind_client.initialize_brokerage_session.assert_called_once()
-        # 1 pre-init check + 2 poll checks (2nd poll authenticates).
+        # Re-init (ssodh/init) is retried until the session establishes.
+        assert client._ibind_client.initialize_brokerage_session.call_count == 2
+        # 1 pre-loop status check + 2 post-init checks (2nd authenticates).
         assert client._ibind_client.authentication_status.call_count == 3
-        sleep.assert_called_once()  # one wait between the two poll checks
+
+    def test_wait_response_authenticates_on_reinit(self):
+        """ssodh/init answers {"wait": N} (async establish), then a re-init returns
+        authenticated — mirrors the real watchlist-vs-live-orders sequence."""
+        client = _make_client()
+        # Status stays not-authenticated; the SECOND ssodh/init reports authenticated.
+        client._ibind_client.authentication_status.return_value = _response(
+            {"authenticated": False, "connected": True, "competing": False}
+        )
+        client._ibind_client.initialize_brokerage_session.side_effect = [
+            _response({"wait": 500}),  # establishing asynchronously
+            _response({"authenticated": True, "connected": True, "competing": False}),
+        ]
+        with patch(self._PATCH_ENSURE), patch("src.ibkr.client.time.sleep"):
+            client._ensure_brokerage_session(operation="watchlist_fetch")
+        assert client._ibind_client.initialize_brokerage_session.call_count == 2
 
     def test_status_check_error_treated_as_unauthenticated(self):
         """A raising authentication_status is treated as not-authenticated, not crash."""
@@ -404,6 +420,24 @@ class TestEnsureBrokerageSession:
         client._ibind_client.authentication_status.side_effect = RuntimeError("boom")
         with patch(self._PATCH_ENSURE), pytest.raises(IBKRAuthError):
             client._ensure_brokerage_session(operation="live_orders")
+
+    def test_ssodh_init_fail_reason_is_surfaced_in_error(self):
+        """IBKR's ssodh/init fail/message is surfaced, not discarded."""
+        client = _make_client()
+        client._ibind_client.authentication_status.return_value = _response(
+            {"authenticated": False, "connected": True, "competing": False}
+        )
+        client._ibind_client.initialize_brokerage_session.return_value = _response(
+            {
+                "authenticated": False,
+                "connected": True,
+                "competing": False,
+                "fail": "Competing session exists",
+            }
+        )
+        with patch(self._PATCH_ENSURE), pytest.raises(IBKRAuthError) as exc:
+            client._ensure_brokerage_session(operation="watchlist_fetch")
+        assert "Competing session exists" in str(exc.value)
 
 
 class TestGetWatchlistFailClosed:
@@ -425,6 +459,26 @@ class TestGetWatchlistFailClosed:
         with patch(self._PATCH_ENSURE), pytest.raises(IBKRAuthError):
             client.get_watchlist("watchlist-2026")
         client._ibind_client.get_all_watchlists.assert_not_called()
+
+
+class TestLogout:
+    def test_logout_noop_when_not_connected(self):
+        client = _make_client()
+        client._ibind_client = None
+        client.logout()  # must not raise
+
+    def test_logout_terminates_session_and_drops_client(self):
+        client = _make_client()
+        ibind = client._ibind_client
+        client.logout()
+        ibind.oauth_shutdown.assert_called_once()  # stop tickler + /logout
+        assert client._ibind_client is None
+
+    def test_logout_swallows_oauth_shutdown_errors(self):
+        client = _make_client()
+        client._ibind_client.oauth_shutdown.side_effect = RuntimeError("boom")
+        client.logout()  # best-effort: must not raise
+        assert client._ibind_client is None
 
 
 class TestMaskAccount:

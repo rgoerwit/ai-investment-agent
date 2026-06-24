@@ -24,6 +24,21 @@ from src.config import _apply_macos_fork_safety_env  # noqa: E402
 
 _apply_macos_fork_safety_env(enabled=True, platform=sys.platform)
 
+
+@pytest.fixture(autouse=True)
+def _reset_ibkr_session_manager():
+    """Reset the process-wide pooled IBKR session between tests.
+
+    The pool is a singleton; without this, a fake client_cls injected by one test
+    would stay connected and be reused by the next, bleeding state across tests.
+    """
+    from src.ibkr.session_manager import reset_ibkr_session_manager
+
+    reset_ibkr_session_manager()
+    yield
+    reset_ibkr_session_manager()
+
+
 # Capture real API key if present (for integration tests)
 _REAL_GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 

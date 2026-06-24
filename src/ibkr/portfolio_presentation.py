@@ -125,6 +125,7 @@ def group_portfolio_actions(
     *,
     watchlist_tickers: set[str] | None = None,
     dip_watch_limit: int = _DEFAULT_DIP_WATCH_LIMIT,
+    macro_event_active: bool = False,
 ) -> PortfolioActionGroups:
     stop_sells = tuple(
         item
@@ -207,6 +208,7 @@ def group_portfolio_actions(
     dip_candidates = tuple(
         select_dip_watch_candidates(
             collect_dip_watch_source_items(items),
+            macro_event_active=macro_event_active,
             limit=dip_watch_limit,
         )
     )

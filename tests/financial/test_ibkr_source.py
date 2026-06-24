@@ -54,10 +54,15 @@ class _FundamentalsClient:
     def __init__(self, _config) -> None:
         pass
 
-    def connect(self, brokerage_session: bool = False) -> None:
+    def connect(
+        self, brokerage_session: bool = False, *, maintain: bool = False
+    ) -> None:
         pass
 
     def close(self) -> None:
+        pass
+
+    def logout(self) -> None:
         pass
 
     def stock_conid_by_symbol(self, symbol: str, default_filtering: bool = False):

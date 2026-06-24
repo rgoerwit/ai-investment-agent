@@ -5,11 +5,21 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+import structlog
+
+from src.error_safety import (
+    format_error_message,
+    safe_error_payload,
+    summarize_exception,
+)
 from src.ibkr.client import IbkrClient
 from src.ibkr.models import NormalizedPosition, PortfolioSummary
 from src.ibkr.portfolio import read_portfolio, read_watchlist
 from src.ibkr.portfolio_defaults import DEFAULT_CASH_BUFFER_PCT
+from src.ibkr.session_manager import get_ibkr_session_manager
 from src.ibkr.types import ProgressCallback
+
+logger = structlog.get_logger(__name__)
 
 
 def _account_id(value: object) -> str:
@@ -23,6 +33,10 @@ class WatchlistSnapshot:
     total: int | None = None
     found: bool = True
     explicitly_requested: bool = False
+    # True when the watchlist could not be read at all (e.g. the /iserver
+    # brokerage session was unavailable) — distinct from a genuinely empty or
+    # not-found watchlist. Callers degrade (warn + continue) rather than abort.
+    unavailable: bool = False
 
 
 @dataclass
@@ -45,9 +59,12 @@ class PortfolioSnapshot:
 class IbkrPortfolioDataService:
     """Async portfolio-data service over the sync IBKR client.
 
-    Important: a single IbkrClient instance must not be shared across multiple
-    concurrent threads. Integrated snapshot methods therefore run sequentially
-    within one thread-confined client session.
+    Connections are not created per call: every method borrows the process-wide
+    pooled connection from ``IbkrSessionManager`` (one OAuth session for the run,
+    logged out once at teardown). IBKR allows a single brokerage session per
+    username, so pooling — not per-thread client confinement — is the correct model;
+    the pool serializes the lazy connect and brokerage-session init, and reads are
+    safe to issue concurrently over the shared connection.
     """
 
     def __init__(
@@ -157,10 +174,20 @@ class IbkrPortfolioDataService:
         return ibkr_config
 
     def _build_client(self):
+        """Return ``(pooled_client, config)`` from the process-wide session pool.
+
+        The client is shared (one OAuth session, logged out once at teardown) — the
+        caller must NOT connect or close it. The prompt-for-missing-secret callback
+        runs once, inside the pool's lazy connect.
+        """
         config = self._resolve_config()
-        if self._prompt_for_missing_secret_fn is not None:
-            self._prompt_for_missing_secret_fn(config)
-        return self._client_cls(config), config
+        manager = get_ibkr_session_manager()
+        manager.configure(
+            client_cls=self._client_cls,
+            config=config,
+            prompt_for_missing_secret_fn=self._prompt_for_missing_secret_fn,
+        )
+        return manager.acquire(), config
 
     def _fetch_holdings_sync(
         self,
@@ -169,12 +196,8 @@ class IbkrPortfolioDataService:
     ) -> list[NormalizedPosition]:
         client, config = self._build_client()
         acct = account_id or _account_id(getattr(config, "ibkr_account_id", ""))
-        client.connect(brokerage_session=False)
-        try:
-            positions, _ = self._read_portfolio_fn(client, acct, cash_buffer_pct)
-            return positions
-        finally:
-            client.close()
+        positions, _ = self._read_portfolio_fn(client, acct, cash_buffer_pct)
+        return positions
 
     def _fetch_portfolio_summary_sync(
         self,
@@ -183,12 +206,8 @@ class IbkrPortfolioDataService:
     ) -> PortfolioSummary:
         client, config = self._build_client()
         acct = account_id or getattr(config, "ibkr_account_id", "")
-        client.connect(brokerage_session=False)
-        try:
-            _, portfolio = self._read_portfolio_fn(client, acct, cash_buffer_pct)
-            return portfolio
-        finally:
-            client.close()
+        _, portfolio = self._read_portfolio_fn(client, acct, cash_buffer_pct)
+        return portfolio
 
     def _fetch_watchlist_sync(
         self,
@@ -196,12 +215,8 @@ class IbkrPortfolioDataService:
         explicitly_requested: bool,
     ) -> WatchlistSnapshot:
         client, _config = self._build_client()
-        client.connect(brokerage_session=False)
-        try:
-            wl_name_hint = (watchlist_name or "") if explicitly_requested else ""
-            result = self._read_watchlist_fn(client, wl_name_hint)
-        finally:
-            client.close()
+        wl_name_hint = (watchlist_name or "") if explicitly_requested else ""
+        result = self._read_watchlist_fn(client, wl_name_hint)
 
         return self._build_watchlist_snapshot(
             result,
@@ -214,14 +229,10 @@ class IbkrPortfolioDataService:
         account_id: str | None,
     ) -> list[dict[str, Any]]:
         client, config = self._build_client()
-        client.connect(brokerage_session=False)
-        try:
-            return self._get_live_orders(
-                client,
-                account_id or _account_id(getattr(config, "ibkr_account_id", "")),
-            )
-        finally:
-            client.close()
+        return self._get_live_orders(
+            client,
+            account_id or _account_id(getattr(config, "ibkr_account_id", "")),
+        )
 
     def _fetch_snapshot_sync(
         self,
@@ -239,37 +250,61 @@ class IbkrPortfolioDataService:
             if progress is not None:
                 progress(message)
 
-        emit("Preparing IBKR client...")
-        emit("Connecting to IBKR...")
-        client.connect(brokerage_session=False)
-
+        # Holdings come from the read-only Portal session (Tier 1) and are the
+        # floor for a useful run. If THIS fails the OAuth session itself is dead,
+        # so let it propagate (the caller aborts). The watchlist and live orders
+        # need the /iserver brokerage session (Tier 2), which can be unavailable
+        # (timed out / held by another login) while Tier 1 still works — those
+        # degrade to a warning instead of aborting.
         snapshot = PortfolioSnapshot()
-        try:
-            emit("Loading portfolio from IBKR...")
-            positions, portfolio = self._read_portfolio_fn(
-                client, acct, cash_buffer_pct
-            )
-            snapshot.positions = positions
-            snapshot.portfolio = portfolio
+        emit("Loading holdings from IBKR...")
+        positions, portfolio = self._read_portfolio_fn(client, acct, cash_buffer_pct)
+        snapshot.positions = positions
+        snapshot.portfolio = portfolio
 
-            wl_name_hint = (watchlist_name or "") if explicitly_requested else ""
-            emit("Loading watchlist from IBKR...")
+        wl_name_hint = (watchlist_name or "") if explicitly_requested else ""
+        emit("Loading watchlist from IBKR...")
+        try:
             wl_result = self._read_watchlist_fn(client, wl_name_hint)
             snapshot.watchlist = self._build_watchlist_snapshot(
                 wl_result,
                 watchlist_name=watchlist_name,
                 explicitly_requested=explicitly_requested,
             )
+        except Exception as exc:
+            error_payload = safe_error_payload(exc, operation="watchlist_fetch")
+            snapshot.errors["watchlist"] = format_error_message(
+                operation="watchlist_fetch",
+                error_type=str(error_payload["error_type"]),
+            )
+            snapshot.watchlist = WatchlistSnapshot(
+                found=False,
+                unavailable=True,
+                explicitly_requested=explicitly_requested,
+                loaded_name=watchlist_name if explicitly_requested else None,
+            )
+            logger.warning(
+                "ibkr_watchlist_unavailable",
+                **summarize_exception(exc, operation="watchlist_fetch"),
+            )
+            emit("⚠ Watchlist unavailable — continuing with holdings only.")
 
-            if include_live_orders:
-                emit("Loading live orders from IBKR...")
-                try:
-                    snapshot.live_orders = self._get_live_orders(client, acct)
-                except Exception as exc:
-                    snapshot.errors["live_orders"] = str(exc)
-                    snapshot.live_orders = []
-        finally:
-            client.close()
+        if include_live_orders:
+            emit("Loading live orders from IBKR...")
+            try:
+                snapshot.live_orders = self._get_live_orders(client, acct)
+            except Exception as exc:
+                error_payload = safe_error_payload(exc, operation="live_orders")
+                snapshot.errors["live_orders"] = format_error_message(
+                    operation="live_orders",
+                    error_type=str(error_payload["error_type"]),
+                )
+                snapshot.live_orders = []
+                logger.warning(
+                    "ibkr_live_orders_unavailable",
+                    **summarize_exception(exc, operation="live_orders"),
+                )
+                emit("⚠ Live orders unavailable — open-order dedup disabled.")
 
         return snapshot
 

@@ -7,6 +7,7 @@ Two-tiered session: read-only (portfolio data) vs brokerage (orders).
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any
 
@@ -28,8 +29,46 @@ logger = structlog.get_logger(__name__)
 # authenticated (the "errored once, worked on re-run" symptom), so poll the
 # status a few times before giving up. Status-only — never re-inits, so it can't
 # bump a healthy or competing session.
-_BROKERAGE_AUTH_POLL_ATTEMPTS = 3
-_BROKERAGE_AUTH_POLL_INTERVAL_S = 1.0
+# ssodh/init can answer {"wait": N} — the brokerage session is establishing
+# asynchronously (often while bumping a competing session); the completed session
+# only shows up on a subsequent init/status. So re-init (ssodh/init IS the
+# documented re-auth) a few times, honoring the wait hint, rather than treating the
+# transient not-authenticated/"wait" state as terminal. Empirically a second init
+# ~1s after a "wait" authenticates where the first did not.
+_BROKERAGE_INIT_ATTEMPTS = 4
+_BROKERAGE_AUTH_POLL_INTERVAL_S = 1.0  # floor between re-inits
+_BROKERAGE_INIT_WAIT_CAP_S = 3.0  # cap on honoring ssodh/init's "wait" hint
+
+# IBKR permits a single brokerage session per username, so brokerage-session
+# init (ssodh/init) must never run concurrently — two callers racing it produce
+# the competing/not-authenticated churn. Serialize it process-wide; the second
+# caller re-checks status inside the lock and returns without a redundant init.
+_BROKERAGE_INIT_LOCK = threading.Lock()
+
+
+def _brief_detail(value: Any) -> str | None:
+    """Normalize an IBKR status ``message``/``prompts`` field (str|list|None) to a
+    short string so the real ssodh/init reason can be logged/surfaced."""
+    if not value:
+        return None
+    if isinstance(value, list | tuple):
+        value = "; ".join(str(v) for v in value)
+    text = str(value).strip()
+    return text[:300] or None
+
+
+def _brokerage_init_wait_seconds(detail: dict) -> float:
+    """Seconds to wait before re-checking after an ssodh/init that returned a
+    ``wait`` hint. IBKR reports it in milliseconds; bounded so a bad value can't
+    stall the run. Falls back to the poll-interval floor when absent."""
+    raw = detail.get("wait")
+    if isinstance(raw, int | float) and raw > 0:
+        seconds = raw / 1000.0 if raw >= 50 else float(raw)
+        return max(
+            _BROKERAGE_AUTH_POLL_INTERVAL_S, min(seconds, _BROKERAGE_INIT_WAIT_CAP_S)
+        )
+    return _BROKERAGE_AUTH_POLL_INTERVAL_S
+
 
 # Known IBKR error payloads → human-readable hint
 _IBKR_ERROR_HINTS: dict[str, str] = {
@@ -128,7 +167,9 @@ class IbkrClient:
             rate_per_sec=self._settings.ibkr_rate_limit_per_sec,
         )
 
-    def connect(self, brokerage_session: bool = False) -> None:
+    def connect(
+        self, brokerage_session: bool = False, *, maintain: bool = False
+    ) -> None:
         """
         Establish connection to IBKR via IBind.
 
@@ -136,6 +177,11 @@ class IbkrClient:
             brokerage_session: If True, create a full brokerage session
                 (needed for orders, only one per username).
                 If False, read-only mode (portfolio data only).
+            maintain: If True, start ibind's tickler so the OAuth live-session
+                token is kept alive for the life of a pooled connection. Use this
+                only for a managed, single-owner connection that is explicitly
+                logged out at teardown (see IbkrSessionManager) — never for the
+                per-call connect/close pattern, which would leak tickler threads.
 
         Raises:
             IBKRAuthError: If credentials are invalid or missing
@@ -169,8 +215,8 @@ class IbkrClient:
                 "signature_key_fp": self._settings.ibkr_oauth_signature_key_fp or None,
                 "init_oauth": True,
                 "init_brokerage_session": brokerage_session,
-                "maintain_oauth": False,
-                "shutdown_oauth": False,  # we call close() manually; skip atexit logout
+                "maintain_oauth": maintain,
+                "shutdown_oauth": False,  # logout is driven explicitly via logout()
             }
             # ibind requires dh_prime (no built-in default).
             # get_oauth_dh_prime_hex() normalises Base64 DER → hex (ibind requires hex).
@@ -215,7 +261,13 @@ class IbkrClient:
         return self._settings.ibkr_account_id
 
     def close(self) -> None:
-        """Close the IBKR connection."""
+        """Close the local connection WITHOUT logging out server-side.
+
+        Use this for the short-lived per-call pattern where the OAuth session is
+        allowed to expire on its own. For a pooled/managed connection, prefer
+        logout() so the server-side session is terminated cleanly rather than
+        orphaned until IBKR times it out.
+        """
         if self._ibind_client is not None:
             try:
                 self._ibind_client.close()
@@ -223,6 +275,25 @@ class IbkrClient:
                 pass
             self._ibind_client = None
         logger.debug("ibkr_disconnected")
+
+    def logout(self) -> None:
+        """Terminate the OAuth/brokerage session server-side, then drop the client.
+
+        Calls ibind's oauth_shutdown() (stops the tickler and POSTs /logout) so a
+        pooled session is not left lingering server-side. Idempotent and
+        best-effort — failures are logged, never raised, so teardown can't crash.
+        """
+        if self._ibind_client is not None:
+            try:
+                self._ibind_client.oauth_shutdown()  # stop_tickler() + logout()
+            except Exception as e:
+                logger.warning(
+                    "ibkr_logout_failed",
+                    **summarize_exception(e, operation="ibkr_logout"),
+                )
+            finally:
+                self._ibind_client = None
+        logger.debug("ibkr_logged_out")
 
     def __enter__(self) -> IbkrClient:
         self.connect()
@@ -335,11 +406,26 @@ class IbkrClient:
             True on success, False on failure (logs a warning on failure).
         """
         self._ensure_connected()
+        self._last_brokerage_init_detail: dict = {}
         try:
-            self._throttle.call(
+            result = self._throttle.call(
                 lambda: self._ibind_client.initialize_brokerage_session(compete=compete)
             )
-            logger.debug("brokerage_session_initialized", compete=compete)
+            data = result.data if hasattr(result, "data") else result
+            detail = data if isinstance(data, dict) else {}
+            self._last_brokerage_init_detail = detail
+            # ssodh/init returns authenticated/competing plus message/fail/prompts that
+            # explain a non-authenticated result — surface them instead of discarding.
+            logger.info(
+                "brokerage_session_init_response",
+                compete=compete,
+                authenticated=detail.get("authenticated"),
+                competing=detail.get("competing"),
+                connected=detail.get("connected"),
+                fail=detail.get("fail") or None,
+                message=_brief_detail(detail.get("message")),
+                prompts=_brief_detail(detail.get("prompts")),
+            )
             return True
         except Exception as e:
             logger.warning(
@@ -371,13 +457,13 @@ class IbkrClient:
     def _ensure_brokerage_session(self, *, operation: str) -> None:
         """Verify (and only if needed re-initialize) the /iserver brokerage session.
 
-        Status-first: check ``/iserver/auth/status`` and call ``ssodh/init`` ONLY when
-        the session is not authenticated. ``initialize_brokerage_session()`` returns
-        True whenever ``ssodh/init`` does not *raise* — but a 200 with
-        ``authenticated=false`` does not raise, so it cannot be trusted on its own.
-        Calling ``ssodh/init`` unconditionally (with ``compete=True``) would also risk
-        bumping a healthy session and causing the competing-session churn this guards
-        against — hence we re-init at most once, only after a failed status check.
+        Status-first: check ``/iserver/auth/status`` and only (re)init when the
+        session is not authenticated — a status-authenticated session is never
+        re-inited, so a healthy session is never bumped. When not authenticated,
+        ssodh/init (the documented re-auth) is retried a bounded number of times
+        because it can answer ``{"wait": N}`` while the session establishes
+        asynchronously; ``authenticated=false`` does not raise, so the init response
+        and ``/auth/status`` are both consulted before giving up.
 
         Raises:
             IBKRAuthError: with an actionable message naming ``operation`` when the
@@ -385,40 +471,63 @@ class IbkrClient:
                 re-login, or a competing session bumped this one).
         """
         self._ensure_connected()
+        # Serialize so concurrent callers (e.g. pooled-session readers) can't race
+        # ssodh/init; the loser re-checks status below and returns without re-init.
+        with _BROKERAGE_INIT_LOCK:
+            self._ensure_brokerage_session_locked(operation=operation)
+
+    def _ensure_brokerage_session_locked(self, *, operation: str) -> None:
         status = self._brokerage_auth_status()
         if status is not None and status.get("authenticated") is True:
             return
-        # Not authenticated (timed out / competing / unknown) — (re)init once.
+        # Not authenticated (timed out / competing / unknown). Re-init: ssodh/init
+        # is the documented re-auth, and it can answer {"wait": N} while the session
+        # establishes asynchronously — the completed session only appears on a
+        # subsequent init/status. So re-init a few times (honoring the wait hint)
+        # rather than treating the first not-authenticated/"wait" as terminal. We
+        # only reach here when no session is authenticated, so re-init can't bump a
+        # healthy one.
         logger.info(
             "brokerage_session_reauth_attempt",
             operation=operation,
             connected=bool(status and status.get("connected")),
             competing=bool(status and status.get("competing")),
         )
-        self.initialize_brokerage_session()  # POST iserver/auth/ssodh/init
-        # The session can take a beat to authenticate after ssodh/init, so poll
-        # the status briefly (status-only — no further re-init) before raising.
-        # This auto-recovers the common transient case that previously errored
-        # and only worked on a manual re-run.
+        detail: dict = {}
         status = None
-        for attempt in range(_BROKERAGE_AUTH_POLL_ATTEMPTS):
+        for _attempt in range(_BROKERAGE_INIT_ATTEMPTS):
+            self.initialize_brokerage_session()  # POST iserver/auth/ssodh/init
+            detail = getattr(self, "_last_brokerage_init_detail", None) or {}
+            if detail.get("authenticated") is True:
+                return
+            time.sleep(_brokerage_init_wait_seconds(detail))
             status = self._brokerage_auth_status()
             if status is not None and status.get("authenticated") is True:
                 return
-            if attempt + 1 < _BROKERAGE_AUTH_POLL_ATTEMPTS:
-                time.sleep(_BROKERAGE_AUTH_POLL_INTERVAL_S)
         connected = bool(status and status.get("connected"))
         competing = bool(status and status.get("competing"))
+        init_detail = getattr(self, "_last_brokerage_init_detail", None) or {}
+        ibkr_fail = init_detail.get("fail") or (status or {}).get("fail") or None
+        ibkr_message = _brief_detail(init_detail.get("message")) or _brief_detail(
+            (status or {}).get("message")
+        )
         logger.warning(
             "brokerage_session_not_authenticated",
             operation=operation,
             connected=connected,
             competing=competing,
+            ibkr_fail=ibkr_fail,
+            ibkr_message=ibkr_message,
+            ssodh_init_keys=sorted(init_detail.keys()) or None,
+            auth_status_keys=sorted((status or {}).keys()) or None,
         )
         if competing:
             hint = (
                 "another live session bumped yours — close the other session "
-                "(IBKR Mobile / TWS / another API client), then re-run"
+                "(IBKR Mobile / TWS / another API client), then re-run. To run the "
+                "API alongside TWS/Mobile permanently, create a SECOND IBKR username "
+                "dedicated to the API (IBKR allows only one brokerage session per "
+                "username — its documented fix for concurrent use)"
             )
         else:
             # connected-but-unauthenticated with competing=False does NOT reliably
@@ -434,14 +543,19 @@ class IbkrClient:
                 "IBKR login is most likely still holding the brokerage session "
                 "even though the API reports none competing — force-quit / log "
                 "out of the IBKR Mobile app (it silently reclaims the session), "
-                "then close TWS, Client Portal web, and any other API client. "
-                "Only if it persists after every other session is closed is the "
-                "OAuth key likely stale (regenerate it in IBKR Client Portal → "
-                "Settings → API → OAuth and update .env)"
+                "then close TWS, Client Portal web, and any other API client. The "
+                "durable fix for running the API while you also use TWS/Mobile is a "
+                "SECOND IBKR username dedicated to the API (only one brokerage "
+                "session is allowed per username). Only if it persists after every "
+                "other session is closed is the OAuth key likely stale (regenerate "
+                "it in IBKR Client Portal → Settings → API → OAuth and update .env)"
             )
+        ibkr_detail = ""
+        if ibkr_fail or ibkr_message:
+            ibkr_detail = f" [IBKR reported: {ibkr_fail or ibkr_message}]"
         raise IBKRAuthError(
             f"IBKR brokerage session not authenticated for {operation} "
-            f"(connected={connected}, competing={competing}): {hint}."
+            f"(connected={connected}, competing={competing}){ibkr_detail}: {hint}."
         )
 
     def _call_iserver_accounts(self) -> bool:

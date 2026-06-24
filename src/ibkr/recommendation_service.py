@@ -243,7 +243,14 @@ class PortfolioRecommendationService:
         watchlist_name: str | None,
     ) -> None:
         watchlist = snapshot.watchlist
-        if not watchlist.found and watchlist.explicitly_requested:
+        # Unavailable (brokerage session down) is a degrade-not-abort case: the run
+        # continues on holdings with a warning (snapshot.errors["watchlist"] drives
+        # the report banner). Only a genuinely not-found named watchlist aborts.
+        if (
+            not watchlist.found
+            and not watchlist.unavailable
+            and watchlist.explicitly_requested
+        ):
             raise ValueError(f"watchlist '{watchlist_name or ''}' not found in IBKR")
 
     def _reconcile_and_classify(

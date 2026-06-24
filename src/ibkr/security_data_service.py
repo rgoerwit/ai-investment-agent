@@ -10,6 +10,7 @@ import structlog
 from src.ibkr.client import IbkrClient
 from src.ibkr.exceptions import IBKRAPIError, IBKRAuthError, IBKRSessionConflictError
 from src.ibkr.order_builder import parse_price
+from src.ibkr.session_manager import get_ibkr_session_manager
 from src.ibkr.ticker_mapper import (
     cache_conid_mapping,
     ibkr_symbol_to_yf,
@@ -154,9 +155,12 @@ class IbkrSecurityDataService:
                 error_kind="NOT_CONFIGURED",
             )
 
-        client = self._client_cls(config)
+        # Reuse the process-wide pooled connection instead of a fresh OAuth
+        # handshake per probe (which minted many never-logged-out sessions).
+        manager = get_ibkr_session_manager()
+        manager.configure(client_cls=self._client_cls, config=config)
         try:
-            client.connect(brokerage_session=False)
+            client = manager.acquire()
             symbol, expected_exchange = yf_to_ibkr_format(yf_ticker)
             raw_candidates = client.stock_conid_by_symbol(
                 symbol, default_filtering=False
@@ -340,8 +344,6 @@ class IbkrSecurityDataService:
                 error_kind="API_ERROR",
                 error_message=str(exc),
             )
-        finally:
-            client.close()
 
     @staticmethod
     def _extract_candidates(raw_candidates: dict[str, Any], symbol: str) -> list[dict]:

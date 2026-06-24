@@ -469,11 +469,12 @@ def _make_dip_item(
     zone: str = "MODERATE",
     action: str = "REVIEW",
     sell_type: str | None = "SOFT_REJECT",
+    age_days: int = 3,
 ) -> ReconciliationItem:
     """Create a demoted SOFT_REJECT REVIEW item with a full analysis record."""
     from datetime import datetime, timedelta
 
-    analysis_date = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+    analysis_date = (datetime.now() - timedelta(days=age_days)).strftime("%Y-%m-%d")
     analysis = AnalysisRecord(
         ticker=ticker,
         analysis_date=analysis_date,
@@ -740,9 +741,10 @@ class TestDipWatch:
         assert "LGRW.T" not in section
         assert "GOOD.T" in section
 
-    def test_dip_watch_excludes_rejected_analysis(self):
-        """A fresh, high-scoring DNI macro review is not a dip-buy candidate."""
-        rejected = _make_dip_item(
+    def test_dip_watch_includes_intact_macro_review_during_event(self):
+        """During a macro event, a fresh + fundamentally-sound DNI/HIGH-zone review
+        that dipped IS a dip-buy candidate (the macro relaxation), with a caveat."""
+        item = _make_dip_item(
             "DNI.T",
             health=95,
             growth=88,
@@ -754,9 +756,66 @@ class TestDipWatch:
             zone="HIGH",
         )
         report = format_report(
-            [rejected],
+            [item],
             _make_portfolio(),
             portfolio_health_flags=[_CORR_FLAG],
+        )
+        assert "DIP WATCH" in report
+        assert "DNI" in report
+        assert "macro dip — fundamentals intact" in report
+
+    def test_dip_watch_excludes_intact_macro_review_without_event(self):
+        """Outside a macro event the normal gates apply: a DNI/HIGH-zone review is
+        NOT a dip-buy candidate."""
+        item = _make_dip_item(
+            "DNI.T",
+            health=95,
+            growth=88,
+            entry=2000,
+            current_price=1700,
+            stop=1600,
+            target=2800,
+            verdict="DO_NOT_INITIATE",
+            zone="HIGH",
+        )
+        report = format_report([item], _make_portfolio(), portfolio_health_flags=[])
+        assert "DIP WATCH" not in report
+
+    def test_dip_watch_excludes_stale_macro_review_during_event(self):
+        """The recency safeguard holds even during a macro event: a stale review is
+        not trusted, so it must be refreshed before it can be a dip-buy candidate."""
+        item = _make_dip_item(
+            "DNI.T",
+            health=95,
+            growth=88,
+            entry=2000,
+            current_price=1700,
+            stop=1600,
+            target=2800,
+            verdict="DO_NOT_INITIATE",
+            zone="HIGH",
+            age_days=120,  # stale — older than dip-watch max age
+        )
+        report = format_report(
+            [item], _make_portfolio(), portfolio_health_flags=[_CORR_FLAG]
+        )
+        assert "DIP WATCH" not in report
+
+    def test_dip_watch_excludes_unsound_macro_review_during_event(self):
+        """Weak fundamentals are excluded even during a macro event."""
+        item = _make_dip_item(
+            "WEAK.T",
+            health=40,
+            growth=35,
+            entry=2000,
+            current_price=1700,
+            stop=1600,
+            target=2800,
+            verdict="DO_NOT_INITIATE",
+            zone="HIGH",
+        )
+        report = format_report(
+            [item], _make_portfolio(), portfolio_health_flags=[_CORR_FLAG]
         )
         assert "DIP WATCH" not in report
 
@@ -1416,6 +1475,7 @@ def _make_buy_item(
     cash_impact_usd: float = -1752.0,
     analysis_date: str = "2026-03-01",
     analysis: AnalysisRecord | None = None,
+    is_watchlist: bool = True,
 ) -> ReconciliationItem:
     """Build a BUY ReconciliationItem as the reconciler would produce for new buys."""
     if analysis is None:
@@ -1440,8 +1500,47 @@ def _make_buy_item(
         suggested_price=suggested_price,
         suggested_order_type="LMT",
         cash_impact_usd=cash_impact_usd,
-        is_watchlist=True,
+        is_watchlist=is_watchlist,
     )
+
+
+class TestWatchlistUnavailableDegradation:
+    """When the watchlist (Tier 2 brokerage session) can't be read but holdings
+    loaded, off-watchlist BUY candidates are surfaced as direct BUYs rather than
+    'add to watchlist' advisories — the run does not abort."""
+
+    def _candidate(self) -> ReconciliationItem:
+        return _make_buy_item(ticker="4396.T", conviction="High", is_watchlist=False)
+
+    def test_unavailable_surfaces_buy_candidates_not_watchlist_adds(self):
+        report = format_report(
+            [self._candidate()],
+            _make_portfolio(),
+            show_recommendations=True,
+            errors={"watchlist": "brokerage session not authenticated"},
+            portfolio_data_loaded=True,
+        )
+        assert "WATCHLIST UNAVAILABLE" in report
+        assert "Watchlist filtering is unavailable" in report
+        assert "BUY CANDIDATES" in report
+        assert "confirm watchlist status and re-check IBKR before acting" in report
+        assert "WATCHLIST CANDIDATES" not in report
+        assert "ADD TO WATCHLIST" not in report
+        assert "NEW BUYS and watchlist filtering are omitted" not in report
+        assert "new-buy suggestions are omitted" not in report
+        assert "→ BUY" in report
+
+    def test_available_keeps_watchlist_add_framing(self):
+        report = format_report(
+            [self._candidate()],
+            _make_portfolio(),
+            show_recommendations=True,
+            errors={},
+            portfolio_data_loaded=True,
+        )
+        assert "WATCHLIST UNAVAILABLE" not in report
+        assert "WATCHLIST CANDIDATES" in report
+        assert "ADD TO WATCHLIST" in report
 
 
 class TestNewBuysSection:

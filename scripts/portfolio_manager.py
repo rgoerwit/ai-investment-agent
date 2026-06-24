@@ -1101,6 +1101,20 @@ def format_report(
     """
     lines: list[str] = []
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    # Watchlist couldn't be read (Tier-2 brokerage session down) but holdings did
+    # load. Ownership is known from holdings; watchlist membership is not, so an
+    # "add to watchlist" advisory is meaningless — unheld BUY analyses are surfaced
+    # as direct BUY CANDIDATES and must be verified in IBKR before acting.
+    watchlist_unavailable = (
+        bool((errors or {}).get("watchlist")) and portfolio_data_loaded
+    )
+    # Active macro event (freshly detected correlated selloff or a stored event):
+    # enables dip-buy candidates on fundamentally-intact, recently-reviewed names
+    # that dipped — even HIGH-zone / REJECT-verdict ones the normal gates exclude.
+    _macro_event_active = any(
+        ("CORRELATED_SELL_EVENT" in f) or ("ACTIVE_MACRO_EVENT" in f)
+        for f in (portfolio_health_flags or [])
+    )
 
     # ── Header ──────────────────────────────────────────────────────────────
     lines.append(f"=== IBKR Portfolio Reconciliation  {now} ===")
@@ -1113,6 +1127,14 @@ def format_report(
         lines.append(
             "  BUYs below come from saved analyses; whether you already own/watch "
             "them is UNKNOWN."
+        )
+        lines.append("")
+    if (errors or {}).get("watchlist"):
+        lines.append(
+            "⚠ WATCHLIST UNAVAILABLE — could not read your IBKR watchlist (brokerage "
+            "session unavailable). Holdings/SELL/HOLD analysis below is unaffected. "
+            "Watchlist filtering is unavailable; unheld BUY analyses are shown as "
+            "BUY CANDIDATES and should be verified in IBKR before acting."
         )
         lines.append("")
     if show_recommendations and (errors or {}).get("live_orders"):
@@ -1173,6 +1195,7 @@ def format_report(
     action_groups = group_portfolio_actions(
         items,
         watchlist_tickers=watchlist_tickers,
+        macro_event_active=_macro_event_active,
     )
     stop_sells = list(action_groups.stop_sells)
     hard_sells = list(action_groups.hard_sells)
@@ -1399,6 +1422,13 @@ def format_report(
             lines.append(
                 f"  {stars}  {_display_ticker(item):<12}  {hg_str}  |  {entry_str}  |  {rr_str}"
             )
+            if dip_watch_source(item) == "macro_review":
+                _as_of = a.analysis_date if a else "?"
+                lines.append(
+                    "             macro dip — fundamentals intact, review "
+                    f"{_as_of}; standalone verdict was REJECT (often valuation, which "
+                    "the dip improves) — review before adding"
+                )
         lines.append("")
         lines.append("  → Re-run before acting:")
         for _c in candidates:
@@ -1947,7 +1977,7 @@ def format_report(
         item
         for item in dip_candidates
         if dip_watch_source(item) == "held_buy_pullback"
-        or (_correlated_flag and dip_watch_source(item) == "macro_review")
+        or (_macro_event_active and dip_watch_source(item) == "macro_review")
     ]
     if display_dip_candidates:
         _render_dip_watch_section(display_dip_candidates)
@@ -2065,15 +2095,26 @@ def format_report(
             ),
         )[:10]
         _hidden = len(_cands_actionable) - len(_top_candidates)
-        _cand_subtitle = (
-            "analysis says BUY — holdings/watchlist not loaded, so own/watchlist "
-            "status is UNKNOWN"
-            if not portfolio_data_loaded
-            else "analysis says BUY — inspect and add to watchlist before acting"
-        )
+        if not portfolio_data_loaded:
+            _cand_title = "WATCHLIST CANDIDATES"
+            _cand_subtitle = (
+                "analysis says BUY — holdings/watchlist not loaded, so own/watchlist "
+                "status is UNKNOWN"
+            )
+        elif watchlist_unavailable:
+            _cand_title = "BUY CANDIDATES"
+            _cand_subtitle = (
+                "analysis says BUY — watchlist could not be read, so surfaced as "
+                "direct buys; confirm watchlist status and re-check IBKR before acting"
+            )
+        else:
+            _cand_title = "WATCHLIST CANDIDATES"
+            _cand_subtitle = (
+                "analysis says BUY — inspect and add to watchlist before acting"
+            )
         if _hidden:
             _cand_subtitle += f"  (showing top 10 of {len(_cands_actionable)})"
-        _section("WATCHLIST CANDIDATES", _cand_subtitle)
+        _section(_cand_title, _cand_subtitle)
         for item in _top_candidates:
             ccy = _item_currency(item)
             # Append "(yf_ticker)" when the exchange suffix disambiguates the IBKR
@@ -2509,7 +2550,13 @@ def format_report(
             reverse=True,
         )[:5]
         if strong_candidates or removes:
-            lines.append(f"  WATCHLIST MOVES ({today_str}):")
+            _moves_header = (
+                "BUY CANDIDATES" if watchlist_unavailable else "WATCHLIST MOVES"
+            )
+            lines.append(f"  {_moves_header} ({today_str}):")
+            _move_label = (
+                "→ BUY             " if watchlist_unavailable else "→ ADD TO WATCHLIST"
+            )
             for i in strong_candidates:
                 _quick_note = (
                     "  ⚠ quick — run full first"
@@ -2517,15 +2564,21 @@ def format_report(
                     else ""
                 )
                 lines.append(
-                    f"    → ADD TO WATCHLIST  {_display_ticker(i)}"
+                    f"    {_move_label}  {_display_ticker(i)}"
                     f"  — analysis {i.analysis.analysis_date if i.analysis else '?'} says BUY{_quick_note}"
                     f"  →  {_analysis_command(run_ticker_for(i))}"
                 )
             skipped = len(_cands_actionable) - len(strong_candidates)
             if skipped > 0:
+                _skip_ref = (
+                    "BUY CANDIDATES"
+                    if watchlist_unavailable
+                    else "WATCHLIST CANDIDATES"
+                )
+                _skip_verb = "buying" if watchlist_unavailable else "adding"
                 lines.append(
                     f"    ({skipped} lower-conviction candidate{'s' if skipped > 1 else ''}"
-                    f" in WATCHLIST CANDIDATES above — review before adding)"
+                    f" in {_skip_ref} above — review before {_skip_verb})"
                 )
             for i in removes:
                 verdict = i.analysis.verdict if i.analysis else "DO_NOT_INITIATE"
@@ -2913,7 +2966,16 @@ def _load_ibkr_context(
     )
 
     watchlist = snapshot.watchlist
-    if not watchlist.found and wl_explicitly_requested:
+    if watchlist.unavailable:
+        # Tier-2 (brokerage) session down: holdings still loaded, so continue with
+        # a warning rather than abort. The report adds a WATCHLIST UNAVAILABLE banner.
+        print(
+            "Warning: could not read your IBKR watchlist (brokerage session "
+            "unavailable) — continuing with holdings only; watchlist filtering is "
+            "unavailable, so unheld BUY analyses may be shown as BUY CANDIDATES.",
+            file=sys.stderr,
+        )
+    elif not watchlist.found and wl_explicitly_requested:
         wl_name_hint = args.watchlist_name or ""
         print(
             f"Error: watchlist '{wl_name_hint}' not found in IBKR.\n"
@@ -2946,9 +3008,31 @@ def _load_ibkr_context(
     )
 
 
+def _install_ibkr_session_teardown(args: argparse.Namespace) -> None:
+    """Arm the pooled IBKR session for clean teardown.
+
+    Installs main-thread SIGINT/SIGTERM handlers and seeds the pool's config +
+    prompt callback so the single shared session is logged out exactly once on
+    exit or signal (atexit covers normal exit; the handlers cover ``kill``).
+    No-op in read-only mode, which never opens an IBKR connection.
+    """
+    if getattr(args, "read_only", False):
+        return
+    from src.ibkr.session_manager import get_ibkr_session_manager
+    from src.ibkr_config import ibkr_config
+
+    manager = get_ibkr_session_manager()
+    manager.configure(
+        config=ibkr_config,
+        prompt_for_missing_secret_fn=_prompt_for_missing_secret,
+    )
+    manager.install_signal_handlers()
+
+
 def main() -> None:
     args = parse_args()
     _configure_logging(args.debug)
+    _install_ibkr_session_teardown(args)
     refresh_policy = _resolve_refresh_policy(args)
 
     # --test-auth exits immediately after credential check — no analyses needed.
