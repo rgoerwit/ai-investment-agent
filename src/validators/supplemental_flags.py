@@ -19,6 +19,25 @@ from src.validators.supplemental_extractors import (
 logger = structlog.get_logger(__name__)
 
 
+def _truncate_at_boundary(text: str, limit: int = 100) -> str:
+    """Truncate to ``limit`` chars at the nearest sentence/word boundary.
+
+    Flag ``detail`` strings are surfaced verbatim in the investment memo and the
+    Red-Flag section; a raw ``text[:limit]`` slice cuts mid-word ("...for US tax
+    purposes, and "). This ends cleanly on a separator and appends a single
+    ellipsis only when content was actually dropped.
+    """
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    for sep in (". ", "; ", ", ", " "):
+        idx = cut.rfind(sep)
+        if idx > limit // 2:
+            return cut[:idx].rstrip(" ,;") + "…"
+    return cut.rstrip() + "…"
+
+
 def _peak_or_transient_blocker(fundamentals_report: str) -> str | None:
     """Return a reason string if durable-quality bonuses should be suppressed.
 
@@ -106,7 +125,7 @@ def detect_legal_flags(
             {
                 "type": "PFIC_PROBABLE",
                 "severity": "WARNING",
-                "detail": f"Company likely classified as PFIC. Evidence: {pfic_evidence[:100]}...",
+                "detail": f"Company likely classified as PFIC. Evidence: {_truncate_at_boundary(pfic_evidence)}",
                 "action": "RISK_PENALTY",
                 "risk_penalty": 1.0,
                 "rationale": "PFIC classification requires onerous US tax reporting (Form 8621). Mark-to-market or QEF election required. Not a viability issue, but increases compliance burden for US investors.",
@@ -120,7 +139,7 @@ def detect_legal_flags(
             {
                 "type": "PFIC_UNCERTAIN",
                 "severity": "WARNING",
-                "detail": f"PFIC status unclear. Evidence: {pfic_evidence[:100]}...",
+                "detail": f"PFIC status unclear. Evidence: {_truncate_at_boundary(pfic_evidence)}",
                 "action": "RISK_PENALTY",
                 "risk_penalty": 0.5,
                 "rationale": "PFIC status cannot be confirmed. Company may use hedge language or is in a high-risk sector without clear disclosure. Recommend consulting tax advisor before investing.",

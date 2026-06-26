@@ -54,6 +54,59 @@ def normalize_governance_terms(text: str) -> str:
     return text
 
 
+_FENCED_PM_BLOCK_PATTERN = re.compile(
+    r"(?:#{2,6}\s+PM_BLOCK[^\n]*\n(?:[ \t]*\n)*)?```[^\n]*\n(?P<body>.*?)\n?```",
+    re.DOTALL,
+)
+
+
+def _strip_fenced_pm_machine_block(text: str) -> str:
+    """Remove a fenced PM_BLOCK code block (and any heading) only when the fence
+    actually encloses both START and END machine markers.
+
+    The PM sometimes emits CONSULTANT_RESOLUTION / APAC_RESOLUTION prose *inside*
+    the same fence, before the START marker. Gating removal on the enclosed markers
+    strips that prose with the block instead of orphaning it as a stray
+    "PM_BLOCK" section (the 6831.HK regression). Fences without both markers
+    (e.g. DECISION LOGIC) are left untouched.
+    """
+
+    def _repl(match: re.Match) -> str:
+        body = match.group("body")
+        if "START PM_BLOCK" in body and "END PM_BLOCK" in body:
+            return ""
+        return match.group(0)
+
+    return _FENCED_PM_BLOCK_PATTERN.sub(_repl, text)
+
+
+# Display-form PM verdicts whose execution levels are not actionable. The PM's
+# execution parameters are authoritative for these; subordinate agent entry/exit
+# levels and the trade plan are suppressed. Kept as one constant so the display
+# form here never drifts from the underscore form used elsewhere (e.g.
+# retrospective.py uses "DO_NOT_INITIATE").
+_NON_EXECUTABLE_VERDICTS = ("DO NOT INITIATE", "SELL")
+
+_ENTRY_EXIT_SUBSECTION_PATTERN = re.compile(
+    r"(#{2,6}\s*ENTRY/EXIT RECOMMENDATIONS[^\n]*\n).*?(?=\n#{2,6}\s|\Z)",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _suppress_executable_levels(market_md: str) -> str:
+    """Neutralize the Technical ENTRY/EXIT subsection for non-actionable verdicts.
+
+    For DO_NOT_INITIATE/SELL the PM's execution parameters are the only authoritative
+    levels; leaving the Market analyst's independent entry/stop numbers visible
+    yields a conflicting stop in the same report (the 6831.HK 5.20 vs 5.75
+    mismatch). Replace the subsection body with a non-actionable note.
+    """
+    return _ENTRY_EXIT_SUBSECTION_PATTERN.sub(
+        r"\1*Not actionable — Portfolio Manager verdict is non-executable.*\n",
+        market_md,
+    )
+
+
 def _markdown_asset_link(asset_path: Path, report_dir: Path | None) -> str:
     """Return a portable markdown link from a report to an asset path."""
     if not report_dir:
@@ -1085,6 +1138,11 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
                 cleaned = self._strip_redundant_header(cleaned, title)
                 report_parts.append(f"{cleaned}\n\n")
 
+        market_report = result.get("market_report", "")
+        if market_report and extracted_decision in _NON_EXECUTABLE_VERDICTS:
+            result["market_report"] = _suppress_executable_levels(
+                self._normalize_string(market_report)
+            )
         add_section("market_report", "Technical Analysis")
 
         # Clean fundamentals: keep only final self-corrected DATA_BLOCK
@@ -1135,7 +1193,7 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
                 )
 
         _verdict = extracted_decision
-        if _verdict in ("DO NOT INITIATE", "SELL"):
+        if _verdict in _NON_EXECUTABLE_VERDICTS:
             report_parts.append("## Trading Strategy\n\n")
             report_parts.append(
                 f"*Entry/exit parameters not applicable — "
@@ -1160,11 +1218,11 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
                 if risky or safe or neutral:
                     risk_title = (
                         "Risk Assessment — Archival Debate (Non-Executable)"
-                        if _verdict in ("DO NOT INITIATE", "SELL")
+                        if _verdict in _NON_EXECUTABLE_VERDICTS
                         else "Risk Assessment"
                     )
                     report_parts.append(f"## {risk_title}\n\n")
-                    if _verdict in ("DO NOT INITIATE", "SELL"):
+                    if _verdict in _NON_EXECUTABLE_VERDICTS:
                         report_parts.append(
                             "*These subordinate views predate or challenge the PM "
                             "override. They are retained for audit context and are "
@@ -1231,20 +1289,17 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         )
 
         # Strip PM_BLOCK structured block (consumed by code; not reader-facing).
-        # Handles ##/###/#### headers, optional label line, optional code fence,
-        # and the bare START/END pair — LLMs drift between 3 and 4 hashes.
+        # Fenced case: remove the whole fence (and heading) only when it encloses
+        # the START/END markers, so resolution prose the PM may emit before the
+        # markers inside that fence is removed with them (the 6831.HK regression).
+        text = _strip_fenced_pm_machine_block(text)
+        # Bare (unfenced) START/END pair — LLMs drift between 3 and 4 hashes.
         # Line-count cap (30 lines) prevents runaway matching if END is absent/malformed.
         _pm_content = r"(?:[^\n]*\n){0,30}"
         _pm_start = r"#{2,6}\s+---\s+START PM_BLOCK\s*:?\s*---"
         _pm_end = r"#{2,6}\s+---\s+END PM_BLOCK\s*:?\s*---"
         text = re.sub(
-            r"(?:#{2,6}\s+PM_BLOCK[^\n]*\n)?```[^\n]*\n?"
-            + _pm_start
-            + r"\n"
-            + _pm_content
-            + _pm_end
-            + r"[^\n]*\n?```?"
-            r"|" + _pm_start + r"\n" + _pm_content + _pm_end + r"[^\n]*",
+            _pm_start + r"\n" + _pm_content + _pm_end + r"[^\n]*",
             "",
             text,
             flags=re.DOTALL,

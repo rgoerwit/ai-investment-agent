@@ -203,6 +203,25 @@ def reconcile_high_risk_fields(
         )
         changed_growth = True
 
+    # 5-year return averages feed cyclical-peak detection; the LLM can drop or
+    # mis-copy them. Promote the computed signals (already percent-scaled) when the
+    # payload carries them, so the DATA_BLOCK stays consistent with their sibling
+    # CYCLE_POSITION/PROFITABILITY_TREND. ``_reconcile_when_present`` never erases a
+    # value the agent may have filing-derived when the raw signal is absent; a 5%
+    # relative tolerance avoids churn from float-format differences.
+    for datablock_key, raw_key in (
+        ("ROA_5Y_AVG", "roa_5y_avg"),
+        ("ROE_5Y_AVG", "roe_5y_avg"),
+    ):
+        updated, changed = _reconcile_when_present(
+            updated,
+            datablock_key,
+            as_float(payload.get(raw_key)),
+            rel_threshold=0.05,
+            formatter=lambda pct: f"{pct:.2f}%",
+        )
+        changed_growth = changed_growth or changed
+
     # Valuation/margin scalars: the Senior Fundamentals LLM can emit a value that
     # contradicts the fetched raw metrics (e.g. a fabricated PE_RATIO_TTM copied from
     # EV/EBITDA). Reconcile against the raw payload when present — never erase a value
@@ -239,6 +258,31 @@ def reconcile_high_risk_fields(
             formatter=formatter,
         )
         changed_valuation = changed_valuation or changed
+
+    # Honest payout: a zero/absent aggregator ``payoutRatio`` on a name whose
+    # provider dividend fields show an actual distribution is a data gap, not a
+    # 0% policy. Asserting PAYOUT_RATIO: 0.0% there manufactures a contradiction
+    # against the real dividend (the 6831.HK HK$0.52 dispute). Emit N/A + a
+    # data-quality note instead, claiming only what the provider fields show.
+    payout_raw = as_float(payload.get("payoutRatio"))
+    has_provider_dividend = any(
+        (as_float(payload.get(key)) or 0) > 0
+        for key in ("dividendRate", "lastDividendValue", "trailingAnnualDividendRate")
+    )
+    if (
+        has_provider_dividend
+        and (payout_raw is None or payout_raw == 0)
+        and extract_block_text_value(updated, "PAYOUT_RATIO") not in ("N/A", "")
+    ):
+        updated = replace_or_append_block_line(updated, "PAYOUT_RATIO", "N/A")
+        updated = replace_or_append_block_line(updated, "DIVIDEND_COVERAGE", "N/A")
+        updated = replace_or_append_block_line(
+            updated,
+            "DIVIDEND_DATA_QUALITY_NOTE",
+            "Provider dividend fields present (dividendRate/lastDividendValue) "
+            "but payout ratio is unavailable; payout not asserted.",
+        )
+        changed_valuation = True
 
     total_debt = as_float(payload.get("totalDebt"))
     cash_and_short_term = as_float(payload.get("cashAndShortTermInvestments"))

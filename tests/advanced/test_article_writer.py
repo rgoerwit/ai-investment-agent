@@ -697,7 +697,7 @@ class TestWritingSamplesDirectory:
 class TestClaudeToGeminiFallback:
     """Tests for automatic Claude → Gemini fallback on API errors."""
 
-    @patch("src.article_writer.create_deep_thinking_llm")
+    @patch("src.article_writer.create_writer_fallback_llm")
     @patch("src.article_writer.create_writer_llm")
     def test_fallback_on_anthropic_billing_error(
         self, mock_create_writer, mock_create_gemini
@@ -731,7 +731,7 @@ class TestClaudeToGeminiFallback:
         assert "Fallback Article" in article
         mock_create_gemini.assert_called_once()
 
-    @patch("src.article_writer.create_deep_thinking_llm")
+    @patch("src.article_writer.create_writer_fallback_llm")
     @patch("src.article_writer.create_writer_llm")
     def test_fallback_caches_gemini_for_subsequent_calls(
         self, mock_create_writer, mock_create_gemini

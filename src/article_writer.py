@@ -24,7 +24,7 @@ from src.article_audit import (
 )
 from src.config import config, get_env_value
 from src.error_safety import redact_sensitive_text, summarize_exception
-from src.llms import create_deep_thinking_llm, create_writer_llm
+from src.llms import create_writer_fallback_llm, create_writer_llm
 from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import classify_failure, get_model_name, infer_provider
 from src.runtime_services import get_current_tool_service
@@ -616,7 +616,7 @@ class ArticleWriter:
                 root_cause_type=primary_failure.root_cause_type,
                 reason=primary_failure.message,
             )
-            fallback_llm = create_deep_thinking_llm()
+            fallback_llm = create_writer_fallback_llm()
             self.llm = fallback_llm  # Cache for subsequent calls (e.g., retry)
             fallback_model = get_model_name(fallback_llm)
             fallback_provider = infer_provider(
@@ -695,6 +695,20 @@ class ArticleWriter:
             RuntimeError: If the model refuses to generate the article
         """
         response = self._invoke_with_fallback(messages)
+
+        # 0. Truncation guard: a MAX_TOKENS/LENGTH finish means the model ran out
+        # of output budget mid-generation (e.g. Gemini hidden reasoning eating the
+        # shared completion pool). Surface it loudly instead of silently saving a
+        # mid-sentence article. (June 2026 1928.T fallback failure.)
+        finish_reason = str(
+            (getattr(response, "response_metadata", {}) or {}).get("finish_reason", "")
+        ).upper()
+        if finish_reason in ("MAX_TOKENS", "LENGTH"):
+            logger.warning(
+                "writer_output_truncated",
+                finish_reason=finish_reason,
+                model=get_model_name(self.llm),
+            )
 
         # 1. Extract text, filtering out thinking blocks
         article = _extract_text_from_response(response)

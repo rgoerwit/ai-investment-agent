@@ -517,6 +517,42 @@ def create_deep_thinking_llm(
     )
 
 
+def create_writer_fallback_llm(
+    temperature: float = 0.1,
+    callbacks: list[BaseCallbackHandler] | None = None,
+) -> BaseChatModel:
+    """
+    Create the Gemini fallback used when the Claude article writer is
+    unavailable (e.g. missing key, billing failure).
+
+    Unlike ``create_deep_thinking_llm`` (the analyst/PM deep-reasoning
+    profile), this mirrors the *writer's* intent: long-form output with
+    minimal reasoning. Article generation needs output budget, not a large
+    hidden-reasoning budget — and for Gemini 3+ the hidden reasoning shares
+    the same completion-token pool as the visible text, so a high
+    ``thinking_level`` here starves the article and truncates it mid-sentence
+    (the June 2026 1928.T failure). We therefore cap thinking at ``"low"`` and
+    pin an explicit 16384-token visible budget (matching the Claude writer's
+    ``max_tokens``); the budget machinery adds only the small "default" reserve
+    on top, so the 16384 visible tokens can never be cannibalized by reasoning.
+    """
+    runtime_config = get_runtime_config(config)
+    model_name = runtime_config.deep_think_llm
+    thinking_level: Literal["low"] | None = None
+    if _is_gemini_v3_or_greater(model_name) or _is_gemini_v2_5(model_name):
+        thinking_level = "low"
+    return create_gemini_model(
+        model_name,
+        temperature,
+        config.api_timeout,
+        runtime_config.api_retry_attempts,
+        callbacks=callbacks,
+        thinking_level=thinking_level,
+        max_output_tokens=16384,
+        reserve_class="default",
+    )
+
+
 # Lazily initialize default instances so importing src.llms does not construct
 # network-capable clients during test collection or light-weight CLI paths.
 quick_thinking_llm = _LazyLLMProxy(create_quick_thinking_llm)
@@ -851,7 +887,7 @@ def create_writer_llm(
 
     if not api_key:
         logger.warning("writer_no_claude_key")
-        return create_deep_thinking_llm(
+        return create_writer_fallback_llm(
             temperature=temperature,
             callbacks=callbacks,
         )
@@ -861,7 +897,7 @@ def create_writer_llm(
         from langchain_anthropic import ChatAnthropic
     except ImportError:
         logger.warning("langchain_anthropic_missing")
-        return create_deep_thinking_llm(
+        return create_writer_fallback_llm(
             temperature=temperature,
             callbacks=callbacks,
         )
