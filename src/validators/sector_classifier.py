@@ -8,6 +8,7 @@ from enum import Enum
 import structlog
 
 from src.data_block_utils import extract_data_block_field
+from src.sector_normalization import normalize_sector_label
 
 logger = structlog.get_logger(__name__)
 
@@ -135,6 +136,17 @@ def detect_sector(fundamentals_report: str) -> Sector:
     exact_match = _GICS_EXACT.get(sector_text.lower())
     if exact_match is not None:
         return exact_match
+
+    # Prefer the shared canonical alias table before the substring keyword
+    # fallback. Vendor labels like "Consumer Cyclical" / "Consumer Defensive"
+    # otherwise collide with the keyword map (e.g. "cyclical" is a Materials
+    # keyword), misclassifying restaurant/retail names as Materials and
+    # silently applying the wrong sector-aware red-flag thresholds.
+    canonical = normalize_sector_label(sector_text)
+    if canonical != "Unknown":
+        canonical_match = _GICS_EXACT.get(canonical.lower())
+        if canonical_match is not None:
+            return canonical_match
 
     sector_lower = sector_text.lower()
     for keywords, sector_enum in _KEYWORD_MAP:

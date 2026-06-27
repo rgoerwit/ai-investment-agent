@@ -311,9 +311,20 @@ def summarize_confidence(state: dict) -> str:
     """One-sentence summary of which optional cross-checks ran."""
     run_summary = state.get("run_summary") or {}
     bits: list[str] = []
-    if run_summary.get("consultant_successful"):
+    verdict = run_summary.get("consultant_verdict")
+    if verdict == "CLEAN" or (
+        verdict is None and run_summary.get("consultant_successful")
+    ):
+        # `verdict is None` = pre-change saved JSON; fall back to the legacy
+        # "ran ok" signal so old analyses still render.
         bits.append("consultant cross-check passed")
-    elif run_summary.get("consultant_completed"):
+    elif verdict == "CONDITIONAL":
+        bits.append("consultant approved with conditions — verify open items")
+    elif verdict == "MAJOR_CONCERNS":
+        bits.append("consultant raised major concerns")
+    elif verdict == "REJECTED":
+        bits.append("consultant did NOT approve")
+    elif verdict in {"UNPARSED", "ERROR"} or run_summary.get("consultant_completed"):
         bits.append("consultant ran but did not approve")
     if run_summary.get("auditor_successful"):
         bits.append("forensic auditor clean")

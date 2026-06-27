@@ -602,6 +602,31 @@ def detect_red_flags(
             ocf_filing_reason=ocf_reason,
         )
 
+    ocf_period = (metrics.get("ocf_period") or "").upper()
+    if ocf_source == "FILING" and re.match(r"\s*(Q[1-4]|H[12])", ocf_period):
+        red_flags.append(
+            {
+                "type": "OCF_PERIOD_NORMALIZATION",
+                "severity": "INFO",
+                "detail": (
+                    f"Headline OCF is sub-annual ({ocf_period}); compare cash-flow "
+                    "claims only on a same-period or TTM/annualized basis"
+                ),
+                "action": "NOTE",
+                "risk_penalty": 0.0,
+                "rationale": (
+                    "A single-quarter or half-year filing OCF is not directly "
+                    "comparable to TTM net income, TTM free cash flow, or annual "
+                    "payout ratios. Any cash-conversion or dividend-coverage claim "
+                    "must use a same-period figure or an explicitly labeled "
+                    "annualized estimate."
+                ),
+            }
+        )
+        logger.info(
+            "red_flag_ocf_period_normalization", ticker=ticker, ocf_period=ocf_period
+        )
+
     if revenue_growth_ttm is not None and revenue_growth_ttm < -15.0:
         red_flags.append(
             {

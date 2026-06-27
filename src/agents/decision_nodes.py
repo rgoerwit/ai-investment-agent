@@ -755,7 +755,9 @@ NEUTRAL ANALYST (Balanced):
 
         if value_trap:
             value_trap_warnings = RedFlagDetector.detect_value_trap_flags(
-                value_trap, ticker
+                value_trap,
+                ticker,
+                m_and_a_status=extract_data_block_field(fundamentals, "M_AND_A_STATUS"),
             )
             if value_trap_warnings:
                 red_flags.extend(value_trap_warnings)
@@ -1371,7 +1373,11 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
                             value_trap_report
                         )
                     vt_warnings = RedFlagDetector.detect_value_trap_flags(
-                        value_trap_report, ticker
+                        value_trap_report,
+                        ticker,
+                        m_and_a_status=extract_data_block_field(
+                            fundamentals_report, "M_AND_A_STATUS"
+                        ),
                     )
                     if vt_warnings:
                         red_flags.extend(vt_warnings)

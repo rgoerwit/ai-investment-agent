@@ -1495,6 +1495,8 @@ async def format_lessons_for_injection(
                 "sector": meta.get("sector", "Unknown"),
                 "exchange": meta.get("exchange", "??"),
                 "confidence": round(effective_score, 2),
+                "lesson_type": meta.get("lesson_type"),
+                "ticker": meta.get("ticker"),
             }
         )
 
@@ -1529,8 +1531,14 @@ async def format_lessons_for_injection(
 
     lines = ["LESSONS FROM PAST ANALYSES (cross-market):"]
     for lesson in top_lessons:
+        # A `prior_rejection` record is a screening artifact, not a learned market
+        # lesson — label it distinctly so it is not read as a generalizable lesson.
+        if lesson.get("lesson_type") == "prior_rejection":
+            prefix = f"PRIOR REJECTION ({lesson.get('ticker') or '?'})"
+        else:
+            prefix = "LESSON"
         lines.append(
-            f"- {lesson['lesson']} "
+            f"- {prefix}: {lesson['lesson']} "
             f"({lesson['failure_mode']} | {lesson['sector']}/{lesson['exchange']} "
             f"| conf: {lesson['confidence']})"
         )

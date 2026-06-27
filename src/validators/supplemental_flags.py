@@ -227,9 +227,21 @@ def detect_legal_flags(
 
 
 def detect_value_trap_flags(
-    value_trap_report: str, ticker: str = "UNKNOWN"
+    value_trap_report: str,
+    ticker: str = "UNKNOWN",
+    *,
+    m_and_a_status: str | None = None,
 ) -> list[dict]:
-    """Parse VALUE_TRAP_BLOCK for deterministic warning flags."""
+    """Parse VALUE_TRAP_BLOCK for deterministic warning flags.
+
+    ``m_and_a_status`` (from the Senior Fundamentals DATA_BLOCK) is an
+    independent catalyst signal: an active tender/offer is, by definition, a
+    re-rating catalyst, so it suppresses ``NO_CATALYST_DETECTED`` even when the
+    Value-Trap Detector's own governance signals show no activist/index/
+    restructuring catalyst. Without this, an active-takeover name (e.g. GAMA.L)
+    self-contradicts — flagged "no catalyst" while the DATA_BLOCK reports
+    ``M_AND_A_STATUS: ACTIVE_TENDER``.
+    """
     flags: list[dict[str, Any]] = []
 
     metrics = extract_value_trap_score(value_trap_report)
@@ -237,6 +249,10 @@ def detect_value_trap_flags(
     verdict = metrics.get("verdict")
     has_catalyst = metrics.get("has_catalyst", False)
     activist_present = metrics.get("activist_present")
+    active_ma = (m_and_a_status or "").strip().upper() in {
+        "ACTIVE_TENDER",
+        "ACTIVE_OFFER",
+    }
 
     if score is not None and score < 40:
         flags.append(
@@ -282,7 +298,7 @@ def detect_value_trap_flags(
         )
         logger.info("value_trap_flag_verdict", ticker=ticker, verdict=verdict)
 
-    if not has_catalyst and activist_present == "NO":
+    if not has_catalyst and activist_present == "NO" and not active_ma:
         flags.append(
             {
                 "type": "NO_CATALYST_DETECTED",
@@ -297,6 +313,12 @@ def detect_value_trap_flags(
             "value_trap_flag_no_catalyst",
             ticker=ticker,
             activist_present=activist_present,
+        )
+    elif not has_catalyst and activist_present == "NO" and active_ma:
+        logger.info(
+            "value_trap_no_catalyst_suppressed_by_ma",
+            ticker=ticker,
+            m_and_a_status=m_and_a_status,
         )
 
     return flags

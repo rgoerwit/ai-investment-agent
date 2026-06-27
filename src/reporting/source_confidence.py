@@ -88,9 +88,18 @@ def build_source_confidence_rows(state: dict) -> list[SourceRow]:
         or bool(summary.get("consultant_finished"))
         or bool(get_consultant_review(state))
     )
-    consultant_ok = bool(summary.get("consultant_successful"))
-    if consultant_ok:
+    # `consultant_successful` only means the consultant returned a parseable
+    # review — not that it approved. Branch on the derived verdict; fall back to
+    # the legacy "ran ok → HIGH" path only for pre-change saved JSON (verdict None).
+    verdict = summary.get("consultant_verdict")
+    if verdict == "CLEAN" or (verdict is None and summary.get("consultant_successful")):
         rows.append(("Cross-model review", "Consultant (gpt-5.4)", "HIGH"))
+    elif verdict == "CONDITIONAL":
+        rows.append(("Cross-model review", "Consultant — conditional", "MEDIUM"))
+    elif verdict == "MAJOR_CONCERNS":
+        rows.append(("Cross-model review", "Consultant — major concerns", "LOW"))
+    elif verdict == "REJECTED":
+        rows.append(("Cross-model review", "Consultant — not approved", "LOW"))
     elif consultant_ran:
         rows.append(
             ("Cross-model review", "Consultant ran with reservations", "MEDIUM")

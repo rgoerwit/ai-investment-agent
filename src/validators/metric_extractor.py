@@ -77,6 +77,7 @@ def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
         "ocf": None,
         "ocf_source": None,
         "ocf_filing_reason": None,
+        "ocf_period": None,
         "segment_flag": None,
         "parent_company": None,
         "listing_role": None,
@@ -215,6 +216,16 @@ def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
         value = ocf_reason_match.group(1).upper()
         if value != "N/A":
             metrics["ocf_filing_reason"] = value
+
+    ocf_period_match = re.search(
+        r"OPERATING_CASH_FLOW_PERIOD:\s*([^\n]+)",
+        data_block,
+        re.IGNORECASE,
+    )
+    if ocf_period_match:
+        value = ocf_period_match.group(1).strip()
+        if value.upper() not in ("N/A", ""):
+            metrics["ocf_period"] = value
 
     segment_flag_match = re.search(
         r"SEGMENT_FLAG:\s*(DETERIORATING|STABLE|N/A)", data_block, re.IGNORECASE

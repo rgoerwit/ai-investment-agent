@@ -390,7 +390,53 @@ def create_research_manager_node(
         if strict_mode:
             system_msg += _STRICT_RM_ADDENDUM
 
-        prompt = f"{system_msg}{governance_block(state)}\n\n{all_reports}\n\nProvide Investment Plan."
+        # Route retrospective lessons into the synthesis agent too: the recurring
+        # defects (period-mixing, undiscovered overclaim) originate at RM synthesis,
+        # which previously never saw lessons (only Bull/Bear did). RM receives the
+        # researchers' *outputs* — not their lesson prompts — so this is not a
+        # double-injection. Reuse the existing format_lessons_for_injection path.
+        ticker = state.get("company_of_interest", "UNKNOWN")
+        runtime_config = get_runtime_config(settings_config)
+        lessons_block = ""
+        if runtime_config.enable_memory:
+            try:
+                from src.retrospective import (
+                    create_lessons_memory,
+                    format_lessons_for_injection,
+                )
+
+                lessons_memory = create_lessons_memory()
+                sector = support._extract_sector_from_state(state)
+                rm_context = support.get_context_from_config(config)
+                current_regime = (
+                    getattr(rm_context, "macro_regime", None) if rm_context else None
+                )
+                lessons_text = await format_lessons_for_injection(
+                    lessons_memory,
+                    ticker,
+                    sector,
+                    current_regime=current_regime,
+                )
+                if lessons_text:
+                    lessons_block = "\n\n" + format_untrusted_block(
+                        lessons_text,
+                        "RETROSPECTIVE LESSONS",
+                        provenance="global lessons_learned collection",
+                    )
+                    logger.info(
+                        "lessons_injected",
+                        agent="research_manager",
+                        ticker=ticker,
+                        lessons_length=len(lessons_text),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "lessons_injection_failed",
+                    agent="research_manager",
+                    **summarize_exception(exc, operation="lessons_injection_failed"),
+                )
+
+        prompt = f"{system_msg}{governance_block(state)}{lessons_block}\n\n{all_reports}\n\nProvide Investment Plan."
 
         try:
             response = await agent_runtime.invoke_with_rate_limit_handling(

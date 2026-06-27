@@ -159,6 +159,41 @@ def _build_quick_consultant_summary(
     }
 
 
+def _derive_consultant_verdict(consultant_status: dict[str, Any]) -> str:
+    """Distinguish 'consultant ran' from 'consultant approved'.
+
+    Mirrors the auditor's ran-vs-clean distinction. Reuses the canonical
+    ``parse_consultant_conditions`` (the same parser the PM uses to raise
+    ``CONSULTANT_*`` flags) on the stored review content rather than inventing a
+    second parse, so the verdict stays consistent with red-flag detection.
+
+    Returns one of: ``REJECTED`` (hard stop), ``MAJOR_CONCERNS`` (mandate breach
+    or major concerns), ``CONDITIONAL`` (conditional approval), ``CLEAN``
+    (approved), ``UNPARSED`` (ran ok but verdict unclassifiable), ``ERROR`` (ran
+    but failed), ``NOT_RUN`` (absent).
+    """
+    if not consultant_status:
+        return "NOT_RUN"
+    if not consultant_status.get("ok"):
+        return "ERROR" if consultant_status.get("complete") else "NOT_RUN"
+
+    from src.validators.supplemental_extractors import parse_consultant_conditions
+
+    conditions = parse_consultant_conditions(consultant_status.get("content") or "")
+    if conditions.get("has_hard_stop"):
+        return "REJECTED"
+    if conditions.get("has_mandate_breach"):
+        return "MAJOR_CONCERNS"
+    verdict = conditions.get("verdict")
+    if verdict == "MAJOR_CONCERNS":
+        return "MAJOR_CONCERNS"
+    if verdict == "CONDITIONAL_APPROVAL":
+        return "CONDITIONAL"
+    if verdict == "APPROVED":
+        return "CLEAN"
+    return "UNPARSED"
+
+
 def build_run_summary(
     result: dict,
     *,
@@ -250,6 +285,14 @@ def build_run_summary(
         and auditor_report_status not in _AUDITOR_CAVEATED_STATUSES
     )
 
+    # The consultant gets the same "ran vs approved" distinction the auditor has:
+    # `consultant_successful` (= bare `ok`) only means it returned a parseable
+    # review, NOT that it approved. Derive the approval verdict once, here, by
+    # reusing the canonical consultant-condition parser on the stored review
+    # content — the same parser the PM uses to raise CONSULTANT_* flags — so the
+    # memo/source-confidence renderers can branch on a single ready value.
+    consultant_verdict = _derive_consultant_verdict(consultant_status)
+
     summary = {
         "quick_mode": quick_mode,
         "quick_model": runtime_config.quick_think_llm,
@@ -262,6 +305,7 @@ def build_run_summary(
         "consultant_finished": consultant_finished,
         "auditor_finished": auditor_finished,
         "consultant_successful": bool(consultant_status.get("ok")),
+        "consultant_verdict": consultant_verdict,
         "auditor_successful": auditor_successful,
         "auditor_status": auditor_report_status,
         "apac_specialist_completed": apac_finished,

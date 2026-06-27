@@ -7,6 +7,8 @@ No LLM is called; only the prompt JSON on disk is inspected.
 
 from __future__ import annotations
 
+import re
+
 from src.prompts import get_prompt
 
 
@@ -289,3 +291,69 @@ class TestKoreanPromptAnchors:
         assert "밸류업" in apac.system_message
         assert "자사주 소각" in apac.system_message
         assert "기업지배구조보고서" in value_trap.system_message
+
+
+def _version_ok(version: str) -> bool:
+    return bool(re.match(r"^\d+\.\d+$", version))
+
+
+class TestOcfSamePeriodRule:
+    """Fundamentals prompt must forbid comparing a sub-annual filing OCF to TTM."""
+
+    def test_version_valid(self):
+        assert _version_ok(get_prompt("fundamentals_analyst").version)
+
+    def test_ocf_same_period_rule_present(self):
+        sm = get_prompt("fundamentals_analyst").system_message
+        assert "OCF same-period rule" in sm
+        assert "ESTIMATED" in sm
+
+
+class TestForeignLanguageSearchCFreshness:
+    """Search C must prefer the latest quarter, not the annual report."""
+
+    def test_version_valid(self):
+        assert _version_ok(get_prompt("foreign_language_analyst").version)
+
+    def test_prefers_latest_quarter(self):
+        sm = get_prompt("foreign_language_analyst").system_message
+        assert "most recent quarterly" in sm
+        assert "trailing-4-quarter" in sm
+
+    def test_en_fallback_not_annual_only(self):
+        sm = get_prompt("foreign_language_analyst").system_message
+        assert "cash flow from operations annual report" not in sm
+        assert "latest quarterly results operating cash flow" in sm
+
+
+class TestUndiscoveredCoverageGuard:
+    """Coverage caveat must bind against unqualified 'undiscovered' framing."""
+
+    def test_research_manager_binding_rule(self):
+        rm = get_prompt("research_manager")
+        assert _version_ok(rm.version)
+        assert "Undiscovered framing is binding" in rm.system_message
+        assert "ANALYST_COVERAGE_DATA_QUALITY_NOTE" in rm.system_message
+
+    def test_sentiment_qualifier(self):
+        s = get_prompt("sentiment_analyst")
+        assert _version_ok(s.version)
+        assert "low Western / English-language" in s.system_message
+
+    def test_no_hardcoded_analyst_count(self):
+        # The disputed "5 analysts" claim must not be encoded anywhere.
+        for key in ("research_manager", "sentiment_analyst"):
+            sm = get_prompt(key).system_message
+            assert "5 analysts" not in sm
+
+
+class TestPmExecutionPrecedence:
+    """PM final execution parameters must be declared binding over upstream stops."""
+
+    def test_version_valid(self):
+        assert _version_ok(get_prompt("portfolio_manager").version)
+
+    def test_precedence_rule_present(self):
+        sm = get_prompt("portfolio_manager").system_message
+        assert "these FINAL EXECUTION PARAMETERS are binding" in sm
+        assert "supersede" in sm

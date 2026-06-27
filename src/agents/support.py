@@ -350,11 +350,20 @@ def compute_data_conflicts(raw_data: str, foreign_data: str) -> str:
             ratio = max(j_abs, f_abs) / min(j_abs, f_abs)
             if ratio > 1.3:
                 period_note = f" ({filing_ocf_period})" if filing_ocf_period else ""
+                sub_annual = bool(
+                    filing_ocf_period
+                    and re.match(r"\s*(H[12]|Q[1-4])", filing_ocf_period, re.IGNORECASE)
+                )
+                verdict = (
+                    "PERIOD MISMATCH — filing OCF is sub-annual; annualize or use a "
+                    "TTM basis before comparing"
+                    if sub_annual
+                    else "INVESTIGATE: same metric, material divergence"
+                )
                 conflicts.append(
                     f"- OCF: Junior={junior_ocf:,.0f} [yfinance] vs "
                     f"Filing={filing_ocf:,.0f}{period_note} [FLA] — "
-                    f"{ratio:.1f}x difference. "
-                    f"{'PERIOD MISMATCH — cannot directly compare' if filing_ocf_period and 'H' in filing_ocf_period.upper() else 'INVESTIGATE: same metric, material divergence'}"
+                    f"{ratio:.1f}x difference. {verdict}"
                 )
 
     if junior_analysts is not None:
