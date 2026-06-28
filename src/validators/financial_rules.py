@@ -99,6 +99,123 @@ def contains_transient_strength_marker(report: str | None) -> bool:
     )
 
 
+_OCF_MAGNITUDE: dict[str, float] = {
+    "T": 1e12,
+    "TRILLION": 1e12,
+    "B": 1e9,
+    "BN": 1e9,
+    "BILLION": 1e9,
+    "M": 1e6,
+    "MN": 1e6,
+    "MM": 1e6,
+    "MILLION": 1e6,
+    "K": 1e3,
+}
+_OCF_NUM_MAG_RE = re.compile(
+    r"(\d[\d,]*\.?\d*)\s*(trillion|billion|million|bn|mm|mn|[tbmk])\b",
+    re.IGNORECASE,
+)
+_OCF_LINE_RE = re.compile(
+    r"(?im)^[^\n]*\b(?:operating cash flow|cash flow from operations|"
+    r"net cash from operating activities|cfo)\b[^\n]*$"
+)
+
+
+def parse_ocf_amount(text: str | None) -> float | None:
+    """Parse one money amount from free text (handles ``~``, currency, magnitude).
+
+    Accepts forms like ``1.148B PLN``, ``~PLN 971m``, ``920,000,000``. Returns the
+    value in base units, or ``None`` if no amount is found.
+    """
+    if not text:
+        return None
+    match = _OCF_NUM_MAG_RE.search(text)
+    if match:
+        try:
+            value = float(match.group(1).replace(",", ""))
+        except ValueError:
+            return None
+        return value * _OCF_MAGNITUDE.get(match.group(2).upper(), 1.0)
+    bare = re.search(r"(\d[\d,]{6,})", text)  # bare large number, e.g. 920000000
+    if bare:
+        try:
+            return float(bare.group(1).replace(",", ""))
+        except ValueError:
+            return None
+    return None
+
+
+def extract_auditor_ocf(report: str | None) -> float | None:
+    """Return the forensic auditor's independently-computed OCF, if stated.
+
+    The auditor reports a line such as ``Operating cash flow: ~PLN 971m``. We
+    anchor on a cash-flow-labelled line so we do not pick up an unrelated figure.
+    """
+    if not report:
+        return None
+    for match in _OCF_LINE_RE.finditer(report):
+        amount = parse_ocf_amount(match.group(0))
+        if amount:
+            return amount
+    return None
+
+
+def detect_ocf_corroboration_flag(
+    datablock_ocf: float | None,
+    auditor_ocf: float | None,
+    ticker: str = "UNKNOWN",
+    threshold: float = 0.15,
+) -> dict[str, Any] | None:
+    """Flag a headline OCF that the forensic auditor's independent figure contradicts.
+
+    The forensic auditor computes OCF from primary documents independently of the
+    Foreign-Language "filing" value the Senior Fundamentals Analyst may have
+    promoted under the FILING AUTHORITY PRINCIPLE. A material divergence means the
+    headline cash-generation narrative is *uncorroborated* — it must not be
+    asserted as fact. Risk-neutral by design (the existing OCF_SOURCE_DISCREPANCY
+    already carries the penalty); this flag exists to block the overclaim and
+    surface the conflict, not to escalate the tally.
+    """
+    if not datablock_ocf or not auditor_ocf or datablock_ocf <= 0 or auditor_ocf <= 0:
+        return None
+    divergence = abs(datablock_ocf - auditor_ocf) / min(datablock_ocf, auditor_ocf)
+    if divergence <= threshold:
+        return None
+    headline_high = datablock_ocf > auditor_ocf
+    detail = (
+        f"Headline OCF {datablock_ocf:,.0f} diverges {divergence * 100:.0f}% from the "
+        f"forensic auditor's independent OCF {auditor_ocf:,.0f}"
+    )
+    if headline_high:
+        detail += (
+            "; do not treat the higher headline as verified 'elite cash generation' "
+            "until reconciled to the actual cash-flow statement line."
+        )
+    else:
+        detail += "."
+    logger.info(
+        "red_flag_ocf_filing_value_uncorroborated",
+        ticker=ticker,
+        datablock_ocf=datablock_ocf,
+        auditor_ocf=auditor_ocf,
+        divergence_pct=round(divergence * 100, 1),
+    )
+    return {
+        "type": "OCF_FILING_VALUE_UNCORROBORATED",
+        "severity": "WARNING",
+        "detail": detail,
+        "action": "DOWNWEIGHT_CASH_NARRATIVE",
+        "risk_penalty": 0.0,
+        "rationale": (
+            "The forensic auditor independently computed operating cash flow from "
+            "primary documents. A material divergence from the headline DATA_BLOCK "
+            "OCF means cash-conversion, dividend-coverage, and 'elite cash "
+            "generation' claims are not corroborated and must not be asserted as "
+            "fact until the figure is traced to the cash-flow statement line."
+        ),
+    }
+
+
 def detect_red_flags(
     metrics: dict[str, Any],
     ticker: str = "UNKNOWN",
@@ -593,7 +710,7 @@ def detect_red_flags(
                 "detail": "OCF value sourced from filing differs from API data — verify",
                 "action": "RISK_PENALTY",
                 "risk_penalty": 0.5,
-                "rationale": "The Senior Fundamentals Analyst preferred the filing-sourced OCF over the API-sourced value due to a >30% discrepancy. This may indicate a yfinance data error, currency mismatch, or period mismatch. The filing value is likely more accurate but warrants cross-validation.",
+                "rationale": "The Senior Fundamentals Analyst preferred the filing-sourced OCF over the API-sourced value due to a >30% discrepancy. This may indicate a yfinance data error, currency mismatch, or period mismatch. Neither source is presumptively correct: a search-derived 'filing' figure can be the wrong statement line. Reconcile to the actual cash-flow statement and corroborate against the forensic auditor's independent OCF before building any cash-quality narrative on the higher value.",
             }
         )
         logger.info(

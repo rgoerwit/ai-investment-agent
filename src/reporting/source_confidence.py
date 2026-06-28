@@ -62,7 +62,22 @@ def build_source_confidence_rows(state: dict) -> list[SourceRow]:
         .strip()
         .upper()
     )
-    if ocf_source == "FILING":
+    ocf_reason = (
+        (extract_data_block_field(fundamentals, "OCF_FILING_REASON") or "")
+        .strip()
+        .upper()
+    )
+    if ocf_source == "FILING" and ocf_reason == "DISCREPANCY":
+        # Filing and aggregator OCF materially diverged: not "ground truth".
+        # Verify against the actual cash-flow statement line (KTY.WA 2026-06-27).
+        rows.append(
+            (
+                "Core financials",
+                "Filing/API OCF conflict — verify statement line",
+                "MEDIUM",
+            )
+        )
+    elif ocf_source == "FILING":
         rows.append(("Core financials", "Filing-level OCF (ground truth)", "HIGH"))
     elif ocf_source in {"JUNIOR", "AGGREGATOR"}:
         rows.append(("Core financials", "Aggregator (yfinance / yahooquery)", "MEDIUM"))

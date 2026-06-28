@@ -20,7 +20,10 @@ import structlog
 
 from src.charts.extractors.pm_block import extract_pm_block
 from src.charts.extractors.valuation import format_iv
-from src.data_block_utils import normalize_structured_block_boundaries
+from src.data_block_utils import (
+    extract_data_block_field,
+    normalize_structured_block_boundaries,
+)
 from src.error_safety import summarize_exception
 from src.pm_decision_parser import canonicalize_pm_verdict
 from src.runtime_diagnostics import is_publishable_analysis
@@ -1160,6 +1163,17 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
                 pass  # Fallback if utils not available
 
         add_section("fundamentals_report", "Fundamental Analysis")
+
+        # Qualify "undiscovered" language when coverage is not independently
+        # confirmed low. Prompt-level guidance (sentiment v5.4) proved
+        # insufficient (KTY.WA 2026-06-27 still asserted "Strongly Undiscovered"
+        # at MODERATE total coverage), so this is a deterministic backstop keyed
+        # off the DATA_BLOCK coverage fields the Fundamentals Analyst owns.
+        sentiment_report = result.get("sentiment_report", "")
+        if sentiment_report:
+            result["sentiment_report"] = self._soften_undiscovered_language(
+                self._normalize_string(sentiment_report), fund_report
+            )
         add_section("sentiment_report", "Market Sentiment")
 
         # Reformat MACRO_DETECTION block before rendering news section
@@ -1305,14 +1319,32 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
             flags=re.DOTALL,
         )
 
-        # Strip CONSULTANT_RESOLUTION machine-readable blocks.
-        # Handles: bare, #### prefix, **bold** wrapping, colon inside or outside bold.
+        # Preserve the PM's consultant reconciliation as reader-facing prose.
+        # The PM emits CONSULTANT_RESOLUTION (CONCERN/DATA_CHECK/VERDICT bullets)
+        # — often the *only* place the reconciliation appears — under the
+        # "CONSULTANT DISAGREEMENT RESOLUTION" heading. Previously the whole block
+        # was stripped; when the PM fenced it, the fence survived and left an empty
+        # ``` block under the heading (the KTY.WA 2026-06-27 regression). Now we
+        # drop only the machine label line and unwrap any fence, keeping the
+        # bullets so the reader sees the reconciliation.
+        # Fenced form: ```\nCONSULTANT_RESOLUTION:\n- ...\n```  -> keep bullets.
         text = re.sub(
-            r"^[#*\s]*CONSULTANT_RESOLUTION[*:]*\s*\n(?:-[^\n]+\n)+",
+            r"```[^\S\n]*\n[#*\s]*CONSULTANT_RESOLUTION[*:]*\s*\n"
+            r"(?P<bullets>(?:[#*\s]*-[^\n]+\n)+)\s*```",
+            lambda m: m.group("bullets"),
+            text,
+        )
+        # Unfenced form: drop only the label line, keep the bullets that follow.
+        text = re.sub(
+            r"^[#*\s]*CONSULTANT_RESOLUTION[*:]*\s*\n(?=[#*\s]*-)",
             "",
             text,
             flags=re.MULTILINE,
         )
+        # Safety net: collapse any fenced block left entirely empty by prior strips
+        # (e.g. a machine block whose body was removed), without touching fences
+        # that still contain content such as APAC_RESOLUTION/AUDITOR_RESOLUTION.
+        text = re.sub(r"```[^\S\n]*\n[ \t]*```[ \t]*\n?", "", text)
 
         # Strip "Analyzing TICKER - Company" openers (redundant with report title).
         # Matches ticker by requiring a dot-delimited exchange suffix (e.g. .HK, .T, .DE).
@@ -1365,6 +1397,42 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
                 return lines[1].lstrip("\n") if len(lines) > 1 else ""
 
         return text
+
+    @staticmethod
+    def _soften_undiscovered_language(sentiment_text: str, fund_report: str) -> str:
+        """Qualify unconditional "undiscovered" claims when coverage isn't confirmed low.
+
+        Fires when the DATA_BLOCK reports MODERATE/HIGH/UNKNOWN total analyst
+        coverage, or an ANALYST_COVERAGE_DATA_QUALITY_NOTE is present. Rewrites
+        "(strongly/exceptionally/...) undiscovered" to a qualified phrase. The
+        replacement contains no "undiscovered" token, so re-running is a no-op.
+        Genuinely-low, confidently-measured coverage is left untouched.
+        """
+        if not sentiment_text:
+            return sentiment_text
+        total_est = (
+            extract_data_block_field(fund_report, "ANALYST_COVERAGE_TOTAL_EST") or ""
+        ).upper()
+        has_note = "ANALYST_COVERAGE_DATA_QUALITY_NOTE" in (fund_report or "")
+        if not (has_note or total_est in {"MODERATE", "HIGH", "UNKNOWN"}):
+            return sentiment_text
+        softened = re.sub(
+            r"\b(?:strongly|exceptionally|truly|genuinely|completely)?\s*undiscovered\b",
+            "low English-language aggregator visibility",
+            sentiment_text,
+            flags=re.IGNORECASE,
+        )
+        # A caveat banner neutralizes the whole family of overclaim synonyms
+        # ("effectively invisible", "entirely absent", "international ignorance")
+        # without fragile in-place phrase rewriting that risks mangling grammar.
+        caveat = (
+            "> **Coverage caveat:** discovery/visibility framing below reflects only "
+            "low *Western English-language retail* visibility — analyst coverage is not "
+            "confirmed low, so treat it as relative, not an absolute claim.\n\n"
+        )
+        if "Coverage caveat:" not in softened:
+            softened = caveat + softened
+        return softened
 
     @staticmethod
     def _reformat_macro_detection(text: str) -> str:

@@ -866,6 +866,32 @@ NEUTRAL ANALYST (Balanced):
                     ),
                 )
 
+        # OCF corroboration: the forensic auditor computes operating cash flow
+        # independently of the Foreign-Language "filing" value the Senior may have
+        # promoted under FILING AUTHORITY. The auditor only completes post-research,
+        # so this cross-check belongs here (not in the pre-screening validator). A
+        # material divergence blocks the "elite cash generation" overclaim without
+        # escalating the risk tally (OCF_SOURCE_DISCREPANCY already carries any
+        # penalty). See KTY.WA 2026-06-27: filing 1.148B vs auditor ~971M. The
+        # auditor content is read through the validity-gated accessor so a failed
+        # auditor artifact is never parsed as a corroborating figure.
+        ocf_corroboration_flag = RedFlagDetector.detect_ocf_corroboration_flag(
+            RedFlagDetector.parse_ocf_amount(
+                extract_data_block_field(fundamentals, "OPERATING_CASH_FLOW")
+            ),
+            RedFlagDetector.extract_auditor_ocf(
+                get_valid_artifact_content(state, "auditor_report") or None
+            ),
+            ticker,
+        )
+        if ocf_corroboration_flag:
+            red_flags.append(ocf_corroboration_flag)
+            logger.info(
+                "ocf_corroboration_flag_detected",
+                ticker=ticker,
+                detail=ocf_corroboration_flag["detail"],
+            )
+
         logger.info(
             "pm_inputs",
             market_present=bool(state.get("market_report")),

@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from src.validators.financial_rules import detect_red_flags
+from src.validators.financial_rules import (
+    detect_ocf_corroboration_flag,
+    detect_red_flags,
+    extract_auditor_ocf,
+    parse_ocf_amount,
+)
 from src.validators.metric_extractor import extract_debt_to_equity, extract_metrics
 from src.validators.sector_classifier import Sector, detect_sector
 from src.validators.supplemental_extractors import (
@@ -30,6 +35,9 @@ class RedFlagDetector:
     extract_metrics = staticmethod(extract_metrics)
     _extract_debt_to_equity = staticmethod(extract_debt_to_equity)
     detect_red_flags = staticmethod(detect_red_flags)
+    detect_ocf_corroboration_flag = staticmethod(detect_ocf_corroboration_flag)
+    extract_auditor_ocf = staticmethod(extract_auditor_ocf)
+    parse_ocf_amount = staticmethod(parse_ocf_amount)
     extract_legal_risks = staticmethod(extract_legal_risks)
     detect_legal_flags = staticmethod(detect_legal_flags)
     extract_value_trap_score = staticmethod(extract_value_trap_score)

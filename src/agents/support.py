@@ -251,6 +251,32 @@ def extract_news_highlights(news_report: str, max_chars: int = 25000) -> str:
     return result if result.strip() else news_report[:max_chars]
 
 
+_HEDGED_OCF_MARKER_RE = re.compile(
+    r"~|\bapprox\.?\b|approximate|estimated?\b", re.IGNORECASE
+)
+_NA_WITH_NUMBER_RE = re.compile(r"\bN/?A\b[^\n]*\([^)]*\d", re.IGNORECASE)
+_OCF_CONTEXT_RE = re.compile(
+    r"(?:operating cash flow|filing cash flow)[^\n]{0,80}", re.IGNORECASE
+)
+
+
+def filing_ocf_is_approximate(foreign_data: str | None) -> bool:
+    """True if the FLA presents its filing OCF as approximate/hedged, not exact.
+
+    Catches ``~``-prefixed or "approx"/"estimated" OCF values and the
+    ``N/A (Operating Cash Flow ~1.148 bln)`` parenthetical-beside-N/A form. Such
+    a value must NOT be promoted to ``OPERATING_CASH_FLOW_SOURCE: FILING`` — only
+    an exact statement-line figure carries filing authority (KTY.WA 2026-06-27).
+    """
+    if not foreign_data:
+        return False
+    for match in _OCF_CONTEXT_RE.finditer(foreign_data):
+        ctx = match.group(0)
+        if _HEDGED_OCF_MARKER_RE.search(ctx) or _NA_WITH_NUMBER_RE.search(ctx):
+            return True
+    return False
+
+
 def compute_data_conflicts(raw_data: str, foreign_data: str) -> str:
     """Compare Junior vs FLA data and return a structured conflict block."""
     if not raw_data:
@@ -365,6 +391,19 @@ def compute_data_conflicts(raw_data: str, foreign_data: str) -> str:
                     f"Filing={filing_ocf:,.0f}{period_note} [FLA] — "
                     f"{ratio:.1f}x difference. {verdict}"
                 )
+
+    # A hedged/approximate FLA filing OCF must not be promoted to FILING
+    # authority. The exact-number regex above won't even parse a "~" value, so it
+    # silently passes through; surface it explicitly so the Senior keeps the
+    # aggregator OCF (KTY.WA 2026-06-27: hedged ~1.148B promoted over API 920M).
+    if filing_ocf_is_approximate(foreign_data):
+        conflicts.append(
+            "- OCF_FILING_NON_AUTHORITATIVE: the Foreign-Language filing OCF is "
+            "approximate/hedged (~, 'approx', or a number beside N/A) — do NOT set "
+            "OPERATING_CASH_FLOW_SOURCE: FILING from it. Keep the aggregator (Junior) "
+            "OCF and note the gap; only an exact statement-line figure has filing "
+            "authority."
+        )
 
     if junior_analysts is not None:
         analysts_int = int(junior_analysts)

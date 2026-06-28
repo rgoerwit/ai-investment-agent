@@ -38,6 +38,37 @@ def test_build_rows_filing_ocf_high_confidence() -> None:
     assert "Filing" in source
 
 
+_DATA_BLOCK_FILING_DISCREPANCY = (
+    "### --- START DATA_BLOCK ---\n"
+    "SECTOR: Basic Materials\n"
+    "OPERATING_CASH_FLOW_SOURCE: FILING\n"
+    "OCF_FILING_REASON: DISCREPANCY\n"
+    "### --- END DATA_BLOCK ---\n"
+)
+
+
+def test_build_rows_filing_ocf_discrepancy_downgraded() -> None:
+    # FILING OCF that conflicts with the aggregator is not "ground truth | HIGH".
+    rows = build_source_confidence_rows(
+        {"fundamentals_report": _DATA_BLOCK_FILING_DISCREPANCY}
+    )
+    claim, source, conf = _claim(rows, "Core financials")
+    assert conf == "MEDIUM"
+    assert "conflict" in source.lower()
+    assert "ground truth" not in source.lower()
+
+
+def test_build_rows_filing_ocf_no_discrepancy_stays_high() -> None:
+    # FILING with API_UNAVAILABLE (single-source, no conflict) keeps HIGH.
+    block = _DATA_BLOCK_FILING.replace(
+        "OPERATING_CASH_FLOW_SOURCE: FILING\n",
+        "OPERATING_CASH_FLOW_SOURCE: FILING\nOCF_FILING_REASON: API_UNAVAILABLE\n",
+    )
+    rows = build_source_confidence_rows({"fundamentals_report": block})
+    _, _, conf = _claim(rows, "Core financials")
+    assert conf == "HIGH"
+
+
 def test_build_rows_aggregator_ocf_medium_confidence() -> None:
     rows = build_source_confidence_rows({"fundamentals_report": _DATA_BLOCK_AGGREGATOR})
     _, source, conf = _claim(rows, "Core financials")
