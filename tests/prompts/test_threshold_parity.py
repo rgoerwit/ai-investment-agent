@@ -18,6 +18,8 @@ from pathlib import Path
 import pytest
 
 from src import thesis_constants as tc
+from src.charts.extractors import data_block as _db
+from src.validators import supplemental_extractors as _se
 
 PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
 
@@ -53,6 +55,11 @@ CASES = [
         "portfolio_manager.json",
         rf"Adjusted Health < {tc.HEALTH_MIN_PCT:.0f}%",
         "health floor",
+    ),
+    (
+        "research_manager.json",
+        rf"Adjusted Score ≥ {tc.HEALTH_MIN_PCT:.0f}%",
+        "health floor (RM)",
     ),
     ("portfolio_manager.json", rf"HIGH >= {tc.RISK_ZONE_HIGH:.1f}", "risk zone high"),
     (
@@ -113,3 +120,36 @@ def test_no_retired_threshold_values(fname: str):
     msg = _system_message(fname)
     for pattern, label in RETIRED_PATTERNS:
         assert not re.search(pattern, msg), f"{fname}: contains retired value ({label})"
+
+
+# --- L0: enum set-equality (prompt vocabulary ≡ every consuming parser) ---------
+# An enum a prompt advertises must equal the token set EVERY consuming parser
+# accepts. Tokens live as named tuples on the parsers (single source); this fails
+# if any of {prompt, parser-1, parser-2} drifts out of agreement. (Shared numeric
+# thresholds — including per-prompt health-floor coverage — are guarded by the
+# CASES table above, the canonical prompt↔constant mechanism; not duplicated here.)
+
+
+def _quoted_enum_from_prompt(fname: str, field: str) -> set[str]:
+    """Parse a ``"field": "A|B|C"`` enum advertised in a JSON example block."""
+    m = re.search(rf'"{field}"\s*:\s*"([^"]+)"', _system_message(fname))
+    assert m, f"{fname}: enum field {field!r} not advertised in JSON example"
+    return {token.strip() for token in m.group(1).split("|")}
+
+
+def test_cmic_enum_prompt_matches_every_consumer():
+    advertised = _quoted_enum_from_prompt("legal_counsel.json", "cmic_status")
+    assert advertised == set(_se.CMIC_STATUS_TOKENS) == set(_db.CMIC_STATUS_TOKENS), (
+        "CMIC_STATUS tokens drifted between legal_counsel.json, "
+        "supplemental_extractors.CMIC_STATUS_TOKENS, and "
+        "charts/extractors/data_block.CMIC_STATUS_TOKENS"
+    )
+
+
+def test_pfic_and_vie_enums_match_parser():
+    assert _quoted_enum_from_prompt("legal_counsel.json", "pfic_status") == set(
+        _se.PFIC_STATUS_TOKENS
+    ), "PFIC_STATUS tokens drifted between prompt and supplemental_extractors"
+    assert _quoted_enum_from_prompt("legal_counsel.json", "vie_structure") == set(
+        _se.VIE_STRUCTURE_TOKENS
+    ), "VIE_STRUCTURE tokens drifted between prompt and supplemental_extractors"

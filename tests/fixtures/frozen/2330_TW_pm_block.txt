@@ -1,0 +1,73 @@
+### PORTFOLIO MANAGER VERDICT: DO NOT INITIATE
+
+**Rationale**: TSMC (2330.TW) is a world-class operator, but it is a fundamental violation of the "undiscovered" mandate. With 32+ analysts, massive institutional ownership, and status as a global benchmark, it lacks the information asymmetry required for this portfolio. It is a "known quantity" asset, not an alpha-generating opportunity.
+
+### THESIS COMPLIANCE SUMMARY
+
+**Hard Fail Checks:**
+- **Financial Health**: 75% (Adjusted) - **PASS**
+- **Growth Transition**: 100% (Adjusted) - **PASS**
+- **Liquidity**: **PASS** ($2.11B daily turnover)
+- **Analyst Coverage**: 32 - **FAIL** (Mandate: <15)
+- **US Revenue**: Not disclosed - **N/A**
+- **P/E Ratio**: 27.47 (PEG: 1.02) - **FAIL** (P/E > 25 hard fail threshold)
+
+**Hard Fail Result**: **FAIL** on: Analyst Coverage (32 > 15) and P/E Ratio (27.47 > 25).
+
+**Qualitative Risk Tally** (if no Hard Fails):
+*Note: Even though the stock failed hard, the tally is provided for context.*
+- **ADR (MODERATE_CONCERN)**: +0.33
+- **Qualitative Risks**: +3.0 (Geopolitical Concentration, Cyclical Peak, Cash Trap)
+- **Marginal Valuation**: +0.5
+- **Moat Signals (BONUS)**: -2.0 (MOAT_DURABLE_ADVANTAGE: -1.0, MOAT_PRICING_POWER: -0.5, MOAT_EARNINGS_QUALITY: -0.5)
+- **Capital Efficiency**: -0.5 (CAPITAL_EFFICIENT)
+- **Local Coverage High**: +0.25
+- **TOTAL RISK COUNT**: 1.58
+
+**Decision Framework Applied**:
+
+```
+=== DECISION LOGIC ===
+ZONE: HIGH (Hard Fail triggered)
+Default Decision: DO NOT INITIATE
+Actual Decision: DO NOT INITIATE
+Data Vacuum Penalty Applied: NO
+Override: NO
+======================
+```
+
+### POSITION-LEVEL CONSTRAINTS
+
+**Maximum Position Size**: 0%
+- **Basis**: Mandate Violation (Institutional Saturation)
+- **Impact**: No capital allocation authorized.
+
+### FINAL EXECUTION PARAMETERS
+
+**Action**: DO NOT INITIATE
+**Recommended Position Size**: 0.0%
+**Entry**: N/A
+**Stop loss**: N/A
+**Profit targets**: N/A
+
+### DECISION RATIONALE
+
+TSMC is an exceptional company, but it is the antithesis of the "undiscovered" thesis. The mandate requires identifying under-followed, high-growth, value-oriented opportunities. TSMC is a global benchmark with 32+ analysts and a P/E of 27.47, which triggers a hard fail on both the coverage and valuation thresholds.
+
+The Risky Analyst’s argument for a 7.5% position is rejected. While TSMC is a foundational asset for the global tech sector, allocating capital here would dilute the portfolio’s core objective of capturing alpha through information asymmetry. The market has fully priced in the AI/HPC narrative; there is no "edge" to be gained here. The geopolitical concentration risk in the Taiwan Strait, while manageable for a diversified index fund, is an unacceptable structural risk for a concentrated, mandate-specific portfolio.
+
+### PM_BLOCK (REQUIRED - Machine-Readable Summary)
+
+```
+### --- START PM_BLOCK ---
+VERDICT: DO_NOT_INITIATE
+HEALTH_ADJ: 75
+GROWTH_ADJ: 100
+RISK_TALLY: 1.58
+ZONE: HIGH
+SHOW_VALUATION_CHART: NO
+VALUATION_DISCOUNT: 0.0
+POSITION_SIZE: 0.0
+VALUATION_CONTEXT: CONTEXTUAL_PASS
+### --- END PM_BLOCK ---
+```

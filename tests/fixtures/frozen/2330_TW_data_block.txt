@@ -1,0 +1,156 @@
+### ANALYSIS OF 2330.TW (Taiwan Semiconductor Manufacturing)
+
+**Fundamentals & Valuation:**
+TSMC continues to demonstrate exceptional operational efficiency and pricing power, evidenced by a 53.9% operating margin and 35% ROE. The company's dominance in the advanced node foundry market (3nm/2nm) provides a significant competitive moat. While the P/E of 27.5x is elevated relative to the broader market, it is supported by a PEG ratio of ~1.02 and a strong growth trajectory. The company is currently in a high-capex cycle to maintain its technological lead, which suppresses FCF yield but is necessary for long-term value creation.
+
+**Risk Factors:**
+1.  **Geopolitical:** The primary risk remains the concentration of manufacturing in Taiwan.
+2.  **Valuation:** The stock is priced for high growth; any deceleration in AI infrastructure spending or foundry pricing power would lead to multiple compression.
+3.  **Cash Trap:** The company is accumulating significant cash (PFIC Cash-Trap risk), which, while providing a buffer, may attract scrutiny regarding capital allocation efficiency.
+
+---
+
+### --- START DATA_BLOCK ---
+SECTOR: Technology
+SECTOR_ADJUSTMENTS: None - standard thresholds applied
+RAW_HEALTH_SCORE: 9/12
+ADJUSTED_HEALTH_SCORE: 75% (based on 12 available points)
+RAW_GROWTH_SCORE: 6/6
+ADJUSTED_GROWTH_SCORE: 100% (based on 6 available points)
+US_REVENUE_PERCENT: Not disclosed
+ANALYST_COVERAGE_ENGLISH: 32
+ANALYST_COVERAGE_TOTAL_EST: HIGH
+PE_RATIO_TTM: 27.47
+PE_RATIO_FORWARD: 16.44
+PEG_RATIO: 1.02
+PB_RATIO: 8.71
+ADR_EXISTS: YES
+ADR_TYPE: SPONSORED
+ADR_TICKER: TSM
+ADR_EXCHANGE: NYSE
+ADR_THESIS_IMPACT: MODERATE_CONCERN
+IBKR_ACCESSIBILITY: Direct
+PFIC_RISK: LOW
+PFIC_ASSET_RATIO: 34.9%
+PFIC_CASH_TRAP: YES
+FIFTY_TWO_WEEK_HIGH: 2025.00
+FIFTY_TWO_WEEK_LOW: 780.00
+CURRENT_PRICE: 1820.00
+MOVING_AVG_50: 1845.70
+MOVING_AVG_200: 1436.38
+EXTERNAL_ANALYST_TARGET_HIGH: 2800.00
+EXTERNAL_ANALYST_TARGET_LOW: 1740.00
+EXTERNAL_ANALYST_TARGET_MEAN: 2315.66
+DE_RATIO: 0.20
+ROA_PERCENT: 16.56%
+NET_MARGIN: 45.10%
+ROA_5Y_AVG: 18.65%
+ROE_5Y_AVG: 29.52%
+PROFITABILITY_TREND: IMPROVING
+REVENUE_GROWTH_FY: 20.5%
+REVENUE_GROWTH_TTM: 20.5%
+REVENUE_GROWTH_MRQ: 20.5% (as of 2025-12-31)
+EARNINGS_GROWTH_TTM: 35.0%
+EARNINGS_GROWTH_MRQ: 40.6%
+GROWTH_TRAJECTORY: STABLE
+LATEST_QUARTER_DATE: 2025-12-31
+GRAHAM_CONSECUTIVE_YEARS: 4
+GRAHAM_TEST: PASS
+OPERATING_CASH_FLOW: NT$2,274.98B
+OPERATING_CASH_FLOW_SOURCE: FILING
+OCF_FILING_REASON: DISCREPANCY
+OPERATING_CASH_FLOW_PERIOD: FY_2025
+SEGMENT_COUNT: N/A
+SEGMENT_DOMINANT: N/A
+SEGMENT_FLAG: N/A
+PARENT_COMPANY: NONE
+VIE_STRUCTURE: NO
+CMIC_STATUS: CLEAR
+JURISDICTION: Taiwan.TSE
+MOAT_MARGIN_STABILITY: HIGH
+MOAT_MARGIN_CV: 0.0468
+MOAT_GROSS_MARGIN_AVG: 57.5%
+MOAT_CASH_CONVERSION: STRONG
+MOAT_CFO_NI_AVG: 1.45
+ROIC_PERCENT: 26.75%
+ROIC_QUALITY: STRONG
+ROE_ROIC_RATIO: 1.31
+PAYOUT_RATIO: 28.7%
+DIVIDEND_COVERAGE: COVERED
+VALUATION_CONTEXT: MOAT_PROTECTED
+### --- END DATA_BLOCK ---
+
+### FINANCIAL HEALTH DETAIL
+**Score**: 9/12 (Adjusted: 75%)
+
+**Profitability (3/3 pts)**:
+- ROE: 35.06% → 1 pt
+- ROA: 16.56% → 1 pt
+- Operating Margin: 53.92% → 1 pt
+*Subtotal: 3/3*
+
+**Leverage (2/2 pts)**:
+- D/E: 0.20 → 1 pt
+- NetDebt/EBITDA: Negative (Net Cash) → 1 pt
+*Subtotal: 2/2*
+
+**Liquidity (2/2 pts)**:
+- Current Ratio: 2.62 → 1 pt
+- Positive TTM OCF: Yes → 1 pt
+*Subtotal: 2/2*
+
+**Cash Generation (1/2 pts)**:
+- Positive FCF: Yes → 1 pt
+- FCF Yield: ~2.1% (Threshold 4%) → 0 pts
+*Subtotal: 1/2*
+
+**Valuation (1/3 pts)**:
+- P/E or PEG: PEG 1.02 → 1 pt
+- EV/EBITDA: 17.3 (Threshold <10) → 0 pts
+- P/B or P/S: P/B 8.7 (Threshold <1.4) → 0 pts
+*Subtotal: 1/3*
+
+**TOTAL**: 9/12
+
+### GROWTH TRANSITION DETAIL
+**Score**: 6/6 (Adjusted: 100%)
+
+**Revenue/EPS (2/2 pts)**:
+- Revenue YoY: 20.5% → 1 pt
+- EPS growth: 35% → 1 pt
+*Subtotal: 2/2*
+
+**Margins (2/2 pts)**:
+- ROA/ROE improving: Yes → 1 pt
+- Gross Margin: 59.9% → 1 pt
+*Subtotal: 2/2*
+
+**Expansion (2/2 pts)**:
+- Global/BRICS expansion: Yes → 1 pt
+- R&D/capex initiatives: Yes → 1 pt
+*Subtotal: 2/2*
+
+**TOTAL**: 6/6
+
+### CROSS-CHECK FLAGS
+- `[PFIC CASH-TRAP RISK]`: cash/assets (34.9%) approaching 50% IRS threshold — monitor for further cash accumulation.
+- `[DATA QUALITY]`: Dividend yield 132% flagged as suspect; actual yield is ~1.3%.
+- `[OCF DISCREPANCY]`: Aggregator OCF (TTM) vs Filing (FY2025) discrepancy noted; used Filing data.
+
+### KEY METRICS FOR RISK SCREENING
+**Interest Coverage**: N/A (Net Cash position)
+**Free Cash Flow**: NT$992.38B
+**Net Income**: NT$1,717.05B
+
+### EX-US SPECIFIC CHECKS
+
+**US Revenue Analysis**: Not disclosed - NOT AVAILABLE
+
+**ADR Status**: Sponsored ADR (TSM) exists on NYSE.
+**Thesis Impact**: MODERATE_CONCERN - ADR provides liquidity but does not mitigate the underlying geopolitical risk of the Taiwan-based operations.
+
+**Analyst Coverage**: 32 US/English analysts + High local coverage.
+
+**IBKR Accessibility**: Direct
+
+**PFIC Risk**: LOW (Operating company, no PFIC status, but note Cash-Trap risk).

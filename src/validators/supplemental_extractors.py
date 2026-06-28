@@ -13,6 +13,20 @@ from src.validators.metric_extractor import parse_ratio_or_percent
 
 logger = structlog.get_logger(__name__)
 
+# Canonical legal-status enum vocabularies. These are the single source of truth
+# for the alternations below AND for the L0 parity test, which asserts each set
+# equals the tokens the Legal Counsel prompt advertises (and, for CMIC, the chart
+# extractor's own copy). Keep in sync with prompts/legal_counsel.json.
+PFIC_STATUS_TOKENS = ("CLEAN", "UNCERTAIN", "PROBABLE", "N/A")
+VIE_STRUCTURE_TOKENS = ("YES", "NO", "N/A")
+CMIC_STATUS_TOKENS = ("FLAGGED", "UNCERTAIN", "CLEAR", "N/A")
+
+
+def _alternation(tokens: tuple[str, ...]) -> str:
+    """Build a capturing regex alternation from an enum token tuple."""
+    return "(" + "|".join(tokens) + ")"
+
+
 # A large operating-metric decline stated in narrative text. Deliberately
 # limited to operating metrics + decline language so share-price drawdowns and
 # small moves do not match. Threshold applied in the extractor below.
@@ -189,7 +203,7 @@ def extract_legal_risks(legal_report: str) -> dict[str, Any]:
         )
 
     pfic_match = re.search(
-        r'"?pfic_status"?\s*:\s*"?(CLEAN|UNCERTAIN|PROBABLE|N/A)"?',
+        rf'"?pfic_status"?\s*:\s*"?{_alternation(PFIC_STATUS_TOKENS)}"?',
         legal_report,
         re.IGNORECASE,
     )
@@ -197,13 +211,15 @@ def extract_legal_risks(legal_report: str) -> dict[str, Any]:
         risks["pfic_status"] = pfic_match.group(1).upper()
 
     vie_match = re.search(
-        r'"?vie_structure"?\s*:\s*"?(YES|NO|N/A)"?', legal_report, re.IGNORECASE
+        rf'"?vie_structure"?\s*:\s*"?{_alternation(VIE_STRUCTURE_TOKENS)}"?',
+        legal_report,
+        re.IGNORECASE,
     )
     if vie_match:
         risks["vie_structure"] = vie_match.group(1).upper()
 
     cmic_match = re.search(
-        r'"?cmic_status"?\s*:\s*"?(FLAGGED|UNCERTAIN|CLEAR|N/A)"?',
+        rf'"?cmic_status"?\s*:\s*"?{_alternation(CMIC_STATUS_TOKENS)}"?',
         legal_report,
         re.IGNORECASE,
     )

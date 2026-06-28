@@ -385,3 +385,80 @@ def test_iter_stage3_specs_use_expected_rubric_families():
 def test_iter_stage3_specs_do_not_repeat_prompt_keys():
     prompt_keys = [spec.prompt_key for spec in iter_stage3_judge_specs()]
     assert len(prompt_keys) == len(set(prompt_keys))
+
+
+def test_parse_response_parses_checklist():
+    parsed = SemanticJudge._parse_response(
+        json.dumps(
+            {
+                "verdict": "PASS",
+                "score": 0.9,
+                "signals": [],
+                "checklist": [
+                    {
+                        "id": "engages_strongest_bear",
+                        "passed": True,
+                        "rationale": "addressed",
+                    },
+                    {"id": "evidence_consistent", "passed": False, "rationale": "gap"},
+                ],
+            }
+        )
+    )
+    assert len(parsed["checklist"]) == 2
+    assert parsed["checklist"][0] == {
+        "id": "engages_strongest_bear",
+        "passed": True,
+        "rationale": "addressed",
+    }
+    assert parsed["checklist"][1]["passed"] is False
+
+
+def test_parse_response_defaults_empty_checklist():
+    parsed = SemanticJudge._parse_response(
+        json.dumps({"verdict": "PASS", "score": 1.0, "signals": []})
+    )
+    assert parsed["checklist"] == ()
+
+
+def test_parse_response_malformed_json_has_empty_checklist():
+    parsed = SemanticJudge._parse_response("not-json")
+    assert parsed["verdict"] == "HARD_FAIL"
+    assert parsed["checklist"] == ()
+
+
+@pytest.mark.asyncio
+async def test_judge_artifact_populates_checklist_and_preserves_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class _FakeResponse:
+        content = json.dumps(
+            {
+                "verdict": "PASS",
+                "score": 0.88,
+                "signals": ["coherent"],
+                "checklist": [
+                    {"id": "engages_strongest_bear", "passed": True, "rationale": "ok"}
+                ],
+            }
+        )
+
+    class _FakeLLM:
+        async def ainvoke(self, _messages):
+            return _FakeResponse()
+
+    monkeypatch.setattr(
+        "src.eval.semantic_judge.SemanticJudge._create_llm",
+        lambda self, model: _FakeLLM(),
+    )
+
+    judge = SemanticJudge()
+    result = await judge.judge_artifact(
+        prompt_key="fundamentals_analyst",
+        rubric_family="analysis_report",
+        baseline_text="baseline thesis",
+        current_text="current thesis",
+    )
+    assert result.verdict == "PASS"  # holistic verdict preserved
+    assert result.checklist[0]["id"] == "engages_strongest_bear"
+    assert result.checklist[0]["passed"] is True

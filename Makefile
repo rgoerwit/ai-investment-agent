@@ -1,7 +1,7 @@
 # Multi-Agent Investment Analysis System - Makefile
 # Convenient commands for development and deployment
 
-.PHONY: help install test security-tests lint format clean docker-build docker-run run-quick run-deep refresh-injection-corpus refresh-judge-fixtures
+.PHONY: help install test security-tests test-prompts replay eval-semantic lint format clean docker-build docker-run run-quick run-deep refresh-injection-corpus refresh-judge-fixtures
 
 # Default target
 .DEFAULT_GOAL := help
@@ -76,6 +76,18 @@ test: ## Run tests
 security-tests: ## Run adversarial prompt-injection/security tests
 	@echo "$(BLUE)Running adversarial security tests...$(NC)"
 	$(POETRY) run pytest -m security -v
+
+test-prompts: ## L0+L1 prompt-drift harness (static parity + contract round-trip; no LLM)
+	@echo "$(BLUE)Running prompt-drift harness (L0/L1)...$(NC)"
+	$(POETRY) run pytest tests/prompts -q
+
+replay: ## L2 deterministic replay over frozen fixtures (no LLM)
+	@echo "$(BLUE)Running deterministic replay (L2)...$(NC)"
+	$(POETRY) run pytest tests/eval/test_deterministic_replay.py -q
+
+eval-semantic: ## L3 semantic judge on the smoke suite (LLM cost; manual/nightly)
+	@echo "$(BLUE)Running Stage-3 semantic judge on smoke suite (L3)...$(NC)"
+	$(POETRY) run python -m src.eval.prompt_checks --suite smoke --stage3
 
 test-cov: ## Run tests with coverage
 	@echo "$(BLUE)Running tests with coverage...$(NC)"

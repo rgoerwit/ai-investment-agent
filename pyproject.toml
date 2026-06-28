@@ -182,6 +182,7 @@ markers = [
     "llm: marks tests that require LLM connectivity",
     "api: marks tests that require external API access",
     "security: marks tests that must not perform network or external side effects",
+    "semantic: marks L3 semantic-judge tests requiring LLM (excluded from default run)",
     "asyncio: marks tests as asyncio",
 ]
 

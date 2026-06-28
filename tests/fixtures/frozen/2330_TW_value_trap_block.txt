@@ -1,0 +1,38 @@
+### --- START VALUE_TRAP_BLOCK ---
+SCORE: 95
+VERDICT: ALIGNED
+TRAP_RISK: LOW
+
+OWNERSHIP:
+  INSIDER_CONCENTRATION: LOW (insiders hold a negligible percentage of shares)
+  CONCENTRATION: LOW (widely held by global institutional investors)
+  MAJORITY_HOLDER: NONE (publicly traded with dispersed ownership)
+  CROSS_HOLDINGS: NO
+  INSIDER_TREND: NEUTRAL
+  ACTIVIST_PRESENT: NO
+
+CAPITAL_ALLOCATION:
+  ROIC_QUALITY: N/A
+  ROIC_PERCENT: N/A
+  RATING: GOOD
+    - TSMC maintains a disciplined capital allocation strategy focused on massive R&D and capacity expansion (Capex) to maintain its technological moat.
+    - Consistent dividend policy and strong free cash flow generation support shareholder returns while funding aggressive growth.
+  M&A_CONTEXT: Strategy is organic growth and technological leadership rather than value-destructive M&A.
+  BUYBACK_CONTEXT: Not a primary focus; capital is prioritized for high-return capacity expansion.
+  PAYOUT_TREND: Increasing (consistent dividend growth).
+  CASH_POSITION: Strong balance sheet with high cash reserves relative to debt, typical for a capital-intensive foundry leader.
+
+CATALYSTS:
+  INDEX_CANDIDATE: Already a core holding in major global indices (MSCI, FTSE).
+  ACTIVIST_RUMOR: NONE
+  RESTRUCTURING: NONE
+  MID_TERM_PLAN: Continuous focus on advanced node leadership (2nm, 1.4nm) and global capacity diversification.
+
+KEY_RISKS:
+- Geopolitical tensions in the Taiwan Strait remain the primary systemic risk.
+- Highly cyclical semiconductor demand and intense capital expenditure requirements.
+
+KEY_CATALYSTS:
+- Sustained demand for AI-related high-performance computing (HPC) chips.
+- Continued technological dominance in sub-3nm process nodes.
+### --- END VALUE_TRAP_BLOCK ---

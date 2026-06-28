@@ -455,6 +455,18 @@ poetry run pytest tests/web -v
 
 If you are changing core runtime behavior, run the full suite before you call it done.
 
+### Prompt-drift harness
+
+Prompts are prose contracts the parsers depend on. These tiers catch drift between `prompts/*.json` and the code that reads them. The first two run no model and are part of the normal `pytest`:
+
+```bash
+make test-prompts   # L0 static parity + L1 contract round-trip (prompt template ≡ its parser)
+make replay         # L2 deterministic replay of frozen LLM outputs through the pure consumers
+make eval-semantic  # L3 semantic judge on the smoke suite (LLM cost; manual/nightly only)
+```
+
+Run `make test-prompts` after editing any `prompts/*.json` or the parser/validator that consumes its output (e.g. a renamed `DATA_BLOCK` field or a changed verdict header fails the round-trip immediately).
+
 ## Troubleshooting
 
 **Poetry or import issues**
