@@ -10,8 +10,14 @@ from langchain_core.messages import ToolMessage
 from langgraph.types import RunnableConfig
 
 from src.data_block_utils import (
+    BLOCK_SHAPES,
+    BlockShape,
     extract_data_block_field,
+    extract_last_fenced_block,
+    fenced_block_pattern,
     has_parseable_data_block,
+    normalize_structured_block_boundaries,
+    unfenced_label,
 )
 from src.macro_regime import parse_macro_regime
 from src.runtime_diagnostics import get_model_name as _get_model_name
@@ -78,7 +84,7 @@ def _unpack_macro_context(context: Any | None) -> tuple[str, str, str]:
 def _extract_heading_block(report: str, heading: str) -> str:
     pattern = (
         rf"(?ims)^###\s+{re.escape(heading)}\s*\n"
-        r"(?P<body>.*?)(?=^###\s+|^MACRO_REGIME_BLOCK:|\Z)"
+        rf"(?P<body>.*?)(?=^###\s+|^{re.escape(unfenced_label('MACRO_REGIME_BLOCK'))}|\Z)"
     )
     match = re.search(pattern, report)
     if not match:
@@ -523,7 +529,10 @@ def extract_value_trap_verdict(value_trap_report: str) -> str:
 # fires. These carry load-bearing structured data for downstream consumers
 # (PM rationale, memo, quality judge, chart overlay) and are emitted at the
 # tail of long agent outputs — exactly where a naive head-truncate drops them.
-_PRESERVED_FENCED_BLOCKS: tuple[str, ...] = (
+_PRESERVED_BLOCKS: tuple[str, ...] = (
+    "DATA_BLOCK",
+    "PM_BLOCK",
+    "VALUE_TRAP_BLOCK",
     "KILL_CRITERIA",
     "VALUATION_SCENARIOS",
     "VALUATION_PARAMS",
@@ -531,11 +540,30 @@ _PRESERVED_FENCED_BLOCKS: tuple[str, ...] = (
     "AUDITOR_RESOLUTION",
     "CONSULTANT_RESOLUTION",
 )
+_PRESERVED_FENCED_BLOCKS: tuple[str, ...] = tuple(
+    name for name in _PRESERVED_BLOCKS if BLOCK_SHAPES.get(name) is BlockShape.FENCED
+)
+_PRESERVED_UNFENCED_BLOCKS: tuple[str, ...] = tuple(
+    name for name in _PRESERVED_BLOCKS if BLOCK_SHAPES.get(name) is BlockShape.UNFENCED
+)
+_LEGACY_FENCED_UNFENCED_BLOCKS = _PRESERVED_UNFENCED_BLOCKS
 # Section-style (not fenced) block that Research Manager v5.3+ emits.
 _VARIANT_PERCEPTION_RE = re.compile(
     r"###\s*VARIANT PERCEPTION.*?(?=\n##\s|\n###\s[A-Z]|\Z)",
     re.DOTALL | re.IGNORECASE,
 )
+
+
+def _unfenced_preserve_pattern(block_name: str) -> re.Pattern[str]:
+    label = re.escape(unfenced_label(block_name))
+    return re.compile(rf"({label}.*?)(?=\n\n[A-Z]|\Z)", re.DOTALL | re.IGNORECASE)
+
+
+def _append_unique_preserved(blocks: list[str], seen: set[str], value: str) -> None:
+    normalized = value.strip()
+    if normalized and normalized not in seen:
+        seen.add(normalized)
+        blocks.append(normalized)
 
 
 def summarize_for_pm(report: str, report_type: str, max_chars: int = 3000) -> str:
@@ -552,31 +580,46 @@ def summarize_for_pm(report: str, report_type: str, max_chars: int = 3000) -> st
     if len(report) <= max_chars:
         return report
 
-    block_patterns = [
-        r"(DATA_BLOCK:.*?)(?=\n\n[A-Z]|\Z)",
-        r"(### --- START DATA_BLOCK[^\n]*---.*?### --- END DATA_BLOCK ---)",
-        r"(PM_BLOCK:.*?)(?=\n\n[A-Z]|\Z)",
-        r"(FORENSIC_DATA_BLOCK:.*?)(?=\n\n[A-Z]|\Z)",
-        r"(VALUE_TRAP_BLOCK:.*?)(?=\n\n[A-Z]|\Z)",
+    report = normalize_structured_block_boundaries(report) or report
+
+    legacy_label_patterns = [
+        rf"({re.escape(unfenced_label('DATA_BLOCK'))}.*?)(?=\n\n[A-Z]|\Z)",
+        rf"({re.escape(unfenced_label('PM_BLOCK'))}.*?)(?=\n\n[A-Z]|\Z)",
+        rf"({re.escape(unfenced_label('VALUE_TRAP_BLOCK'))}.*?)(?=\n\n[A-Z]|\Z)",
         r"(\*\*VERDICT\*\*:.*?)(?=\n\n|\Z)",
         r"(RECOMMENDATION:.*?)(?=\n\n|\Z)",
         r"(SCORE:\s*\d+.*?)(?=\n\n|\Z)",
     ]
-    # Append the Tranche-1–4 fenced blocks dynamically.
-    block_patterns.extend(
-        rf"(### --- START {name}[^\n]*---.*?### --- END {name} ---)"
-        for name in _PRESERVED_FENCED_BLOCKS
-    )
 
     blocks_to_preserve: list[str] = []
-    for pattern in block_patterns:
+    seen_blocks: set[str] = set()
+    for pattern in legacy_label_patterns:
         matches = re.findall(pattern, report, re.DOTALL | re.IGNORECASE)
-        blocks_to_preserve.extend(matches)
+        for match in matches:
+            _append_unique_preserved(blocks_to_preserve, seen_blocks, match)
+
+    for name in _PRESERVED_FENCED_BLOCKS:
+        for match in fenced_block_pattern(name).finditer(report):
+            _append_unique_preserved(blocks_to_preserve, seen_blocks, match.group(0))
+
+    for name in _PRESERVED_UNFENCED_BLOCKS:
+        for match in _unfenced_preserve_pattern(name).finditer(report):
+            _append_unique_preserved(blocks_to_preserve, seen_blocks, match.group(1))
+
+    # Old artifacts may contain resolution labels inside fenced markers even
+    # though the canonical PM resolution blocks are unfenced.
+    for name in _LEGACY_FENCED_UNFENCED_BLOCKS:
+        for match in fenced_block_pattern(name).finditer(report):
+            _append_unique_preserved(blocks_to_preserve, seen_blocks, match.group(0))
 
     # Variant Perception section (not fenced — anchored on the heading).
     variant_match = _VARIANT_PERCEPTION_RE.search(report)
     if variant_match:
-        blocks_to_preserve.append(variant_match.group(0).strip())
+        _append_unique_preserved(
+            blocks_to_preserve,
+            seen_blocks,
+            variant_match.group(0),
+        )
 
     preserved = "\n\n".join(blocks_to_preserve)
     remaining_chars = max_chars - len(preserved) - 100
@@ -854,10 +897,6 @@ def _extract_sector_country(raw_data: str) -> tuple:
     return sector, country
 
 
-_KILL_CRITERIA_BLOCK = re.compile(
-    r"### --- START KILL_CRITERIA ---\s*(.+?)\s*### --- END KILL_CRITERIA ---",
-    re.DOTALL,
-)
 _KILL_CRITERIA_TRIGGER = re.compile(r"TRIGGER_\d+\s*:\s*(.+)")
 
 
@@ -869,11 +908,11 @@ def extract_kill_criteria(bear_text: str | None) -> list[str]:
     """
     if not bear_text:
         return []
-    match = _KILL_CRITERIA_BLOCK.search(bear_text)
-    if not match:
+    block = extract_last_fenced_block(bear_text, "KILL_CRITERIA")
+    if block is None:
         return []
     triggers: list[str] = []
-    for line in match.group(1).splitlines():
+    for line in block.splitlines():
         m = _KILL_CRITERIA_TRIGGER.search(line)
         if m:
             value = m.group(1).strip()

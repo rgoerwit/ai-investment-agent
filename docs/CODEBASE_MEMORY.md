@@ -87,6 +87,12 @@ Package roots such as `src/__init__.py`, `src/tooling/__init__.py`, and `src/too
 
 `src/runtime_diagnostics.py` owns artifact completion/validity and publishability checks.
 
+`src/data_block_utils.py` owns structured data-block marker vocabulary. Use
+`BLOCK_SHAPES`, `fenced_start()`, `fenced_end()`, `build_fenced_block()`,
+`unfenced_label()`, and the shared tolerant fenced matcher instead of hand-rolled
+`--- START` / `--- END` regexes. `tests/prompts/test_marker_parity.py` is the L0
+guard for prompt marker form, parser shape parity, and source-level marker drift.
+
 ## Information Flow Model
 
 Primary agent-to-agent flow is through typed state fields, not just message history.

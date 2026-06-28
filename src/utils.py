@@ -12,10 +12,14 @@ import structlog
 from src.agents import extract_string_content
 from src.config import Config
 from src.data_block_utils import (
+    BLOCK_SHAPES,
+    BlockShape,
+    fenced_marker_fragment,
     find_fenced_block_spans,
     has_parseable_data_block,
     has_parseable_fenced_block,
     normalize_structured_block_boundaries,
+    unfenced_label,
 )
 from src.error_safety import summarize_exception
 from src.llms import quick_thinking_llm
@@ -35,6 +39,36 @@ def _has_complete_legacy_block(
     if not _line_starts_with_any(text, header_patterns):
         return False
     return any(field in text for field in required_fields)
+
+
+def _has_complete_unfenced_block(
+    text: str,
+    block_name: str,
+    required_fields: tuple[str, ...],
+) -> bool:
+    label_pattern = rf"^\s*{re.escape(unfenced_label(block_name))}\s*$"
+    if not _line_starts_with_any(text, (label_pattern,)):
+        return False
+    return all(field in text for field in required_fields)
+
+
+def _has_complete_structured_block(
+    text: str,
+    block_name: str,
+    required_fields: tuple[str, ...],
+) -> bool:
+    shape = BLOCK_SHAPES.get(block_name)
+    if block_name == "DATA_BLOCK":
+        return has_parseable_data_block(text)
+    if shape is BlockShape.FENCED:
+        return has_parseable_fenced_block(text, block_name)
+    if shape is BlockShape.UNFENCED:
+        return _has_complete_unfenced_block(
+            text,
+            block_name,
+            required_fields,
+        ) or has_parseable_fenced_block(text, block_name)
+    return False
 
 
 def _ends_with_known_structured_terminator(text: str, agent: str | None) -> bool:
@@ -387,43 +421,51 @@ def detect_truncation(text: str, agent: str | None = None) -> dict:
             "PM_BLOCK",
             "portfolio_manager",
             (
-                r"^\s*PM_BLOCK:\s*$",
-                r"^\s*#+\s*--- START PM_BLOCK[^\n]*---\s*$",
+                rf"^\s*{re.escape(unfenced_label('PM_BLOCK'))}\s*$",
+                rf"^{fenced_marker_fragment('PM_BLOCK', 'START')}\s*$",
             ),
             ("VERDICT:", "RISK_ZONE:", "ZONE:"),
-            lambda value: has_parseable_fenced_block(value, "PM_BLOCK"),
+            lambda value: _has_complete_structured_block(
+                value, "PM_BLOCK", ("VERDICT:", "RISK_ZONE:", "ZONE:")
+            ),
         ),
         (
             "DATA_BLOCK",
             "fundamentals_analyst",
             (
-                r"^\s*DATA_BLOCK:\s*$",
-                r"^\s*###\s+DATA_BLOCK(?:\b.*)?$",
-                r"^\s*#+\s*--- START DATA_BLOCK[^\n]*---\s*$",
+                rf"^\s*{re.escape(unfenced_label('DATA_BLOCK'))}\s*$",
+                r"^\s*#{2,}\s+DATA_BLOCK(?:\b.*)?$",
+                rf"^{fenced_marker_fragment('DATA_BLOCK', 'START')}\s*$",
             ),
             ("HEALTH_SCORE:", "GROWTH_SCORE:"),
-            has_parseable_data_block,
+            lambda value: _has_complete_structured_block(
+                value, "DATA_BLOCK", ("HEALTH_SCORE:", "GROWTH_SCORE:")
+            ),
         ),
         (
             "FORENSIC_DATA_BLOCK",
             "global_forensic_auditor",
             (
-                r"^\s*FORENSIC_DATA_BLOCK:\s*$",
-                r"^\s*#+\s*--- START FORENSIC_DATA_BLOCK[^\n]*---\s*$",
+                rf"^\s*{re.escape(unfenced_label('FORENSIC_DATA_BLOCK'))}\s*$",
+                rf"^{fenced_marker_fragment('FORENSIC_DATA_BLOCK', 'START')}\s*$",
             ),
             ("VERDICT:", "STATUS:"),
-            lambda value: has_parseable_fenced_block(value, "FORENSIC_DATA_BLOCK"),
+            lambda value: _has_complete_structured_block(
+                value, "FORENSIC_DATA_BLOCK", ("VERDICT:", "STATUS:")
+            ),
         ),
         (
             "VALUE_TRAP_BLOCK",
             "value_trap_detector",
             (
-                r"^\s*VALUE_TRAP_BLOCK:\s*$",
-                r"^\s*###\s+VALUE_TRAP_BLOCK(?:\b.*)?$",
-                r"^\s*#+\s*--- START VALUE_TRAP_BLOCK[^\n]*---\s*$",
+                rf"^\s*{re.escape(unfenced_label('VALUE_TRAP_BLOCK'))}\s*$",
+                r"^\s*#{2,}\s+VALUE_TRAP_BLOCK(?:\b.*)?$",
+                rf"^{fenced_marker_fragment('VALUE_TRAP_BLOCK', 'START')}\s*$",
             ),
             ("SCORE:", "VERDICT:"),
-            lambda value: has_parseable_fenced_block(value, "VALUE_TRAP_BLOCK"),
+            lambda value: _has_complete_structured_block(
+                value, "VALUE_TRAP_BLOCK", ("SCORE:", "VERDICT:")
+            ),
         ),
     )
 
@@ -436,9 +478,13 @@ def detect_truncation(text: str, agent: str | None = None) -> dict:
     ) in block_rules:
         if agent and agent != owner:
             continue
-        if parseable_check(text) or _has_complete_legacy_block(
-            text, start_patterns, required_fields
-        ):
+        shape = BLOCK_SHAPES.get(block_name)
+        legacy_complete = (
+            _has_complete_unfenced_block(text, block_name, required_fields)
+            if shape is BlockShape.UNFENCED
+            else _has_complete_legacy_block(text, start_patterns, required_fields)
+        )
+        if parseable_check(text) or legacy_complete:
             return {
                 "truncated": False,
                 "source": None,

@@ -22,7 +22,9 @@ from src.charts.extractors.pm_block import extract_pm_block
 from src.charts.extractors.valuation import format_iv
 from src.data_block_utils import (
     extract_data_block_field,
+    fenced_marker_fragment,
     normalize_structured_block_boundaries,
+    unfenced_label,
 )
 from src.error_safety import summarize_exception
 from src.pm_decision_parser import canonicalize_pm_verdict
@@ -58,7 +60,7 @@ def normalize_governance_terms(text: str) -> str:
 
 
 _FENCED_PM_BLOCK_PATTERN = re.compile(
-    r"(?:#{2,6}\s+PM_BLOCK[^\n]*\n(?:[ \t]*\n)*)?```[^\n]*\n(?P<body>.*?)\n?```",
+    r"(?:#{2,}\s+PM_BLOCK[^\n]*\n(?:[ \t]*\n)*)?```[^\n]*\n(?P<body>.*?)\n?```",
     re.DOTALL,
 )
 
@@ -1310,8 +1312,8 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         # Bare (unfenced) START/END pair — LLMs drift between 3 and 4 hashes.
         # Line-count cap (30 lines) prevents runaway matching if END is absent/malformed.
         _pm_content = r"(?:[^\n]*\n){0,30}"
-        _pm_start = r"#{2,6}\s+---\s+START PM_BLOCK\s*:?\s*---"
-        _pm_end = r"#{2,6}\s+---\s+END PM_BLOCK\s*:?\s*---"
+        _pm_start = fenced_marker_fragment("PM_BLOCK", "START")
+        _pm_end = fenced_marker_fragment("PM_BLOCK", "END")
         text = re.sub(
             _pm_start + r"\n" + _pm_content + _pm_end + r"[^\n]*",
             "",
@@ -1328,15 +1330,18 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         # drop only the machine label line and unwrap any fence, keeping the
         # bullets so the reader sees the reconciliation.
         # Fenced form: ```\nCONSULTANT_RESOLUTION:\n- ...\n```  -> keep bullets.
+        consultant_resolution = re.escape(
+            unfenced_label("CONSULTANT_RESOLUTION").rstrip(":")
+        )
         text = re.sub(
-            r"```[^\S\n]*\n[#*\s]*CONSULTANT_RESOLUTION[*:]*\s*\n"
+            rf"```[^\S\n]*\n[#*\s]*{consultant_resolution}[*:]*\s*\n"
             r"(?P<bullets>(?:[#*\s]*-[^\n]+\n)+)\s*```",
             lambda m: m.group("bullets"),
             text,
         )
         # Unfenced form: drop only the label line, keep the bullets that follow.
         text = re.sub(
-            r"^[#*\s]*CONSULTANT_RESOLUTION[*:]*\s*\n(?=[#*\s]*-)",
+            rf"^[#*\s]*{consultant_resolution}[*:]*\s*\n(?=[#*\s]*-)",
             "",
             text,
             flags=re.MULTILINE,
@@ -1468,10 +1473,13 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         annotation after START DATA_BLOCK (e.g. '(INTERNAL SCORING…)').
         Missing or malformed END markers cause no match — nothing is moved.
         """
+        data_start = fenced_marker_fragment("DATA_BLOCK", "START")
+        data_end = fenced_marker_fragment("DATA_BLOCK", "END")
         match = re.search(
-            r"(#{2,6}\s+---\s+START DATA_BLOCK[^\n]*---"
+            rf"({data_start}"
+            r"\n"
             r"(?:[^\n]*\n){0,120}"  # bounded: at most ~120 lines of content
-            r"#{2,6}\s+---\s+END DATA_BLOCK[^\n]*---\n?)",
+            rf"{data_end}\n?)",
             text,
             re.DOTALL,
         )

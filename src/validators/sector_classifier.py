@@ -7,7 +7,11 @@ from enum import Enum
 
 import structlog
 
-from src.data_block_utils import extract_data_block_field
+from src.data_block_utils import (
+    extract_data_block_field,
+    fenced_marker_fragment,
+    unfenced_label,
+)
 from src.sector_normalization import normalize_sector_label
 
 logger = structlog.get_logger(__name__)
@@ -113,11 +117,16 @@ def detect_sector(fundamentals_report: str) -> Sector:
     sector_text = extract_data_block_field(fundamentals_report, "SECTOR")
 
     if not sector_text:
+        fenced_match = re.search(
+            rf"(?m)^{fenced_marker_fragment('DATA_BLOCK', 'START')}\s*$",
+            fundamentals_report,
+        )
+        label_marker = f"\n{unfenced_label('DATA_BLOCK')}"
         marker_positions = [
             pos
             for pos in (
-                fundamentals_report.find("### --- START DATA_BLOCK"),
-                fundamentals_report.find("\nDATA_BLOCK:"),
+                fenced_match.start() if fenced_match else -1,
+                fundamentals_report.find(label_marker),
             )
             if pos >= 0
         ]

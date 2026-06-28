@@ -13,9 +13,12 @@ from langgraph.types import RunnableConfig
 from src.charts.extractors.valuation_signals import VALUATION_CONTEXT_TOKENS
 from src.config import config as settings_config
 from src.data_block_utils import (
+    build_fenced_block,
     detect_legacy_data_block_shape,
     extract_block_text_value,
     extract_last_data_block,
+    fenced_end,
+    fenced_start,
     has_parseable_data_block,
     has_parseable_fenced_block,
     normalize_legacy_data_block_report,
@@ -50,12 +53,15 @@ _FUNDAMENTALS_RETRY_FORMAT_SUFFIX = """
 CRITICAL FORMAT CORRECTION:
 Emit the DATA_BLOCK first.
 Use exactly these fenced markers:
-### --- START DATA_BLOCK ---
+{start_marker}
 ...
-### --- END DATA_BLOCK ---
+{end_marker}
 Inside DATA_BLOCK, use plain KEY: VALUE lines only.
 Do NOT use markdown tables inside DATA_BLOCK.
-"""
+""".format(
+    start_marker=fenced_start("DATA_BLOCK"),
+    end_marker=fenced_end("DATA_BLOCK"),
+)
 
 _QUARANTINED_FORWARD_KEYS = ("PE_RATIO_FORWARD", "PEG_RATIO")
 _VALUATION_RELIABILITY_FIELD = "VALUATION_INPUT_RELIABILITY"
@@ -318,11 +324,7 @@ def _sanitize_fundamentals_output(
     # (which changes the block on nearly every run) logs at INFO.
     log = logger.warning if corrective else logger.info
     log("fundamentals_datablock_sanitized", ticker=ticker, corrective=corrective)
-    updated_block = (
-        "### --- START DATA_BLOCK ---\n"
-        f"{updated_body.rstrip()}\n"
-        "### --- END DATA_BLOCK ---"
-    )
+    updated_block = build_fenced_block("DATA_BLOCK", updated_body.rstrip())
     block_index = content.rfind(block_with_markers)
     if block_index < 0:
         return content

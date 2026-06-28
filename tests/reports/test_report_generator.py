@@ -1312,19 +1312,20 @@ class TestCleanTextPMBlock:
         if "START PM_BLOCK" in result:
             assert "Important prose after." in result
 
-    def test_strips_pm_block_with_three_hash_markers(self):
-        """### (3-hash) PM_BLOCK — common LLM drift variant — must be stripped."""
-        text = (
-            "Verdict prose.\n"
-            "### --- START PM_BLOCK ---\n"
-            "VERDICT: BUY\nRISK_ZONE: LOW\n"
-            "### --- END PM_BLOCK ---\n"
-            "Trailing prose."
-        )
-        result = self._clean(text)
-        assert "START PM_BLOCK" not in result
-        assert "Verdict prose." in result
-        assert "Trailing prose." in result
+    def test_strips_pm_block_with_shared_marker_drift(self):
+        """PM_BLOCK stripping uses the shared tolerant marker matcher."""
+        for hashes, dashes in (("##", "--"), ("###", "---"), ("####", "----")):
+            text = (
+                "Verdict prose.\n"
+                f"{hashes} {dashes} START PM_BLOCK {dashes}\n"
+                "VERDICT: BUY\nRISK_ZONE: LOW\n"
+                f"{hashes} {dashes} END PM_BLOCK {dashes}\n"
+                "Trailing prose."
+            )
+            result = self._clean(text)
+            assert "START PM_BLOCK" not in result
+            assert "Verdict prose." in result
+            assert "Trailing prose." in result
 
     def test_strips_pm_block_label_with_three_hash(self):
         """### PM_BLOCK label + fenced block — also stripped."""
@@ -1641,17 +1642,20 @@ class TestMoveDataBlockToEnd:
         assert result.count("START DATA_BLOCK") == 1
         assert result.count("END DATA_BLOCK") == 1
 
-    def test_moves_data_block_with_three_hash_markers(self):
-        """### (3-hash) DATA_BLOCK markers — common LLM drift — are moved correctly."""
-        text = (
-            "### --- START DATA_BLOCK ---\n"
-            "SECTOR: Financials\n"
-            "### --- END DATA_BLOCK ---\n\n"
-            "Prose section follows."
-        )
-        result = QuietModeReporter._move_data_block_to_end(text)
-        assert result.index("Prose section follows.") < result.index("START DATA_BLOCK")
-        assert result.count("START DATA_BLOCK") == 1
+    def test_moves_data_block_with_shared_marker_drift(self):
+        """DATA_BLOCK relocation uses the shared tolerant marker matcher."""
+        for hashes, dashes in (("##", "--"), ("###", "---"), ("####", "----")):
+            text = (
+                f"{hashes} {dashes} START DATA_BLOCK {dashes}\n"
+                "SECTOR: Financials\n"
+                f"{hashes} {dashes} END DATA_BLOCK {dashes}\n\n"
+                "Prose section follows."
+            )
+            result = QuietModeReporter._move_data_block_to_end(text)
+            assert result.index("Prose section follows.") < result.index(
+                "START DATA_BLOCK"
+            )
+            assert result.count("START DATA_BLOCK") == 1
 
     def test_moves_data_block_with_parenthetical_annotation(self):
         """DATA_BLOCK (INTERNAL SCORING…) parenthetical variant is moved correctly."""

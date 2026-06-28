@@ -19,11 +19,12 @@ from src.agents.decision_nodes import (
     _requires_apac_resolution,
 )
 
+_PM_START_MARKER = "#### -- START PM_BLOCK --"
 _PM_WITH_BLOCK = (
     "Some PM rationale.\n\n"
-    "### --- START PM_BLOCK ---\n"
+    f"{_PM_START_MARKER}\n"
     "VERDICT: BUY\n"
-    "### --- END PM_BLOCK ---\n"
+    "#### -- END PM_BLOCK --\n"
 )
 
 _PM_WITHOUT_BLOCK = "Some PM rationale without a PM_BLOCK fence.\n"
@@ -80,7 +81,7 @@ def test_ensure_apac_inserts_before_pm_block_when_missing() -> None:
     out = _ensure_apac_resolution_block(_PM_WITH_BLOCK, apac)
     assert "APAC_RESOLUTION:" in out
     apac_pos = out.find("APAC_RESOLUTION:")
-    pm_pos = out.find("### --- START PM_BLOCK ---")
+    pm_pos = out.find(_PM_START_MARKER)
     assert apac_pos < pm_pos, "APAC block must precede PM_BLOCK"
     assert "VERDICT: UNVERIFIABLE" in out
     assert "promoter pledges" in out
@@ -129,7 +130,7 @@ def test_ensure_auditor_inserts_when_anomalies_present() -> None:
     out = _ensure_auditor_resolution_block(_PM_WITH_BLOCK, auditor)
     assert "AUDITOR_RESOLUTION:" in out
     audit_pos = out.find("AUDITOR_RESOLUTION:")
-    pm_pos = out.find("### --- START PM_BLOCK ---")
+    pm_pos = out.find(_PM_START_MARKER)
     assert audit_pos < pm_pos
 
 
@@ -203,10 +204,10 @@ def test_normalize_pm_block_contract_rewrites_only_final_block() -> None:
         "VERDICT: HOLD\n"
         "POSITION_SIZE: 2.0\n"
         "### --- END PM_BLOCK ---\n\n"
-        "### --- START PM_BLOCK ---\n"
+        "## -- START PM_BLOCK --\n"
         "VERDICT: DO_NOT_INITIATE\n"
         "POSITION_SIZE: 5.0\n"
-        "### --- END PM_BLOCK ---\n"
+        "## -- END PM_BLOCK --\n"
     )
     out = _normalize_pm_block_contract(pm)
     assert "POSITION_SIZE: 2.0" in out

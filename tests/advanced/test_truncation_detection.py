@@ -134,6 +134,13 @@ class TestCompleteOutput:
         result = detect_truncation(text, agent="global_forensic_auditor")
         assert result["truncated"] is False
 
+    def test_forensic_block_missing_verdict_is_flagged(self):
+        """Unfenced forensic blocks require both STATUS and VERDICT."""
+        text = "FORENSIC_DATA_BLOCK:\nSTATUS: CLEAN"
+        result = detect_truncation(text, agent="global_forensic_auditor")
+        assert result["truncated"] is True
+        assert "FORENSIC_DATA_BLOCK" in result["marker"]
+
     def test_raw_data_exact_end_sentinel_not_flagged_for_junior_fundamentals(self):
         """Junior raw-data sentinel should count as a complete structured terminator."""
         text = (

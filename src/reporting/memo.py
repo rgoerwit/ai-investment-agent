@@ -30,7 +30,7 @@ from src.charts.extractors.valuation import (
     format_iv,
     scenario_valuation_caveat,
 )
-from src.data_block_utils import extract_data_block_field
+from src.data_block_utils import extract_data_block_field, extract_last_fenced_block
 from src.pm_decision_parser import canonicalize_pm_verdict
 from src.reporting.source_confidence import (
     SourceRow,
@@ -47,10 +47,6 @@ from src.reporting.state_access import (
 logger = structlog.get_logger(__name__)
 
 
-_VERDICT_PM_BLOCK = re.compile(
-    r"### --- START PM_BLOCK[^\n]*---(.+?)### --- END PM_BLOCK ---",
-    re.DOTALL,
-)
 _VERDICT_LINE = re.compile(r"VERDICT:\s*([A-Z_ ]+)")
 _VERDICT_NARRATIVE = re.compile(
     r"PORTFOLIO MANAGER VERDICT:\s*(BUY|HOLD|DO NOT INITIATE|SELL)",
@@ -84,9 +80,9 @@ def extract_pm_verdict(pm_text: str) -> str:
     """Return the canonical verdict label from PM output, or 'UNAVAILABLE'."""
     if not pm_text:
         return "UNAVAILABLE"
-    blocks = list(_VERDICT_PM_BLOCK.finditer(pm_text))
-    if blocks:
-        match = _VERDICT_LINE.search(blocks[-1].group(1))
+    pm_block = extract_last_fenced_block(pm_text, "PM_BLOCK")
+    if pm_block is not None:
+        match = _VERDICT_LINE.search(pm_block)
         if match:
             verdict = canonicalize_pm_verdict(match.group(1))
             return "UNAVAILABLE" if verdict == "UNPARSEABLE" else verdict

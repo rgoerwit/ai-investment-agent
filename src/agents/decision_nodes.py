@@ -20,7 +20,12 @@ from src.agents.pm_verdict_metadata import (
     PMVerdictRecovery,
     pm_verdict_metadata_from_text,
 )
-from src.data_block_utils import extract_data_block_field, has_parseable_data_block
+from src.data_block_utils import (
+    extract_data_block_field,
+    fenced_block_pattern,
+    has_parseable_data_block,
+    unfenced_label,
+)
 from src.error_safety import summarize_exception
 
 # Verdict canonicalization lives in the neutral, dependency-free parser (it used
@@ -198,7 +203,8 @@ def _ensure_consultant_resolution_block(
     pm_output: str, consultant_review: str | None
 ) -> str:
     """Ensure PM output always includes CONSULTANT_RESOLUTION when consultant ran."""
-    if not consultant_review or "CONSULTANT_RESOLUTION:" in pm_output:
+    label = unfenced_label("CONSULTANT_RESOLUTION")
+    if not consultant_review or label in pm_output:
         return pm_output
 
     from src.validators.red_flag_detector import RedFlagDetector
@@ -208,7 +214,7 @@ def _ensure_consultant_resolution_block(
 
     if conditions["verdict"] == "APPROVED" and not concerns:
         resolution_lines = [
-            "CONSULTANT_RESOLUTION:",
+            label,
             "- CONCERN: NONE",
             "- DATA_CHECK: N/A",
             "- VERDICT: N/A",
@@ -222,7 +228,7 @@ def _ensure_consultant_resolution_block(
         for concern in concerns:
             resolution_lines.extend(
                 [
-                    "CONSULTANT_RESOLUTION:",
+                    label,
                     f"- CONCERN: {concern}",
                     "- DATA_CHECK: NOT_PROVIDED",
                     "- VERDICT: UNVERIFIABLE",
@@ -230,12 +236,7 @@ def _ensure_consultant_resolution_block(
             )
 
     resolution_block = "\n".join(resolution_lines).rstrip()
-    pm_block_marker = "### --- START PM_BLOCK ---"
-    if pm_block_marker in pm_output:
-        return pm_output.replace(
-            pm_block_marker, f"{resolution_block}\n\n{pm_block_marker}", 1
-        )
-    return f"{pm_output.rstrip()}\n\n{resolution_block}\n"
+    return _insert_block_before_pm_block(pm_output, resolution_block)
 
 
 _APAC_SILENCE_SENTINELS = {
@@ -275,10 +276,11 @@ def _extract_apac_verdict_line(apac_report: str) -> str:
 
 def _insert_block_before_pm_block(pm_output: str, block_text: str) -> str:
     """Insert a resolution block immediately above PM_BLOCK (or at tail if absent)."""
-    pm_block_marker = "### --- START PM_BLOCK ---"
-    if pm_block_marker in pm_output:
-        return pm_output.replace(
-            pm_block_marker, f"{block_text.rstrip()}\n\n{pm_block_marker}", 1
+    match = fenced_block_pattern("PM_BLOCK").search(pm_output)
+    if match:
+        return (
+            f"{pm_output[: match.start()]}{block_text.rstrip()}\n\n"
+            f"{pm_output[match.start() :]}"
         )
     return f"{pm_output.rstrip()}\n\n{block_text.rstrip()}\n"
 
@@ -290,16 +292,12 @@ def _normalize_pm_block_contract(pm_output: str) -> str:
     including older artifacts. This boundary rewrite keeps newly persisted PM
     output internally coherent with that same contract.
     """
-    pm_block_pattern = re.compile(
-        r"### --- START PM_BLOCK[^\n]*---(?P<body>.+?)### --- END PM_BLOCK ---",
-        re.DOTALL,
-    )
-    blocks = list(pm_block_pattern.finditer(pm_output))
+    blocks = list(fenced_block_pattern("PM_BLOCK").finditer(pm_output))
     if not blocks:
         return pm_output
 
     last = blocks[-1]
-    body = last.group("body")
+    body = last.group(1)
     verdict_match = re.search(r"(?im)^VERDICT:\s*([^\n]+)", body)
     size_match = re.search(r"(?im)^(POSITION_SIZE:\s*)([\d.]+)", body)
     if not verdict_match or not size_match:
@@ -325,9 +323,7 @@ def _normalize_pm_block_contract(pm_output: str) -> str:
         body,
         count=1,
     )
-    return (
-        pm_output[: last.start("body")] + rewritten_body + pm_output[last.end("body") :]
-    )
+    return pm_output[: last.start(1)] + rewritten_body + pm_output[last.end(1) :]
 
 
 def _ensure_apac_resolution_block(pm_output: str, apac_report: str | None) -> str:
@@ -340,13 +336,14 @@ def _ensure_apac_resolution_block(pm_output: str, apac_report: str | None) -> st
     """
     if not _requires_apac_resolution(apac_report):
         return pm_output
-    if "APAC_RESOLUTION:" in pm_output:
+    label = unfenced_label("APAC_RESOLUTION")
+    if label in pm_output:
         return pm_output
     summary = _extract_apac_verdict_line(apac_report or "") or (
         "APAC specialist output not reconciled in PM rationale."
     )
     fallback = (
-        "APAC_RESOLUTION:\n"
+        f"{label}\n"
         f"- FINDING: {summary}\n"
         "- DATA_CHECK: NOT_PROVIDED\n"
         "- VERDICT: UNVERIFIABLE"
@@ -425,10 +422,11 @@ def _ensure_auditor_resolution_block(pm_output: str, auditor_report: str | None)
     """
     if not _auditor_has_material_concern(auditor_report):
         return pm_output
-    if "AUDITOR_RESOLUTION:" in pm_output:
+    label = unfenced_label("AUDITOR_RESOLUTION")
+    if label in pm_output:
         return pm_output
     fallback = (
-        "AUDITOR_RESOLUTION:\n"
+        f"{label}\n"
         "- FINDING: Forensic Auditor flagged anomalies not explicitly addressed by PM rationale.\n"
         "- DATA_CHECK: NOT_PROVIDED\n"
         "- VERDICT: UNVERIFIABLE"

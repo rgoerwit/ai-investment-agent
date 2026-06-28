@@ -12,6 +12,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.types import RunnableConfig
 
 from src.config import config as settings_config
+from src.data_block_utils import unfenced_label
 from src.error_safety import redact_sensitive_text, summarize_exception
 from src.runtime_diagnostics import ArtifactStatus, failure_artifact, success_artifact
 from src.runtime_services import get_current_tool_service
@@ -978,6 +979,7 @@ Perform a forensic audit using your tools."""
             )
 
             if is_context_error:
+                forensic_label = unfenced_label("FORENSIC_DATA_BLOCK")
                 graceful_msg = f"""## FORENSIC AUDITOR REPORT
 
 **STATUS**: CONTEXT_LIMIT_EXCEEDED
@@ -988,7 +990,7 @@ Perform a forensic audit using your tools."""
 Downstream agents should rely on Fundamentals Analyst DATA_BLOCK (structured APIs: yfinance, FMP, EODHD) as primary source. Independent forensic audit unavailable for {ticker}.
 
 ---
-FORENSIC_DATA_BLOCK:
+{forensic_label}
 STATUS: UNAVAILABLE
 META: CONTEXT_LIMIT_EXCEEDED
 REASON: Data volume exceeded 128k token limit
