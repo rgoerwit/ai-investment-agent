@@ -251,7 +251,10 @@ _PROFIT_TAKE_CAPITAL_FLAGS = frozenset(
 
 
 def _extract_flag_types(
-    data: dict[str, Any], ticker: str
+    data: dict[str, Any],
+    ticker: str,
+    *,
+    source_file: str | None = None,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Single validator pass → (capital_flag_types, quality_flag_types).
 
@@ -274,19 +277,31 @@ def _extract_flag_types(
         reports.get("value_trap_report") or data.get("value_trap_report") or ""
     )
     try:
-        metrics = extract_metrics(fundamentals_report)
+        metrics = extract_metrics(
+            fundamentals_report,
+            ticker=ticker,
+            source_file=source_file,
+        )
         red_flags, _ = detect_red_flags(metrics, ticker=ticker)
-        moat = detect_moat_flags(fundamentals_report, ticker=ticker)
+        moat = detect_moat_flags(
+            fundamentals_report,
+            ticker=ticker,
+            base_metrics=metrics,
+        )
         capital = detect_capital_efficiency_flags(
             fundamentals_report,
             ticker=ticker,
             value_trap_report=value_trap_report or None,
+            base_metrics=metrics,
         )
     except Exception as exc:
+        log_fields = _safe_exception_fields(exc, operation="extracting analysis flags")
+        if source_file:
+            log_fields["file"] = source_file
         logger.warning(
             "flag_extraction_failed",
             ticker=ticker,
-            **_safe_exception_fields(exc, operation="extracting analysis flags"),
+            **log_fields,
         )
         return (), ()
 
@@ -460,7 +475,11 @@ def _build_analysis_record_from_data(
     )
     macro_regime = macro_regime_raw if isinstance(macro_regime_raw, dict) else {}
     data_quality = _extract_analysis_data_quality(data, snapshot)
-    capital_flag_types, quality_flag_types = _extract_flag_types(data, ticker)
+    capital_flag_types, quality_flag_types = _extract_flag_types(
+        data,
+        ticker,
+        source_file=filepath.name,
+    )
 
     return AnalysisRecord(
         ticker=ticker,
@@ -519,7 +538,7 @@ def _repair_legacy_snapshot_currency(
         normalized_currency, scale = normalize_minor_unit_currency(resolution.code)
         major_rate = FALLBACK_RATES_TO_USD.get(normalized_currency or "")
         repaired_fx_rate = major_rate * scale if major_rate is not None else None
-        logger.info(
+        logger.debug(
             "legacy_snapshot_currency_repaired",
             ticker=ticker,
             from_currency=actual_currency,

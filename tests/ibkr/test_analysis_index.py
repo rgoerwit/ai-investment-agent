@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import src.ibkr.analysis_index as analysis_index
 from src.ibkr.analysis_index import (
     _build_analysis_record_from_data,
     _extract_flag_types,
@@ -108,6 +109,72 @@ def test_extract_flag_types_partitions_in_one_pass():
 
 def test_extract_flag_types_empty_without_fundamentals():
     assert _extract_flag_types({}, "TEST.T") == ((), ())
+
+
+def test_extract_flag_types_reuses_base_metrics(monkeypatch):
+    """Index loading should parse the fundamentals DATA_BLOCK once per file."""
+    report = "malformed but present"
+    parsed_metrics = {"cycle_position": "PEAK"}
+    extract_calls = []
+
+    def fake_extract_metrics(
+        fundamentals_report: str,
+        *,
+        ticker: str | None = None,
+        source_file: str | None = None,
+    ) -> dict:
+        extract_calls.append((fundamentals_report, ticker, source_file))
+        return parsed_metrics
+
+    def fake_detect_red_flags(metrics: dict, *, ticker: str):
+        assert metrics is parsed_metrics
+        assert ticker == "TEST.T"
+        return [{"type": "CYCLICAL_PEAK_WARNING"}], 0.0
+
+    def fake_detect_moat_flags(
+        fundamentals_report: str,
+        ticker: str = "UNKNOWN",
+        *,
+        base_metrics: dict | None = None,
+    ) -> list[dict]:
+        assert fundamentals_report == report
+        assert ticker == "TEST.T"
+        assert base_metrics is parsed_metrics
+        return []
+
+    def fake_detect_capital_flags(
+        fundamentals_report: str,
+        ticker: str = "UNKNOWN",
+        value_trap_report: str | None = None,
+        sector=None,
+        *,
+        base_metrics: dict | None = None,
+    ) -> list[dict]:
+        assert fundamentals_report == report
+        assert ticker == "TEST.T"
+        assert value_trap_report is None
+        assert sector is None
+        assert base_metrics is parsed_metrics
+        return [{"type": "CAPITAL_IDLE_CASH_RISK"}]
+
+    monkeypatch.setattr(analysis_index, "extract_metrics", fake_extract_metrics)
+    monkeypatch.setattr(analysis_index, "detect_red_flags", fake_detect_red_flags)
+    monkeypatch.setattr(analysis_index, "detect_moat_flags", fake_detect_moat_flags)
+    monkeypatch.setattr(
+        analysis_index,
+        "detect_capital_efficiency_flags",
+        fake_detect_capital_flags,
+    )
+
+    capital, quality = analysis_index._extract_flag_types(
+        {"reports": {"fundamentals_report": report}},
+        "TEST.T",
+        source_file="TEST.T_20260601_000000_analysis.json",
+    )
+
+    assert extract_calls == [(report, "TEST.T", "TEST.T_20260601_000000_analysis.json")]
+    assert capital == ("CAPITAL_IDLE_CASH_RISK",)
+    assert quality == ("CYCLICAL_PEAK_WARNING",)
 
 
 def test_parse_scores_handles_signed_risk_tally():

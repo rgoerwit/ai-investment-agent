@@ -38,7 +38,11 @@ def _truncate_at_boundary(text: str, limit: int = 100) -> str:
     return cut.rstrip() + "…"
 
 
-def _peak_or_transient_blocker(fundamentals_report: str) -> str | None:
+def _peak_or_transient_blocker(
+    fundamentals_report: str,
+    *,
+    base_metrics: dict[str, Any] | None = None,
+) -> str | None:
     """Return a reason string if durable-quality bonuses should be suppressed.
 
     Moat and capital-efficiency bonuses are computed from margin stability,
@@ -50,7 +54,11 @@ def _peak_or_transient_blocker(fundamentals_report: str) -> str | None:
     ``financial_rules`` so suppression fires exactly when the earnings base is
     already questioned.
     """
-    metrics = extract_metrics(fundamentals_report)
+    metrics = (
+        base_metrics
+        if base_metrics is not None
+        else extract_metrics(fundamentals_report)
+    )
     if metrics.get("cycle_position") == "PEAK":
         return "DATA_BLOCK CYCLE_POSITION: PEAK"
     roa_current = metrics.get("roa_current")
@@ -101,7 +109,7 @@ def detect_material_operating_signal_flags(
             "rationale": "A large operating-profit/earnings decline is material even when unverified. Do not score it as confirmed risk (0.0 tally — unverified is not confirmed), but BLOCK BUY and require primary-source verification before initiating. Never auto-SELL/REJECT on this signal alone.",
         }
     )
-    logger.info(
+    logger.debug(
         "material_unverified_operating_signal",
         ticker=ticker,
         metric=signal["metric"],
@@ -131,7 +139,7 @@ def detect_legal_flags(
                 "rationale": "PFIC classification requires onerous US tax reporting (Form 8621). Mark-to-market or QEF election required. Not a viability issue, but increases compliance burden for US investors.",
             }
         )
-        logger.info(
+        logger.debug(
             "legal_flag_pfic_probable", ticker=ticker, evidence=pfic_evidence[:50]
         )
     elif pfic_status == "UNCERTAIN":
@@ -145,7 +153,7 @@ def detect_legal_flags(
                 "rationale": "PFIC status cannot be confirmed. Company may use hedge language or is in a high-risk sector without clear disclosure. Recommend consulting tax advisor before investing.",
             }
         )
-        logger.info(
+        logger.debug(
             "legal_flag_pfic_uncertain", ticker=ticker, evidence=pfic_evidence[:50]
         )
 
@@ -161,7 +169,7 @@ def detect_legal_flags(
                 "rationale": "VIE structure means investors own contracts, not equity. China regulatory risk if VIE agreements are invalidated. Common for China tech/education stocks but adds legal uncertainty.",
             }
         )
-        logger.info(
+        logger.debug(
             "legal_flag_vie_structure", ticker=ticker, evidence=vie_evidence[:50]
         )
 
@@ -178,7 +186,7 @@ def detect_legal_flags(
                 "rationale": "US Executive Orders prohibit US persons from investing in NS-CMIC listed companies. Verify current OFAC status before investing. Restrictions may be modified by future executive orders.",
             }
         )
-        logger.info(
+        logger.debug(
             "legal_flag_cmic_flagged", ticker=ticker, evidence=cmic_evidence[:50]
         )
     elif cmic_status == "UNCERTAIN":
@@ -193,7 +201,7 @@ def detect_legal_flags(
                 "rationale": "Company may have ties to Chinese military-industrial complex. Recommend verifying against current OFAC NS-CMIC list before investing.",
             }
         )
-        logger.info(
+        logger.debug(
             "legal_flag_cmic_uncertain", ticker=ticker, evidence=cmic_evidence[:50]
         )
 
@@ -216,7 +224,7 @@ def detect_legal_flags(
                 "rationale": f"Regulatory risk identified by Legal Counsel. Type: {risk_type}, Severity: {severity}. Review before investing.",
             }
         )
-        logger.info(
+        logger.debug(
             "legal_flag_other_regulatory",
             ticker=ticker,
             risk_type=risk_type,
@@ -265,7 +273,7 @@ def detect_value_trap_flags(
                 "rationale": "Low governance score suggests entrenched ownership, poor capital allocation, or no catalyst for re-rating.",
             }
         )
-        logger.info(
+        logger.debug(
             "value_trap_flag_high_risk", ticker=ticker, score=score, verdict=verdict
         )
     elif score is not None and score < 60:
@@ -279,7 +287,7 @@ def detect_value_trap_flags(
                 "rationale": "Moderate governance concerns. Some trap characteristics present but not conclusive. Monitor for catalyst development.",
             }
         )
-        logger.info(
+        logger.debug(
             "value_trap_flag_moderate_risk", ticker=ticker, score=score, verdict=verdict
         )
 
@@ -296,7 +304,7 @@ def detect_value_trap_flags(
                 "rationale": "Agent assessment indicates high probability of value trap. Stock may remain cheap indefinitely without catalyst.",
             }
         )
-        logger.info("value_trap_flag_verdict", ticker=ticker, verdict=verdict)
+        logger.debug("value_trap_flag_verdict", ticker=ticker, verdict=verdict)
 
     if not has_catalyst and activist_present == "NO" and not active_ma:
         flags.append(
@@ -309,13 +317,13 @@ def detect_value_trap_flags(
                 "rationale": "Without a catalyst, cheap stocks can remain cheap. Value realization depends on external pressure or internal change.",
             }
         )
-        logger.info(
+        logger.debug(
             "value_trap_flag_no_catalyst",
             ticker=ticker,
             activist_present=activist_present,
         )
     elif not has_catalyst and activist_present == "NO" and active_ma:
-        logger.info(
+        logger.debug(
             "value_trap_no_catalyst_suppressed_by_ma",
             ticker=ticker,
             m_and_a_status=m_and_a_status,
@@ -358,7 +366,7 @@ def detect_shareholder_return_execution_flags(
     verdict = vt_metrics.get("verdict")
     score = vt_metrics.get("score")
     if verdict == "TRAP" or (score is not None and score < 40):
-        logger.info(
+        logger.debug(
             "value_up_executed_bonus_withheld_hard_fail",
             ticker=ticker,
             verdict=verdict,
@@ -376,7 +384,7 @@ def detect_shareholder_return_execution_flags(
             "rationale": "Controlling shareholder has a concrete shareholder-return plan AND has demonstrably executed it (dividends raised, buybacks completed, or treasury shares cancelled per filings). This right-sizes the governance/Korea discount. Bounded credit: does not apply to announced-only or weak plans and cannot rescue a value-trap hard fail.",
         }
     )
-    logger.info(
+    logger.debug(
         "value_up_executed_bonus_detected",
         ticker=ticker,
         plan_strength=plan_strength,
@@ -387,7 +395,12 @@ def detect_shareholder_return_execution_flags(
     return flags
 
 
-def detect_moat_flags(fundamentals_report: str, ticker: str = "UNKNOWN") -> list[dict]:
+def detect_moat_flags(
+    fundamentals_report: str,
+    ticker: str = "UNKNOWN",
+    *,
+    base_metrics: dict[str, Any] | None = None,
+) -> list[dict]:
     """Detect economic moat indicators and create bonus flags."""
     flags: list[dict[str, Any]] = []
 
@@ -403,7 +416,10 @@ def detect_moat_flags(fundamentals_report: str, ticker: str = "UNKNOWN") -> list
     # spurious "suppressed" flag for a name that had no moat bonus to begin with.
     would_emit_bonus = margin_stability == "HIGH" or cash_conversion == "STRONG"
     if would_emit_bonus:
-        suppression_reason = _peak_or_transient_blocker(fundamentals_report)
+        suppression_reason = _peak_or_transient_blocker(
+            fundamentals_report,
+            base_metrics=base_metrics,
+        )
         if suppression_reason:
             flags.append(
                 {
@@ -415,7 +431,7 @@ def detect_moat_flags(fundamentals_report: str, ticker: str = "UNKNOWN") -> list
                     "rationale": "Moat bonuses derive from margin stability and cash conversion, which a cyclical peak or one-time event inflates. The bonus is suppressed (not netted against the peak/transient warning) while the earnings base is flagged suspect.",
                 }
             )
-            logger.info(
+            logger.debug(
                 "moat_bonus_suppressed_peak_transient",
                 ticker=ticker,
                 reason=suppression_reason,
@@ -439,7 +455,7 @@ def detect_moat_flags(fundamentals_report: str, ticker: str = "UNKNOWN") -> list
                 "rationale": "Company exhibits both stable gross margins (CV < 8%) and high cash conversion (CFO/NI > 90%) over multiple years. This combination suggests a durable competitive advantage with pricing power.",
             }
         )
-        logger.info(
+        logger.debug(
             "moat_flag_durable_advantage",
             ticker=ticker,
             margin_stability=margin_stability,
@@ -461,7 +477,7 @@ def detect_moat_flags(fundamentals_report: str, ticker: str = "UNKNOWN") -> list
                 "rationale": "Low gross margin volatility (CV < 8%) over 5 years suggests pricing power. Company can maintain margins without aggressive discounting, indicating competitive advantage.",
             }
         )
-        logger.info("moat_flag_pricing_power", ticker=ticker, margin_cv=margin_cv)
+        logger.debug("moat_flag_pricing_power", ticker=ticker, margin_cv=margin_cv)
 
     if cash_conversion == "STRONG":
         detail = (
@@ -477,7 +493,7 @@ def detect_moat_flags(fundamentals_report: str, ticker: str = "UNKNOWN") -> list
                 "rationale": "CFO/Net Income ratio averaging > 90% over 3 years indicates reported earnings are converting to actual cash flow. Not relying on accounting accruals or channel stuffing.",
             }
         )
-        logger.info("moat_flag_earnings_quality", ticker=ticker, cfo_ni_avg=cfo_ni_avg)
+        logger.debug("moat_flag_earnings_quality", ticker=ticker, cfo_ni_avg=cfo_ni_avg)
 
     return flags
 
@@ -487,6 +503,8 @@ def detect_capital_efficiency_flags(
     ticker: str = "UNKNOWN",
     value_trap_report: str | None = None,
     sector: Sector | None = None,
+    *,
+    base_metrics: dict[str, Any] | None = None,
 ) -> list[dict]:
     """Detect capital-efficiency risk and bonus flags."""
     flags: list[dict[str, Any]] = []
@@ -494,10 +512,11 @@ def detect_capital_efficiency_flags(
     from src.config import config
 
     metrics = extract_capital_efficiency_signals(fundamentals_report)
-    base_metrics = extract_metrics(fundamentals_report)
     value_trap_metrics = extract_value_trap_score(value_trap_report or "")
     if not metrics:
         return flags
+    if base_metrics is None:
+        base_metrics = extract_metrics(fundamentals_report)
 
     roic_quality = metrics.get("roic_quality")
     leverage_quality = metrics.get("leverage_quality")
@@ -526,7 +545,7 @@ def detect_capital_efficiency_flags(
                 "rationale": "Company has negative ROIC but positive ROE. This means the core business is destroying value while financial leverage creates the illusion of shareholder returns. Classic value trap pattern.",
             }
         )
-        logger.info(
+        logger.debug(
             "capital_flag_value_destruction",
             ticker=ticker,
             roic=roic,
@@ -546,7 +565,7 @@ def detect_capital_efficiency_flags(
                 "rationale": "ROE significantly exceeds ROIC (ratio > 3x), indicating shareholder returns come from leverage, buybacks, or capital structure rather than underlying business quality.",
             }
         )
-        logger.info(
+        logger.debug(
             "capital_flag_engineered_returns",
             ticker=ticker,
             roe_roic_ratio=roe_roic_ratio,
@@ -563,7 +582,7 @@ def detect_capital_efficiency_flags(
                 "rationale": "ROE moderately exceeds ROIC (ratio 2-3x). Returns partially driven by leverage rather than operational excellence.",
             }
         )
-        logger.info(
+        logger.debug(
             "capital_flag_suspect_returns", ticker=ticker, roe_roic_ratio=roe_roic_ratio
         )
 
@@ -579,10 +598,13 @@ def detect_capital_efficiency_flags(
                 "rationale": "ROIC below 8% hurdle rate suggests the company may be destroying value on a risk-adjusted basis. Acceptable only with clear turnaround thesis and improving trajectory.",
             }
         )
-        logger.info("capital_flag_below_hurdle", ticker=ticker, roic=roic)
+        logger.debug("capital_flag_below_hurdle", ticker=ticker, roic=roic)
 
     if roic_quality == "STRONG" and leverage_quality in ("GENUINE", "CONSERVATIVE"):
-        suppression_reason = _peak_or_transient_blocker(fundamentals_report)
+        suppression_reason = _peak_or_transient_blocker(
+            fundamentals_report,
+            base_metrics=base_metrics,
+        )
         if suppression_reason:
             flags.append(
                 {
@@ -594,7 +616,7 @@ def detect_capital_efficiency_flags(
                     "rationale": "Current ROIC strength may reflect a cyclical peak or one-time event. The capital-efficiency bonus is suppressed (not netted against the peak/transient warning) until the earnings base is verified.",
                 }
             )
-            logger.info(
+            logger.debug(
                 "capital_efficiency_bonus_suppressed_peak_transient",
                 ticker=ticker,
                 reason=suppression_reason,
@@ -611,7 +633,7 @@ def detect_capital_efficiency_flags(
                     "rationale": "High ROIC (>15%) with ROE/ROIC ratio below 2x indicates returns driven by operational excellence rather than financial leverage. Suggests sustainable competitive advantage.",
                 }
             )
-            logger.info(
+            logger.debug(
                 "capital_flag_efficient",
                 ticker=ticker,
                 roic=roic,
@@ -659,7 +681,7 @@ def detect_capital_efficiency_flags(
                 "rationale": "Large excess cash relative to market value combined with weak returns, weak shareholder distributions, and no explicit use plan suggests capital is being warehoused rather than deployed.",
             }
         )
-        logger.info(
+        logger.debug(
             "capital_flag_idle_cash_severe",
             ticker=ticker,
             net_cash_to_market_cap=net_cash_to_mc,
@@ -682,7 +704,7 @@ def detect_capital_efficiency_flags(
                 "rationale": "Cash-rich balance sheets are not automatically a problem, but retained capital with weak ROIC, low payout, and no disclosed deployment plan can become a value trap.",
             }
         )
-        logger.info(
+        logger.debug(
             "capital_flag_idle_cash_risk",
             ticker=ticker,
             net_cash_to_market_cap=net_cash_to_mc,
@@ -711,7 +733,7 @@ def detect_consultant_flags(
                 "rationale": "External consultant flagged a hard stop condition (e.g., CMIC restricted list). Position must not be initiated.",
             }
         )
-        logger.info("consultant_flag_hard_stop", ticker=ticker)
+        logger.debug("consultant_flag_hard_stop", ticker=ticker)
         return flags
 
     if conditions.get("has_mandate_breach"):
@@ -725,7 +747,7 @@ def detect_consultant_flags(
                 "rationale": "External consultant identified a mandate compliance issue (e.g., PFIC threshold, jurisdiction risk). PM must explicitly address this before proceeding.",
             }
         )
-        logger.info("consultant_flag_mandate_breach", ticker=ticker)
+        logger.debug("consultant_flag_mandate_breach", ticker=ticker)
 
     if verdict == "MAJOR_CONCERNS":
         flags.append(
@@ -738,7 +760,7 @@ def detect_consultant_flags(
                 "rationale": "External consultant found material issues with the analysis. These could be factual errors, severe biases, or fundamentally flawed synthesis. PM decision should reflect these concerns.",
             }
         )
-        logger.info("consultant_flag_major_concerns", ticker=ticker)
+        logger.debug("consultant_flag_major_concerns", ticker=ticker)
     elif verdict == "CONDITIONAL_APPROVAL":
         flags.append(
             {
@@ -750,7 +772,7 @@ def detect_consultant_flags(
                 "rationale": "External consultant approved with conditions. PM should verify conditions are addressed in the final decision rationale.",
             }
         )
-        logger.info("consultant_flag_conditional", ticker=ticker)
+        logger.debug("consultant_flag_conditional", ticker=ticker)
 
     if conditions.get("growth_quality_unproven"):
         flags.append(
@@ -763,7 +785,7 @@ def detect_consultant_flags(
                 "rationale": "External consultant could not verify that recent growth is organic, accretive, or supported by recurring-revenue evidence. Treat current strength as provisional.",
             }
         )
-        logger.info("consultant_flag_growth_quality_unproven", ticker=ticker)
+        logger.debug("consultant_flag_growth_quality_unproven", ticker=ticker)
 
     if conditions.get("transient_strength_unproven"):
         flags.append(
@@ -776,7 +798,7 @@ def detect_consultant_flags(
                 "rationale": "External consultant identified a named non-recurring driver that may be inflating current strength. Do not treat this as durable baseline performance without further proof.",
             }
         )
-        logger.info("consultant_flag_transient_strength", ticker=ticker)
+        logger.debug("consultant_flag_transient_strength", ticker=ticker)
 
     if discrepancies:
         disc_penalty = min(len(discrepancies) * 0.5, 1.5)
@@ -791,7 +813,7 @@ def detect_consultant_flags(
                 "rationale": "Consultant's independent spot-checks found discrepancies between DATA_BLOCK values and direct API queries. This suggests potential data quality issues that should be investigated.",
             }
         )
-        logger.info(
+        logger.debug(
             "consultant_flag_discrepancies",
             ticker=ticker,
             count=len(discrepancies),

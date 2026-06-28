@@ -193,7 +193,7 @@ def detect_ocf_corroboration_flag(
         )
     else:
         detail += "."
-    logger.info(
+    logger.debug(
         "red_flag_ocf_filing_value_uncorroborated",
         ticker=ticker,
         datablock_ocf=datablock_ocf,
@@ -298,7 +298,7 @@ def detect_red_flags(
         and debt_to_equity > leverage_threshold
     ):
         if holdco_leverage_explained:
-            logger.info(
+            logger.debug(
                 "red_flag_extreme_leverage_suppressed_holdco",
                 ticker=ticker,
                 debt_to_equity=debt_to_equity,
@@ -316,7 +316,7 @@ def detect_red_flags(
                     "rationale": f"Leverage exceeds sector-appropriate threshold - bankruptcy risk (sector: {sector.value})",
                 }
             )
-            logger.info(
+            logger.debug(
                 "red_flag_extreme_leverage",
                 ticker=ticker,
                 debt_to_equity=debt_to_equity,
@@ -359,7 +359,7 @@ def detect_red_flags(
                     "rationale": "Earnings likely fabricated through accounting tricks - FCF disconnect",
                 }
             )
-            logger.info(
+            logger.debug(
                 "red_flag_earnings_quality",
                 ticker=ticker,
                 net_income=net_income,
@@ -385,7 +385,7 @@ def detect_red_flags(
                 "rationale": f"Cannot comfortably service debt - refinancing/default risk (sector: {sector.value})",
             }
         )
-        logger.info(
+        logger.debug(
             "red_flag_refinancing_risk",
             ticker=ticker,
             interest_coverage=interest_coverage,
@@ -416,7 +416,7 @@ def detect_red_flags(
                     "rationale": "Dividend exceeds earnings, FCF doesn't cover it, ROIC below hurdle, and no improving trend. Mathematically unsustainable value destruction.",
                 }
             )
-            logger.info(
+            logger.debug(
                 "red_flag_unsustainable_distribution_critical",
                 ticker=ticker,
                 payout_ratio=payout_ratio,
@@ -435,7 +435,7 @@ def detect_red_flags(
                     "rationale": "Dividend funded by debt/reserves. Watch for dividend cut or verify cyclical recovery thesis if ROIC improving.",
                 }
             )
-            logger.info(
+            logger.debug(
                 "red_flag_unsustainable_distribution_warning",
                 ticker=ticker,
                 payout_ratio=payout_ratio,
@@ -463,7 +463,7 @@ def detect_red_flags(
                 "rationale": "Valuation mismatch: Paying high-growth multiples for a low-margin, capital-intensive business. No margin of safety against execution risk.",
             }
         )
-        logger.info(
+        logger.debug(
             "red_flag_fragile_valuation",
             ticker=ticker,
             net_margin=net_margin,
@@ -499,7 +499,7 @@ def detect_red_flags(
                 "rationale": "Current metrics significantly exceed historical averages with unstable profitability. P/E and PEG are calculated on peak earnings and may revert. Normalize valuations using 5-year averages before deciding.",
             }
         )
-        logger.info(
+        logger.debug(
             "red_flag_cyclical_peak_warning",
             ticker=ticker,
             signals=peak_signals,
@@ -538,7 +538,7 @@ def detect_red_flags(
                 "rationale": "Strong reported growth is not yet supported by improving capital efficiency. Treat the new baseline as unproven until returns stabilize or improve.",
             }
         )
-        logger.info(
+        logger.debug(
             "red_flag_growth_quality_unproven",
             ticker=ticker,
             revenue_growth_ttm=revenue_growth_ttm,
@@ -586,7 +586,7 @@ def detect_red_flags(
                 "rationale": "Current-period strength may reflect a non-recurring driver rather than durable operating improvement. Do not treat this as proven baseline earning power.",
             }
         )
-        logger.info(
+        logger.debug(
             "red_flag_transient_strength_distortion",
             ticker=ticker,
             drivers=transient_strength_labels,
@@ -607,7 +607,7 @@ def detect_red_flags(
                 "rationale": "Distortion-before-catalyst discipline: classify the one-time item as an earnings/cash-flow distortion first. It may be credited as a catalyst only after normalized (ex-one-time) revenue, margin, EPS, and OCF are reconciled. Cap/withhold BUY until then; carries 0.0 tally weight to avoid double-counting TRANSIENT_STRENGTH_DISTORTION.",
             }
         )
-        logger.info("red_flag_normalized_earnings_required", ticker=ticker)
+        logger.debug("red_flag_normalized_earnings_required", ticker=ticker)
 
     ocf = metrics.get("ocf")
     ni_for_ocf = metrics.get("net_income")
@@ -635,7 +635,7 @@ def detect_red_flags(
                     "rationale": f"Operating cash flow exceeding net income by >{ocf_ni_ratio:.0f}x is unusual and may indicate a data source error, wrong currency, or period mismatch. Cross-validate with an independent source.",
                 }
             )
-            logger.info(
+            logger.debug(
                 "red_flag_suspicious_ocf_ni_ratio",
                 ticker=ticker,
                 ocf=ocf,
@@ -650,7 +650,7 @@ def detect_red_flags(
             peg_for_floor > 0 and rev_growth is not None and rev_growth >= 50.0
         )
         if peg_explained_by_growth:
-            logger.info(
+            logger.debug(
                 "unreliable_peg_skipped_high_growth",
                 ticker=ticker,
                 peg=peg_for_floor,
@@ -672,7 +672,7 @@ def detect_red_flags(
                     "rationale": "A PEG ratio below 0.05 without confirmed high revenue growth means the growth rate input is likely missing or stale. All PEG-derived conclusions should be discounted.",
                 }
             )
-            logger.info("red_flag_unreliable_peg", ticker=ticker, peg=peg_for_floor)
+            logger.debug("red_flag_unreliable_peg", ticker=ticker, peg=peg_for_floor)
 
     segment_flag = metrics.get("segment_flag")
     if segment_flag == "DETERIORATING":
@@ -686,7 +686,7 @@ def detect_red_flags(
                 "rationale": "A major business segment contributing >20% of revenue has operating profit declining >20% YoY. Consolidated metrics may mask deterioration in a key business unit.",
             }
         )
-        logger.info("red_flag_segment_deterioration", ticker=ticker)
+        logger.debug("red_flag_segment_deterioration", ticker=ticker)
 
     ocf_source = metrics.get("ocf_source")
     ocf_reason = (metrics.get("ocf_filing_reason") or "DISCREPANCY").upper()
@@ -701,7 +701,7 @@ def detect_red_flags(
                 "rationale": "The filing provided the only usable OCF value because the aggregator/API source was unavailable. This is a process limitation, not evidence of a company data inconsistency.",
             }
         )
-        logger.info("red_flag_ocf_single_source", ticker=ticker)
+        logger.debug("red_flag_ocf_single_source", ticker=ticker)
     elif ocf_source == "FILING":
         red_flags.append(
             {
@@ -713,7 +713,7 @@ def detect_red_flags(
                 "rationale": "The Senior Fundamentals Analyst preferred the filing-sourced OCF over the API-sourced value due to a >30% discrepancy. This may indicate a yfinance data error, currency mismatch, or period mismatch. Neither source is presumptively correct: a search-derived 'filing' figure can be the wrong statement line. Reconcile to the actual cash-flow statement and corroborate against the forensic auditor's independent OCF before building any cash-quality narrative on the higher value.",
             }
         )
-        logger.info(
+        logger.debug(
             "red_flag_ocf_source_discrepancy",
             ticker=ticker,
             ocf_filing_reason=ocf_reason,
@@ -740,7 +740,7 @@ def detect_red_flags(
                 ),
             }
         )
-        logger.info(
+        logger.debug(
             "red_flag_ocf_period_normalization", ticker=ticker, ocf_period=ocf_period
         )
 
@@ -755,7 +755,7 @@ def detect_red_flags(
                 "rationale": "Trailing twelve-month revenue shows sharp decline. This may indicate loss of key contracts, competitive disruption, or demand collapse. Annual data may still look acceptable, masking the deterioration.",
             }
         )
-        logger.info(
+        logger.debug(
             "red_flag_growth_cliff",
             ticker=ticker,
             revenue_growth_ttm=revenue_growth_ttm,
@@ -773,7 +773,7 @@ def detect_red_flags(
                 "rationale": "Price targets, PEG ratio, and forward P/E are all derived from consensus analyst estimates. With fewer than 3 analysts, these figures reflect individual opinions, not statistical consensus. Prefer trailing P/E, P/B, and intrinsic valuation (DCF, asset-based) over consensus-derived metrics for this stock.",
             }
         )
-        logger.info("red_flag_thin_consensus", ticker=ticker, total_est=total_est)
+        logger.debug("red_flag_thin_consensus", ticker=ticker, total_est=total_est)
     if total_est == "HIGH" or (isinstance(total_est, int) and total_est > 20):
         red_flags.append(
             {
@@ -785,7 +785,7 @@ def detect_red_flags(
                 "rationale": "English-language coverage may still be low, but high local coverage means the home market has likely already absorbed segment-level, governance, and catalyst information. The undiscovered edge is therefore weaker.",
             }
         )
-        logger.info("red_flag_local_coverage_high", ticker=ticker, total_est=total_est)
+        logger.debug("red_flag_local_coverage_high", ticker=ticker, total_est=total_est)
 
     if strict_mode:
         sector_str = (metrics.get("sector") or "").lower()
@@ -810,7 +810,7 @@ def detect_red_flags(
                     "rationale": "REITs are pass-through vehicles; not compatible with GARP growth-transition strategy",
                 }
             )
-            logger.info(
+            logger.debug(
                 "strict_reit_etf_rejected",
                 ticker=ticker,
                 industry=industry_str,
@@ -832,7 +832,7 @@ def detect_red_flags(
                         "rationale": "Operating cash flow well below net income — earnings likely overstated via accruals",
                     }
                 )
-                logger.info(
+                logger.debug(
                     "strict_earnings_quality_rejected",
                     ticker=ticker,
                     ocf_ni_ratio=ratio,

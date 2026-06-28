@@ -7,6 +7,7 @@ from tests.validators.red_flag_validator_cases import (
 
 __all__ = ["TestConsultantConditionEnforcement", "TestConsultantVerdictVariants"]
 
+import src.validators.supplemental_flags as supplemental_flags
 from src.validators.red_flag_detector import RedFlagDetector
 from src.validators.supplemental_extractors import (
     extract_material_unverified_operating_signal,
@@ -114,3 +115,22 @@ class TestMaterialUnverifiedOperatingSignal:
             )
             == []
         )
+
+
+def test_capital_efficiency_skips_base_metric_parse_without_signals(monkeypatch):
+    def fake_extract_capital_efficiency_signals(_report: str) -> dict:
+        return {}
+
+    def fail_extract_metrics(_report: str) -> dict:
+        raise AssertionError("extract_metrics should not run without capital signals")
+
+    monkeypatch.setattr(
+        supplemental_flags,
+        "extract_capital_efficiency_signals",
+        fake_extract_capital_efficiency_signals,
+    )
+    monkeypatch.setattr(supplemental_flags, "extract_metrics", fail_extract_metrics)
+
+    assert (
+        supplemental_flags.detect_capital_efficiency_flags("no structured block") == []
+    )

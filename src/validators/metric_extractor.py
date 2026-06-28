@@ -53,7 +53,12 @@ def parse_ratio_or_percent(raw_value: str) -> float | None:
     return value
 
 
-def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
+def extract_metrics(
+    fundamentals_report: str,
+    *,
+    ticker: str | None = None,
+    source_file: str | None = None,
+) -> dict[str, Any]:
     """Extract financial metrics from the Senior Fundamentals DATA_BLOCK and body."""
     metrics: dict[str, Any] = {
         "debt_to_equity": None,
@@ -108,7 +113,12 @@ def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
 
     data_block = extract_last_data_block(fundamentals_report)
     if not data_block:
-        logger.warning("no_data_block_found_in_fundamentals_report")
+        log_fields: dict[str, Any] = {}
+        if ticker:
+            log_fields["ticker"] = ticker
+        if source_file:
+            log_fields["file"] = source_file
+        logger.warning("no_data_block_found_in_fundamentals_report", **log_fields)
         return metrics
 
     health_match = re.search(r"ADJUSTED_HEALTH_SCORE:\s*(\d+(?:\.\d+)?)%", data_block)
