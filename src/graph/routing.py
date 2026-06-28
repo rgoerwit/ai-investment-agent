@@ -356,12 +356,14 @@ def _classify_rm_verdict(investment_plan: object) -> str:
 
     global _POSITIVE_VERDICT_RE, _NEGATIVE_VERDICT_RE
     if _POSITIVE_VERDICT_RE is None:
+        # Tolerate markdown header prefixes and the INVESTMENT/FINAL qualifier,
+        # e.g. "### FINAL RECOMMENDATION: BUY" / "### INVESTMENT RECOMMENDATION: REJECT".
         _POSITIVE_VERDICT_RE = re.compile(
-            r"(?im)^\s*(?:FINAL\s+)?(?:RECOMMENDATION|VERDICT|DECISION)\s*[:=]\s*"
+            r"(?im)^\s*#*\s*(?:FINAL\s+|INVESTMENT\s+)?(?:RECOMMENDATION|VERDICT|DECISION)\s*[:=]\s*"
             r"(STRONG[\s_-]*BUY|BUY|ACCUMULATE|WATCH|INITIATE)"
         )
         _NEGATIVE_VERDICT_RE = re.compile(
-            r"(?im)^\s*(?:FINAL\s+)?(?:RECOMMENDATION|VERDICT|DECISION)\s*[:=]\s*"
+            r"(?im)^\s*#*\s*(?:FINAL\s+|INVESTMENT\s+)?(?:RECOMMENDATION|VERDICT|DECISION)\s*[:=]\s*"
             r"(SELL|STRONG[\s_-]*SELL|DO[\s_-]*NOT[\s_-]*INITIATE|REJECT|AVOID|"
             r"STRONG[\s_-]*HOLD)"
         )

@@ -9,9 +9,27 @@ import pytest
 
 from src.graph.routing import (
     CONSULTANT_SKIP_SENTINEL,
+    _classify_rm_verdict,
     consultant_gate_router,
     should_invoke_consultant,
 )
+
+
+@pytest.mark.parametrize(
+    "plan, expected",
+    [
+        # The Research Manager emits markdown-prefixed headers; the classifier
+        # must see through "### " and the FINAL/INVESTMENT qualifiers.
+        ("### FINAL RECOMMENDATION: REJECT", "negative"),
+        ("### FINAL RECOMMENDATION: DO NOT INITIATE", "negative"),
+        ("### INVESTMENT RECOMMENDATION: BUY", "positive"),
+        ("### FINAL RECOMMENDATION: STRONG BUY", "positive"),
+        ("FINAL RECOMMENDATION: BUY", "positive"),
+        ("Notes: mixed signals only", "ambiguous"),
+    ],
+)
+def test_classify_rm_verdict_tolerates_markdown_headers(plan, expected):
+    assert _classify_rm_verdict(plan) == expected
 
 
 def _config(quick_mode: bool) -> dict[str, Any]:

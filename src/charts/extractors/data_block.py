@@ -105,15 +105,19 @@ def _extract_vie_from_block(data_block: str) -> bool | None:
 def _extract_cmic_from_block(data_block: str) -> bool | None:
     """Extract CMIC_STATUS from DATA_BLOCK.
 
-    Expected format: CMIC_STATUS: [FLAGGED / CLEAR / N/A]
+    Expected format: CMIC_STATUS: [FLAGGED / UNCERTAIN / CLEAR / N/A]
+    UNCERTAIN and N/A map to None (neither confirmed flagged nor clear).
     """
-    match = re.search(r"CMIC_STATUS:\s*(FLAGGED|CLEAR|N/A)", data_block, re.IGNORECASE)
+    match = re.search(
+        r"CMIC_STATUS:\s*(FLAGGED|UNCERTAIN|CLEAR|N/A)", data_block, re.IGNORECASE
+    )
     if match:
         value = match.group(1).upper()
         if value == "FLAGGED":
             return True
         elif value == "CLEAR":
             return False
+        # UNCERTAIN / N/A -> unknown
     return None
 
 
