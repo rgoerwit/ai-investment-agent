@@ -45,6 +45,7 @@ def find_opportunities(
 ) -> tuple[list[ReconciliationItem], float]:
     """Find new BUY recommendations not already held or handled by watchlist."""
     items: list[ReconciliationItem] = []
+    withheld_unstable: list[str] = []
 
     for ticker, analysis in analyses.items():
         if ticker in held_tickers:
@@ -81,11 +82,12 @@ def find_opportunities(
                 cfg=stability_cfg,
             )
             if withhold_reason:
-                logger.info(
+                logger.debug(
                     "offwatch_buy_withheld_unstable",
                     ticker=ticker,
                     reason=withhold_reason,
                 )
+                withheld_unstable.append(ticker)
                 continue
 
         is_stale, _stale_reason = check_staleness(
@@ -155,6 +157,19 @@ def find_opportunities(
                 suggested_order_type="LMT",
                 cash_impact_usd=-buy_cost_usd if buy_cost_usd > 0 else 0.0,
             )
+        )
+
+    if withheld_unstable:
+        # Often dozens across a large index — one operator-visible summary, per-ticker
+        # detail at debug (mirrors reconciler.alpha_base_ambiguous_summary).
+        logger.info(
+            "offwatch_buy_withheld_unstable_summary",
+            count=len(withheld_unstable),
+            sample=sorted(withheld_unstable)[:8],
+            reason=(
+                "marginal BUY with unresolved peak/transient flag — "
+                "withheld pending stability"
+            ),
         )
 
     return items, remaining_cash

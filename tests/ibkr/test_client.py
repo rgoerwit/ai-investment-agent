@@ -31,6 +31,7 @@ def _make_client() -> IbkrClient:
 
     client = IbkrClient.__new__(IbkrClient)
     client._settings = settings
+    client._brokerage_ready_until = 0.0  # mirrors __init__ (bypassed by __new__)
     client._ibind_client = MagicMock()
     # Default: brokerage session is authenticated so /iserver preflight passes.
     # Tests exercising the unauthenticated path override this return_value.
@@ -498,3 +499,62 @@ class TestMaskAccount:
         from src.ibkr.client import mask_account
 
         assert "1234567" not in mask_account("U1234567")
+
+
+class TestGetContractInfoBrokerageGuard:
+    """get_contract_info uses a status-first, non-retrying, non-displacing guard
+    (_ensure_brokerage_session_ready) instead of re-initing ssodh per call."""
+
+    _PATCH_INIT = "src.ibkr.client.IbkrClient.initialize_brokerage_session"
+
+    def test_authenticated_batch_does_not_reinit_and_checks_status_once(self):
+        """Healthy steady state: a batch of lookups does ONE status check, ZERO inits."""
+        client = _make_client()
+        client._ibind_client.contract_information_by_conid.return_value = _response(
+            {"symbol": "X", "exchange": "TSEJ", "currency": "JPY"}
+        )
+        with patch(self._PATCH_INIT) as mock_init:
+            for _ in range(10):
+                client.get_contract_info(123, compete=False)
+        mock_init.assert_not_called()
+        # Memoized after the first confirmed-auth status check.
+        assert client._ibind_client.authentication_status.call_count == 1
+
+    def test_unauthenticated_inits_with_caller_compete_false_never_true(self):
+        """MANDATORY regression guard: an unauthenticated compete=False lookup must
+        init non-displacingly (compete=False) and NEVER with compete=True."""
+        client = _make_client()
+        client._ibind_client.authentication_status.return_value = _response(
+            {"authenticated": False, "connected": True, "competing": False}
+        )
+        client._ibind_client.contract_information_by_conid.return_value = _response({})
+        with patch(self._PATCH_INIT) as mock_init:
+            client.get_contract_info(123, compete=False)
+        mock_init.assert_called_once_with(compete=False)
+        for c in mock_init.call_args_list:
+            assert c.kwargs.get("compete") is not True
+
+    def test_memo_expiry_triggers_second_status_check(self):
+        client = _make_client()
+        client._ibind_client.contract_information_by_conid.return_value = _response({})
+        client.get_contract_info(1, compete=False)  # checks, memoizes
+        assert client._ibind_client.authentication_status.call_count == 1
+        assert client._brokerage_ready_until > 0.0
+        client._brokerage_ready_until = 0.0  # simulate TTL expiry
+        client.get_contract_info(2, compete=False)  # memo expired -> re-check
+        assert client._ibind_client.authentication_status.call_count == 2
+
+    def test_init_failure_is_swallowed_and_not_memoized(self):
+        """A brokerage init failure inside the guard must not propagate out of
+        get_contract_info, and the unauthenticated path is never memoized."""
+        client = _make_client()
+        client._ibind_client.authentication_status.return_value = _response(
+            {"authenticated": False, "connected": True, "competing": False}
+        )
+        client._ibind_client.contract_information_by_conid.return_value = _response(
+            {"symbol": "Z"}
+        )
+        with patch(self._PATCH_INIT, side_effect=RuntimeError("boom")):
+            result = client.get_contract_info(123, compete=False)  # must not raise
+        assert result == {"symbol": "Z"}
+        assert client._brokerage_ready_until == 0.0

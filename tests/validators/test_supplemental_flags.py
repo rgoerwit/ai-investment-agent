@@ -134,3 +134,74 @@ def test_capital_efficiency_skips_base_metric_parse_without_signals(monkeypatch)
     assert (
         supplemental_flags.detect_capital_efficiency_flags("no structured block") == []
     )
+
+
+def _rqf_block(**fields: str) -> str:
+    body = "\n".join(f"{k}: {v}" for k, v in fields.items())
+    return f"### --- START DATA_BLOCK ---\n{body}\n### --- END DATA_BLOCK ---"
+
+
+class TestReturnQualityFragility:
+    """Deterministic relocation of PM rubric item #11 (RETURN_QUALITY_FRAGILITY)."""
+
+    def test_unstable_trend_fires(self):
+        block = _rqf_block(
+            PROFITABILITY_TREND="UNSTABLE", ROA_PERCENT="6.0%", ROA_5Y_AVG="6.0%"
+        )
+        flags = supplemental_flags.detect_return_quality_fragility_flags(block, "X")
+        assert len(flags) == 1
+        assert flags[0]["type"] == "RETURN_QUALITY_FRAGILITY"
+        assert flags[0]["risk_penalty"] == 0.5
+
+    def test_apr_declining_below_5y_avg_does_not_fire(self):
+        # The exact APR.WA misfire: DECLINING (not UNSTABLE) + ROA_5Y_AVG 11.1% (not <5%).
+        block = _rqf_block(
+            PROFITABILITY_TREND="DECLINING", ROA_PERCENT="8.77%", ROA_5Y_AVG="11.12%"
+        )
+        assert (
+            supplemental_flags.detect_return_quality_fragility_flags(block, "APR") == []
+        )
+
+    def test_unproven_turnaround_fires(self):
+        # current strong but weak 5Y base, with a non-peak trend so blocker stays quiet.
+        block = _rqf_block(
+            PROFITABILITY_TREND="IMPROVING", ROA_PERCENT="8.0%", ROA_5Y_AVG="4.0%"
+        )
+        flags = supplemental_flags.detect_return_quality_fragility_flags(block, "X")
+        assert len(flags) == 1
+        assert flags[0]["risk_penalty"] == 0.5
+
+    def test_peak_distortion_suppresses_double_count(self):
+        # UNSTABLE + ROA 12 vs 6 avg (ratio 2.0) -> CYCLICAL_PEAK semantics already
+        # cover it; do not double-count.
+        block = _rqf_block(
+            PROFITABILITY_TREND="UNSTABLE", ROA_PERCENT="12.0%", ROA_5Y_AVG="6.0%"
+        )
+        assert (
+            supplemental_flags.detect_return_quality_fragility_flags(block, "X") == []
+        )
+
+    def test_cycle_position_peak_suppresses(self):
+        block = _rqf_block(
+            PROFITABILITY_TREND="UNSTABLE",
+            ROA_PERCENT="6.0%",
+            ROA_5Y_AVG="6.0%",
+            CYCLE_POSITION="PEAK",
+        )
+        assert (
+            supplemental_flags.detect_return_quality_fragility_flags(block, "X") == []
+        )
+
+    def test_missing_fields_no_flag_no_crash(self):
+        block = _rqf_block(PROFITABILITY_TREND="STABLE")
+        assert (
+            supplemental_flags.detect_return_quality_fragility_flags(block, "X") == []
+        )
+        assert supplemental_flags.detect_return_quality_fragility_flags("", "X") == []
+
+    def test_exposed_on_facade(self):
+        block = _rqf_block(
+            PROFITABILITY_TREND="UNSTABLE", ROA_PERCENT="6.0%", ROA_5Y_AVG="6.0%"
+        )
+        flags = RedFlagDetector.detect_return_quality_fragility_flags(block, "X")
+        assert flags and flags[0]["type"] == "RETURN_QUALITY_FRAGILITY"

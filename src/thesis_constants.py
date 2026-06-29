@@ -30,6 +30,23 @@ SECTOR_MEDIAN_PE: dict[str, float] = {
 }
 PE_VS_SECTOR_RICH = 1.30
 
+# Business-model-aware margin floors for the distribution model (thin margin,
+# high asset turnover). The standard scoring bars (operating margin >12%, gross
+# margin >30%) penalize structurally-thin distributors that earn returns through
+# turnover, not margin (APR.WA). These relaxed floors apply ONLY to the
+# distribution-prone GICS sectors below AND ONLY when asset turnover confirms the
+# model (>= ASSET_TURNOVER_DISTRIBUTION_MIN); every other name keeps the standard bar.
+ASSET_TURNOVER_DISTRIBUTION_MIN = 1.5
+# Distribution-prone GICS sectors = the keys of the margin dicts below.
+SECTOR_OPERATING_MARGIN_MIN: dict[str, float] = {
+    "Consumer Discretionary": 6.0,
+    "Industrials": 6.0,
+}
+SECTOR_GROSS_MARGIN_MIN: dict[str, float] = {
+    "Consumer Discretionary": 22.0,
+    "Industrials": 22.0,
+}
+
 # Quality floors (percent scores from Senior Fundamentals DATA_BLOCK)
 HEALTH_MIN_PCT = 50.0
 GROWTH_MIN_PCT = 50.0

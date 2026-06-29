@@ -334,7 +334,7 @@ def _resolve_conid_to_yf(
     yf_ticker = ibkr_symbol_to_yf(symbol, exchange, currency)
     if yf_ticker:
         cache_conid_mapping(yf_ticker, conid, symbol, exchange)
-        logger.info(
+        logger.debug(
             "conid_resolved",
             context=context,
             conid=conid,

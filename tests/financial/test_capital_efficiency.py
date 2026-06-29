@@ -962,3 +962,60 @@ class TestCapitalEfficiencyBonusSuppression:
     def test_empty_report_safe(self):
         """Error handling: empty input yields no flags, no crash."""
         assert RedFlagDetector.detect_capital_efficiency_flags("", "E") == []
+
+
+class TestAssetTurnoverSignal:
+    """capital_assetTurnover = revenue / total assets (distribution-model proxy)."""
+
+    def _fetch(self):
+        from src.data.fetcher import SmartMarketDataFetcher
+
+        return SmartMarketDataFetcher()
+
+    def test_asset_turnover_from_info_revenue(self):
+        income_stmt = pd.DataFrame({"2024": [0.0]}, index=["EBIT"])
+        balance_sheet = pd.DataFrame({"2024": [500_000_000]}, index=["Total Assets"])
+        info = {"totalRevenue": 1_000_000_000, "totalAssets": 500_000_000}
+        signals = self._fetch()._calculate_capital_efficiency_signals(
+            income_stmt, balance_sheet, info, "TEST"
+        )
+        assert signals["capital_assetTurnover"] == pytest.approx(2.0, rel=0.01)
+
+    def test_asset_turnover_statement_revenue_fallback(self):
+        # info has no revenue -> derive from income statement Total Revenue.
+        income_stmt = pd.DataFrame(
+            {"2024": [0.0, 800_000_000]}, index=["EBIT", "Total Revenue"]
+        )
+        balance_sheet = pd.DataFrame({"2024": [400_000_000]}, index=["Total Assets"])
+        info = {"totalAssets": 400_000_000}
+        signals = self._fetch()._calculate_capital_efficiency_signals(
+            income_stmt, balance_sheet, info, "TEST"
+        )
+        assert signals["capital_assetTurnover"] == pytest.approx(2.0, rel=0.01)
+
+    def test_asset_turnover_omitted_when_assets_missing(self):
+        income_stmt = pd.DataFrame({"2024": [0.0]}, index=["EBIT"])
+        balance_sheet = pd.DataFrame({"2024": [0.0]}, index=["Other"])
+        info = {"totalRevenue": 1_000_000_000}
+        signals = self._fetch()._calculate_capital_efficiency_signals(
+            income_stmt, balance_sheet, info, "TEST"
+        )
+        assert "capital_assetTurnover" not in signals
+
+    def test_asset_turnover_omitted_when_assets_zero(self):
+        income_stmt = pd.DataFrame({"2024": [0.0]}, index=["EBIT"])
+        balance_sheet = pd.DataFrame({"2024": [0.0]}, index=["Total Assets"])
+        info = {"totalRevenue": 1_000_000_000, "totalAssets": 0}
+        signals = self._fetch()._calculate_capital_efficiency_signals(
+            income_stmt, balance_sheet, info, "TEST"
+        )
+        assert "capital_assetTurnover" not in signals
+
+    def test_asset_turnover_omitted_when_revenue_missing(self):
+        income_stmt = pd.DataFrame({"2024": [0.0]}, index=["EBIT"])
+        balance_sheet = pd.DataFrame({"2024": [500_000_000]}, index=["Total Assets"])
+        info = {"totalAssets": 500_000_000}
+        signals = self._fetch()._calculate_capital_efficiency_signals(
+            income_stmt, balance_sheet, info, "TEST"
+        )
+        assert "capital_assetTurnover" not in signals

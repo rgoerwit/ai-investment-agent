@@ -20,6 +20,7 @@ from src.agents.pm_verdict_metadata import (
     PMVerdictRecovery,
     pm_verdict_metadata_from_text,
 )
+from src.agents.verdict_policy import maybe_floor_verdict_to_hold
 from src.data_block_utils import (
     extract_data_block_field,
     fenced_block_pattern,
@@ -112,6 +113,32 @@ def _present_pm_inputs(state: AgentState) -> tuple[list[str], list[str]]:
     else:
         missing.append(RISK_DEBATE_FIELD)
     return present, missing
+
+
+def _value_trap_capital_context(
+    fundamentals_report: str | None,
+) -> dict[str, str] | None:
+    """Build the capex/ROIC/plan context the Value-Trap reconciliation needs.
+
+    The Value-Trap Detector runs parallel to Fundamentals and is blind to these
+    DATA_BLOCK fields; the PM node sees both, so it supplies them here so a HIGH/TRAP
+    penalty driven by reinvestment can be downgraded when the DATA_BLOCK confirms
+    genuine growth investment (see ``detect_value_trap_flags``).
+    """
+    if not fundamentals_report:
+        return None
+    return {
+        "capex_to_da_status": extract_data_block_field(
+            fundamentals_report, "CAPEX_TO_DA_STATUS"
+        )
+        or "",
+        "roic_quality": extract_data_block_field(fundamentals_report, "ROIC_QUALITY")
+        or "",
+        "capital_plan_status": extract_data_block_field(
+            fundamentals_report, "CAPITAL_PLAN_STATUS"
+        )
+        or "",
+    }
 
 
 def _parse_price_value(raw: str | None) -> float | None:
@@ -756,6 +783,7 @@ NEUTRAL ANALYST (Balanced):
                 value_trap,
                 ticker,
                 m_and_a_status=extract_data_block_field(fundamentals, "M_AND_A_STATUS"),
+                capital_context=_value_trap_capital_context(fundamentals),
             )
             if value_trap_warnings:
                 red_flags.extend(value_trap_warnings)
@@ -781,6 +809,22 @@ NEUTRAL ANALYST (Balanced):
                     bonus_types=[bonus["type"] for bonus in moat_bonuses],
                     total_risk_bonus=sum(
                         bonus.get("risk_penalty", 0) for bonus in moat_bonuses
+                    ),
+                )
+
+            return_quality_flags = (
+                RedFlagDetector.detect_return_quality_fragility_flags(
+                    fundamentals, ticker
+                )
+            )
+            if return_quality_flags:
+                red_flags.extend(return_quality_flags)
+                logger.info(
+                    "return_quality_fragility_flags_detected",
+                    ticker=ticker,
+                    flag_types=[flag["type"] for flag in return_quality_flags],
+                    total_risk_adjustment=sum(
+                        flag.get("risk_penalty", 0) for flag in return_quality_flags
                     ),
                 )
 
@@ -1186,6 +1230,14 @@ RISK TEAM DEBATE:
                 )
 
             content_str = _normalize_pm_block_contract(content_str)
+            content_str, verdict_floored = maybe_floor_verdict_to_hold(
+                content_str,
+                fundamentals_report=fundamentals,
+                red_flags=red_flags,
+                code_subtotal=code_risk_subtotal,
+                pre_screening_result=pre_screening_result,
+                ticker=ticker,
+            )
             _log_risk_tally_reconciliation(content_str, code_risk_subtotal, ticker)
             _log_pm_discipline_checks(
                 content_str, red_flags, valuation_reliability, ticker
@@ -1205,6 +1257,7 @@ RISK TEAM DEBATE:
                 ticker=ticker,
                 verdict=pm_metadata.verdict,
                 pm_verdict_recovered=pm_verdict_recovered,
+                verdict_floored_to_hold=verdict_floored,
                 pm_verdict_metadata=pm_metadata.model_dump(exclude_none=True),
                 pre_screening_result=state.get("pre_screening_result"),
                 direct_pm_inputs_present=present_inputs,
@@ -1401,6 +1454,9 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
                         ticker,
                         m_and_a_status=extract_data_block_field(
                             fundamentals_report, "M_AND_A_STATUS"
+                        ),
+                        capital_context=_value_trap_capital_context(
+                            fundamentals_report
                         ),
                     )
                     if vt_warnings:

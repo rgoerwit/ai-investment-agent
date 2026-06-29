@@ -47,6 +47,12 @@ STATEMENT_ROW_ALIASES: dict[str, tuple[str, ...]] = {
     "cash_only": ("Cash And Cash Equivalents", "Cash"),
     "cash_and_short_term_investments": ("Cash And Short Term Investments",),
     "short_term_investments": ("Short Term Investments",),
+    "cost_of_revenue": (
+        "Cost Of Revenue",
+        "Reconciled Cost Of Revenue",
+        "Cost Of Goods Sold",
+    ),
+    "inventory": ("Inventory",),
 }
 
 
@@ -62,6 +68,39 @@ def statement_value(df: pd.DataFrame, key: str, col: int = 0) -> float | None:
 def _canonical_sector(value: Any) -> str | None:
     normalized = normalize_sector_label(str(value) if value is not None else None)
     return normalized if normalized in SECTOR_MEDIAN_PE else None
+
+
+def inventory_turnover_trend(
+    financials: pd.DataFrame, balance_sheet: pd.DataFrame
+) -> tuple[str, float] | None:
+    """Inventory-turnover (COGS/inventory) trend over available years, latest-first.
+
+    Distinguishes stocking-ahead-of-capacity from obsolescence for a build-out name:
+    RISING turnover = selling faster; FALLING = inventory building faster than sales.
+    Returns ``(trend, latest_turnover)`` or ``None`` when <2 comparable periods exist.
+    """
+    if financials.empty or balance_sheet.empty:
+        return None
+    years = min(len(financials.columns), len(balance_sheet.columns), 4)
+    turnovers: list[float] = []
+    for col in range(years):
+        cogs = statement_value(financials, "cost_of_revenue", col=col)
+        inv = statement_value(balance_sheet, "inventory", col=col)
+        if cogs is None or not inv or inv <= 0:
+            continue
+        turnovers.append(abs(cogs) / inv)
+    if len(turnovers) < 2:
+        return None
+    latest, oldest = turnovers[0], turnovers[-1]
+    if oldest <= 0:
+        return None
+    if latest > oldest * 1.1:
+        trend = "RISING"
+    elif latest < oldest * 0.9:
+        trend = "FALLING"
+    else:
+        trend = "STABLE"
+    return trend, round(latest, 2)
 
 
 def _statement_series(df: pd.DataFrame, key: str, max_years: int = 4) -> list[float]:
@@ -277,6 +316,19 @@ def extract_from_financial_statements(
                     extracted["_currentRatio_source"] = "calculated_from_statements"
             except Exception as exc:
                 _log_statement_field_extraction_failed(symbol, "current_ratio", exc)
+
+            try:
+                inv_trend = inventory_turnover_trend(financials, balance_sheet)
+                if inv_trend is not None:
+                    extracted["inventoryTurnoverTrend"] = inv_trend[0]
+                    extracted["inventoryTurnoverLatest"] = inv_trend[1]
+                    extracted["_inventoryTurnoverTrend_source"] = (
+                        "calculated_from_statements"
+                    )
+            except Exception as exc:
+                _log_statement_field_extraction_failed(
+                    symbol, "inventory_turnover_trend", exc
+                )
 
             try:
                 debt = statement_value(balance_sheet, "total_debt")
@@ -734,6 +786,20 @@ def calculate_capital_efficiency_signals(
             )
         if cash is not None and total_assets and total_assets > 0:
             signals["capital_cashToAssets"] = round(cash / total_assets, 4)
+        # Asset turnover (revenue / total assets): a structural proxy for the
+        # low-margin/high-turnover distribution model, used to gate relaxed margin
+        # floors for distributors (see SECTOR_OPERATING_MARGIN_MIN).
+        revenue = _safe_float(info.get("totalRevenue"))
+        if (
+            revenue is None
+            and not income_stmt.empty
+            and "Total Revenue" in income_stmt.index
+        ):
+            val = income_stmt.loc["Total Revenue"].iloc[0]
+            if pd.notna(val):
+                revenue = float(val)
+        if revenue is not None and total_assets and total_assets > 0:
+            signals["capital_assetTurnover"] = round(revenue / total_assets, 2)
         if capex is not None and d_and_a is not None and d_and_a != 0:
             capex_to_da_ratio = abs(capex) / abs(d_and_a)
             signals["capital_capexToDaRatio"] = round(capex_to_da_ratio, 2)

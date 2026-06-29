@@ -102,6 +102,10 @@ def extract_metrics(
         "net_debt_ebitda": None,
         "capex_to_da": None,
         "capex_to_da_status": None,
+        "asset_turnover": None,
+        "inventory_turnover_trend": None,
+        "capacity_utilization": None,
+        "facility_buildout_status": None,
         "capital_plan_status": None,
         "sector": None,
         "industry": None,
@@ -378,6 +382,45 @@ def extract_metrics(
                 metrics["capex_to_da"] = float(raw_value)
             except ValueError:
                 pass
+
+    asset_turnover_match = re.search(
+        r"ASSET_TURNOVER:\s*([0-9]+(?:\.[0-9]+)?)", data_block
+    )
+    if asset_turnover_match:
+        try:
+            metrics["asset_turnover"] = float(asset_turnover_match.group(1))
+        except ValueError:
+            pass
+
+    inv_trend_match = re.search(
+        r"INVENTORY_TURNOVER_TREND:\s*(RISING|STABLE|FALLING|N/A)",
+        data_block,
+        re.IGNORECASE,
+    )
+    if inv_trend_match:
+        value = inv_trend_match.group(1).upper()
+        if value != "N/A":
+            metrics["inventory_turnover_trend"] = value
+
+    capacity_util_match = re.search(
+        r"CAPACITY_UTILIZATION:\s*([0-9]+(?:\.[0-9]+)?)\s*%", data_block
+    )
+    if capacity_util_match:
+        try:
+            metrics["capacity_utilization"] = float(capacity_util_match.group(1))
+        except ValueError:
+            pass
+
+    facility_status_match = re.search(
+        r"FACILITY_BUILDOUT_STATUS:\s*"
+        r"(UNDER_CONSTRUCTION|RAMPING|AT_CAPACITY|NONE|N/A)",
+        data_block,
+        re.IGNORECASE,
+    )
+    if facility_status_match:
+        value = facility_status_match.group(1).upper()
+        if value != "N/A":
+            metrics["facility_buildout_status"] = value
 
     capex_status_match = re.search(
         r"CAPEX_TO_DA_STATUS:\s*(UNDERINVESTING|MAINTENANCE|GROWTH_INVESTING|N/A)",

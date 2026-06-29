@@ -249,3 +249,18 @@ def test_zero_penalty_quarantine_flag_renders_visibly_and_floor_neutral() -> Non
     text, subtotal = format_red_flag_section("PASS", flags)
     assert subtotal == 1.0  # the 0.0 flag does not move the floor
     assert "VALUATION_INPUT_QUARANTINED [risk_penalty +0.00]" in text
+
+
+def test_return_quality_fragility_lands_in_code_subtotal() -> None:
+    """RQF was relocated from PM free-form to the deterministic subtotal (Step 1)."""
+    flags = [
+        {
+            "type": "RETURN_QUALITY_FRAGILITY",
+            "detail": "PROFITABILITY_TREND: UNSTABLE",
+            "risk_penalty": 0.5,
+        },
+    ]
+    text, subtotal = format_red_flag_section("PASS", flags)
+    assert subtotal == 0.5
+    assert "RETURN_QUALITY_FRAGILITY [risk_penalty +0.50]" in text
+    assert "do NOT re-score them" in text

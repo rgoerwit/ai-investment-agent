@@ -38,6 +38,11 @@ logger = structlog.get_logger(__name__)
 _BROKERAGE_INIT_ATTEMPTS = 4
 _BROKERAGE_AUTH_POLL_INTERVAL_S = 1.0  # floor between re-inits
 _BROKERAGE_INIT_WAIT_CAP_S = 3.0  # cap on honoring ssodh/init's "wait" hint
+# Best-effort read paths (contract-info conid resolution) only need the brokerage
+# session to be authenticated, not re-inited per call. Memoize a confirmed-auth
+# status briefly so a batch of per-position lookups doesn't re-check/re-init N times.
+# Well under IBKR's ~5-min brokerage-session timeout; a stale memo just re-checks.
+_BROKERAGE_READY_TTL_S = 60.0
 
 # IBKR permits a single brokerage session per username, so brokerage-session
 # init (ssodh/init) must never run concurrently — two callers racing it produce
@@ -166,6 +171,9 @@ class IbkrClient:
         self._throttle = IBKRThrottle(
             rate_per_sec=self._settings.ibkr_rate_limit_per_sec,
         )
+        # Memo for the best-effort contract-info brokerage guard (see
+        # _ensure_brokerage_session_ready); monotonic deadline of a confirmed auth.
+        self._brokerage_ready_until: float = 0.0
 
     def connect(
         self, brokerage_session: bool = False, *, maintain: bool = False
@@ -416,7 +424,7 @@ class IbkrClient:
             self._last_brokerage_init_detail = detail
             # ssodh/init returns authenticated/competing plus message/fail/prompts that
             # explain a non-authenticated result — surface them instead of discarding.
-            logger.info(
+            logger.debug(
                 "brokerage_session_init_response",
                 compete=compete,
                 authenticated=detail.get("authenticated"),
@@ -475,6 +483,40 @@ class IbkrClient:
         # ssodh/init; the loser re-checks status below and returns without re-init.
         with _BROKERAGE_INIT_LOCK:
             self._ensure_brokerage_session_locked(operation=operation)
+
+    def _ensure_brokerage_session_ready(self, *, compete: bool) -> None:
+        """Best-effort, status-first, NON-raising, NON-retrying brokerage guard for
+        read/diagnostic paths (contract-info conid resolution).
+
+        Unlike ``_ensure_brokerage_session`` (which retries and raises for operations
+        that must succeed, and re-inits with the default ``compete=True``), this:
+          * checks ``/iserver/auth/status`` (IBKR's source of truth) and memoizes a
+            confirmed-authenticated session for ``_BROKERAGE_READY_TTL_S`` so a batch
+            of per-position lookups doesn't re-check/re-init N times;
+          * when not authenticated, does a SINGLE ``initialize_brokerage_session``
+            honoring the caller's ``compete`` flag (so ``compete=False`` callers never
+            displace another live session) — no retry, no memoization;
+          * never raises: contract-info is best-effort and falls back to ``{}``.
+        """
+        if time.monotonic() < self._brokerage_ready_until:
+            return
+        status = self._brokerage_auth_status()  # quiet on success; logs only on failure
+        if status is not None and status.get("authenticated") is True:
+            self._brokerage_ready_until = time.monotonic() + _BROKERAGE_READY_TTL_S
+            return
+        # Not authenticated: single best-effort init, non-displacing when compete=False.
+        # Do NOT memoize (next call re-checks); do NOT retry. Wrap because
+        # initialize_brokerage_session() calls _ensure_connected() OUTSIDE its own try,
+        # so a connection-state failure would otherwise escape this best-effort helper.
+        try:
+            self.initialize_brokerage_session(compete=compete)
+        except (
+            Exception
+        ) as e:  # best-effort: contract-info proceeds and falls back to {}
+            logger.debug(
+                "brokerage_session_ready_init_failed",
+                **summarize_exception(e, operation="contract_info_brokerage_init"),
+            )
 
     def _ensure_brokerage_session_locked(self, *, operation: str) -> None:
         status = self._brokerage_auth_status()
@@ -845,7 +887,10 @@ class IbkrClient:
         Returns raw contract info dict, or {} on failure.
         """
         self._ensure_connected()
-        self.initialize_brokerage_session(compete=compete)
+        # Status-first best-effort guard: re-inits only when the brokerage session is
+        # not authenticated (and never displaces another session when compete=False),
+        # so a batch of per-position conid lookups doesn't re-init ssodh per call.
+        self._ensure_brokerage_session_ready(compete=compete)
         try:
             result = self._throttle.call(
                 lambda: self._ibind_client.contract_information_by_conid(str(conid))

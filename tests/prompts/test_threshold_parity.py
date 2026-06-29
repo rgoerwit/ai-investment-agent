@@ -82,6 +82,21 @@ CASES = [
     ),
     ("fundamentals_analyst.json", rf"P/E <={_PE}", "PE scoring threshold"),
     ("fundamentals_analyst.json", rf"PEG <={re.escape(_PEG)}", "PEG scoring threshold"),
+    (
+        "fundamentals_analyst.json",
+        rf"ASSET_TURNOVER >= {tc.ASSET_TURNOVER_DISTRIBUTION_MIN:g}",
+        "distribution-model asset-turnover gate",
+    ),
+    (
+        "fundamentals_analyst.json",
+        rf"Operating Margin >{tc.SECTOR_OPERATING_MARGIN_MIN['Consumer Discretionary']:.0f}%",
+        "distribution relaxed operating-margin floor",
+    ),
+    (
+        "fundamentals_analyst.json",
+        rf"Gross Margin >{tc.SECTOR_GROSS_MARGIN_MIN['Consumer Discretionary']:.0f}%",
+        "distribution relaxed gross-margin floor",
+    ),
 ]
 
 RETIRED_PATTERNS = [
@@ -144,6 +159,32 @@ def test_cmic_enum_prompt_matches_every_consumer():
         "supplemental_extractors.CMIC_STATUS_TOKENS, and "
         "charts/extractors/data_block.CMIC_STATUS_TOKENS"
     )
+
+
+def test_new_datablock_fields_parser_compatible():
+    """The APR-mitigation fields must use identical names across prompt + parser.
+
+    Guards the FLA -> Senior DATA_BLOCK -> extract_metrics chain against silent
+    field-name drift (the data would then never reach the parser).
+    """
+    from src.validators.metric_extractor import extract_metrics
+
+    fund = _system_message("fundamentals_analyst.json")
+    fla = _system_message("foreign_language_analyst.json")
+    parser_keys = extract_metrics("")  # empty report -> dict initialized with all keys
+
+    for field, parser_key in (
+        ("ASSET_TURNOVER", "asset_turnover"),
+        ("INVENTORY_TURNOVER_TREND", "inventory_turnover_trend"),
+        ("CAPACITY_UTILIZATION", "capacity_utilization"),
+        ("FACILITY_BUILDOUT_STATUS", "facility_buildout_status"),
+    ):
+        assert field in fund, f"{field} missing from Senior DATA_BLOCK template"
+        assert parser_key in parser_keys, f"{parser_key} not parsed by extract_metrics"
+
+    # The capacity/facility signals originate in the Foreign Language Analyst.
+    for field in ("CAPACITY_UTILIZATION", "FACILITY_BUILDOUT_STATUS"):
+        assert field in fla, f"{field} missing from Foreign Language Analyst prompt"
 
 
 def test_pfic_and_vie_enums_match_parser():

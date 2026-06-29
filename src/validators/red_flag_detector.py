@@ -23,6 +23,7 @@ from src.validators.supplemental_flags import (
     detect_legal_flags,
     detect_material_operating_signal_flags,
     detect_moat_flags,
+    detect_return_quality_fragility_flags,
     detect_shareholder_return_execution_flags,
     detect_value_trap_flags,
 )
@@ -44,6 +45,9 @@ class RedFlagDetector:
     detect_value_trap_flags = staticmethod(detect_value_trap_flags)
     extract_moat_signals = staticmethod(extract_moat_signals)
     detect_moat_flags = staticmethod(detect_moat_flags)
+    detect_return_quality_fragility_flags = staticmethod(
+        detect_return_quality_fragility_flags
+    )
     extract_capital_efficiency_signals = staticmethod(
         extract_capital_efficiency_signals
     )

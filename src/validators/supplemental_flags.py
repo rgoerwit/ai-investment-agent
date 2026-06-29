@@ -234,11 +234,34 @@ def detect_legal_flags(
     return warnings
 
 
+def _reinvestment_context_contradicts_trap(
+    capital_context: dict[str, Any] | None,
+) -> bool:
+    """True when the DATA_BLOCK shows genuine growth investment, not value destruction.
+
+    The Value-Trap Detector runs in parallel with Fundamentals and is blind to ROIC /
+    capex status, so it can mislabel heavy reinvestment as "POOR" capital allocation and
+    sink the score below 40 (APR.WA). When the Senior Fundamentals DATA_BLOCK independently
+    confirms GROWTH_INVESTING capex AND ADEQUATE/STRONG ROIC AND an EXPLICIT capital plan,
+    the "trap" rationale is contradicted and the penalty is downgraded (never removed —
+    a cash-hoarder is not GROWTH_INVESTING, so this cannot whitewash a true trap).
+    """
+    if not capital_context:
+        return False
+    return (
+        (capital_context.get("capex_to_da_status") or "").upper() == "GROWTH_INVESTING"
+        and (capital_context.get("roic_quality") or "").upper()
+        in {"ADEQUATE", "STRONG"}
+        and (capital_context.get("capital_plan_status") or "").upper() == "EXPLICIT"
+    )
+
+
 def detect_value_trap_flags(
     value_trap_report: str,
     ticker: str = "UNKNOWN",
     *,
     m_and_a_status: str | None = None,
+    capital_context: dict[str, Any] | None = None,
 ) -> list[dict]:
     """Parse VALUE_TRAP_BLOCK for deterministic warning flags.
 
@@ -249,6 +272,12 @@ def detect_value_trap_flags(
     restructuring catalyst. Without this, an active-takeover name (e.g. GAMA.L)
     self-contradicts — flagged "no catalyst" while the DATA_BLOCK reports
     ``M_AND_A_STATUS: ACTIVE_TENDER``.
+
+    ``capital_context`` (parsed DATA_BLOCK capex/ROIC/plan fields) lets a HIGH/TRAP
+    penalty be **downgraded** to MODERATE when the trap was driven by reinvestment that
+    the DATA_BLOCK independently shows is genuine growth investment (see
+    ``_reinvestment_context_contradicts_trap``). ``NO_CATALYST_DETECTED`` is **not**
+    dropped here — a capex plan explains reinvestment but is not itself a near-term catalyst.
     """
     flags: list[dict[str, Any]] = []
 
@@ -261,21 +290,50 @@ def detect_value_trap_flags(
         "ACTIVE_TENDER",
         "ACTIVE_OFFER",
     }
+    # Only downgrade when the trap was actually driven by a POOR capital-allocation
+    # rating AND the DATA_BLOCK contradicts it (genuine growth investment). A trap
+    # scored low for governance/concentration/no-catalyst (RATING != POOR) must NOT
+    # be whitewashed just because the company also happens to be investing.
+    reinvestment_downgrade = metrics.get(
+        "capital_allocation_rating"
+    ) == "POOR" and _reinvestment_context_contradicts_trap(capital_context)
 
     if score is not None and score < 40:
-        flags.append(
-            {
-                "type": "VALUE_TRAP_HIGH_RISK",
-                "severity": "WARNING",
-                "detail": f"Value Trap Score {score}/100 (< 40 threshold indicates probable trap)",
-                "action": "RISK_PENALTY",
-                "risk_penalty": 1.0,
-                "rationale": "Low governance score suggests entrenched ownership, poor capital allocation, or no catalyst for re-rating.",
-            }
-        )
-        logger.debug(
-            "value_trap_flag_high_risk", ticker=ticker, score=score, verdict=verdict
-        )
+        if reinvestment_downgrade:
+            flags.append(
+                {
+                    "type": "VALUE_TRAP_MODERATE_RISK",
+                    "severity": "WARNING",
+                    "detail": (
+                        f"Value Trap Score {score}/100 downgraded HIGH->MODERATE: "
+                        "DATA_BLOCK shows GROWTH_INVESTING capex + ADEQUATE/STRONG ROIC "
+                        "+ EXPLICIT capital plan (reinvestment, not value destruction)"
+                    ),
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 0.5,
+                    "rationale": "Value-Trap Detector runs blind to ROIC/capex and can mislabel reinvestment as poor allocation. The Senior Fundamentals DATA_BLOCK independently confirms genuine growth investment with adequate returns, so the HIGH-risk trap penalty is downgraded (not removed) to MODERATE.",
+                }
+            )
+            logger.info(
+                "value_trap_high_downgraded_reinvestment_context",
+                ticker=ticker,
+                score=score,
+                verdict=verdict,
+            )
+        else:
+            flags.append(
+                {
+                    "type": "VALUE_TRAP_HIGH_RISK",
+                    "severity": "WARNING",
+                    "detail": f"Value Trap Score {score}/100 (< 40 threshold indicates probable trap)",
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 1.0,
+                    "rationale": "Low governance score suggests entrenched ownership, poor capital allocation, or no catalyst for re-rating.",
+                }
+            )
+            logger.debug(
+                "value_trap_flag_high_risk", ticker=ticker, score=score, verdict=verdict
+            )
     elif score is not None and score < 60:
         flags.append(
             {
@@ -294,17 +352,41 @@ def detect_value_trap_flags(
     if verdict == "TRAP" and not any(
         flag["type"] == "VALUE_TRAP_HIGH_RISK" for flag in flags
     ):
-        flags.append(
-            {
-                "type": "VALUE_TRAP_VERDICT",
-                "severity": "WARNING",
-                "detail": "Value Trap Detector verdict: TRAP",
-                "action": "RISK_PENALTY",
-                "risk_penalty": 1.0,
-                "rationale": "Agent assessment indicates high probability of value trap. Stock may remain cheap indefinitely without catalyst.",
-            }
+        already_moderate = any(
+            flag["type"] == "VALUE_TRAP_MODERATE_RISK" for flag in flags
         )
-        logger.debug("value_trap_flag_verdict", ticker=ticker, verdict=verdict)
+        if reinvestment_downgrade:
+            # Reinvestment context contradicts the TRAP verdict: do not add a full
+            # +1.0 verdict penalty. If a MODERATE downgrade flag already represents the
+            # residual risk, add nothing; otherwise record a single MODERATE penalty.
+            if not already_moderate:
+                flags.append(
+                    {
+                        "type": "VALUE_TRAP_MODERATE_RISK",
+                        "severity": "WARNING",
+                        "detail": "Value Trap verdict TRAP downgraded to MODERATE: DATA_BLOCK confirms GROWTH_INVESTING + ADEQUATE/STRONG ROIC + EXPLICIT capital plan",
+                        "action": "RISK_PENALTY",
+                        "risk_penalty": 0.5,
+                        "rationale": "TRAP verdict rests on a capital-allocation read the DATA_BLOCK contradicts (genuine growth investment with adequate returns). Penalty downgraded (not removed) to MODERATE.",
+                    }
+                )
+            logger.info(
+                "value_trap_verdict_downgraded_reinvestment_context",
+                ticker=ticker,
+                verdict=verdict,
+            )
+        else:
+            flags.append(
+                {
+                    "type": "VALUE_TRAP_VERDICT",
+                    "severity": "WARNING",
+                    "detail": "Value Trap Detector verdict: TRAP",
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 1.0,
+                    "rationale": "Agent assessment indicates high probability of value trap. Stock may remain cheap indefinitely without catalyst.",
+                }
+            )
+            logger.debug("value_trap_flag_verdict", ticker=ticker, verdict=verdict)
 
     if not has_catalyst and activist_present == "NO" and not active_ma:
         flags.append(
@@ -495,6 +577,76 @@ def detect_moat_flags(
         )
         logger.debug("moat_flag_earnings_quality", ticker=ticker, cfo_ni_avg=cfo_ni_avg)
 
+    return flags
+
+
+def detect_return_quality_fragility_flags(
+    fundamentals_report: str,
+    ticker: str = "UNKNOWN",
+    *,
+    base_metrics: dict[str, Any] | None = None,
+) -> list[dict]:
+    """Flag fragile return quality: unstable profitability or unproven turnaround.
+
+    This is the deterministic relocation of the former PM-prompt free-form rubric
+    item ("Return Quality Fragility +0.5"). A pure threshold check belongs in code,
+    not in the LLM's hand-summed tally where it drifted (the APR.WA case applied it
+    on ``DECLINING`` / ``ROA_5Y_AVG 11.1%`` — neither branch of the stated rule).
+
+    Fires when ``PROFITABILITY_TREND == UNSTABLE`` OR (``ROA >= 7%`` AND
+    ``ROA_5Y_AVG < 5%`` — a current-strong/history-weak unproven turnaround).
+    Suppressed under ``_peak_or_transient_blocker`` so it never double-counts the
+    deterministic ``CYCLICAL_PEAK_WARNING`` / ``TRANSIENT_STRENGTH_DISTORTION``.
+    """
+    flags: list[dict[str, Any]] = []
+
+    metrics = (
+        base_metrics
+        if base_metrics is not None
+        else extract_metrics(fundamentals_report)
+    )
+    trend = metrics.get("profitability_trend")
+    roa_current = metrics.get("roa_current")
+    roa_5y_avg = metrics.get("roa_5y_avg")
+
+    unproven_turnaround = (
+        roa_current is not None
+        and roa_current >= 7.0
+        and roa_5y_avg is not None
+        and roa_5y_avg < 5.0
+    )
+    if trend != "UNSTABLE" and not unproven_turnaround:
+        return flags
+
+    # Do not double-count: CYCLICAL_PEAK_WARNING / TRANSIENT_STRENGTH_DISTORTION
+    # already charge the same suspect-earnings base.
+    if _peak_or_transient_blocker(fundamentals_report, base_metrics=metrics):
+        return flags
+
+    if trend == "UNSTABLE":
+        detail = "PROFITABILITY_TREND: UNSTABLE — return base is volatile."
+    else:
+        detail = (
+            f"Unproven turnaround: ROA {roa_current:.1f}% above threshold but "
+            f"5Y avg {roa_5y_avg:.1f}% below 5% — new return level not yet durable."
+        )
+    flags.append(
+        {
+            "type": "RETURN_QUALITY_FRAGILITY",
+            "severity": "WARNING",
+            "detail": detail,
+            "action": "RISK_PENALTY",
+            "risk_penalty": 0.5,
+            "rationale": "Returns are either volatile (UNSTABLE) or sit well above a weak 5-year base (unproven turnaround). Either way the current return level is not yet demonstrated to be durable, warranting a modest risk premium. Computed deterministically from the DATA_BLOCK to keep the threshold off the PM's free-form tally.",
+        }
+    )
+    logger.debug(
+        "return_quality_fragility_flag",
+        ticker=ticker,
+        profitability_trend=trend,
+        roa_current=roa_current,
+        roa_5y_avg=roa_5y_avg,
+    )
     return flags
 
 
