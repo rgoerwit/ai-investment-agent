@@ -22,8 +22,8 @@ def test_apac_prompt_version_bumped() -> None:
 
 def test_apac_prompt_metadata_updated() -> None:
     md = _load()["metadata"]
-    assert md["last_updated"] == "2026-06-14"
-    assert "v1.3" in md["changes"]
+    assert md["last_updated"] == "2026-06-29"
+    assert "v1.4" in md["changes"]
 
 
 def test_apac_value_up_credit_is_narrowly_scoped() -> None:
@@ -50,6 +50,21 @@ def test_apac_prompt_default_is_support() -> None:
     msg = _load()["system_message"]
     assert "SUPPORT, not CAUTION" in msg
     # And the silence sentinel is still preserved.
+    assert "NO_MATERIAL_APAC_CONNECTION" in msg
+
+
+def test_apac_prompt_exposure_mode_not_silence_by_default() -> None:
+    """v1.4: non-APAC-listed issuers must get a transmission-channel audit
+    (APAC as a global supply-chain / market lens), not a default silence. The
+    NO_MATERIAL_APAC_CONNECTION sentinel survives but is narrowed to a rare
+    fallback."""
+    msg = _load()["system_message"]
+    assert "APAC-EXPOSURE mode" in msg
+    assert "DOMESTIC-APAC mode" in msg
+    # Silence is explicitly demoted from the default path.
+    assert "SILENCE PROTOCOL (rare)" in msg
+    assert "Do NOT silence merely because the issuer is not APAC-listed" in msg
+    # Sentinel token stays byte-identical for the node/parsers.
     assert "NO_MATERIAL_APAC_CONNECTION" in msg
 
 
