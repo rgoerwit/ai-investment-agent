@@ -1999,6 +1999,14 @@ class TestSavedDiagnostics:
             "fundamentals_report": "DATA_BLOCK",
             "final_trade_decision": "BUY",
             "pre_screening_result": "PASS",
+            "red_flags": [
+                {
+                    "type": "PFIC_UNCERTAIN",
+                    "severity": "WARNING",
+                    "detail": "PFIC status unclear.",
+                    "risk_penalty": 0.5,
+                }
+            ],
             "investment_debate_state": {"count": 1},
             "analysis_validity": {"publishable": True},
             "artifact_statuses": {},
@@ -2017,6 +2025,7 @@ class TestSavedDiagnostics:
         payload = json.loads(output_path.read_text())
 
         assert payload["pre_screening_result"] == "PASS"
+        assert payload["red_flags"] == result["red_flags"]
         assert payload["metadata"]["llm_provider"] == "google"
 
     def test_save_results_includes_macro_context_metadata(self, tmp_path, monkeypatch):

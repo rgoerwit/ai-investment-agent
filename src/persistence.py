@@ -601,6 +601,7 @@ def save_results_to_file(
             "decision": result.get("final_trade_decision", ""),
             "processed_signal": None,
         },
+        "red_flags": result.get("red_flags", []),
         "pre_screening_result": result.get("pre_screening_result", ""),
         "run_summary": result.get("run_summary", {}),
         "analysis_validity": result.get("analysis_validity", {}),

@@ -775,6 +775,7 @@ NEUTRAL ANALYST (Balanced):
 
         pre_screening_result = state.get("pre_screening_result", "N/A")
         red_flags = list(state.get("red_flags", []))
+        pm_generated_red_flags: list[dict[str, Any]] = []
         ticker = state.get("company_of_interest", "UNKNOWN")
         macro_section = support.macro_section_for(config)
 
@@ -787,6 +788,7 @@ NEUTRAL ANALYST (Balanced):
             )
             if value_trap_warnings:
                 red_flags.extend(value_trap_warnings)
+                pm_generated_red_flags.extend(value_trap_warnings)
                 logger.info(
                     "value_trap_warnings_detected",
                     ticker=ticker,
@@ -803,6 +805,7 @@ NEUTRAL ANALYST (Balanced):
             moat_bonuses = RedFlagDetector.detect_moat_flags(fundamentals, ticker)
             if moat_bonuses:
                 red_flags.extend(moat_bonuses)
+                pm_generated_red_flags.extend(moat_bonuses)
                 logger.info(
                     "moat_bonuses_detected",
                     ticker=ticker,
@@ -819,6 +822,7 @@ NEUTRAL ANALYST (Balanced):
             )
             if return_quality_flags:
                 red_flags.extend(return_quality_flags)
+                pm_generated_red_flags.extend(return_quality_flags)
                 logger.info(
                     "return_quality_fragility_flags_detected",
                     ticker=ticker,
@@ -836,6 +840,7 @@ NEUTRAL ANALYST (Balanced):
             )
             if capital_flags:
                 red_flags.extend(capital_flags)
+                pm_generated_red_flags.extend(capital_flags)
                 logger.info(
                     "capital_efficiency_flags_detected",
                     ticker=ticker,
@@ -854,6 +859,7 @@ NEUTRAL ANALYST (Balanced):
             )
             if value_up_bonuses:
                 red_flags.extend(value_up_bonuses)
+                pm_generated_red_flags.extend(value_up_bonuses)
                 logger.info(
                     "value_up_executed_bonus_detected",
                     ticker=ticker,
@@ -878,6 +884,7 @@ NEUTRAL ANALYST (Balanced):
             )
             if material_signal_flags:
                 red_flags.extend(material_signal_flags)
+                pm_generated_red_flags.extend(material_signal_flags)
                 logger.info(
                     "material_operating_signal_flags_detected",
                     ticker=ticker,
@@ -885,6 +892,7 @@ NEUTRAL ANALYST (Balanced):
                 )
 
         consultant_review = get_valid_artifact_content(state, "consultant_review")
+        consultant_conditions = None
         if consultant_review:
             if not isinstance(consultant_review, str):
                 consultant_review = message_utils.extract_string_content(
@@ -899,6 +907,7 @@ NEUTRAL ANALYST (Balanced):
             )
             if consultant_flags:
                 red_flags.extend(consultant_flags)
+                pm_generated_red_flags.extend(consultant_flags)
                 logger.info(
                     "consultant_flags_detected",
                     ticker=ticker,
@@ -917,17 +926,17 @@ NEUTRAL ANALYST (Balanced):
         # penalty). See KTY.WA 2026-06-27: filing 1.148B vs auditor ~971M. The
         # auditor content is read through the validity-gated accessor so a failed
         # auditor artifact is never parsed as a corroborating figure.
+        auditor_report = get_valid_artifact_content(state, "auditor_report") or None
         ocf_corroboration_flag = RedFlagDetector.detect_ocf_corroboration_flag(
             RedFlagDetector.parse_ocf_amount(
                 extract_data_block_field(fundamentals, "OPERATING_CASH_FLOW")
             ),
-            RedFlagDetector.extract_auditor_ocf(
-                get_valid_artifact_content(state, "auditor_report") or None
-            ),
+            RedFlagDetector.extract_auditor_ocf(auditor_report),
             ticker,
         )
         if ocf_corroboration_flag:
             red_flags.append(ocf_corroboration_flag)
+            pm_generated_red_flags.append(ocf_corroboration_flag)
             logger.info(
                 "ocf_corroboration_flag_detected",
                 ticker=ticker,
@@ -1082,21 +1091,30 @@ NEUTRAL ANALYST (Balanced):
             extract_data_block_field(fundamentals, "VALUATION_INPUT_RELIABILITY") or ""
         ).upper()
         if valuation_reliability == "QUARANTINED":
-            red_flags.append(
-                {
-                    "type": "VALUATION_INPUT_QUARANTINED",
-                    "severity": "WARNING",
-                    "detail": (
-                        "Forward/trailing valuation multiples were quarantined by "
-                        "structured data checks; they cannot independently support a BUY."
-                    ),
-                    "action": "REVIEW",
-                    "risk_penalty": 0.0,
-                    "rationale": (
-                        "Distrusted valuation inputs — verify before using as BUY support."
-                    ),
-                }
-            )
+            valuation_flag = {
+                "type": "VALUATION_INPUT_QUARANTINED",
+                "severity": "WARNING",
+                "detail": (
+                    "Forward/trailing valuation multiples were quarantined by "
+                    "structured data checks; they cannot independently support a BUY."
+                ),
+                "action": "REVIEW",
+                "risk_penalty": 0.0,
+                "rationale": (
+                    "Distrusted valuation inputs — verify before using as BUY support."
+                ),
+            }
+            red_flags.append(valuation_flag)
+            pm_generated_red_flags.append(valuation_flag)
+
+        red_flags = RedFlagDetector.reconcile_ocf_period_mismatch_flags(
+            red_flags,
+            fundamentals_report=fundamentals,
+            consultant_review=consultant_review,
+            auditor_report=auditor_report,
+            ticker=ticker,
+            consultant_conditions=consultant_conditions,
+        )
 
         red_flag_section, code_risk_subtotal = support.format_red_flag_section(
             pre_screening_result, red_flags
@@ -1267,11 +1285,13 @@ RISK TEAM DEBATE:
                 ),
                 strict_mode=strict_mode,
             )
-            return success_artifact(
+            result = success_artifact(
                 "final_trade_decision",
                 cap_state_value(content_str, "final_trade_decision"),
                 provider=support.infer_provider_name(llm),
             )
+            result["red_flags"] = pm_generated_red_flags
+            return result
         except Exception as exc:
             logger.error(
                 "pm_error",

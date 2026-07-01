@@ -1226,6 +1226,34 @@ class TestTraderSectionVerdictGating:
         assert "PM_BLOCK verdict was DO NOT INITIATE" in report
         assert "6.00 NZD" not in report
 
+    def test_invalid_consultant_review_is_caveated_not_rendered(self):
+        reporter = QuietModeReporter("TEST.NZ")
+        result = self._result("#### PORTFOLIO MANAGER VERDICT: HOLD\n\nRationale.")
+        result.update(
+            {
+                "consultant_review": (
+                    "### CONSULTANT REVIEW: CONDITIONAL APPROVAL\n\n"
+                    "### SECTION 1: FACTUAL VERIFICATION\n"
+                    "Useful-looking text that failed validation."
+                ),
+                "artifact_statuses": {
+                    "consultant_review": {
+                        "complete": True,
+                        "ok": False,
+                        "message": "Consultant review completed with tool failures",
+                    }
+                },
+            }
+        )
+
+        report = reporter.generate_report(result)
+
+        assert "Verification Caveats" in report
+        assert "External consultant review excluded" in report
+        assert "completed with tool failures" in report
+        assert "External Consultant Review (Cross-Validation)" not in report
+        assert "Useful-looking text that failed validation" not in report
+
     def test_dni_risk_debate_is_labeled_non_executable(self):
         reporter = QuietModeReporter("TEST.NZ")
         report = reporter.generate_report(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from src.agents.support import format_red_flag_section
 from src.reporting.memo import (
     InvestmentMemo,
     build_memo,
@@ -231,12 +232,73 @@ def test_extract_legacy_target_range_unavailable() -> None:
 
 def test_extract_pm_risks_prefers_red_flags() -> None:
     red_flags = [
-        {"type": "PFIC_UNCERTAIN", "detail": "PFIC status unclear"},
-        {"type": "HIGH_JURISDICTION_RISK", "detail": "China consumer exposure"},
+        {
+            "type": "PFIC_UNCERTAIN",
+            "detail": "PFIC status unclear",
+            "risk_penalty": 1.0,
+        },
+        {
+            "type": "HIGH_JURISDICTION_RISK",
+            "detail": "China consumer exposure",
+            "risk_penalty": 0.5,
+        },
     ]
     risks = extract_pm_risks(_PM_OUTPUT_BUY, red_flags, limit=4)
     assert len(risks) >= 2
     assert risks[0].startswith("PFIC_UNCERTAIN:")
+
+
+def test_extract_pm_risks_skips_notes_and_bonus_flags() -> None:
+    red_flags = [
+        {
+            "type": "OCF_PERIOD_MISMATCH_RESOLVED",
+            "detail": "period mismatch",
+            "action": "NOTE",
+            "risk_penalty": 0.0,
+        },
+        {
+            "type": "MOAT_PRICING_POWER",
+            "detail": "durable pricing power",
+            "risk_penalty": -0.5,
+        },
+        {
+            "type": "LOCAL_COVERAGE_HIGH",
+            "detail": "moderate local coverage",
+            "risk_penalty": 0.25,
+        },
+    ]
+    risks = extract_pm_risks("", red_flags, limit=4)
+    assert risks == ["LOCAL_COVERAGE_HIGH: moderate local coverage"]
+
+
+def test_extract_pm_risks_keeps_critical_zero_penalty_flags() -> None:
+    red_flags = [
+        {
+            "type": "STRUCTURAL_STOP",
+            "detail": "hard governance stop",
+            "severity": "CRITICAL",
+            "risk_penalty": 0.0,
+        },
+    ]
+    assert extract_pm_risks("", red_flags) == ["STRUCTURAL_STOP: hard governance stop"]
+
+
+def test_valuation_quarantine_is_visible_but_not_a_top_risk() -> None:
+    red_flags = [
+        {
+            "type": "VALUATION_INPUT_QUARANTINED",
+            "detail": "Distrusted valuation inputs — verify before using as BUY support.",
+            "severity": "WARNING",
+            "action": "REVIEW",
+            "risk_penalty": 0.0,
+        }
+    ]
+
+    assert extract_pm_risks("", red_flags, limit=4) == []
+    rendered, subtotal = format_red_flag_section("PASS", red_flags)
+    assert subtotal == 0.0
+    assert "VALUATION_INPUT_QUARANTINED [risk_penalty +0.00]" in rendered
+    assert "verify before using as BUY support" in rendered
 
 
 def test_extract_pm_risks_falls_back_to_pm_narrative() -> None:
@@ -268,6 +330,20 @@ def test_summarize_confidence_when_nothing_ran() -> None:
     assert "did not run" in out
 
 
+def test_summarize_confidence_consultant_error_is_validation_failure() -> None:
+    out = summarize_confidence(
+        {
+            "run_summary": {
+                "consultant_completed": True,
+                "consultant_successful": False,
+                "consultant_verdict": "ERROR",
+            }
+        }
+    )
+    assert "consultant review failed validation" in out
+    assert "consultant ran but did not approve" not in out
+
+
 # ---------- build_memo + render_memo_markdown (happy/edge/error) ----------
 
 
@@ -284,7 +360,11 @@ def test_build_memo_happy_path_buy() -> None:
             ),
         },
         "red_flags": [
-            {"type": "PFIC_UNCERTAIN", "detail": "PFIC status unclear"},
+            {
+                "type": "PFIC_UNCERTAIN",
+                "detail": "PFIC status unclear",
+                "risk_penalty": 1.0,
+            },
         ],
         "run_summary": {
             "consultant_successful": True,
@@ -301,6 +381,39 @@ def test_build_memo_happy_path_buy() -> None:
     ]
     assert memo.top_risks[0].startswith("PFIC_UNCERTAIN")
     assert "consultant" in memo.confidence
+
+
+def test_build_memo_uses_effective_resolved_ocf_flags() -> None:
+    state = {
+        "final_trade_decision": (
+            "### PORTFOLIO MANAGER VERDICT: HOLD\n\n"
+            "### DECISION RATIONALE\n"
+            "Hold while cash-flow period mismatch is reconciled.\n\n"
+            "### --- START PM_BLOCK ---\nVERDICT: HOLD\n### --- END PM_BLOCK ---\n"
+        ),
+        "fundamentals_report": (
+            "### --- START DATA_BLOCK ---\n"
+            "OPERATING_CASH_FLOW: 151.97M PLN\n"
+            "OPERATING_CASH_FLOW_SOURCE: FILING\n"
+            "OCF_FILING_REASON: DISCREPANCY\n"
+            "### --- END DATA_BLOCK ---\n"
+        ),
+        "consultant_review": (
+            "SPOT_CHECK operatingCashflow: DATA_BLOCK 151.97m PLN FY2025; "
+            "FMP 178.06m PLN TTM/Q1 — PERIOD MISMATCH, not a data conflict."
+        ),
+        "auditor_report": "Operating cash flow: PLN 151.967m",
+        "red_flags": [
+            {
+                "type": "OCF_SOURCE_DISCREPANCY",
+                "detail": "OCF value sourced from filing differs from API data",
+                "risk_penalty": 0.5,
+            }
+        ],
+    }
+    memo = build_memo(state)
+    assert memo.top_risks == []
+    assert "period mismatch" in memo.source_confidence[0][1]
 
 
 def test_render_memo_markdown_happy_path_renders_all_sections() -> None:

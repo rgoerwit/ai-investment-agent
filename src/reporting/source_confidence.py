@@ -23,6 +23,7 @@ from src.reporting.state_access import (
     get_apac_regional_report,
     get_auditor_report,
     get_consultant_review,
+    get_effective_red_flags,
     get_fundamentals_report,
 )
 
@@ -52,6 +53,14 @@ def _apac_status(state: dict) -> str | None:
     return "RAN"
 
 
+def _has_effective_flag(state: dict, flag_type: str) -> bool:
+    target = flag_type.upper()
+    return any(
+        isinstance(flag, dict) and str(flag.get("type", "")).upper() == target
+        for flag in get_effective_red_flags(state)
+    )
+
+
 def build_source_confidence_rows(state: dict) -> list[SourceRow]:
     """Compose the source-confidence rows for the memo."""
     rows: list[SourceRow] = []
@@ -67,7 +76,19 @@ def build_source_confidence_rows(state: dict) -> list[SourceRow]:
         .strip()
         .upper()
     )
-    if ocf_source == "FILING" and ocf_reason == "DISCREPANCY":
+    if (
+        ocf_source == "FILING"
+        and ocf_reason == "DISCREPANCY"
+        and _has_effective_flag(state, "OCF_PERIOD_MISMATCH_RESOLVED")
+    ):
+        rows.append(
+            (
+                "Core financials",
+                "Filing OCF corroborated; API difference appears period mismatch",
+                "MEDIUM",
+            )
+        )
+    elif ocf_source == "FILING" and ocf_reason == "DISCREPANCY":
         # Filing and aggregator OCF materially diverged: not "ground truth".
         # Verify against the actual cash-flow statement line (KTY.WA 2026-06-27).
         rows.append(
@@ -115,6 +136,12 @@ def build_source_confidence_rows(state: dict) -> list[SourceRow]:
         rows.append(("Cross-model review", "Consultant — major concerns", "LOW"))
     elif verdict == "REJECTED":
         rows.append(("Cross-model review", "Consultant — not approved", "LOW"))
+    elif verdict == "ERROR":
+        rows.append(
+            ("Cross-model review", "Consultant review failed validation", "LOW")
+        )
+    elif verdict == "UNPARSED":
+        rows.append(("Cross-model review", "Consultant review unparsed", "LOW"))
     elif consultant_ran:
         rows.append(
             ("Cross-model review", "Consultant ran with reservations", "MEDIUM")

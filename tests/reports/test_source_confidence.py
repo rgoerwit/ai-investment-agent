@@ -25,6 +25,16 @@ _DATA_BLOCK_AGGREGATOR = (
 )
 
 
+def _ocf_source_discrepancy_flag() -> dict[str, object]:
+    return {
+        "type": "OCF_SOURCE_DISCREPANCY",
+        "severity": "WARNING",
+        "detail": "Filing OCF differs from aggregator OCF.",
+        "action": "RISK_PENALTY",
+        "risk_penalty": 0.5,
+    }
+
+
 def _claim(rows, claim_name):
     matches = [row for row in rows if row[0] == claim_name]
     assert matches, f"no row for claim {claim_name!r}"
@@ -56,6 +66,57 @@ def test_build_rows_filing_ocf_discrepancy_downgraded() -> None:
     assert conf == "MEDIUM"
     assert "conflict" in source.lower()
     assert "ground truth" not in source.lower()
+
+
+def test_build_rows_resolved_ocf_period_mismatch_wording() -> None:
+    block = (
+        "### --- START DATA_BLOCK ---\n"
+        "OPERATING_CASH_FLOW: 151.97M PLN\n"
+        "OPERATING_CASH_FLOW_SOURCE: FILING\n"
+        "OCF_FILING_REASON: DISCREPANCY\n"
+        "### --- END DATA_BLOCK ---\n"
+    )
+    rows = build_source_confidence_rows(
+        {
+            "fundamentals_report": block,
+            "consultant_review": (
+                "SPOT_CHECK operatingCashflow: DATA_BLOCK 151.97m PLN FY2025; "
+                "FMP 178.06m PLN TTM/Q1 — PERIOD MISMATCH, not a data conflict."
+            ),
+            "auditor_report": "Operating cash flow: PLN 151.967m",
+            "red_flags": [_ocf_source_discrepancy_flag()],
+        }
+    )
+    _, source, conf = _claim(rows, "Core financials")
+    assert conf == "MEDIUM"
+    assert "corroborated" in source
+    assert "period mismatch" in source
+
+
+def test_build_rows_major_concerns_do_not_resolve_ocf_period_mismatch() -> None:
+    block = (
+        "### --- START DATA_BLOCK ---\n"
+        "OPERATING_CASH_FLOW: 151.97M PLN\n"
+        "OPERATING_CASH_FLOW_SOURCE: FILING\n"
+        "OCF_FILING_REASON: DISCREPANCY\n"
+        "### --- END DATA_BLOCK ---\n"
+    )
+    rows = build_source_confidence_rows(
+        {
+            "fundamentals_report": block,
+            "consultant_review": (
+                "### CONSULTANT REVIEW: MAJOR_CONCERNS\n"
+                "SPOT_CHECK operatingCashflow: DATA_BLOCK 151.97m PLN FY2025; "
+                "FMP 178.06m PLN TTM/Q1 — PERIOD MISMATCH, not a data conflict."
+            ),
+            "auditor_report": "Operating cash flow: PLN 151.967m",
+            "red_flags": [_ocf_source_discrepancy_flag()],
+        }
+    )
+    _, source, conf = _claim(rows, "Core financials")
+    assert conf == "MEDIUM"
+    assert "conflict" in source.lower()
+    assert "corroborated" not in source.lower()
 
 
 def test_build_rows_filing_ocf_no_discrepancy_stays_high() -> None:
@@ -116,6 +177,20 @@ def test_build_rows_consultant_successful_high() -> None:
     rows = build_source_confidence_rows(state)
     _, source, conf = _claim(rows, "Cross-model review")
     assert conf == "HIGH"
+
+
+def test_build_rows_consultant_error_low_confidence() -> None:
+    state = {
+        "run_summary": {
+            "consultant_completed": True,
+            "consultant_successful": False,
+            "consultant_verdict": "ERROR",
+        }
+    }
+    rows = build_source_confidence_rows(state)
+    _, source, conf = _claim(rows, "Cross-model review")
+    assert conf == "LOW"
+    assert "failed validation" in source
 
 
 def test_build_rows_apac_caution_surfaced() -> None:

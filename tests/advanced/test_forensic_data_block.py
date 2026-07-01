@@ -61,7 +61,8 @@ class TestAuditorForensicDataBlock:
         system_msg = auditor.system_message
 
         # Check for key formula definitions
-        assert "NI_TO_OCF = Operating Cash Flow / Net Income" in system_msg
+        assert "OCF_TO_NI = Operating Cash Flow / Net Income" in system_msg
+        assert "NI_TO_OCF = Operating Cash Flow / Net Income" not in system_msg
         assert "PAPER_PROFIT = (Net Income - OCF) / Total Assets" in system_msg
         assert "DSO = (Accounts Receivable / Revenue)" in system_msg
         assert "ZOMBIE_RATIO = EBIT / Interest Expense" in system_msg

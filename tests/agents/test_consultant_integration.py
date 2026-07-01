@@ -735,7 +735,18 @@ class TestPortfolioManagerConsultantGating:
     async def test_pm_ignores_invalid_consultant_review_for_flag_generation(self):
         mock_llm = Mock()
         mock_response = Mock()
-        mock_response.content = "## FINAL DECISION: HOLD"
+        mock_response.content = (
+            "### PORTFOLIO MANAGER VERDICT: HOLD\n\n"
+            "### THESIS COMPLIANCE SUMMARY\n"
+            "Hard Fail Checks: PASS\n\n"
+            "### FINAL EXECUTION PARAMETERS\n"
+            "- Action: HOLD\n\n"
+            "### --- START PM_BLOCK ---\n"
+            "VERDICT: HOLD\n"
+            "RISK_TALLY: 0.5\n"
+            "ZONE: MODERATE\n"
+            "### --- END PM_BLOCK ---\n"
+        )
         captured_prompt: dict[str, str] = {}
 
         async def mock_invoke(*args, **kwargs):
@@ -798,7 +809,179 @@ Conditions:
         prompt_text = captured_prompt["text"]
         assert "CONSULTANT_CONDITIONAL" not in prompt_text
         assert "N/A (consultant disabled or unavailable)" in prompt_text
-        assert result["final_trade_decision"] == "## FINAL DECISION: HOLD"
+        assert "PORTFOLIO MANAGER VERDICT: HOLD" in result["final_trade_decision"]
+
+    @pytest.mark.asyncio
+    async def test_pm_returns_generated_red_flags_for_downstream_reporting(self):
+        mock_llm = Mock()
+        mock_response = Mock()
+        mock_response.content = (
+            "### PORTFOLIO MANAGER VERDICT: HOLD\n\n"
+            "### THESIS COMPLIANCE SUMMARY\n"
+            "Hard Fail Checks: PASS\n\n"
+            "### FINAL EXECUTION PARAMETERS\n"
+            "- Action: HOLD\n\n"
+            "### --- START PM_BLOCK ---\n"
+            "VERDICT: HOLD\n"
+            "RISK_TALLY: 0.5\n"
+            "ZONE: MODERATE\n"
+            "### --- END PM_BLOCK ---\n"
+        )
+
+        async def mock_invoke(*args, **kwargs):
+            return mock_response
+
+        consultant_review = """
+### CONSULTANT REVIEW: CONDITIONAL APPROVAL
+
+**Overall Assessment**: CONDITIONAL APPROVAL
+"""
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                mock_prompt = Mock()
+                mock_prompt.system_message = "You are the portfolio manager."
+                mock_prompt.agent_name = "Portfolio Manager"
+                mock_get_prompt.return_value = mock_prompt
+
+                node = create_portfolio_manager_node(mock_llm, None)
+                state = {
+                    "market_report": "Market report",
+                    "sentiment_report": "Sentiment report",
+                    "news_report": "News report",
+                    "fundamentals_report": (
+                        "### --- START DATA_BLOCK ---\n"
+                        "PFIC_RISK: LOW\n"
+                        "VALUATION_INPUT_RELIABILITY: USABLE\n"
+                        "### --- END DATA_BLOCK ---"
+                    ),
+                    "value_trap_report": "",
+                    "investment_plan": "Research plan",
+                    "consultant_review": consultant_review,
+                    "trader_investment_plan": "Trader plan",
+                    "risk_debate_state": {
+                        "current_risky_response": "Risky view",
+                        "current_safe_response": "Safe view",
+                        "current_neutral_response": "Neutral view",
+                    },
+                    "company_of_interest": "TEST.T",
+                    "red_flags": [],
+                    "pre_screening_result": "PASS",
+                    "artifact_statuses": {
+                        "consultant_review": {
+                            "complete": True,
+                            "ok": True,
+                            "content": consultant_review,
+                        }
+                    },
+                }
+
+                result = await node(state, RunnableConfig(configurable={}))
+
+        assert any(
+            flag["type"] == "CONSULTANT_CONDITIONAL"
+            for flag in result.get("red_flags", [])
+        )
+
+    @pytest.mark.asyncio
+    async def test_pm_prompt_uses_resolved_ocf_period_mismatch_flag(self):
+        mock_llm = Mock()
+        mock_response = Mock()
+        mock_response.content = (
+            "### PORTFOLIO MANAGER VERDICT: HOLD\n\n"
+            "### THESIS COMPLIANCE SUMMARY\n"
+            "Hard Fail Checks: PASS\n\n"
+            "### FINAL EXECUTION PARAMETERS\n"
+            "- Action: HOLD\n\n"
+            "### --- START PM_BLOCK ---\n"
+            "VERDICT: HOLD\n"
+            "RISK_TALLY: 0.0\n"
+            "ZONE: LOW\n"
+            "### --- END PM_BLOCK ---\n"
+        )
+        captured_prompt: dict[str, str] = {}
+
+        async def mock_invoke(*args, **kwargs):
+            messages = args[1]
+            captured_prompt["text"] = messages[0].content
+            return mock_response
+
+        fundamentals_report = (
+            "### --- START DATA_BLOCK ---\n"
+            "OPERATING_CASH_FLOW: 151.97M PLN\n"
+            "OPERATING_CASH_FLOW_SOURCE: FILING\n"
+            "OCF_FILING_REASON: DISCREPANCY\n"
+            "VALUATION_INPUT_RELIABILITY: USABLE\n"
+            "### --- END DATA_BLOCK ---"
+        )
+        consultant_review = (
+            "### CONSULTANT REVIEW: CONDITIONAL APPROVAL\n\n"
+            "SPOT_CHECK operatingCashflow: DATA_BLOCK 151.97m PLN FY2025; "
+            "FMP 178.06m PLN TTM/Q1 — PERIOD MISMATCH, not a data conflict.\n\n"
+            "**Overall Assessment**: CONDITIONAL APPROVAL\n"
+        )
+        auditor_report = (
+            "Observed FY2025 figures used:\n- Operating cash flow: PLN 151.967m\n"
+        )
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                mock_prompt = Mock()
+                mock_prompt.system_message = "You are the portfolio manager."
+                mock_prompt.agent_name = "Portfolio Manager"
+                mock_get_prompt.return_value = mock_prompt
+
+                node = create_portfolio_manager_node(mock_llm, None)
+                state = {
+                    "market_report": "Market report",
+                    "sentiment_report": "Sentiment report",
+                    "news_report": "News report",
+                    "fundamentals_report": fundamentals_report,
+                    "value_trap_report": "",
+                    "investment_plan": "Research plan",
+                    "consultant_review": consultant_review,
+                    "auditor_report": auditor_report,
+                    "trader_investment_plan": "Trader plan",
+                    "risk_debate_state": {
+                        "current_risky_response": "Risky view",
+                        "current_safe_response": "Safe view",
+                        "current_neutral_response": "Neutral view",
+                    },
+                    "company_of_interest": "APR.WA",
+                    "red_flags": [
+                        {
+                            "type": "OCF_SOURCE_DISCREPANCY",
+                            "severity": "WARNING",
+                            "detail": "Filing and API OCF differ",
+                            "action": "RISK_PENALTY",
+                            "risk_penalty": 0.5,
+                        }
+                    ],
+                    "pre_screening_result": "PASS",
+                    "artifact_statuses": {
+                        "consultant_review": {
+                            "complete": True,
+                            "ok": True,
+                            "content": consultant_review,
+                        },
+                        "auditor_report": {
+                            "complete": True,
+                            "ok": True,
+                            "content": auditor_report,
+                        },
+                    },
+                }
+
+                result = await node(state, RunnableConfig(configurable={}))
+
+        prompt_text = captured_prompt["text"]
+        assert "OCF_PERIOD_MISMATCH_RESOLVED [risk_penalty +0.00]" in prompt_text
+        assert "OCF_SOURCE_DISCREPANCY [risk_penalty +0.50]" not in prompt_text
+        assert "PORTFOLIO MANAGER VERDICT: HOLD" in result["final_trade_decision"]
 
 
 class TestConsultantValueAddition:

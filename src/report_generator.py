@@ -28,6 +28,7 @@ from src.data_block_utils import (
 )
 from src.error_safety import summarize_exception
 from src.pm_decision_parser import canonicalize_pm_verdict
+from src.reporting.state_access import get_effective_red_flags
 from src.runtime_diagnostics import is_publishable_analysis
 from src.thesis_constants import ANALYST_COVERAGE_MAX
 from src.ticker_policy import CHINA_SUFFIXES, KOREA_SUFFIXES, ticker_in_group
@@ -308,7 +309,7 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
 
             # Combine into FootballFieldData
             quality_warnings = []
-            red_flags = result.get("red_flags", [])
+            red_flags = get_effective_red_flags(result)
 
             for flag in red_flags:
                 # Only show CRITICAL or WARNING severity on the chart to reduce noise
@@ -510,7 +511,7 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
 
             # Canonicalize PFIC status: Legal Counsel overrides DATA_BLOCK heuristic.
             legal_pfic_status = None
-            for flag in result.get("red_flags", []):
+            for flag in get_effective_red_flags(result):
                 flag_type = str(flag.get("type", "")).upper()
                 if flag_type == "PFIC_PROBABLE":
                     legal_pfic_status = "PROBABLE"
@@ -580,7 +581,7 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
             # --- Data Quality Warnings ---
             axis_warnings = {}
             footnote_parts = []
-            red_flags = result.get("red_flags", [])
+            red_flags = get_effective_red_flags(result)
 
             # Check flags for specific warnings
             for flag in red_flags:
@@ -857,6 +858,10 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         final_decision = self._normalize_string(result.get("final_trade_decision", ""))
         return bool(final_decision and final_decision.strip())
 
+    def _artifact_ok(self, result: dict[str, Any], field: str) -> bool:
+        status = (result.get("artifact_statuses", {}) or {}).get(field) or {}
+        return not (isinstance(status, dict) and status.get("ok") is False)
+
     def _build_verification_caveat(self, result: dict[str, Any]) -> str | None:
         review = self._normalize_string(result.get("consultant_review", ""))
         if not review:
@@ -868,6 +873,21 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         consultant_status = (result.get("artifact_statuses", {}) or {}).get(
             "consultant_review"
         ) or {}
+        intro = (
+            "Independent consultant checks raised verification caveats. Treat any "
+            "unsupported or conflicting narrative claims below as suspect until re-verified."
+        )
+        if consultant_status.get("ok") is False:
+            message = self._normalize_string(
+                consultant_status.get("message")
+                or "Consultant review failed validation."
+            )
+            return (
+                intro
+                + "\n\n- External consultant review excluded from PM/report "
+                + f"cross-validation: {message}"
+            )
+
         flagged_patterns = (
             r"\b(unsubstantiated|unsupported|likely wrong|likely incorrect)\b",
             r"\b(cannot verify|unable to verify|not supported)\b",
@@ -905,10 +925,6 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         if not candidate_lines:
             return None
 
-        intro = (
-            "Independent consultant checks raised verification caveats. Treat any "
-            "unsupported or conflicting narrative claims below as suspect until re-verified."
-        )
         return intro + "\n\n" + "\n".join(candidate_lines)
 
     def _reconcile_consultant_wording(
@@ -1026,7 +1042,7 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
             pass
 
         # Red Flag Pre-Screening (if applicable)
-        red_flags = result.get("red_flags", [])
+        red_flags = get_effective_red_flags(result)
         pre_screening_result = result.get("pre_screening_result", "PASS")
 
         if red_flags or pre_screening_result == "REJECT":
@@ -1190,7 +1206,11 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
 
         # CRITICAL: Include consultant review if present (external cross-validation)
         consultant_review = result.get("consultant_review", "")
-        if consultant_review and consultant_review.strip():
+        if (
+            consultant_review
+            and consultant_review.strip()
+            and self._artifact_ok(result, "consultant_review")
+        ):
             # Check if it's a real review (not an error message or "N/A")
             normalized = self._normalize_string(consultant_review)
             if (

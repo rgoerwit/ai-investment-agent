@@ -814,7 +814,7 @@ class TestReportGeneration:
                 "The 100 new vessels claim is likely wrong."
             ),
             "artifact_statuses": {
-                "consultant_review": {"complete": True, "ok": False},
+                "consultant_review": {"complete": True, "ok": True},
             },
             "final_trade_decision": "FINAL DECISION: HOLD",
         }

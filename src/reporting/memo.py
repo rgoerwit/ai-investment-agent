@@ -38,6 +38,7 @@ from src.reporting.source_confidence import (
     render_source_confidence_markdown,
 )
 from src.reporting.state_access import (
+    get_effective_red_flags,
     get_fundamentals_report,
     get_investment_plan,
     get_pm_output,
@@ -278,6 +279,8 @@ def extract_pm_risks(
     """Combine red-flag detail lines and PM-narrative risk bullets into a short list."""
     risks: list[str] = []
     for flag in red_flags or []:
+        if not _is_material_risk_flag(flag):
+            continue
         flag_type = flag.get("type") if isinstance(flag, dict) else None
         detail = flag.get("detail") if isinstance(flag, dict) else None
         if flag_type and detail:
@@ -303,6 +306,20 @@ def extract_pm_risks(
     return risks[:limit]
 
 
+def _is_material_risk_flag(flag: dict) -> bool:
+    """True for flags that belong in the memo's Top risks list."""
+    if not isinstance(flag, dict):
+        return False
+    if flag.get("action") == "AUTO_REJECT" or flag.get("severity") == "CRITICAL":
+        return True
+    penalty = flag.get("risk_penalty")
+    if isinstance(penalty, bool):
+        return False
+    if isinstance(penalty, int | float):
+        return penalty > 0
+    return False
+
+
 def summarize_confidence(state: dict) -> str:
     """One-sentence summary of which optional cross-checks ran."""
     run_summary = state.get("run_summary") or {}
@@ -320,7 +337,11 @@ def summarize_confidence(state: dict) -> str:
         bits.append("consultant raised major concerns")
     elif verdict == "REJECTED":
         bits.append("consultant did NOT approve")
-    elif verdict in {"UNPARSED", "ERROR"} or run_summary.get("consultant_completed"):
+    elif verdict == "ERROR":
+        bits.append("consultant review failed validation")
+    elif verdict == "UNPARSED":
+        bits.append("consultant review unparsed")
+    elif run_summary.get("consultant_completed"):
         bits.append("consultant ran but did not approve")
     if run_summary.get("auditor_successful"):
         bits.append("forensic auditor clean")
@@ -343,7 +364,7 @@ def build_memo(state: dict) -> InvestmentMemo:
     pm = get_pm_output(state)
     fundamentals = get_fundamentals_report(state)
     bear_text = get_bear_history(state)
-    red_flags = state.get("red_flags") or []
+    red_flags = get_effective_red_flags(state)
 
     return InvestmentMemo(
         decision=extract_pm_verdict(pm),
