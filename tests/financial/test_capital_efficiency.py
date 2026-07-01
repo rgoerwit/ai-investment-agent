@@ -946,6 +946,79 @@ class TestCapitalEfficiencyBonusSuppression:
         assert "CAPITAL_EFFICIENT" not in types
         assert sum(f["risk_penalty"] for f in flags) == 0.0
 
+    def test_unmitigated_underinvestment_suppresses_bonus(self):
+        """Edge: strong ROIC gets no bonus when capex underinvestment is unresolved."""
+        flags = RedFlagDetector.detect_capital_efficiency_flags(
+            self._block(
+                "CAPEX_TO_DA_STATUS: UNDERINVESTING",
+                "CAPITAL_PLAN_STATUS: NONE",
+            ),
+            "CAPEX",
+        )
+
+        types = [f["type"] for f in flags]
+        assert "CAPITAL_EFFICIENCY_BONUS_SUPPRESSED" in types
+        assert "CAPITAL_EFFICIENT" not in types
+        suppressed = next(
+            f for f in flags if f["type"] == "CAPITAL_EFFICIENCY_BONUS_SUPPRESSED"
+        )
+        assert suppressed["risk_penalty"] == 0.0
+        assert "underinvestment" in suppressed["detail"]
+        assert "maintenance-capex adequacy" in suppressed["detail"]
+
+    def test_underinvestment_with_explicit_plan_preserves_bonus(self):
+        flags = RedFlagDetector.detect_capital_efficiency_flags(
+            self._block(
+                "CAPEX_TO_DA_STATUS: UNDERINVESTING",
+                "CAPITAL_PLAN_STATUS: EXPLICIT",
+            ),
+            "PLAN",
+        )
+
+        types = [f["type"] for f in flags]
+        assert "CAPITAL_EFFICIENT" in types
+        assert "CAPITAL_EFFICIENCY_BONUS_SUPPRESSED" not in types
+
+    def test_underinvestment_with_backlog_cover_preserves_bonus(self):
+        flags = RedFlagDetector.detect_capital_efficiency_flags(
+            self._block(
+                "CAPEX_TO_DA_STATUS: UNDERINVESTING",
+                "CAPITAL_PLAN_STATUS: NONE",
+                "REVENUE_BACKLOG_COVERAGE: 1.2",
+            ),
+            "BACKLOG",
+        )
+
+        types = [f["type"] for f in flags]
+        assert "CAPITAL_EFFICIENT" in types
+        assert "CAPITAL_EFFICIENCY_BONUS_SUPPRESSED" not in types
+
+    @pytest.mark.parametrize("capex_status", ["MAINTENANCE", "GROWTH_INVESTING"])
+    def test_maintenance_or_growth_capex_preserves_bonus(self, capex_status: str):
+        flags = RedFlagDetector.detect_capital_efficiency_flags(
+            self._block(f"CAPEX_TO_DA_STATUS: {capex_status}"), "CAPEX"
+        )
+
+        types = [f["type"] for f in flags]
+        assert "CAPITAL_EFFICIENT" in types
+        assert "CAPITAL_EFFICIENCY_BONUS_SUPPRESSED" not in types
+
+    def test_peak_suppression_reason_takes_precedence_over_underinvestment(self):
+        flags = RedFlagDetector.detect_capital_efficiency_flags(
+            self._block(
+                "CYCLE_POSITION: PEAK",
+                "CAPEX_TO_DA_STATUS: UNDERINVESTING",
+                "CAPITAL_PLAN_STATUS: NONE",
+            ),
+            "PEAK",
+        )
+
+        suppressed = next(
+            f for f in flags if f["type"] == "CAPITAL_EFFICIENCY_BONUS_SUPPRESSED"
+        )
+        assert "CYCLE_POSITION: PEAK" in suppressed["detail"]
+        assert "maintenance-capex adequacy" not in suppressed["detail"]
+
     def test_transient_marker_suppresses_bonus(self):
         """Edge: acquisition-led consolidation marker suppresses the bonus."""
         report = (

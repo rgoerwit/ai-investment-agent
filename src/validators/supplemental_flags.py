@@ -684,6 +684,9 @@ def detect_capital_efficiency_flags(
         capital_plan_status = "EXPLICIT"
     if sector is None:
         sector = detect_sector(fundamentals_report)
+    deployment_mitigated = capital_plan_status == "EXPLICIT" or (
+        revenue_backlog_coverage is not None and revenue_backlog_coverage >= 1.0
+    )
 
     if leverage_quality == "VALUE_DESTRUCTION":
         detail = f"ROIC: {roic:.1%}" if roic is not None else "Negative ROIC"
@@ -757,6 +760,16 @@ def detect_capital_efficiency_flags(
             fundamentals_report,
             base_metrics=base_metrics,
         )
+        if (
+            not suppression_reason
+            and capex_to_da_status == "UNDERINVESTING"
+            and not deployment_mitigated
+        ):
+            suppression_reason = (
+                "ROIC may be inflated by underinvestment "
+                "(CAPEX/D&A below maintenance threshold); "
+                "verify maintenance-capex adequacy"
+            )
         if suppression_reason:
             flags.append(
                 {
@@ -765,11 +778,11 @@ def detect_capital_efficiency_flags(
                     "detail": f"Capital-efficiency bonus suppressed: {suppression_reason}",
                     "action": "RISK_BONUS",
                     "risk_penalty": 0.0,
-                    "rationale": "Current ROIC strength may reflect a cyclical peak or one-time event. The capital-efficiency bonus is suppressed (not netted against the peak/transient warning) until the earnings base is verified.",
+                    "rationale": "Current ROIC strength may reflect a cyclical peak, one-time event, or underinvestment. The capital-efficiency bonus is suppressed (not netted against the warning) until the earnings base and maintenance-capex adequacy are verified.",
                 }
             )
             logger.debug(
-                "capital_efficiency_bonus_suppressed_peak_transient",
+                "capital_efficiency_bonus_suppressed",
                 ticker=ticker,
                 reason=suppression_reason,
             )
@@ -805,11 +818,7 @@ def detect_capital_efficiency_flags(
     weak_shareholder_return = (
         payout_ratio is None or payout_ratio < config.idle_cash_min_payout_ratio
     )
-    mitigated = (
-        capital_plan_status == "EXPLICIT"
-        or capex_to_da_status == "GROWTH_INVESTING"
-        or (revenue_backlog_coverage is not None and revenue_backlog_coverage >= 1.0)
-    )
+    mitigated = deployment_mitigated or capex_to_da_status == "GROWTH_INVESTING"
     severe_idle_cash = (
         net_cash_to_mc is not None
         and net_cash_to_mc >= config.idle_cash_severe_net_cash_to_mc_threshold
