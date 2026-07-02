@@ -12,7 +12,10 @@ from src.data_block_utils import (
     has_non_na_block_field_value,
     replace_or_append_block_line,
 )
-from src.validators.pfic_constants import PFIC_ASSET_TEST_THRESHOLD
+from src.validators.pfic_constants import (
+    PFIC_ASSET_PROXIMITY_THRESHOLD,
+    PFIC_ASSET_TEST_THRESHOLD,
+)
 
 HORIZON_FIELD_RAW_KEYS = (
     ("REVENUE_GROWTH_TTM", "revenueGrowth_TTM"),
@@ -341,6 +344,20 @@ def reconcile_high_risk_fields(
         changed_balance_sheet = changed_balance_sheet or changed
 
     if cash_to_assets_ratio is not None:
+        if (
+            PFIC_ASSET_PROXIMITY_THRESHOLD
+            <= cash_to_assets_ratio
+            < PFIC_ASSET_TEST_THRESHOLD
+        ):
+            current_pfic_risk = (
+                extract_block_text_value(updated, "PFIC_RISK").upper()
+                if has_block_field_value(updated, "PFIC_RISK")
+                else ""
+            )
+            if current_pfic_risk in {"", "N/A", "LOW"}:
+                updated = replace_or_append_block_line(updated, "PFIC_RISK", "MEDIUM")
+                changed_balance_sheet = True
+
         expected_cash_trap = (
             "YES" if cash_to_assets_ratio >= PFIC_ASSET_TEST_THRESHOLD else "NO"
         )

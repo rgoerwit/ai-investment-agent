@@ -266,6 +266,91 @@ PFIC_CASH_TRAP: YES
     assert "PFIC_CASH_TRAP: YES" not in sanitized
 
 
+def test_sanitize_fundamentals_output_promotes_pfic_proximity_to_medium() -> None:
+    content = """### --- START DATA_BLOCK ---
+PFIC_RISK: LOW
+CASH_TO_ASSETS: 49.3%
+PFIC_ASSET_RATIO: 49.3%
+PFIC_CASH_TRAP: NO
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps({"capital_cashToAssets": 0.4934})
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "3393.T")
+
+    assert "PFIC_RISK: MEDIUM" in sanitized
+    assert "PFIC_ASSET_RATIO: 49.3%" in sanitized
+    assert "PFIC_CASH_TRAP: NO" in sanitized
+
+
+def test_sanitize_fundamentals_output_appends_missing_pfic_risk_on_proximity() -> None:
+    content = """### --- START DATA_BLOCK ---
+CASH_TO_ASSETS: 49.3%
+PFIC_ASSET_RATIO: 49.3%
+PFIC_CASH_TRAP: NO
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps(
+        {
+            "cashAndShortTermInvestments": 4_934,
+            "totalAssets": 10_000,
+        }
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "3393.T")
+
+    assert "PFIC_RISK: MEDIUM" in sanitized
+
+
+def test_sanitize_fundamentals_output_keeps_pfic_low_below_proximity() -> None:
+    content = """### --- START DATA_BLOCK ---
+PFIC_RISK: LOW
+CASH_TO_ASSETS: 44.9%
+PFIC_ASSET_RATIO: 44.9%
+PFIC_CASH_TRAP: NO
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps({"capital_cashToAssets": 0.449})
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "3393.T")
+
+    assert "PFIC_RISK: LOW" in sanitized
+    assert "PFIC_RISK: MEDIUM" not in sanitized
+
+
+def test_sanitize_fundamentals_output_preserves_pfic_high_on_proximity() -> None:
+    content = """### --- START DATA_BLOCK ---
+PFIC_RISK: HIGH
+CASH_TO_ASSETS: 49.3%
+PFIC_ASSET_RATIO: 49.3%
+PFIC_CASH_TRAP: NO
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps({"capital_cashToAssets": 0.4934})
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "3393.T")
+
+    assert "PFIC_RISK: HIGH" in sanitized
+    assert "PFIC_RISK: MEDIUM" not in sanitized
+
+
+def test_sanitize_fundamentals_output_leaves_pfic_risk_when_basis_unreliable() -> None:
+    content = """### --- START DATA_BLOCK ---
+PFIC_RISK: LOW
+CASH_TO_ASSETS: 49.3%
+PFIC_ASSET_RATIO: 49.3%
+PFIC_CASH_TRAP: NO
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps({"totalDebt": 1_000, "ebitda": 500})
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "3393.T")
+
+    assert "PFIC_RISK: LOW" in sanitized
+    assert "PFIC_RISK: MEDIUM" not in sanitized
+    assert "PFIC_ASSET_NOTE:" in sanitized
+
+
 def test_sanitize_fundamentals_output_downgrades_unreliable_pfic_basis() -> None:
     content = """### --- START DATA_BLOCK ---
 CASH_TO_ASSETS: 33.1%
