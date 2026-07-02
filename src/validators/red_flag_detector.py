@@ -14,7 +14,9 @@ from src.validators.metric_extractor import extract_debt_to_equity, extract_metr
 from src.validators.sector_classifier import Sector, detect_sector
 from src.validators.supplemental_extractors import (
     extract_capital_efficiency_signals,
+    extract_drawdown_explanation,
     extract_legal_risks,
+    extract_material_events_status,
     extract_moat_signals,
     extract_value_trap_score,
     parse_consultant_conditions,
@@ -27,6 +29,7 @@ from src.validators.supplemental_flags import (
     detect_moat_flags,
     detect_return_quality_fragility_flags,
     detect_shareholder_return_execution_flags,
+    detect_unexplained_drawdown_flags,
     detect_value_trap_flags,
 )
 
@@ -66,6 +69,9 @@ class RedFlagDetector:
     detect_material_operating_signal_flags = staticmethod(
         detect_material_operating_signal_flags
     )
+    extract_material_events_status = staticmethod(extract_material_events_status)
+    extract_drawdown_explanation = staticmethod(extract_drawdown_explanation)
+    detect_unexplained_drawdown_flags = staticmethod(detect_unexplained_drawdown_flags)
 
 
 __all__ = ["RedFlagDetector", "Sector"]

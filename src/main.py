@@ -323,6 +323,46 @@ async def _fetch_market_context(ticker: str, trade_date: str) -> str:
     return ""
 
 
+async def _fetch_price_snapshot(ticker: str) -> dict[str, float] | None:
+    """Fetch a 52-week/SMA price snapshot for the drawdown-investigation trigger.
+
+    Strictly advisory: failure returns None (debug log only) and must never
+    affect analysis validity. Mirrors ``_fetch_market_context``'s bounded pattern.
+    """
+    try:
+        import yfinance as yf
+
+        hist = await run_with_hard_timeout(
+            asyncio.to_thread(lambda: yf.Ticker(ticker).history(period="1y")),
+            timeout=10,
+            label=f"price_snapshot:{ticker}",
+        )
+        closes = hist["Close"].dropna()
+        if len(closes) < 20:
+            return None
+        return {
+            "current": float(closes.iloc[-1]),
+            "high_52w": float(hist["High"].dropna().max()),
+            "low_52w": float(hist["Low"].dropna().min()),
+            "sma50": float(closes.tail(50).mean()),
+            "sma200": (
+                float(closes.tail(200).mean())
+                if len(closes) >= 200
+                else float(closes.mean())
+            ),
+        }
+    except Exception as e:
+        logger.debug(
+            "price_snapshot_fetch_failed",
+            **summarize_exception(
+                e,
+                operation="fetching price snapshot",
+                provider="unknown",
+            ),
+        )
+    return None
+
+
 async def _prefetch_macro_context(
     ticker: str,
     trade_date: str,
@@ -582,6 +622,10 @@ async def run_analysis(
             # Fetch benchmark context once (non-blocking) before graph starts.
             # Prepended to the HumanMessage so every agent receives it as session context.
             market_context = await _fetch_market_context(ticker, real_date)
+            # Advisory 52wk/SMA snapshot: powers the news-analyst drawdown
+            # investigation trigger (news runs parallel to fundamentals, so it
+            # cannot read DATA_BLOCK price fields). None on failure by design.
+            price_snapshot = await _fetch_price_snapshot(ticker)
             # The macro brief remains advisory News Analyst context, but its LLM call
             # should still flow through the same callback-based cost/tracing surface.
             macro_context = await _prefetch_macro_context(
@@ -700,6 +744,7 @@ async def run_analysis(
                 macro_context_region=macro_context_region,
                 macro_context_status=macro_context_status,
                 macro_regime=macro_regime_block,
+                price_snapshot=price_snapshot,
             )
 
             logger.info(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from src.data_block_utils import extract_data_block_field
+from src.thesis_constants import DRAWDOWN_52WK_RATIO
 
 MACRO_DRAWDOWN_TERMS = (
     "rate shock",
@@ -91,7 +92,7 @@ def classify_large_drawdown_context(
     """
     if current is None or high is None or current <= 0 or high <= 0:
         return None
-    if current / high > 0.60:
+    if current / high > DRAWDOWN_52WK_RATIO:
         return None
 
     window = _decline_context(text)
@@ -105,6 +106,18 @@ def classify_large_drawdown_context(
     if has_company:
         return "LARGE_DRAWDOWN_COMPANY_SPECIFIC"
     return "UNEXPLAINED_LARGE_DRAWDOWN"
+
+
+def drawdown_flag(fundamentals: str | None, *reports: str | None) -> str | None:
+    """Classify a large drawdown from DATA_BLOCK price fields + report narrative.
+
+    Single shared classification for the PM narrative section and the
+    UNEXPLAINED_DRAWDOWN_NEWS_GAP red flag — keep both callers on this helper.
+    """
+    current = _parse_number(extract_data_block_field(fundamentals, "CURRENT_PRICE"))
+    high = _parse_number(extract_data_block_field(fundamentals, "FIFTY_TWO_WEEK_HIGH"))
+    text = "\n".join(report for report in reports if report)
+    return classify_large_drawdown_context(text, current, high)
 
 
 def unresolved_related_tickers(fundamentals: str | None) -> list[str]:
@@ -129,14 +142,13 @@ def format_pm_context_flags(fundamentals: str | None, *reports: str | None) -> s
     current = _parse_number(extract_data_block_field(fundamentals, "CURRENT_PRICE"))
     high = _parse_number(extract_data_block_field(fundamentals, "FIFTY_TWO_WEEK_HIGH"))
     low = extract_data_block_field(fundamentals, "FIFTY_TWO_WEEK_LOW")
-    text = "\n".join(report for report in reports if report)
 
-    drawdown_flag = classify_large_drawdown_context(text, current, high)
-    if drawdown_flag:
+    classification = drawdown_flag(fundamentals, *reports)
+    if classification:
         drawdown_pct = (1.0 - (current or 0.0) / (high or 1.0)) * 100.0
         low_text = f"; 52-week low {low.strip()}" if low else ""
         lines.append(
-            f"- {drawdown_flag}: current price is {drawdown_pct:.1f}% below "
+            f"- {classification}: current price is {drawdown_pct:.1f}% below "
             f"52-week high{low_text}; distinguish macro/multiple compression "
             "from company-specific deterioration."
         )

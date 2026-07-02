@@ -8,7 +8,7 @@ import structlog
 from langchain_core.messages import HumanMessage
 from langgraph.types import RunnableConfig
 
-from src.agents.context_flags import format_pm_context_flags
+from src.agents.context_flags import drawdown_flag, format_pm_context_flags
 from src.agents.pm_inputs import (
     DIRECT_PM_INPUT_FIELDS,
     RISK_DEBATE_FIELD,
@@ -1084,6 +1084,33 @@ NEUTRAL ANALYST (Balanced):
             apac,
             consultant,
         )
+
+        # A large drawdown the news search could not attribute is risk, not noise.
+        # Same report set as format_pm_context_flags above so the classification
+        # the PM narrates and the one that carries the penalty never diverge.
+        drawdown_classification = drawdown_flag(
+            fundamentals,
+            market,
+            news,
+            foreign_language,
+            inv_plan,
+            apac,
+            consultant,
+        )
+        drawdown_gap_flags = RedFlagDetector.detect_unexplained_drawdown_flags(
+            drawdown_classification, news, ticker
+        )
+        if drawdown_gap_flags:
+            red_flags.extend(drawdown_gap_flags)
+            pm_generated_red_flags.extend(drawdown_gap_flags)
+            logger.info(
+                "drawdown_gap_flags_detected",
+                ticker=ticker,
+                classification=drawdown_classification,
+                total_risk_penalty=sum(
+                    flag.get("risk_penalty", 0) for flag in drawdown_gap_flags
+                ),
+            )
 
         # Surface distrusted valuation inputs to the PM as a zero-penalty (data-quality)
         # warning. Assigned unconditionally so it is in scope for the discipline log below.

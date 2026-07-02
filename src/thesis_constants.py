@@ -51,6 +51,15 @@ SECTOR_GROSS_MARGIN_MIN: dict[str, float] = {
 HEALTH_MIN_PCT = 50.0
 GROWTH_MIN_PCT = 50.0
 
+# Senior Fundamentals scoring rubric totals (prompt: "FINANCIAL HEALTH SCORE
+# (12 Points Total)" / "GROWTH TRANSITION SCORE (6 Points Total)"). N/A criteria
+# may legitimately shrink the *available* denominator below these totals, so the
+# code-side consistency check treats them as ceilings, not exact requirements.
+HEALTH_RUBRIC_POINTS = 12.0
+GROWTH_RUBRIC_POINTS = 6.0
+FINANCIALS_HEALTH_REMOVED_POINTS = 1.0  # D/E point removed for Financials
+SCORE_PCT_TOLERANCE = 1.5  # pct-points; absorbs LLM rounding (83% vs 83.3%)
+
 # Discovery / diversification
 ANALYST_COVERAGE_MAX = 15  # at/above: "discovered", hard fail
 US_REVENUE_MAX_PCT = 35.0
@@ -58,3 +67,8 @@ US_REVENUE_MAX_PCT = 35.0
 # Portfolio Manager qualitative risk-tally zones
 RISK_ZONE_HIGH = 2.0  # >=: default SELL
 RISK_ZONE_MODERATE = 1.0  # >=: default HOLD; below: default BUY
+
+# Large-drawdown triggers (shared by context_flags classification and the
+# pre-graph news-analyst drawdown-investigation injection)
+DRAWDOWN_52WK_RATIO = 0.60  # current/52wk-high at/below: large drawdown
+DRAWDOWN_SMA200_RATIO = 0.80  # current below 0.8×SMA200: large drawdown

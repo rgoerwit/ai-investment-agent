@@ -423,6 +423,32 @@ def detect_red_flags(
             }
         )
 
+    for kind in ("health", "growth"):
+        if metrics.get(f"{kind}_score_consistency") != "SUSPECT":
+            continue
+        red_flags.append(
+            {
+                "type": f"{kind.upper()}_SCORE_UNRELIABLE",
+                "severity": "WARNING",
+                "detail": (
+                    f"{kind.capitalize()} score arithmetic/denominator is inconsistent "
+                    f"with the scoring rubric; the reported ADJUSTED_{kind.upper()}"
+                    "_SCORE cannot be trusted."
+                ),
+                "action": "REVIEW",
+                # Data-quality flag, not stock risk (mirrors VALUATION_INPUT
+                # quarantine): the model's arithmetic error must not penalize
+                # the name, only block mechanical use of the score.
+                "risk_penalty": 0.0,
+                "rationale": (
+                    f"Do NOT apply the hard quality gate (Adjusted {kind.capitalize()} "
+                    "< 50% -> SELL) mechanically on this value; reconcile the scoring "
+                    "rubric first."
+                ),
+            }
+        )
+        logger.warning("score_consistency_flag", ticker=ticker, kind=kind)
+
     debt_to_equity = metrics.get("debt_to_equity")
     role = str(entity_role or metrics.get("listing_role") or "").upper()
     holdco_leverage_explained = role in {"PURE_HOLDCO", "INTERMEDIATE_HOLDCO"} and (

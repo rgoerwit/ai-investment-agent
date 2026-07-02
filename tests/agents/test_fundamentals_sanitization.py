@@ -8,6 +8,7 @@ from src.agents.analyst_nodes import (
     _sanitize_fundamentals_output,
     _valuation_input_reliability,
 )
+from src.agents.fundamentals_reconciler import reconcile_score_consistency
 
 
 def test_sanitize_fundamentals_output_forces_missing_horizons_to_na() -> None:
@@ -807,3 +808,168 @@ PEG_RATIO: 0.46
 
     assert "PE_RATIO_TTM: N/A" in sanitized
     assert "PE_RATIO_TTM: 11.47" not in sanitized
+
+
+class TestScoreConsistency:
+    """reconcile_score_consistency: hybrid correct-vs-flag policy."""
+
+    @staticmethod
+    def _body(*lines: str) -> str:
+        return "\n".join(lines)
+
+    def test_consistent_scores_untouched(self) -> None:
+        body = self._body(
+            "RAW_HEALTH_SCORE: 9.5/12",
+            "ADJUSTED_HEALTH_SCORE: 79.2% (based on 12 available points)",
+            "RAW_GROWTH_SCORE: 4/6",
+            "ADJUSTED_GROWTH_SCORE: 67% (based on 6 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected
+        assert not suspect
+
+    def test_available_denominator_convention_accepted(self) -> None:
+        """RAW x/available (the dominant real-world convention) is not suspect."""
+        body = self._body(
+            "SECTOR: Financials",
+            "RAW_HEALTH_SCORE: 9/11",
+            "ADJUSTED_HEALTH_SCORE: 82% (based on 11 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected and not suspect
+
+    def test_arithmetic_error_corrected(self) -> None:
+        body = self._body(
+            "RAW_HEALTH_SCORE: 8/12",
+            "ADJUSTED_HEALTH_SCORE: 50% (based on 10 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert corrected and not suspect
+        assert "ADJUSTED_HEALTH_SCORE: 80.0% (based on 10 available points)" in updated
+        assert "HEALTH_SCORE_DATA_QUALITY_NOTE:" in updated
+
+    def test_rounding_within_tolerance_no_churn(self) -> None:
+        body = self._body(
+            "RAW_HEALTH_SCORE: 10/12",
+            "ADJUSTED_HEALTH_SCORE: 83% (based on 12 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected and not suspect
+
+    def test_denominator_incoherent_flagged_not_fixed(self) -> None:
+        """Fraction disagrees with both rubric total and available points."""
+        body = self._body(
+            "RAW_HEALTH_SCORE: 4/10",
+            "ADJUSTED_HEALTH_SCORE: 40% (based on 8 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert suspect and not corrected
+        assert "HEALTH_SCORE_CONSISTENCY: SUSPECT" in updated
+        assert "ADJUSTED_HEALTH_SCORE: 40%" in updated  # never rewritten
+
+    def test_earned_exceeds_available_flagged(self) -> None:
+        body = self._body(
+            "RAW_HEALTH_SCORE: 11/9",
+            "ADJUSTED_HEALTH_SCORE: 100% (based on 9 available points)",
+        )
+        _, corrected, suspect = reconcile_score_consistency(body)
+        assert suspect and not corrected
+
+    def test_available_above_rubric_total_flagged(self) -> None:
+        body = self._body(
+            "RAW_GROWTH_SCORE: 5/8",
+            "ADJUSTED_GROWTH_SCORE: 63% (based on 8 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert suspect and not corrected
+        assert "GROWTH_SCORE_CONSISTENCY: SUSPECT" in updated
+
+    def test_financials_de_removed_without_denominator_reduction(self) -> None:
+        body = self._body(
+            "SECTOR: Financial Services",
+            "SECTOR_ADJUSTMENTS: Financials (Insurance) - D/E removed; ROE >12%.",
+            "RAW_HEALTH_SCORE: 10/12",
+            "ADJUSTED_HEALTH_SCORE: 83% (based on 12 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert suspect and not corrected
+        assert "HEALTH_SCORE_CONSISTENCY: SUSPECT" in updated
+        assert "D/E removed" in updated
+
+    def test_financials_de_removed_with_reduced_denominator_ok(self) -> None:
+        """AGS.BR June-29 shape: internally consistent, must not flag."""
+        body = self._body(
+            "SECTOR: Financials",
+            "SECTOR_ADJUSTMENTS: Financials: D/E Ratio and EV/EBITDA removed.",
+            "RAW_HEALTH_SCORE: 7.5/9",
+            "ADJUSTED_HEALTH_SCORE: 83% (based on 9 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected and not suspect
+
+    def test_malformed_lines_are_skipped(self) -> None:
+        body = self._body(
+            "RAW_HEALTH_SCORE: strong",
+            "ADJUSTED_HEALTH_SCORE: solid pass",
+            "RAW_GROWTH_SCORE: 4/0",
+            "ADJUSTED_GROWTH_SCORE: 80% (based on 0 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        # Health lines unparseable -> skipped; growth zero denominator -> suspect.
+        assert not corrected
+        assert suspect
+        assert "GROWTH_SCORE_CONSISTENCY: SUSPECT" in updated
+        assert "HEALTH_SCORE_CONSISTENCY" not in updated
+
+    def test_missing_adjusted_line_skipped(self) -> None:
+        body = self._body("RAW_HEALTH_SCORE: 8/12")
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected and not suspect
+
+    def test_sanitize_runs_score_check_without_raw_data(self) -> None:
+        """Empty raw payload no longer short-circuits the DATA_BLOCK-internal check."""
+        content = """### --- START DATA_BLOCK ---
+RAW_HEALTH_SCORE: 8/12
+ADJUSTED_HEALTH_SCORE: 50% (based on 10 available points)
+### --- END DATA_BLOCK ---
+"""
+        sanitized = _sanitize_fundamentals_output(content, "", "AGS.BR")
+        assert (
+            "ADJUSTED_HEALTH_SCORE: 80.0% (based on 10 available points)" in sanitized
+        )
+
+    def test_earned_over_available_parenthetical_accepted(self) -> None:
+        """Prompt-example form: '70% (7/10 available)' = earned 7 of 10."""
+        body = self._body(
+            "RAW_HEALTH_SCORE: 7/12",
+            "ADJUSTED_HEALTH_SCORE: 70% (7/10 available)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected and not suspect
+
+    def test_available_statement_parenthetical_accepted(self) -> None:
+        """Real-world form: '79% (12/12 available)' with RAW 9.5/12 is a
+        denominator statement, not an earned claim — must not flag."""
+        body = self._body(
+            "RAW_HEALTH_SCORE: 9.5/12",
+            "ADJUSTED_HEALTH_SCORE: 79% (12/12 available)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected and not suspect
+
+    def test_conflicting_earned_readings_flagged(self) -> None:
+        """Self-consistent earned/available reading that contradicts RAW."""
+        body = self._body(
+            "RAW_HEALTH_SCORE: 5/12",
+            "ADJUSTED_HEALTH_SCORE: 70% (7/10 available)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert suspect and not corrected
+        assert "HEALTH_SCORE_CONSISTENCY: SUSPECT" in updated

@@ -12,6 +12,13 @@ from src.data_block_utils import (
     has_non_na_block_field_value,
     replace_or_append_block_line,
 )
+from src.sector_normalization import normalize_sector_label
+from src.thesis_constants import (
+    FINANCIALS_HEALTH_REMOVED_POINTS,
+    GROWTH_RUBRIC_POINTS,
+    HEALTH_RUBRIC_POINTS,
+    SCORE_PCT_TOLERANCE,
+)
 from src.validators.pfic_constants import (
     PFIC_ASSET_PROXIMITY_THRESHOLD,
     PFIC_ASSET_TEST_THRESHOLD,
@@ -415,6 +422,139 @@ def reconcile_high_risk_fields(
         )
 
     return updated
+
+
+_SCORE_RUBRIC_TOTALS: tuple[tuple[str, float], ...] = (
+    ("HEALTH", HEALTH_RUBRIC_POINTS),
+    ("GROWTH", GROWTH_RUBRIC_POINTS),
+)
+_FRACTION_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s*$")
+# Both observed parentheticals: "(based on 10 available points)" and "(7/10 available)".
+_ADJUSTED_RE = re.compile(
+    r"^\s*(\d+(?:\.\d+)?)\s*%"
+    r"(?:\s*\(\s*(?:based on\s*)?(?:(\d+(?:\.\d+)?)\s*/\s*)?(\d+(?:\.\d+)?)\s*available[^)]*\))?",
+    re.IGNORECASE,
+)
+_DE_REMOVED_RE = re.compile(r"(?i)D/?E\b[^.\n;]{0,60}(?:remov|not applicable|excluded)")
+
+
+def _parse_raw_score(body: str, kind: str) -> tuple[float, float] | None:
+    match = _FRACTION_RE.match(extract_block_text_value(body, f"RAW_{kind}_SCORE"))
+    if match is None:
+        return None
+    return float(match.group(1)), float(match.group(2))
+
+
+def _parse_adjusted_score(
+    body: str, kind: str
+) -> tuple[float, float | None, float | None] | None:
+    """Return (percent, parenthetical earned, parenthetical available) or None.
+
+    The ``p% (a/b available)`` form is ambiguous in the wild: the prompt example
+    reads it as earned/available ("70% (7/10 available)") while real reports
+    also use it as an available-points statement ("79% (12/12 available)" with
+    RAW 9.5/12). Trust ``a`` as earned only when that reading is arithmetically
+    self-consistent (a != b and a/b matches the stated percent); otherwise only
+    ``b`` (available) is taken.
+    """
+    match = _ADJUSTED_RE.match(extract_block_text_value(body, f"ADJUSTED_{kind}_SCORE"))
+    if match is None:
+        return None
+    pct = float(match.group(1))
+    paren_earned = float(match.group(2)) if match.group(2) else None
+    paren_available = float(match.group(3)) if match.group(3) else None
+    if paren_earned is not None and (
+        paren_earned == paren_available
+        or not paren_available
+        or abs(paren_earned / paren_available * 100.0 - pct) > SCORE_PCT_TOLERANCE
+    ):
+        paren_earned = None
+    return pct, paren_earned, paren_available
+
+
+def reconcile_score_consistency(body: str) -> tuple[str, bool, bool]:
+    """Validate RAW vs ADJUSTED health/growth score lines for internal consistency.
+
+    The scores are LLM arithmetic that feeds the hard quality gates (Adjusted
+    Health/Growth < 50% -> SELL), so an inconsistent line is catastrophic. Hybrid
+    policy: rewrite ADJUSTED only when the correction is *provable* arithmetic
+    (denominators coherent, only the percent diverges); anything template-violating
+    or implausible gets a ``*_SCORE_CONSISTENCY: SUSPECT`` line — never fixed by
+    inference. N/A criteria legitimately shrink the available denominator below the
+    rubric total, so totals are ceilings, not exact requirements; a numerator that
+    is merely *wrong* (same data scored differently across runs) is not detectable
+    here without a per-criterion breakdown.
+
+    Returns ``(body, corrected, suspect)``.
+    """
+    updated, corrected, suspect = body, False, False
+    sector = normalize_sector_label(extract_block_text_value(body, "SECTOR"))
+    adjustments = extract_block_text_value(body, "SECTOR_ADJUSTMENTS")
+
+    for kind, total in _SCORE_RUBRIC_TOTALS:
+        raw = _parse_raw_score(updated, kind)
+        adjusted = _parse_adjusted_score(updated, kind)
+        if raw is None or adjusted is None:
+            continue
+        (earned, raw_den), (pct, paren_earned, paren_available) = raw, adjusted
+
+        available = paren_available if paren_available is not None else raw_den
+        denominator_coherent = raw_den in (available, total)
+
+        reasons: list[str] = []
+        if not denominator_coherent:
+            reasons.append(
+                f"raw denominator {raw_den:g} matches neither rubric total "
+                f"{total:g} nor available points {available:g}"
+            )
+        if available > total or available <= 0:
+            reasons.append(
+                f"available points {available:g} implausible vs rubric total {total:g}"
+            )
+        if earned > available and denominator_coherent:
+            reasons.append(f"earned points {earned:g} exceed available {available:g}")
+        if paren_earned is not None and abs(paren_earned - earned) > 0.01:
+            reasons.append(
+                f"earned points differ between RAW ({earned:g}) and "
+                f"ADJUSTED ({paren_earned:g}) lines"
+            )
+        if (
+            kind == "HEALTH"
+            and sector == "Financials"
+            and _DE_REMOVED_RE.search(adjustments)
+            and available > total - FINANCIALS_HEALTH_REMOVED_POINTS
+        ):
+            reasons.append(
+                "SECTOR_ADJUSTMENTS says D/E removed but available points not reduced"
+            )
+
+        if reasons:
+            suspect = True
+            updated = replace_or_append_block_line(
+                updated,
+                f"{kind}_SCORE_CONSISTENCY",
+                "SUSPECT — " + "; ".join(reasons),
+            )
+            continue
+
+        expected_pct = earned / available * 100.0
+        if abs(expected_pct - pct) > SCORE_PCT_TOLERANCE:
+            corrected = True
+            updated = replace_or_append_block_line(
+                updated,
+                f"ADJUSTED_{kind}_SCORE",
+                f"{expected_pct:.1f}% (based on {available:g} available points)",
+            )
+            updated = replace_or_append_block_line(
+                updated,
+                f"{kind}_SCORE_DATA_QUALITY_NOTE",
+                (
+                    f"Adjusted score recomputed from RAW {earned:g}/{available:g}; "
+                    f"reported {pct:.1f}% was arithmetically inconsistent."
+                ),
+            )
+
+    return updated, corrected, suspect
 
 
 def append_analyst_coverage_data_quality_note(

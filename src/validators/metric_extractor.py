@@ -70,6 +70,8 @@ def extract_metrics(
         "pe_vs_sector": None,
         "pb_ratio": None,
         "adjusted_health_score": None,
+        "health_score_consistency": None,
+        "growth_score_consistency": None,
         "payout_ratio": None,
         "dividend_coverage": None,
         "net_margin": None,
@@ -128,6 +130,13 @@ def extract_metrics(
     health_match = re.search(r"ADJUSTED_HEALTH_SCORE:\s*(\d+(?:\.\d+)?)%", data_block)
     if health_match:
         metrics["adjusted_health_score"] = float(health_match.group(1))
+
+    for kind in ("HEALTH", "GROWTH"):
+        consistency_match = re.search(
+            rf"{kind}_SCORE_CONSISTENCY:\s*SUSPECT\b", data_block
+        )
+        if consistency_match:
+            metrics[f"{kind.lower()}_score_consistency"] = "SUSPECT"
 
     pe_match = re.search(r"PE_RATIO_TTM:\s*([0-9.]+)", data_block)
     if pe_match:

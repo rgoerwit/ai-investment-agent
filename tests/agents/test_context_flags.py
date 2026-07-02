@@ -1,5 +1,6 @@
 from src.agents.context_flags import (
     classify_large_drawdown_context,
+    drawdown_flag,
     format_pm_context_flags,
     unresolved_related_tickers,
 )
@@ -82,3 +83,23 @@ def test_format_pm_context_flags_combines_drawdown_and_related_ticker() -> None:
     assert "52-week low 17750" in section
     assert "UNRESOLVED_RELATED_TICKERS" in section
     assert "filing-verification-required" in section
+
+
+def test_drawdown_flag_shares_classification_with_narrative() -> None:
+    """drawdown_flag reads DATA_BLOCK price fields and classifies report text."""
+    fundamentals = (
+        "### --- START DATA_BLOCK ---\n"
+        "CURRENT_PRICE: 5.60\n"
+        "FIFTY_TWO_WEEK_HIGH: 9.81\n"
+        "### --- END DATA_BLOCK ---"
+    )
+    market = "Price is in a clear downtrend; technical setup bearish."
+
+    assert drawdown_flag(fundamentals, market) == "LARGE_DRAWDOWN_MACRO_ONLY"
+    # No decline discussion anywhere -> uninvestigated.
+    assert drawdown_flag(fundamentals, "All quiet.") == "UNEXPLAINED_LARGE_DRAWDOWN"
+
+
+def test_drawdown_flag_none_without_price_fields() -> None:
+    assert drawdown_flag("no data block here", "downtrend text") is None
+    assert drawdown_flag(None, "downtrend text") is None

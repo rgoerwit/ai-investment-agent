@@ -38,6 +38,7 @@ from src.ibkr.order_builder import parse_trade_block
 from src.validators.metric_extractor import extract_metrics
 from src.validators.supplemental_extractors import (
     extract_legal_risks,
+    extract_material_events_status,
     extract_value_trap_score,
 )
 
@@ -198,5 +199,22 @@ PROMPT_CONTRACTS: tuple[PromptContract, ...] = (
         shape=Shape.UNFENCED_BLOCK,
         parser=lambda text: validate_required_output("consultant", text),
         success=_consultant_ok,
+    ),
+    PromptContract(
+        name="material_events_status",
+        prompt_key="news_analyst",
+        shape=Shape.LABELED_LINE,
+        parser=extract_material_events_status,
+        success=lambda result: result in {"FOUND", "NONE_FOUND"},
+        line_pattern=r"^[\s*-]*MATERIAL_EVENTS_90D\*{0,2}:",
+        legacy_forms=(
+            ("MATERIAL_EVENTS_90D: NONE_FOUND", lambda r: r == "NONE_FOUND"),
+            # Pre-v5.4 prose (the 6831.HK 2026-07-01 phrasing).
+            (
+                "No material operational events have been reported in the last "
+                "90 days.",
+                lambda r: r == "NONE_FOUND",
+            ),
+        ),
     ),
 )

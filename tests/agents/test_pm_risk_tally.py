@@ -301,3 +301,19 @@ def test_return_quality_fragility_lands_in_code_subtotal() -> None:
     assert subtotal == 0.5
     assert "RETURN_QUALITY_FRAGILITY [risk_penalty +0.50]" in text
     assert "do NOT re-score them" in text
+
+
+def test_drawdown_gap_flag_carries_weight_into_subtotal() -> None:
+    """UNEXPLAINED_DRAWDOWN_NEWS_GAP (+0.5) must surface with its weight tag."""
+    from src.validators.red_flag_detector import RedFlagDetector
+
+    flags = RedFlagDetector.detect_unexplained_drawdown_flags(
+        "UNEXPLAINED_LARGE_DRAWDOWN",
+        "MATERIAL_EVENTS_90D: NONE_FOUND",
+        "6831.HK",
+    )
+    text, subtotal = format_red_flag_section("PASS", flags)
+
+    assert subtotal == 0.5
+    assert "UNEXPLAINED_DRAWDOWN_NEWS_GAP" in text
+    assert "[risk_penalty +0.50]" in text

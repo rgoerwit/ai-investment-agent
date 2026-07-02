@@ -48,7 +48,11 @@ def test_toolkit_group_accessors_return_expected_tools():
     assert {"get_yfinance_data", "get_technical_indicators"} <= market_tool_names
 
     news_tool_names = {tool.name for tool in toolkit.get_news_tools()}
-    assert news_tool_names == {"get_news", "get_macroeconomic_news"}
+    assert news_tool_names == {
+        "get_news",
+        "get_macroeconomic_news",
+        "search_foreign_sources",
+    }
 
     foreign_tool_names = {tool.name for tool in toolkit.get_foreign_language_tools()}
     assert foreign_tool_names == {"search_foreign_sources", "get_official_filings"}

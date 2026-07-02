@@ -1092,3 +1092,71 @@ class TestAssetTurnoverSignal:
             income_stmt, balance_sheet, info, "TEST"
         )
         assert "capital_assetTurnover" not in signals
+
+
+class TestSuppressionZoneBoundary:
+    """Pin the 6831.HK-shaped tally interaction at the RISK_ZONE_HIGH boundary.
+
+    On 2026-07-01 (pre-suppression) the PM tally was 1.50 = MODERATE->HOLD, with a
+    code subtotal of -0.50 that included an unjustified CAPITAL_EFFICIENT -0.5
+    while CAPEX_TO_DA_STATUS was UNDERINVESTING. Suppressing that bonus moves the
+    same inputs to exactly 2.00 = RISK_ZONE_HIGH (default SELL). That flip is
+    intended, but must stay attributable: the suppressed flag carries the reason.
+    """
+
+    _PM_QUALITATIVE_PENALTIES = 2.0  # jurisdiction +1.0, ownership concentration +1.0
+
+    def _hk6831_report(self) -> str:
+        lines = [
+            "ROIC_PERCENT: 20.00",
+            "ROIC_QUALITY: STRONG",
+            "LEVERAGE_QUALITY: GENUINE",
+            "ROE_ROIC_RATIO: 1.30",
+            "CAPEX_TO_DA: 0.73",
+            "CAPEX_TO_DA_STATUS: UNDERINVESTING",
+            "CAPITAL_PLAN_STATUS: NONE",
+        ]
+        body = "\n".join(lines)
+        return f"### --- START DATA_BLOCK ---\n{body}\n### --- END DATA_BLOCK ---"
+
+    def _code_subtotal(self, flags: list[dict]) -> float:
+        other_code_flags = (
+            0.5 + -1.0 + 0.5
+        )  # VIE, MOAT_DURABLE_ADVANTAGE, CONSULTANT_CONDITIONAL
+        return other_code_flags + sum(f.get("risk_penalty", 0.0) for f in flags)
+
+    def test_suppressed_bonus_lands_tally_exactly_on_high_zone_boundary(self):
+        from src.thesis_constants import RISK_ZONE_HIGH
+
+        flags = RedFlagDetector.detect_capital_efficiency_flags(
+            self._hk6831_report(), "6831.HK"
+        )
+
+        types = [f["type"] for f in flags]
+        assert "CAPITAL_EFFICIENCY_BONUS_SUPPRESSED" in types
+        assert "CAPITAL_EFFICIENT" not in types
+
+        tally = self._code_subtotal(flags) + self._PM_QUALITATIVE_PENALTIES
+        assert tally == pytest.approx(RISK_ZONE_HIGH)
+        assert tally >= RISK_ZONE_HIGH  # >= boundary is HIGH zone: default SELL
+
+    def test_pre_suppression_bonus_kept_tally_in_moderate_zone(self):
+        """Documents the HOLD->DNI flip: with the bonus the same inputs were 1.50."""
+        from src.thesis_constants import RISK_ZONE_HIGH, RISK_ZONE_MODERATE
+
+        pre_fix_tally = (
+            self._code_subtotal([{"risk_penalty": -0.5}])
+            + self._PM_QUALITATIVE_PENALTIES
+        )
+        assert pre_fix_tally == pytest.approx(1.5)
+        assert RISK_ZONE_MODERATE <= pre_fix_tally < RISK_ZONE_HIGH
+
+    def test_suppression_reason_is_attributable(self):
+        flags = RedFlagDetector.detect_capital_efficiency_flags(
+            self._hk6831_report(), "6831.HK"
+        )
+        suppressed = next(
+            f for f in flags if f["type"] == "CAPITAL_EFFICIENCY_BONUS_SUPPRESSED"
+        )
+        assert suppressed["risk_penalty"] == 0.0
+        assert "underinvestment" in suppressed["detail"].lower()

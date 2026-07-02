@@ -11,6 +11,8 @@ from src.validators.metric_extractor import extract_metrics
 from src.validators.sector_classifier import FINANCIALS_SECTORS, Sector, detect_sector
 from src.validators.supplemental_extractors import (
     extract_capital_efficiency_signals,
+    extract_drawdown_explanation,
+    extract_material_events_status,
     extract_material_unverified_operating_signal,
     extract_moat_signals,
     extract_value_trap_score,
@@ -78,6 +80,59 @@ def _peak_or_transient_blocker(
     if contains_transient_strength_marker(fundamentals_report):
         return "transient-strength / one-time event marker present"
     return None
+
+
+DRAWDOWN_GAP_TRIGGERS = frozenset(
+    {"UNEXPLAINED_LARGE_DRAWDOWN", "LARGE_DRAWDOWN_MACRO_ONLY"}
+)
+
+
+def detect_unexplained_drawdown_flags(
+    drawdown_classification: str | None,
+    news_report: str | None,
+    ticker: str = "UNKNOWN",
+) -> list[dict]:
+    """Flag a large drawdown whose cause the news search failed to surface.
+
+    Fires only when the shared drawdown classifier reports the decline as
+    uninvestigated (no company-specific cause near the decline discussion) AND
+    the news report affirmatively states no material events were found. An
+    empty/absent news report yields no flag — artifact absence is penalized
+    elsewhere and must not read as "no events" (6831.HK 2026-07-01: −24%/1mo
+    with a news search drowned in green-tea-commodity noise).
+    """
+    if drawdown_classification not in DRAWDOWN_GAP_TRIGGERS:
+        return []
+    if extract_material_events_status(news_report) != "NONE_FOUND":
+        return []
+    if extract_drawdown_explanation(news_report):
+        return []
+    flags: list[dict[str, Any]] = [
+        {
+            "type": "UNEXPLAINED_DRAWDOWN_NEWS_GAP",
+            "severity": "WARNING",
+            "detail": (
+                f"{drawdown_classification}: price is far below the 52-week high, "
+                "but the news search found no material company events — the "
+                "decline is uninvestigated, not benign."
+            ),
+            "action": "RISK_PENALTY",
+            "risk_penalty": 0.5,
+            "rationale": (
+                "A large drawdown with an empty news read usually means the "
+                "search missed the cause (entity conflation, local-language-only "
+                "coverage), not that no cause exists. Reconcile the drawdown "
+                "against a named cause before treating price weakness as "
+                "opportunity."
+            ),
+        }
+    ]
+    logger.info(
+        "unexplained_drawdown_news_gap",
+        ticker=ticker,
+        classification=drawdown_classification,
+    )
+    return flags
 
 
 def detect_material_operating_signal_flags(

@@ -28,6 +28,7 @@ from src.data_block_utils import (
 from src.error_safety import summarize_exception
 from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import failure_artifact, success_artifact
+from src.thesis_constants import DRAWDOWN_52WK_RATIO, DRAWDOWN_SMA200_RATIO
 from src.tooling.text_boundary import format_untrusted_block
 
 from . import message_utils, support
@@ -37,6 +38,7 @@ from .fundamentals_reconciler import (
     append_analyst_coverage_data_quality_note,
     extract_raw_metrics_payload,
     reconcile_high_risk_fields,
+    reconcile_score_consistency,
 )
 from .output_limits import cap_state_value
 from .output_validation import (
@@ -193,7 +195,10 @@ def _sanitize_fundamentals_output(
     ticker: str,
     foreign_data: str = "",
 ) -> str:
-    if not raw_data or not has_parseable_data_block(content):
+    # Score consistency is checked even without raw data (it is DATA_BLOCK-internal),
+    # so only an unparseable block short-circuits; payload-dependent steps stay
+    # gated on has_structured_payload below.
+    if not has_parseable_data_block(content):
         return content
 
     payload = extract_raw_metrics_payload(raw_data)
@@ -213,6 +218,18 @@ def _sanitize_fundamentals_output(
     corrective = False
     if has_structured_payload:
         updated_body = reconcile_high_risk_fields(updated_body, payload)
+
+    updated_body, score_corrected, score_suspect = reconcile_score_consistency(
+        updated_body
+    )
+    if score_corrected or score_suspect:
+        corrective = True
+        logger.warning(
+            "score_consistency_reconciled",
+            ticker=ticker,
+            corrected=score_corrected,
+            suspect=score_suspect,
+        )
 
     updated_body = append_analyst_coverage_data_quality_note(
         updated_body,
@@ -481,6 +498,39 @@ def _build_news_macro_extra_context(ticker: str, context: Any | None) -> str:
     return "\n\n" + "\n\n".join(blocks) + "\n"
 
 
+def _build_news_price_drawdown_context(ticker: str, context: Any | None) -> str:
+    """Return the drawdown-investigation trigger block for the News Analyst.
+
+    News runs parallel to fundamentals, so the trigger uses the pre-graph
+    ``price_snapshot`` (advisory; empty string when absent or not triggered).
+    """
+    snapshot = getattr(context, "price_snapshot", None) or {}
+    current = snapshot.get("current")
+    high = snapshot.get("high_52w")
+    sma200 = snapshot.get("sma200")
+    if not current or not high or current <= 0 or high <= 0:
+        return ""
+    triggered = (current / high <= DRAWDOWN_52WK_RATIO) or (
+        sma200 and sma200 > 0 and current < DRAWDOWN_SMA200_RATIO * sma200
+    )
+    if not triggered:
+        return ""
+    logger.info(
+        "news_drawdown_context_injected",
+        ticker=ticker,
+        pct_of_52wk_high=round(current / high * 100, 1),
+    )
+    sma_line = f" 200-day SMA: {sma200:.2f}." if sma200 else ""
+    return (
+        "### PRICE DRAWDOWN CONTEXT\n"
+        f"- Current price {current:.2f} is {(1 - current / high) * 100:.0f}% below "
+        f"the 52-week high ({high:.2f}).{sma_line}\n"
+        "Instruction: follow the PRICE DRAWDOWN PROTOCOL — run the mandatory "
+        "targeted 'share price decline reason' searches (English + native "
+        "language) and report DRAWDOWN_EXPLANATION in the SUMMARY."
+    )
+
+
 def create_analyst_node(
     llm,
     agent_key: str,
@@ -659,6 +709,9 @@ def create_analyst_node(
                 macro_context_injected_into_news = (
                     "### REGIONAL MACRO CONTEXT" in news_macro_context
                 )
+                drawdown_context = _build_news_price_drawdown_context(ticker, context)
+                if drawdown_context:
+                    extra_context += "\n\n" + drawdown_context + "\n"
 
             core_system_instruction = (
                 f"{agent_prompt.system_message}\n\n"

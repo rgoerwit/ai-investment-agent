@@ -48,6 +48,7 @@ class TradingContext:
     macro_context_region: str = ""
     macro_context_status: str = "disabled"
     macro_regime: dict[str, str | bool] = field(default_factory=dict)
+    price_snapshot: dict[str, float] | None = None
 
 
 @dataclass

@@ -81,6 +81,26 @@ CASES = [
         "analyst-coverage requirement",
     ),
     ("fundamentals_analyst.json", rf"P/E <={_PE}", "PE scoring threshold"),
+    (
+        "fundamentals_analyst.json",
+        rf"FINANCIAL HEALTH SCORE \({tc.HEALTH_RUBRIC_POINTS:.0f} Points Total\)",
+        "health rubric total",
+    ),
+    (
+        "fundamentals_analyst.json",
+        rf"GROWTH TRANSITION SCORE \({tc.GROWTH_RUBRIC_POINTS:.0f} Points Total\)",
+        "growth rubric total",
+    ),
+    (
+        "fundamentals_analyst.json",
+        rf"RAW_HEALTH_SCORE: \[X\]/{tc.HEALTH_RUBRIC_POINTS:.0f}",
+        "raw health score template",
+    ),
+    (
+        "fundamentals_analyst.json",
+        rf"RAW_GROWTH_SCORE: \[X\]/{tc.GROWTH_RUBRIC_POINTS:.0f}",
+        "raw growth score template",
+    ),
     ("fundamentals_analyst.json", rf"PEG <={re.escape(_PEG)}", "PEG scoring threshold"),
     (
         "fundamentals_analyst.json",
@@ -185,6 +205,18 @@ def test_new_datablock_fields_parser_compatible():
     # The capacity/facility signals originate in the Foreign Language Analyst.
     for field in ("CAPACITY_UTILIZATION", "FACILITY_BUILDOUT_STATUS"):
         assert field in fla, f"{field} missing from Foreign Language Analyst prompt"
+
+
+def test_material_events_enum_matches_parser():
+    """news_analyst SUMMARY token line ≡ supplemental_extractors token tuple."""
+    msg = _system_message("news_analyst.json")
+    m = re.search(r"^MATERIAL_EVENTS_90D:\s*([^\n]+)$", msg, re.MULTILINE)
+    assert m, "MATERIAL_EVENTS_90D token line missing from news_analyst SUMMARY"
+    advertised = {token.strip() for token in m.group(1).split("|")}
+    assert advertised == set(_se.MATERIAL_EVENTS_TOKENS), (
+        "MATERIAL_EVENTS_90D tokens drifted between news_analyst.json and "
+        "supplemental_extractors.MATERIAL_EVENTS_TOKENS"
+    )
 
 
 def test_pfic_and_vie_enums_match_parser():

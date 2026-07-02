@@ -91,6 +91,55 @@ def extract_material_unverified_operating_signal(
     return None
 
 
+MATERIAL_EVENTS_TOKENS = ("FOUND", "NONE_FOUND")
+
+# Leading [\s*-]* tolerates bullets and markdown-bold token wrappers.
+_MATERIAL_EVENTS_TOKEN_RE = re.compile(
+    rf"(?im)^[\s*-]*MATERIAL_EVENTS_90D\*{{0,2}}:\s*\*{{0,2}}"
+    rf"({_alternation(MATERIAL_EVENTS_TOKENS)})\b"
+)
+# Legacy fallback for pre-v5.4 news reports that state the absence in prose,
+# e.g. "No material operational events ... have been reported in the last 90 days."
+_NO_MATERIAL_EVENTS_PROSE_RE = re.compile(
+    r"(?i)\bno (?:material|significant|notable)\b"
+    r"[^.\n]{0,80}\b(?:operational\s+)?(?:events?|news|developments?)\b"
+)
+_DRAWDOWN_EXPLANATION_RE = re.compile(
+    r"(?im)^[\s*-]*DRAWDOWN_EXPLANATION\*{0,2}:\s*([^\n]+)"
+)
+
+
+def extract_material_events_status(news_report: str | None) -> str | None:
+    """Return FOUND / NONE_FOUND from the news report, or None when unstated.
+
+    Prefers the structured ``MATERIAL_EVENTS_90D`` token (news prompt >= v5.4);
+    falls back to the legacy "no material ... events" prose so older reports
+    still classify. An empty/absent report returns None — artifact absence is
+    penalized elsewhere and must not read as "no events".
+    """
+    if not news_report:
+        return None
+    token = _MATERIAL_EVENTS_TOKEN_RE.search(news_report)
+    if token:
+        return token.group(1).upper()
+    if _NO_MATERIAL_EVENTS_PROSE_RE.search(news_report):
+        return "NONE_FOUND"
+    return None
+
+
+def extract_drawdown_explanation(news_report: str | None) -> str | None:
+    """Return the DRAWDOWN_EXPLANATION line value, or None when absent/NOT_FOUND."""
+    if not news_report:
+        return None
+    match = _DRAWDOWN_EXPLANATION_RE.search(news_report)
+    if not match:
+        return None
+    value = match.group(1).strip().strip("*").strip()
+    if not value or value.upper().rstrip(".") in {"NOT_FOUND", "N/A", "NONE"}:
+        return None
+    return value
+
+
 _CONSULTANT_GROWTH_QUALITY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\borganic\s+vs\.?\s+acquired\b", re.IGNORECASE),
     re.compile(
