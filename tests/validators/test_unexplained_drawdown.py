@@ -102,3 +102,40 @@ class TestDetectUnexplainedDrawdownFlags:
             )
             == []
         )
+
+
+class TestExplicitNotFoundOverridesClassification:
+    """6831.HK 2026-07-02: incidental words near a decline mention classified the
+    drawdown MIXED, but the protocol explicitly reported NOT_FOUND — the failed
+    targeted search outranks word proximity."""
+
+    _PROTOCOL_FAILED = (
+        "MATERIAL_EVENTS_90D: NONE_FOUND\nDRAWDOWN_EXPLANATION: NOT_FOUND"
+    )
+
+    def test_mixed_with_explicit_not_found_fires(self) -> None:
+        flags = RedFlagDetector.detect_unexplained_drawdown_flags(
+            "LARGE_DRAWDOWN_MIXED", self._PROTOCOL_FAILED, "6831.HK"
+        )
+        assert len(flags) == 1
+        assert flags[0]["risk_penalty"] == 0.5
+
+    def test_company_specific_with_explicit_not_found_fires(self) -> None:
+        flags = RedFlagDetector.detect_unexplained_drawdown_flags(
+            "LARGE_DRAWDOWN_COMPANY_SPECIFIC", self._PROTOCOL_FAILED, "TEST"
+        )
+        assert len(flags) == 1
+
+    def test_mixed_without_explicit_not_found_does_not_fire(self) -> None:
+        """Legacy reports (no DRAWDOWN_EXPLANATION line): word-proximity
+        classification remains authoritative."""
+        flags = RedFlagDetector.detect_unexplained_drawdown_flags(
+            "LARGE_DRAWDOWN_MIXED", "MATERIAL_EVENTS_90D: NONE_FOUND", "TEST"
+        )
+        assert flags == []
+
+    def test_no_classification_still_never_fires(self) -> None:
+        flags = RedFlagDetector.detect_unexplained_drawdown_flags(
+            None, self._PROTOCOL_FAILED, "TEST"
+        )
+        assert flags == []

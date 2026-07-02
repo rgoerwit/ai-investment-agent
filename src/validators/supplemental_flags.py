@@ -10,6 +10,7 @@ from src.validators.financial_rules import contains_transient_strength_marker
 from src.validators.metric_extractor import extract_metrics
 from src.validators.sector_classifier import FINANCIALS_SECTORS, Sector, detect_sector
 from src.validators.supplemental_extractors import (
+    drawdown_explanation_not_found,
     extract_capital_efficiency_signals,
     extract_drawdown_explanation,
     extract_material_events_status,
@@ -101,7 +102,17 @@ def detect_unexplained_drawdown_flags(
     elsewhere and must not read as "no events" (6831.HK 2026-07-01: −24%/1mo
     with a news search drowned in green-tea-commodity noise).
     """
-    if drawdown_classification not in DRAWDOWN_GAP_TRIGGERS:
+    if drawdown_classification is None:
+        return []
+    # An explicit DRAWDOWN_EXPLANATION: NOT_FOUND means the protocol's targeted
+    # searches ran and failed — stronger evidence than the word-proximity
+    # classification, which can read incidental vocabulary ("revenue",
+    # "governance") near a decline mention as a company-side cause (the
+    # 6831.HK 2026-07-02 MIXED misread). It widens the trigger set.
+    if (
+        drawdown_classification not in DRAWDOWN_GAP_TRIGGERS
+        and not drawdown_explanation_not_found(news_report)
+    ):
         return []
     if extract_material_events_status(news_report) != "NONE_FOUND":
         return []

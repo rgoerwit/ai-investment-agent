@@ -332,8 +332,13 @@ async def _fetch_price_snapshot(ticker: str) -> dict[str, float] | None:
     try:
         import yfinance as yf
 
+        # auto_adjust=False: the trigger must share the DATA_BLOCK's basis
+        # (vendor fiftyTwoWeekHigh is unadjusted; adjusted highs sit lower and
+        # silently under-trigger — 6831.HK 2026-07-02: 8.73 adjusted vs 9.81).
         hist = await run_with_hard_timeout(
-            asyncio.to_thread(lambda: yf.Ticker(ticker).history(period="1y")),
+            asyncio.to_thread(
+                lambda: yf.Ticker(ticker).history(period="1y", auto_adjust=False)
+            ),
             timeout=10,
             label=f"price_snapshot:{ticker}",
         )

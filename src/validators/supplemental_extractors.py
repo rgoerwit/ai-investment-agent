@@ -127,6 +127,9 @@ def extract_material_events_status(news_report: str | None) -> str | None:
     return None
 
 
+_DRAWDOWN_NOT_FOUND_VALUES = {"NOT_FOUND", "N/A", "NONE"}
+
+
 def extract_drawdown_explanation(news_report: str | None) -> str | None:
     """Return the DRAWDOWN_EXPLANATION line value, or None when absent/NOT_FOUND."""
     if not news_report:
@@ -135,9 +138,25 @@ def extract_drawdown_explanation(news_report: str | None) -> str | None:
     if not match:
         return None
     value = match.group(1).strip().strip("*").strip()
-    if not value or value.upper().rstrip(".") in {"NOT_FOUND", "N/A", "NONE"}:
+    if not value or value.upper().rstrip(".") in _DRAWDOWN_NOT_FOUND_VALUES:
         return None
     return value
+
+
+def drawdown_explanation_not_found(news_report: str | None) -> bool:
+    """True when the news report *explicitly* reports DRAWDOWN_EXPLANATION: NOT_FOUND.
+
+    Distinct from the line being absent: an explicit NOT_FOUND means the drawdown
+    protocol ran its targeted searches and failed — the strongest available
+    evidence the decline is uninvestigated.
+    """
+    if not news_report:
+        return False
+    match = _DRAWDOWN_EXPLANATION_RE.search(news_report)
+    if not match:
+        return False
+    value = match.group(1).strip().strip("*").strip()
+    return value.upper().rstrip(".") in _DRAWDOWN_NOT_FOUND_VALUES
 
 
 _CONSULTANT_GROWTH_QUALITY_PATTERNS: tuple[re.Pattern[str], ...] = (
