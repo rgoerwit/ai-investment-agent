@@ -7,6 +7,7 @@ UPDATED: Added OpenAI consultant LLM for cross-validation (Dec 2025).
 """
 
 import re
+import sys
 from collections.abc import Callable
 from importlib.util import find_spec
 from numbers import Real
@@ -28,9 +29,35 @@ from src.error_safety import summarize_exception
 from src.llm_budgets import GenerationBudget, get_generation_budget
 from src.runtime_config import get_runtime_config
 from src.runtime_services import get_current_provider_runtime
+from src.service_tiers import (
+    floor_llm_timeout,
+    gemini_flex_active,
+    is_flex_unsupported,
+    is_flex_unsupported_error,
+    mark_flex_unsupported,
+    normalize_model_name,
+    openai_flex_active,
+)
 
 logger = structlog.get_logger(__name__)
 _logged_model_init_configs: set[tuple[str, str, int, int, str | None]] = set()
+
+
+def _langchain_openai_available() -> bool:
+    """Availability guard tolerant of test-injected module mocks.
+
+    ``find_spec`` raises ValueError for modules present in ``sys.modules``
+    with ``__spec__ = None`` (how tests stub ``langchain_openai``), so check
+    ``sys.modules`` first.
+    """
+    if "langchain_openai" in sys.modules:
+        return True
+    try:
+        return find_spec("langchain_openai") is not None
+    except ValueError:
+        return True
+
+
 _THINKING_BUDGETS = {"low": 512, "medium": 4096, "high": 16384}
 
 # Relax safety settings slightly for financial/market analysis context
@@ -310,6 +337,270 @@ def _stamp_budget_metadata(
             callback.reasoning_reserve_tokens = budget.reserve_tokens  # type: ignore[attr-defined]
 
 
+def _is_flex_capacity_error(exc: BaseException) -> bool:
+    """Detect flex-tier capacity exhaustion (429/503-class errors).
+
+    Marker style mirrors ``runtime_diagnostics.classify_failure``. Genuine
+    rate-limit 429s also match; falling back to the standard tier is a valid
+    (if full-price) recovery for those too, and the process rate limiter
+    keeps them rare.
+    """
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if code in (429, 503):
+        return True
+    combined = str(exc).lower()
+    return any(
+        marker in combined
+        for marker in (
+            "429",
+            "503",
+            "rate limit",
+            "too many requests",
+            "resource_exhausted",
+            "resource exhausted",
+            "resource_unavailable",
+            "unavailable",
+        )
+    )
+
+
+def _stamp_service_tier(result: Any, tier: str) -> None:
+    """Record the effective service tier on a ChatResult for cost tracking.
+
+    Stamped on both ``llm_output`` and each message's ``response_metadata``
+    so the token tracker can price flex calls at flex rates regardless of
+    how the callback receives the result.
+    """
+    try:
+        if getattr(result, "llm_output", None) is None:
+            result.llm_output = {}
+        result.llm_output["service_tier"] = tier
+        for generation in getattr(result, "generations", []) or []:
+            message = getattr(generation, "message", None)
+            if message is not None:
+                message.response_metadata["service_tier"] = tier
+    except Exception:  # noqa: BLE001 - accounting must never break the call
+        logger.debug("service_tier_stamp_failed", tier=tier)
+
+
+class _TieredChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
+    """ChatGoogleGenerativeAI with Gemini flex-tier support.
+
+    langchain-google-genai 4.2.5 does not expose ``service_tier`` (see
+    langchain-ai/langchain-google#1682), but its ``_prepare_request`` forwards
+    unconsumed invoke kwargs into ``GenerateContentConfig``, which the
+    installed google-genai SDK (>=1.75) accepts. We inject the tier there —
+    ``_generate``/``_agenerate``/``_stream``/``_astream`` all route through
+    ``_prepare_request``, so one override covers every path.
+
+    Two error paths on a flex call, handled in ``_generate``/``_agenerate``:
+
+    - **Capability rejection** (400-class naming the service tier): the model
+      does not offer flex. The model is recorded in the process-wide negative
+      cache (``mark_flex_unsupported``) so no further flex attempts are made,
+      and the call is re-issued at the standard tier. This replaces any
+      hardcoded model allowlist — eligibility is discovered, not declared.
+    - **Capacity exhaustion** (429/503 after SDK-level retries): re-issue the
+      call once at the standard tier (unless ``flex_fallback_to_standard`` is
+      off). Not cached — the next call tries flex again.
+
+    Streaming paths get tier injection but no fallback (this repo constructs
+    non-streaming Gemini models; outer retry machinery covers streams).
+    """
+
+    service_tier: str | None = None
+    flex_fallback_to_standard: bool = True
+
+    def _prepare_request(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        if (
+            self.service_tier is not None
+            and "service_tier" not in kwargs
+            and not is_flex_unsupported(self.model)
+        ):
+            kwargs["service_tier"] = self.service_tier
+        return super()._prepare_request(*args, **kwargs)
+
+    def _effective_tier(self, kwargs: dict[str, Any]) -> str | None:
+        if kwargs.get("service_tier") is not None:
+            return kwargs["service_tier"]
+        if self.service_tier == "flex" and is_flex_unsupported(self.model):
+            return None
+        return self.service_tier
+
+    def _flex_retry_tier(
+        self, exc: BaseException, kwargs: dict[str, Any]
+    ) -> str | None:
+        """Tier to retry a failed flex call at, or None to re-raise."""
+        if self._effective_tier(kwargs) != "flex":
+            return None
+        if is_flex_unsupported_error(exc):
+            # Capability, not capacity: cache the downgrade regardless of
+            # the capacity-fallback setting — flex can never work here.
+            mark_flex_unsupported(self.model)
+            return "standard"
+        if self.flex_fallback_to_standard and _is_flex_capacity_error(exc):
+            logger.warning(
+                "flex_fallback_to_standard",
+                model=self.model,
+                **summarize_exception(exc, operation="gemini_flex_capacity"),
+            )
+            return "standard"
+        return None
+
+    def _generate(self, *args: Any, **kwargs: Any) -> Any:
+        try:
+            result = super()._generate(*args, **kwargs)
+        except Exception as exc:
+            retry_tier = self._flex_retry_tier(exc, kwargs)
+            if retry_tier is None:
+                raise
+            result = super()._generate(*args, **{**kwargs, "service_tier": retry_tier})
+            _stamp_service_tier(result, retry_tier)
+            return result
+        tier = self._effective_tier(kwargs)
+        if tier is not None:
+            _stamp_service_tier(result, tier)
+        return result
+
+    async def _agenerate(self, *args: Any, **kwargs: Any) -> Any:
+        try:
+            result = await super()._agenerate(*args, **kwargs)
+        except Exception as exc:
+            retry_tier = self._flex_retry_tier(exc, kwargs)
+            if retry_tier is None:
+                raise
+            result = await super()._agenerate(
+                *args, **{**kwargs, "service_tier": retry_tier}
+            )
+            _stamp_service_tier(result, retry_tier)
+            return result
+        tier = self._effective_tier(kwargs)
+        if tier is not None:
+            _stamp_service_tier(result, tier)
+        return result
+
+
+_flex_fallback_chat_openai_cls: type | None = None
+
+
+def _get_flex_fallback_chat_openai_cls() -> type:
+    """Lazily define the flex-capable ChatOpenAI subclass.
+
+    Defined inside a factory because ``langchain_openai`` is an optional
+    dependency imported function-locally throughout this module.
+
+    ``service_tier`` is a first-class ChatOpenAI field; the subclass only
+    adds capacity fallback: langchain-openai merges invoke kwargs over
+    ``_default_params`` (kwargs win), so re-calling with
+    ``service_tier="auto"`` overrides the constructor's ``"flex"`` for the
+    fallback attempt. Per OpenAI docs, flex-capacity 429s are not billed.
+    """
+    global _flex_fallback_chat_openai_cls
+    if _flex_fallback_chat_openai_cls is not None:
+        return _flex_fallback_chat_openai_cls
+
+    from langchain_openai import ChatOpenAI
+
+    class _FlexFallbackChatOpenAI(ChatOpenAI):
+        flex_fallback_to_standard: bool = True
+
+        def _effective_tier(self, kwargs: dict[str, Any]) -> str | None:
+            if kwargs.get("service_tier") is not None:
+                return kwargs["service_tier"]
+            if self.service_tier == "flex" and is_flex_unsupported(self.model_name):
+                return "auto"
+            return self.service_tier
+
+        def _payload_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+            # A model learned to be flex-incapable must not send "flex" from
+            # the constructor field; invoke kwargs override _default_params.
+            if (
+                self.service_tier == "flex"
+                and "service_tier" not in kwargs
+                and is_flex_unsupported(self.model_name)
+            ):
+                return {**kwargs, "service_tier": "auto"}
+            return kwargs
+
+        def _flex_retry_tier(
+            self, exc: BaseException, kwargs: dict[str, Any]
+        ) -> str | None:
+            """Tier to retry a failed flex call at, or None to re-raise."""
+            if self._effective_tier(kwargs) != "flex":
+                return None
+            if is_flex_unsupported_error(exc):
+                mark_flex_unsupported(self.model_name)
+                return "auto"
+            if self.flex_fallback_to_standard and _is_flex_capacity_error(exc):
+                logger.warning(
+                    "flex_fallback_to_standard",
+                    model=self.model_name,
+                    **summarize_exception(exc, operation="openai_flex_capacity"),
+                )
+                return "auto"
+            return None
+
+        def _generate(self, *args: Any, **kwargs: Any) -> Any:
+            kwargs = self._payload_kwargs(kwargs)
+            try:
+                return super()._generate(*args, **kwargs)
+            except Exception as exc:
+                retry_tier = self._flex_retry_tier(exc, kwargs)
+                if retry_tier is None:
+                    raise
+                return super()._generate(
+                    *args, **{**kwargs, "service_tier": retry_tier}
+                )
+
+        async def _agenerate(self, *args: Any, **kwargs: Any) -> Any:
+            kwargs = self._payload_kwargs(kwargs)
+            try:
+                return await super()._agenerate(*args, **kwargs)
+            except Exception as exc:
+                retry_tier = self._flex_retry_tier(exc, kwargs)
+                if retry_tier is None:
+                    raise
+                return await super()._agenerate(
+                    *args, **{**kwargs, "service_tier": retry_tier}
+                )
+
+    _flex_fallback_chat_openai_cls = _FlexFallbackChatOpenAI
+    return _FlexFallbackChatOpenAI
+
+
+def _apply_openai_service_tier(kwargs: dict[str, Any], *, label: str) -> None:
+    """Mutate ChatOpenAI constructor kwargs for OPENAI_SERVICE_TIER=flex.
+
+    Sets the tier, enables fallback per config, and floors the client
+    timeout (OpenAI recommends ~15 min for flex requests). No-op when the
+    standard/auto tier is configured, or when this process has already
+    learned the model rejects flex. Not applied to the APAC specialist,
+    whose OpenAI-compatible backend is a different vendor.
+    """
+    if not openai_flex_active():
+        return
+    if is_flex_unsupported(str(kwargs.get("model", ""))):
+        return
+    kwargs["service_tier"] = "flex"
+    kwargs["flex_fallback_to_standard"] = config.flex_fallback_to_standard
+    kwargs["timeout"] = int(
+        floor_llm_timeout(
+            float(kwargs.get("timeout", 120)),
+            provider="openai",
+            label=label,
+        )
+    )
+
+
+def _construct_chat_openai(kwargs: dict[str, Any]) -> BaseChatModel:
+    """Build ChatOpenAI, using the flex-fallback subclass when tiered."""
+    if kwargs.get("service_tier") == "flex":
+        return _get_flex_fallback_chat_openai_cls()(**kwargs)
+    from langchain_openai import ChatOpenAI
+
+    return ChatOpenAI(**kwargs)
+
+
 class _LazyLLMProxy:
     """Lazily construct a default LLM on first use."""
 
@@ -349,6 +640,29 @@ def get_all_llm_instances() -> dict:
     return _llm_instances.copy()
 
 
+def _resolve_gemini_service_tier(
+    model_name: str, service_tier: str | None
+) -> str | None:
+    """Resolve the effective Gemini tier for a new model instance.
+
+    ``None`` means "follow config": flex when ``GEMINI_SERVICE_TIER=flex``,
+    unless this process has already learned the model rejects flex (no
+    hardcoded model allowlist — eligibility is discovered via the vendor's
+    own capability error and cached; see ``src/service_tiers.py``). An
+    explicit ``"standard"`` pins the instance to the standard tier (e.g. the
+    LLM-judge content inspector, an inline security path that must not queue).
+    """
+    if service_tier is not None:
+        return service_tier if service_tier == "flex" else None
+    if (
+        gemini_flex_active()
+        and normalize_model_name(model_name).startswith("gemini-")
+        and not is_flex_unsupported(model_name)
+    ):
+        return "flex"
+    return None
+
+
 def create_gemini_model(
     model_name: str,
     temperature: float,
@@ -359,10 +673,17 @@ def create_gemini_model(
     thinking_level: str | None = None,
     max_output_tokens: int | None = None,
     reserve_class: Literal["default", "deep"] = "default",
+    service_tier: str | None = None,
 ) -> BaseChatModel:
     """
     Generic factory for Gemini models.
     All created instances are tracked for proper cleanup at shutdown.
+
+    ``service_tier=None`` follows ``GEMINI_SERVICE_TIER`` (flex only for
+    documented flex-eligible models); pass ``"standard"`` to pin an instance
+    to the standard tier regardless of config. Flex instances get their SDK
+    timeout floored to ``FLEX_LLM_TIMEOUT_SECONDS`` — flex calls may queue
+    1-15 minutes and a short socket timeout would turn that into retry churn.
 
     Note: API key is explicitly passed from config to avoid dependency on
     os.environ being populated by load_dotenv() (Pydantic Settings handles
@@ -370,6 +691,16 @@ def create_gemini_model(
     expect explicit api_key or os.environ values).
     """
     global _llm_instance_counter
+
+    resolved_tier = _resolve_gemini_service_tier(model_name, service_tier)
+    if resolved_tier == "flex":
+        timeout = int(
+            floor_llm_timeout(
+                float(timeout),
+                provider="google",
+                label=f"gemini_sdk_timeout:{model_name}",
+            )
+        )
 
     intent_tokens = max_output_tokens or config.llm_base_output_tokens
     thinking_budget = None
@@ -415,7 +746,11 @@ def create_gemini_model(
             model=model_name,
         )
 
-    llm = ChatGoogleGenerativeAI(**kwargs)
+    if resolved_tier is not None:
+        kwargs["service_tier"] = resolved_tier
+        kwargs["flex_fallback_to_standard"] = config.flex_fallback_to_standard
+
+    llm = _TieredChatGoogleGenerativeAI(**kwargs)
     _stamp_budget_metadata(
         llm,
         callbacks=kwargs["callbacks"],
@@ -441,10 +776,15 @@ def create_quick_thinking_llm(
     max_retries: int | None = None,
     callbacks: list[BaseCallbackHandler] | None = None,
     max_output_tokens: int | None = None,
+    service_tier: str | None = None,
 ) -> BaseChatModel:
     """
     Create a quick thinking LLM.
     If the QUICK_MODEL is Gemini 3+ or Gemini 2.5, this will set low reasoning.
+
+    ``service_tier`` defaults to config (``GEMINI_SERVICE_TIER``); pass
+    ``"standard"`` for latency-sensitive callers that must not queue on the
+    flex tier (e.g. the LLM-judge content inspector).
     """
     runtime_config = get_runtime_config(config)
     model_name = model or runtime_config.quick_think_llm
@@ -476,6 +816,7 @@ def create_quick_thinking_llm(
         thinking_level=thinking_level,
         max_output_tokens=max_output_tokens,
         reserve_class="default",
+        service_tier=service_tier,
     )
 
 
@@ -601,13 +942,11 @@ def create_consultant_llm(
         >>> result = consultant_llm.invoke("Review this analysis...")
         >>> quick_llm = create_consultant_llm(quick_mode=True)
     """
-    try:
-        from langchain_openai import ChatOpenAI
-    except ImportError as e:
+    if not _langchain_openai_available():
         raise ImportError(
             "langchain-openai package not found. Install with: "
             "pip install langchain-openai>=0.3.0"
-        ) from e
+        )
 
     # Check if consultant is enabled (via config, not os.environ)
     if not config.enable_consultant:
@@ -654,6 +993,7 @@ def create_consultant_llm(
         "use_responses_api": True,
         "output_version": "responses/v1",
     }
+    _apply_openai_service_tier(kwargs, label="openai_sdk_timeout:consultant")
     _rl = _get_openai_rate_limiter()
     if _rl is not None:
         kwargs["rate_limiter"] = _rl
@@ -681,7 +1021,7 @@ def create_consultant_llm(
     )
     kwargs["max_completion_tokens"] = budget.api_cap_tokens
 
-    llm = ChatOpenAI(**kwargs)
+    llm = _construct_chat_openai(kwargs)
     _stamp_budget_metadata(
         llm,
         callbacks=kwargs["callbacks"],
@@ -712,13 +1052,8 @@ def create_auditor_llm(
     In quick mode, gpt-5 reasoning effort is dropped to "minimal" to keep the
     auditor cheap on screening passes; normal mode preserves "medium".
     """
-    try:
-        from langchain_openai import ChatOpenAI
-    except ImportError as e:
-        logger.warning(
-            "langchain_openai_missing",
-            **summarize_exception(e, operation="langchain_openai_missing"),
-        )
+    if not _langchain_openai_available():
+        logger.warning("langchain_openai_missing")
         return None
 
     if not config.enable_consultant:
@@ -755,6 +1090,7 @@ def create_auditor_llm(
         "use_responses_api": True,
         "output_version": "responses/v1",
     }
+    _apply_openai_service_tier(kwargs, label="openai_sdk_timeout:auditor")
     _rl = _get_openai_rate_limiter()
     if _rl is not None:
         kwargs["rate_limiter"] = _rl
@@ -779,7 +1115,7 @@ def create_auditor_llm(
     )
     kwargs["max_completion_tokens"] = budget.api_cap_tokens
 
-    llm = ChatOpenAI(**kwargs)
+    llm = _construct_chat_openai(kwargs)
     _stamp_budget_metadata(
         llm,
         callbacks=kwargs["callbacks"],
@@ -969,13 +1305,8 @@ def create_editor_llm(
     Returns:
         ChatOpenAI instance or None if editor unavailable
     """
-    try:
-        from langchain_openai import ChatOpenAI
-    except ImportError as e:
-        logger.warning(
-            "langchain_openai_missing",
-            **summarize_exception(e, operation="langchain_openai_missing"),
-        )
+    if not _langchain_openai_available():
+        logger.warning("langchain_openai_missing")
         return None
 
     if not config.enable_consultant:
@@ -1003,6 +1334,7 @@ def create_editor_llm(
         "use_responses_api": True,
         "output_version": "responses/v1",
     }
+    _apply_openai_service_tier(kwargs, label="openai_sdk_timeout:editor")
     _rl = _get_openai_rate_limiter()
     if _rl is not None:
         kwargs["rate_limiter"] = _rl
@@ -1021,7 +1353,7 @@ def create_editor_llm(
     )
     kwargs["max_completion_tokens"] = budget.api_cap_tokens
 
-    llm = ChatOpenAI(**kwargs)
+    llm = _construct_chat_openai(kwargs)
     _stamp_budget_metadata(
         llm,
         callbacks=kwargs["callbacks"],

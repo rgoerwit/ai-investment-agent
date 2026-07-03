@@ -211,7 +211,7 @@ class TestOpenAIRateLimiter:
             captured_kw.update(kw)
             return MagicMock()
 
-        with patch("src.llms.ChatGoogleGenerativeAI", side_effect=fake_gemini):
+        with patch("src.llms._TieredChatGoogleGenerativeAI", side_effect=fake_gemini):
             with patch("src.llms.config_module.config") as mock_cfg:
                 mock_cfg.gemini_rpm_limit = 15
                 mock_cfg.llm_base_output_tokens = 8192

@@ -24,6 +24,7 @@ from src.runtime_diagnostics import (
     get_model_name,
     infer_provider,
 )
+from src.service_tiers import floor_llm_hard_timeout
 
 logger = structlog.get_logger(__name__)
 
@@ -264,6 +265,15 @@ async def invoke_with_rate_limit_handling(
         )
     else:
         hard_timeout = float(runtime_config.llm_call_hard_timeout_seconds)
+    # Flex tier: queued calls may take minutes; floor the hard cap so a
+    # legitimately-slow flex call (plus its potential standard-tier fallback
+    # attempt) isn't killed and fed to the circuit breaker as a timeout.
+    hard_timeout = floor_llm_hard_timeout(
+        hard_timeout,
+        provider=resolved_provider,
+        cfg=settings_config,
+        label=f"invoke_hard_timeout:{resolved_provider}",
+    )
     deadline = (
         time.monotonic() + float(overall_timeout_seconds)
         if overall_timeout_seconds is not None

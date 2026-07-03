@@ -943,9 +943,13 @@ FAILURE_MODE: CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_BLEED | OPERATIONAL_MISS | 
             }
         )
         from src.config import config as settings_config
+        from src.service_tiers import floor_llm_hard_timeout
 
-        hard_timeout = float(
-            get_runtime_config(settings_config).llm_call_hard_timeout_seconds
+        # Lesson LLM is the quick Gemini model; floor for GEMINI_SERVICE_TIER=flex.
+        hard_timeout = floor_llm_hard_timeout(
+            float(get_runtime_config(settings_config).llm_call_hard_timeout_seconds),
+            provider="google",
+            label="retrospective_lesson_timeout",
         )
         if invoke_config:
             response = await run_with_hard_timeout(

@@ -13,6 +13,9 @@ class TokenUsageBreakdown:
     thinking_tokens: int | None
     visible_output_tokens: int | None
     total_tokens: int | None
+    # Prompt-prefix cache hits, already counted inside input_tokens (both the
+    # LangChain UsageMetadata spec and OpenAI's raw prompt_tokens include them).
+    cached_input_tokens: int | None = None
 
 
 def _is_mockish(value: Any) -> bool:
@@ -38,6 +41,7 @@ def _with_visible_output(
     total_output_tokens: int | None,
     thinking_tokens: int | None,
     total_tokens: int | None,
+    cached_input_tokens: int | None = None,
 ) -> TokenUsageBreakdown:
     visible_output_tokens = None
     if total_output_tokens is not None and thinking_tokens is not None:
@@ -48,6 +52,7 @@ def _with_visible_output(
         thinking_tokens=thinking_tokens,
         visible_output_tokens=visible_output_tokens,
         total_tokens=total_tokens,
+        cached_input_tokens=cached_input_tokens,
     )
 
 
@@ -67,6 +72,7 @@ def _extract_from_usage_container(usage: Any) -> TokenUsageBreakdown | None:
         return None
 
     output_details = _metadata_get(usage, "output_token_details") or {}
+    input_details = _metadata_get(usage, "input_token_details") or {}
     input_tokens = _coerce_optional_int(
         _metadata_get(usage, "input_tokens") or _metadata_get(usage, "prompt_tokens")
     )
@@ -76,6 +82,9 @@ def _extract_from_usage_container(usage: Any) -> TokenUsageBreakdown | None:
         or _metadata_get(usage, "total_output_tokens")
     )
     thinking_tokens = _coerce_optional_int(_metadata_get(output_details, "reasoning"))
+    cached_input_tokens = _coerce_optional_int(
+        _metadata_get(input_details, "cache_read")
+    )
     total_tokens = _coerce_optional_int(_metadata_get(usage, "total_tokens"))
     if (
         input_tokens is None
@@ -95,6 +104,7 @@ def _extract_from_usage_container(usage: Any) -> TokenUsageBreakdown | None:
         total_output_tokens=total_output_tokens,
         thinking_tokens=thinking_tokens,
         total_tokens=total_tokens,
+        cached_input_tokens=cached_input_tokens,
     )
 
 
@@ -103,6 +113,7 @@ def _extract_from_token_usage_container(token_usage: Any) -> TokenUsageBreakdown
         return None
 
     completion_details = _metadata_get(token_usage, "completion_tokens_details") or {}
+    prompt_details = _metadata_get(token_usage, "prompt_tokens_details") or {}
     input_tokens = _coerce_optional_int(
         _metadata_get(token_usage, "input_tokens")
         or _metadata_get(token_usage, "prompt_tokens")
@@ -113,6 +124,9 @@ def _extract_from_token_usage_container(token_usage: Any) -> TokenUsageBreakdown
     )
     thinking_tokens = _coerce_optional_int(
         _metadata_get(completion_details, "reasoning_tokens")
+    )
+    cached_input_tokens = _coerce_optional_int(
+        _metadata_get(prompt_details, "cached_tokens")
     )
     total_tokens = _coerce_optional_int(_metadata_get(token_usage, "total_tokens"))
     if (
@@ -133,6 +147,7 @@ def _extract_from_token_usage_container(token_usage: Any) -> TokenUsageBreakdown
         total_output_tokens=total_output_tokens,
         thinking_tokens=thinking_tokens,
         total_tokens=total_tokens,
+        cached_input_tokens=cached_input_tokens,
     )
 
 

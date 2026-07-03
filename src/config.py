@@ -540,6 +540,41 @@ class Settings(BaseSettings):
         description="Capex / D&A ratio above which reinvestment is treated as growth investing. Default 1.25.",
     )
 
+    # --- Service tiers (flex inference) ---
+    # Flex halves per-token cost on both vendors in exchange for variable
+    # latency (1-15 min queue target) and best-effort capacity. Timeout floors
+    # are applied automatically wherever a wall-clock ceiling could kill a
+    # legitimately-queued flex call (see src/service_tiers.py). Applies in
+    # both normal and --quick runs. The LLM-judge content inspector is pinned
+    # to the standard tier regardless (inline security path).
+    gemini_service_tier: Literal["standard", "flex"] = Field(
+        default="standard",
+        validation_alias="GEMINI_SERVICE_TIER",
+        description="Gemini inference tier: standard, or flex (50% cost, higher latency)",
+    )
+    openai_service_tier: Literal["auto", "flex"] = Field(
+        default="auto",
+        validation_alias="OPENAI_SERVICE_TIER",
+        description="OpenAI service tier for consultant/auditor/editor: auto or flex",
+    )
+    flex_fallback_to_standard: bool = Field(
+        default=True,
+        validation_alias="FLEX_FALLBACK_TO_STANDARD",
+        description=(
+            "On flex capacity exhaustion (429/503 after SDK retries), re-issue "
+            "the call once at the standard tier instead of failing"
+        ),
+    )
+    flex_llm_timeout_seconds: int = Field(
+        default=900,
+        ge=60,
+        validation_alias="FLEX_LLM_TIMEOUT_SECONDS",
+        description=(
+            "Minimum per-call wall-clock allowance (seconds) for flex-tier LLM "
+            "calls; floors SDK timeouts and hard-timeout caps when flex is active"
+        ),
+    )
+
     # --- Logging ---
     log_level: str = Field(
         default="INFO",

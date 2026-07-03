@@ -28,6 +28,7 @@ from src.data_block_utils import (
 from src.error_safety import summarize_exception
 from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import failure_artifact, success_artifact
+from src.service_tiers import floor_llm_hard_timeout
 from src.thesis_constants import DRAWDOWN_52WK_RATIO, DRAWDOWN_SMA200_RATIO
 from src.tooling.text_boundary import format_untrusted_block
 
@@ -810,10 +811,16 @@ def create_analyst_node(
                             context=f"{agent_prompt.agent_name} (RETRY-HIGH)",
                             provider=support.infer_provider_name(retry_llm),
                             model_name=support.get_model_name(retry_llm),
-                            overall_timeout_seconds=float(
-                                get_runtime_config(
-                                    settings_config
-                                ).llm_call_hard_timeout_seconds
+                            # Floor for flex: an un-floored overall budget
+                            # would clamp the flex-aware hard cap back down.
+                            overall_timeout_seconds=floor_llm_hard_timeout(
+                                float(
+                                    get_runtime_config(
+                                        settings_config
+                                    ).llm_call_hard_timeout_seconds
+                                ),
+                                provider=support.infer_provider_name(retry_llm),
+                                label="analyst_retry_overall_timeout",
                             ),
                         )
                     )

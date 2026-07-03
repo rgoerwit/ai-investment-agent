@@ -59,6 +59,16 @@ def setup_test_env():
         "GOOGLE_API_KEY": "test-key",  # Default to dummy key
         "TAVILY_API_KEY": "test-key",
         "FINNHUB_API_KEY": "test-key",
+        # Service tiers must be pinned to defaults: an operator .env with
+        # GEMINI/OPENAI_SERVICE_TIER=flex flips llms.py construction paths
+        # (flex subclasses bypass ChatOpenAI/ChatGoogleGenerativeAI mocks) and
+        # floors timeout assertions (35 s quick budgets become 1350 s). Flex
+        # behavior is tested explicitly via config patching in
+        # tests/test_llms_flex.py / tests/test_service_tiers.py.
+        "GEMINI_SERVICE_TIER": "standard",
+        "OPENAI_SERVICE_TIER": "auto",
+        "FLEX_FALLBACK_TO_STANDARD": "true",
+        "FLEX_LLM_TIMEOUT_SECONDS": "900",
     }
 
     # 1. Patch os.environ

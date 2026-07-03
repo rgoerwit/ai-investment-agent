@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -16,7 +17,9 @@ from src.data_block_utils import unfenced_label
 from src.error_safety import redact_sensitive_text, summarize_exception
 from src.runtime_diagnostics import ArtifactStatus, failure_artifact, success_artifact
 from src.runtime_services import get_current_tool_service
+from src.service_tiers import floor_llm_hard_timeout, floor_llm_total_timeout
 from src.tooling.runtime import ToolInvocation
+from src.tooling.text_boundary import format_untrusted_block
 
 from . import message_utils, support
 from . import runtime as agent_runtime
@@ -42,6 +45,9 @@ logger = structlog.get_logger(__name__)
 
 CONSULTANT_CALL_TIMEOUT_SECONDS = 90.0
 CONSULTANT_TOTAL_TIMEOUT_SECONDS = 240.0
+# Cap for the aggregator-metrics snapshot injected into the auditor's first
+# message (the loop's ToolMessage truncation cap is far larger at 63.5k).
+_AUDITOR_SNAPSHOT_MAX_CHARS = 20_000
 _CONSULTANT_QUICK_SCREENING_ADDENDUM = """
 ## QUICK SCREENING MODE
 
@@ -108,7 +114,14 @@ async def _invoke_consultant_with_deadline(
             f"Consultant node exceeded total wall-clock timeout of {total_timeout:.0f}s for {ticker}"
         )
 
-    timeout_s = min(CONSULTANT_CALL_TIMEOUT_SECONDS, remaining)
+    # Flex tier: a queued call may legitimately take minutes; floor the
+    # per-call cap (the shrinking `remaining` budget still bounds the loop).
+    per_call_cap = floor_llm_hard_timeout(
+        CONSULTANT_CALL_TIMEOUT_SECONDS,
+        provider="openai",
+        label="consultant_call_timeout",
+    )
+    timeout_s = min(per_call_cap, remaining)
     try:
         return await agent_runtime.invoke_with_rate_limit_handling(
             runnable,
@@ -376,10 +389,12 @@ Provide your independent consultant review."""
         try:
             messages = [HumanMessage(content=prompt)]
             active_llm = llm_with_tools or llm
-            total_timeout = (
+            total_timeout = floor_llm_total_timeout(
                 settings_config.consultant_quick_total_timeout_seconds
                 if quick_mode
-                else CONSULTANT_TOTAL_TIMEOUT_SECONDS
+                else CONSULTANT_TOTAL_TIMEOUT_SECONDS,
+                provider="openai",
+                label="consultant_total_timeout",
             )
             consultant_deadline = time.monotonic() + total_timeout
 
@@ -722,6 +737,57 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
     return legal_counsel_node
 
 
+async def _preload_metrics_snapshot(ticker: str, tools_by_name: dict) -> str:
+    """One deterministic get_financial_metrics call through the hook chain.
+
+    Replaces the auditor's own aggregator-metrics tool rounds (the fetcher's
+    metrics cache is already warm from the pre-graph data-vacuum probe, so
+    this is near-free). Returns a formatted snapshot block for the auditor's
+    first message, or "" (fail-open) when the tool is absent, blocked,
+    errored, or non-JSON — the prompt's fallback tool budget covers that case.
+    """
+    metrics_tool = tools_by_name.get("get_financial_metrics")
+    if metrics_tool is None:
+        return ""
+    try:
+
+        async def _run_preload_tool(args: dict[str, Any]) -> Any:
+            return await metrics_tool.ainvoke(args)
+
+        result = await get_current_tool_service().execute(
+            ToolInvocation(
+                name="get_financial_metrics",
+                args={"ticker": ticker},
+                source="auditor",
+                agent_key="global_forensic_auditor",
+            ),
+            runner=_run_preload_tool,
+        )
+        if result.blocked:
+            return ""
+        payload = str(result.value)
+        parsed = json.loads(payload)
+        if not isinstance(parsed, dict) or "error" in parsed:
+            return ""
+    except Exception as exc:
+        logger.debug(
+            "auditor_metrics_preload_skipped",
+            ticker=ticker,
+            reason=type(exc).__name__,
+        )
+        return ""
+    return (
+        "\n\nPRE-LOADED AGGREGATOR SNAPSHOT "
+        "(merged yfinance/FMP/EODHD metrics — aggregator tier, "
+        "not filing ground truth):\n"
+        + format_untrusted_block(
+            payload[:_AUDITOR_SNAPSHOT_MAX_CHARS],
+            "financial_api",
+            provenance=f"merged aggregator metrics for {ticker}",
+        )
+    )
+
+
 def create_auditor_node(llm, tools: list) -> Callable:
     """
     Create the Global Forensic Auditor node.
@@ -752,18 +818,23 @@ def create_auditor_node(llm, tools: list) -> Callable:
         company_warning = (
             "" if company_resolved else f"\n{support._UNRESOLVED_NAME_WARNING}"
         )
+        tools_by_name = {t.name: t for t in tools}
+        snapshot_block = await _preload_metrics_snapshot(ticker, tools_by_name)
+
         human_msg = f"""Analyze financial statements for:
 Ticker: {ticker}
 Company: {company_name}{company_warning}
 Date: {support._format_date_with_fy_hint(current_date)}
 
-Perform a forensic audit using your tools."""
-
-        tools_by_name = {t.name: t for t in tools}
-        # recursion_limit=12 in the old create_react_agent maps to 6 tool-call rounds
-        # (each round = 1 LLM call + 1 tool execution step in LangGraph).
-        # We use 6 manual iterations here to preserve the same budget.
-        max_tool_iterations = 6
+Perform a forensic audit using your tools.{snapshot_block}"""
+        # Prompt v2.11 mandates plan-then-batch: all searches in one parallel
+        # round, follow-up rounds only on gate failures. The per-tool budgets
+        # (3 foreign + 1 metrics fallback + 1 news) fit in 2 batched rounds,
+        # so 3 rounds (4 LLM calls incl. synthesis) is the hard ceiling — a
+        # model that regresses to one-search-per-turn is cut off economically
+        # rather than allowed the old 6-round (create_react_agent-era) budget.
+        # At the cap the loop forces a final answer from the data collected.
+        max_tool_iterations = 3
 
         def _truncate_messages_for_llm(msgs: list) -> list:
             """Apply the auditor truncation hook to ToolMessages before LLM invocation."""
@@ -830,7 +901,9 @@ Perform a forensic audit using your tools."""
                     )
 
                 messages.append(response)
-                for tool_call in tool_calls:
+
+                async def _exec_one(tool_call: dict[str, Any]) -> ToolMessage:
+                    """Run one tool call; failures are contained per task."""
                     tool_fn = tools_by_name.get(tool_call["name"])
                     tool_call_id = tool_call.get("id", tool_call["name"])
                     if tool_fn:
@@ -863,9 +936,14 @@ Perform a forensic audit using your tools."""
                             tool_output = f"TOOL_ERROR: {tool_err}"
                     else:
                         tool_output = f"Unknown tool: {tool_call['name']}"
-                    messages.append(
-                        ToolMessage(content=tool_output, tool_call_id=tool_call_id)
-                    )
+                    return ToolMessage(content=tool_output, tool_call_id=tool_call_id)
+
+                # Plan-then-batch (prompt v2.11) puts several searches in one
+                # round; run them concurrently like the graph tool node does.
+                # gather preserves tool_calls order for the ToolMessages.
+                messages.extend(
+                    await asyncio.gather(*[_exec_one(tc) for tc in tool_calls])
+                )
 
                 logger.debug(
                     "auditor_tool_iteration",
