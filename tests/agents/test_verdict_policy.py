@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from src.agents.verdict_policy import maybe_floor_verdict_to_hold
+from src.agents.verdict_policy import (
+    maybe_demote_buy_on_blocking_flags,
+    maybe_floor_verdict_to_hold,
+)
 from src.charts.extractors.pm_block import extract_pm_block
 
 
@@ -214,3 +217,94 @@ def test_not_floored_when_growth_score_unparseable():
         ticker="X",
     )
     assert floored is False
+
+
+# --------------------------------------------------------------------------- #
+# maybe_demote_buy_on_blocking_flags
+# --------------------------------------------------------------------------- #
+_UNRELIABLE = {
+    "type": "HEALTH_SCORE_UNRELIABLE",
+    "severity": "WARNING",
+    "risk_penalty": 0.0,
+    "blocks_buy": True,
+}
+
+
+def _buy_output() -> str:
+    return (
+        "### PORTFOLIO MANAGER VERDICT: BUY\n\n"
+        "### --- START PM_BLOCK ---\n"
+        "VERDICT: BUY\n"
+        "HEALTH_ADJ: 56\nGROWTH_ADJ: 67\nRISK_TALLY: 0.75\nZONE: LOW\n"
+        "POSITION_SIZE: 3.0%\n"
+        "### --- END PM_BLOCK ---\n"
+    )
+
+
+def test_buy_demoted_when_health_score_unreliable():
+    """AGS.BR 2026-07-02 shape: unreliable 56% health must not back a BUY."""
+    out, demoted = maybe_demote_buy_on_blocking_flags(
+        _buy_output(), red_flags=[_UNRELIABLE], ticker="AGS.BR"
+    )
+    assert demoted
+    assert extract_pm_block(out).verdict == "HOLD"
+    assert "### PORTFOLIO MANAGER VERDICT: HOLD" in out
+    assert "DETERMINISTIC VERDICT DEMOTION APPLIED" in out
+    assert "HEALTH_SCORE_UNRELIABLE" in out
+
+
+def test_material_unverified_signal_also_blocks_buy():
+    """blocks_buy is the contract: the material-op-signal flag's documented
+    BUY-block is now enforced deterministically, not via unrendered rationale."""
+    out, demoted = maybe_demote_buy_on_blocking_flags(
+        _buy_output(),
+        red_flags=[
+            {
+                "type": "MATERIAL_UNVERIFIED_OPERATING_SIGNAL",
+                "risk_penalty": 0.0,
+                "blocks_buy": True,
+            }
+        ],
+        ticker="T",
+    )
+    assert demoted
+    assert extract_pm_block(out).verdict == "HOLD"
+
+
+def test_boolean_true_required_for_blocks_buy():
+    """Truthy-but-not-True values (e.g. a stray string) must not demote."""
+    out, demoted = maybe_demote_buy_on_blocking_flags(
+        _buy_output(),
+        red_flags=[{"type": "X", "blocks_buy": "yes"}],
+        ticker="T",
+    )
+    assert not demoted
+
+
+def test_buy_kept_without_unreliable_flag():
+    out, demoted = maybe_demote_buy_on_blocking_flags(
+        _buy_output(),
+        red_flags=[{"type": "VIE_STRUCTURE", "risk_penalty": 0.5}],
+        ticker="T",
+    )
+    assert not demoted
+    assert extract_pm_block(out).verdict == "BUY"
+
+
+def test_non_buy_verdicts_untouched_by_demotion():
+    for display, block in (("HOLD", "HOLD"), ("DO NOT INITIATE", "DO_NOT_INITIATE")):
+        content = _pm_output(display, block)
+        out, demoted = maybe_demote_buy_on_blocking_flags(
+            content, red_flags=[_UNRELIABLE], ticker="T"
+        )
+        assert not demoted
+        assert out == content
+
+
+def test_demotion_skipped_when_pm_block_verdict_missing():
+    content = "### PORTFOLIO MANAGER VERDICT: BUY\n\nProse only, no PM_BLOCK."
+    out, demoted = maybe_demote_buy_on_blocking_flags(
+        content, red_flags=[_UNRELIABLE], ticker="T"
+    )
+    assert not demoted
+    assert out == content

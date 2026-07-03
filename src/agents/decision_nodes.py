@@ -20,7 +20,10 @@ from src.agents.pm_verdict_metadata import (
     PMVerdictRecovery,
     pm_verdict_metadata_from_text,
 )
-from src.agents.verdict_policy import maybe_floor_verdict_to_hold
+from src.agents.verdict_policy import (
+    maybe_demote_buy_on_blocking_flags,
+    maybe_floor_verdict_to_hold,
+)
 from src.data_block_utils import (
     extract_data_block_field,
     fenced_block_pattern,
@@ -1283,6 +1286,11 @@ RISK TEAM DEBATE:
                 pre_screening_result=pre_screening_result,
                 ticker=ticker,
             )
+            content_str, buy_demoted = maybe_demote_buy_on_blocking_flags(
+                content_str,
+                red_flags=red_flags,
+                ticker=ticker,
+            )
             _log_risk_tally_reconciliation(content_str, code_risk_subtotal, ticker)
             _log_pm_discipline_checks(
                 content_str, red_flags, valuation_reliability, ticker
@@ -1303,6 +1311,7 @@ RISK TEAM DEBATE:
                 verdict=pm_metadata.verdict,
                 pm_verdict_recovered=pm_verdict_recovered,
                 verdict_floored_to_hold=verdict_floored,
+                buy_demoted_on_blocking_flags=buy_demoted,
                 pm_verdict_metadata=pm_metadata.model_dump(exclude_none=True),
                 pre_screening_result=state.get("pre_screening_result"),
                 direct_pm_inputs_present=present_inputs,

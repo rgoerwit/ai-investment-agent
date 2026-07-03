@@ -51,6 +51,67 @@ _SHOW_CHART_NO_RE = re.compile(r"(?im)^(\s*SHOW_VALUATION_CHART:\s*)NO\b.*$")
 _DISCOUNT_ZERO_RE = re.compile(r"(?im)^(\s*VALUATION_DISCOUNT:\s*)0(?:\.0+)?\b.*$")
 
 
+_PM_HEADER_BUY_RE = re.compile(r"(?im)^(#+\s*PORTFOLIO MANAGER VERDICT:\s*)BUY\b.*$")
+_PM_BLOCK_VERDICT_BUY_RE = re.compile(r"(?im)^(\s*VERDICT:\s*)BUY\b.*$")
+
+
+def maybe_demote_buy_on_blocking_flags(
+    content_str: str,
+    *,
+    red_flags: list[dict],
+    ticker: str = "UNKNOWN",
+) -> tuple[str, bool]:
+    """Demote a BUY to HOLD when any red flag carries ``blocks_buy: True``.
+
+    Flags that block BUY (``*_SCORE_UNRELIABLE``, ``MATERIAL_UNVERIFIED_
+    OPERATING_SIGNAL``) are zero-penalty by design, so the tally cannot stop a
+    BUY that ignores them — and ``format_red_flag_section`` renders only
+    type+detail, so their rationale prose never reaches the PM. This is the
+    deterministic enforcement of that contract (the AGS.BR 2026-07-02 failure:
+    an unreliable 56% health passed the <50% gate and backed a BUY).
+    Conservative: only BUY -> HOLD, never touches SELL/DNI/HOLD, and never
+    upgrades anything.
+
+    Returns ``(content_str, demoted)``; on demotion the caller re-derives
+    metadata so all surfaces agree.
+    """
+    if pm_verdict_metadata_from_text(content_str).verdict != "BUY":
+        return content_str, False
+    blocking = sorted(
+        {
+            str(flag.get("type", "UNKNOWN"))
+            for flag in red_flags
+            if flag.get("blocks_buy") is True
+        }
+    )
+    if not blocking:
+        return content_str, False
+
+    demoted, n_header = _PM_HEADER_BUY_RE.subn(r"\1HOLD", content_str)
+    demoted, n_block = _PM_BLOCK_VERDICT_BUY_RE.subn(r"\1HOLD", demoted)
+    if n_block == 0:
+        logger.warning("buy_demotion_skipped_no_pm_block_verdict", ticker=ticker)
+        return content_str, False
+
+    note = (
+        "\n\n> **DETERMINISTIC VERDICT DEMOTION APPLIED — BUY → HOLD**\n"
+        f"> BUY-blocking flag(s) present: {', '.join(blocking)}. These mark the "
+        "supporting evidence as indeterminate or unverified, so it may not back "
+        "initiating a position. Resolve the flagged issue and re-run to restore "
+        "BUY eligibility.\n"
+    )
+    demoted = demoted.rstrip() + note
+
+    logger.info(
+        "buy_demoted_on_blocking_flags",
+        ticker=ticker,
+        blocking_flags=blocking,
+        header_rewrites=n_header,
+        block_rewrites=n_block,
+    )
+    return demoted, True
+
+
 def _has_hard_flag(red_flags: list[dict]) -> bool:
     return any(
         (flag.get("action") == "AUTO_REJECT") or (flag.get("severity") == "CRITICAL")

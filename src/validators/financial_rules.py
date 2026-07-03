@@ -440,10 +440,14 @@ def detect_red_flags(
                 # quarantine): the model's arithmetic error must not penalize
                 # the name, only block mechanical use of the score.
                 "risk_penalty": 0.0,
+                # Enforced deterministically post-PM by
+                # verdict_policy.maybe_demote_buy_on_unreliable_score.
+                "blocks_buy": True,
                 "rationale": (
-                    f"Do NOT apply the hard quality gate (Adjusted {kind.capitalize()} "
-                    "< 50% -> SELL) mechanically on this value; reconcile the scoring "
-                    "rubric first."
+                    f"The score is indeterminate in BOTH directions: do NOT apply "
+                    f"the hard quality gate (Adjusted {kind.capitalize()} < 50% -> "
+                    "SELL) mechanically on this value, and do NOT count it as a "
+                    "pass supporting BUY — cap at HOLD until the rubric reconciles."
                 ),
             }
         )

@@ -101,6 +101,11 @@ CASES = [
         rf"RAW_GROWTH_SCORE: \[X\]/{tc.GROWTH_RUBRIC_POINTS:.0f}",
         "raw growth score template",
     ),
+    (
+        "portfolio_manager.json",
+        r"HEALTH_SCORE_UNRELIABLE \(or\s*GROWTH_SCORE_UNRELIABLE\)",
+        "unreliable-score gate guard",
+    ),
     ("fundamentals_analyst.json", rf"PEG <={re.escape(_PEG)}", "PEG scoring threshold"),
     (
         "fundamentals_analyst.json",
@@ -205,6 +210,60 @@ def test_new_datablock_fields_parser_compatible():
     # The capacity/facility signals originate in the Foreign Language Analyst.
     for field in ("CAPACITY_UTILIZATION", "FACILITY_BUILDOUT_STATUS"):
         assert field in fla, f"{field} missing from Foreign Language Analyst prompt"
+
+
+def _breakdown_template_keys(msg: str, field: str) -> list[str]:
+    m = re.search(rf"^{field}:\s*([^\n]+)$", msg, re.MULTILINE)
+    assert m, f"{field} template line missing from fundamentals_analyst prompt"
+    return [item.split("=")[0].strip() for item in m.group(1).split(";")]
+
+
+def test_score_breakdown_keys_match_criteria_maps():
+    """Breakdown template keys ≡ thesis_constants criterion maps (order too)."""
+    msg = _system_message("fundamentals_analyst.json")
+    assert _breakdown_template_keys(msg, "HEALTH_SCORE_BREAKDOWN") == list(
+        tc.HEALTH_SCORE_CRITERIA
+    ), "HEALTH_SCORE_BREAKDOWN keys drifted from HEALTH_SCORE_CRITERIA"
+    assert _breakdown_template_keys(msg, "GROWTH_SCORE_BREAKDOWN") == list(
+        tc.GROWTH_SCORE_CRITERIA
+    ), "GROWTH_SCORE_BREAKDOWN keys drifted from GROWTH_SCORE_CRITERIA"
+
+
+def test_criteria_maps_sum_to_rubric_totals():
+    assert sum(tc.HEALTH_SCORE_CRITERIA.values()) == tc.HEALTH_RUBRIC_POINTS
+    assert sum(tc.GROWTH_SCORE_CRITERIA.values()) == tc.GROWTH_RUBRIC_POINTS
+
+
+def _rubric_bullet_points(msg: str, start: str, end: str) -> list[float]:
+    section = msg[msg.index(start) : msg.index(end)]
+    return [
+        float(m.group(1))
+        for m in re.finditer(r"(?m)^- [^\n]*?:\s*(\d+(?:\.\d+)?)\s*pt", section)
+    ]
+
+
+def test_health_rubric_prose_sums_to_declared_total():
+    """The v9.30 rubric summed 12.5 under a '12 Points Total' header (OCF
+    double-counted between Liquidity and Cash Generation) — a correct
+    per-criterion breakdown could never reconcile. Guard the repair."""
+    msg = _system_message("fundamentals_analyst.json")
+    points = _rubric_bullet_points(
+        msg, "### FINANCIAL HEALTH SCORE", "### GROWTH TRANSITION SCORE"
+    )
+    assert sum(points) == tc.HEALTH_RUBRIC_POINTS, (
+        f"health rubric bullets sum to {sum(points)}, "
+        f"declared total is {tc.HEALTH_RUBRIC_POINTS:g}"
+    )
+    assert len(points) == len(tc.HEALTH_SCORE_CRITERIA)
+
+
+def test_growth_rubric_prose_sums_to_declared_total():
+    msg = _system_message("fundamentals_analyst.json")
+    points = _rubric_bullet_points(
+        msg, "### GROWTH TRANSITION SCORE", "## ADAPTIVE SCORING PROTOCOL"
+    )
+    assert sum(points) == tc.GROWTH_RUBRIC_POINTS
+    assert len(points) == len(tc.GROWTH_SCORE_CRITERIA)
 
 
 def test_material_events_enum_matches_parser():

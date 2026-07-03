@@ -60,6 +60,33 @@ GROWTH_RUBRIC_POINTS = 6.0
 FINANCIALS_HEALTH_REMOVED_POINTS = 1.0  # D/E point removed for Financials
 SCORE_PCT_TOLERANCE = 1.5  # pct-points; absorbs LLM rounding (83% vs 83.3%)
 
+# Per-criterion rubric maps (key → max points). Keys must match the prompt's
+# HEALTH_SCORE_BREAKDOWN / GROWTH_SCORE_BREAKDOWN template lines exactly
+# (parity-guarded); names align with existing DATA_BLOCK fields where one
+# exists (DE_RATIO, NET_DEBT_EBITDA). Values sum to the rubric totals above.
+HEALTH_SCORE_CRITERIA: dict[str, float] = {
+    "ROE": 1.0,
+    "ROA": 1.0,
+    "OPERATING_MARGIN": 1.0,
+    "DE_RATIO": 1.0,
+    "NET_DEBT_EBITDA": 1.0,
+    "CURRENT_RATIO": 1.0,
+    "OCF_POSITIVE": 1.0,
+    "FCF_POSITIVE": 1.0,
+    "FCF_YIELD": 1.0,
+    "PE_OR_PEG": 1.0,
+    "EV_EBITDA": 1.0,
+    "PB_OR_PS": 1.0,
+}
+GROWTH_SCORE_CRITERIA: dict[str, float] = {
+    "REVENUE_GROWTH": 1.0,
+    "EPS_GROWTH": 1.0,
+    "ROA_ROE_IMPROVING": 1.0,
+    "GROSS_MARGIN": 1.0,
+    "GLOBAL_EXPANSION": 1.0,
+    "R_AND_D_CAPEX_BACKLOG": 1.0,
+}
+
 # Discovery / diversification
 ANALYST_COVERAGE_MAX = 15  # at/above: "discovered", hard fail
 US_REVENUE_MAX_PCT = 35.0

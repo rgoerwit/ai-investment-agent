@@ -506,6 +506,8 @@ def extract_interest_coverage(report: str) -> float | None:
 def extract_free_cash_flow(report: str) -> float | None:
     """Extract free cash flow with support for signs and B/M/K multipliers."""
     patterns = [
+        # Canonical DATA_BLOCK field (fundamentals prompt v9.31)
+        r"(?:^|\n)\s*FREE_CASH_FLOW:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
         r"\*\*Free Cash Flow\*\*:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
         r"(?:^|\n)\s*Free Cash Flow:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
         r"(?:^|\n)\s*FCF:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",

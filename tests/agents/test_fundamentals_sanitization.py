@@ -8,7 +8,10 @@ from src.agents.analyst_nodes import (
     _sanitize_fundamentals_output,
     _valuation_input_reliability,
 )
-from src.agents.fundamentals_reconciler import reconcile_score_consistency
+from src.agents.fundamentals_reconciler import (
+    parse_score_breakdown,
+    reconcile_score_consistency,
+)
 
 
 def test_sanitize_fundamentals_output_forces_missing_horizons_to_na() -> None:
@@ -973,3 +976,355 @@ ADJUSTED_HEALTH_SCORE: 50% (based on 10 available points)
         updated, corrected, suspect = reconcile_score_consistency(body)
         assert suspect and not corrected
         assert "HEALTH_SCORE_CONSISTENCY: SUSPECT" in updated
+
+
+class TestScoreBreakdown:
+    """Per-criterion *_SCORE_BREAKDOWN audit (A5b): numerator becomes checkable."""
+
+    _HEALTH_OK = (
+        "HEALTH_SCORE_BREAKDOWN: ROE=1; ROA=0.5; OPERATING_MARGIN=0; DE_RATIO=1; "
+        "NET_DEBT_EBITDA=N/A; CURRENT_RATIO=1; OCF_POSITIVE=1; FCF_POSITIVE=1; "
+        "FCF_YIELD=N/A; PE_OR_PEG=1; EV_EBITDA=N/A; PB_OR_PS=0"
+    )  # numeric sum 6.5, available 9
+
+    @staticmethod
+    def _body(*lines: str) -> str:
+        return "\n".join(lines)
+
+    def test_consistent_breakdown_passes(self) -> None:
+        body = self._body(
+            self._HEALTH_OK,
+            "RAW_HEALTH_SCORE: 6.5/9",
+            "ADJUSTED_HEALTH_SCORE: 72% (based on 9 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected and not suspect
+
+    def test_breakdown_sum_mismatch_flagged(self) -> None:
+        body = self._body(
+            self._HEALTH_OK,
+            "RAW_HEALTH_SCORE: 5/9",
+            "ADJUSTED_HEALTH_SCORE: 56% (based on 9 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert suspect and not corrected
+        assert "HEALTH_SCORE_CONSISTENCY: SUSPECT" in updated
+        assert "breakdown awards sum 6.5 != RAW earned 5" in updated
+
+    def test_breakdown_available_mismatch_flagged(self) -> None:
+        body = self._body(
+            self._HEALTH_OK,
+            "RAW_HEALTH_SCORE: 6.5/10",
+            "ADJUSTED_HEALTH_SCORE: 65% (based on 10 available points)",
+        )
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect
+        assert "breakdown available points 9 != stated available 10" in updated
+
+    def test_financials_removed_and_na_reconcile_denominator(self) -> None:
+        body = self._body(
+            "SECTOR: Financials",
+            "SECTOR_ADJUSTMENTS: Financials: D/E removed; ROE threshold 12%.",
+            "HEALTH_SCORE_BREAKDOWN: ROE=1; ROA=1; OPERATING_MARGIN=0.5; "
+            "DE_RATIO=REMOVED; NET_DEBT_EBITDA=N/A; CURRENT_RATIO=1; "
+            "OCF_POSITIVE=1; FCF_POSITIVE=1; FCF_YIELD=N/A; PE_OR_PEG=1; "
+            "EV_EBITDA=REMOVED; PB_OR_PS=1",
+            "RAW_HEALTH_SCORE: 7.5/8",
+            "ADJUSTED_HEALTH_SCORE: 94% (based on 8 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected and not suspect
+
+    def test_unknown_and_missing_keys_flagged(self) -> None:
+        body = self._body(
+            "HEALTH_SCORE_BREAKDOWN: ROE=1; MYSTERY_METRIC=1",
+            "RAW_HEALTH_SCORE: 2/12",
+            "ADJUSTED_HEALTH_SCORE: 17% (based on 12 available points)",
+        )
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect
+        assert "breakdown keys do not match rubric" in updated
+        assert "MYSTERY_METRIC" in updated
+
+    def test_duplicate_keys_flagged(self) -> None:
+        body = self._body(
+            "HEALTH_SCORE_BREAKDOWN: ROE=1; ROE=0; ROA=1",
+            "RAW_HEALTH_SCORE: 2/12",
+            "ADJUSTED_HEALTH_SCORE: 17% (based on 12 available points)",
+        )
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect
+        assert "unparseable or has duplicate criteria" in updated
+
+    def test_malformed_award_values_flagged_not_raised(self) -> None:
+        body = self._body(
+            "HEALTH_SCORE_BREAKDOWN: ROE=maybe; ROA=strong",
+            "RAW_HEALTH_SCORE: 2/12",
+            "ADJUSTED_HEALTH_SCORE: 17% (based on 12 available points)",
+        )
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect  # nothing parseable -> unparseable reason
+
+    def test_absent_breakdown_line_degrades_to_totals_only(self) -> None:
+        """Pre-v9.31 reports: identical behavior to the A2 validator."""
+        body = self._body(
+            "RAW_HEALTH_SCORE: 9/11",
+            "ADJUSTED_HEALTH_SCORE: 82% (based on 11 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected and not suspect
+
+    def test_growth_breakdown_validated_independently(self) -> None:
+        body = self._body(
+            "GROWTH_SCORE_BREAKDOWN: REVENUE_GROWTH=1; EPS_GROWTH=0; "
+            "ROA_ROE_IMPROVING=0.5; GROSS_MARGIN=1; GLOBAL_EXPANSION=0; "
+            "R_AND_D_CAPEX_BACKLOG=1",
+            "RAW_GROWTH_SCORE: 4/6",
+            "ADJUSTED_GROWTH_SCORE: 67% (based on 6 available points)",
+        )
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect  # 3.5 != 4
+        assert "GROWTH_SCORE_CONSISTENCY: SUSPECT" in updated
+
+
+class TestScoreBreakdownObjectiveChecks:
+    _BASE = (
+        "HEALTH_SCORE_BREAKDOWN: ROE=1; ROA=1; OPERATING_MARGIN=1; DE_RATIO=1; "
+        "NET_DEBT_EBITDA=1; CURRENT_RATIO=1; OCF_POSITIVE=1; FCF_POSITIVE=1; "
+        "FCF_YIELD=1; PE_OR_PEG=1; EV_EBITDA=1; PB_OR_PS=1"
+    )  # sum 12/12
+
+    def _body(self, *extra: str) -> str:
+        return "\n".join(
+            (
+                *extra,
+                self._BASE,
+                "RAW_HEALTH_SCORE: 12/12",
+                "ADJUSTED_HEALTH_SCORE: 100% (based on 12 available points)",
+            )
+        )
+
+    def test_ocf_award_with_negative_ocf_flagged(self) -> None:
+        body = self._body("OPERATING_CASH_FLOW: -¥1.2B")
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect
+        assert "OCF_POSITIVE=1 but OPERATING_CASH_FLOW is negative" in updated
+
+    def test_fcf_award_with_negative_fcf_flagged(self) -> None:
+        body = self._body("FCF: -$120M")
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect
+        assert "FCF_POSITIVE=1 but FCF is negative" in updated
+
+    def test_pe_award_with_clearly_failing_multiples_flagged(self) -> None:
+        body = self._body("SECTOR: Industrials", "PE_RATIO_TTM: 25.0", "PEG_RATIO: 1.8")
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect
+        assert "PE_OR_PEG" in updated
+
+    def test_pe_check_skipped_for_information_technology(self) -> None:
+        """IT has a documented P/S alternative to the P/E gate."""
+        body = self._body(
+            "SECTOR: Information Technology", "PE_RATIO_TTM: 25.0", "PEG_RATIO: 1.8"
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert not suspect and not corrected
+
+    def test_pe_near_threshold_not_flagged(self) -> None:
+        body = self._body(
+            "SECTOR: Industrials", "PE_RATIO_TTM: 19.0", "PEG_RATIO: 1.25"
+        )
+        _, corrected, suspect = reconcile_score_consistency(body)
+        assert not suspect and not corrected
+
+    def test_pe_check_needs_both_multiples_present(self) -> None:
+        body = self._body("SECTOR: Industrials", "PE_RATIO_TTM: 25.0")
+        _, corrected, suspect = reconcile_score_consistency(body)
+        assert not suspect and not corrected
+
+    def test_positive_values_not_flagged(self) -> None:
+        body = self._body(
+            "SECTOR: Industrials",
+            "OPERATING_CASH_FLOW: ¥2.9B",
+            "FCF: $120M",
+            "PE_RATIO_TTM: 12.0",
+            "PEG_RATIO: 0.9",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not suspect and not corrected
+
+
+class TestAgsBrNumeratorTriplet:
+    """The three AGS.BR runs (4/10, 7.5/9, 5/9 on identical data) that motivated
+    A5b: internally consistent totals pass only when the breakdown supports the
+    numerator; a contradicting breakdown lands HEALTH_SCORE_UNRELIABLE-class
+    SUSPECT instead of silently flipping the <50% gate."""
+
+    _FIN = (
+        "SECTOR: Financials",
+        "SECTOR_ADJUSTMENTS: Financials: D/E Ratio and EV/EBITDA removed.",
+    )
+
+    def _breakdown(self, awards: dict[str, str]) -> str:
+        base = {
+            "ROE": "0",
+            "ROA": "0",
+            "OPERATING_MARGIN": "0",
+            "DE_RATIO": "REMOVED",
+            "NET_DEBT_EBITDA": "N/A",
+            "CURRENT_RATIO": "0",
+            "OCF_POSITIVE": "0",
+            "FCF_POSITIVE": "0",
+            "FCF_YIELD": "0",
+            "PE_OR_PEG": "0",
+            "EV_EBITDA": "REMOVED",
+            "PB_OR_PS": "0",
+        }
+        base.update(awards)
+        return "HEALTH_SCORE_BREAKDOWN: " + "; ".join(
+            f"{k}={v}" for k, v in base.items()
+        )  # available = 9
+
+    def test_5_of_9_with_supporting_breakdown_passes(self) -> None:
+        body = "\n".join(
+            (
+                *self._FIN,
+                self._breakdown(
+                    {
+                        "ROE": "1",
+                        "ROA": "1",
+                        "CURRENT_RATIO": "1",
+                        "OCF_POSITIVE": "1",
+                        "PE_OR_PEG": "1",
+                    }
+                ),
+                "RAW_HEALTH_SCORE: 5/9",
+                "ADJUSTED_HEALTH_SCORE: 56% (based on 9 available points)",
+            )
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected and not suspect
+
+    def test_5_of_9_total_with_7_5_breakdown_is_suspect(self) -> None:
+        """June-29-style numerator (7.5) contradicting a July-2-style total."""
+        body = "\n".join(
+            (
+                *self._FIN,
+                self._breakdown(
+                    {
+                        "ROE": "1",
+                        "ROA": "1",
+                        "OPERATING_MARGIN": "0.5",
+                        "CURRENT_RATIO": "1",
+                        "OCF_POSITIVE": "1",
+                        "FCF_POSITIVE": "1",
+                        "PE_OR_PEG": "1",
+                        "PB_OR_PS": "1",
+                    }
+                ),
+                "RAW_HEALTH_SCORE: 5/9",
+                "ADJUSTED_HEALTH_SCORE: 56% (based on 9 available points)",
+            )
+        )
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect
+        assert "breakdown awards sum 7.5 != RAW earned 5" in updated
+
+    def test_4_of_10_shape_denominator_still_audited(self) -> None:
+        """June-28 shape: breakdown says 9 available but totals claim 10."""
+        body = "\n".join(
+            (
+                *self._FIN,
+                self._breakdown(
+                    {"ROE": "1", "ROA": "1", "CURRENT_RATIO": "1", "OCF_POSITIVE": "1"}
+                ),
+                "RAW_HEALTH_SCORE: 4/10",
+                "ADJUSTED_HEALTH_SCORE: 40% (based on 10 available points)",
+            )
+        )
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect
+        assert "breakdown available points 9 != stated available 10" in updated
+
+
+class TestScoreBreakdownHardening:
+    """Fix-round regressions: strict item parsing + REMOVED semantics."""
+
+    @staticmethod
+    def _body(breakdown_items: str, raw: str, adjusted: str) -> str:
+        return "\n".join(
+            (
+                f"HEALTH_SCORE_BREAKDOWN: {breakdown_items}",
+                f"RAW_HEALTH_SCORE: {raw}",
+                f"ADJUSTED_HEALTH_SCORE: {adjusted}",
+            )
+        )
+
+    def test_out_of_vocabulary_numeric_award_is_suspect_not_misparsed(self) -> None:
+        """ROE=1.5 must not silently parse as ROE=1 (verified regression)."""
+        assert parse_score_breakdown("ROE=1.5; ROA=0.75") is None
+        body = self._body(
+            "ROE=1.5; ROA=0.75", "2/12", "17% (based on 12 available points)"
+        )
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect
+        assert "unparseable or has duplicate criteria" in updated
+
+    def test_trailing_period_after_award_tolerated(self) -> None:
+        awards = parse_score_breakdown("ROE=1; PB_OR_PS=0.")
+        assert awards == {"ROE": "1", "PB_OR_PS": "0"}
+
+    def test_labeled_full_line_parses(self) -> None:
+        awards = parse_score_breakdown("HEALTH_SCORE_BREAKDOWN: ROE=1; ROA=0")
+        assert awards == {"ROE": "1", "ROA": "0"}
+
+    def test_removed_on_never_removable_criterion_is_suspect(self) -> None:
+        """AGS.BR 2026-07-02 run 2 shape: OCF_POSITIVE=REMOVED claims a sector
+        mandate that does not exist."""
+        body = self._body(
+            "ROE=1; ROA=0; OPERATING_MARGIN=0.5; DE_RATIO=REMOVED; "
+            "NET_DEBT_EBITDA=REMOVED; CURRENT_RATIO=1; OCF_POSITIVE=REMOVED; "
+            "FCF_POSITIVE=REMOVED; FCF_YIELD=REMOVED; PE_OR_PEG=1; "
+            "EV_EBITDA=REMOVED; PB_OR_PS=0",
+            "3.5/6",
+            "58% (based on 6 available points)",
+        )
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect
+        assert (
+            "REMOVED claimed for non-sector-removable criteria: OCF_POSITIVE" in updated
+        )
+
+    def test_removed_on_sector_removable_criteria_accepted(self) -> None:
+        """FCF-class / D/E / EV-EBITDA REMOVED stays legal (Financials usage)."""
+        body = self._body(
+            "ROE=1; ROA=1; OPERATING_MARGIN=0.5; DE_RATIO=REMOVED; "
+            "NET_DEBT_EBITDA=REMOVED; CURRENT_RATIO=1; OCF_POSITIVE=1; "
+            "FCF_POSITIVE=REMOVED; FCF_YIELD=REMOVED; PE_OR_PEG=1; "
+            "EV_EBITDA=REMOVED; PB_OR_PS=0.5",
+            "6/7",
+            "86% (based on 7 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected and not suspect
+
+    def test_fcf_sign_check_reads_canonical_free_cash_flow_field(self) -> None:
+        body = "\n".join(
+            (
+                "FREE_CASH_FLOW: -€0.3B",
+                "HEALTH_SCORE_BREAKDOWN: ROE=1; ROA=1; OPERATING_MARGIN=1; "
+                "DE_RATIO=1; NET_DEBT_EBITDA=1; CURRENT_RATIO=1; OCF_POSITIVE=1; "
+                "FCF_POSITIVE=1; FCF_YIELD=1; PE_OR_PEG=1; EV_EBITDA=1; PB_OR_PS=1",
+                "RAW_HEALTH_SCORE: 12/12",
+                "ADJUSTED_HEALTH_SCORE: 100% (based on 12 available points)",
+            )
+        )
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect
+        assert "FCF_POSITIVE=1 but FREE_CASH_FLOW is negative" in updated

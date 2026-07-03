@@ -16,7 +16,11 @@ from src.sector_normalization import normalize_sector_label
 from src.thesis_constants import (
     FINANCIALS_HEALTH_REMOVED_POINTS,
     GROWTH_RUBRIC_POINTS,
+    GROWTH_SCORE_CRITERIA,
     HEALTH_RUBRIC_POINTS,
+    HEALTH_SCORE_CRITERIA,
+    PE_MAX,
+    PEG_MAX,
     SCORE_PCT_TOLERANCE,
 )
 from src.validators.pfic_constants import (
@@ -472,6 +476,172 @@ def _parse_adjusted_score(
     return pct, paren_earned, paren_available
 
 
+_SCORE_CRITERIA: dict[str, dict[str, float]] = {
+    "HEALTH": HEALTH_SCORE_CRITERIA,
+    "GROWTH": GROWTH_SCORE_CRITERIA,
+}
+# Each item must fullmatch: a lax scan would mis-read malformed awards
+# ("ROE=1.5" as 1, "ROA=0.75" as 0) instead of flagging them.
+_BREAKDOWN_ITEM_RE = re.compile(
+    r"([A-Z][A-Z0-9_]*)\s*=\s*(0\.5|0|1|N/?A|REMOVED)\.?", re.IGNORECASE
+)
+# Criteria no sector adjustment ever removes: a REMOVED token on one of these
+# claims a sector mandate that does not exist (data gaps must use N/A). The
+# sector-removable remainder (D/E, EV/EBITDA, FCF-class, margins, expansion)
+# is deliberately permissive — vendors' sector prose varies.
+_NEVER_REMOVED_CRITERIA: dict[str, frozenset[str]] = {
+    "HEALTH": frozenset(
+        {"ROE", "ROA", "CURRENT_RATIO", "OCF_POSITIVE", "PE_OR_PEG", "PB_OR_PS"}
+    ),
+    "GROWTH": frozenset({"REVENUE_GROWTH", "EPS_GROWTH"}),
+}
+# Tolerance for objective threshold cross-checks: only flag awards that are
+# wrong by a clear margin, never near-threshold judgment calls.
+_OBJECTIVE_CHECK_MARGIN = 1.10
+
+
+def parse_score_breakdown(text: str, kind: str = "HEALTH") -> dict[str, str] | None:
+    """Parse a ``*_SCORE_BREAKDOWN`` line value into {criterion: award-token}.
+
+    Returns None when the text is empty, any semicolon-delimited item fails to
+    parse cleanly, or keys are duplicated (ambiguous — the caller flags it).
+    Tokens are normalized to ``0``/``0.5``/``1``/``N/A``/``REMOVED``. Unknown
+    keys are kept so the caller can name them.
+    """
+    if not text or not text.strip():
+        return None
+    # Accept a full labeled line ("HEALTH_SCORE_BREAKDOWN: ROE=1; ...") as well
+    # as the bare value — the L1 prompt contract feeds whole lines.
+    text = re.sub(r"^\s*[A-Z_]*_SCORE_BREAKDOWN\s*:\s*", "", text.strip())
+    awards: dict[str, str] = {}
+    for item in text.split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        match = _BREAKDOWN_ITEM_RE.fullmatch(item)
+        if match is None:
+            return None  # malformed item (e.g. ROE=1.5, ROA=strong)
+        key, token = match.group(1).upper(), match.group(2).upper()
+        if token == "NA":
+            token = "N/A"
+        if key in awards:
+            return None  # duplicate key
+        awards[key] = token
+    return awards or None
+
+
+def _is_negative_amount(text: str) -> bool:
+    """True when a DATA_BLOCK money value reads as negative (e.g. '-¥1.2B')."""
+    return bool(re.search(r"[-−(]\s*[$¥€£]?\s*\d", text))
+
+
+def _breakdown_objective_reasons(body: str, awards: dict[str, str]) -> list[str]:
+    """Flag awards that contradict the (already reconciled) DATA_BLOCK values.
+
+    Deliberately conservative: sign checks (sector-invariant) plus the PE_OR_PEG
+    gate for non-IT sectors only (Information Technology has a documented
+    P/S-based alternative), with a clear margin — never near-threshold calls.
+    Threshold criteria with sector-adjusted bars (D/E, P/B, ROE...) are out of
+    scope by design.
+    """
+    reasons: list[str] = []
+    for criterion, fields in (
+        ("OCF_POSITIVE", ("OPERATING_CASH_FLOW",)),
+        # Canonical field first (v9.31 template); bare FCF tolerated for
+        # reports that emit the shorthand.
+        ("FCF_POSITIVE", ("FREE_CASH_FLOW", "FCF")),
+    ):
+        token = awards.get(criterion, "")
+        if token not in {"0.5", "1"}:
+            continue
+        for field in fields:
+            value = extract_block_text_value(body, field)
+            if value and _is_negative_amount(value):
+                reasons.append(
+                    f"breakdown awards {criterion}={token} but {field} is negative"
+                )
+                break
+
+    sector = normalize_sector_label(extract_block_text_value(body, "SECTOR"))
+    pe = extract_block_number_from_text(body, "PE_RATIO_TTM")
+    peg = extract_block_number_from_text(body, "PEG_RATIO")
+    if (
+        awards.get("PE_OR_PEG") in {"0.5", "1"}
+        and sector != "Information Technology"
+        and pe is not None
+        and peg is not None
+        and pe > PE_MAX * _OBJECTIVE_CHECK_MARGIN
+        and peg > PEG_MAX * _OBJECTIVE_CHECK_MARGIN
+    ):
+        reasons.append(
+            f"breakdown awards PE_OR_PEG but P/E {pe:g} and PEG {peg:g} both "
+            f"clearly fail the {PE_MAX:g}/{PEG_MAX:g} thresholds"
+        )
+    return reasons
+
+
+def _breakdown_reasons(
+    body: str, kind: str, earned: float, available: float
+) -> list[str]:
+    """Validate the per-criterion breakdown against RAW/available totals.
+
+    Absent line -> no reasons (pre-v9.31 reports degrade to totals-only checks).
+    """
+    text = extract_block_text_value(body, f"{kind}_SCORE_BREAKDOWN")
+    if not text.strip():
+        return []
+    criteria = _SCORE_CRITERIA[kind]
+    awards = parse_score_breakdown(text, kind)
+    if awards is None:
+        return [f"{kind} breakdown line is unparseable or has duplicate criteria"]
+    if set(awards) != set(criteria):
+        missing = sorted(set(criteria) - set(awards))
+        unknown = sorted(set(awards) - set(criteria))
+        detail = "; ".join(
+            part
+            for part in (
+                f"missing {', '.join(missing)}" if missing else "",
+                f"unknown {', '.join(unknown)}" if unknown else "",
+            )
+            if part
+        )
+        return [f"breakdown keys do not match rubric ({detail})"]
+
+    reasons: list[str] = []
+    bogus_removed = sorted(
+        key
+        for key, token in awards.items()
+        if token == "REMOVED" and key in _NEVER_REMOVED_CRITERIA[kind]
+    )
+    if bogus_removed:
+        reasons.append(
+            "REMOVED claimed for non-sector-removable criteria: "
+            f"{', '.join(bogus_removed)} (data gaps must use N/A)"
+        )
+    numeric = {
+        key: float(token)
+        for key, token in awards.items()
+        if token not in {"N/A", "REMOVED"}
+    }
+    for key, points in numeric.items():
+        if points > criteria[key]:
+            reasons.append(
+                f"breakdown award {key}={points:g} exceeds max {criteria[key]:g}"
+            )
+    awards_sum = sum(numeric.values())
+    if abs(awards_sum - earned) > 0.01:
+        reasons.append(f"breakdown awards sum {awards_sum:g} != RAW earned {earned:g}")
+    expected_available = sum(criteria[key] for key in numeric)
+    if abs(expected_available - available) > 0.01:
+        reasons.append(
+            f"breakdown available points {expected_available:g} != stated "
+            f"available {available:g}"
+        )
+    if not reasons:
+        reasons.extend(_breakdown_objective_reasons(body, awards))
+    return reasons
+
+
 def reconcile_score_consistency(body: str) -> tuple[str, bool, bool]:
     """Validate RAW vs ADJUSTED health/growth score lines for internal consistency.
 
@@ -481,9 +651,11 @@ def reconcile_score_consistency(body: str) -> tuple[str, bool, bool]:
     (denominators coherent, only the percent diverges); anything template-violating
     or implausible gets a ``*_SCORE_CONSISTENCY: SUSPECT`` line — never fixed by
     inference. N/A criteria legitimately shrink the available denominator below the
-    rubric total, so totals are ceilings, not exact requirements; a numerator that
-    is merely *wrong* (same data scored differently across runs) is not detectable
-    here without a per-criterion breakdown.
+    rubric total, so totals are ceilings, not exact requirements. When the prompt's
+    (v9.31+) per-criterion ``*_SCORE_BREAKDOWN`` line is present, the numerator is
+    audited too: awards must reconcile to RAW/available and pass conservative
+    objective cross-checks; pre-v9.31 reports without the line degrade to the
+    totals-only checks.
 
     Returns ``(body, corrected, suspect)``.
     """
@@ -527,6 +699,8 @@ def reconcile_score_consistency(body: str) -> tuple[str, bool, bool]:
             reasons.append(
                 "SECTOR_ADJUSTMENTS says D/E removed but available points not reduced"
             )
+
+        reasons.extend(_breakdown_reasons(updated, kind, earned, available))
 
         if reasons:
             suspect = True

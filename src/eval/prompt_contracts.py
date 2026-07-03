@@ -25,6 +25,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from src.agents.fundamentals_reconciler import parse_score_breakdown
+
 # Owning parsers — each contract points at the live consumer, not a copy.
 from src.agents.output_validation import validate_required_output
 from src.charts.extractors.pm_block import PMBlockData, extract_pm_block
@@ -35,6 +37,7 @@ from src.graph.routing import (
     parse_auditor_status,
 )
 from src.ibkr.order_builder import parse_trade_block
+from src.thesis_constants import HEALTH_SCORE_CRITERIA
 from src.validators.metric_extractor import extract_metrics
 from src.validators.supplemental_extractors import (
     extract_legal_risks,
@@ -199,6 +202,26 @@ PROMPT_CONTRACTS: tuple[PromptContract, ...] = (
         shape=Shape.UNFENCED_BLOCK,
         parser=lambda text: validate_required_output("consultant", text),
         success=_consultant_ok,
+    ),
+    PromptContract(
+        name="health_score_breakdown",
+        prompt_key="fundamentals_analyst",
+        shape=Shape.LABELED_LINE,
+        parser=parse_score_breakdown,
+        success=lambda result: isinstance(result, dict)
+        and set(result) == set(HEALTH_SCORE_CRITERIA),
+        line_pattern=r"^HEALTH_SCORE_BREAKDOWN:",
+        legacy_forms=(
+            (
+                "HEALTH_SCORE_BREAKDOWN: ROE=1; ROA=0.5; OPERATING_MARGIN=0; "
+                "DE_RATIO=REMOVED; NET_DEBT_EBITDA=N/A; CURRENT_RATIO=1; "
+                "OCF_POSITIVE=1; FCF_POSITIVE=1; FCF_YIELD=N/A; PE_OR_PEG=1; "
+                "EV_EBITDA=N/A; PB_OR_PS=0",
+                lambda result: isinstance(result, dict)
+                and set(result) == set(HEALTH_SCORE_CRITERIA)
+                and result["DE_RATIO"] == "REMOVED",
+            ),
+        ),
     ),
     PromptContract(
         name="material_events_status",

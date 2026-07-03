@@ -86,12 +86,15 @@ class TestFundamentalsAnalystOCFPriority:
 
         cash_gen_text = cash_gen_match.group(1)
 
-        # Should mention OCF as primary
-        assert "Operating Cash Flow >0: 1 pt" in cash_gen_text
-        assert "primary measure - operating health" in cash_gen_text
+        # v9.31 rubric repair: OCF is awarded exactly once, under Liquidity;
+        # Cash Generation must NOT award it a second time (the old prose
+        # double-counted it and summed 12.5 under a 12-point header).
+        assert "Positive TTM OCF: 1 pt" in msg  # Liquidity section
+        assert "already scored under Liquidity" in cash_gen_text
+        assert "Operating Cash Flow >0: 1 pt" not in cash_gen_text
 
-        # FCF should be secondary (0.5 pt)
-        assert "Free Cash Flow >0: 0.5 pt additional" in cash_gen_text
+        # FCF is a full point (promoted from 0.5 so the section sums to 2).
+        assert "Free Cash Flow >0: 1 pt" in cash_gen_text
 
     def test_ocf_fcf_note_exists(self):
         """Should have note about OCF+/FCF- being acceptable."""
