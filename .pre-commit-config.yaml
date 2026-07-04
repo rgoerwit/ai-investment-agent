@@ -41,3 +41,24 @@ repos:
   #     - id: mypy
   #       additional_dependencies: [types-requests]
   #       args: [--ignore-missing-imports]
+
+  # Snyk advisory security scan.
+  # Silently skips when snyk is not installed or not authenticated, and treats a
+  # depleted plan/test-limit ("licensing") failure as a skip — never blocks a
+  # commit. HIGH/CRITICAL findings are printed as remediation notes.
+  # Install: brew install snyk  or  npm install -g snyk   Authenticate: snyk auth
+  #
+  # Scoped to dependency-manifest changes: Snyk scans poetry.lock/pyproject.toml,
+  # which is all that affects the result, so running on every commit would only
+  # burn the monthly test allowance. CI (pip-audit in security.yml) still scans
+  # dependencies on every push regardless.
+  - repo: local
+    hooks:
+      - id: snyk
+        name: Snyk (advisory HIGH/CRITICAL scan)
+        language: script
+        entry: scripts/snyk_check.sh
+        pass_filenames: false
+        files: '^(poetry\.lock|pyproject\.toml)$'
+        verbose: true
+        stages: [pre-commit]
