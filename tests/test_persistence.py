@@ -417,3 +417,65 @@ def test_persist_analysis_outputs_surfaces_formatted_warning():
 
     console.print.assert_called_once()
     assert "saving analysis results:RuntimeError" in console.print.call_args.args[0]
+
+
+def test_persist_analysis_outputs_records_saved_path(tmp_path):
+    from src.persistence import _persist_analysis_outputs
+
+    args = SimpleNamespace(ticker="7203.T", quick=True, quiet=True, brief=False)
+    result: dict = {}
+    saved = tmp_path / "7203.T_20260704_analysis.json"
+
+    with patch("src.persistence.save_results_to_file", return_value=saved):
+        _persist_analysis_outputs(
+            result,
+            args,
+            logger_obj=MagicMock(),
+            console_obj=None,
+        )
+
+    assert result["_saved_analysis_path"] == str(saved)
+
+
+def test_patch_saved_run_summary_merges_fields(tmp_path):
+    from src.persistence import patch_saved_run_summary
+
+    path = tmp_path / "a_analysis.json"
+    path.write_text(
+        json.dumps({"run_summary": {"existing": 1}, "metadata": {"ticker": "7203.T"}}),
+        encoding="utf-8",
+    )
+
+    patch_saved_run_summary(
+        path,
+        {"article_writer_model": "gemini-3.5-flash", "article_writer_fell_back": True},
+    )
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["run_summary"]["existing"] == 1
+    assert data["run_summary"]["article_writer_model"] == "gemini-3.5-flash"
+    assert data["run_summary"]["article_writer_fell_back"] is True
+    assert data["metadata"]["ticker"] == "7203.T"
+
+
+def test_patch_saved_run_summary_creates_missing_run_summary(tmp_path):
+    from src.persistence import patch_saved_run_summary
+
+    path = tmp_path / "a_analysis.json"
+    path.write_text(json.dumps({"metadata": {}}), encoding="utf-8")
+
+    patch_saved_run_summary(path, {"article_writer_fell_back": False})
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["run_summary"] == {"article_writer_fell_back": False}
+
+
+def test_patch_saved_run_summary_missing_file_fails_open(tmp_path):
+    from src.persistence import patch_saved_run_summary
+
+    logger = MagicMock()
+
+    patch_saved_run_summary(tmp_path / "missing.json", {"a": 1}, logger_obj=logger)
+
+    logger.warning.assert_called_once()
+    assert logger.warning.call_args.args[0] == "run_summary_patch_failed"

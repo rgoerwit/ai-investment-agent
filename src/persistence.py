@@ -746,6 +746,32 @@ def save_results_to_file(
     return filepath
 
 
+def patch_saved_run_summary(
+    path: str | Path,
+    fields: dict[str, Any],
+    *,
+    logger_obj=logger,
+) -> None:
+    """Merge ``fields`` into ``run_summary`` of an already-saved analysis JSON.
+
+    Used to record post-persistence facts (e.g. the article writer model /
+    fallback flag) without re-running the full save path. Fail-open: a patch
+    failure must never break the run.
+    """
+    from src.error_safety import summarize_exception
+
+    try:
+        filepath = Path(path)
+        data = json.loads(filepath.read_text(encoding="utf-8"))
+        data.setdefault("run_summary", {}).update(fields)
+        filepath.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception as exc:
+        logger_obj.warning(
+            "run_summary_patch_failed",
+            **summarize_exception(exc, operation="patching saved run_summary"),
+        )
+
+
 def _persist_analysis_outputs(
     result: dict,
     args: Any,
@@ -779,6 +805,10 @@ def _persist_analysis_outputs(
             strict_mode=getattr(args, "strict", False),
             logger_obj=logger_obj,
         )
+        # Internal-only marker (save_data is a curated dict, so this never
+        # self-persists): lets post-persistence steps such as the article
+        # writer-model stamp patch the saved JSON in place.
+        result["_saved_analysis_path"] = str(filepath)
         if not args.quiet and not args.brief and console_obj is not None:
             console_obj.print(
                 f"[green]Results saved to:[/green] [cyan]{filepath}[/cyan]{cost_suffix_fn()}"

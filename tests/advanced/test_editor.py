@@ -808,7 +808,8 @@ class TestEditorialLoopIntegration:
             data_block=data_block,
         )
 
-        assert result.startswith("## Verification Caveats")
+        # Caveats are QA scaffolding: they land below the article's H1 title.
+        assert result.startswith("# Still Wrong\n\n## Verification Caveats")
         assert "NET_DEBT_EBITDA: 1.95" in result
         assert feedback["verdict"] == "REVISE"
         assert feedback["deterministic_citation_audit"] is True
@@ -1037,6 +1038,68 @@ class TestMainPyIntegration:
         run_summary = analysis_result["run_summary"]
         assert run_summary["article_writer_model"] == "gemini-3.5-flash"
         assert run_summary["article_writer_fell_back"] is True
+
+    @pytest.mark.asyncio
+    async def test_handle_article_generation_patches_saved_json(self, tmp_path):
+        """The writer-model stamp must reach the already-persisted analysis JSON.
+
+        The JSON artifact is saved before article generation, so the in-memory
+        run_summary stamp alone never reaches disk (the 3393.T review gap).
+        """
+        import json
+        from unittest.mock import MagicMock, mock_open, patch
+
+        args = MagicMock()
+        args.article = "test_article.md"
+        args.output = "/tmp/test_output.md"
+        args.quiet = True
+        args.brief = False
+
+        mock_writer_instance = MagicMock()
+        mock_writer_instance.write.return_value = "# Draft"
+        mock_writer_instance.current_model_name = "gemini-3.5-flash"
+        mock_writer_instance.writer_fell_back = True
+
+        mock_editor_instance = MagicMock()
+        mock_editor_instance.is_available.return_value = False
+
+        saved_json = tmp_path / "TEST_20260704_analysis.json"
+        saved_json.write_text(
+            json.dumps({"run_summary": {"verdict": "HOLD"}}), encoding="utf-8"
+        )
+        analysis_result = {
+            "fundamentals_report": "DATA",
+            "final_trade_decision": "PM",
+            "_saved_analysis_path": str(saved_json),
+        }
+
+        with (
+            patch(
+                "src.article_writer.ArticleWriter", return_value=mock_writer_instance
+            ),
+            patch(
+                "src.article_writer.ArticleEditor", return_value=mock_editor_instance
+            ),
+            patch("builtins.open", mock_open()),
+        ):
+            from src.output import handle_article_generation
+
+            await handle_article_generation(
+                args=args,
+                ticker="TEST",
+                company_name="Test Corp",
+                report_text="Full report...",
+                trade_date="2026-01-01",
+                analysis_result=analysis_result,
+                resolve_article_path_fn=lambda *_a, **_k: str(
+                    tmp_path / "test_article.md"
+                ),
+            )
+
+        data = json.loads(saved_json.read_text(encoding="utf-8"))
+        assert data["run_summary"]["verdict"] == "HOLD"
+        assert data["run_summary"]["article_writer_model"] == "gemini-3.5-flash"
+        assert data["run_summary"]["article_writer_fell_back"] is True
 
     @pytest.mark.asyncio
     async def test_handle_article_generation_records_primary_writer_model(self):

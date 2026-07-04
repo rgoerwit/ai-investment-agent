@@ -364,6 +364,21 @@ async def handle_article_generation(
             run_summary = analysis_result.setdefault("run_summary", {})
             run_summary["article_writer_model"] = writer_model
             run_summary["article_writer_fell_back"] = writer_fell_back
+            # The analysis JSON was persisted before article generation, so
+            # the in-memory stamp above never reaches disk on its own — patch
+            # the saved artifact in place (fail-open).
+            saved_path = analysis_result.get("_saved_analysis_path")
+            if saved_path:
+                from src.persistence import patch_saved_run_summary
+
+                patch_saved_run_summary(
+                    saved_path,
+                    {
+                        "article_writer_model": writer_model,
+                        "article_writer_fell_back": writer_fell_back,
+                    },
+                    logger_obj=logger_obj,
+                )
         if writer_fell_back and not args.quiet and not args.brief:
             console_obj.print(
                 f"[yellow]Claude writer unavailable — article written by "

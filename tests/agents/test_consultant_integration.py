@@ -525,6 +525,131 @@ class TestConsultantNodeExecution:
         assert not result["consultant_review"].startswith("[PARTIAL REVIEW")
 
     @pytest.mark.asyncio
+    async def test_consultant_boundary_half_tool_failure_is_partial(self):
+        """2-of-4 failures (ratio exactly 0.5) sit on the inclusive <= boundary.
+
+        CONSULTANT_PARTIAL_TOOL_FAILURE_RATIO is 0.5 and the gate is
+        `failure_ratio <= ratio` — exactly-half must still degrade to PARTIAL,
+        not exclusion. Classic silent off-by-one regression spot.
+        """
+        error_payload = (
+            '{"error":"upstream 500","provider":"fmp","failure_kind":"server_error"}'
+        )
+        result = await self._run_consultant_with_tool_results(
+            [
+                ToolResult(value=error_payload),
+                ToolResult(value=error_payload),
+                ToolResult(value="ok-1"),
+                ToolResult(value="ok-2"),
+            ]
+        )
+
+        status = result["artifact_statuses"]["consultant_review"]
+        assert status["ok"] is True
+        assert status["message"] == (
+            "Consultant review PARTIAL: 2/4 verification tool calls failed"
+        )
+        assert result["consultant_tool_failures"] == 2
+        assert result["consultant_review"].startswith("[PARTIAL REVIEW: 2 of 4")
+
+    @pytest.mark.asyncio
+    async def test_consultant_all_tool_failures_excluded(self):
+        """4-of-4 failures (ratio 1.0) stay excluded."""
+        error_payload = (
+            '{"error":"upstream 500","provider":"fmp","failure_kind":"server_error"}'
+        )
+        result = await self._run_consultant_with_tool_results(
+            [ToolResult(value=error_payload) for _ in range(4)]
+        )
+
+        status = result["artifact_statuses"]["consultant_review"]
+        assert status["ok"] is False
+        assert result["consultant_tool_failures"] == 4
+        assert not result["consultant_review"].startswith("[PARTIAL REVIEW")
+
+    async def _run_consultant_with_loop_result(self, loop_result):
+        """Drive the node with a crafted loop result (bypasses the tool loop)."""
+        mock_llm = Mock()
+
+        with patch(
+            "src.agents.consultant_nodes.run_bounded_consultant_loop",
+            new=AsyncMock(return_value=loop_result),
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                mock_prompt = Mock()
+                mock_prompt.system_message = "You are a consultant."
+                mock_prompt.agent_name = "External Consultant"
+                mock_get_prompt.return_value = mock_prompt
+
+                consultant_node = create_consultant_node(
+                    mock_llm, "consultant", tools=[]
+                )
+
+                state = {
+                    "company_of_interest": "0005.HK",
+                    "company_name": "HSBC Holdings",
+                    "market_report": "Report",
+                    "sentiment_report": "Report",
+                    "news_report": "Report",
+                    "fundamentals_report": "Report",
+                    "investment_debate_state": {"history": "Debate"},
+                    "investment_plan": "Plan",
+                }
+                config = RunnableConfig(
+                    configurable={"context": Mock(trade_date="2025-12-13")}
+                )
+
+                return await consultant_node(state, config)
+
+    @pytest.mark.asyncio
+    async def test_consultant_zero_executed_tool_calls_no_zero_division(self):
+        """tool_call_count == 0 with failures must hit the `else 1.0` guard.
+
+        The ratio guard treats zero executed calls as full failure (excluded),
+        and must never raise ZeroDivisionError.
+        """
+        from src.agents.consultant_tool_loop import ConsultantLoopResult
+
+        loop_result = ConsultantLoopResult(
+            content="CONSULTANT REVIEW: CONDITIONAL APPROVAL",
+            response=Mock(),
+            had_tool_errors=True,
+            tool_failure_count=1,
+            tool_call_count=0,
+        )
+
+        result = await self._run_consultant_with_loop_result(loop_result)
+
+        status = result["artifact_statuses"]["consultant_review"]
+        assert status["ok"] is False
+        assert status["message"] == "Consultant review completed with tool failures"
+        assert not result["consultant_review"].startswith("[PARTIAL REVIEW")
+
+    @pytest.mark.asyncio
+    async def test_consultant_empty_synthesis_with_failures_excluded(self):
+        """Blank synthesis + tool failures fails closed before the partial gate.
+
+        Empty consultant content trips should_fail_closed (missing required
+        structure), so the review is excluded rather than PARTIAL-tagged.
+        """
+        from src.agents.consultant_tool_loop import ConsultantLoopResult
+
+        loop_result = ConsultantLoopResult(
+            content="",
+            response=Mock(),
+            had_tool_errors=True,
+            tool_failure_count=1,
+            tool_call_count=4,
+        )
+
+        result = await self._run_consultant_with_loop_result(loop_result)
+
+        status = result["artifact_statuses"]["consultant_review"]
+        assert status["ok"] is False
+        assert status["message"] == "Consultant output missing required structure"
+        assert result["consultant_review"] == ""
+
+    @pytest.mark.asyncio
     async def test_consultant_suppresses_repeated_fmp_alt_calls_after_failure(self):
         """Managed FMP alt-source unavailability should not poison consultant validity."""
         mock_tool_bound_llm = Mock()

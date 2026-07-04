@@ -37,6 +37,13 @@ _SOURCE_CONFIDENCE_FIELDS = (
 def _normalize_citation_value(value: str) -> str:
     text = value.strip().strip("`").strip()
     text = _UNVERIFIED_TAG_PATTERN.sub("", text)
+    # A DATA_BLOCK value may carry a trailing parenthetical qualifier the
+    # article legitimately omits, e.g. "91.7% (based on 12 available points)".
+    # Strip it on both sides of the comparison — but never strip a value that
+    # is *only* a parenthetical (accounting-negative style "(3,057)").
+    qualifier_stripped = re.sub(r"\s*\([^()]*\)\s*$", "", text)
+    if qualifier_stripped:
+        text = qualifier_stripped
     text = text.strip("'\"").replace(",", "")
     text = re.sub(r"\s+", "", text)
     if text.endswith("%"):
@@ -117,7 +124,9 @@ def prepend_verification_caveats(
     article: str,
     factual_errors: list[dict[str, Any]],
 ) -> str:
-    if not factual_errors or article.lstrip().startswith("## Verification Caveats"):
+    if not factual_errors or re.search(
+        r"^## Verification Caveats\b", article, flags=re.MULTILINE
+    ):
         return article
 
     lines = [
@@ -130,7 +139,14 @@ def prepend_verification_caveats(
             f"- {error.get('claim', 'Citation mismatch')}: "
             f"{error.get('ground_truth', 'No ground truth available')}"
         )
-    return "\n".join(lines) + "\n\n" + article
+    caveat_block = "\n".join(lines)
+    # The caveat block is QA scaffolding, not the lede — place it under the
+    # article's own H1 title when one exists instead of above it.
+    title_match = re.search(r"^# .+$", article, flags=re.MULTILINE)
+    if title_match:
+        end = title_match.end()
+        return article[:end] + "\n\n" + caveat_block + "\n" + article[end:]
+    return caveat_block + "\n\n" + article
 
 
 def extract_source_confidence_context(

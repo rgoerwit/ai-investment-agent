@@ -120,7 +120,7 @@ def test_article_citation_audit_flags_missing_field() -> None:
 
     assert len(errors) == 1
     assert "No `FAKE_FIELD` field exists" in errors[0]["ground_truth"]
-    assert caveated.startswith("## Verification Caveats")
+    assert caveated.startswith("# Title\n\n## Verification Caveats")
 
 
 def test_article_citation_audit_flags_only_invalid_citation() -> None:
@@ -149,6 +149,87 @@ def test_article_citation_audit_flags_non_na_cite_against_na_block_value() -> No
 
     assert len(errors) == 1
     assert "REVENUE_GROWTH_TTM: N/A" in errors[0]["ground_truth"]
+
+
+def test_article_citation_audit_accepts_trailing_qualifier_on_block_value() -> None:
+    # Run-3 false-positive class: the DATA_BLOCK value carries a trailing
+    # parenthetical qualifier the article legitimately omits.
+    article = "Health is strong `(ADJUSTED_HEALTH_SCORE: 91.7%)`."
+    data_block = _block("ADJUSTED_HEALTH_SCORE: 91.7% (based on 12 available points)")
+
+    assert audit_article_citations(article, data_block) == []
+
+
+def test_article_citation_audit_still_flags_mismatch_despite_qualifier() -> None:
+    article = "Health is strong `(ADJUSTED_HEALTH_SCORE: 92.1%)`."
+    data_block = _block("ADJUSTED_HEALTH_SCORE: 91.7% (based on 12 available points)")
+
+    errors = audit_article_citations(article, data_block)
+
+    assert len(errors) == 1
+    assert "ADJUSTED_HEALTH_SCORE: 92.1%" in errors[0]["claim"]
+
+
+def test_article_citation_audit_qualifier_strip_preserves_units() -> None:
+    # Guard against over-normalization: a wrong magnitude suffix must still
+    # be flagged even though the numeric prefix matches.
+    article = "Cash flow held up `(OPERATING_CASH_FLOW: 3,057B JPY)`."
+    data_block = _block("OPERATING_CASH_FLOW: 3,057M JPY (filing-derived)")
+
+    errors = audit_article_citations(article, data_block)
+
+    assert len(errors) == 1
+
+
+def test_article_citation_audit_accepts_na_with_qualifier() -> None:
+    article = "Growth data is unavailable `(REVENUE_GROWTH_TTM: N/A)`."
+    data_block = _block("REVENUE_GROWTH_TTM: N/A (data vacuum: yfinance null)")
+
+    assert audit_article_citations(article, data_block) == []
+
+
+def test_verification_caveats_insert_after_h1_title() -> None:
+    article = "# Big Story\n\nBody paragraph."
+    errors = [
+        {"claim": "Article cites (X: 1)", "ground_truth": "DATA_BLOCK shows X: 2"}
+    ]
+
+    caveated = prepend_verification_caveats(article, errors)
+
+    assert caveated.startswith("# Big Story\n\n## Verification Caveats")
+    assert "Body paragraph." in caveated
+    assert caveated.index("# Big Story") < caveated.index("## Verification Caveats")
+
+
+def test_verification_caveats_prepend_when_no_h1() -> None:
+    article = "Body paragraph without a title."
+    errors = [
+        {"claim": "Article cites (X: 1)", "ground_truth": "DATA_BLOCK shows X: 2"}
+    ]
+
+    caveated = prepend_verification_caveats(article, errors)
+
+    assert caveated.startswith("## Verification Caveats")
+    assert article in caveated
+
+
+def test_verification_caveats_idempotent_after_h1_insert() -> None:
+    article = "# Big Story\n\nBody paragraph."
+    errors = [
+        {"claim": "Article cites (X: 1)", "ground_truth": "DATA_BLOCK shows X: 2"}
+    ]
+
+    once = prepend_verification_caveats(article, errors)
+    twice = prepend_verification_caveats(once, errors)
+
+    assert twice == once
+    assert twice.count("## Verification Caveats") == 1
+
+
+def test_verification_caveats_no_errors_returns_article_unchanged() -> None:
+    article = "# Big Story\n\nBody paragraph."
+
+    assert prepend_verification_caveats(article, []) == article
 
 
 def test_article_citation_audit_empty_article_has_no_errors() -> None:
