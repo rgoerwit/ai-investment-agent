@@ -2118,3 +2118,195 @@ class TestSearchClaimTool:
         tool_names = [t.name for t in tools]
         assert "fetch_reference_content" in tool_names
         assert "search_claim" in tool_names
+
+
+# =============================================================================
+# Verdict Consistency & EDITOR_NOTES Tests (July 2026 editorial-loop hardening)
+# =============================================================================
+
+
+class TestEnforceVerdictConsistency:
+    """The verdict must follow the editor's own findings."""
+
+    def test_clean_approval_passes_through(self):
+        from src.article_writer import _enforce_verdict_consistency
+
+        feedback = {"verdict": "APPROVED", "factual_errors": [], "confidence": 0.6}
+        assert _enforce_verdict_consistency(feedback)["verdict"] == "APPROVED"
+
+    def test_approved_with_factual_errors_coerced_to_revise(self):
+        from src.article_writer import _enforce_verdict_consistency
+
+        feedback = {
+            "verdict": "APPROVED",
+            "factual_errors": [{"location": "X", "claim": "Y", "ground_truth": "Z"}],
+        }
+        assert _enforce_verdict_consistency(feedback)["verdict"] == "REVISE"
+
+    def test_approved_with_broken_reference_coerced_to_revise(self):
+        from src.article_writer import _enforce_verdict_consistency
+
+        feedback = {
+            "verdict": "APPROVED",
+            "factual_errors": [],
+            "reference_checks": [{"url": "https://x", "status": "broken"}],
+        }
+        assert _enforce_verdict_consistency(feedback)["verdict"] == "REVISE"
+
+    def test_verified_reference_does_not_coerce(self):
+        from src.article_writer import _enforce_verdict_consistency
+
+        feedback = {
+            "verdict": "APPROVED",
+            "factual_errors": [],
+            "reference_checks": [{"url": "https://x", "status": "verified"}],
+        }
+        assert _enforce_verdict_consistency(feedback)["verdict"] == "APPROVED"
+
+    def test_revise_verdict_untouched(self):
+        from src.article_writer import _enforce_verdict_consistency
+
+        feedback = {"verdict": "REVISE", "factual_errors": []}
+        assert _enforce_verdict_consistency(feedback)["verdict"] == "REVISE"
+
+    def test_malformed_reference_entries_do_not_raise(self):
+        from src.article_writer import _enforce_verdict_consistency
+
+        feedback = {
+            "verdict": "APPROVED",
+            "factual_errors": [],
+            "reference_checks": ["not-a-dict", None, 42],
+        }
+        assert _enforce_verdict_consistency(feedback)["verdict"] == "APPROVED"
+
+
+class TestStripEditorNotes:
+    """The revision meta block must never survive into the published article."""
+
+    def test_strips_closed_block(self):
+        from src.article_writer import _strip_editor_notes
+
+        article = (
+            "# Title\n\nBody text.\n\n## References\n- https://x\n\n"
+            "```EDITOR_NOTES\nCORRECTED: fixed P/E\nCONTESTED: kept phrasing — "
+            "matches writing samples\n```\n"
+        )
+        stripped = _strip_editor_notes(article)
+        assert "EDITOR_NOTES" not in stripped
+        assert "CORRECTED" not in stripped
+        assert stripped.startswith("# Title")
+        assert "## References" in stripped
+
+    def test_strips_unclosed_block_at_eof(self):
+        from src.article_writer import _strip_editor_notes
+
+        article = "# Title\n\nBody.\n\n```EDITOR_NOTES\nCORRECTED: item"
+        stripped = _strip_editor_notes(article)
+        assert "EDITOR_NOTES" not in stripped
+        assert "Body." in stripped
+
+    def test_noop_without_block(self):
+        from src.article_writer import _strip_editor_notes
+
+        article = "# Title\n\nBody with ```python\ncode\n``` fence.\n"
+        assert _strip_editor_notes(article) == article
+
+    def test_noop_on_empty_string(self):
+        from src.article_writer import _strip_editor_notes
+
+        assert _strip_editor_notes("") == ""
+
+    @pytest.mark.asyncio
+    async def test_edit_strips_notes_from_approved_return(self):
+        """A draft carrying EDITOR_NOTES must come back clean from edit()."""
+        from src.article_writer import ArticleWriter
+
+        writer = ArticleWriter()
+        editor = _create_article_editor()
+        editor.llm = MagicMock()
+        editor.review = AsyncMock(
+            return_value={"verdict": "APPROVED", "confidence": 0.9}
+        )
+
+        draft = (
+            "# Title\n\nBody.\n\n## References\n- https://x\n\n"
+            "```EDITOR_NOTES\nCORRECTED: item\n```\n"
+        )
+        result, feedback = await editor.edit(
+            writer=writer,
+            article_draft=draft,
+            ticker="TEST",
+            company_name="Test Corp",
+        )
+        assert feedback["verdict"] == "APPROVED"
+        assert "EDITOR_NOTES" not in result
+        assert "Body." in result
+
+    @pytest.mark.asyncio
+    async def test_edit_coerces_approved_with_errors_and_revises(self):
+        """APPROVED + listed factual errors must trigger a revision pass."""
+        editor = _create_article_editor()
+        editor.llm = MagicMock()
+
+        call_count = 0
+
+        async def mock_review(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Self-approves despite listing an error — must be coerced
+                return {
+                    "verdict": "APPROVED",
+                    "factual_errors": [
+                        {"location": "X", "claim": "Y", "ground_truth": "Z"}
+                    ],
+                    "confidence": 0.95,
+                }
+            return {"verdict": "APPROVED", "factual_errors": [], "confidence": 0.9}
+
+        editor.review = mock_review
+        writer = MagicMock()
+        writer.revise.return_value = "# Revised\n\nClean."
+
+        result, feedback = await editor.edit(
+            writer=writer,
+            article_draft="# Original\n\nWith an error.",
+            ticker="TEST",
+            company_name="Test Corp",
+        )
+
+        assert writer.revise.called
+        assert feedback["verdict"] == "APPROVED"
+        assert result == "# Revised\n\nClean."
+
+
+class TestEditorContextWiring:
+    """New context inputs reach the editor's fact-check context."""
+
+    def test_valuation_context_included(self):
+        editor = _create_article_editor()
+        context = editor.build_fact_check_context(
+            data_block="DATA",
+            valuation_context="VALUATION DATA (scenario target suppressed): ...",
+        )
+        assert "=== VALUATION CONTEXT (as given to writer) ===" in context
+        assert "scenario target suppressed" in context
+
+    def test_valuation_context_omitted_when_none(self):
+        editor = _create_article_editor()
+        context = editor.build_fact_check_context(data_block="DATA")
+        assert "VALUATION CONTEXT" not in context
+
+    def test_writing_samples_header_used(self):
+        editor = _create_article_editor()
+        context = editor.build_fact_check_context(voice_samples="Sample prose.")
+        assert "=== WRITING SAMPLES (Match This Voice) ===" in context
+        assert "VOICE SAMPLES" not in context
+
+    def test_writer_public_sample_loader(self, tmp_path):
+        from src.article_writer import ArticleWriter
+
+        (tmp_path / "sample.txt").write_text("Voiceful prose.", encoding="utf-8")
+        writer = ArticleWriter(samples_dir=tmp_path)
+        samples = writer.load_voice_samples(max_chars=1000)
+        assert "Voiceful prose." in samples

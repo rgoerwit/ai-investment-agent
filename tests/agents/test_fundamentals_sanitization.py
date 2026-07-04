@@ -1145,6 +1145,70 @@ class TestScoreBreakdownObjectiveChecks:
         _, corrected, suspect = reconcile_score_consistency(body)
         assert not suspect and not corrected
 
+    def test_forward_ttm_swap_flagged(self) -> None:
+        """145020.KQ quick-mode: award earned on PE_RATIO_FORWARD 14.58 while
+        trailing 18.22 and PEG fail — swap signature, plain thresholds."""
+        body = self._body(
+            "SECTOR: Industrials",
+            "PE_RATIO_TTM: 18.22",
+            "PE_RATIO_FORWARD: 14.58",
+            "PEG_RATIO: 1.5",
+        )
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect
+        assert "forward P/E basis" in updated
+
+    def test_borderline_ttm_without_forward_tolerated(self) -> None:
+        """No rescuing forward value: 18.22 stays inside the 10% margin."""
+        body = self._body(
+            "SECTOR: Industrials", "PE_RATIO_TTM: 18.22", "PEG_RATIO: 1.5"
+        )
+        _, corrected, suspect = reconcile_score_consistency(body)
+        assert not suspect and not corrected
+
+    def test_failing_forward_is_not_a_swap(self) -> None:
+        """Forward also above PE_MAX cannot have rescued the point."""
+        body = self._body(
+            "SECTOR: Industrials",
+            "PE_RATIO_TTM: 18.22",
+            "PE_RATIO_FORWARD: 19.0",
+            "PEG_RATIO: 1.5",
+        )
+        _, corrected, suspect = reconcile_score_consistency(body)
+        assert not suspect and not corrected
+
+    def test_swap_check_skipped_for_information_technology(self) -> None:
+        body = self._body(
+            "SECTOR: Information Technology",
+            "PE_RATIO_TTM: 18.22",
+            "PE_RATIO_FORWARD: 14.58",
+            "PEG_RATIO: 1.5",
+        )
+        _, corrected, suspect = reconcile_score_consistency(body)
+        assert not suspect and not corrected
+
+    def test_passing_ttm_with_forward_present_untouched(self) -> None:
+        body = self._body(
+            "SECTOR: Industrials",
+            "PE_RATIO_TTM: 12.0",
+            "PE_RATIO_FORWARD: 10.0",
+            "PEG_RATIO: 1.5",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not suspect and not corrected
+
+    def test_passing_peg_with_forward_present_untouched(self) -> None:
+        """PEG legitimately earns the point even when both P/E bases differ."""
+        body = self._body(
+            "SECTOR: Industrials",
+            "PE_RATIO_TTM: 18.22",
+            "PE_RATIO_FORWARD: 14.58",
+            "PEG_RATIO: 0.9",
+        )
+        _, corrected, suspect = reconcile_score_consistency(body)
+        assert not suspect and not corrected
+
     def test_positive_values_not_flagged(self) -> None:
         body = self._body(
             "SECTOR: Industrials",

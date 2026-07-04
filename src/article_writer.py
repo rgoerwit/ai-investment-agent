@@ -7,6 +7,7 @@ while matching the author's distinctive voice from writing samples.
 
 import json
 import random
+import re
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
@@ -97,6 +98,51 @@ class EditorReviewResult(BaseModel):
     cuts: list[str] = Field(default_factory=list)
     style_issues: list[str] = Field(default_factory=list)
     confidence: float = 0.5
+
+
+# Fenced meta block the writer appends during revisions (CORRECTED/CONTESTED
+# lines). The editor reads it for contest adjudication; it must never survive
+# into the published article.
+_EDITOR_NOTES_PATTERN = re.compile(r"\n*```EDITOR_NOTES\b.*?(?:```|\Z)\s*", re.DOTALL)
+
+
+def _strip_editor_notes(article: str) -> str:
+    """Remove the fenced EDITOR_NOTES block from a (revised) article."""
+    if not article or "```EDITOR_NOTES" not in article:
+        return article
+    stripped = _EDITOR_NOTES_PATTERN.sub("", article)
+    logger.info(
+        "stripped_editor_notes_block",
+        removed_chars=len(article) - len(stripped),
+    )
+    return stripped.rstrip() + "\n"
+
+
+def _enforce_verdict_consistency(feedback: dict) -> dict:
+    """Coerce APPROVED to REVISE when the editor's own findings contradict it.
+
+    The LLM applies the decision rules in the prompt, but nothing stops it from
+    listing factual errors (or broken references) and still self-approving.
+    The verdict must follow the findings, so enforce that in code.
+    """
+    if not isinstance(feedback, dict) or feedback.get("verdict") != "APPROVED":
+        return feedback
+
+    reference_checks = feedback.get("reference_checks") or []
+    broken_reference = any(
+        isinstance(check, dict)
+        and str(check.get("status", "")).lower() in ("broken", "unsupported")
+        for check in reference_checks
+    )
+    if feedback.get("factual_errors") or broken_reference:
+        logger.warning(
+            "editor_verdict_overridden",
+            reason="findings_present",
+            num_factual_errors=len(feedback.get("factual_errors") or []),
+            broken_reference=broken_reference,
+        )
+        feedback["verdict"] = "REVISE"
+    return feedback
 
 
 def _review_response_for_citation_errors(errors: list[dict[str, str]]) -> dict:
@@ -376,6 +422,10 @@ class ArticleWriter:
         )
 
         return "\n\n".join(samples)
+
+    def load_voice_samples(self, max_chars: int | None = None) -> str:
+        """Public accessor so the editor can receive the same writing samples."""
+        return self._load_voice_samples(max_chars=max_chars)
 
     def _format_image_manifest(self, ticker: str, trade_date: str) -> str:
         """
@@ -1257,6 +1307,7 @@ class ArticleEditor:
         voice_samples: str | None = None,
         governance_context: str | None = None,
         consultant_review: str | None = None,
+        valuation_context: str | None = None,
     ) -> str:
         """
         Assemble fact-check context for the editor.
@@ -1266,6 +1317,8 @@ class ArticleEditor:
             pm_block: PM_BLOCK from Portfolio Manager (verdict, adjusted scores)
             valuation_params: Valuation parameters (target ranges)
             voice_samples: Writing samples for style reference
+            valuation_context: The valuation summary given to the writer
+                (carries the conditional/suppressed caveat when it fired)
 
         Returns:
             Formatted context string
@@ -1280,6 +1333,12 @@ class ArticleEditor:
 
         if valuation_params:
             context_parts.append(f"=== VALUATION PARAMETERS ===\n{valuation_params}")
+
+        if valuation_context:
+            context_parts.append(
+                "=== VALUATION CONTEXT (as given to writer) ===\n"
+                f"{valuation_context}"
+            )
 
         if governance_context:
             context_parts.append(governance_context)
@@ -1297,7 +1356,7 @@ class ArticleEditor:
             if len(voice_samples) > 5000:
                 truncated_samples += "\n...[truncated]"
             context_parts.append(
-                f"=== VOICE SAMPLES (Match This Style) ===\n{truncated_samples}"
+                f"=== WRITING SAMPLES (Match This Voice) ===\n{truncated_samples}"
             )
 
         return "\n\n".join(context_parts) if context_parts else "No context provided."
@@ -1660,6 +1719,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
         voice_samples: str | None = None,
         governance_card: dict[str, Any] | None = None,
         consultant_review: str | None = None,
+        valuation_context: str | None = None,
     ) -> tuple[str, dict]:
         """
         Run the full editorial loop: review -> revise -> review.
@@ -1673,6 +1733,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
             pm_block: Portfolio Manager verdict/scores
             valuation_params: Valuation parameters
             voice_samples: Writing samples for style
+            valuation_context: Valuation summary given to the writer
 
         Returns:
             Tuple of (final_article, final_feedback)
@@ -1697,6 +1758,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
             voice_samples=voice_samples,
             governance_context=governance_context,
             consultant_review=consultant_review,
+            valuation_context=valuation_context,
         )
 
         current_draft = article_draft
@@ -1707,7 +1769,11 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
         self._url_cache = {}
         try:
             while revision_count < self.MAX_REVISIONS:
-                citation_errors = audit_article_citations(current_draft, data_block)
+                # Audit the article body only — the EDITOR_NOTES meta block may
+                # quote the editor's (wrong) claimed values verbatim.
+                citation_errors = audit_article_citations(
+                    _strip_editor_notes(current_draft), data_block
+                )
                 if citation_errors:
                     feedback = _review_response_for_citation_errors(citation_errors)
                     logger.warning(
@@ -1716,8 +1782,11 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
                         mismatch_count=len(citation_errors),
                     )
                 else:
-                    # Review the current draft
-                    feedback = await self.review(current_draft, fact_check_context)
+                    # Review the current draft (with EDITOR_NOTES intact so the
+                    # editor can adjudicate CONTESTED items)
+                    feedback = _enforce_verdict_consistency(
+                        await self.review(current_draft, fact_check_context)
+                    )
 
                 logger.info(
                     "editor_review_complete",
@@ -1730,7 +1799,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
                 # Check if approved
                 if feedback.get("verdict") == "APPROVED":
                     feedback["revisions"] = revision_count
-                    return current_draft, feedback
+                    return _strip_editor_notes(current_draft), feedback
 
                 # Revise based on feedback
                 revision_count += 1
@@ -1750,7 +1819,10 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
                 )
 
             # Max revisions reached, do final review
-            final_feedback = await self.review(current_draft, fact_check_context)
+            final_feedback = _enforce_verdict_consistency(
+                await self.review(current_draft, fact_check_context)
+            )
+            current_draft = _strip_editor_notes(current_draft)
             final_citation_errors = audit_article_citations(current_draft, data_block)
             if final_citation_errors:
                 current_draft = prepend_verification_caveats(

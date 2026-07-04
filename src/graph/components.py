@@ -86,6 +86,14 @@ def create_quick_thinking_llm(*args: Any, **kwargs: Any) -> Any:
     return _create_quick_thinking_llm(*args, **kwargs)
 
 
+def create_senior_fundamentals_llm(*args: Any, **kwargs: Any) -> Any:
+    from src.llms import (
+        create_senior_fundamentals_llm as _create_senior_fundamentals_llm,
+    )
+
+    return _create_senior_fundamentals_llm(*args, **kwargs)
+
+
 def get_consultant_llm(*args: Any, **kwargs: Any) -> Any:
     from src.llms import get_consultant_llm as _get_consultant_llm
 
@@ -242,11 +250,12 @@ def build_graph_components(
         callbacks=tracked_callbacks("Junior Fundamentals Analyst"),
         max_output_tokens=output_budget("Junior Fundamentals Analyst"),
     )
-    # Senior Fundamentals stays on the quick model even in normal mode.
-    # This node does structured synthesis over large upstream inputs; using the
-    # deep/thinking-heavy model here has historically increased timeout risk
-    # without improving downstream scoring quality enough to justify it.
-    senior_fund_llm = create_quick_thinking_llm(
+    # Senior Fundamentals does the rubric arithmetic feeding the hard <50%
+    # health/growth gates. It defaults to the quick model (historical
+    # timeout-risk rationale, now largely superseded by flex timeout floors)
+    # but can be pinned to a dedicated model via SENIOR_FUNDAMENTALS_MODEL —
+    # which applies in --quick too, where the 145020.KQ score-swap occurred.
+    senior_fund_llm = create_senior_fundamentals_llm(
         callbacks=tracked_callbacks("Fundamentals Analyst"),
         max_output_tokens=output_budget("Fundamentals Analyst"),
     )

@@ -128,6 +128,58 @@ def test_quick_negative_verdict_variants_skip(verdict_line):
     assert reason == "rm_clear_negative"
 
 
+def test_quick_negative_with_data_discrepancy_keeps_consultant():
+    """A reject resting on an unresolved data conflict still gets the
+    Consultant's reconciliation (145020.KQ OCF period-mismatch, July 2026)."""
+    state = _state(
+        plan=_NEGATIVE_PLAN,
+        auditor=_CLEAN_AUDITOR,
+        red_flags=["OCF_SOURCE_DISCREPANCY"],
+    )
+    invoke, reason = should_invoke_consultant(state, _config(quick_mode=True))
+    assert invoke is True
+    assert reason == "default_invoke"
+
+
+def test_quick_negative_with_dict_shaped_discrepancy_flag():
+    """Production red flags are dicts with a 'type' key — must not raise and
+    must still be recognized."""
+    state = _state(plan=_NEGATIVE_PLAN, auditor=_CLEAN_AUDITOR)
+    state["red_flags"] = [
+        {"type": "OCF_FILING_VALUE_UNCORROBORATED", "severity": "WARNING"}
+    ]
+    invoke, reason = should_invoke_consultant(state, _config(quick_mode=True))
+    assert invoke is True
+    assert reason == "default_invoke"
+
+
+def test_quick_negative_with_non_discrepancy_flag_still_skips():
+    """Well-founded value-trap rejects don't need a second opinion."""
+    state = _state(
+        plan=_NEGATIVE_PLAN,
+        auditor=_CLEAN_AUDITOR,
+        red_flags=["VALUE_TRAP_HIGH_RISK"],
+    )
+    invoke, reason = should_invoke_consultant(state, _config(quick_mode=True))
+    assert invoke is False
+    assert reason == "rm_clear_negative"
+
+
+def test_quick_negative_with_conflict_marker_keeps_consultant():
+    plan = _NEGATIVE_PLAN + "\nNote: CONFLICT between analyst and filing data."
+    state = _state(plan=plan, auditor=_CLEAN_AUDITOR)
+    invoke, reason = should_invoke_consultant(state, _config(quick_mode=True))
+    assert invoke is True
+    assert reason == "default_invoke"
+
+
+def test_full_mode_negative_with_discrepancy_unchanged():
+    state = _state(plan=_NEGATIVE_PLAN, red_flags=["OCF_SOURCE_DISCREPANCY"])
+    invoke, reason = should_invoke_consultant(state, _config(quick_mode=False))
+    assert invoke is True
+    assert reason == "full_mode"
+
+
 def test_quick_missing_auditor_treated_as_clean():
     """Auditor unset (e.g., ENABLE_CONSULTANT off elsewhere) should not block
     the Fast-Pass — the absence of an auditor report is not evidence of

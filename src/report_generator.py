@@ -1441,8 +1441,10 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         has_note = "ANALYST_COVERAGE_DATA_QUALITY_NOTE" in (fund_report or "")
         if not (has_note or total_est in {"MODERATE", "HIGH", "UNKNOWN"}):
             return sentiment_text
+        # Whitespace is consumed only when a modifier is present — a bare
+        # "for undiscovered" must keep its preceding space ("forlow…" bug).
         softened = re.sub(
-            r"\b(?:strongly|exceptionally|truly|genuinely|completely)?\s*undiscovered\b",
+            r"\b(?:(?:strongly|exceptionally|truly|genuinely|completely)\s+)?undiscovered\b",
             "low English-language aggregator visibility",
             sentiment_text,
             flags=re.IGNORECASE,

@@ -541,8 +541,12 @@ def _breakdown_objective_reasons(body: str, awards: dict[str, str]) -> list[str]
     Deliberately conservative: sign checks (sector-invariant) plus the PE_OR_PEG
     gate for non-IT sectors only (Information Technology has a documented
     P/S-based alternative), with a clear margin — never near-threshold calls.
-    Threshold criteria with sector-adjusted bars (D/E, P/B, ROE...) are out of
-    scope by design.
+    The one exception to the margin is the forward/TTM swap signature (145020.KQ
+    quick-mode, July 2026): trailing P/E and PEG both fail at the plain
+    thresholds while PE_RATIO_FORWARD passes — the passing forward value, not
+    generosity on a borderline number, is what earned the point, so the plain
+    thresholds apply. Threshold criteria with sector-adjusted bars (D/E, P/B,
+    ROE...) are out of scope by design.
     """
     reasons: list[str] = []
     for criterion, fields in (
@@ -570,13 +574,25 @@ def _breakdown_objective_reasons(body: str, awards: dict[str, str]) -> list[str]
         and sector != "Information Technology"
         and pe is not None
         and peg is not None
-        and pe > PE_MAX * _OBJECTIVE_CHECK_MARGIN
-        and peg > PEG_MAX * _OBJECTIVE_CHECK_MARGIN
     ):
-        reasons.append(
-            f"breakdown awards PE_OR_PEG but P/E {pe:g} and PEG {peg:g} both "
-            f"clearly fail the {PE_MAX:g}/{PEG_MAX:g} thresholds"
-        )
+        forward = extract_block_number_from_text(body, "PE_RATIO_FORWARD")
+        if (
+            pe > PE_MAX * _OBJECTIVE_CHECK_MARGIN
+            and peg > PEG_MAX * _OBJECTIVE_CHECK_MARGIN
+        ):
+            reasons.append(
+                f"breakdown awards PE_OR_PEG but P/E {pe:g} and PEG {peg:g} both "
+                f"clearly fail the {PE_MAX:g}/{PEG_MAX:g} thresholds"
+            )
+        elif (
+            pe > PE_MAX and peg > PEG_MAX and forward is not None and forward <= PE_MAX
+        ):
+            reasons.append(
+                f"breakdown awards PE_OR_PEG on the forward P/E basis "
+                f"({forward:g} passes) but the criterion is trailing-only — "
+                f"P/E (TTM) {pe:g} and PEG {peg:g} fail the "
+                f"{PE_MAX:g}/{PEG_MAX:g} thresholds"
+            )
     return reasons
 
 

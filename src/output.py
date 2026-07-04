@@ -322,6 +322,8 @@ async def handle_article_generation(
                     pm_block=pm_block,
                     valuation_params=valuation_params,
                     consultant_review=consultant_review,
+                    voice_samples=writer.load_voice_samples(max_chars=5000),
+                    valuation_context=valuation_context,
                     governance_card=governance_card
                     if isinstance(governance_card, dict)
                     else None,

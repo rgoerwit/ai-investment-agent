@@ -340,6 +340,26 @@ class Settings(BaseSettings):
         validation_alias="QUICK_MODEL",
         description="Model for quick thinking/data gathering agents",
     )
+    # Senior Fundamentals does the rubric arithmetic feeding the hard <50%
+    # health/growth gates; it is pinned to the quick tier by default but can
+    # be given a dedicated model. Env-only (no CLI flag). Applies in BOTH
+    # normal and --quick runs — the 145020.KQ score-swap hit in quick mode.
+    senior_fundamentals_model: str | None = Field(
+        default=None,
+        validation_alias="SENIOR_FUNDAMENTALS_MODEL",
+        description=(
+            "Dedicated model for the Senior Fundamentals Analyst (DATA_BLOCK "
+            "scoring). Unset/empty = inherit QUICK_MODEL (legacy behavior)."
+        ),
+    )
+    senior_fundamentals_thinking_level: Literal["low", "medium", "high"] = Field(
+        default="high",
+        validation_alias="SENIOR_FUNDAMENTALS_THINKING_LEVEL",
+        description=(
+            "Thinking level for the dedicated Senior Fundamentals model; "
+            "only consulted when SENIOR_FUNDAMENTALS_MODEL is set"
+        ),
+    )
 
     # --- Debate & Risk Configuration ---
     max_debate_rounds: int = Field(

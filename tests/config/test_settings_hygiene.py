@@ -116,6 +116,12 @@ _SETTINGS_ENV_CASES = [
     ("gemini_rpm_limit", "GEMINI_RPM_LIMIT", "123", 123),
     ("enable_consultant", "ENABLE_CONSULTANT", "false", False),
     ("max_debate_rounds", "MAX_DEBATE_ROUNDS", "1", 1),
+    (
+        "senior_fundamentals_model",
+        "SENIOR_FUNDAMENTALS_MODEL",
+        "gemini-3.5-flash",
+        "gemini-3.5-flash",
+    ),
 ]
 
 

@@ -120,6 +120,28 @@ class TestSoftenUndiscovered:
             == self._SENTIMENT
         )
 
+    def test_preceding_space_preserved_without_modifier(self):
+        """Regression (145020.KQ): the old regex consumed the space before a
+        bare "undiscovered", yielding "forlow English-language…"."""
+        out = QuietModeReporter._soften_undiscovered_language(
+            "Positive for undiscovered thesis.\n", self._fund("MODERATE")
+        )
+        assert "for low English-language aggregator visibility thesis" in out
+        assert "forlow" not in out
+
+    def test_preceding_newline_preserved_without_modifier(self):
+        out = QuietModeReporter._soften_undiscovered_language(
+            "Positive for\nundiscovered thesis.\n", self._fund("MODERATE")
+        )
+        assert "for\nlow English-language aggregator visibility thesis" in out
+
+    def test_modifier_still_consumed_with_its_whitespace(self):
+        out = QuietModeReporter._soften_undiscovered_language(
+            "Status: PASS (Strongly Undiscovered).\n", self._fund("MODERATE")
+        )
+        assert "(low English-language aggregator visibility)" in out
+        assert "Strongly low" not in out
+
     def test_caveat_banner_neutralizes_synonyms(self):
         # Synonym overclaims with no literal "undiscovered" still get the caveat.
         synonym_text = (

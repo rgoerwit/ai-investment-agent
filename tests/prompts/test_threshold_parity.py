@@ -82,6 +82,14 @@ CASES = [
     ),
     ("fundamentals_analyst.json", rf"P/E <={_PE}", "PE scoring threshold"),
     (
+        # The PE_OR_PEG health point is trailing-only; quick-mode runs scored it
+        # off the forward P/E until v9.32 pinned the basis (145020.KQ).
+        "fundamentals_analyst.json",
+        rf"Trailing P/E <={_PE} OR PEG <={re.escape(_PEG)}: 1 pt "
+        r"\(P/E basis is PE_RATIO_TTM — never PE_RATIO_FORWARD\)",
+        "PE_OR_PEG trailing (TTM) basis",
+    ),
+    (
         "fundamentals_analyst.json",
         rf"FINANCIAL HEALTH SCORE \({tc.HEALTH_RUBRIC_POINTS:.0f} Points Total\)",
         "health rubric total",

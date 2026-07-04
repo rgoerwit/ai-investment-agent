@@ -858,6 +858,48 @@ def create_deep_thinking_llm(
     )
 
 
+def create_senior_fundamentals_llm(
+    callbacks: list[BaseCallbackHandler] | None = None,
+    max_output_tokens: int | None = None,
+) -> BaseChatModel:
+    """
+    Create the LLM for the Senior Fundamentals Analyst.
+
+    Falls back to the quick-thinking path when SENIOR_FUNDAMENTALS_MODEL is
+    unset (legacy behavior). When set, builds a dedicated instance with
+    deep-tier settings — low temperature, deep reasoning reserve, and the
+    configured thinking level — regardless of --quick, because the DATA_BLOCK
+    scoring arithmetic feeds the hard <50% health/growth gates in both modes.
+    """
+    model_name = config.senior_fundamentals_model
+    if not model_name:
+        return create_quick_thinking_llm(
+            callbacks=callbacks, max_output_tokens=max_output_tokens
+        )
+
+    thinking_level: str | None = config.senior_fundamentals_thinking_level
+    if not (_is_gemini_v3_or_greater(model_name) or _is_gemini_v2_5(model_name)):
+        logger.warning("senior_fund_model_no_thinking_support", model=model_name)
+        thinking_level = None
+
+    runtime_config = get_runtime_config(config)
+    final_timeout = config.api_timeout
+    final_retries = runtime_config.api_retry_attempts
+    _log_model_init_once(
+        "senior_fundamentals", model_name, final_timeout, final_retries, thinking_level
+    )
+    return create_gemini_model(
+        model_name,
+        temperature=0.1,
+        timeout=final_timeout,
+        max_retries=final_retries,
+        callbacks=callbacks,
+        thinking_level=thinking_level,
+        max_output_tokens=max_output_tokens,
+        reserve_class="deep",
+    )
+
+
 def create_writer_fallback_llm(
     temperature: float = 0.1,
     callbacks: list[BaseCallbackHandler] | None = None,
