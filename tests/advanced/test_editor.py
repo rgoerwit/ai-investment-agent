@@ -1376,6 +1376,25 @@ class TestExtractTextFromResponse:
         result = _extract_text_from_response(mock_response)
         assert result == "# Gemini Article"
 
+    def test_openai_responses_v1_reasoning_blocks_skipped(self):
+        """OpenAI responses/v1 (writer EDITOR_MODEL fallback tier): reasoning
+        blocks are excluded by type, even if they carry a text field."""
+        from src.article_writer import _extract_text_from_response
+
+        mock_response = MagicMock()
+        mock_response.content = [
+            {
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "planning..."}],
+                "text": "internal chain of thought",
+            },
+            {"type": "text", "text": "# GPT Fallback Article\n\nContent."},
+        ]
+
+        result = _extract_text_from_response(mock_response)
+        assert result == "# GPT Fallback Article\n\nContent."
+        assert "chain of thought" not in result
+
     def test_multiple_text_blocks_concatenated(self):
         """Should concatenate multiple text blocks."""
         from src.article_writer import _extract_text_from_response
@@ -1480,7 +1499,7 @@ class TestCreateWriterLLM:
         assert callable(create_writer_llm)
 
     def test_falls_back_to_gemini_without_claude_key(self):
-        """Should fall back to Gemini when CLAUDE_KEY is not set."""
+        """No CLAUDE_KEY and no usable OpenAI tier → Gemini floor of the chain."""
         from src.llms import create_writer_llm
 
         mock_llm = MagicMock()
@@ -1490,6 +1509,9 @@ class TestCreateWriterLLM:
             patch("src.llms.ChatGoogleGenerativeAI", return_value=mock_llm),
         ):
             mock_config.get_claude_api_key.return_value = None
+            # No usable OpenAI tier — the chain must resolve to the Gemini floor.
+            mock_config.enable_consultant = False
+            mock_config.get_openai_api_key.return_value = ""
             mock_config.deep_think_llm = "gemini-3-pro-preview"
             mock_config.api_timeout = 300
             mock_config.api_retry_attempts = 10

@@ -10,11 +10,15 @@ and any residual ``MAX_TOKENS`` truncation must be logged loudly.
 
 from __future__ import annotations
 
+import ast
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import src.llms as llms
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _fake_runtime(model: str) -> SimpleNamespace:
@@ -66,15 +70,50 @@ class TestWriterFallbackFactory:
         assert budget.api_cap_tokens == 18432
 
     @patch("src.llms.create_writer_fallback_llm")
-    def test_create_writer_llm_uses_fallback_when_no_claude_key(self, mock_fallback):
+    def test_create_writer_llm_no_claude_key_no_openai_uses_gemini(self, mock_fallback):
+        """No Claude key AND no usable OpenAI tier → Gemini floor (old behavior)."""
         sentinel = MagicMock()
         mock_fallback.return_value = sentinel
         # config is a pydantic Settings singleton — patch the method on the
         # class, not the instance (pydantic blocks instance-attr assignment).
-        with patch.object(type(llms.config), "get_claude_api_key", return_value=""):
+        with (
+            patch.object(type(llms.config), "get_claude_api_key", return_value=""),
+            patch("src.llms._writer_openai_tier_available", return_value=False),
+        ):
             result = llms.create_writer_llm()
         mock_fallback.assert_called_once()
         assert result is sentinel
+
+    @patch("src.llms.create_writer_fallback_llm")
+    @patch("src.llms.create_writer_openai_fallback_llm")
+    def test_create_writer_llm_no_claude_key_prefers_openai_tier(
+        self, mock_openai_fallback, mock_gemini_fallback
+    ):
+        """No Claude key with OpenAI usable → EDITOR_MODEL tier, Gemini untouched."""
+        sentinel = MagicMock()
+        mock_openai_fallback.return_value = sentinel
+        with (
+            patch.object(type(llms.config), "get_claude_api_key", return_value=""),
+            patch("src.llms._writer_openai_tier_available", return_value=True),
+        ):
+            result = llms.create_writer_llm()
+        assert result is sentinel
+        mock_openai_fallback.assert_called_once()
+        mock_gemini_fallback.assert_not_called()
+
+    def test_create_writer_llm_no_key_routes_through_shared_chain(self):
+        """Parity guard: the no-key path consumes writer_fallback_chain — the
+        same resolver the runtime-error path iterates — so the two preference
+        orders cannot diverge."""
+        sentinel = MagicMock()
+        chain = [llms.WriterTier("editor_model", lambda: sentinel)]
+        with (
+            patch.object(type(llms.config), "get_claude_api_key", return_value=""),
+            patch("src.llms.writer_fallback_chain", return_value=chain) as mock_chain,
+        ):
+            result = llms.create_writer_llm()
+        assert result is sentinel
+        mock_chain.assert_called_once()
 
 
 class _RecordingLogger:
@@ -105,6 +144,59 @@ def _make_writer(mock_create_writer, response):
         if Path("writing_samples").exists()
         else None,
     )
+
+
+class TestHonestFallbackEventNames:
+    """Fallback-path log event *names* must be family-neutral.
+
+    Invariant: an event name must never bake in a destination model family the
+    code didn't necessarily construct (the
+    ``claude_writer_failed_falling_back_to_gemini`` bug class). Accurate
+    source-family names (``writer_no_claude_key``,
+    ``claude_writer_primary_failed``) are allowed — only fallback-shaped names
+    are constrained; model/provider belong in structured fields.
+    """
+
+    _FAMILY = re.compile(r"gemini|gpt|claude|openai|anthropic", re.IGNORECASE)
+    _FALLBACK = re.compile(r"fall.?back", re.IGNORECASE)
+    _SCANNED_FILES = ("src/article_writer.py", "src/llms.py")
+
+    @staticmethod
+    def _logger_event_names(path: Path) -> list[str]:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        names: list[str] = []
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"debug", "info", "warning", "error", "critical"}
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "logger"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            ):
+                names.append(node.args[0].value)
+        return names
+
+    def test_fallback_event_names_are_family_neutral(self):
+        offenders = []
+        for rel in self._SCANNED_FILES:
+            for event in self._logger_event_names(_REPO_ROOT / rel):
+                if self._FALLBACK.search(event) and self._FAMILY.search(event):
+                    offenders.append((rel, event))
+        assert (
+            offenders == []
+        ), f"Fallback-path event names must not hardcode a model family: {offenders}"
+
+    def test_old_hardcoded_gemini_fallback_event_gone(self):
+        old_event = "claude_writer_failed_falling_back_to_gemini"
+        hits = []
+        for top in ("src", "scripts"):
+            for py_file in (_REPO_ROOT / top).rglob("*.py"):
+                if old_event in py_file.read_text(encoding="utf-8"):
+                    hits.append(str(py_file.relative_to(_REPO_ROOT)))
+        assert hits == []
 
 
 class TestTruncationGuard:

@@ -9,6 +9,7 @@ UPDATED: Added OpenAI consultant LLM for cross-validation (Dec 2025).
 import re
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass
 from importlib.util import find_spec
 from numbers import Real
 from typing import Any, Literal
@@ -936,6 +937,94 @@ def create_writer_fallback_llm(
     )
 
 
+@dataclass(frozen=True)
+class WriterTier:
+    """One tier of the article-writer fallback chain.
+
+    ``label`` is a family-neutral tier name (never a model name — the honest-
+    messaging invariant); ``build`` is lazy: the tier's LLM is constructed only
+    when the tier is actually attempted, so an unused tier never creates a
+    client or pollutes the instance registry.
+    """
+
+    label: str
+    build: Callable[[], BaseChatModel]
+
+
+def _writer_openai_tier_available() -> bool:
+    """OpenAI usable for the writer fallback tier: lib + key + ENABLE_CONSULTANT.
+
+    ``enable_consultant`` is the de-facto OpenAI master switch (consultant,
+    auditor, and editor all gate on it) — the writer tier honors it too, so a
+    deployment that disabled every other OpenAI agent never gets a GPT writer.
+    """
+    return (
+        _langchain_openai_available()
+        and config.enable_consultant
+        and bool(config.get_openai_api_key())
+    )
+
+
+def create_writer_openai_fallback_llm(
+    callbacks: list[BaseCallbackHandler] | None = None,
+) -> BaseChatModel | None:
+    """EDITOR_MODEL (OpenAI) as the preferred article-writer fallback.
+
+    GPT-class prose with the writer's long-form output budget (16384, matching
+    the Claude writer's ``max_tokens`` — the editor's 8192 cap would truncate
+    articles) and low reasoning effort (prose needs output budget, not
+    reasoning depth). Returns None when the tier is unavailable (missing
+    lib/key or ``ENABLE_CONSULTANT=false``).
+    """
+    if not _writer_openai_tier_available():
+        return None
+
+    model_name = config.editor_model or config.consultant_model or "gpt-4o"
+    logger.info("writer_fallback_tier_init", tier="editor_model", model=model_name)
+    return _build_openai_chat(
+        model_name,
+        api_key=config.get_openai_api_key(),
+        callbacks=callbacks,
+        max_completion_tokens=16384,
+        service_tier_label="openai_sdk_timeout:writer_fallback",
+        unthrottled_kind="writer_fallback",
+        gpt5_reasoning_effort="low",
+    )
+
+
+def writer_fallback_chain(
+    callbacks: list[BaseCallbackHandler] | None = None,
+    temperature: float = 0.7,
+) -> list[WriterTier]:
+    """Ordered, key/switch-aware fallback tiers for the article writer.
+
+    EDITOR_MODEL (OpenAI) first when usable, then the Gemini floor — always
+    present, so the chain is never empty. Tiers are lazy factories: nothing is
+    constructed until a tier is actually attempted. ``temperature`` reaches
+    only the Gemini tier (OpenAI reasoning models ignore sampling temperature);
+    it defaults to the writer's 0.7 prose setting.
+    """
+
+    def _build_openai_tier() -> BaseChatModel:
+        llm = create_writer_openai_fallback_llm(callbacks=callbacks)
+        if llm is None:  # availability changed between chain build and attempt
+            raise RuntimeError("OpenAI writer fallback tier unavailable")
+        return llm
+
+    tiers: list[WriterTier] = []
+    if _writer_openai_tier_available():
+        tiers.append(WriterTier("editor_model", _build_openai_tier))
+    tiers.append(
+        WriterTier(
+            "gemini_last_resort",
+            lambda: create_writer_fallback_llm(
+                temperature=temperature, callbacks=callbacks
+            ),
+        )
+    )
+    return tiers
+
+
 # Lazily initialize default instances so importing src.llms does not construct
 # network-capable clients during test collection or light-weight CLI paths.
 quick_thinking_llm = _LazyLLMProxy(create_quick_thinking_llm)
@@ -1248,8 +1337,9 @@ def create_writer_llm(
     """
     Create the LLM for article writing.
 
-    Prefers Claude (Anthropic) when CLAUDE_KEY is configured.
-    Falls back gracefully to Gemini deep thinking LLM when not.
+    Prefers Claude (Anthropic) when CLAUDE_KEY is configured. Otherwise
+    resolves the first available tier of writer_fallback_chain():
+    EDITOR_MODEL (OpenAI) when usable, else the Gemini/DEEP_MODEL floor.
 
     Args:
         temperature: Sampling temperature. NOTE: Overridden to 1.0
@@ -1265,20 +1355,18 @@ def create_writer_llm(
 
     if not api_key:
         logger.warning("writer_no_claude_key")
-        return create_writer_fallback_llm(
-            temperature=temperature,
-            callbacks=callbacks,
-        )
+        return writer_fallback_chain(callbacks=callbacks, temperature=temperature)[
+            0
+        ].build()
 
     # --- Claude path ---
     try:
         from langchain_anthropic import ChatAnthropic
     except ImportError:
         logger.warning("langchain_anthropic_missing")
-        return create_writer_fallback_llm(
-            temperature=temperature,
-            callbacks=callbacks,
-        )
+        return writer_fallback_chain(callbacks=callbacks, temperature=temperature)[
+            0
+        ].build()
 
     model_name = config.writer_model
     final_timeout = float(timeout if timeout is not None else config.api_timeout)
@@ -1331,6 +1419,62 @@ def create_writer_llm(
     return llm
 
 
+def _build_openai_chat(
+    model_name: str,
+    *,
+    api_key: str,
+    callbacks: list[BaseCallbackHandler] | None,
+    max_completion_tokens: int,
+    service_tier_label: str,
+    unthrottled_kind: str,
+    gpt5_reasoning_effort: str,
+) -> BaseChatModel:
+    """Shared ChatOpenAI construction for the editor and writer-fallback tiers.
+
+    Service-tier floor, process rate limiter, gpt-5 reasoning effort, and
+    generation-budget handling live here once so the two callers cannot drift.
+    """
+    kwargs: dict[str, Any] = {
+        "model": model_name,
+        "timeout": 120,
+        "max_retries": 3,
+        "api_key": api_key,
+        "callbacks": callbacks or [],
+        "max_completion_tokens": max_completion_tokens,
+        "streaming": False,
+        "use_responses_api": True,
+        "output_version": "responses/v1",
+    }
+    _apply_openai_service_tier(kwargs, label=service_tier_label)
+    _rl = _get_openai_rate_limiter()
+    if _rl is not None:
+        kwargs["rate_limiter"] = _rl
+    else:
+        _warn_openai_unthrottled_once(unthrottled_kind)
+    if model_name.startswith("gpt-5") and "pro" not in model_name:
+        kwargs["reasoning_effort"] = gpt5_reasoning_effort
+    budget = _resolve_generation_budget(
+        intent_tokens=kwargs["max_completion_tokens"],
+        reserve_class="default",
+        reserve_enabled=_reasoning_counts_against_completion_cap(
+            provider="openai",
+            model_name=model_name,
+            reasoning_effort=kwargs.get("reasoning_effort"),
+        ),
+    )
+    kwargs["max_completion_tokens"] = budget.api_cap_tokens
+
+    llm = _construct_chat_openai(kwargs)
+    _stamp_budget_metadata(
+        llm,
+        callbacks=kwargs["callbacks"],
+        budget=budget,
+        intent_attr="_configured_max_completion_tokens",
+        api_attr="_configured_api_completion_tokens",
+    )
+    return llm
+
+
 def create_editor_llm(
     callbacks: list[BaseCallbackHandler] | None = None,
 ) -> BaseChatModel | None:
@@ -1365,45 +1509,15 @@ def create_editor_llm(
 
     logger.info("editor_llm_init", model=model_name)
 
-    kwargs: dict[str, Any] = {
-        "model": model_name,
-        "timeout": 120,
-        "max_retries": 3,
-        "api_key": api_key,
-        "callbacks": callbacks or [],
-        "max_completion_tokens": 8192,
-        "streaming": False,
-        "use_responses_api": True,
-        "output_version": "responses/v1",
-    }
-    _apply_openai_service_tier(kwargs, label="openai_sdk_timeout:editor")
-    _rl = _get_openai_rate_limiter()
-    if _rl is not None:
-        kwargs["rate_limiter"] = _rl
-    else:
-        _warn_openai_unthrottled_once("editor")
-    if model_name.startswith("gpt-5") and "pro" not in model_name:
-        kwargs["reasoning_effort"] = "medium"
-    budget = _resolve_generation_budget(
-        intent_tokens=kwargs["max_completion_tokens"],
-        reserve_class="default",
-        reserve_enabled=_reasoning_counts_against_completion_cap(
-            provider="openai",
-            model_name=model_name,
-            reasoning_effort=kwargs.get("reasoning_effort"),
-        ),
+    return _build_openai_chat(
+        model_name,
+        api_key=api_key,
+        callbacks=callbacks,
+        max_completion_tokens=8192,
+        service_tier_label="openai_sdk_timeout:editor",
+        unthrottled_kind="editor",
+        gpt5_reasoning_effort="medium",
     )
-    kwargs["max_completion_tokens"] = budget.api_cap_tokens
-
-    llm = _construct_chat_openai(kwargs)
-    _stamp_budget_metadata(
-        llm,
-        callbacks=kwargs["callbacks"],
-        budget=budget,
-        intent_attr="_configured_max_completion_tokens",
-        api_attr="_configured_api_completion_tokens",
-    )
-    return llm
 
 
 # Legacy symbol kept for compatibility with older tests/importers. Consultant

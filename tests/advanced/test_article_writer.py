@@ -694,145 +694,353 @@ class TestWritingSamplesDirectory:
         assert has_content, "At least one sample should have substantial content"
 
 
-class TestClaudeToGeminiFallback:
-    """Tests for automatic Claude → Gemini fallback on API errors."""
+def _samples_dir():
+    return Path("writing_samples") if Path("writing_samples").exists() else None
 
-    @patch("src.article_writer.create_writer_fallback_llm")
-    @patch("src.article_writer.create_writer_llm")
-    def test_fallback_on_anthropic_billing_error(
-        self, mock_create_writer, mock_create_gemini
-    ):
-        """Regression: billing errors should fall back to Gemini, not crash."""
+
+def _billing_error() -> Exception:
+    return Exception(
+        "Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', "
+        "'message': 'Your credit balance is too low to access the Anthropic API.'}}"
+    )
+
+
+def _mock_llm(model: str, response_text: str | None = None, error=None):
+    """LLM mock with a real model-name string so provider inference works."""
+    llm = MagicMock()
+    llm.model = model
+    if error is not None:
+        llm.invoke.side_effect = error
+    else:
+        llm.invoke.return_value = MagicMock(content=response_text)
+    return llm
+
+
+def _tier(label: str, llm):
+    from src.llms import WriterTier
+
+    return WriterTier(label, lambda: llm)
+
+
+class _RecordingLogger:
+    def __init__(self):
+        self.events: list[tuple[str, dict]] = []
+
+    def _record(self, event, **kwargs):
+        self.events.append((event, kwargs))
+
+    debug = info = warning = error = _record
+
+    def named(self, event: str) -> list[dict]:
+        return [kwargs for name, kwargs in self.events if name == event]
+
+
+class TestWriterFallbackChainRuntime:
+    """Runtime Claude-error path: iterate the writer fallback chain.
+
+    Chain order (EDITOR_MODEL → Gemini floor) is covered at construction level
+    in tests/test_llms_writer_fallback.py; here the chain is injected so the
+    loop's behavior — recovery, caching, logging, output — is tested directly.
+    """
+
+    def _writer(self, mock_create_writer, primary):
         from src.article_writer import ArticleWriter
 
-        # Claude LLM that raises billing error
-        mock_claude = MagicMock()
-        mock_claude.invoke.side_effect = Exception(
-            "Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', "
-            "'message': 'Your credit balance is too low to access the Anthropic API.'}}"
-        )
-        mock_create_writer.return_value = mock_claude
+        mock_create_writer.return_value = primary
+        return ArticleWriter(samples_dir=_samples_dir())
 
-        # Gemini fallback
-        mock_gemini = MagicMock()
-        mock_gemini.invoke.return_value = MagicMock(
-            content="# Fallback Article\n\nWritten by Gemini."
-        )
-        mock_create_gemini.return_value = mock_gemini
+    @patch("src.article_writer.create_writer_llm")
+    def test_billing_error_recovers_on_first_tier(self, mock_create_writer):
+        """Claude billing error → EDITOR_MODEL tier writes the article."""
+        primary = _mock_llm("claude-opus-4-8", error=_billing_error())
+        gpt = _mock_llm("gpt-5.4", "# Fallback Article\n\nWritten by GPT.")
+        gemini = _mock_llm("gemini-3.5-flash", "# Should not be used.")
+        writer = self._writer(mock_create_writer, primary)
 
-        writer = ArticleWriter(
-            samples_dir=Path("writing_samples")
-            if Path("writing_samples").exists()
-            else None,
-        )
-        article = writer._invoke_writer([MagicMock()])
+        with patch(
+            "src.article_writer.writer_fallback_chain",
+            return_value=[
+                _tier("editor_model", gpt),
+                _tier("gemini_last_resort", gemini),
+            ],
+        ):
+            article = writer._invoke_writer([MagicMock()])
 
-        # Should have fallen back to Gemini and produced an article
         assert "Fallback Article" in article
-        mock_create_gemini.assert_called_once()
+        assert writer.writer_fell_back is True
+        assert writer.current_model_name == "gpt-5.4"
+        gemini.invoke.assert_not_called()
 
-    @patch("src.article_writer.create_writer_fallback_llm")
     @patch("src.article_writer.create_writer_llm")
-    def test_fallback_sets_writer_fell_back_flag(
-        self, mock_create_writer, mock_create_gemini
-    ):
-        """The silent-fallback flag must flip so run summaries can surface it."""
-        from src.article_writer import ArticleWriter
+    def test_first_tier_failure_recovers_on_gemini_floor(self, mock_create_writer):
+        """EDITOR_MODEL tier also fails → Gemini floor still produces the article."""
+        primary = _mock_llm("claude-opus-4-8", error=_billing_error())
+        gpt = _mock_llm("gpt-5.4", error=Exception("openai 503"))
+        gemini = _mock_llm("gemini-3.5-flash", "# Floor Article\n\nWritten by Gemini.")
+        writer = self._writer(mock_create_writer, primary)
 
-        mock_claude = MagicMock()
-        mock_claude.invoke.side_effect = Exception(
-            "Your credit balance is too low to access the Anthropic API."
-        )
-        mock_create_writer.return_value = mock_claude
+        with patch(
+            "src.article_writer.writer_fallback_chain",
+            return_value=[
+                _tier("editor_model", gpt),
+                _tier("gemini_last_resort", gemini),
+            ],
+        ):
+            article = writer._invoke_writer([MagicMock()])
 
-        mock_gemini = MagicMock()
-        mock_gemini.invoke.return_value = MagicMock(content="# Article\n\nContent.")
-        mock_create_gemini.return_value = mock_gemini
+        assert "Floor Article" in article
+        assert writer.writer_fell_back is True
+        assert writer.current_model_name == "gemini-3.5-flash"
+        assert gpt.invoke.call_count == 1
 
-        writer = ArticleWriter(
-            samples_dir=Path("writing_samples")
-            if Path("writing_samples").exists()
-            else None,
-        )
+    @patch("src.article_writer.create_writer_llm")
+    def test_all_tiers_fail_raises_last_exception(self, mock_create_writer):
+        """No silent empty article: every tier failing re-raises the last error."""
+        primary = _mock_llm("claude-opus-4-8", error=_billing_error())
+        gpt = _mock_llm("gpt-5.4", error=Exception("openai 503"))
+        gemini = _mock_llm("gemini-3.5-flash", error=Exception("gemini floor down"))
+        writer = self._writer(mock_create_writer, primary)
+
+        with (
+            patch(
+                "src.article_writer.writer_fallback_chain",
+                return_value=[
+                    _tier("editor_model", gpt),
+                    _tier("gemini_last_resort", gemini),
+                ],
+            ),
+            pytest.raises(Exception, match="gemini floor down"),
+        ):
+            writer._invoke_writer([MagicMock()])
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_non_anthropic_errors_propagate_without_chain(self, mock_create_writer):
+        """Non-Anthropic primary errors must NOT trigger the fallback chain."""
+        primary = _mock_llm("claude-opus-4-8", error=ValueError("Some unrelated error"))
+        writer = self._writer(mock_create_writer, primary)
+
+        with patch("src.article_writer.writer_fallback_chain") as mock_chain:
+            with pytest.raises(ValueError, match="Some unrelated error"):
+                writer._invoke_writer([MagicMock()])
+        mock_chain.assert_not_called()
         assert writer.writer_fell_back is False
 
-        writer._invoke_writer([MagicMock()])
+    @patch("src.article_writer.create_writer_llm")
+    def test_winning_tier_cached_for_subsequent_calls(self, mock_create_writer):
+        """After recovery the winning tier is cached — Claude is not retried."""
+        primary = _mock_llm("claude-opus-4-8", error=_billing_error())
+        gpt = _mock_llm("gpt-5.4", "# Article\n\nContent.")
+        writer = self._writer(mock_create_writer, primary)
 
+        with patch(
+            "src.article_writer.writer_fallback_chain",
+            return_value=[_tier("editor_model", gpt)],
+        ) as mock_chain:
+            writer._invoke_writer([MagicMock()])
+            writer._invoke_writer([MagicMock()])
+
+        assert primary.invoke.call_count == 1
+        assert gpt.invoke.call_count == 2
+        mock_chain.assert_called_once()
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_fallback_invoke_preserves_writer_persona_messages(
+        self, mock_create_writer
+    ):
+        """The fallback swaps only the LLM — the writer's messages (persona
+        SystemMessage included) reach the fallback tier unchanged."""
+        from langchain_core.messages import SystemMessage
+
+        primary = _mock_llm("claude-opus-4-8", error=_billing_error())
+        gpt = _mock_llm("gpt-5.4", "# Article\n\nContent.")
+        writer = self._writer(mock_create_writer, primary)
+        messages = [SystemMessage(content="writer persona"), MagicMock()]
+
+        with patch(
+            "src.article_writer.writer_fallback_chain",
+            return_value=[_tier("editor_model", gpt)],
+        ):
+            writer._invoke_writer(messages)
+
+        assert gpt.invoke.call_args.args[0] is messages
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_fallback_tiers_receive_tracking_callbacks(self, mock_create_writer):
+        """Fallback tokens must be attributed — the chain is built with the
+        writer's TokenTrackingCallback (the old single-hop passed none)."""
+        from src.token_tracker import TokenTrackingCallback
+
+        primary = _mock_llm("claude-opus-4-8", error=_billing_error())
+        gpt = _mock_llm("gpt-5.4", "# Article\n\nContent.")
+        writer = self._writer(mock_create_writer, primary)
+
+        with patch(
+            "src.article_writer.writer_fallback_chain",
+            return_value=[_tier("editor_model", gpt)],
+        ) as mock_chain:
+            writer._invoke_writer([MagicMock()])
+
+        callbacks = mock_chain.call_args.kwargs["callbacks"]
+        assert isinstance(callbacks[0], TokenTrackingCallback)
+        assert callbacks[0].agent_name == "Article Writer"
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_recovery_logging_is_family_neutral_and_complete(
+        self, mock_create_writer, monkeypatch
+    ):
+        """Success path emits primary-failed + attempt + succeeded with the tier
+        label and real model/provider in structured fields — never a model
+        family baked into a fallback event name."""
+        import src.article_writer as aw
+
+        primary = _mock_llm("claude-opus-4-8", error=_billing_error())
+        gpt = _mock_llm("gpt-5.4", "# Article\n\nContent.")
+        writer = self._writer(mock_create_writer, primary)
+
+        recorder = _RecordingLogger()
+        monkeypatch.setattr(aw, "logger", recorder)
+        with patch(
+            "src.article_writer.writer_fallback_chain",
+            return_value=[_tier("editor_model", gpt)],
+        ):
+            writer._invoke_writer([MagicMock()])
+
+        assert len(recorder.named("claude_writer_primary_failed")) == 1
+        attempts = recorder.named("writer_fallback_attempt")
+        assert [a["tier"] for a in attempts] == ["editor_model"]
+        assert attempts[0]["fallback_model"] == "gpt-5.4"
+        assert attempts[0]["fallback_provider"] == "openai"
+        succeeded = recorder.named("writer_fallback_succeeded")
+        assert [s["tier"] for s in succeeded] == ["editor_model"]
+        fallback_events = [name for name, _ in recorder.events if "fallback" in name]
+        for name in fallback_events:
+            assert not any(
+                family in name for family in ("gemini", "gpt", "claude", "openai")
+            ), f"family token in fallback event name: {name}"
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_tier_failure_logging_then_recovery(self, mock_create_writer, monkeypatch):
+        """A failing tier logs writer_fallback_attempt_failed and the loop
+        advances — events tell the full story in order."""
+        import src.article_writer as aw
+
+        primary = _mock_llm("claude-opus-4-8", error=_billing_error())
+        gpt = _mock_llm("gpt-5.4", error=Exception("openai 503"))
+        gemini = _mock_llm("gemini-3.5-flash", "# Article\n\nContent.")
+        writer = self._writer(mock_create_writer, primary)
+
+        recorder = _RecordingLogger()
+        monkeypatch.setattr(aw, "logger", recorder)
+        with patch(
+            "src.article_writer.writer_fallback_chain",
+            return_value=[
+                _tier("editor_model", gpt),
+                _tier("gemini_last_resort", gemini),
+            ],
+        ):
+            writer._invoke_writer([MagicMock()])
+
+        failed = recorder.named("writer_fallback_attempt_failed")
+        assert [f["tier"] for f in failed] == ["editor_model"]
+        assert failed[0]["fallback_model"] == "gpt-5.4"
+        succeeded = recorder.named("writer_fallback_succeeded")
+        assert [s["tier"] for s in succeeded] == ["gemini_last_resort"]
+        assert succeeded[0]["fallback_provider"] == "google"
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_tier_build_failure_is_contained_and_loop_advances(
+        self, mock_create_writer, monkeypatch
+    ):
+        """A tier whose build() raises (availability race) is logged with empty
+        model fields — no NameError — and the next tier still recovers."""
+        import src.article_writer as aw
+        from src.llms import WriterTier
+
+        primary = _mock_llm("claude-opus-4-8", error=_billing_error())
+        gemini = _mock_llm("gemini-3.5-flash", "# Article\n\nContent.")
+
+        def _broken_build():
+            raise RuntimeError("OpenAI writer fallback tier unavailable")
+
+        writer = self._writer(mock_create_writer, primary)
+        recorder = _RecordingLogger()
+        monkeypatch.setattr(aw, "logger", recorder)
+        with patch(
+            "src.article_writer.writer_fallback_chain",
+            return_value=[
+                WriterTier("editor_model", _broken_build),
+                _tier("gemini_last_resort", gemini),
+            ],
+        ):
+            article = writer._invoke_writer([MagicMock()])
+
+        assert "Content." in article
+        failed = recorder.named("writer_fallback_attempt_failed")
+        assert [f["tier"] for f in failed] == ["editor_model"]
+        assert failed[0]["fallback_model"] == ""
+        assert failed[0]["fallback_provider"] == "unknown"
         assert writer.writer_fell_back is True
 
-    @patch("src.article_writer.create_writer_fallback_llm")
     @patch("src.article_writer.create_writer_llm")
-    def test_primary_success_keeps_fell_back_flag_false(
-        self, mock_create_writer, mock_create_gemini
-    ):
-        from src.article_writer import ArticleWriter
+    def test_primary_success_keeps_fell_back_flag_false(self, mock_create_writer):
+        primary = _mock_llm("claude-opus-4-8", "# Article\n\nContent.")
+        writer = self._writer(mock_create_writer, primary)
 
-        mock_claude = MagicMock()
-        mock_claude.invoke.return_value = MagicMock(content="# Article\n\nContent.")
-        mock_create_writer.return_value = mock_claude
-        mock_create_gemini.return_value = MagicMock()
-
-        writer = ArticleWriter(
-            samples_dir=Path("writing_samples")
-            if Path("writing_samples").exists()
-            else None,
-        )
-
-        writer._invoke_writer([MagicMock()])
+        with patch("src.article_writer.writer_fallback_chain") as mock_chain:
+            writer._invoke_writer([MagicMock()])
 
         assert writer.writer_fell_back is False
-        mock_create_gemini.assert_not_called()
+        mock_chain.assert_not_called()
 
-    @patch("src.article_writer.create_writer_fallback_llm")
+
+class TestWriterFellBackInitStamp:
+    """writer_fell_back is derived from the provider actually constructed —
+    a no-CLAUDE_KEY run resolving to GPT/Gemini must stamp True in the saved
+    run_summary, not the pre-chain default False."""
+
+    def _writer_with_model(self, mock_create_writer, model: str):
+        from src.article_writer import ArticleWriter
+
+        mock_create_writer.return_value = _mock_llm(model, "# A\n\nB.")
+        return ArticleWriter(samples_dir=_samples_dir())
+
     @patch("src.article_writer.create_writer_llm")
-    def test_fallback_caches_gemini_for_subsequent_calls(
-        self, mock_create_writer, mock_create_gemini
+    def test_claude_backed_writer_stamps_false(self, mock_create_writer):
+        writer = self._writer_with_model(mock_create_writer, "claude-opus-4-8")
+        assert writer.writer_fell_back is False
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_openai_backed_writer_stamps_true(self, mock_create_writer):
+        writer = self._writer_with_model(mock_create_writer, "gpt-5.4")
+        assert writer.writer_fell_back is True
+        assert writer.current_model_name == "gpt-5.4"
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_gemini_backed_writer_stamps_true(self, mock_create_writer):
+        writer = self._writer_with_model(mock_create_writer, "gemini-3.5-flash")
+        assert writer.writer_fell_back is True
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_creation_log_reports_constructed_instance(
+        self, mock_create_writer, monkeypatch
     ):
-        """After fallback, Gemini should be cached so subsequent calls don't retry Claude."""
+        """creating_articlewriter_llm logs the real provider/model — never the
+        pre-chain 'gemini-fallback' guess."""
+        import src.article_writer as aw
+
+        mock_create_writer.return_value = _mock_llm("gpt-5.4", "# A\n\nB.")
+        recorder = _RecordingLogger()
+        monkeypatch.setattr(aw, "logger", recorder)
+
         from src.article_writer import ArticleWriter
 
-        mock_claude = MagicMock()
-        mock_claude.invoke.side_effect = Exception(
-            "Your credit balance is too low to access the Anthropic API."
-        )
-        mock_create_writer.return_value = mock_claude
+        ArticleWriter(samples_dir=_samples_dir())
 
-        mock_gemini = MagicMock()
-        mock_gemini.invoke.return_value = MagicMock(content="# Article\n\nContent.")
-        mock_create_gemini.return_value = mock_gemini
-
-        writer = ArticleWriter(
-            samples_dir=Path("writing_samples")
-            if Path("writing_samples").exists()
-            else None,
-        )
-
-        # First call triggers fallback
-        writer._invoke_writer([MagicMock()])
-        # Second call should use cached Gemini, not retry Claude
-        writer._invoke_writer([MagicMock()])
-
-        # Claude called once (first attempt), Gemini created once (cached), invoked twice
-        assert mock_claude.invoke.call_count == 1
-        assert mock_gemini.invoke.call_count == 2
-
-    @patch("src.article_writer.create_writer_llm")
-    def test_non_anthropic_errors_propagate(self, mock_create_writer):
-        """Non-Anthropic errors should NOT trigger fallback."""
-        from src.article_writer import ArticleWriter
-
-        mock_claude = MagicMock()
-        mock_claude.invoke.side_effect = ValueError("Some unrelated error")
-        mock_create_writer.return_value = mock_claude
-
-        writer = ArticleWriter(
-            samples_dir=Path("writing_samples")
-            if Path("writing_samples").exists()
-            else None,
-        )
-
-        with pytest.raises(ValueError, match="Some unrelated error"):
-            writer._invoke_writer([MagicMock()])
+        creations = recorder.named("creating_articlewriter_llm")
+        assert len(creations) == 1
+        assert creations[0]["provider"] == "openai"
+        assert creations[0]["model"] == "gpt-5.4"
+        assert "gemini-fallback" not in str(recorder.events)
 
 
 class TestArticleEditorTracing:

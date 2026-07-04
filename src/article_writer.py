@@ -25,7 +25,7 @@ from src.article_audit import (
 )
 from src.config import config, get_env_value
 from src.error_safety import redact_sensitive_text, summarize_exception
-from src.llms import create_writer_fallback_llm, create_writer_llm
+from src.llms import create_writer_llm, writer_fallback_chain
 from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import classify_failure, get_model_name, infer_provider
 from src.runtime_services import get_current_tool_service
@@ -193,9 +193,11 @@ def _extract_text_from_response(response) -> str:
         "plain string"
     Gemini with thinking:
         [{"text": "..."}, ...]  (no type field)
+    OpenAI responses/v1 (writer fallback tier):
+        [{"type": "reasoning", ...}, {"type": "text", "text": "..."}]
 
     Returns:
-        Concatenated text content, excluding thinking/redacted blocks.
+        Concatenated text content, excluding thinking/reasoning/redacted blocks.
     """
     content = response.content
 
@@ -211,7 +213,7 @@ def _extract_text_from_response(response) -> str:
             text_parts.append(block)
         elif isinstance(block, dict):
             block_type = block.get("type", "")
-            if block_type in ("thinking", "redacted_thinking"):
+            if block_type in ("thinking", "redacted_thinking", "reasoning"):
                 continue
             if block_type == "text":
                 text_parts.append(block["text"])
@@ -271,7 +273,17 @@ class ArticleWriter:
 
         self.prompt_config = self._load_prompt_config()
         self.llm = self._create_llm()
-        self.writer_fell_back = False
+        # "Fell back" = not backed by the configured Claude writer, whether
+        # that happened at construction (no CLAUDE_KEY → fallback chain) or
+        # later at runtime — this stamp feeds run_summary.article_writer_fell_back,
+        # the surface operators check before judging article voice.
+        self.writer_fell_back = (
+            infer_provider(
+                model_name=get_model_name(self.llm),
+                class_name=type(self.llm).__name__,
+            )
+            != "anthropic"
+        )
 
         logger.info(
             "articlewriter_initialized",
@@ -326,25 +338,19 @@ class ArticleWriter:
     def _create_llm(self):
         """Create the LLM for article generation.
 
-        Uses Claude (Anthropic) when CLAUDE_KEY is configured,
-        falls back to Gemini otherwise. Model selection and
-        thinking configuration are handled by create_writer_llm().
+        Uses Claude (Anthropic) when CLAUDE_KEY is configured; otherwise
+        create_writer_llm() resolves the first available tier of the writer
+        fallback chain (EDITOR_MODEL/OpenAI, then DEEP_MODEL/Gemini floor).
 
-        Note: use_quick_model in model_config is ignored — the writer
-        always uses WRITER_MODEL (Claude) or DEEP_MODEL (Gemini fallback).
-        To use a cheaper Claude model, set WRITER_MODEL=claude-haiku-4-5.
+        Note: use_quick_model in model_config is ignored — the writer model
+        is --quick-invariant. To use a cheaper Claude model, set
+        WRITER_MODEL=claude-haiku-4-5.
         """
         metadata = self.prompt_config.get("metadata", {})
         model_config = metadata.get("model_config", {})
         temperature = model_config.get("temperature", 0.7)
 
-        logger.info(
-            "creating_articlewriter_llm",
-            provider="claude" if config.get_claude_api_key() else "gemini-fallback",
-            model=config.writer_model,
-        )
-
-        return create_writer_llm(
+        llm = create_writer_llm(
             temperature=temperature,
             timeout=config.api_timeout,
             max_retries=get_runtime_config(config).api_retry_attempts,
@@ -353,11 +359,33 @@ class ArticleWriter:
                 *self._callbacks,
             ],
         )
+        # Log the instance actually constructed — the no-Claude-key path can
+        # resolve to any chain tier, so a pre-computed label would lie.
+        model_name = get_model_name(llm)
+        logger.info(
+            "creating_articlewriter_llm",
+            provider=infer_provider(
+                model_name=model_name, class_name=type(llm).__name__
+            ),
+            model=model_name,
+        )
+        return llm
 
     @property
     def current_model_name(self) -> str:
         """Model actually backing the writer (reflects any fallback swap)."""
         return get_model_name(self.llm) or ""
+
+    def _fallback_callbacks(self) -> list[BaseCallbackHandler]:
+        """Tracking callbacks for fallback tiers — same as the primary writer.
+
+        Fallback tokens must be attributed to the run, not silently free
+        (the pre-chain single-hop fallback was built with no callbacks).
+        """
+        return [
+            TokenTrackingCallback("Article Writer", get_tracker()),
+            *self._callbacks,
+        ]
 
     def _invoke_config(self, *, workflow: str) -> dict[str, object]:
         return {
@@ -599,7 +627,14 @@ class ArticleWriter:
             return ""
 
     def _invoke_with_fallback(self, messages: list):
-        """Invoke LLM with automatic Claude → Gemini fallback on API errors."""
+        """Invoke the writer LLM, walking the fallback chain on Claude API errors.
+
+        Chain order (from writer_fallback_chain): EDITOR_MODEL (OpenAI, when
+        lib+key+ENABLE_CONSULTANT allow) → DEEP_MODEL (Gemini floor). First
+        tier to succeed is cached on self.llm; non-Anthropic primary errors
+        propagate without falling back; if every tier fails, the last
+        exception is raised.
+        """
         primary_model = get_model_name(self.llm)
         primary_provider = infer_provider(
             model_name=primary_model, class_name=type(self.llm).__name__
@@ -669,79 +704,86 @@ class ArticleWriter:
                 raise  # Not a Claude error — propagate
 
             logger.warning(
-                "claude_writer_failed_falling_back_to_gemini",
+                "claude_writer_primary_failed",
                 failure_kind=primary_failure.kind,
                 host=primary_failure.host,
                 error_type=primary_failure.error_type,
                 root_cause_type=primary_failure.root_cause_type,
                 reason=primary_failure.message,
             )
-            fallback_llm = create_writer_fallback_llm()
-            self.llm = fallback_llm  # Cache for subsequent calls (e.g., retry)
-            self.writer_fell_back = True
-            fallback_model = get_model_name(fallback_llm)
-            fallback_provider = infer_provider(
-                model_name=fallback_model, class_name=type(fallback_llm).__name__
-            )
-            try:
-                logger.info(
-                    "llm_call_start",
-                    context="article_writer_fallback",
-                    provider=fallback_provider,
-                    model=fallback_model,
-                    runnable_class=type(fallback_llm).__name__,
-                    max_attempts=1,
-                )
-                response = fallback_llm.invoke(
-                    messages,
-                    config=cast(Any, self._invoke_config(workflow="article_fallback")),
-                )
-                logger.info(
-                    "llm_call_success",
-                    context="article_writer_fallback",
-                    provider=fallback_provider,
-                    model=fallback_model,
-                    runnable_class=type(fallback_llm).__name__,
-                    attempt=1,
-                )
-                return response
-            except Exception as fallback_exc:
-                fallback_failure = classify_failure(
-                    fallback_exc,
-                    provider=fallback_provider,
-                    model_name=fallback_model,
-                    class_name=type(fallback_llm).__name__,
-                )
-                get_tracker().record_failure(
-                    agent_name="Article Writer Fallback",
-                    provider=fallback_failure.provider,
-                    failure_kind=fallback_failure.kind,
-                    model_name=fallback_model or "",
-                )
-                logger.error(
-                    "llm_call_failed",
-                    context="article_writer_fallback",
-                    provider=fallback_failure.provider,
-                    model=fallback_model,
-                    runnable_class=type(fallback_llm).__name__,
-                    attempt=1,
-                    max_attempts=1,
-                    failure_kind=fallback_failure.kind,
-                    host=fallback_failure.host,
-                    retryable=fallback_failure.retryable,
-                    error_type=fallback_failure.error_type,
-                    root_cause_type=fallback_failure.root_cause_type,
-                    error_message=fallback_failure.message,
-                    same_failure_kind=fallback_failure.kind == primary_failure.kind,
-                )
-                raise
+            last_exc: Exception = e
+            for tier in writer_fallback_chain(callbacks=self._fallback_callbacks()):
+                fallback_model = ""
+                fallback_provider = "unknown"
+                fallback_class = ""
+                try:
+                    tier_llm = tier.build()  # lazy: construct only when attempted
+                    fallback_model = get_model_name(tier_llm)
+                    fallback_provider = infer_provider(
+                        model_name=fallback_model,
+                        class_name=type(tier_llm).__name__,
+                    )
+                    fallback_class = type(tier_llm).__name__
+                    logger.info(
+                        "writer_fallback_attempt",
+                        tier=tier.label,
+                        fallback_model=fallback_model,
+                        fallback_provider=fallback_provider,
+                        runnable_class=fallback_class,
+                    )
+                    response = tier_llm.invoke(
+                        messages,
+                        config=cast(
+                            Any, self._invoke_config(workflow="article_fallback")
+                        ),
+                    )
+                    self.llm = tier_llm  # Cache for subsequent calls (e.g., retry)
+                    self.writer_fell_back = True
+                    logger.info(
+                        "writer_fallback_succeeded",
+                        tier=tier.label,
+                        fallback_model=fallback_model,
+                        fallback_provider=fallback_provider,
+                        runnable_class=fallback_class,
+                    )
+                    return response
+                except Exception as fallback_exc:
+                    last_exc = fallback_exc
+                    fallback_failure = classify_failure(
+                        fallback_exc,
+                        provider=fallback_provider,
+                        model_name=fallback_model,
+                        class_name=fallback_class,
+                    )
+                    get_tracker().record_failure(
+                        agent_name="Article Writer Fallback",
+                        provider=fallback_failure.provider,
+                        failure_kind=fallback_failure.kind,
+                        model_name=fallback_model or "",
+                    )
+                    logger.error(
+                        "writer_fallback_attempt_failed",
+                        tier=tier.label,
+                        fallback_model=fallback_model,
+                        fallback_provider=fallback_provider,
+                        runnable_class=fallback_class,
+                        failure_kind=fallback_failure.kind,
+                        host=fallback_failure.host,
+                        retryable=fallback_failure.retryable,
+                        error_type=fallback_failure.error_type,
+                        root_cause_type=fallback_failure.root_cause_type,
+                        error_message=fallback_failure.message,
+                        same_failure_kind=fallback_failure.kind == primary_failure.kind,
+                    )
+            raise last_exc from e
 
     def _invoke_writer(self, messages: list) -> str:
         """
         Invoke the writer LLM with provider-aware post-processing.
 
         Handles:
-        1. Claude → Gemini fallback on API errors (billing, auth, rate limits)
+        1. Fallback chain on Claude API errors (billing, auth, rate limits):
+           EDITOR_MODEL (OpenAI) when usable, then Gemini floor
         2. Thinking block extraction (Claude adaptive thinking / Gemini thinking)
         3. Preamble stripping (Claude's politeness tendency)
         4. Refusal detection (financial advice guardrails)
