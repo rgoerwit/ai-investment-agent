@@ -354,6 +354,22 @@ async def handle_article_generation(
                         "[yellow]Editor revision failed, using original draft.[/yellow]"
                     )
 
+        # Surface which model actually wrote the article — a silent Claude →
+        # Gemini fallback (e.g. exhausted Anthropic credits) otherwise only
+        # shows up as a warning buried in the logs, and article-quality
+        # conclusions get drawn against the wrong model.
+        writer_model = getattr(writer, "current_model_name", "")
+        writer_fell_back = bool(getattr(writer, "writer_fell_back", False))
+        if isinstance(analysis_result, dict):
+            run_summary = analysis_result.setdefault("run_summary", {})
+            run_summary["article_writer_model"] = writer_model
+            run_summary["article_writer_fell_back"] = writer_fell_back
+        if writer_fell_back and not args.quiet and not args.brief:
+            console_obj.print(
+                f"[yellow]Claude writer unavailable — article written by "
+                f"fallback model {writer_model}.[/yellow]"
+            )
+
         if not args.quiet and not args.brief:
             console_obj.print(
                 f"[green]Article saved to:[/green] [cyan]{article_path}[/cyan]{_cost_suffix()}"

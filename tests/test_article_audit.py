@@ -52,6 +52,65 @@ def test_article_citation_audit_ignores_non_backticked_parenthetical() -> None:
     assert audit_article_citations(article, data_block) == []
 
 
+def test_article_citation_audit_catches_bare_parenthetical_mismatch() -> None:
+    # The 3393.T regression: hallucinated 52-week low in a plain parenthetical.
+    article = (
+        "The stock trades near its high "
+        "(FIFTY_TWO_WEEK_HIGH: 3100.00, FIFTY_TWO_WEEK_LOW: 1850.00 [unverified])."
+    )
+    data_block = _block(
+        """
+FIFTY_TWO_WEEK_HIGH: 3100.00
+FIFTY_TWO_WEEK_LOW: 2545.00
+"""
+    )
+
+    errors = audit_article_citations(article, data_block)
+
+    assert len(errors) == 1
+    assert "FIFTY_TWO_WEEK_LOW: 1850.00" in errors[0]["claim"]
+    assert "FIFTY_TWO_WEEK_LOW: 2545.00" in errors[0]["ground_truth"]
+
+
+def test_article_citation_audit_bare_parenthetical_keeps_thousands_value() -> None:
+    article = "Cash flow held up (OPERATING_CASH_FLOW: 3,057M JPY)."
+    data_block = _block("OPERATING_CASH_FLOW: 3,057M JPY")
+
+    assert audit_article_citations(article, data_block) == []
+
+
+def test_article_citation_audit_bare_parenthetical_ignores_unknown_key() -> None:
+    # Bare parentheticals never produce missing-field errors — prose like
+    # (NOTE: 2 caveats apply) must not be treated as a citation.
+    article = "One caveat applies (NOTE: 2 caveats apply)."
+    data_block = _block("ROIC_PERCENT: 17.43%")
+
+    assert audit_article_citations(article, data_block) == []
+
+
+def test_article_citation_audit_bare_parenthetical_ignores_prose_value() -> None:
+    article = "The sector is stable (SECTOR: Technology remains dominant)."
+    data_block = _block("SECTOR: Technology")
+
+    assert audit_article_citations(article, data_block) == []
+
+
+def test_article_citation_audit_accepts_quoted_value() -> None:
+    # Run-1 false-positive class: the writer copied quoted values from the
+    # editor's CORRECTED notes into citations.
+    article = 'Cash flow held up `(OPERATING_CASH_FLOW: "3,057M JPY")`.'
+    data_block = _block("OPERATING_CASH_FLOW: 3,057M JPY")
+
+    assert audit_article_citations(article, data_block) == []
+
+
+def test_article_citation_audit_accepts_unverified_tag_on_matching_value() -> None:
+    article = "Rates rose (FIFTY_TWO_WEEK_LOW: 2545.00 [unverified])."
+    data_block = _block("FIFTY_TWO_WEEK_LOW: 2545.00")
+
+    assert audit_article_citations(article, data_block) == []
+
+
 def test_article_citation_audit_flags_missing_field() -> None:
     article = "# Title\n\nUnsupported `(FAKE_FIELD: 42)`."
     data_block = _block("ROIC_PERCENT: 17.43%")

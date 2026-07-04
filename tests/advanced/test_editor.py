@@ -989,6 +989,100 @@ class TestMainPyIntegration:
 
             # The function should complete without raising
 
+    @pytest.mark.asyncio
+    async def test_handle_article_generation_surfaces_writer_fallback(self):
+        """A silent Claude → Gemini fallback must land in the run summary."""
+        from unittest.mock import MagicMock, mock_open, patch
+
+        args = MagicMock()
+        args.article = "test_article.md"
+        args.output = "/tmp/test_output.md"
+        args.quiet = True
+        args.brief = False
+
+        mock_writer_instance = MagicMock()
+        mock_writer_instance.write.return_value = "# Draft"
+        mock_writer_instance.current_model_name = "gemini-3.5-flash"
+        mock_writer_instance.writer_fell_back = True
+
+        mock_editor_instance = MagicMock()
+        mock_editor_instance.is_available.return_value = False
+
+        analysis_result = {
+            "fundamentals_report": "DATA",
+            "final_trade_decision": "PM",
+        }
+
+        with (
+            patch(
+                "src.article_writer.ArticleWriter", return_value=mock_writer_instance
+            ),
+            patch(
+                "src.article_writer.ArticleEditor", return_value=mock_editor_instance
+            ),
+            patch("builtins.open", mock_open()),
+        ):
+            from src.output import handle_article_generation
+
+            await handle_article_generation(
+                args=args,
+                ticker="TEST",
+                company_name="Test Corp",
+                report_text="Full report...",
+                trade_date="2026-01-01",
+                analysis_result=analysis_result,
+                resolve_article_path_fn=lambda *_a, **_k: "/tmp/test_article.md",
+            )
+
+        run_summary = analysis_result["run_summary"]
+        assert run_summary["article_writer_model"] == "gemini-3.5-flash"
+        assert run_summary["article_writer_fell_back"] is True
+
+    @pytest.mark.asyncio
+    async def test_handle_article_generation_records_primary_writer_model(self):
+        from unittest.mock import MagicMock, mock_open, patch
+
+        args = MagicMock()
+        args.article = "test_article.md"
+        args.output = "/tmp/test_output.md"
+        args.quiet = True
+        args.brief = False
+
+        mock_writer_instance = MagicMock()
+        mock_writer_instance.write.return_value = "# Draft"
+        mock_writer_instance.current_model_name = "claude-opus-4-8"
+        mock_writer_instance.writer_fell_back = False
+
+        mock_editor_instance = MagicMock()
+        mock_editor_instance.is_available.return_value = False
+
+        analysis_result = {}
+
+        with (
+            patch(
+                "src.article_writer.ArticleWriter", return_value=mock_writer_instance
+            ),
+            patch(
+                "src.article_writer.ArticleEditor", return_value=mock_editor_instance
+            ),
+            patch("builtins.open", mock_open()),
+        ):
+            from src.output import handle_article_generation
+
+            await handle_article_generation(
+                args=args,
+                ticker="TEST",
+                company_name="Test Corp",
+                report_text="Full report...",
+                trade_date="2026-01-01",
+                analysis_result=analysis_result,
+                resolve_article_path_fn=lambda *_a, **_k: "/tmp/test_article.md",
+            )
+
+        run_summary = analysis_result["run_summary"]
+        assert run_summary["article_writer_model"] == "claude-opus-4-8"
+        assert run_summary["article_writer_fell_back"] is False
+
 
 class TestStripLLMPreamble:
     """Tests for the _strip_llm_preamble helper function."""
@@ -2178,6 +2272,114 @@ class TestEnforceVerdictConsistency:
             "reference_checks": ["not-a-dict", None, 42],
         }
         assert _enforce_verdict_consistency(feedback)["verdict"] == "APPROVED"
+
+
+class TestFlagFailedReferences:
+    """URLs the editor watched fail must not survive in the published draft."""
+
+    def test_failed_url_in_draft_appends_error_and_forces_revise(self):
+        editor = _create_article_editor()
+        editor._failed_urls = {"https://dead.example/quote"}
+        draft = "Body text.\n\n### References\n1. [X](https://dead.example/quote)\n"
+        feedback = {"verdict": "APPROVED", "factual_errors": []}
+
+        result = editor._flag_failed_references(draft, feedback)
+
+        assert result["verdict"] == "REVISE"
+        assert len(result["factual_errors"]) == 1
+        error = result["factual_errors"][0]
+        assert error["location"] == "References"
+        assert "https://dead.example/quote" in error["claim"]
+        assert error["action"] == "correct"
+
+    def test_failed_url_absent_from_draft_leaves_feedback_untouched(self):
+        editor = _create_article_editor()
+        editor._failed_urls = {"https://dead.example/quote"}
+        feedback = {"verdict": "APPROVED", "factual_errors": []}
+
+        result = editor._flag_failed_references("No links here.", feedback)
+
+        assert result["verdict"] == "APPROVED"
+        assert result["factual_errors"] == []
+
+    def test_no_failed_urls_is_a_noop(self):
+        editor = _create_article_editor()
+        editor._failed_urls = set()
+        feedback = {"verdict": "APPROVED", "factual_errors": []}
+
+        assert editor._flag_failed_references("any", feedback) is feedback
+
+    def test_non_dict_feedback_returned_as_is(self):
+        editor = _create_article_editor()
+        editor._failed_urls = {"https://dead.example/quote"}
+
+        assert (
+            editor._flag_failed_references("https://dead.example/quote", None) is None
+        )
+
+    def test_existing_claim_not_duplicated(self):
+        editor = _create_article_editor()
+        editor._failed_urls = {"https://dead.example/quote"}
+        claim = (
+            "References include a URL whose verification fetch failed: "
+            "https://dead.example/quote"
+        )
+        feedback = {
+            "verdict": "REVISE",
+            "factual_errors": [{"location": "References", "claim": claim}],
+        }
+
+        result = editor._flag_failed_references(
+            "see https://dead.example/quote", feedback
+        )
+
+        assert len(result["factual_errors"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_calls_records_failure_sentinels(self):
+        editor = _create_article_editor()
+        editor._failed_urls = set()
+        editor._url_cache = {}
+
+        mock_tool = AsyncMock()
+        mock_tool.ainvoke = AsyncMock(return_value="FETCH_FAILED: HTTP 404")
+        mock_tool.name = "fetch_reference_content"
+        editor._tools_by_name = {"fetch_reference_content": mock_tool}
+
+        await editor._execute_tool_calls(
+            [
+                {
+                    "name": "fetch_reference_content",
+                    "args": {"url": "https://dead.example/quote"},
+                    "id": "call_1",
+                }
+            ]
+        )
+
+        assert editor._failed_urls == {"https://dead.example/quote"}
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_calls_ignores_successful_fetch(self):
+        editor = _create_article_editor()
+        editor._failed_urls = set()
+        editor._url_cache = {}
+
+        mock_tool = AsyncMock()
+        mock_tool.ainvoke = AsyncMock(return_value="Plenty of real page content")
+        mock_tool.name = "fetch_reference_content"
+        editor._tools_by_name = {"fetch_reference_content": mock_tool}
+
+        await editor._execute_tool_calls(
+            [
+                {
+                    "name": "fetch_reference_content",
+                    "args": {"url": "https://alive.example/page"},
+                    "id": "call_1",
+                }
+            ]
+        )
+
+        assert editor._failed_urls == set()
 
 
 class TestStripEditorNotes:

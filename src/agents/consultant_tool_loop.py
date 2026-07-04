@@ -25,6 +25,8 @@ class ConsultantLoopResult:
     response: object | None
     had_tool_errors: bool
     tool_failure_count: int
+    tool_call_count: int = 0
+    failed_tools: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,8 @@ async def run_bounded_consultant_loop(
     content_str = ""
     had_tool_errors = False
     tool_failure_count = 0
+    tool_call_count = 0
+    failed_tools: list[str] = []
     fmp_alt_disabled_kind: str | None = None
     response: object | None = None
 
@@ -124,6 +128,7 @@ async def run_bounded_consultant_loop(
         for tool_call in capped:
             tool_fn = tools_by_name.get(tool_call["name"])
             tool_call_id = tool_call.get("id", tool_call["name"])
+            tool_call_count += 1
             result_failed = False
             count_failure = True
             if tool_fn:
@@ -212,6 +217,7 @@ async def run_bounded_consultant_loop(
                 had_tool_errors = True
                 if count_failure:
                     tool_failure_count += 1
+                    failed_tools.append(tool_call["name"])
                 all_suppressed_this_iter = False
             elif count_failure:
                 all_suppressed_this_iter = False
@@ -261,4 +267,6 @@ async def run_bounded_consultant_loop(
         response=response,
         had_tool_errors=had_tool_errors,
         tool_failure_count=tool_failure_count,
+        tool_call_count=tool_call_count,
+        failed_tools=tuple(failed_tools),
     )

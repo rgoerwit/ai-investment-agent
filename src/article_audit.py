@@ -14,6 +14,16 @@ from src.data_block_utils import (
 logger = structlog.get_logger(__name__)
 
 _ARTICLE_CITATION_PATTERN = re.compile(r"`\(([A-Z][A-Z0-9_]+):\s*([^)]+?)\)`")
+# Un-backticked parentheticals: the writer sometimes cites DATA_BLOCK keys as
+# plain prose parentheses (3393.T shipped a hallucinated FIFTY_TWO_WEEK_LOW
+# that way). Audited more conservatively than backticked citations: only keys
+# that exist in the DATA_BLOCK, and only numeric-like values.
+_BARE_PARENTHETICAL_PATTERN = re.compile(r"(?<!`)\(([^()`\n]+)\)")
+# Value runs to the next comma unless the comma is a thousands separator
+# (comma directly followed by a digit), so "1.95, a moderate level" cites
+# 1.95 while "3,057M JPY" stays whole.
+_BARE_PAIR_PATTERN = re.compile(r"\b([A-Z][A-Z0-9_]{2,}):\s*([^,]*(?:,\d[^,]*)*)")
+_UNVERIFIED_TAG_PATTERN = re.compile(r"\s*\[unverified\]\s*$", re.IGNORECASE)
 _SOURCE_CONFIDENCE_FIELDS = (
     "OPERATING_CASH_FLOW_SOURCE",
     "OCF_FILING_REASON",
@@ -25,7 +35,9 @@ _SOURCE_CONFIDENCE_FIELDS = (
 
 
 def _normalize_citation_value(value: str) -> str:
-    text = value.strip().strip("`").replace(",", "")
+    text = value.strip().strip("`").strip()
+    text = _UNVERIFIED_TAG_PATTERN.sub("", text)
+    text = text.strip("'\"").replace(",", "")
     text = re.sub(r"\s+", "", text)
     if text.endswith("%"):
         text = text[:-1]
@@ -51,13 +63,17 @@ def audit_article_citations(
         logger.warning("article_citation_audit_no_parseable_datablock")
         return []
 
+    def _lookup(key: str) -> str | None:
+        actual = extract_block_field_from_text(block_text, key)
+        if actual is None:
+            actual = extract_block_field_from_text_raw(block_text, key)
+        return actual
+
     errors: list[dict[str, str]] = []
     for match in _ARTICLE_CITATION_PATTERN.finditer(article):
         key = match.group(1)
         cited = match.group(2).strip()
-        actual = extract_block_field_from_text(block_text, key)
-        if actual is None:
-            actual = extract_block_field_from_text_raw(block_text, key)
+        actual = _lookup(key)
         if actual is None:
             errors.append(
                 {
@@ -68,6 +84,24 @@ def audit_article_citations(
                 }
             )
         elif not _citation_values_match(cited, actual):
+            errors.append(
+                {
+                    "location": "DATA_BLOCK citation audit",
+                    "claim": f"Article cites ({key}: {cited})",
+                    "ground_truth": f"DATA_BLOCK shows {key}: {actual}",
+                    "action": "Correct the cited value and any narrative built on it.",
+                }
+            )
+
+    for paren_match in _BARE_PARENTHETICAL_PATTERN.finditer(article):
+        for pair_match in _BARE_PAIR_PATTERN.finditer(paren_match.group(1)):
+            key = pair_match.group(1)
+            cited = _UNVERIFIED_TAG_PATTERN.sub("", pair_match.group(2).strip())
+            if not re.search(r"\d", cited):
+                continue
+            actual = _lookup(key)
+            if actual is None or _citation_values_match(cited, actual):
+                continue
             errors.append(
                 {
                     "location": "DATA_BLOCK citation audit",

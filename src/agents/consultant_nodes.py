@@ -45,6 +45,12 @@ logger = structlog.get_logger(__name__)
 
 CONSULTANT_CALL_TIMEOUT_SECONDS = 90.0
 CONSULTANT_TOTAL_TIMEOUT_SECONDS = 240.0
+# A completed review with a minority of failed verification calls is degraded,
+# not worthless: above this failed/executed ratio the review is excluded from
+# PM inputs (previous all-or-nothing behavior); at or below it the review
+# reaches the PM tagged PARTIAL. The 3393.T 2026-07-03 run lost the entire
+# +2.0 confirmed-risk counterweight to a single 1-of-4 tool failure.
+CONSULTANT_PARTIAL_TOOL_FAILURE_RATIO = 0.5
 # Cap for the aggregator-metrics snapshot injected into the auditor's first
 # message (the loop's ToolMessage truncation cap is far larger at 63.5k).
 _AUDITOR_SNAPSHOT_MAX_CHARS = 20_000
@@ -484,6 +490,55 @@ Provide your independent consultant review."""
                 truncated=trunc_info["truncated"],
             )
             if had_tool_errors:
+                executed = loop_result.tool_call_count
+                failure_ratio = tool_failure_count / executed if executed else 1.0
+                is_partial = (
+                    bool(content_str.strip())
+                    and tool_failure_count > 0
+                    and failure_ratio <= CONSULTANT_PARTIAL_TOOL_FAILURE_RATIO
+                )
+                if is_partial:
+                    logger.warning(
+                        "consultant_review_partial",
+                        ticker=ticker,
+                        tool_failure_count=tool_failure_count,
+                        tool_call_count=executed,
+                        failed_tools=list(loop_result.failed_tools),
+                    )
+                    failed_tools_note = (
+                        f" ({', '.join(loop_result.failed_tools)})"
+                        if loop_result.failed_tools
+                        else ""
+                    )
+                    partial_content = (
+                        f"[PARTIAL REVIEW: {tool_failure_count} of {executed} "
+                        f"verification tool calls failed{failed_tools_note}. "
+                        "Claims depending on the failed verification remain "
+                        "unverified — weight accordingly.]\n\n" + content_str
+                    )
+                    partial_status = ArtifactStatus(
+                        complete=True,
+                        ok=True,
+                        content=partial_content,
+                        provider=support.infer_provider_name(llm),
+                        message=(
+                            f"Consultant review PARTIAL: {tool_failure_count}/"
+                            f"{executed} verification tool calls failed"
+                        ),
+                    )
+                    partial_result: dict[str, Any] = {
+                        "consultant_review": partial_content,
+                        "consultant_tool_failures": tool_failure_count,
+                        **(
+                            {"consultant_quick_profile": consultant_profile}
+                            if quick_mode
+                            else {}
+                        ),
+                        "artifact_statuses": {
+                            "consultant_review": partial_status.as_dict(),
+                        },
+                    }
+                    return partial_result
                 status = ArtifactStatus(
                     complete=True,
                     ok=False,

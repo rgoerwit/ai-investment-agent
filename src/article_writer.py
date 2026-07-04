@@ -105,6 +105,10 @@ class EditorReviewResult(BaseModel):
 # into the published article.
 _EDITOR_NOTES_PATTERN = re.compile(r"\n*```EDITOR_NOTES\b.*?(?:```|\Z)\s*", re.DOTALL)
 
+# Failure sentinels returned by fetch_reference_content (src/editor_tools.py).
+# A URL whose fetch produced one of these must not survive in References.
+_REFERENCE_FAILURE_PREFIXES = ("FETCH_FAILED:", "INSUFFICIENT_CONTENT:", "INVALID_URL:")
+
 
 def _strip_editor_notes(article: str) -> str:
     """Remove the fenced EDITOR_NOTES block from a (revised) article."""
@@ -267,6 +271,7 @@ class ArticleWriter:
 
         self.prompt_config = self._load_prompt_config()
         self.llm = self._create_llm()
+        self.writer_fell_back = False
 
         logger.info(
             "articlewriter_initialized",
@@ -348,6 +353,11 @@ class ArticleWriter:
                 *self._callbacks,
             ],
         )
+
+    @property
+    def current_model_name(self) -> str:
+        """Model actually backing the writer (reflects any fallback swap)."""
+        return get_model_name(self.llm) or ""
 
     def _invoke_config(self, *, workflow: str) -> dict[str, object]:
         return {
@@ -668,6 +678,7 @@ class ArticleWriter:
             )
             fallback_llm = create_writer_fallback_llm()
             self.llm = fallback_llm  # Cache for subsequent calls (e.g., retry)
+            self.writer_fell_back = True
             fallback_model = get_model_name(fallback_llm)
             fallback_provider = infer_provider(
                 model_name=fallback_model, class_name=type(fallback_llm).__name__
@@ -1238,6 +1249,7 @@ class ArticleEditor:
         self.tools = get_editor_tools()
         self.prompt_config = self._load_prompt_config()
         self._url_cache: dict[str, str] = {}
+        self._failed_urls: set[str] = set()
         self.review_llm = self._build_structured_review_llm()
 
         # Build tool lookup and bind tools to LLM for agentic reference checking
@@ -1434,7 +1446,10 @@ class ArticleEditor:
 
                 # Cache URL fetch results for this editorial session
                 if tool_name == "fetch_reference_content":
-                    url_cache[tool_args.get("url", "")] = content
+                    url = tool_args.get("url", "")
+                    url_cache[url] = content
+                    if content.startswith(_REFERENCE_FAILURE_PREFIXES):
+                        self._failed_urls.add(url)
 
                 results.append(ToolMessage(content=content, tool_call_id=tool_id))
             except Exception as e:
@@ -1447,7 +1462,9 @@ class ArticleEditor:
 
                 # Cache errors too — no point retrying a broken URL
                 if tool_name == "fetch_reference_content":
-                    url_cache[tool_args.get("url", "")] = error_content
+                    url = tool_args.get("url", "")
+                    url_cache[url] = error_content
+                    self._failed_urls.add(url)
 
                 results.append(ToolMessage(content=error_content, tool_call_id=tool_id))
 
@@ -1463,6 +1480,50 @@ class ArticleEditor:
             )
 
         return results
+
+    def _flag_failed_references(self, draft: str, feedback: dict) -> dict:
+        """Deterministically flag reference URLs the editor watched fail.
+
+        The editor prompt asks for this too, but nothing stops the LLM from
+        fetching a 404 and approving the draft with the dead link intact
+        (3393.T 2026-07-03 shipped a 404'd JPX quote URL). Only URLs still
+        present in the current draft are flagged.
+        """
+        if not isinstance(feedback, dict) or not self._failed_urls:
+            return feedback
+
+        leaked = sorted(url for url in self._failed_urls if url and url in draft)
+        if not leaked:
+            return feedback
+
+        factual_errors = feedback.setdefault("factual_errors", [])
+        known_claims = {
+            error.get("claim") for error in factual_errors if isinstance(error, dict)
+        }
+        for url in leaked:
+            claim = f"References include a URL whose verification fetch failed: {url}"
+            if claim in known_claims:
+                continue
+            factual_errors.append(
+                {
+                    "location": "References",
+                    "claim": claim,
+                    "ground_truth": (
+                        "The editor's fetch of this URL failed "
+                        "(HTTP error, invalid URL, or empty content)."
+                    ),
+                    "action": "correct",
+                }
+            )
+
+        if feedback.get("verdict") == "APPROVED":
+            logger.warning(
+                "editor_verdict_overridden",
+                reason="failed_reference_in_draft",
+                num_failed_references=len(leaked),
+            )
+            feedback["verdict"] = "REVISE"
+        return feedback
 
     async def review(
         self,
@@ -1767,6 +1828,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
         # Session-scoped URL cache: avoids re-fetching the same URLs across
         # review iterations (e.g. paywalled sites that 401 every time).
         self._url_cache = {}
+        self._failed_urls = set()
         try:
             while revision_count < self.MAX_REVISIONS:
                 # Audit the article body only — the EDITOR_NOTES meta block may
@@ -1784,8 +1846,11 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
                 else:
                     # Review the current draft (with EDITOR_NOTES intact so the
                     # editor can adjudicate CONTESTED items)
-                    feedback = _enforce_verdict_consistency(
-                        await self.review(current_draft, fact_check_context)
+                    feedback = self._flag_failed_references(
+                        current_draft,
+                        _enforce_verdict_consistency(
+                            await self.review(current_draft, fact_check_context)
+                        ),
                     )
 
                 logger.info(
@@ -1819,8 +1884,11 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
                 )
 
             # Max revisions reached, do final review
-            final_feedback = _enforce_verdict_consistency(
-                await self.review(current_draft, fact_check_context)
+            final_feedback = self._flag_failed_references(
+                current_draft,
+                _enforce_verdict_consistency(
+                    await self.review(current_draft, fact_check_context)
+                ),
             )
             current_draft = _strip_editor_notes(current_draft)
             final_citation_errors = audit_article_citations(current_draft, data_block)
@@ -1846,6 +1914,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
             return current_draft, final_feedback
         finally:
             self._url_cache = {}
+            self._failed_urls = set()
 
 
 def generate_article(

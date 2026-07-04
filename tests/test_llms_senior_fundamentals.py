@@ -115,7 +115,9 @@ class TestSettingsFields:
     def test_defaults_preserve_legacy_behavior(self, monkeypatch):
         monkeypatch.setenv("SENIOR_FUNDAMENTALS_MODEL", "")
         monkeypatch.delenv("SENIOR_FUNDAMENTALS_THINKING_LEVEL", raising=False)
-        settings = Settings()
+        # _env_file=None: an operator .env pinning the thinking level must not
+        # flip the default assertion (shell delenv can't mask the .env file).
+        settings = Settings(_env_file=None)
         assert not settings.senior_fundamentals_model
         assert settings.senior_fundamentals_thinking_level == "high"
 

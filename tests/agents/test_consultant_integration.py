@@ -408,6 +408,122 @@ class TestConsultantNodeExecution:
             == "Consultant review completed with tool failures"
         )
 
+    async def _run_consultant_with_tool_results(self, tool_results: list):
+        """Drive one tool round with len(tool_results) calls, then synthesis."""
+        mock_llm = Mock()
+        tool_call_response = Mock()
+        tool_call_response.content = ""
+        tool_call_response.tool_calls = [
+            {
+                "name": "spot_check_metric",
+                "args": {"ticker": "0005.HK"},
+                "id": f"call_{i}",
+            }
+            for i in range(len(tool_results))
+        ]
+        final_response = Mock()
+        final_response.content = "CONSULTANT REVIEW: CONDITIONAL APPROVAL"
+        final_response.tool_calls = []
+
+        mock_tool = Mock()
+        mock_tool.name = "spot_check_metric"
+        mock_tool.ainvoke = AsyncMock()
+
+        async def mock_invoke(*args, **kwargs):
+            if mock_invoke.calls == 0:
+                mock_invoke.calls += 1
+                return tool_call_response
+            return final_response
+
+        mock_invoke.calls = 0
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                tool_service = Mock()
+                tool_service.execute = AsyncMock(side_effect=tool_results)
+                with patch(
+                    "src.agents.consultant_nodes.get_current_tool_service",
+                    return_value=tool_service,
+                ):
+                    mock_prompt = Mock()
+                    mock_prompt.system_message = "You are a consultant."
+                    mock_prompt.agent_name = "External Consultant"
+                    mock_get_prompt.return_value = mock_prompt
+
+                    consultant_node = create_consultant_node(
+                        mock_llm, "consultant", tools=[mock_tool]
+                    )
+
+                    state = {
+                        "company_of_interest": "0005.HK",
+                        "company_name": "HSBC Holdings",
+                        "market_report": "Report",
+                        "sentiment_report": "Report",
+                        "news_report": "Report",
+                        "fundamentals_report": "Report",
+                        "investment_debate_state": {"history": "Debate"},
+                        "investment_plan": "Plan",
+                    }
+                    config = RunnableConfig(
+                        configurable={"context": Mock(trade_date="2025-12-13")}
+                    )
+
+                    return await consultant_node(state, config)
+
+    @pytest.mark.asyncio
+    async def test_consultant_minority_tool_failure_yields_partial_review(self):
+        """1-of-4 tool failures must degrade to PARTIAL, not exclude the review.
+
+        The 3393.T 2026-07-03 run lost the entire consultant counterweight
+        (and flipped the PM verdict) to a single failed verification call.
+        """
+        error_payload = (
+            '{"error":"upstream 500","provider":"fmp","failure_kind":"server_error"}'
+        )
+        result = await self._run_consultant_with_tool_results(
+            [
+                ToolResult(value=error_payload),
+                ToolResult(value="ok-1"),
+                ToolResult(value="ok-2"),
+                ToolResult(value="ok-3"),
+            ]
+        )
+
+        status = result["artifact_statuses"]["consultant_review"]
+        assert status["ok"] is True
+        assert status["message"] == (
+            "Consultant review PARTIAL: 1/4 verification tool calls failed"
+        )
+        assert result["consultant_tool_failures"] == 1
+        assert result["consultant_review"].startswith("[PARTIAL REVIEW: 1 of 4")
+        assert "spot_check_metric" in result["consultant_review"]
+        assert result["consultant_review"].endswith(
+            "CONSULTANT REVIEW: CONDITIONAL APPROVAL"
+        )
+
+    @pytest.mark.asyncio
+    async def test_consultant_majority_tool_failure_still_excluded(self):
+        """3-of-4 tool failures keep the previous not-ok exclusion behavior."""
+        error_payload = (
+            '{"error":"upstream 500","provider":"fmp","failure_kind":"server_error"}'
+        )
+        result = await self._run_consultant_with_tool_results(
+            [
+                ToolResult(value=error_payload),
+                ToolResult(value=error_payload),
+                ToolResult(value=error_payload),
+                ToolResult(value="ok-1"),
+            ]
+        )
+
+        status = result["artifact_statuses"]["consultant_review"]
+        assert status["ok"] is False
+        assert status["message"] == "Consultant review completed with tool failures"
+        assert result["consultant_tool_failures"] == 3
+        assert not result["consultant_review"].startswith("[PARTIAL REVIEW")
+
     @pytest.mark.asyncio
     async def test_consultant_suppresses_repeated_fmp_alt_calls_after_failure(self):
         """Managed FMP alt-source unavailability should not poison consultant validity."""

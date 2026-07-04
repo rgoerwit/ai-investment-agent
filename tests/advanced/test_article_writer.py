@@ -733,6 +733,58 @@ class TestClaudeToGeminiFallback:
 
     @patch("src.article_writer.create_writer_fallback_llm")
     @patch("src.article_writer.create_writer_llm")
+    def test_fallback_sets_writer_fell_back_flag(
+        self, mock_create_writer, mock_create_gemini
+    ):
+        """The silent-fallback flag must flip so run summaries can surface it."""
+        from src.article_writer import ArticleWriter
+
+        mock_claude = MagicMock()
+        mock_claude.invoke.side_effect = Exception(
+            "Your credit balance is too low to access the Anthropic API."
+        )
+        mock_create_writer.return_value = mock_claude
+
+        mock_gemini = MagicMock()
+        mock_gemini.invoke.return_value = MagicMock(content="# Article\n\nContent.")
+        mock_create_gemini.return_value = mock_gemini
+
+        writer = ArticleWriter(
+            samples_dir=Path("writing_samples")
+            if Path("writing_samples").exists()
+            else None,
+        )
+        assert writer.writer_fell_back is False
+
+        writer._invoke_writer([MagicMock()])
+
+        assert writer.writer_fell_back is True
+
+    @patch("src.article_writer.create_writer_fallback_llm")
+    @patch("src.article_writer.create_writer_llm")
+    def test_primary_success_keeps_fell_back_flag_false(
+        self, mock_create_writer, mock_create_gemini
+    ):
+        from src.article_writer import ArticleWriter
+
+        mock_claude = MagicMock()
+        mock_claude.invoke.return_value = MagicMock(content="# Article\n\nContent.")
+        mock_create_writer.return_value = mock_claude
+        mock_create_gemini.return_value = MagicMock()
+
+        writer = ArticleWriter(
+            samples_dir=Path("writing_samples")
+            if Path("writing_samples").exists()
+            else None,
+        )
+
+        writer._invoke_writer([MagicMock()])
+
+        assert writer.writer_fell_back is False
+        mock_create_gemini.assert_not_called()
+
+    @patch("src.article_writer.create_writer_fallback_llm")
+    @patch("src.article_writer.create_writer_llm")
     def test_fallback_caches_gemini_for_subsequent_calls(
         self, mock_create_writer, mock_create_gemini
     ):

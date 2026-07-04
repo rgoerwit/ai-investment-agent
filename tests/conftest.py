@@ -76,6 +76,9 @@ def setup_test_env():
         # behavior is tested explicitly via config patching in
         # tests/test_llms_senior_fundamentals.py.
         "SENIOR_FUNDAMENTALS_MODEL": "",
+        # Same rationale: an operator .env overriding the thinking level
+        # breaks default-value assertions.
+        "SENIOR_FUNDAMENTALS_THINKING_LEVEL": "high",
     }
 
     # 1. Patch os.environ
