@@ -136,6 +136,159 @@ def test_capital_efficiency_skips_base_metric_parse_without_signals(monkeypatch)
     )
 
 
+# Verbatim FINAL VERDICT section from results/3393.T_20260704_160529_analysis.json
+# (trailing markdown spaces dropped) — the run that charged a false +2.0
+# CONSULTANT_MANDATE_BREACH off "No mandate breach triggered".
+_3393T_FINAL_VERDICT_SECTION = (
+    "### FINAL CONSULTANT VERDICT\n\n"
+    "**Overall Assessment**: CONDITIONAL APPROVAL\n\n"
+    "**Recommended Action for Portfolio Manager**:\n"
+    "- **Proceed only after reconciling the FY2028 management-plan targets "
+    "and clarifying FCF definition/source.**\n"
+    "- No mandate breach triggered: **PFIC_RISK=MEDIUM**, **CMIC clear**, "
+    "health well above Tier-3 warning level.\n\n"
+    "**Confidence in Internal Analysis**: Medium\n"
+)
+
+
+class TestConsultantBreachNegationAwareParsing:
+    """Negated breach/hard-stop mentions must not raise flags (3393.T 2026-07-04).
+
+    Precedence: structured MANDATE_BREACH:/HARD_STOP: tokens (consultant prompt
+    v2.12+) > negation-aware prose scan, scoped to the FINAL CONSULTANT VERDICT
+    section when one exists.
+    """
+
+    def test_affirmative_breach_without_verdict_section(self):
+        conditions = RedFlagDetector.parse_consultant_conditions(
+            "MANDATE BREACH: PFIC threshold exceeded"
+        )
+        assert conditions["has_mandate_breach"] is True
+
+    def test_affirmative_breach_inside_verdict_section(self):
+        review = (
+            "Body prose with no markers.\n\n### FINAL CONSULTANT VERDICT\n\n"
+            "MANDATE BREACH: PFIC threshold exceeded\n"
+        )
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["has_mandate_breach"] is True
+
+    def test_hard_stop_dash_form_fires(self):
+        conditions = RedFlagDetector.parse_consultant_conditions(
+            "HARD STOP — sanctions exposure"
+        )
+        assert conditions["has_hard_stop"] is True
+
+    def test_real_3393t_verdict_section_no_false_breach(self):
+        body = (
+            "### CONSULTANT REVIEW: CONDITIONAL APPROVAL\n\n"
+            "FCF margin is compressing quarterly, though not yet a mandate "
+            "breach.\n\n"
+        )
+        conditions = RedFlagDetector.parse_consultant_conditions(
+            body + _3393T_FINAL_VERDICT_SECTION
+        )
+        assert conditions["has_mandate_breach"] is False
+        assert conditions["has_hard_stop"] is False
+        assert conditions["verdict"] == "CONDITIONAL_APPROVAL"
+
+    def test_negated_body_mention_only(self):
+        conditions = RedFlagDetector.parse_consultant_conditions(
+            "FCF is compressing, though not yet a mandate breach."
+        )
+        assert conditions["has_mandate_breach"] is False
+
+    def test_negated_without_hard_stop(self):
+        conditions = RedFlagDetector.parse_consultant_conditions(
+            "The review completed without a hard stop."
+        )
+        assert conditions["has_hard_stop"] is False
+
+    def test_negated_body_plus_affirmative_verdict_section(self):
+        review = (
+            "No mandate breach was found during factual verification.\n\n"
+            "### FINAL CONSULTANT VERDICT\n\n"
+            "MANDATE BREACH: PFIC threshold exceeded after re-check.\n"
+        )
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["has_mandate_breach"] is True
+
+    def test_body_affirmative_ignored_when_verdict_section_present(self):
+        # Body prose discusses conditions hypothetically; the verdict section
+        # is the consultant's own summary judgment and wins.
+        review = (
+            "A MANDATE BREACH would be triggered if PFIC income passes 75%.\n\n"
+            "### FINAL CONSULTANT VERDICT\n\n"
+            "**Overall Assessment**: APPROVED\n"
+        )
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["has_mandate_breach"] is False
+
+    def test_token_none_clears_despite_prose_mention(self):
+        review = (
+            "### FINAL CONSULTANT VERDICT\n\n"
+            "The PFIC exposure edges toward a mandate breach in spirit.\n"
+            "**MANDATE_BREACH**: NONE\n"
+            "**HARD_STOP**: NONE\n"
+        )
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["has_mandate_breach"] is False
+        assert conditions["has_hard_stop"] is False
+
+    def test_token_with_description_fires(self):
+        review = (
+            "### FINAL CONSULTANT VERDICT\n\n"
+            "**MANDATE_BREACH**: PFIC threshold exceeded (75% passive income)\n"
+            "**HARD_STOP**: NONE\n"
+        )
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["has_mandate_breach"] is True
+        assert conditions["has_hard_stop"] is False
+
+    def test_token_wins_only_for_the_flag_it_names(self):
+        review = (
+            "### FINAL CONSULTANT VERDICT\n\n"
+            "**MANDATE_BREACH**: NONE\n"
+            "HARD STOP: NS-CMIC listed entity.\n"
+        )
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["has_mandate_breach"] is False
+        assert conditions["has_hard_stop"] is True
+
+    def test_token_negated_restatement_clears(self):
+        review = (
+            "### FINAL CONSULTANT VERDICT\n\n"
+            "**MANDATE_BREACH**: No breach detected\n"
+            "**HARD_STOP**: Not triggered\n"
+        )
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["has_mandate_breach"] is False
+        assert conditions["has_hard_stop"] is False
+
+    def test_token_n_a_and_parenthetical_none_clear(self):
+        review = (
+            "### FINAL CONSULTANT VERDICT\n\n"
+            "- **MANDATE_BREACH**: NONE (PFIC below threshold)\n"
+            "- **HARD_STOP**: N/A\n"
+        )
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["has_mandate_breach"] is False
+        assert conditions["has_hard_stop"] is False
+
+    def test_malformed_empty_token_falls_back_without_crash(self):
+        # Empty token value → prose-scan fallback; the bare marker itself is
+        # unnegated, so the flag fires conservatively.
+        review = "### FINAL CONSULTANT VERDICT\n\nMANDATE_BREACH:\n"
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["has_mandate_breach"] is True
+
+    def test_empty_review_defaults(self):
+        conditions = RedFlagDetector.parse_consultant_conditions("")
+        assert conditions["has_mandate_breach"] is False
+        assert conditions["has_hard_stop"] is False
+        assert conditions["verdict"] == "UNKNOWN"
+
+
 def _rqf_block(**fields: str) -> str:
     body = "\n".join(f"{k}: {v}" for k, v in fields.items())
     return f"### --- START DATA_BLOCK ---\n{body}\n### --- END DATA_BLOCK ---"

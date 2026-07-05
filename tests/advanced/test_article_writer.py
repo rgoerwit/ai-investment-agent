@@ -229,6 +229,73 @@ class TestImageManifest:
 
             assert "No charts available" in manifest
 
+    def test_chart_paths_excludes_stale_suppressed_chart(self):
+        """A stale football-field file (run suppressed it, e.g. DNI/SELL) must
+        not resurface in the manifest when chart_paths from this run omit it."""
+        from src.article_writer import ArticleWriter
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            images_dir = Path(tmpdir)
+            (images_dir / "2767.T_football_field.png").touch()  # stale, prior run
+            (images_dir / "2767.T_radar.png").touch()
+
+            writer = ArticleWriter.__new__(ArticleWriter)
+            writer.images_dir = images_dir
+            writer.use_github_urls = False
+
+            manifest = writer._format_image_manifest(
+                "2767.T",
+                "2026-02-07",
+                chart_paths={"radar": str(images_dir / "2767.T_radar.png")},
+            )
+
+            assert "Radar" in manifest
+            assert "Football Field" not in manifest
+
+    def test_chart_paths_includes_fresh_charts(self):
+        """Charts listed in chart_paths appear in the manifest normally."""
+        from src.article_writer import ArticleWriter
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            images_dir = Path(tmpdir)
+            (images_dir / "2767.T_football_field.png").touch()
+            (images_dir / "2767.T_radar.png").touch()
+
+            writer = ArticleWriter.__new__(ArticleWriter)
+            writer.images_dir = images_dir
+            writer.use_github_urls = False
+
+            manifest = writer._format_image_manifest(
+                "2767.T",
+                "2026-02-07",
+                chart_paths={
+                    "football_field": str(images_dir / "2767.T_football_field.png"),
+                    "radar": str(images_dir / "2767.T_radar.png"),
+                },
+            )
+
+            assert "Football Field" in manifest
+            assert "Radar" in manifest
+
+    def test_chart_paths_none_or_empty_keeps_legacy_glob(self):
+        """None/{} chart_paths follow the legacy disk glob (mirrors
+        report_generator's empty-dict fallback convention)."""
+        from src.article_writer import ArticleWriter
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            images_dir = Path(tmpdir)
+            (images_dir / "2767.T_football_field.png").touch()
+
+            writer = ArticleWriter.__new__(ArticleWriter)
+            writer.images_dir = images_dir
+            writer.use_github_urls = False
+
+            for chart_paths in (None, {}):
+                manifest = writer._format_image_manifest(
+                    "2767.T", "2026-02-07", chart_paths=chart_paths
+                )
+                assert "Football Field" in manifest
+
 
 class TestArticlePathResolution:
     """Tests for article output path resolution."""

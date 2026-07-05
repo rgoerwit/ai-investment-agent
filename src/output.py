@@ -281,6 +281,11 @@ async def handle_article_generation(
         governance_card = (
             analysis_result.get("entity_governance_card") if analysis_result else None
         )
+        chart_paths = (
+            analysis_result.get("chart_paths")
+            if isinstance(analysis_result, dict)
+            else None
+        )
         draft_article = writer.write(
             ticker=ticker,
             company_name=company_name,
@@ -289,6 +294,7 @@ async def handle_article_generation(
             output_path=article_path,
             valuation_context=valuation_context,
             governance_card=governance_card,
+            chart_paths=chart_paths if isinstance(chart_paths, dict) else None,
         )
 
         editor = ArticleEditor(

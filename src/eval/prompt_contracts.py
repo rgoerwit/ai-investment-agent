@@ -43,6 +43,7 @@ from src.validators.supplemental_extractors import (
     extract_legal_risks,
     extract_material_events_status,
     extract_value_trap_score,
+    parse_consultant_conditions,
 )
 
 _PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
@@ -202,6 +203,31 @@ PROMPT_CONTRACTS: tuple[PromptContract, ...] = (
         shape=Shape.UNFENCED_BLOCK,
         parser=lambda text: validate_required_output("consultant", text),
         success=_consultant_ok,
+    ),
+    PromptContract(
+        name="consultant_breach_tokens",
+        prompt_key="consultant",
+        shape=Shape.LABELED_LINE,
+        parser=parse_consultant_conditions,
+        success=lambda result: isinstance(result, dict)
+        and "has_mandate_breach" in result,
+        line_pattern=r"^\*\*MANDATE_BREACH\*\*:",
+        legacy_forms=(
+            (
+                "### FINAL CONSULTANT VERDICT\n\n"
+                "**MANDATE_BREACH**: NONE\n**HARD_STOP**: NONE",
+                lambda r: r["has_mandate_breach"] is False
+                and r["has_hard_stop"] is False,
+            ),
+            (
+                "MANDATE BREACH: PFIC — company classified as PFIC.",
+                lambda r: r["has_mandate_breach"] is True,
+            ),
+            (
+                "HARD STOP: RESTRICTED — NS-CMIC listed entity.",
+                lambda r: r["has_hard_stop"] is True,
+            ),
+        ),
     ),
     PromptContract(
         name="health_score_breakdown",

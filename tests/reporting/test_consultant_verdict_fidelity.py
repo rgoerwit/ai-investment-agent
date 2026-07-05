@@ -65,6 +65,19 @@ def test_derive_mandate_breach_is_major_concerns():
     )
 
 
+def test_derive_conditional_when_verdict_clears_mandate_breach():
+    # Regression: 3393.T 2026-07-04 16:05 — "No mandate breach triggered" in the
+    # FINAL CONSULTANT VERDICT was read as a breach → false MAJOR_CONCERNS.
+    review = (
+        "FCF margin is compressing quarterly, though not yet a mandate breach.\n\n"
+        "### FINAL CONSULTANT VERDICT\n\n"
+        "**Overall Assessment**: CONDITIONAL APPROVAL\n\n"
+        "- No mandate breach triggered: **PFIC_RISK=MEDIUM**, **CMIC clear**, "
+        "health well above Tier-3 warning level.\n"
+    )
+    assert _derive_consultant_verdict(_status(review)) == "CONDITIONAL"
+
+
 def test_derive_unparsed_when_ran_ok_but_no_verdict():
     assert _derive_consultant_verdict(_status("Some prose without a verdict.")) == (
         "UNPARSED"

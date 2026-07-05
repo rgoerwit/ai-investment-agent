@@ -207,6 +207,40 @@ _CONSULTANT_VERDICT_PATTERNS = (
 )
 _CONSULTANT_MANDATE_BREACH_PATTERN = re.compile(r"MANDATE[\s_-]BREACH", re.IGNORECASE)
 _CONSULTANT_HARD_STOP_PATTERN = re.compile(r"HARD[\s_-]STOP", re.IGNORECASE)
+# A negation shortly before a breach/hard-stop mention on the same
+# line/sentence ("No mandate breach triggered", "not yet a mandate breach")
+# means the consultant is clearing the condition, not raising it (3393.T
+# 2026-07-04: a cleared mandate charged a false +2.0 CONSULTANT_MANDATE_BREACH).
+_CONSULTANT_NEGATION_BEFORE_PATTERN = re.compile(
+    r"\b(?:no|not|none|without|never|absent)\b[^.\n]{0,50}$", re.IGNORECASE
+)
+# When the review has a FINAL CONSULTANT VERDICT section, breach/hard-stop
+# markers are read from that section only — body prose discusses these
+# conditions hypothetically ("...though not yet a mandate breach").
+_CONSULTANT_FINAL_VERDICT_SECTION_PATTERN = re.compile(
+    r"FINAL\s+CONSULTANT\s+VERDICT.*\Z", re.IGNORECASE | re.DOTALL
+)
+# Structured verdict-block tokens (consultant prompt v2.12+): explicit
+# `MANDATE_BREACH: NONE | <description>` lines. Preferred over prose scanning
+# when present; tolerate bullet/bold decoration around the key.
+_CONSULTANT_MANDATE_BREACH_TOKEN_PATTERN = re.compile(
+    r"^[ \t]*(?:[-•*][ \t]+)?\**MANDATE[ _-]BREACH\**[ \t]*:[ \t]*(.+)$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_CONSULTANT_HARD_STOP_TOKEN_PATTERN = re.compile(
+    r"^[ \t]*(?:[-•*][ \t]+)?\**HARD[ _-]STOP\**[ \t]*:[ \t]*(.+)$",
+    re.IGNORECASE | re.MULTILINE,
+)
+# Token values that clear the condition: "NONE", "N/A", a bare "No", or a
+# negated restatement ("No breach detected", "Not triggered"). Anything else
+# is treated as a breach description.
+_CONSULTANT_TOKEN_CLEAR_PATTERN = re.compile(
+    r"(?:NONE|N/?A)\b"
+    r"|NO[.!]*$"
+    r"|(?:NO|NOT)\b[^.\n]{0,40}"
+    r"\b(?:BREACH|STOP|TRIGGERED|DETECTED|IDENTIFIED|FOUND|APPLICABLE)\b",
+    re.IGNORECASE,
+)
 
 
 def extract_legal_risks(legal_report: str) -> dict[str, Any]:
@@ -578,6 +612,45 @@ def extract_capital_efficiency_signals(fundamentals_report: str) -> dict[str, An
     return signals
 
 
+def _non_negated_search(pattern: re.Pattern[str], text: str) -> bool:
+    """True when *pattern* matches without a negation shortly before it."""
+    for match in pattern.finditer(text):
+        prefix = text[max(0, match.start() - 60) : match.start()]
+        if not _CONSULTANT_NEGATION_BEFORE_PATTERN.search(prefix):
+            return True
+    return False
+
+
+def _breach_token_value(token_pattern: re.Pattern[str], text: str) -> bool | None:
+    """Read structured ``KEY: value`` verdict tokens; None when absent/empty.
+
+    A token carrying a breach description wins over a clearing token —
+    conservative when a review contains both forms.
+    """
+    saw_clear = False
+    for match in token_pattern.finditer(text):
+        value = match.group(1).strip("* \t")
+        if not value:
+            continue
+        if _CONSULTANT_TOKEN_CLEAR_PATTERN.match(value):
+            saw_clear = True
+        else:
+            return True
+    return False if saw_clear else None
+
+
+def _breach_marker_present(
+    token_pattern: re.Pattern[str],
+    prose_pattern: re.Pattern[str],
+    text: str,
+) -> bool:
+    """Structured token wins when present; otherwise negation-aware prose scan."""
+    token = _breach_token_value(token_pattern, text)
+    if token is not None:
+        return token
+    return _non_negated_search(prose_pattern, text)
+
+
 def parse_consultant_conditions(consultant_review: str) -> dict[str, Any]:
     """Parse consultant output for verdict and material concerns."""
     result: dict[str, Any] = {
@@ -603,11 +676,17 @@ def parse_consultant_conditions(consultant_review: str) -> dict[str, Any]:
             result["verdict"] = verdict
             break
 
-    result["has_mandate_breach"] = bool(
-        _CONSULTANT_MANDATE_BREACH_PATTERN.search(consultant_review)
+    section_match = _CONSULTANT_FINAL_VERDICT_SECTION_PATTERN.search(consultant_review)
+    scan_text = section_match.group(0) if section_match else consultant_review
+    result["has_mandate_breach"] = _breach_marker_present(
+        _CONSULTANT_MANDATE_BREACH_TOKEN_PATTERN,
+        _CONSULTANT_MANDATE_BREACH_PATTERN,
+        scan_text,
     )
-    result["has_hard_stop"] = bool(
-        _CONSULTANT_HARD_STOP_PATTERN.search(consultant_review)
+    result["has_hard_stop"] = _breach_marker_present(
+        _CONSULTANT_HARD_STOP_TOKEN_PATTERN,
+        _CONSULTANT_HARD_STOP_PATTERN,
+        scan_text,
     )
 
     discrepancy_matches = re.findall(
