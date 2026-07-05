@@ -510,6 +510,22 @@ def detect_shareholder_return_execution_flags(
     if plan_strength != "STRONG" or execution != "PROVEN":
         return flags
 
+    # Korea-only by design: the Value-Up Program is a KRX/FSC governance
+    # initiative, and both the Senior and Foreign-Language prompts mandate
+    # emitting N/A for non-.KS/.KQ names. A STRONG/PROVEN pair on any other
+    # ticker is a prompt violation upstream (3393.T 2026-07-04: Senior emitted
+    # STRONG for a Japanese name, granting a spurious −0.5 credit), not a
+    # creditable plan — Japan/TSE capital plans earn moat/CAPITAL_EFFICIENT
+    # credits instead.
+    if not ticker.upper().endswith((".KS", ".KQ")):
+        logger.warning(
+            "value_up_credit_suppressed_non_korean_ticker",
+            ticker=ticker,
+            plan_strength=plan_strength,
+            execution=execution,
+        )
+        return flags
+
     vt_metrics = extract_value_trap_score(value_trap_report or "")
     verdict = vt_metrics.get("verdict")
     score = vt_metrics.get("score")

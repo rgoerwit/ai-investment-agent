@@ -212,6 +212,27 @@ def _check_env_overrides() -> None:
                 )
 
 
+def _warn_retired_env_vars() -> None:
+    """Warn when a retired env var is still set (shell or .env).
+
+    SENIOR_FUNDAMENTALS_MODEL / SENIOR_FUNDAMENTALS_THINKING_LEVEL were
+    replaced by the APEX tier (APEX_MODEL / APEX_QUICK_MODEL /
+    APEX_THINKING_LEVEL), which covers the Portfolio Manager as well as the
+    Senior Fundamentals Analyst. The old names are ignored entirely.
+    """
+    retired = {
+        "SENIOR_FUNDAMENTALS_MODEL": "APEX_MODEL",
+        "SENIOR_FUNDAMENTALS_THINKING_LEVEL": "APEX_THINKING_LEVEL",
+    }
+    for name, replacement in retired.items():
+        if get_env_value(name):
+            logger.warning(
+                f"RETIRED ENV VAR IGNORED: {name} is no longer read - "
+                f"set {replacement} instead (APEX tier covers both the Senior "
+                f"Fundamentals Analyst and the Portfolio Manager)."
+            )
+
+
 def _apply_macos_fork_safety_env(*, enabled: bool, platform: str) -> None:
     """Export env vars that prevent benign macOS fork-safety crashes.
 
@@ -282,6 +303,7 @@ def validate_environment_variables() -> None:
 
     # Check for problematic shell environment overrides
     _check_env_overrides()
+    _warn_retired_env_vars()
 
     configure_langsmith_tracing(settings=config)
     logger.info("Environment variables validated")
@@ -340,24 +362,37 @@ class Settings(BaseSettings):
         validation_alias="QUICK_MODEL",
         description="Model for quick thinking/data gathering agents",
     )
-    # Senior Fundamentals does the rubric arithmetic feeding the hard <50%
-    # health/growth gates; it is pinned to the quick tier by default but can
-    # be given a dedicated model. Env-only (no CLI flag). Applies in BOTH
-    # normal and --quick runs — the 145020.KQ score-swap hit in quick mode.
-    senior_fundamentals_model: str | None = Field(
-        default=None,
-        validation_alias="SENIOR_FUNDAMENTALS_MODEL",
+    # APEX tier: one pin for the two gate-critical seats — Senior Fundamentals
+    # (rubric arithmetic feeding the hard <50% health/growth gates) and the
+    # Portfolio Manager (gate checks, override logic, PM_BLOCK contract).
+    # Env-only (no CLI flag). Unset = legacy per-seat behavior (senior: quick
+    # tier; PM: deep tier). In --quick the seats fall back to APEX_QUICK_MODEL
+    # when set, else the plain quick floor — quick mode stays cheap and the
+    # degradation is an accepted trade-off (supersedes the old
+    # SENIOR_FUNDAMENTALS_MODEL applies-in-quick behavior).
+    apex_model: str = Field(
+        default="",
+        validation_alias="APEX_MODEL",
         description=(
-            "Dedicated model for the Senior Fundamentals Analyst (DATA_BLOCK "
-            "scoring). Unset/empty = inherit QUICK_MODEL (legacy behavior)."
+            "Model pin for the gate-critical seats (Senior Fundamentals + "
+            "Portfolio Manager) in full mode. Empty = legacy per-seat tiers."
         ),
     )
-    senior_fundamentals_thinking_level: Literal["low", "medium", "high"] = Field(
-        default="high",
-        validation_alias="SENIOR_FUNDAMENTALS_THINKING_LEVEL",
+    apex_quick_model: str = Field(
+        default="",
+        validation_alias="APEX_QUICK_MODEL",
         description=(
-            "Thinking level for the dedicated Senior Fundamentals model; "
-            "only consulted when SENIOR_FUNDAMENTALS_MODEL is set"
+            "Optional --quick override for the apex seats; empty = plain "
+            "QUICK_MODEL floor (accepted degradation). Only consulted when "
+            "APEX_MODEL is set."
+        ),
+    )
+    apex_thinking_level: Literal["low", "medium", "high"] = Field(
+        default="high",
+        validation_alias="APEX_THINKING_LEVEL",
+        description=(
+            "Thinking level for whichever apex model is in play; only "
+            "consulted when APEX_MODEL is set"
         ),
     )
 

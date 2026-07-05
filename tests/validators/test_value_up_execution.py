@@ -92,35 +92,52 @@ class TestShareholderReturnExecutionFlag:
             VALUE_UP_PLAN_STRENGTH="STRONG",
             SHAREHOLDER_RETURN_EXECUTION="ANNOUNCED_ONLY",
         )
-        assert detect_shareholder_return_execution_flags(report, _VT_HEALTHY) == []
+        assert (
+            detect_shareholder_return_execution_flags(report, _VT_HEALTHY, "TEST.KS")
+            == []
+        )
 
     def test_partial_execution_no_bonus(self):
         report = _data_block(
             VALUE_UP_PLAN_STRENGTH="STRONG",
             SHAREHOLDER_RETURN_EXECUTION="PARTIAL",
         )
-        assert detect_shareholder_return_execution_flags(report, _VT_HEALTHY) == []
+        assert (
+            detect_shareholder_return_execution_flags(report, _VT_HEALTHY, "TEST.KS")
+            == []
+        )
 
     def test_weak_plan_no_bonus(self):
         report = _data_block(
             VALUE_UP_PLAN_STRENGTH="WEAK",
             SHAREHOLDER_RETURN_EXECUTION="PROVEN",
         )
-        assert detect_shareholder_return_execution_flags(report, _VT_HEALTHY) == []
+        assert (
+            detect_shareholder_return_execution_flags(report, _VT_HEALTHY, "TEST.KS")
+            == []
+        )
 
     def test_trap_verdict_blocks_bonus(self):
         report = _data_block(
             VALUE_UP_PLAN_STRENGTH="STRONG",
             SHAREHOLDER_RETURN_EXECUTION="PROVEN",
         )
-        assert detect_shareholder_return_execution_flags(report, _VT_TRAP_VERDICT) == []
+        assert (
+            detect_shareholder_return_execution_flags(
+                report, _VT_TRAP_VERDICT, "TEST.KS"
+            )
+            == []
+        )
 
     def test_low_value_trap_score_blocks_bonus(self):
         report = _data_block(
             VALUE_UP_PLAN_STRENGTH="STRONG",
             SHAREHOLDER_RETURN_EXECUTION="PROVEN",
         )
-        assert detect_shareholder_return_execution_flags(report, _VT_LOW_SCORE) == []
+        assert (
+            detect_shareholder_return_execution_flags(report, _VT_LOW_SCORE, "TEST.KS")
+            == []
+        )
 
     def test_financials_sector_still_eligible(self):
         # Credit-bureau / holding names are often Financials; the dedicated detector
@@ -130,7 +147,9 @@ class TestShareholderReturnExecutionFlag:
             VALUE_UP_PLAN_STRENGTH="STRONG",
             SHAREHOLDER_RETURN_EXECUTION="PROVEN",
         )
-        flags = detect_shareholder_return_execution_flags(report, _VT_HEALTHY)
+        flags = detect_shareholder_return_execution_flags(
+            report, _VT_HEALTHY, "TEST.KS"
+        )
         assert len(flags) == 1
         assert flags[0]["type"] == "KOREA_VALUE_UP_EXECUTED"
 
@@ -140,11 +159,60 @@ class TestShareholderReturnExecutionFlag:
             VALUE_UP_PLAN_STRENGTH="STRONG",
             SHAREHOLDER_RETURN_EXECUTION="PROVEN",
         )
-        flags = detect_shareholder_return_execution_flags(report, None)
+        flags = detect_shareholder_return_execution_flags(report, None, "TEST.KS")
         assert len(flags) == 1
 
     def test_empty_report_no_bonus(self):
-        assert detect_shareholder_return_execution_flags("", _VT_HEALTHY) == []
+        assert (
+            detect_shareholder_return_execution_flags("", _VT_HEALTHY, "TEST.KS") == []
+        )
+
+
+class TestJurisdictionGuard:
+    """KOREA_VALUE_UP_EXECUTED is Korea-only (.KS/.KQ): the KRX/FSC Value-Up
+    programme. A STRONG/PROVEN pair on any other ticker is an upstream prompt
+    violation (3393.T 2026-07-04 run 5), never a credit."""
+
+    _REPORT = _data_block(
+        VALUE_UP_PLAN_STRENGTH="STRONG",
+        SHAREHOLDER_RETURN_EXECUTION="PROVEN",
+    )
+
+    def test_kosdaq_ticker_fires(self):
+        flags = detect_shareholder_return_execution_flags(
+            self._REPORT, _VT_HEALTHY, "035720.KQ"
+        )
+        assert len(flags) == 1
+        assert flags[0]["type"] == "KOREA_VALUE_UP_EXECUTED"
+
+    def test_japanese_ticker_suppressed(self):
+        # The exact run-5 misfire: Senior emitted STRONG/PROVEN for 3393.T.
+        assert (
+            detect_shareholder_return_execution_flags(
+                self._REPORT, _VT_HEALTHY, "3393.T"
+            )
+            == []
+        )
+
+    def test_european_ticker_suppressed(self):
+        assert (
+            detect_shareholder_return_execution_flags(
+                self._REPORT, _VT_HEALTHY, "KTY.WA"
+            )
+            == []
+        )
+
+    def test_unknown_ticker_suppressed(self):
+        # Default ticker="UNKNOWN" falls through the suffix check.
+        assert (
+            detect_shareholder_return_execution_flags(self._REPORT, _VT_HEALTHY) == []
+        )
+
+    def test_lowercase_suffix_still_recognized(self):
+        flags = detect_shareholder_return_execution_flags(
+            self._REPORT, _VT_HEALTHY, "005930.ks"
+        )
+        assert len(flags) == 1
 
     def test_exposed_on_facade(self):
         assert hasattr(RedFlagDetector, "detect_shareholder_return_execution_flags")
@@ -193,3 +261,15 @@ class TestPromptContent:
     def test_pm_applies_bounded_credit(self):
         sm = self._load("portfolio_manager.json")["system_message"]
         assert "KOREA_VALUE_UP_EXECUTED" in sm
+
+    def test_value_up_field_stays_korea_scoped(self):
+        # Parity with the code-side jurisdiction guard in
+        # detect_shareholder_return_execution_flags: both prompts must keep the
+        # explicit Korea-only rule so a prompt rewrite can't silently widen the
+        # field to Japan/TSE plans (which earn moat/CAPITAL_EFFICIENT instead).
+        for name in ("fundamentals_analyst.json", "foreign_language_analyst.json"):
+            sm = self._load(name)["system_message"]
+            assert re.search(r"\.KS/\.KQ", sm), name
+            assert re.search(
+                r"emit N/A for (?:all )?non-Korean names", sm, re.IGNORECASE
+            ), name

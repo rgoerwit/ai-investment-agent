@@ -94,6 +94,14 @@ def extract_pm_verdict(pm_text: str) -> str:
     return "UNAVAILABLE"
 
 
+# A period ending one of these is an abbreviation, not a sentence boundary —
+# "**Operational Quality vs." rendered as the whole thesis (3393.T 2026-07-04).
+_ABBREVIATION_SENTENCE_END = re.compile(
+    r"\b(?:vs|etc|cf|ca|approx|incl|resp|e\.g|i\.e|inc|ltd|co|corp|u\.s|u\.k)\.$",
+    re.IGNORECASE,
+)
+
+
 def extract_pm_thesis(pm_text: str, max_words: int = 30) -> str:
     """Pull the first sentence of the DECISION RATIONALE section, capped at max_words."""
     if not pm_text:
@@ -110,19 +118,31 @@ def extract_pm_thesis(pm_text: str, max_words: int = 30) -> str:
     # so the captured sentence keeps balanced markdown.
     body = re.sub(r"^(?:#+\s*|\d+[.)]\s+|[-•]\s+)+", "", body)
     # First sentence-ish, but never a degenerate marker-only capture (e.g. a
-    # stray "1." an enumerator strip missed): require at least one letter.
+    # stray "1." an enumerator strip missed): require at least one letter. A
+    # fragment ending in an abbreviation ("vs.", "e.g.") is not a sentence
+    # boundary — keep appending the following segments.
     sentence = ""
+    fragment = ""
     for candidate in re.finditer(r"(.+?[.!?])(?:\s|$)", body + " "):
         text = candidate.group(1).strip()
-        if re.search(r"[A-Za-z]", text) and len(text) > 3:
-            sentence = text
-            break
+        if not fragment and not (re.search(r"[A-Za-z]", text) and len(text) > 3):
+            continue
+        fragment = f"{fragment} {text}".strip()
+        if _ABBREVIATION_SENTENCE_END.search(fragment):
+            continue
+        sentence = fragment
+        break
     if not sentence:
-        sentence = body.split("\n", 1)[0]
+        sentence = fragment or body.split("\n", 1)[0]
     words = sentence.split()
     if len(words) > max_words:
         sentence = " ".join(words[:max_words]).rstrip(",;:") + "…"
-    return sentence.strip()
+    sentence = sentence.strip()
+    # Balance a dangling bold marker left by abbreviation-fallback or word-cap
+    # truncation so the memo line renders as markdown.
+    if sentence.count("**") % 2:
+        sentence += "**"
+    return sentence
 
 
 def extract_variant_view(state: dict) -> str:

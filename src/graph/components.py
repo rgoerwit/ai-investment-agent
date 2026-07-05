@@ -86,12 +86,10 @@ def create_quick_thinking_llm(*args: Any, **kwargs: Any) -> Any:
     return _create_quick_thinking_llm(*args, **kwargs)
 
 
-def create_senior_fundamentals_llm(*args: Any, **kwargs: Any) -> Any:
-    from src.llms import (
-        create_senior_fundamentals_llm as _create_senior_fundamentals_llm,
-    )
+def create_apex_llm(*args: Any, **kwargs: Any) -> Any:
+    from src.llms import create_apex_llm as _create_apex_llm
 
-    return _create_senior_fundamentals_llm(*args, **kwargs)
+    return _create_apex_llm(*args, **kwargs)
 
 
 def get_consultant_llm(*args: Any, **kwargs: Any) -> Any:
@@ -250,14 +248,22 @@ def build_graph_components(
         callbacks=tracked_callbacks("Junior Fundamentals Analyst"),
         max_output_tokens=output_budget("Junior Fundamentals Analyst"),
     )
-    # Senior Fundamentals does the rubric arithmetic feeding the hard <50%
-    # health/growth gates. It defaults to the quick model (historical
-    # timeout-risk rationale, now largely superseded by flex timeout floors)
-    # but can be pinned to a dedicated model via SENIOR_FUNDAMENTALS_MODEL —
-    # which applies in --quick too, where the 145020.KQ score-swap occurred.
-    senior_fund_llm = create_senior_fundamentals_llm(
+    # Senior Fundamentals and the PM are the two gate-critical (APEX) seats:
+    # the largest, most rule-dense prompts, whose outputs feed the hard <50%
+    # gates and the verdict contract. Both route through create_apex_llm —
+    # APEX_MODEL pins them in full mode; in --quick they drop to
+    # APEX_QUICK_MODEL (or the plain quick floor) so screening stays cheap.
+    senior_fund_llm = create_apex_llm(
+        "senior_fundamentals",
+        quick_mode=quick_mode,
         callbacks=tracked_callbacks("Fundamentals Analyst"),
         max_output_tokens=output_budget("Fundamentals Analyst"),
+    )
+    pm_llm = create_apex_llm(
+        "portfolio_manager",
+        quick_mode=quick_mode,
+        callbacks=tracked_callbacks("Portfolio Manager"),
+        max_output_tokens=output_budget("Portfolio Manager"),
     )
 
     retry_llm = None
@@ -285,10 +291,6 @@ def build_graph_components(
             callbacks=tracked_callbacks("Research Manager"),
             max_output_tokens=output_budget("Research Manager"),
         )
-        pm_llm = create_quick_thinking_llm(
-            callbacks=tracked_callbacks("Portfolio Manager"),
-            max_output_tokens=output_budget("Portfolio Manager"),
-        )
         risky_llm = create_quick_thinking_llm(
             callbacks=tracked_callbacks("Risky Analyst"),
             max_output_tokens=output_budget("Risky Analyst"),
@@ -314,10 +316,6 @@ def build_graph_components(
         res_mgr_llm = create_deep_thinking_llm(
             callbacks=tracked_callbacks("Research Manager"),
             max_output_tokens=output_budget("Research Manager"),
-        )
-        pm_llm = create_deep_thinking_llm(
-            callbacks=tracked_callbacks("Portfolio Manager"),
-            max_output_tokens=output_budget("Portfolio Manager"),
         )
         risky_llm = create_deep_thinking_llm(
             callbacks=tracked_callbacks("Risky Analyst"),

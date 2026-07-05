@@ -117,11 +117,18 @@ _SETTINGS_ENV_CASES = [
     ("enable_consultant", "ENABLE_CONSULTANT", "false", False),
     ("max_debate_rounds", "MAX_DEBATE_ROUNDS", "1", 1),
     (
-        "senior_fundamentals_model",
-        "SENIOR_FUNDAMENTALS_MODEL",
+        "apex_model",
+        "APEX_MODEL",
+        "gemini-3.1-pro-preview",
+        "gemini-3.1-pro-preview",
+    ),
+    (
+        "apex_quick_model",
+        "APEX_QUICK_MODEL",
         "gemini-3.5-flash",
         "gemini-3.5-flash",
     ),
+    ("apex_thinking_level", "APEX_THINKING_LEVEL", "medium", "medium"),
 ]
 
 

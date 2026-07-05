@@ -69,16 +69,16 @@ def setup_test_env():
         "OPENAI_SERVICE_TIER": "auto",
         "FLEX_FALLBACK_TO_STANDARD": "true",
         "FLEX_LLM_TIMEOUT_SECONDS": "900",
-        # Pin the Senior Fundamentals dedicated-model knob to unset: an
-        # operator .env with SENIOR_FUNDAMENTALS_MODEL flips the llms.py
-        # construction path (dedicated deep-tier instance instead of the
-        # quick-thinking path) under mock-based unit tests. Dedicated-path
-        # behavior is tested explicitly via config patching in
-        # tests/test_llms_senior_fundamentals.py.
-        "SENIOR_FUNDAMENTALS_MODEL": "",
+        # Pin the APEX-tier knobs to unset: an operator .env with APEX_MODEL
+        # flips the llms.py construction path for the Senior Fundamentals and
+        # PM seats (dedicated deep-tier instance instead of the quick/deep
+        # tiers) under mock-based unit tests. Apex-path behavior is tested
+        # explicitly via config patching in tests/test_llms_apex.py.
+        "APEX_MODEL": "",
+        "APEX_QUICK_MODEL": "",
         # Same rationale: an operator .env overriding the thinking level
         # breaks default-value assertions.
-        "SENIOR_FUNDAMENTALS_THINKING_LEVEL": "high",
+        "APEX_THINKING_LEVEL": "high",
     }
 
     # 1. Patch os.environ

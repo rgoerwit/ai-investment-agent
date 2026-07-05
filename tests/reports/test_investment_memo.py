@@ -141,6 +141,52 @@ def test_extract_pm_thesis_returns_placeholder_when_missing() -> None:
     assert extract_pm_thesis("VERDICT: BUY") == "Thesis unavailable."
 
 
+def test_extract_pm_thesis_does_not_split_on_abbreviations() -> None:
+    """Regression: 3393.T 2026-07-04 run 5 rendered the memo lead as the
+    dangling fragment "**Operational Quality vs." — "vs." is an abbreviation,
+    not a sentence boundary."""
+    rationale = (
+        "### DECISION RATIONALE\n\n"
+        "1. **Operational Quality vs. Market Pricing**: Startia Holdings is a "
+        "high-quality business masquerading as a legacy IT distributor. "
+        "More text follows.\n"
+    )
+    thesis = extract_pm_thesis(rationale)
+    assert not thesis.endswith("vs.")
+    assert "Market Pricing" in thesis and "Startia" in thesis
+    assert thesis.count("**") % 2 == 0  # balanced bold
+
+
+def test_extract_pm_thesis_handles_eg_abbreviation() -> None:
+    rationale = (
+        "### DECISION RATIONALE\n\n"
+        "Margins compress under known headwinds, e.g. FX and freight, "
+        "yet cash conversion holds. Next sentence.\n"
+    )
+    thesis = extract_pm_thesis(rationale)
+    assert not thesis.endswith("e.g.")
+    assert "cash conversion holds." in thesis
+
+
+def test_extract_pm_thesis_word_cap_balances_bold() -> None:
+    rationale = (
+        "### DECISION RATIONALE\n\n**"
+        + " ".join(["word"] * 40)
+        + "** trailing prose ends here.\n"
+    )
+    thesis = extract_pm_thesis(rationale, max_words=10)
+    assert thesis.endswith("…**")
+    assert thesis.count("**") % 2 == 0
+
+
+def test_extract_pm_thesis_trailing_abbreviation_degrades_gracefully() -> None:
+    # Body ends on the abbreviation with nothing after it: fall back to the
+    # accumulated fragment rather than crashing or returning empty.
+    rationale = "### DECISION RATIONALE\n\nQuality holds up vs.\n"
+    thesis = extract_pm_thesis(rationale)
+    assert "Quality holds up" in thesis
+
+
 # ---------- extract_variant_view ----------
 
 

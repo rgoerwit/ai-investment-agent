@@ -859,35 +859,60 @@ def create_deep_thinking_llm(
     )
 
 
-def create_senior_fundamentals_llm(
+APEX_SEATS = ("senior_fundamentals", "portfolio_manager")
+
+
+def create_apex_llm(
+    seat: str,
+    *,
+    quick_mode: bool,
     callbacks: list[BaseCallbackHandler] | None = None,
     max_output_tokens: int | None = None,
 ) -> BaseChatModel:
     """
-    Create the LLM for the Senior Fundamentals Analyst.
+    Create the LLM for a gate-critical (APEX) seat.
 
-    Falls back to the quick-thinking path when SENIOR_FUNDAMENTALS_MODEL is
-    unset (legacy behavior). When set, builds a dedicated instance with
-    deep-tier settings — low temperature, deep reasoning reserve, and the
-    configured thinking level — regardless of --quick, because the DATA_BLOCK
-    scoring arithmetic feeds the hard <50% health/growth gates in both modes.
+    The two seats — Senior Fundamentals (DATA_BLOCK rubric arithmetic feeding
+    the hard <50% health/growth gates) and Portfolio Manager (gate checks,
+    override logic, PM_BLOCK contract) — share the largest, most rule-dense
+    prompts in the pipeline and fail flash-tier models at a steady rate.
+
+    APEX_MODEL unset → legacy per-seat behavior (senior: quick tier; PM: deep
+    tier in full mode, quick tier in --quick). Set → APEX_MODEL with deep-tier
+    settings in full mode; in --quick, APEX_QUICK_MODEL when provided, else
+    the plain quick floor — quick mode stays cheap and the degradation is an
+    accepted trade-off.
     """
-    model_name = config.senior_fundamentals_model
-    if not model_name:
+    if seat not in APEX_SEATS:
+        raise ValueError(f"unknown apex seat: {seat!r} (expected one of {APEX_SEATS})")
+
+    if not config.apex_model:
+        if seat == "portfolio_manager" and not quick_mode:
+            return create_deep_thinking_llm(
+                callbacks=callbacks, max_output_tokens=max_output_tokens
+            )
         return create_quick_thinking_llm(
             callbacks=callbacks, max_output_tokens=max_output_tokens
         )
 
-    thinking_level: str | None = config.senior_fundamentals_thinking_level
+    model_name = config.apex_model
+    if quick_mode:
+        if not config.apex_quick_model:
+            return create_quick_thinking_llm(
+                callbacks=callbacks, max_output_tokens=max_output_tokens
+            )
+        model_name = config.apex_quick_model
+
+    thinking_level: str | None = config.apex_thinking_level
     if not (_is_gemini_v3_or_greater(model_name) or _is_gemini_v2_5(model_name)):
-        logger.warning("senior_fund_model_no_thinking_support", model=model_name)
+        logger.warning("apex_model_no_thinking_support", seat=seat, model=model_name)
         thinking_level = None
 
     runtime_config = get_runtime_config(config)
     final_timeout = config.api_timeout
     final_retries = runtime_config.api_retry_attempts
     _log_model_init_once(
-        "senior_fundamentals", model_name, final_timeout, final_retries, thinking_level
+        f"apex:{seat}", model_name, final_timeout, final_retries, thinking_level
     )
     return create_gemini_model(
         model_name,

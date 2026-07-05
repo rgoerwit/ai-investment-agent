@@ -6,6 +6,8 @@ UPDATED: Added tests for --brief mode functionality.
 
 from datetime import datetime
 
+import pytest
+
 from src.report_generator import QuietModeReporter, suppress_logging
 
 
@@ -733,6 +735,42 @@ RATIONALE: Market leader with pricing power and strong demand outlook.
 
 class TestSuppressLogging:
     """Test suppress_logging() function."""
+
+    @pytest.fixture(autouse=True)
+    def _restore_logging_state(self):
+        """suppress_logging() mutates process-global logging/warnings/structlog
+        state with no teardown; snapshot and restore it so log-asserting tests
+        that run later in the session (caplog, structlog capture) aren't
+        silently blinded (pm_risk_tally tests failed whenever this module ran
+        first)."""
+        import logging
+        import warnings
+
+        import structlog
+
+        root = logging.root
+        saved_root_level = root.level
+        saved_root_handlers = root.handlers[:]
+        saved_loggers = {
+            name: (lg.level, lg.propagate)
+            for name, lg in root.manager.loggerDict.items()
+            if isinstance(lg, logging.Logger)
+        }
+        saved_filters = warnings.filters[:]
+        saved_structlog = structlog.get_config()
+        try:
+            yield
+        finally:
+            root.setLevel(saved_root_level)
+            root.handlers[:] = saved_root_handlers
+            for name, lg in root.manager.loggerDict.items():
+                if not isinstance(lg, logging.Logger):
+                    continue
+                level, propagate = saved_loggers.get(name, (logging.NOTSET, True))
+                lg.setLevel(level)
+                lg.propagate = propagate
+            warnings.filters[:] = saved_filters
+            structlog.configure(**saved_structlog)
 
     def test_suppress_logging_no_errors(self):
         """Test suppress_logging runs without errors."""
