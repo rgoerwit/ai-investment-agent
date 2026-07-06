@@ -536,7 +536,7 @@ def _render_primary_output(
         try:
             if output_targets.output_file.parent != Path("."):
                 output_targets.output_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(output_targets.output_file, "w") as f:
+            with open(output_targets.output_file, "w", encoding="utf-8") as f:
                 f.write(report)
             if not args.quiet and not args.brief:
                 console_obj.print(
