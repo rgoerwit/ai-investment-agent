@@ -216,7 +216,7 @@ def dump_pending_tasks(
 
 def install_pending_task_dump_handler(
     *,
-    sig: int = signal.SIGUSR1,
+    sig: int = getattr(signal, "SIGUSR1", 0),
 ) -> Callable[[], None]:
     """Install a signal handler that logs all pending asyncio tasks.
 

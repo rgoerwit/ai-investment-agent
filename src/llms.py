@@ -423,7 +423,7 @@ def create_gemini_model(
         intent_attr="_configured_max_output_tokens",
         api_attr="_configured_api_output_tokens",
     )
-    if thinking_level:
+    if thinking_level and _is_gemini_v3_or_greater(model_name):
         llm.thinking_level = thinking_level  # type: ignore[attr-defined,assignment]
 
     # Track instance for cleanup
