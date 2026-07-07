@@ -802,7 +802,8 @@ if [[ $START_STAGE -le 2 ]]; then
         STAGE2_PROCESSED=$((STAGE2_PROCESSED + 1))
         info "[$STAGE2_PROCESSED/$STAGE2_TODO, $BUY_TOTAL total] Full: $ticker"
 
-        if run_tracked_child "$LOGFILE" "${PYTHON_CMD[@]}" -m src.main \
+        if PIPELINE_TICKER_TIMEOUT_SECONDS="${STAGE2_TICKER_TIMEOUT_SECONDS:-2400}" \
+            run_tracked_child "$LOGFILE" "${PYTHON_CMD[@]}" -m src.main \
             --ticker "$ticker" \
             --transparent --quiet \
             $STRICT_FLAG \

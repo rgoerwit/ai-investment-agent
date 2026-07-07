@@ -2,30 +2,35 @@
 
 Background
 ----------
-Production hang observed on 2026-05-09 (0883.HK): multiple ``asyncio.to_thread``
-workers entered ``ddgs.DDGS.__init__`` concurrently. DDG's lazy-loaded HTTP
-client calls ``logging.getLogger`` from inside its ``__init__`` while doing
-internal setup that holds the GIL. With multiple worker threads contending
-on the import lock, ``logging._lock``, and the GIL, the asyncio loop in the
-main thread was starved — even ``run_with_hard_timeout`` deadlines never
-fired. py-spy confirmed three threads simultaneously stuck in DDG init.
+Production hang observed on 2026-05-09 (0883.HK): multiple worker threads
+entered ``ddgs.DDGS.__init__`` concurrently. DDG's lazy-loaded HTTP client
+calls ``logging.getLogger`` from inside its ``__init__`` while doing internal
+setup that holds the GIL; with multiple threads contending on the import lock,
+``logging._lock``, and the GIL, the asyncio loop starved and even
+``run_with_hard_timeout`` deadlines never fired.
 
-The structural mitigation in ``src/tools/shared.py`` has three layers, each
-of which this test enforces:
+The *original* fix pinned the DDG executor to a single worker. That prevented
+concurrent constructor re-entry but created a second, quieter failure (2026-07
+pipeline ``child_timeout`` investigation, 214150.KQ): a DDG call that hangs on
+an uncancellable OS socket read orphans the single worker thread forever, so
+every subsequent DDG search queues behind it, times out at
+``DDG_SEARCH_TIMEOUT_SECONDS``, and returns ``[]`` — DDG fallback silently dies
+for the rest of the process.
+
+The current design (``src/tools/shared.py``) decouples the two concerns:
 
   1. **Pre-warm at module load** — ``ddgs`` is imported and ``DDGS(...)``
-     instantiated once on the main thread, single-threaded, before any
-     worker thread or event loop exists.
-  2. **Dedicated single-thread executor** — every DDG call runs on
-     ``_get_ddg_executor()`` (a ``ThreadPoolExecutor(max_workers=1)``).
-     Concurrent re-entry of DDG's constructor from multiple threads is
-     impossible by construction.
-  3. **asyncio.Lock around every call** — surfaces the serialization at
-     the await level so ``run_with_hard_timeout`` can cancel a queued
-     call cleanly before it ever runs.
+     instantiated once on the main thread before any worker/event loop exists.
+  2. **Constructor-only lock** — ``_DDG_INIT_LOCK`` (a ``threading.Lock``) is
+     held ONLY around ``DDGS(...)`` construction, so no two threads re-enter
+     DDG's lazy HTTP-client init at once. The network ``.text()`` call runs
+     OUTSIDE the lock.
+  3. **Small worker pool** — ``_get_ddg_executor()`` has
+     ``_DDG_EXECUTOR_MAX_WORKERS`` (>1) workers, so one hung socket read orphans
+     a single worker and the others stay free. Searches run in parallel.
 
-Each layer is enforced statically (AST checks) and behaviorally (a parallel
-gather that asserts serial execution).
+Each layer is enforced statically (AST checks) and behaviorally (parallel
+gathers that assert overlap + hang-resilience).
 """
 
 from __future__ import annotations
@@ -33,12 +38,24 @@ from __future__ import annotations
 import ast
 import asyncio
 import concurrent.futures
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 import src.tools.shared as shared
+
+
+@pytest.fixture(autouse=True)
+def _fresh_ddg_executor():
+    """Give each test a fresh DDG pool so an orphaned (hung) worker from one
+    test can't deplete the shared pool for the next. The old pool's orphaned
+    thread lives on harmlessly (it is what we are modelling)."""
+    shared._DDG_EXECUTOR = None
+    yield
+    shared._DDG_EXECUTOR = None
+
 
 # ---------------------------------------------------------------------------
 # Static checks
@@ -52,30 +69,45 @@ def test_ddgs_is_pre_imported_at_module_load():
     ), "shared.DDGS_AVAILABLE missing — pre-import guard removed?"
 
 
-def test_ddg_call_lock_is_an_asyncio_lock():
-    """A module-level asyncio.Lock must serialize DDG calls at await level."""
+def test_ddg_init_lock_is_a_threading_lock():
+    """Constructor safety is a ``threading.Lock`` (held in the worker thread
+    around ``DDGS(...)``), NOT an asyncio.Lock serializing whole calls."""
     assert hasattr(
-        shared, "_DDG_CALL_LOCK"
-    ), "shared._DDG_CALL_LOCK missing — DDG concurrency guard removed?"
-    assert isinstance(
-        shared._DDG_CALL_LOCK, asyncio.Lock
-    ), f"_DDG_CALL_LOCK must be asyncio.Lock, got {type(shared._DDG_CALL_LOCK)}"
+        shared, "_DDG_INIT_LOCK"
+    ), "shared._DDG_INIT_LOCK missing — DDG constructor guard removed?"
+    # threading.Lock() returns a _thread.lock instance; assert it quacks right.
+    assert hasattr(shared._DDG_INIT_LOCK, "acquire") and hasattr(
+        shared._DDG_INIT_LOCK, "release"
+    ), f"_DDG_INIT_LOCK must be a threading lock, got {type(shared._DDG_INIT_LOCK)}"
+    # And it must NOT be an asyncio.Lock (that would serialize network I/O too).
+    assert not isinstance(
+        shared._DDG_INIT_LOCK, asyncio.Lock
+    ), "_DDG_INIT_LOCK must be a threading.Lock, not an asyncio.Lock"
 
 
-def test_ddg_executor_is_single_threaded():
-    """The dedicated DDG executor must have exactly one worker thread.
+def test_ddg_call_lock_is_gone():
+    """The old whole-call asyncio serialization must be removed — keeping it
+    would defeat the multi-worker pool (calls would run one-at-a-time)."""
+    assert not hasattr(shared, "_DDG_CALL_LOCK"), (
+        "shared._DDG_CALL_LOCK still present — the whole-call asyncio lock "
+        "serializes DDG searches and re-creates the head-of-line stall the "
+        "multi-worker pool is meant to remove."
+    )
 
-    More than one worker would re-introduce the original deadlock by
-    allowing concurrent re-entry into DDG's lazy http_client init.
-    """
+
+def test_ddg_executor_is_multi_worker():
+    """The DDG executor must have >1 worker so one hung (uncancellable) socket
+    read orphans a single thread instead of saturating the pool."""
     executor = shared._get_ddg_executor()
     assert isinstance(
         executor, concurrent.futures.ThreadPoolExecutor
     ), f"DDG executor must be ThreadPoolExecutor, got {type(executor)}"
-    assert executor._max_workers == 1, (
-        f"DDG executor must be single-threaded (max_workers=1), "
-        f"got {executor._max_workers}. A pool size > 1 re-introduces the "
-        "import-lock + logging-lock deadlock that caused the 0883.HK hang."
+    assert executor._max_workers == shared._DDG_EXECUTOR_MAX_WORKERS
+    assert executor._max_workers > 1, (
+        f"DDG executor must be multi-worker, got {executor._max_workers}. "
+        "A single worker is permanently saturated by the first hung socket "
+        "read, silently disabling DDG fallback for the rest of the process "
+        "(2026-07 214150.KQ)."
     )
 
 
@@ -88,9 +120,7 @@ def test_ddg_executor_is_module_singleton():
 
 def test_ddg_search_uses_dedicated_executor_not_default_to_thread():
     """``_ddg_search`` must run DDG on ``_get_ddg_executor()``, never on the
-    default thread pool. AST check so future refactors can't silently switch
-    back to ``asyncio.to_thread`` (which uses the shared default executor
-    and re-opens the door to concurrent DDG init)."""
+    default thread pool (which is shared with every other to_thread caller)."""
     source = Path("src/tools/shared.py").read_text()
     tree = ast.parse(source)
 
@@ -109,9 +139,6 @@ def test_ddg_search_uses_dedicated_executor_not_default_to_thread():
     for node in ast.walk(target):
         if not isinstance(node, ast.Call):
             continue
-        # Disallow asyncio.to_thread anywhere in _ddg_search — it implicitly
-        # uses the default executor, which is shared with every other
-        # to_thread caller and is the failure mode we're protecting against.
         if (
             isinstance(node.func, ast.Attribute)
             and node.func.attr == "to_thread"
@@ -119,7 +146,6 @@ def test_ddg_search_uses_dedicated_executor_not_default_to_thread():
             and node.func.value.id == "asyncio"
         ):
             uses_default_to_thread = True
-        # Require loop.run_in_executor(_get_ddg_executor(), ...)
         if (
             isinstance(node.func, ast.Attribute)
             and node.func.attr == "run_in_executor"
@@ -132,63 +158,11 @@ def test_ddg_search_uses_dedicated_executor_not_default_to_thread():
 
     assert not uses_default_to_thread, (
         "_ddg_search uses asyncio.to_thread — that runs on the shared default "
-        "executor and re-opens the concurrent-DDG-init deadlock. Use "
-        "loop.run_in_executor(_get_ddg_executor(), fn) instead."
+        "executor and re-opens the concurrent-DDG-init deadlock."
     )
-    assert uses_run_in_executor_with_ddg_executor, (
-        "_ddg_search must call loop.run_in_executor(_get_ddg_executor(), ...) "
-        "to route every DDG call through the dedicated single-thread executor."
-    )
-
-
-def test_ddg_search_acquires_the_lock_around_the_executor_call():
-    """``_ddg_search`` must wrap its executor call with ``async with _DDG_CALL_LOCK``."""
-    source = Path("src/tools/shared.py").read_text()
-    tree = ast.parse(source)
-
-    target = next(
-        (
-            n
-            for n in ast.walk(tree)
-            if isinstance(n, ast.AsyncFunctionDef) and n.name == "_ddg_search"
-        ),
-        None,
-    )
-    assert target is not None
-
-    found = False
-    for aw in ast.walk(target):
-        if not isinstance(aw, ast.AsyncWith):
-            continue
-        for item in aw.items:
-            ctx = item.context_expr
-            if isinstance(ctx, ast.Name) and ctx.id == "_DDG_CALL_LOCK":
-                # Confirm a run_in_executor or run_with_hard_timeout call is
-                # inside this with block.
-                for inner in ast.walk(aw):
-                    if (
-                        isinstance(inner, ast.Call)
-                        and isinstance(inner.func, ast.Attribute)
-                        and inner.func.attr in ("run_in_executor",)
-                    ):
-                        found = True
-                        break
-                    if (
-                        isinstance(inner, ast.Call)
-                        and isinstance(inner.func, ast.Name)
-                        and inner.func.id == "run_with_hard_timeout"
-                    ):
-                        found = True
-                        break
-        if found:
-            break
-
-    assert found, (
-        "_ddg_search must enclose its run_in_executor / run_with_hard_timeout "
-        "call in `async with _DDG_CALL_LOCK:`. This is the await-level "
-        "serialization that lets run_with_hard_timeout cancel a queued call "
-        "before it ever reaches the executor."
-    )
+    assert (
+        uses_run_in_executor_with_ddg_executor
+    ), "_ddg_search must call loop.run_in_executor(_get_ddg_executor(), ...)."
 
 
 # ---------------------------------------------------------------------------
@@ -197,120 +171,156 @@ def test_ddg_search_acquires_the_lock_around_the_executor_call():
 
 
 @pytest.mark.asyncio
-async def test_concurrent_ddg_searches_run_serially_and_on_one_thread():
-    """N parallel _ddg_search calls must execute serially on a single thread.
+async def test_concurrent_ddg_searches_run_in_parallel_on_multiple_threads():
+    """N parallel _ddg_search calls must overlap and use >1 worker thread.
 
-    The dedicated executor + asyncio.Lock together guarantee:
-      - At most one DDG call is in flight at any time (lock).
-      - Every DDG call runs on the same OS thread (executor max_workers=1).
-
-    Both invariants are tested by a fake DDGS that records (event, thread_id,
-    query) tuples and asserts no overlap and a single thread_id.
+    The multi-worker pool + constructor-only lock let the network ``.text()``
+    calls run concurrently (the old single-worker + call-lock design forced
+    strict serialization on one thread).
     """
-    import threading
-
-    timeline: list[tuple[str, int, str]] = []
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+    thread_ids: set[int] = set()
 
     class _FakeDDGS:
         def __init__(self, *_args, **_kwargs):
             pass
 
         def text(self, query, max_results=5):
-            tid = threading.get_ident()
-            timeline.append(("enter", tid, query))
-            # Simulate work; if the lock fails to serialize, this window is
-            # where parallel callers would interleave.
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+                thread_ids.add(threading.get_ident())
             import time
 
-            time.sleep(0.05)
-            timeline.append(("exit", tid, query))
+            time.sleep(0.1)
+            with lock:
+                active -= 1
             return [{"title": query, "href": f"https://x/{query}", "body": "b"}]
 
     with patch.object(shared, "DDGS_AVAILABLE", True), patch("ddgs.DDGS", _FakeDDGS):
-        await asyncio.gather(
+        results = await asyncio.gather(
             shared._ddg_search("a"),
             shared._ddg_search("b"),
             shared._ddg_search("c"),
         )
 
-    # All calls ran on the same thread (single-thread executor).
-    thread_ids = {tid for (_kind, tid, _q) in timeline}
-    assert len(thread_ids) == 1, (
-        f"DDG calls ran on {len(thread_ids)} threads {thread_ids}; "
-        "the dedicated executor must keep all DDG work on exactly one thread."
+    assert all(r for r in results), "every search should have returned results"
+    assert max_active >= 2, (
+        f"DDG searches did not overlap (max concurrency {max_active}); the "
+        "multi-worker pool must let network calls run in parallel."
+    )
+    assert len(thread_ids) >= 2, (
+        f"DDG calls ran on {len(thread_ids)} thread(s); a multi-worker pool "
+        "should spread parallel searches across threads."
     )
 
-    # No interleaving — each enter is immediately followed by its own exit.
-    assert len(timeline) == 6, f"unexpected timeline length: {timeline}"
-    for i in range(0, 6, 2):
-        kind_in, _t_in, q_in = timeline[i]
-        kind_out, _t_out, q_out = timeline[i + 1]
-        assert (
-            kind_in == "enter" and kind_out == "exit"
-        ), f"interleaved DDG calls — lock failed to serialize. {timeline}"
-        assert (
-            q_in == q_out
-        ), f"call {q_in} did not exit before {q_out} entered. {timeline}"
-
 
 @pytest.mark.asyncio
-async def test_ddg_search_returns_empty_when_unavailable():
-    """When DDGS_AVAILABLE is False, _ddg_search returns [] without
-    submitting any work to the executor (so a missing dep can't deadlock
-    startup or leak a thread)."""
-    with patch.object(shared, "DDGS_AVAILABLE", False):
-        result = await shared._ddg_search("anything")
-        assert result == []
+async def test_hung_search_does_not_disable_subsequent_searches():
+    """The core 2026-07 regression: a call hung on an uncancellable socket read
+    must NOT prevent later searches from succeeding.
 
-
-@pytest.mark.asyncio
-async def test_ddg_search_hard_timeout_does_not_block_subsequent_calls():
-    """A hung DDG call must not block the next call from running once the
-    hard timeout fires.
-
-    The dedicated executor is single-threaded, so a stuck call leaves its
-    thread parked — the executor's queue would otherwise wait for that
-    thread to free up. ``run_with_hard_timeout`` must raise on schedule,
-    the asyncio.Lock must be released, and the next caller must be able
-    to attempt its own call (which will then queue behind the stuck thread
-    and itself time out — but cleanly, not as a process-wide deadlock).
+    With a single worker the hung thread saturated the pool and every later
+    search returned []. With the multi-worker pool a second search runs on a
+    free worker and returns real results while the first is still hung.
     """
-    call_count = 0
-    started = asyncio.Event()
-    finally_done = asyncio.Event()
+    first_started = threading.Event()
 
-    class _HangingDDGS:
+    class _FirstHangsRestWork:
         def __init__(self, *_args, **_kwargs):
             pass
 
         def text(self, query, max_results=5):
-            nonlocal call_count
-            call_count += 1
-            started.set()
-            # Block much longer than DDG_SEARCH_TIMEOUT_SECONDS.
             import time
 
-            time.sleep(30)
-            return []
+            if query == "hung":
+                first_started.set()
+                time.sleep(2.0)  # >> DDG_SEARCH_TIMEOUT_SECONDS; orphans a worker
+                return []
+            return [{"title": query, "href": f"https://x/{query}", "body": "b"}]
 
     with (
         patch.object(shared, "DDGS_AVAILABLE", True),
-        patch("ddgs.DDGS", _HangingDDGS),
-        patch.object(shared, "DDG_SEARCH_TIMEOUT_SECONDS", 0.2),
+        patch("ddgs.DDGS", _FirstHangsRestWork),
+        patch.object(shared, "DDG_SEARCH_TIMEOUT_SECONDS", 0.3),
     ):
-        try:
-            await asyncio.wait_for(shared._ddg_search("first"), timeout=2.0)
-        except asyncio.TimeoutError:
-            pytest.fail(
-                "outer wait_for fired — run_with_hard_timeout did not abort "
-                "the call within DDG_SEARCH_TIMEOUT_SECONDS"
-            )
-        finally:
-            finally_done.set()
+        # Launch the hung search; wait until its worker is actually blocked.
+        hung = asyncio.ensure_future(shared._ddg_search("hung"))
+        await asyncio.get_event_loop().run_in_executor(None, first_started.wait, 1.0)
 
-    # If we got here, the hard timeout fired and _ddg_search returned [].
-    # Lock must have been released — confirm by acquiring it briefly.
-    assert not shared._DDG_CALL_LOCK.locked(), (
-        "_DDG_CALL_LOCK was not released after run_with_hard_timeout fired. "
-        "A leaked lock would deadlock all subsequent DDG searches."
+        # A subsequent search must run on a different worker and succeed.
+        result = await shared._ddg_search("healthy")
+        assert result and result[0]["title"] == "healthy", (
+            "a second search returned nothing while the first was hung — the "
+            "worker pool was saturated by one orphaned socket read."
+        )
+
+        # The hung search itself still times out cleanly (returns []).
+        assert await hung == []
+
+
+@pytest.mark.asyncio
+async def test_constructor_re_entry_is_serialized_by_init_lock():
+    """Even with parallel workers, no two threads may be inside ``DDGS(...)``
+    construction at once — that is the invariant the 0883.HK hang violated."""
+    lock = threading.Lock()
+    constructing = 0
+    max_constructing = 0
+
+    class _SlowCtorDDGS:
+        def __init__(self, *_args, **_kwargs):
+            nonlocal constructing, max_constructing
+            with lock:
+                constructing += 1
+                max_constructing = max(max_constructing, constructing)
+            import time
+
+            time.sleep(0.05)  # widen the constructor window
+            with lock:
+                constructing -= 1
+
+        def text(self, query, max_results=5):
+            return [{"title": query, "href": "https://x", "body": "b"}]
+
+    with (
+        patch.object(shared, "DDGS_AVAILABLE", True),
+        patch("ddgs.DDGS", _SlowCtorDDGS),
+    ):
+        await asyncio.gather(*(shared._ddg_search(q) for q in "abcd"))
+
+    assert max_constructing == 1, (
+        f"{max_constructing} threads constructed DDGS concurrently; "
+        "_DDG_INIT_LOCK must serialize the constructor (0883.HK re-entry hang)."
     )
+
+
+@pytest.mark.asyncio
+async def test_ddg_search_materializes_results_to_list():
+    """``_sync_search`` must return a concrete list (defensive against a future
+    ddgs version returning a lazy iterator that would evaluate off-thread)."""
+
+    class _IterDDGS:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def text(self, query, max_results=5):
+            # A generator: if _ddg_search forwarded it un-materialized the type
+            # below would not be list.
+            return iter([{"title": query, "href": "https://x", "body": "b"}])
+
+    with patch.object(shared, "DDGS_AVAILABLE", True), patch("ddgs.DDGS", _IterDDGS):
+        result = await shared._ddg_search("q")
+
+    assert isinstance(result, list) and result[0]["title"] == "q"
+
+
+@pytest.mark.asyncio
+async def test_ddg_search_returns_empty_when_unavailable():
+    """When DDGS_AVAILABLE is False, _ddg_search returns [] without submitting
+    any work to the executor."""
+    with patch.object(shared, "DDGS_AVAILABLE", False):
+        result = await shared._ddg_search("anything")
+        assert result == []

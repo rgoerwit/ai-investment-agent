@@ -3,6 +3,7 @@
 import asyncio
 import concurrent.futures
 import math  # noqa: E402  (kept after concurrent.futures for grouping)
+import threading
 from typing import Any
 
 import structlog
@@ -25,14 +26,17 @@ DDG_SEARCH_TIMEOUT_SECONDS = 8.0
 # deadlines never fired. py-spy confirmed three threads simultaneously
 # stuck in ``ddgs/http_client.py:__init__`` and ``ddgs/__init__.py:_load_real``.
 #
-# The structural fix is a dedicated single-thread executor for every DDG
-# call. Concurrent re-entry of DDG's constructor from multiple threads is
-# impossible by construction, not by convention, because there is exactly
-# one thread that ever runs DDG code. The executor's queue naturally
-# serializes calls; the explicit ``_DDG_CALL_LOCK`` surfaces that
-# serialization at the asyncio level so ``run_with_hard_timeout`` can
-# cancel a *queued* call before it ever runs (cleaner than waiting for the
-# executor to dequeue and immediately drop it).
+# The fix has two parts. (1) Constructor re-entry is serialized by a
+# process-wide ``threading.Lock`` (``_DDG_INIT_LOCK``) held ONLY around the
+# ``DDGS(...)`` constructor — a sub-millisecond critical section — so no two
+# threads can be inside DDG's lazy HTTP-client init at once. (2) The dedicated
+# executor uses a small worker pool (not a single worker): a DDG call that
+# hangs on an uncancellable socket read orphans just one worker thread
+# (``run_with_hard_timeout`` bounds the caller at DDG_SEARCH_TIMEOUT_SECONDS
+# but cannot reclaim the OS thread), leaving the other workers free. A single
+# worker would be permanently saturated by the first hang, silently disabling
+# DDG fallback for the rest of the process. Network I/O (``.text()``) runs
+# outside the init lock, so searches proceed in parallel.
 #
 # We also pre-warm DDG once on the main thread at module load. Any
 # first-time module-state init then happens single-threaded, before any
@@ -53,21 +57,27 @@ except ImportError:
     logger.debug("ddgs_not_installed_at_startup")
 
 _DDG_EXECUTOR: concurrent.futures.ThreadPoolExecutor | None = None
-_DDG_CALL_LOCK = asyncio.Lock()
+# Held ONLY around the DDGS(...) constructor so concurrent workers can't
+# re-enter DDG's lazy HTTP-client init; the network call runs outside it.
+_DDG_INIT_LOCK = threading.Lock()
+# >1 so one hung (uncancellable) socket read orphans a single worker instead of
+# saturating the pool and silently disabling DDG fallback for the rest of the run.
+_DDG_EXECUTOR_MAX_WORKERS = 4
 
 
 def _get_ddg_executor() -> concurrent.futures.ThreadPoolExecutor:
-    """Return the dedicated single-thread executor for DDG calls.
+    """Return the dedicated DDG worker pool.
 
     Lazy so that test harnesses which don't touch DDG don't pay the cost of
-    a thread, and so a worker process that forks before DDG is used gets a
-    fresh executor in the child rather than inheriting a half-initialized
-    one from the parent.
+    threads, and so a worker process that forks before DDG is used gets a
+    fresh executor in the child rather than inheriting a half-initialized one
+    from the parent. Constructor safety comes from ``_DDG_INIT_LOCK``, not from
+    restricting the pool to a single worker.
     """
     global _DDG_EXECUTOR
     if _DDG_EXECUTOR is None:
         _DDG_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="ddg-search"
+            max_workers=_DDG_EXECUTOR_MAX_WORKERS, thread_name_prefix="ddg-search"
         )
     return _DDG_EXECUTOR
 
@@ -285,11 +295,11 @@ def _sanitize_for_json(data: dict) -> dict:
 async def _ddg_search(query: str, max_results: int = 5) -> list[dict]:
     """DuckDuckGo fallback search. Returns list of {title, href, body}.
 
-    Every call runs on the dedicated single-thread DDG executor and is
-    serialized through ``_DDG_CALL_LOCK``. Together these prevent the
-    import-lock / logging-lock deadlock observed in production where
-    multiple worker threads re-entered DDG's lazy-loaded HTTP-client
-    constructor simultaneously. See module-level note for full background.
+    Runs on the dedicated DDG worker pool. The ``DDGS(...)`` constructor is
+    serialized by ``_DDG_INIT_LOCK`` to prevent the import-lock / logging-lock
+    re-entry deadlock observed in production; the network call runs outside the
+    lock so concurrent searches proceed in parallel, and one hung read orphans
+    only a single worker. See module-level note for full background.
     """
     from src.async_utils import run_with_hard_timeout
 
@@ -300,15 +310,18 @@ async def _ddg_search(query: str, max_results: int = 5) -> list[dict]:
         from ddgs import DDGS
 
         def _sync_search():
-            return DDGS(timeout=5).text(query, max_results=max_results)
+            with _DDG_INIT_LOCK:
+                client = DDGS(timeout=5)
+            # Materialize inside the worker thread (defensive: .text() returns a
+            # list today, but pin it so no lazy iterator escapes the pool).
+            return list(client.text(query, max_results=max_results))
 
         loop = asyncio.get_running_loop()
-        async with _DDG_CALL_LOCK:
-            results = await run_with_hard_timeout(
-                loop.run_in_executor(_get_ddg_executor(), _sync_search),
-                timeout=DDG_SEARCH_TIMEOUT_SECONDS,
-                label=f"ddg:{query[:60]}",
-            )
+        results = await run_with_hard_timeout(
+            loop.run_in_executor(_get_ddg_executor(), _sync_search),
+            timeout=DDG_SEARCH_TIMEOUT_SECONDS,
+            label=f"ddg:{query[:60]}",
+        )
         return results if results else []
     except asyncio.TimeoutError:
         logger.debug(

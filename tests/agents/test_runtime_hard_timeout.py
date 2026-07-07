@@ -302,6 +302,104 @@ def _resp(content: str, finish_reason: object = "stop") -> AIMessage:
 _SENTINEL = object()
 
 
+class TestQuickModeFlexLatencyGuard:
+    """Fix A3 step 4 (runtime quick-guard): a flex-tier latency timeout that
+    reaches the retry loop in quick mode (transport fallback disabled, or the
+    client-timeout/outer-cap race) must be non-retryable AND excluded from the
+    circuit breaker — it is a queue event, not a provider fault. See the
+    flex-fallback x timeout matrix rows 6-8."""
+
+    @pytest.mark.asyncio
+    async def test_quick_flex_timeout_is_non_retryable_and_not_breaker_counted(
+        self, monkeypatch
+    ):
+        from unittest.mock import MagicMock
+
+        from src.agents.circuit_breaker import (
+            get_circuit_breaker,
+            reset_circuit_breaker_for_tests,
+        )
+        from src.runtime_config import RuntimeConfig, use_runtime_config
+
+        reset_circuit_breaker_for_tests()
+        # Activate gemini flex + quick mode so the guard condition is met.
+        monkeypatch.setattr(settings_config, "gemini_service_tier", "flex")
+        rc = RuntimeConfig.from_config(settings_config).with_overrides(
+            quick_mode_active=True
+        )
+
+        async def always_hangs(*_a, **_kw):
+            await asyncio.get_event_loop().create_future()
+
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(side_effect=always_hangs)
+
+        breaker = get_circuit_breaker()
+        record_spy = MagicMock(wraps=breaker.record_outcome)
+        monkeypatch.setattr(breaker, "record_outcome", record_spy)
+
+        with (
+            patch.object(settings_config, "quick_llm_call_hard_timeout_seconds", 0.02),
+            patch("src.agents.runtime.asyncio.sleep", new_callable=AsyncMock),
+            use_runtime_config(rc),
+        ):
+            with pytest.raises(TimeoutError):
+                await invoke_with_rate_limit_handling(
+                    runnable,
+                    {"input": "x"},
+                    max_attempts=3,
+                    max_transient_attempts=2,
+                    context="QuickFlexGuard",
+                    provider="google",
+                    model_name="gemini-3.5-flash",
+                )
+
+        # Non-retryable: exactly one SDK attempt despite the transient budget.
+        assert runnable.ainvoke.call_count == 1
+        # Breaker never told about a failure for this queue-timeout.
+        failure_calls = [
+            c for c in record_spy.call_args_list if c.kwargs.get("ok") is False
+        ]
+        assert failure_calls == []
+        reset_circuit_breaker_for_tests()
+
+    @pytest.mark.asyncio
+    async def test_full_mode_flex_timeout_still_retries(self, monkeypatch):
+        """Contrast: the guard is quick-gated. In full mode a flex timeout is a
+        normal transient failure and still consumes the retry budget.
+
+        The SDK raises the timeout directly here (rather than relying on the
+        outer wrap) because in full mode the flex floor stretches the hard cap
+        to 1350s — the point under test is the retry classification, not the
+        wrap firing."""
+        from src.agents.circuit_breaker import reset_circuit_breaker_for_tests
+
+        reset_circuit_breaker_for_tests()
+        monkeypatch.setattr(settings_config, "gemini_service_tier", "flex")
+        # No quick RuntimeConfig bound => full mode.
+
+        async def raises_timeout(*_a, **_kw):
+            raise TimeoutError("flex attempt exceeded SDK client timeout")
+
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(side_effect=raises_timeout)
+
+        with patch("src.agents.runtime.asyncio.sleep", new_callable=AsyncMock):
+            with pytest.raises(TimeoutError):
+                await invoke_with_rate_limit_handling(
+                    runnable,
+                    {"input": "x"},
+                    max_attempts=3,
+                    max_transient_attempts=2,
+                    context="FullFlexRetry",
+                    provider="google",
+                    model_name="gemini-3.5-flash",
+                )
+
+        assert runnable.ainvoke.call_count == 2
+        reset_circuit_breaker_for_tests()
+
+
 class TestProviderPartialResponseDetection:
     """Pin the finish_reason classifier behavior so future provider quirks
     don't quietly slip through."""

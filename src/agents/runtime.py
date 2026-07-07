@@ -24,7 +24,7 @@ from src.runtime_diagnostics import (
     get_model_name,
     infer_provider,
 )
-from src.service_tiers import floor_llm_hard_timeout
+from src.service_tiers import floor_llm_hard_timeout, provider_flex_active
 
 logger = structlog.get_logger(__name__)
 
@@ -460,7 +460,19 @@ async def invoke_with_rate_limit_handling(
                 class_name=class_name,
             )
             elapsed_seconds = time.monotonic() - attempt_started
-            if breaker is not None:
+            # Quick-mode flex latency timeout: a queued flex call the transport
+            # could not fall back to standard (fallback disabled, or the flex
+            # client timeout raced the outer hard cap). It is a queue event, not
+            # a provider fault — so it must NOT re-queue at flex (non-retryable)
+            # and must be excluded from the circuit breakers, which would
+            # otherwise trip and fast-fail sibling agents on transient queueing.
+            # See the mitigation plan's flex-fallback x timeout matrix (rows 6-8).
+            flex_latency_timeout_quick = (
+                details.kind == "timeout"
+                and runtime_config.quick_mode_active
+                and provider_flex_active(resolved_provider, settings_config)
+            )
+            if breaker is not None and not flex_latency_timeout_quick:
                 breaker.record_outcome(
                     agent_name=context,
                     provider=resolved_provider,
@@ -468,7 +480,7 @@ async def invoke_with_rate_limit_handling(
                     ok=False,
                     failure_kind=details.kind,
                 )
-            if network_breaker is not None:
+            if network_breaker is not None and not flex_latency_timeout_quick:
                 network_breaker.record_outcome(ok=False, failure_kind=details.kind)
             with _accounting_hook("capture_manager_failure"):
                 capture_manager = _get_capture_manager()
@@ -569,7 +581,11 @@ async def invoke_with_rate_limit_handling(
                 continue
 
             transient_max_attempts = max(1, min(max_attempts, max_transient_attempts))
-            if is_transient and attempt < transient_max_attempts - 1:
+            if (
+                is_transient
+                and not flex_latency_timeout_quick
+                and attempt < transient_max_attempts - 1
+            ):
                 wait_time = 5 * (attempt + 1) + random.uniform(1, 3)
                 if deadline is not None:
                     remaining = deadline - time.monotonic()

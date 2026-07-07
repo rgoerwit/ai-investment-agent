@@ -2,13 +2,13 @@
 runtime/*
 
 # Multi-Agent Investment Analysis System - .gitignore
-CLAUDE.md
+CLAUDE*.md
 .claude
 .claude/*
 .gemini
 .gemini/*
-GEMINI.md
-AGENTS.md
+GEMINI*.md
+AGENTS*.md
 
 # Local things we ignore
 examples/~*

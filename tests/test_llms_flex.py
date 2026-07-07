@@ -349,3 +349,145 @@ class TestLLMJudgePinnedStandard:
         with patch("src.llms.create_quick_thinking_llm", side_effect=fake_create):
             inspector._get_llm()
         assert captured.get("service_tier") == "standard"
+
+
+class TestFlexLatencyTimeoutDetection:
+    """`_is_flex_latency_timeout` classifies a queued flex call's SDK client
+    timeout so the transport can fall back to standard (Fix A3 step 2)."""
+
+    def test_builtin_timeout_error(self):
+        assert llms_mod._is_flex_latency_timeout(TimeoutError("timed out"))
+
+    def test_asyncio_timeout_error(self):
+        import asyncio
+
+        assert llms_mod._is_flex_latency_timeout(asyncio.TimeoutError())
+
+    def test_class_name_match(self):
+        class APITimeoutError(Exception):
+            pass
+
+        assert llms_mod._is_flex_latency_timeout(APITimeoutError("boom"))
+
+    def test_deadline_message_match(self):
+        assert llms_mod._is_flex_latency_timeout(
+            ValueError("504 Deadline Exceeded while awaiting flex worker")
+        )
+
+    def test_unrelated_error_is_not_timeout(self):
+        assert not llms_mod._is_flex_latency_timeout(ValueError("bad request"))
+
+
+class TestGeminiFlexLatencyFallback:
+    """Row 5/6/7-8 of the flex-fallback x timeout matrix, Gemini transport."""
+
+    @pytest.mark.asyncio
+    async def test_latency_timeout_falls_back_to_standard(self):
+        llm = _tiered_llm()
+        calls: list[dict] = []
+
+        async def fake_agenerate(self, *args, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise TimeoutError("flex attempt exceeded client timeout")
+            return _chat_result()
+
+        with patch.object(ChatGoogleGenerativeAI, "_agenerate", fake_agenerate):
+            result = await llm._agenerate([HumanMessage(content="hi")])
+
+        assert len(calls) == 2
+        assert calls[1]["service_tier"] == "standard"
+        assert result.llm_output["service_tier"] == "standard"
+        # Latency is transient — must NOT be cached as capability-unsupported.
+        assert not is_flex_unsupported("gemini-3.5-flash")
+
+    @pytest.mark.asyncio
+    async def test_latency_timeout_propagates_when_fallback_disabled(self):
+        llm = _tiered_llm(flex_fallback_to_standard=False)
+
+        async def fake_agenerate(self, *args, **kwargs):
+            raise TimeoutError("flex queued too long")
+
+        with (
+            patch.object(ChatGoogleGenerativeAI, "_agenerate", fake_agenerate),
+            pytest.raises(TimeoutError),
+        ):
+            await llm._agenerate([HumanMessage(content="hi")])
+
+    @pytest.mark.asyncio
+    async def test_standard_reissue_does_not_loop_on_timeout(self):
+        """No-loop guard: the standard re-issue's tier is not flex, so a second
+        timeout propagates instead of recursing into another fallback."""
+        llm = _tiered_llm()
+        calls: list[dict] = []
+
+        async def fake_agenerate(self, *args, **kwargs):
+            calls.append(kwargs)
+            raise TimeoutError("both attempts time out")
+
+        with (
+            patch.object(ChatGoogleGenerativeAI, "_agenerate", fake_agenerate),
+            pytest.raises(TimeoutError),
+        ):
+            await llm._agenerate([HumanMessage(content="hi")])
+
+        # Exactly two SDK calls: the flex attempt + one standard re-issue.
+        assert len(calls) == 2
+        assert calls[1]["service_tier"] == "standard"
+
+    def test_flex_retry_tier_none_for_standard_attempt(self):
+        llm = _tiered_llm()
+        # A call already at standard tier must never trigger fallback.
+        assert (
+            llm._flex_retry_tier(TimeoutError("x"), {"service_tier": "standard"})
+            is None
+        )
+
+
+class TestOpenAIFlexLatencyFallback:
+    @pytest.mark.asyncio
+    async def test_latency_timeout_falls_back_to_auto(self):
+        from langchain_openai import ChatOpenAI
+
+        flex_cls = llms_mod._get_flex_fallback_chat_openai_cls()
+        llm = flex_cls(
+            model="gpt-5.4",
+            api_key="test-key",
+            service_tier="flex",
+            flex_fallback_to_standard=True,
+        )
+        calls: list[dict] = []
+
+        async def fake_agenerate(self, *args, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise TimeoutError("flex attempt exceeded client timeout")
+            return _chat_result()
+
+        with patch.object(ChatOpenAI, "_agenerate", fake_agenerate):
+            await llm._agenerate([HumanMessage(content="hi")])
+
+        assert len(calls) == 2
+        assert calls[1]["service_tier"] == "auto"
+        assert not is_flex_unsupported("gpt-5.4")
+
+    @pytest.mark.asyncio
+    async def test_latency_timeout_propagates_when_fallback_disabled(self):
+        from langchain_openai import ChatOpenAI
+
+        flex_cls = llms_mod._get_flex_fallback_chat_openai_cls()
+        llm = flex_cls(
+            model="gpt-5.4",
+            api_key="test-key",
+            service_tier="flex",
+            flex_fallback_to_standard=False,
+        )
+
+        async def fake_agenerate(self, *args, **kwargs):
+            raise TimeoutError("flex queued too long")
+
+        with (
+            patch.object(ChatOpenAI, "_agenerate", fake_agenerate),
+            pytest.raises(TimeoutError),
+        ):
+            await llm._agenerate([HumanMessage(content="hi")])

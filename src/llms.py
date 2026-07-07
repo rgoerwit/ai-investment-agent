@@ -31,7 +31,7 @@ from src.llm_budgets import GenerationBudget, get_generation_budget
 from src.runtime_config import get_runtime_config
 from src.runtime_services import get_current_provider_runtime
 from src.service_tiers import (
-    floor_llm_timeout,
+    flex_attempt_client_timeout,
     gemini_flex_active,
     is_flex_unsupported,
     is_flex_unsupported_error,
@@ -365,6 +365,29 @@ def _is_flex_capacity_error(exc: BaseException) -> bool:
     )
 
 
+def _is_flex_latency_timeout(exc: BaseException) -> bool:
+    """Detect a flex-attempt SDK client timeout (a queued call that never returned).
+
+    A flex request may queue silently for minutes; the model instance's SDK
+    client timeout (bounded below the outer hard cap in quick mode — see
+    ``flex_attempt_client_timeout``) surfaces that queue as a raised
+    timeout/deadline error, which we treat like a capacity signal and fall back
+    to the standard tier. Only errors raised *inside* the SDK call reach here;
+    the outer ``run_with_hard_timeout`` fires in ``runtime.py``, never in the
+    transport, so this cannot swallow the outer wall-clock cap.
+    """
+    if isinstance(exc, TimeoutError):  # asyncio.TimeoutError aliases this on 3.11+
+        return True
+    name = type(exc).__name__.lower()
+    if "timeout" in name or "deadline" in name:
+        return True
+    combined = str(exc).lower()
+    return any(
+        marker in combined
+        for marker in ("timed out", "timeout", "deadline exceeded", "deadlineexceeded")
+    )
+
+
 def _stamp_service_tier(result: Any, tier: str) -> None:
     """Record the effective service tier on a ChatResult for cost tracking.
 
@@ -444,6 +467,16 @@ class _TieredChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
                 "flex_fallback_to_standard",
                 model=self.model,
                 **summarize_exception(exc, operation="gemini_flex_capacity"),
+            )
+            return "standard"
+        if self.flex_fallback_to_standard and _is_flex_latency_timeout(exc):
+            # Queued-too-long: the flex attempt exceeded its (short, quick-mode)
+            # SDK client timeout. Re-issue at standard rather than re-queue at
+            # flex. Not cached — the queue is transient.
+            logger.warning(
+                "flex_fallback_to_standard",
+                model=self.model,
+                **summarize_exception(exc, operation="gemini_flex_latency"),
             )
             return "standard"
         return None
@@ -539,6 +572,15 @@ def _get_flex_fallback_chat_openai_cls() -> type:
                     **summarize_exception(exc, operation="openai_flex_capacity"),
                 )
                 return "auto"
+            if self.flex_fallback_to_standard and _is_flex_latency_timeout(exc):
+                # Queued-too-long: re-issue at standard (auto) rather than
+                # re-queue at flex. Not cached — the queue is transient.
+                logger.warning(
+                    "flex_fallback_to_standard",
+                    model=self.model_name,
+                    **summarize_exception(exc, operation="openai_flex_latency"),
+                )
+                return "auto"
             return None
 
         def _generate(self, *args: Any, **kwargs: Any) -> Any:
@@ -585,7 +627,7 @@ def _apply_openai_service_tier(kwargs: dict[str, Any], *, label: str) -> None:
     kwargs["service_tier"] = "flex"
     kwargs["flex_fallback_to_standard"] = config.flex_fallback_to_standard
     kwargs["timeout"] = int(
-        floor_llm_timeout(
+        flex_attempt_client_timeout(
             float(kwargs.get("timeout", 120)),
             provider="openai",
             label=label,
@@ -696,7 +738,7 @@ def create_gemini_model(
     resolved_tier = _resolve_gemini_service_tier(model_name, service_tier)
     if resolved_tier == "flex":
         timeout = int(
-            floor_llm_timeout(
+            flex_attempt_client_timeout(
                 float(timeout),
                 provider="google",
                 label=f"gemini_sdk_timeout:{model_name}",

@@ -360,8 +360,19 @@ class TestPipelineCancellationContract:
     def test_stage_commands_run_through_tracked_child_helper(self):
         script = self._script_text()
         assert 'if run_tracked_child "" "${GEMS_CMD[@]}"; then' in script
+        # Both stage-1 and stage-2 ticker analyses route through the tracked
+        # child helper with the per-ticker logfile; each is prefixed with a
+        # PIPELINE_TICKER_TIMEOUT_SECONDS override (stage-1 360s, stage-2 2400s)
+        # so a flex-queued call can't outlast the watchdog silently.
         assert (
-            'if run_tracked_child "$LOGFILE" "${PYTHON_CMD[@]}" -m src.main \\'
+            'run_tracked_child "$LOGFILE" "${PYTHON_CMD[@]}" -m src.main \\' in script
+        )
+        assert (
+            'PIPELINE_TICKER_TIMEOUT_SECONDS="${STAGE1_TICKER_TIMEOUT_SECONDS:-360}"'
+            in script
+        )
+        assert (
+            'PIPELINE_TICKER_TIMEOUT_SECONDS="${STAGE2_TICKER_TIMEOUT_SECONDS:-2400}"'
             in script
         )
 

@@ -127,6 +127,27 @@ def flex_floor_seconds(cfg: Any = None) -> float:
     return float(getattr(_cfg(cfg), "flex_llm_timeout_seconds", 900))
 
 
+def _quick_mode_active(cfg: Any = None) -> bool:
+    """Whether the current run is a ``--quick`` (latency-bounded) screening run.
+
+    Quick mode imposes a tight per-ticker wall-clock budget (the pipeline
+    watchdog) and a 120s in-process hard cap. Stretching a timeout *floor*
+    past that budget converts a graceful in-process timeout into a hard
+    external SIGTERM that discards the whole ticker, so the flex floors below
+    must not apply in quick mode. Flex *eligibility* is unaffected — a fast
+    flex call still gets the discount; a queued one is bounded by the quick
+    deadline and falls back to standard (see ``src/llms.py``).
+
+    ``quick_mode_active`` is run-scoped (the ``RuntimeConfig`` ContextVar set by
+    ``--quick``), not a per-tier ``cfg`` field, so the ContextVar is the source
+    of truth and the no-binding fallback snapshots the full global config —
+    never the (possibly partial) tier ``cfg`` passed to the floor helpers.
+    """
+    from src.runtime_config import get_runtime_config
+
+    return bool(get_runtime_config(config_module.config).quick_mode_active)
+
+
 def _log_floor_once(label: str, base: float, floored: float, kind: str) -> None:
     with _floor_log_lock:
         if label in _logged_floor_labels:
@@ -150,11 +171,12 @@ def floor_llm_timeout(
 ) -> float:
     """Floor a per-call wall-clock ceiling while flex is active for provider.
 
-    Returns ``base_seconds`` unchanged when flex is off for the provider or
-    the configured ceiling already exceeds the floor. Logs once per label so
-    operators can see which ceilings were stretched.
+    Returns ``base_seconds`` unchanged when flex is off for the provider,
+    when quick mode is active (the floor must not outlast the quick deadline),
+    or when the configured ceiling already exceeds the floor. Logs once per
+    label so operators can see which ceilings were stretched.
     """
-    if not provider_flex_active(provider, cfg):
+    if not provider_flex_active(provider, cfg) or _quick_mode_active(cfg):
         return base_seconds
     floor = flex_floor_seconds(cfg)
     if base_seconds >= floor:
@@ -174,9 +196,10 @@ def floor_llm_hard_timeout(
 
     Uses 1.5x the per-call floor: a flex attempt that queues up to the SDK
     timeout may then fall back to a standard-tier attempt inside the same
-    wrapper window, so the cap must outlast attempt + fallback.
+    wrapper window, so the cap must outlast attempt + fallback. Skipped in
+    quick mode, where the tight watchdog forbids stretching the deadline.
     """
-    if not provider_flex_active(provider, cfg):
+    if not provider_flex_active(provider, cfg) or _quick_mode_active(cfg):
         return base_seconds
     floor = flex_floor_seconds(cfg) * 1.5
     if base_seconds >= floor:
@@ -195,15 +218,50 @@ def floor_llm_total_timeout(
     """Floor a multi-call wall-clock budget (e.g. consultant tool loop).
 
     Uses 2x the per-call floor so a budget spanning several flex calls is not
-    consumed entirely by the first queued call.
+    consumed entirely by the first queued call. Skipped in quick mode, where
+    the tight watchdog forbids stretching the deadline.
     """
-    if not provider_flex_active(provider, cfg):
+    if not provider_flex_active(provider, cfg) or _quick_mode_active(cfg):
         return base_seconds
     floor = flex_floor_seconds(cfg) * 2.0
     if base_seconds >= floor:
         return base_seconds
     _log_floor_once(label, base_seconds, floor, kind="total_budget")
     return floor
+
+
+# Fraction of the quick-mode outer hard cap allotted to a single flex attempt's
+# SDK client timeout, so a flex attempt PLUS its standard-tier re-issue both fit
+# inside one run_with_hard_timeout window (2 x fraction < 1, with margin).
+FLEX_QUICK_ATTEMPT_FRACTION = 0.4
+
+
+def flex_attempt_client_timeout(
+    base_seconds: float,
+    *,
+    provider: str | None,
+    cfg: Any = None,
+    label: str = "llm_call",
+) -> float:
+    """SDK client timeout for a flex-tier model instance.
+
+    - **Full mode**: floor up to ``FLEX_LLM_TIMEOUT_SECONDS`` so a legitimately
+      queued flex call (1-15 min) is not killed by a short socket timeout.
+    - **Quick mode**: cap *below* the quick outer hard cap
+      (``quick_llm_call_hard_timeout_seconds``) so a queued flex call raises a
+      timeout in time for a standard-tier re-issue within the same
+      ``run_with_hard_timeout`` window, instead of being guillotined by the
+      outer cap (which would bypass the transport fallback). See the
+      flex-fallback x timeout matrix in the mitigation plan.
+
+    No-op (returns ``base_seconds``) when flex is off for the provider.
+    """
+    if not provider_flex_active(provider, cfg):
+        return base_seconds
+    if _quick_mode_active(cfg):
+        outer = float(getattr(_cfg(cfg), "quick_llm_call_hard_timeout_seconds", 60.0))
+        return min(base_seconds, max(5.0, outer * FLEX_QUICK_ATTEMPT_FRACTION))
+    return floor_llm_timeout(base_seconds, provider=provider, cfg=cfg, label=label)
 
 
 def _reset_floor_log_cache_for_tests() -> None:
