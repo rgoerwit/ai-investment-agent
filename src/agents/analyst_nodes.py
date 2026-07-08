@@ -803,6 +803,18 @@ def create_analyst_node(
                     else prompt_template | retry_llm
                 )
 
+                # In --quick, base the retry's overall budget on the same
+                # per-seat cap the main path uses (larger for gate-critical APEX
+                # seats), so a retry can't clip an APEX seat below its 180s
+                # allowance. Full mode keeps the standard hard cap.
+                _retry_rc = get_runtime_config(settings_config)
+                _retry_base_seconds = (
+                    agent_runtime.quick_mode_hard_timeout_seconds(
+                        agent_prompt.agent_name, settings_config
+                    )
+                    if _retry_rc.quick_mode_active
+                    else float(_retry_rc.llm_call_hard_timeout_seconds)
+                )
                 try:
                     retry_response = (
                         await agent_runtime.invoke_with_rate_limit_handling(
@@ -814,11 +826,7 @@ def create_analyst_node(
                             # Floor for flex: an un-floored overall budget
                             # would clamp the flex-aware hard cap back down.
                             overall_timeout_seconds=floor_llm_hard_timeout(
-                                float(
-                                    get_runtime_config(
-                                        settings_config
-                                    ).llm_call_hard_timeout_seconds
-                                ),
+                                _retry_base_seconds,
                                 provider=support.infer_provider_name(retry_llm),
                                 label="analyst_retry_overall_timeout",
                             ),

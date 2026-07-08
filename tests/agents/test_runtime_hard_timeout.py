@@ -85,6 +85,53 @@ class TestApiRetryAttemptsDefault:
         assert hasattr(settings_config, "llm_call_hard_timeout_seconds")
 
 
+class TestApexQuickHardTimeout:
+    """The two gate-critical APEX seats get a larger --quick per-call budget so
+    the flat quick cap (sized for cheap flash agents) can't guillotine the
+    DATA_BLOCK / PM_BLOCK the hard gates depend on (2026-07-06 fix)."""
+
+    def test_apex_seat_gets_apex_budget(self, monkeypatch):
+        from src.agents.runtime import (
+            APEX_SEAT_CONTEXTS,
+            quick_mode_hard_timeout_seconds,
+        )
+
+        monkeypatch.setattr(
+            settings_config, "apex_quick_llm_call_hard_timeout_seconds", 180.0
+        )
+        monkeypatch.setattr(
+            settings_config, "quick_llm_call_hard_timeout_seconds", 60.0
+        )
+        for context in APEX_SEAT_CONTEXTS:
+            assert quick_mode_hard_timeout_seconds(context, settings_config) == 180.0
+
+    def test_non_apex_agent_gets_flat_quick_budget(self, monkeypatch):
+        from src.agents.runtime import quick_mode_hard_timeout_seconds
+
+        monkeypatch.setattr(
+            settings_config, "apex_quick_llm_call_hard_timeout_seconds", 180.0
+        )
+        monkeypatch.setattr(
+            settings_config, "quick_llm_call_hard_timeout_seconds", 60.0
+        )
+        assert quick_mode_hard_timeout_seconds("News Analyst", settings_config) == 60.0
+
+    def test_apex_seat_contexts_match_prompt_agent_names(self):
+        # APEX_SEAT_CONTEXTS must equal the on-disk agent_name of the two APEX
+        # seats, or the larger budget silently stops applying after a rename.
+        import json
+
+        from src.agents.runtime import APEX_SEAT_CONTEXTS
+        from src.llms import APEX_SEATS
+
+        names = set()
+        for seat in APEX_SEATS:
+            key = "fundamentals_analyst" if seat == "senior_fundamentals" else seat
+            with open(f"prompts/{key}.json") as fh:
+                names.add(json.load(fh)["agent_name"])
+        assert APEX_SEAT_CONTEXTS == names
+
+
 class TestHardTimeoutWrap:
     """`invoke_with_rate_limit_handling` must enforce a wall-clock cap."""
 

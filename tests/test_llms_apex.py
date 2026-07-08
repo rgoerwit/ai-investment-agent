@@ -152,6 +152,30 @@ class TestApexFactorySet:
         assert kwargs["thinking_level"] == "high"
         assert kwargs["temperature"] == 0.1
 
+    def test_quick_mode_pins_standard_tier(self, monkeypatch):
+        # Gate-critical seat must not queue on best-effort flex under the tight
+        # --quick budget: create_gemini_model gets service_tier="standard".
+        _set_cfg(
+            monkeypatch,
+            apex_model="gemini-3.1-pro-preview",
+            apex_quick_model="gemini-3.5-flash",
+            apex_thinking_level="high",
+        )
+        with patch.object(llms_mod, "create_gemini_model") as gemini:
+            llms_mod.create_apex_llm("portfolio_manager", quick_mode=True)
+        assert gemini.call_args.kwargs["service_tier"] == "standard"
+
+    def test_full_mode_leaves_tier_to_config(self, monkeypatch):
+        # Full mode keeps config-driven flex (service_tier=None follows config).
+        _set_cfg(
+            monkeypatch,
+            apex_model="gemini-3.1-pro-preview",
+            apex_thinking_level="high",
+        )
+        with patch.object(llms_mod, "create_gemini_model") as gemini:
+            llms_mod.create_apex_llm("senior_fundamentals", quick_mode=False)
+        assert gemini.call_args.kwargs["service_tier"] is None
+
     def test_configured_thinking_level_is_passed_through(self, monkeypatch):
         _set_cfg(
             monkeypatch,

@@ -384,7 +384,17 @@ def _is_flex_latency_timeout(exc: BaseException) -> bool:
     combined = str(exc).lower()
     return any(
         marker in combined
-        for marker in ("timed out", "timeout", "deadline exceeded", "deadlineexceeded")
+        for marker in (
+            "timed out",
+            "timeout",
+            "deadline exceeded",
+            "deadlineexceeded",
+            # Google's actual 504 body: status 'DEADLINE_EXCEEDED' (underscore)
+            # and message 'Deadline expired ...' — neither matched the two
+            # forms above, so 504s silently bypassed the standard-tier fallback.
+            "deadline_exceeded",
+            "deadline expired",
+        )
     )
 
 
@@ -965,6 +975,12 @@ def create_apex_llm(
         thinking_level=thinking_level,
         max_output_tokens=max_output_tokens,
         reserve_class="deep",
+        # Gate-critical seat on the critical path under the tight --quick
+        # budget: pin to standard so best-effort flex 503/504 queueing can't
+        # burn the per-call budget (and lose the DATA_BLOCK / PM_BLOCK) before
+        # any fallback. Full mode keeps config-driven flex (the flex floors +
+        # the _is_flex_latency_timeout fallback give it room to recover).
+        service_tier="standard" if quick_mode else None,
     )
 
 

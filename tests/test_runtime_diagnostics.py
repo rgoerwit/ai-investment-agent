@@ -105,6 +105,39 @@ class TestRuntimeFailureClassification:
         assert details.provider == "openai"
         assert details.retryable is False
 
+    def test_transfer_encoding_400_with_connection_reset_is_retryable(self):
+        exc = Exception(
+            "Response payload is not completed: <TransferEncodingError: 400, "
+            "message='Not enough data to satisfy transfer length header.'>. "
+            "ConnectionResetError(54, 'Connection reset by peer')"
+        )
+
+        details = classify_failure(
+            exc,
+            provider="google",
+            model_name="gemini-3.5-flash",
+        )
+
+        assert details.kind == "connect_error"
+        assert details.provider == "google"
+        assert details.retryable is True
+
+    def test_incomplete_client_payload_without_reset_is_retryable(self):
+        exc = Exception(
+            "ClientPayloadError: Response payload is not completed: "
+            "TransferEncodingError: Not enough data to satisfy transfer length header."
+        )
+
+        details = classify_failure(
+            exc,
+            provider="google",
+            model_name="gemini-3.5-flash",
+        )
+
+        assert details.kind == "connect_error"
+        assert details.provider == "google"
+        assert details.retryable is True
+
     def test_classifies_local_rate_limiter_type_error_as_application_error(self):
         exc = TypeError(
             "'_LazyRateLimiterProxy' object does not support the asynchronous context manager protocol"

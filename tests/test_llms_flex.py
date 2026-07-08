@@ -374,6 +374,23 @@ class TestFlexLatencyTimeoutDetection:
             ValueError("504 Deadline Exceeded while awaiting flex worker")
         )
 
+    def test_real_google_504_deadline_exceeded_body(self):
+        # Regression: the verbatim Google 504 body uses status
+        # 'DEADLINE_EXCEEDED' (underscore) + message 'Deadline expired ...' —
+        # neither matched the original ("deadline exceeded"/"deadlineexceeded")
+        # markers, so 504s silently bypassed the standard-tier fallback and
+        # sank every gate-critical quick-mode ticker (2026-07-06).
+        msg = (
+            "504 DEADLINE_EXCEEDED. {'error': {'code': 504, 'message': "
+            "'Deadline expired before operation could complete.', 'status': "
+            "'DEADLINE_EXCEEDED'}}"
+        )
+
+        class ServerError(Exception):
+            pass
+
+        assert llms_mod._is_flex_latency_timeout(ServerError(msg))
+
     def test_unrelated_error_is_not_timeout(self):
         assert not llms_mod._is_flex_latency_timeout(ValueError("bad request"))
 

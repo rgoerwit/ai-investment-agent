@@ -240,6 +240,17 @@ def classify_failure(
         kind = "model_not_found"
         retryable = False
     elif any(
+        marker in combined
+        for marker in (
+            "clientpayloaderror",
+            "transferencodingerror",
+            "not enough data to satisfy transfer length header",
+            "response payload is not completed",
+        )
+    ):
+        kind = "connect_error"
+        retryable = True
+    elif any(
         marker in combined for marker in ("400", "bad request", "invalid_request_error")
     ):
         kind = "bad_request"

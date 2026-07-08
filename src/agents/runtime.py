@@ -29,6 +29,28 @@ from src.service_tiers import floor_llm_hard_timeout, provider_flex_active
 logger = structlog.get_logger(__name__)
 
 
+# Graph node labels (agent_name / context) of the two gate-critical APEX seats.
+# These run the biggest, most rule-dense prompts on the APEX model and need a
+# larger --quick per-call budget than the flat quick cap sized for cheap flash
+# data-gathering agents. Kept in lockstep with APEX_SEATS in src/llms.py via
+# tests/agents/test_runtime_hard_timeout.py (the seats' prompt agent_name).
+APEX_SEAT_CONTEXTS = frozenset({"Fundamentals Analyst", "Portfolio Manager"})
+
+
+def quick_mode_hard_timeout_seconds(context: str, cfg: Any = settings_config) -> float:
+    """Per-call hard wall-clock cap for a single ``--quick`` LLM ainvoke.
+
+    Gate-critical APEX seats (Senior Fundamentals, Portfolio Manager) get the
+    larger ``apex_quick_llm_call_hard_timeout_seconds`` budget so the tight quick
+    cap can't guillotine the DATA_BLOCK / PM_BLOCK the hard gates depend on;
+    every other (cheap, fast) agent keeps ``quick_llm_call_hard_timeout_seconds``
+    so quick mode still surfaces a hung provider quickly.
+    """
+    if context in APEX_SEAT_CONTEXTS:
+        return float(getattr(cfg, "apex_quick_llm_call_hard_timeout_seconds", 180.0))
+    return float(getattr(cfg, "quick_llm_call_hard_timeout_seconds", 60.0))
+
+
 @contextmanager
 def _accounting_hook(label: str):
     """Wrap an accounting/observability side-effect so its failures never bubble.
@@ -260,9 +282,7 @@ async def invoke_with_rate_limit_handling(
 
     runtime_config = get_runtime_config(settings_config)
     if runtime_config.quick_mode_active:
-        hard_timeout = float(
-            getattr(settings_config, "quick_llm_call_hard_timeout_seconds", 60.0)
-        )
+        hard_timeout = quick_mode_hard_timeout_seconds(context, settings_config)
     else:
         hard_timeout = float(runtime_config.llm_call_hard_timeout_seconds)
     # Flex tier: queued calls may take minutes; floor the hard cap so a

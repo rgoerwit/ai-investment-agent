@@ -226,9 +226,11 @@ class TestResumability:
 
     @staticmethod
     def _run_skip_check(outfile: Path, force: bool = False) -> str:
-        """Pure-Python reimplementation of the skip logic from run_pipeline.sh.
+        """Pure-Python reimplementation of ``report_is_complete``-gated skip.
 
-        The shell script checks whether the report has a parseable verdict header.
+        The shell script skips a ticker only if its report has a verdict header
+        AND that verdict is not the ``ANALYSIS FAILED`` sentinel — an
+        unpublishable soft-failure that must be retried, not skipped forever.
 
         Returns "SKIP" or "PROCESS".
 
@@ -238,7 +240,8 @@ class TestResumability:
         """
         if not force and outfile.is_file():
             content = outfile.read_text()
-            if re.search(r"^# .+: .+$", content, re.MULTILINE):
+            m = re.search(r"^# .+: (?P<verdict>[^\r\n]+)$", content, re.MULTILINE)
+            if m and m.group("verdict").strip() != "ANALYSIS FAILED":
                 return "SKIP"
         return "PROCESS"
 
@@ -290,6 +293,98 @@ class TestResumability:
 
         result = self._run_skip_check(outfile, force=False)
         assert result == "SKIP"
+
+    def test_analysis_failed_report_is_not_skipped(self, tmp_path):
+        """An ANALYSIS FAILED report is a soft failure, not a completed
+        analysis — it must be re-run on the next pass, not skipped forever."""
+        outfile = tmp_path / "report.md"
+        outfile.write_text("# 1999.HK (Man Wah Holdings Limited): ANALYSIS FAILED\n")
+
+        result = self._run_skip_check(outfile, force=False)
+        assert result == "PROCESS"
+
+    def test_force_still_processes_analysis_failed(self, tmp_path):
+        outfile = tmp_path / "report.md"
+        outfile.write_text("# 1999.HK (Man Wah): ANALYSIS FAILED\n")
+
+        assert self._run_skip_check(outfile, force=True) == "PROCESS"
+
+
+class TestAnalysisFailedHandling:
+    """Contract: an ANALYSIS FAILED report (unpublishable soft failure) must be
+    retried and surfaced loudly, never counted as a green success."""
+
+    @staticmethod
+    def _script_text() -> str:
+        return _RUN_PIPELINE_PATH.read_text()
+
+    def test_report_is_complete_helper_exists_and_excludes_failed(self):
+        script = self._script_text()
+        assert "report_is_complete()" in script
+        assert '"$verdict" != "ANALYSIS FAILED"' in script
+        # The old unconditional predicate is fully replaced.
+        assert "report_has_verdict_header" not in script
+
+    def test_resumability_uses_report_is_complete(self):
+        script = self._script_text()
+        # Both stage skip checks gate on report_is_complete, not a bare header.
+        assert (
+            'if ! $FORCE && [[ -f "$OUTFILE" ]] && report_is_complete "$OUTFILE"; then'
+            in script
+        )
+
+    def test_no_analysis_is_warned_not_succeeded(self):
+        script = self._script_text()
+        # The exit-0 branch distinguishes ANALYSIS FAILED / empty verdict.
+        assert '"$VERDICT" == "ANALYSIS FAILED"' in script
+        assert 'warn "NO ANALYSIS: $ticker' in script
+        # Both stages tally + report a no-analysis count.
+        assert "STAGE1_NOANALYSIS" in script
+        assert "STAGE2_NOANALYSIS" in script
+        assert "no-analysis (will retry)" in script
+
+
+class TestTimeoutBudgetContract:
+    """The Stage-1 per-ticker watchdog must give the gate-critical APEX seats'
+    larger --quick per-call budget room to finish (2026-07-06 fix), and every
+    failure must leave a durable, rerun-proof record."""
+
+    @staticmethod
+    def _script_text() -> str:
+        return _RUN_PIPELINE_PATH.read_text()
+
+    def test_stage1_watchdog_default_raised_to_600(self):
+        script = self._script_text()
+        assert (
+            'STAGE1_TICKER_TIMEOUT_SECONDS="${STAGE1_TICKER_TIMEOUT_SECONDS:-600}"'
+            in script
+        )
+        # The old 360 default (which the collapsed 60s call budget dies well
+        # inside, and which was too tight for a standard-tier APEX seat) is gone.
+        assert ":-360}" not in script
+
+    def test_stage2_watchdog_default_preserved(self):
+        script = self._script_text()
+        assert (
+            'STAGE2_TICKER_TIMEOUT_SECONDS="${STAGE2_TICKER_TIMEOUT_SECONDS:-2400}"'
+            in script
+        )
+
+    def test_watchdog_printed_in_previews(self):
+        script = self._script_text()
+        assert "Per-ticker watchdog: ${STAGE1_TICKER_TIMEOUT_SECONDS}s" in script
+        assert "Per-ticker watchdog:   ${STAGE2_TICKER_TIMEOUT_SECONDS}s" in script
+
+    def test_durable_failure_log_helper_exists_and_is_called(self):
+        script = self._script_text()
+        assert "record_pipeline_failure()" in script
+        assert "pipeline_failures-${DATE}.log" in script
+        # Recorded on both the exit-0 no-analysis path and the child-exit path,
+        # in both stages.
+        assert 'record_pipeline_failure "$ticker" 1 no_analysis' in script
+        assert 'record_pipeline_failure "$ticker" 1 "child_exit_${status}"' in script
+        assert 'record_pipeline_failure "$ticker" 2 no_analysis' in script
+        assert 'record_pipeline_failure "$ticker" 2 "child_exit_${status}"' in script
 
 
 class TestStage1Contract:
@@ -362,17 +457,18 @@ class TestPipelineCancellationContract:
         assert 'if run_tracked_child "" "${GEMS_CMD[@]}"; then' in script
         # Both stage-1 and stage-2 ticker analyses route through the tracked
         # child helper with the per-ticker logfile; each is prefixed with a
-        # PIPELINE_TICKER_TIMEOUT_SECONDS override (stage-1 360s, stage-2 2400s)
-        # so a flex-queued call can't outlast the watchdog silently.
+        # PIPELINE_TICKER_TIMEOUT_SECONDS override (stage-1 600s, stage-2 2400s;
+        # defaults set once at the top) so a flex-queued call can't outlast the
+        # watchdog silently.
         assert (
             'run_tracked_child "$LOGFILE" "${PYTHON_CMD[@]}" -m src.main \\' in script
         )
         assert (
-            'PIPELINE_TICKER_TIMEOUT_SECONDS="${STAGE1_TICKER_TIMEOUT_SECONDS:-360}"'
+            'PIPELINE_TICKER_TIMEOUT_SECONDS="${STAGE1_TICKER_TIMEOUT_SECONDS}"'
             in script
         )
         assert (
-            'PIPELINE_TICKER_TIMEOUT_SECONDS="${STAGE2_TICKER_TIMEOUT_SECONDS:-2400}"'
+            'PIPELINE_TICKER_TIMEOUT_SECONDS="${STAGE2_TICKER_TIMEOUT_SECONDS}"'
             in script
         )
 

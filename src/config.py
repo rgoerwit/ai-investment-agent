@@ -690,6 +690,23 @@ class Settings(BaseSettings):
             "Hard wall-clock cap (seconds) for a single LLM ainvoke in --quick mode."
         ),
     )
+    # Larger per-call cap for the two gate-critical APEX seats (Senior
+    # Fundamentals + PM) in --quick mode. They run the biggest, most rule-dense
+    # prompts on the APEX model with high thinking, so the flat 60s quick cap
+    # (sized for flash data-gathering agents) guillotines them before they can
+    # emit the DATA_BLOCK / PM_BLOCK the hard gates depend on — turning a
+    # "cheap" screen into a zero-yield ANALYSIS FAILED. Quick mode must still
+    # *finish* the gate-critical work. Keep comfortably below the Stage-1
+    # pipeline watchdog (STAGE1_TICKER_TIMEOUT_SECONDS, default 600).
+    apex_quick_llm_call_hard_timeout_seconds: float = Field(
+        default=180.0,
+        gt=0.0,
+        validation_alias="APEX_QUICK_LLM_CALL_HARD_TIMEOUT_SECONDS",
+        description=(
+            "Hard wall-clock cap (seconds) for a single gate-critical APEX-seat "
+            "LLM ainvoke (Senior Fundamentals, Portfolio Manager) in --quick mode."
+        ),
+    )
 
     # --- LLM circuit breaker (P2-7) ----------------------------------------
     # When a provider/model starts serving back-to-back hard-timeouts (e.g.,
