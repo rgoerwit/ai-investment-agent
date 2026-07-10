@@ -165,6 +165,33 @@ record_pipeline_failure() {
         >> "${SCRATCH}/pipeline_failures-${DATE}.log"
 }
 
+update_latest_log_alias() {
+    local detail_logfile="$1" latest_logfile="$2"
+    local latest_dir latest_name detail_base
+
+    [[ -z "$detail_logfile" || -z "$latest_logfile" ]] && return 0
+    [[ ! -f "$detail_logfile" ]] && return 0
+
+    latest_dir=$(dirname "$latest_logfile")
+    latest_name=$(basename "$latest_logfile")
+    detail_base=$(basename "$detail_logfile")
+
+    if (cd "$latest_dir" && ln -sfn "$detail_base" "$latest_name") 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$latest_logfile"
+    cp "$detail_logfile" "$latest_logfile"
+}
+
+run_pipeline_child() {
+    local detail_logfile="$1" latest_logfile="$2" status
+    shift 2
+    run_tracked_child "$detail_logfile" "$@"
+    status=$?
+    update_latest_log_alias "$detail_logfile" "$latest_logfile"
+    return "$status"
+}
+
 write_pipeline_marker() {
     local results_dir="${RESULTS_DIR:-results}"
     local marker="${results_dir}/.pipeline_last_run.json"
@@ -636,6 +663,7 @@ if [[ $START_STAGE -le 1 ]]; then
         DASH=$(echo "$ticker" | tr '._' '-')
         OUTFILE="${SCRATCH}/README-${DASH}-${DATE}_quick.md"
         LOGFILE="${SCRATCH}/${DASH}-LOG-${DATE}_quick.txt"
+        DETAIL_LOGFILE="${SCRATCH}/${DASH}-LOG-${DATE}_quick-${PIPELINE_RUN_ID}.txt"
 
         # Resumability: skip if output already has a verdict line
         if ! $FORCE && [[ -f "$OUTFILE" ]] && report_is_complete "$OUTFILE"; then
@@ -648,20 +676,20 @@ if [[ $START_STAGE -le 1 ]]; then
         info "[$STAGE1_PROCESSED/$STAGE1_TODO, $TICKER_COUNT total] Quick: $ticker"
 
         if PIPELINE_TICKER_TIMEOUT_SECONDS="${STAGE1_TICKER_TIMEOUT_SECONDS}" \
-            run_tracked_child "$LOGFILE" "${PYTHON_CMD[@]}" -m src.main \
+            run_pipeline_child "$DETAIL_LOGFILE" "$LOGFILE" "${PYTHON_CMD[@]}" -m src.main \
             --ticker "$ticker" \
             --quick --no-charts --quiet --brief --no-memory \
             --output "$OUTFILE"; then
             VERDICT=$(extract_report_verdict "$OUTFILE")
-            BADGE=$(python3 "${SCRIPT_DIR}/extract_run_health.py" "$LOGFILE" 2>/dev/null)
+            BADGE=$(python3 "${SCRIPT_DIR}/extract_run_health.py" "$DETAIL_LOGFILE" 2>/dev/null)
             if [[ -z "$VERDICT" || "$VERDICT" == "ANALYSIS FAILED" ]]; then
                 # Exit 0 but no publishable analysis (a gate-critical agent
                 # failed, e.g. an LLM timeout). Not a success: report_is_complete
                 # rejects it, so the next run retries this ticker. Surface it
                 # loudly rather than as a green [OK].
                 STAGE1_NOANALYSIS=$((STAGE1_NOANALYSIS + 1))
-                record_pipeline_failure "$ticker" 1 no_analysis "${VERDICT:-no_verdict_header}"
-                warn "NO ANALYSIS: $ticker (${VERDICT:-no verdict header}) — completed but unpublishable; will retry next run. See $LOGFILE"
+                record_pipeline_failure "$ticker" 1 no_analysis "logfile=${DETAIL_LOGFILE} ${VERDICT:-no_verdict_header}"
+                warn "NO ANALYSIS: $ticker (${VERDICT:-no verdict header}) — completed but unpublishable; will retry next run. See $DETAIL_LOGFILE"
             elif [[ -n "$BADGE" ]]; then
                 success "$ticker done [Verdict=${VERDICT}] [${BADGE}]"
             else
@@ -670,12 +698,12 @@ if [[ $START_STAGE -le 1 ]]; then
         else
             status=$?
             exit_if_interrupted_status "$status"
-            BADGE=$(python3 "${SCRIPT_DIR}/extract_run_health.py" "$LOGFILE" 2>/dev/null)
-            record_pipeline_failure "$ticker" 1 "child_exit_${status}" "${BADGE:-}"
+            BADGE=$(python3 "${SCRIPT_DIR}/extract_run_health.py" "$DETAIL_LOGFILE" 2>/dev/null)
+            record_pipeline_failure "$ticker" 1 "child_exit_${status}" "logfile=${DETAIL_LOGFILE} ${BADGE:-}"
             if [[ -n "$BADGE" ]]; then
-                fail "FAILED: $ticker [${BADGE}] (see $LOGFILE)"
+                fail "FAILED: $ticker [${BADGE}] (see $DETAIL_LOGFILE)"
             else
-                fail "FAILED: $ticker (see $LOGFILE)"
+                fail "FAILED: $ticker (see $DETAIL_LOGFILE)"
             fi
             STAGE1_FAILED=$((STAGE1_FAILED + 1))
         fi
@@ -828,6 +856,7 @@ if [[ $START_STAGE -le 2 ]]; then
         DASH=$(echo "$ticker" | tr '._' '-')
         OUTFILE="${SCRATCH}/README-${DASH}-${DATE}.md"
         LOGFILE="${SCRATCH}/${DASH}-LOG-${DATE}.txt"
+        DETAIL_LOGFILE="${SCRATCH}/${DASH}-LOG-${DATE}-${PIPELINE_RUN_ID}.txt"
 
         # Resumability: skip if full analysis output already has a verdict
         if ! $FORCE && [[ -f "$OUTFILE" ]] && report_is_complete "$OUTFILE"; then
@@ -840,21 +869,21 @@ if [[ $START_STAGE -le 2 ]]; then
         info "[$STAGE2_PROCESSED/$STAGE2_TODO, $BUY_TOTAL total] Full: $ticker"
 
         if PIPELINE_TICKER_TIMEOUT_SECONDS="${STAGE2_TICKER_TIMEOUT_SECONDS}" \
-            run_tracked_child "$LOGFILE" "${PYTHON_CMD[@]}" -m src.main \
+            run_pipeline_child "$DETAIL_LOGFILE" "$LOGFILE" "${PYTHON_CMD[@]}" -m src.main \
             --ticker "$ticker" \
             --transparent --quiet \
             $STRICT_FLAG \
             --output "$OUTFILE"; then
             VERDICT=$(extract_report_verdict "$OUTFILE")
-            BADGE=$(python3 "${SCRIPT_DIR}/extract_run_health.py" "$LOGFILE" 2>/dev/null)
+            BADGE=$(python3 "${SCRIPT_DIR}/extract_run_health.py" "$DETAIL_LOGFILE" 2>/dev/null)
             if [[ -z "$VERDICT" || "$VERDICT" == "ANALYSIS FAILED" ]]; then
                 # Exit 0 but no publishable analysis (a gate-critical agent
                 # failed, e.g. an LLM timeout). Not a success: report_is_complete
                 # rejects it, so the next run retries this ticker. Surface it
                 # loudly rather than as a green [OK].
                 STAGE2_NOANALYSIS=$((STAGE2_NOANALYSIS + 1))
-                record_pipeline_failure "$ticker" 2 no_analysis "${VERDICT:-no_verdict_header}"
-                warn "NO ANALYSIS: $ticker (${VERDICT:-no verdict header}) — completed but unpublishable; will retry next run. See $LOGFILE"
+                record_pipeline_failure "$ticker" 2 no_analysis "logfile=${DETAIL_LOGFILE} ${VERDICT:-no_verdict_header}"
+                warn "NO ANALYSIS: $ticker (${VERDICT:-no verdict header}) — completed but unpublishable; will retry next run. See $DETAIL_LOGFILE"
             elif [[ -n "$BADGE" ]]; then
                 success "$ticker done [Verdict=${VERDICT}] [${BADGE}]"
             else
@@ -863,12 +892,12 @@ if [[ $START_STAGE -le 2 ]]; then
         else
             status=$?
             exit_if_interrupted_status "$status"
-            BADGE=$(python3 "${SCRIPT_DIR}/extract_run_health.py" "$LOGFILE" 2>/dev/null)
-            record_pipeline_failure "$ticker" 2 "child_exit_${status}" "${BADGE:-}"
+            BADGE=$(python3 "${SCRIPT_DIR}/extract_run_health.py" "$DETAIL_LOGFILE" 2>/dev/null)
+            record_pipeline_failure "$ticker" 2 "child_exit_${status}" "logfile=${DETAIL_LOGFILE} ${BADGE:-}"
             if [[ -n "$BADGE" ]]; then
-                fail "FAILED: $ticker [${BADGE}] (see $LOGFILE)"
+                fail "FAILED: $ticker [${BADGE}] (see $DETAIL_LOGFILE)"
             else
-                fail "FAILED: $ticker (see $LOGFILE)"
+                fail "FAILED: $ticker (see $DETAIL_LOGFILE)"
             fi
             STAGE2_FAILED=$((STAGE2_FAILED + 1))
         fi

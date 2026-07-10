@@ -60,6 +60,41 @@ def test_build_run_summary_tracks_finished_successful_artifacts(monkeypatch):
     assert summary["llm_failures"] == 2
 
 
+def _min_summary(monkeypatch, result: dict):
+    from src.persistence import build_run_summary
+
+    class _T:
+        def get_total_stats(self):
+            return {"failed_attempts": 0, "total_calls": 1}
+
+    monkeypatch.setattr("src.token_tracker.get_tracker", lambda: _T())
+    return build_run_summary(
+        result, quick_mode=True, article_requested=False, provider_preflight={}
+    )
+
+
+def test_debate_rounds_is_turns_over_two(monkeypatch):
+    # `count` tallies bull+bear turns: quick=2 → 1 round, full=4 → 2 rounds.
+    quick = _min_summary(monkeypatch, {"investment_debate_state": {"count": 2}})
+    assert quick["debate_rounds"] == 1
+    assert quick["debate_turns"] == 2
+    full = _min_summary(monkeypatch, {"investment_debate_state": {"count": 4}})
+    assert full["debate_rounds"] == 2
+    assert full["debate_turns"] == 4
+
+
+def test_verdict_qualified_flag_reflects_marker(monkeypatch):
+    qualified = _min_summary(
+        monkeypatch,
+        {
+            "final_trade_decision": "### VERDICT: BUY\n> **QUICK-MODE QUALIFICATION** ..."
+        },
+    )
+    assert qualified["verdict_qualified_by_quick_mode"] is True
+    plain = _min_summary(monkeypatch, {"final_trade_decision": "### VERDICT: BUY"})
+    assert plain["verdict_qualified_by_quick_mode"] is False
+
+
 @pytest.mark.parametrize(
     "report, expected_successful, expected_status",
     [

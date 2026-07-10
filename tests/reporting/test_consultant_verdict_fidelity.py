@@ -84,6 +84,31 @@ def test_derive_unparsed_when_ran_ok_but_no_verdict():
     )
 
 
+def test_derive_bypass_is_skipped_by_provider():
+    # Quick-mode gate bypass writes a completed, ok artifact with provider="bypass".
+    # It is an intentional skip, not a garbled review — must read as SKIPPED.
+    status = {
+        "ok": True,
+        "complete": True,
+        "provider": "bypass",
+        "content": (
+            "SKIPPED_BY_GATE: External Consultant bypass active for quick-mode "
+            "screening. Reason: rm_clear_negative."
+        ),
+    }
+    assert _derive_consultant_verdict(status) == "SKIPPED"
+
+
+def test_derive_bypass_is_skipped_by_sentinel_prefix():
+    # Even without the provider tag, the SKIPPED_BY_GATE sentinel identifies a bypass.
+    assert (
+        _derive_consultant_verdict(
+            _status("SKIPPED_BY_GATE: bypass active. Reason: x.")
+        )
+        == "SKIPPED"
+    )
+
+
 def test_derive_error_when_complete_but_not_ok():
     assert _derive_consultant_verdict(_status("", ok=False, complete=True)) == "ERROR"
 
@@ -126,6 +151,12 @@ def test_memo_rejected_says_not_approved():
     text = _memo("REJECTED")
     assert "did NOT approve" in text
     assert "passed" not in text
+
+
+def test_memo_skipped_says_skipped_not_unparsed():
+    text = _memo("SKIPPED")
+    assert "skipped" in text
+    assert "unparsed" not in text
 
 
 def test_memo_legacy_fallback_passes():
@@ -174,6 +205,14 @@ def test_source_rejected_is_low():
     assert "not approved" in source.lower()
 
 
+def test_source_skipped_is_neutral_not_low():
+    # A gate bypass must not read as LOW confidence (which "unparsed" would give);
+    # it is a deliberate skip → neutral "—", labelled as a bypass.
+    claim, source, conf = _consultant_row("SKIPPED")
+    assert conf == "—"
+    assert "bypassed" in source.lower()
+
+
 def test_source_legacy_fallback_is_high():
     rows = build_source_confidence_rows(
         {"run_summary": {"consultant_successful": True, "consultant_completed": True}}
@@ -220,3 +259,24 @@ def test_build_run_summary_clean_verdict():
 def test_build_run_summary_not_run_when_consultant_absent():
     summary = build_run_summary({}, quick_mode=False, article_requested=False)
     assert summary["consultant_verdict"] == "NOT_RUN"
+
+
+def test_build_run_summary_quick_gate_bypass_reads_skipped_not_unparsed():
+    # Regression: quick-mode runs (005830.KS/AUTO.L/NRO.PA, 2026-07) bypassed the
+    # Consultant via the gate but run_summary reported consultant_verdict=UNPARSED,
+    # which renders as LOW-confidence "review unparsed". A bypass must read SKIPPED.
+    result = {
+        "artifact_statuses": {
+            "consultant_review": {
+                "complete": True,
+                "ok": True,
+                "provider": "bypass",
+                "content": (
+                    "SKIPPED_BY_GATE: External Consultant bypass active for "
+                    "quick-mode screening. Reason: rm_clear_negative."
+                ),
+            }
+        }
+    }
+    summary = build_run_summary(result, quick_mode=True, article_requested=False)
+    assert summary["consultant_verdict"] == "SKIPPED"

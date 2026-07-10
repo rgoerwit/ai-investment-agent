@@ -57,6 +57,9 @@ _RATIONALE_HEADER = re.compile(
     r"#+\s*DECISION RATIONALE\s*\n+(.+?)(?:\n#+\s|\n---|\Z)",
     re.DOTALL | re.IGNORECASE,
 )
+_NUMBER_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+_WEAK_BUY_MIN_WEIGHTED_UPSIDE = 0.10
+_WEAK_BUY_DOWNSIDE_PROBABILITY = 50.0
 
 
 _VARIANT_PLACEHOLDER = "Not explicitly stated."
@@ -228,6 +231,18 @@ def _detect_currency(fundamentals: str) -> str:
     return ""
 
 
+def _parse_numeric_value(raw: str | None) -> float | None:
+    if not raw:
+        return None
+    match = _NUMBER_RE.search(raw)
+    if not match:
+        return None
+    try:
+        return float(match.group(0).replace(",", ""))
+    except ValueError:
+        return None
+
+
 def format_scenario_summary(state: dict) -> str | None:
     """Return a one-line scenario summary if a valid VALUATION_SCENARIOS block exists.
 
@@ -262,6 +277,34 @@ def format_scenario_summary(state: dict) -> str | None:
         if caveat
         else ""
     )
+    current_price = _parse_numeric_value(
+        extract_data_block_field(fundamentals, "CURRENT_PRICE")
+    )
+    if (
+        extract_pm_verdict(get_pm_output(state)) == "BUY"
+        and current_price is not None
+        and current_price > 0
+        and scenarios.weighted_iv
+    ):
+        weighted_upside = (scenarios.weighted_iv / current_price) - 1.0
+        downside_probability = sum(
+            scenario.probability
+            for scenario, intrinsic_value in (
+                (scenarios.bear, scenarios.bear_iv),
+                (scenarios.base, scenarios.base_iv),
+                (scenarios.bull, scenarios.bull_iv),
+            )
+            if intrinsic_value < current_price
+        )
+        if (
+            weighted_upside < _WEAK_BUY_MIN_WEIGHTED_UPSIDE
+            or downside_probability >= _WEAK_BUY_DOWNSIDE_PROBABILITY
+        ):
+            warning += (
+                " Warning: BUY verdict has weak valuation asymmetry; review "
+                f"weighted IV upside ({weighted_upside * 100:.1f}%) and "
+                f"downside probability ({downside_probability:.0f}%)."
+            )
 
     return (
         f"Bear {_fmt(scenarios.bear_iv)} ({scenarios.bear.probability:.0f}%) / "
@@ -359,6 +402,8 @@ def summarize_confidence(state: dict) -> str:
         bits.append("consultant did NOT approve")
     elif verdict == "ERROR":
         bits.append("consultant review failed validation")
+    elif verdict == "SKIPPED":
+        bits.append("consultant cross-check skipped (quick screen)")
     elif verdict == "UNPARSED":
         bits.append("consultant review unparsed")
     elif run_summary.get("consultant_completed"):

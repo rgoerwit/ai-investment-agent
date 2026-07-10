@@ -45,6 +45,13 @@ _PM_HEADER_RE = re.compile(
     rf"(?im)^(#+\s*PORTFOLIO MANAGER VERDICT:\s*){_FLOORED_FROM}\b.*$"
 )
 _PM_BLOCK_VERDICT_RE = re.compile(rf"(?im)^(\s*VERDICT:\s*){_FLOORED_FROM}\b.*$")
+# PM-owned narrative/execution decision lines. Deliberately case-sensitive:
+# Trader TRADE_BLOCK uses all-caps ACTION:, and report errors use
+# **Action Required**:. Do not loosen this to Action[^:]* or add re.IGNORECASE.
+_PM_DECISION_SURFACE_RE = re.compile(
+    r"(?m)^(?P<label>\*{0,2}(?:Actual Decision|Action)\*{0,2}):\s*"
+    r"(?P<verdict>BUY|HOLD|SELL|DO NOT INITIATE)\b.*$"
+)
 # Verdict-coupled chart-control fields that must not stay in their negative-verdict
 # state after the floor (extract_pm_block reads them before falling back to verdict).
 _SHOW_CHART_NO_RE = re.compile(r"(?im)^(\s*SHOW_VALUATION_CHART:\s*)NO\b.*$")
@@ -53,6 +60,14 @@ _DISCOUNT_ZERO_RE = re.compile(r"(?im)^(\s*VALUATION_DISCOUNT:\s*)0(?:\.0+)?\b.*
 
 _PM_HEADER_BUY_RE = re.compile(r"(?im)^(#+\s*PORTFOLIO MANAGER VERDICT:\s*)BUY\b.*$")
 _PM_BLOCK_VERDICT_BUY_RE = re.compile(r"(?im)^(\s*VERDICT:\s*)BUY\b.*$")
+
+
+def _rewrite_pm_decision_surfaces(content_str: str, canonical_display: str) -> str:
+    """Rewrite PM-owned narrative/execution decision lines to the canonical verdict."""
+    return _PM_DECISION_SURFACE_RE.sub(
+        lambda match: f"{match.group('label')}: {canonical_display}",
+        content_str,
+    )
 
 
 def maybe_demote_buy_on_blocking_flags(
@@ -92,6 +107,7 @@ def maybe_demote_buy_on_blocking_flags(
     if n_block == 0:
         logger.warning("buy_demotion_skipped_no_pm_block_verdict", ticker=ticker)
         return content_str, False
+    demoted = _rewrite_pm_decision_surfaces(demoted, "HOLD")
 
     note = (
         "\n\n> **DETERMINISTIC VERDICT DEMOTION APPLIED — BUY → HOLD**\n"
@@ -110,6 +126,38 @@ def maybe_demote_buy_on_blocking_flags(
         block_rewrites=n_block,
     )
     return demoted, True
+
+
+def maybe_qualify_buy_in_quick_mode(
+    content_str: str, *, quick_mode: bool, ticker: str = "UNKNOWN"
+) -> tuple[str, bool]:
+    """Append a 'screening candidate, not investable' caveat to a quick-mode BUY.
+
+    The `--quick` tier is a screener (flash-lite gathering, cheap deep models, 1 debate
+    round); a quick BUY is not trustworthy enough to act on. This appends a caveat note
+    but deliberately leaves the ``VERDICT: BUY`` token intact, so no downstream parser
+    (charts, article, IBKR, run-summary) changes — the note flows through the persisted
+    PM text the same way ``maybe_demote_buy_on_blocking_flags`` appends its note.
+
+    Conservative and idempotent: fires only in quick mode on a BUY verdict, and never
+    a second time. Returns ``(content_str, qualified)``; ``qualified`` reflects whether
+    the note is present so the caller can stamp an honest run-summary flag (never a
+    recomputed ``quick and BUY`` that could lie if this no-ops on parse drift).
+    """
+    if not quick_mode:
+        return content_str, False
+    if pm_verdict_metadata_from_text(content_str).verdict != "BUY":
+        return content_str, False
+    if "QUICK-MODE QUALIFICATION" in content_str:
+        return content_str, True
+    note = (
+        "\n\n> **QUICK-MODE QUALIFICATION — CANDIDATE FOR FULL ANALYSIS, NOT INVESTABLE OUTPUT**\n"
+        "> This BUY came from the fast screening tier (quick models, 1 debate round). Treat it "
+        "as a shortlist candidate to promote to a full analysis, not an actionable buy. Re-run in "
+        "full mode before acting.\n"
+    )
+    logger.info("buy_qualified_quick_mode", ticker=ticker)
+    return content_str.rstrip() + note, True
 
 
 def _has_hard_flag(red_flags: list[dict]) -> bool:
@@ -183,6 +231,7 @@ def maybe_floor_verdict_to_hold(
     # VALUATION_DISCOUNT: 0.0, which would still suppress targets under the floored HOLD.
     floored = _SHOW_CHART_NO_RE.sub(r"\1YES", floored)
     floored = _DISCOUNT_ZERO_RE.sub(r"\g<1>0.8", floored)
+    floored = _rewrite_pm_decision_surfaces(floored, "HOLD")
 
     note = (
         "\n\n> **DETERMINISTIC VERDICT FLOOR APPLIED — DO NOT INITIATE → HOLD**\n"

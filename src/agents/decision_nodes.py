@@ -23,6 +23,7 @@ from src.agents.pm_verdict_metadata import (
 from src.agents.verdict_policy import (
     maybe_demote_buy_on_blocking_flags,
     maybe_floor_verdict_to_hold,
+    maybe_qualify_buy_in_quick_mode,
 )
 from src.data_block_utils import (
     extract_data_block_field,
@@ -31,6 +32,7 @@ from src.data_block_utils import (
     unfenced_label,
 )
 from src.error_safety import summarize_exception
+from src.pm_claim_audit import audit_pm_claims
 
 # Verdict canonicalization lives in the neutral, dependency-free parser (it used
 # to live on src.agents.pm_verdict_metadata, which created a charts circular
@@ -1291,6 +1293,19 @@ RISK TEAM DEBATE:
                 red_flags=red_flags,
                 ticker=ticker,
             )
+            pm_context = support.get_context_from_config(config)
+            quick_mode = bool(getattr(pm_context, "quick_mode", False))
+            content_str, quick_buy_qualified = maybe_qualify_buy_in_quick_mode(
+                content_str,
+                quick_mode=quick_mode,
+                ticker=ticker,
+            )
+            content_str, pm_claim_caveats = audit_pm_claims(
+                content_str,
+                fundamentals=fundamentals,
+                valuation_params=get_valid_artifact_content(state, "valuation_params"),
+                ticker=ticker,
+            )
             _log_risk_tally_reconciliation(content_str, code_risk_subtotal, ticker)
             _log_pm_discipline_checks(
                 content_str, red_flags, valuation_reliability, ticker
@@ -1312,13 +1327,16 @@ RISK TEAM DEBATE:
                 pm_verdict_recovered=pm_verdict_recovered,
                 verdict_floored_to_hold=verdict_floored,
                 buy_demoted_on_blocking_flags=buy_demoted,
+                quick_buy_qualified=quick_buy_qualified,
+                pm_claim_caveats=len(pm_claim_caveats),
                 pm_verdict_metadata=pm_metadata.model_dump(exclude_none=True),
                 pre_screening_result=state.get("pre_screening_result"),
                 direct_pm_inputs_present=present_inputs,
                 direct_pm_inputs_missing=missing_inputs,
                 debate_rounds=(state.get("investment_debate_state") or {}).get(
                     "count", 0
-                ),
+                )
+                // 2,
                 strict_mode=strict_mode,
             )
             result = success_artifact(

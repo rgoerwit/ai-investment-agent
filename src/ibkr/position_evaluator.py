@@ -417,6 +417,9 @@ def evaluate_positions(
             if (
                 shortfall_pct > underweight_threshold_pct
                 and verdict_upper == "BUY"
+                # A quick-mode BUY is a screening candidate — it must not drive an ADD
+                # to an existing position; the position holds until a full re-run.
+                and not getattr(analysis, "is_quick_mode", False)
                 and remaining_cash > 0
             ):
                 target_value_usd = portfolio.portfolio_value_usd * (

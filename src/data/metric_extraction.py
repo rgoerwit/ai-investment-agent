@@ -415,6 +415,17 @@ def extract_from_financial_statements(
 def extract_quarterly_horizons(ticker, symbol: str) -> dict[str, Any]:
     """Extract TTM and MRQ growth/earnings/cash-flow horizons from quarterly statements."""
     extracted: dict[str, Any] = {}
+    diagnostics: list[dict[str, str]] = []
+
+    def add_diagnostic(field: str, reason: str) -> None:
+        diagnostics.append(
+            {
+                "field": field,
+                "status": "unavailable",
+                "reason": reason,
+            }
+        )
+
     try:
         qt_inc = ticker.quarterly_financials
         qt_cf = ticker.quarterly_cashflow
@@ -428,12 +439,17 @@ def extract_quarterly_horizons(ticker, symbol: str) -> dict[str, Any]:
                 provider="unknown",
             ),
         )
+        add_diagnostic("quarterly_horizons", "quarterly_data_unavailable")
+        extracted["_quarterly_diagnostics"] = diagnostics
         return extracted
 
     if qt_inc is not None and not qt_inc.empty:
         latest_q_date = qt_inc.columns[0]
         extracted["latest_quarter_date"] = str(latest_q_date.date())
         extracted["_latest_quarter_date_source"] = "yfinance_quarterly"
+
+    income_available = qt_inc is not None and not qt_inc.empty
+    cashflow_available = qt_cf is not None and not qt_cf.empty
 
     def _find_yoy_match_idx(
         series_index: pd.DatetimeIndex, latest_date: pd.Timestamp
@@ -450,8 +466,9 @@ def extract_quarterly_horizons(ticker, symbol: str) -> dict[str, Any]:
                 best_idx = i
         return best_idx
 
-    if qt_inc is not None and not qt_inc.empty and "Total Revenue" in qt_inc.index:
-        rev_series = qt_inc.loc["Total Revenue"].dropna()
+    if income_available and "Total Revenue" in qt_inc.index:
+        rev_raw = qt_inc.loc["Total Revenue"]
+        rev_series = rev_raw.dropna()
         if len(rev_series) >= 5:
             match_idx = _find_yoy_match_idx(rev_series.index, rev_series.index[0])
             if match_idx is not None:
@@ -464,6 +481,12 @@ def extract_quarterly_horizons(ticker, symbol: str) -> dict[str, Any]:
                         extracted["_revenueGrowth_MRQ_source"] = (
                             "calculated_from_quarterly"
                         )
+                else:
+                    add_diagnostic("revenueGrowth_MRQ", "nonpositive_prior_year_value")
+            else:
+                add_diagnostic("revenueGrowth_MRQ", "prior_year_quarter_not_matched")
+        else:
+            add_diagnostic("revenueGrowth_MRQ", "insufficient_quarterly_history")
         if len(rev_series) >= 8:
             ttm_current = rev_series.iloc[0:4].sum(min_count=4)
             ttm_prior = rev_series.iloc[4:8].sum(min_count=4)
@@ -475,9 +498,30 @@ def extract_quarterly_horizons(ticker, symbol: str) -> dict[str, Any]:
             if pd.notna(ttm_current):
                 extracted["revenue_TTM"] = float(ttm_current)
                 extracted["_revenue_TTM_source"] = "calculated_from_quarterly"
+            else:
+                add_diagnostic("revenue_TTM", "malformed_quarterly_window")
+            if "revenueGrowth_TTM" not in extracted:
+                add_diagnostic("revenueGrowth_TTM", "malformed_or_invalid_ttm_window")
+        else:
+            reason = (
+                "malformed_quarterly_window"
+                if len(rev_raw) >= 8
+                else "insufficient_quarterly_history"
+            )
+            add_diagnostic("revenueGrowth_TTM", reason)
+            add_diagnostic("revenue_TTM", reason)
+    elif income_available:
+        add_diagnostic("revenueGrowth_MRQ", "missing_total_revenue_row")
+        add_diagnostic("revenueGrowth_TTM", "missing_total_revenue_row")
+        add_diagnostic("revenue_TTM", "missing_total_revenue_row")
+    else:
+        add_diagnostic("revenueGrowth_MRQ", "quarterly_income_unavailable")
+        add_diagnostic("revenueGrowth_TTM", "quarterly_income_unavailable")
+        add_diagnostic("revenue_TTM", "quarterly_income_unavailable")
 
-    if qt_inc is not None and not qt_inc.empty and "Net Income" in qt_inc.index:
-        ni_series = qt_inc.loc["Net Income"].dropna()
+    if income_available and "Net Income" in qt_inc.index:
+        ni_raw = qt_inc.loc["Net Income"]
+        ni_series = ni_raw.dropna()
         if len(ni_series) >= 5:
             match_idx = _find_yoy_match_idx(ni_series.index, ni_series.index[0])
             if match_idx is not None:
@@ -490,11 +534,19 @@ def extract_quarterly_horizons(ticker, symbol: str) -> dict[str, Any]:
                         extracted["_earningsGrowth_MRQ_source"] = (
                             "calculated_from_quarterly"
                         )
+                else:
+                    add_diagnostic("earningsGrowth_MRQ", "nonpositive_prior_year_value")
+            else:
+                add_diagnostic("earningsGrowth_MRQ", "prior_year_quarter_not_matched")
+        else:
+            add_diagnostic("earningsGrowth_MRQ", "insufficient_quarterly_history")
         if len(ni_series) >= 4:
             ttm_ni = ni_series.iloc[0:4].sum(min_count=4)
             if pd.notna(ttm_ni):
                 extracted["netIncome_TTM"] = float(ttm_ni)
                 extracted["_netIncome_TTM_source"] = "calculated_from_quarterly"
+            else:
+                add_diagnostic("netIncome_TTM", "malformed_quarterly_window")
             if len(ni_series) >= 8:
                 ttm_ni_prior = ni_series.iloc[4:8].sum(min_count=4)
                 if pd.notna(ttm_ni) and pd.notna(ttm_ni_prior) and ttm_ni_prior > 0:
@@ -504,18 +556,58 @@ def extract_quarterly_horizons(ticker, symbol: str) -> dict[str, Any]:
                         extracted["_earningsGrowth_TTM_source"] = (
                             "calculated_from_quarterly"
                         )
+                if "earningsGrowth_TTM" not in extracted:
+                    add_diagnostic(
+                        "earningsGrowth_TTM", "malformed_or_invalid_ttm_window"
+                    )
+            else:
+                add_diagnostic(
+                    "earningsGrowth_TTM",
+                    "malformed_quarterly_window"
+                    if len(ni_raw) >= 8
+                    else "insufficient_quarterly_history",
+                )
+        else:
+            reason = (
+                "malformed_quarterly_window"
+                if len(ni_raw) >= 4
+                else "insufficient_quarterly_history"
+            )
+            add_diagnostic("netIncome_TTM", reason)
+            add_diagnostic("earningsGrowth_TTM", reason)
+    elif income_available:
+        add_diagnostic("earningsGrowth_MRQ", "missing_net_income_row")
+        add_diagnostic("earningsGrowth_TTM", "missing_net_income_row")
+        add_diagnostic("netIncome_TTM", "missing_net_income_row")
+    else:
+        add_diagnostic("earningsGrowth_MRQ", "quarterly_income_unavailable")
+        add_diagnostic("earningsGrowth_TTM", "quarterly_income_unavailable")
+        add_diagnostic("netIncome_TTM", "quarterly_income_unavailable")
 
-    if qt_cf is not None and not qt_cf.empty and "Operating Cash Flow" in qt_cf.index:
-        ocf_series = qt_cf.loc["Operating Cash Flow"].dropna()
+    if cashflow_available and "Operating Cash Flow" in qt_cf.index:
+        ocf_raw = qt_cf.loc["Operating Cash Flow"]
+        ocf_series = ocf_raw.dropna()
         if len(ocf_series) >= 4:
             ttm_ocf = ocf_series.iloc[0:4].sum(min_count=4)
             if pd.notna(ttm_ocf):
                 extracted["operatingCashflow_TTM"] = float(ttm_ocf)
                 extracted["_operatingCashflow_TTM_source"] = "calculated_from_quarterly"
+            else:
+                add_diagnostic("operatingCashflow_TTM", "malformed_quarterly_window")
+        else:
+            add_diagnostic(
+                "operatingCashflow_TTM",
+                "malformed_quarterly_window"
+                if len(ocf_raw) >= 4
+                else "insufficient_quarterly_history",
+            )
+    elif cashflow_available:
+        add_diagnostic("operatingCashflow_TTM", "missing_operating_cash_flow_row")
+    else:
+        add_diagnostic("operatingCashflow_TTM", "quarterly_cashflow_unavailable")
 
     if (
-        qt_cf is not None
-        and not qt_cf.empty
+        cashflow_available
         and "Operating Cash Flow" in qt_cf.index
         and "Capital Expenditure" in qt_cf.index
     ):
@@ -528,6 +620,14 @@ def extract_quarterly_horizons(ticker, symbol: str) -> dict[str, Any]:
             if pd.notna(ttm_fcf_ocf) and pd.notna(ttm_fcf_capex):
                 extracted["freeCashflow_TTM"] = float(ttm_fcf_ocf + ttm_fcf_capex)
                 extracted["_freeCashflow_TTM_source"] = "calculated_from_quarterly"
+            else:
+                add_diagnostic("freeCashflow_TTM", "malformed_quarterly_window")
+        else:
+            add_diagnostic("freeCashflow_TTM", "insufficient_quarterly_history")
+    elif cashflow_available:
+        add_diagnostic("freeCashflow_TTM", "missing_cashflow_or_capex_row")
+    else:
+        add_diagnostic("freeCashflow_TTM", "quarterly_cashflow_unavailable")
 
     extracted_mrq_growth = _safe_float(extracted.get("revenueGrowth_MRQ"))
     ttm_growth = _safe_float(extracted.get("revenueGrowth_TTM"))
@@ -556,6 +656,13 @@ def extract_quarterly_horizons(ticker, symbol: str) -> dict[str, Any]:
             "quarterly_horizons_extracted",
             symbol=symbol,
             fields=sorted(key for key in extracted if not key.startswith("_")),
+        )
+    if diagnostics:
+        extracted["_quarterly_diagnostics"] = diagnostics
+        logger.debug(
+            "quarterly_horizon_diagnostics",
+            symbol=symbol,
+            diagnostics=diagnostics,
         )
     return extracted
 

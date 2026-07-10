@@ -53,6 +53,24 @@ def find_opportunities(
         if _normalize_verdict(analysis.verdict or "") != "BUY":
             continue
 
+        # Quick-mode BUYs are screening candidates, not investable signals — surface as
+        # REVIEW so the off-watchlist finder never proposes an order off a fast-tier
+        # verdict (the analysis itself carries a QUICK-MODE QUALIFICATION note).
+        if getattr(analysis, "is_quick_mode", False):
+            items.append(
+                ReconciliationItem(
+                    ticker=Ticker.from_yf(ticker),
+                    action="REVIEW",
+                    reason=(
+                        f"Quick-mode screening BUY ({analysis.analysis_date}) — "
+                        "re-run full analysis before acting"
+                    ),
+                    urgency="LOW",
+                    analysis=analysis,
+                )
+            )
+            continue
+
         # Opt-in BUY stability gate. Withhold a fresh BUY that is either
         # contradicted by recent same-ticker runs (verdict-noise defense) or
         # marginal (risk_tally >= margin) with an unresolved peak/transient

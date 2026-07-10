@@ -5,6 +5,7 @@ from __future__ import annotations
 from src.agents.verdict_policy import (
     maybe_demote_buy_on_blocking_flags,
     maybe_floor_verdict_to_hold,
+    maybe_qualify_buy_in_quick_mode,
 )
 from src.charts.extractors.pm_block import extract_pm_block
 
@@ -26,6 +27,18 @@ def _full_pm_output(verdict_display: str, verdict_block: str) -> str:
     """A realistic DO_NOT_INITIATE PM_BLOCK with the verdict-coupled chart fields."""
     return (
         f"### PORTFOLIO MANAGER VERDICT: {verdict_display}\n\n"
+        "```\n"
+        "=== DECISION LOGIC ===\n"
+        "Default Decision: DO NOT INITIATE\n"
+        f"Actual Decision: {verdict_display}\n"
+        "======================\n"
+        "```\n\n"
+        "### FINAL EXECUTION PARAMETERS\n\n"
+        f"**Action**: {verdict_display}\n"
+        "TRADE_BLOCK:\n"
+        "ACTION: BUY\n\n"
+        "**Action Required**:\n"
+        "Re-run analysis with verbose logging.\n\n"
         "### --- START PM_BLOCK ---\n"
         f"VERDICT: {verdict_block}\n"
         "HEALTH_ADJ: 75\nGROWTH_ADJ: 33\nRISK_TALLY: 1.0\nZONE: HIGH\n"
@@ -67,6 +80,10 @@ def test_floor_normalizes_chart_control_fields():
     assert "SHOW_VALUATION_CHART: NO" not in out
     assert "VALUATION_DISCOUNT: 0.8" in out
     assert "VALUATION_DISCOUNT: 0.0" not in out
+    assert "Actual Decision: HOLD" in out
+    assert "**Action**: HOLD" in out
+    assert "ACTION: BUY" in out
+    assert "**Action Required**:" in out
     # Downstream chart extractor must now agree the verdict is non-negative.
     block = extract_pm_block(out)
     assert block.verdict == "HOLD"
@@ -244,11 +261,17 @@ def _buy_output() -> str:
 def test_buy_demoted_when_health_score_unreliable():
     """AGS.BR 2026-07-02 shape: unreliable 56% health must not back a BUY."""
     out, demoted = maybe_demote_buy_on_blocking_flags(
-        _buy_output(), red_flags=[_UNRELIABLE], ticker="AGS.BR"
+        _buy_output()
+        + "\nActual Decision: BUY\n**Action**: BUY\nTRADE_BLOCK:\nACTION: BUY\n",
+        red_flags=[_UNRELIABLE],
+        ticker="AGS.BR",
     )
     assert demoted
     assert extract_pm_block(out).verdict == "HOLD"
     assert "### PORTFOLIO MANAGER VERDICT: HOLD" in out
+    assert "Actual Decision: HOLD" in out
+    assert "**Action**: HOLD" in out
+    assert "ACTION: BUY" in out
     assert "DETERMINISTIC VERDICT DEMOTION APPLIED" in out
     assert "HEALTH_SCORE_UNRELIABLE" in out
 
@@ -308,3 +331,38 @@ def test_demotion_skipped_when_pm_block_verdict_missing():
     )
     assert not demoted
     assert out == content
+
+
+class TestQuickModeBuyQualification:
+    """Quick-mode BUY gets a 'candidate, not investable' caveat; token stays BUY."""
+
+    def _buy(self) -> str:
+        return _pm_output("BUY", "BUY")
+
+    def test_quick_buy_gets_caveat_and_token_unchanged(self):
+        out, qualified = maybe_qualify_buy_in_quick_mode(
+            self._buy(), quick_mode=True, ticker="X"
+        )
+        assert qualified is True
+        assert "QUICK-MODE QUALIFICATION" in out
+        # Verdict token deliberately unchanged so no downstream parser breaks.
+        assert "VERDICT: BUY" in out
+
+    def test_full_mode_no_caveat(self):
+        pm = self._buy()
+        out, qualified = maybe_qualify_buy_in_quick_mode(pm, quick_mode=False)
+        assert qualified is False
+        assert out == pm
+
+    def test_quick_non_buy_untouched(self):
+        pm = _pm_output("HOLD", "HOLD")
+        out, qualified = maybe_qualify_buy_in_quick_mode(pm, quick_mode=True)
+        assert qualified is False
+        assert out == pm
+
+    def test_idempotent(self):
+        out1, _ = maybe_qualify_buy_in_quick_mode(self._buy(), quick_mode=True)
+        out2, qualified2 = maybe_qualify_buy_in_quick_mode(out1, quick_mode=True)
+        assert qualified2 is True
+        assert out2 == out1
+        assert out2.count("QUICK-MODE QUALIFICATION") == 1

@@ -169,13 +169,25 @@ def _derive_consultant_verdict(consultant_status: dict[str, Any]) -> str:
 
     Returns one of: ``REJECTED`` (hard stop), ``MAJOR_CONCERNS`` (mandate breach
     or major concerns), ``CONDITIONAL`` (conditional approval), ``CLEAN``
-    (approved), ``UNPARSED`` (ran ok but verdict unclassifiable), ``ERROR`` (ran
-    but failed), ``NOT_RUN`` (absent).
+    (approved), ``SKIPPED`` (intentionally bypassed by the quick-mode gate),
+    ``UNPARSED`` (ran ok but verdict unclassifiable), ``ERROR`` (ran but failed),
+    ``NOT_RUN`` (absent).
     """
     if not consultant_status:
         return "NOT_RUN"
     if not consultant_status.get("ok"):
         return "ERROR" if consultant_status.get("complete") else "NOT_RUN"
+
+    # The quick-mode gate bypass writes a completed, ok artifact whose content is
+    # the SKIPPED_BY_GATE sentinel (provider="bypass"; see routing.py). That is an
+    # intentional cost-saving skip, not a garbled review — surface it as SKIPPED so
+    # run_summary and the memo/source-confidence renderers don't misread the bypass
+    # as an unparseable verdict (which wrongly downgrades cross-check confidence).
+    content = consultant_status.get("content") or ""
+    if consultant_status.get("provider") == "bypass" or (
+        isinstance(content, str) and content.startswith("SKIPPED_BY_GATE")
+    ):
+        return "SKIPPED"
 
     from src.validators.supplemental_extractors import parse_consultant_conditions
 
@@ -299,7 +311,15 @@ def build_run_summary(
         "deep_model": runtime_config.deep_think_llm,
         "provider_preflight": provider_preflight or {},
         "pre_screening_result": result.get("pre_screening_result", ""),
-        "debate_rounds": result.get("investment_debate_state", {}).get("count", 0),
+        # `count` tallies debate *turns* (one Bull + one Bear per round → even), so
+        # actual rounds = count // 2 (quick=1, full=2). `debate_turns` keeps the raw value.
+        "debate_rounds": result.get("investment_debate_state", {}).get("count", 0) // 2,
+        "debate_turns": result.get("investment_debate_state", {}).get("count", 0),
+        # Honest flag: reflects whether the quick-mode qualification note was actually
+        # appended to the PM text (marker presence), never a recomputed `quick and BUY`
+        # that would lie if the hook no-ops on PM-block parse drift.
+        "verdict_qualified_by_quick_mode": "QUICK-MODE QUALIFICATION"
+        in (result.get("final_trade_decision") or ""),
         "consultant_completed": consultant_finished,
         "auditor_completed": auditor_finished,
         "consultant_finished": consultant_finished,

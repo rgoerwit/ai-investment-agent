@@ -132,6 +132,27 @@ def test_scenario_summary_warns_when_valuation_is_conditional() -> None:
     assert "conditional, not normalized fair value" in out
 
 
+def test_scenario_summary_warns_weak_buy_asymmetry_only_for_buy() -> None:
+    fundamentals = _FUNDAMENTALS.replace("CURRENT_PRICE: 100.00", "CURRENT_PRICE: 120")
+    buy_state = {
+        "final_trade_decision": "### --- START PM_BLOCK ---\nVERDICT: BUY\n### --- END PM_BLOCK ---",
+        "fundamentals_report": fundamentals,
+        "valuation_params": _VALUATION_PARAMS,
+    }
+    buy_out = format_scenario_summary(buy_state)
+    assert buy_out is not None
+    assert "BUY verdict has weak valuation asymmetry" in buy_out
+    assert "weighted IV upside" in buy_out
+
+    hold_state = {
+        **buy_state,
+        "final_trade_decision": "### --- START PM_BLOCK ---\nVERDICT: HOLD\n### --- END PM_BLOCK ---",
+    }
+    hold_out = format_scenario_summary(hold_state)
+    assert hold_out is not None
+    assert "BUY verdict has weak valuation asymmetry" not in hold_out
+
+
 def test_scenario_summary_drops_cents_on_large_nominal_values() -> None:
     """KRW/JPY-scale IVs run to thousands; two decimals there is false precision."""
     fundamentals = (

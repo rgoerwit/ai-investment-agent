@@ -16,8 +16,12 @@ shape, so quality-judge tooling that walks ``results/*.json`` can call it.
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
+
 import structlog
 
+from src.agents.fundamentals_reconciler import extract_raw_metrics_payload
 from src.data_block_utils import extract_data_block_field
 from src.reporting.state_access import (
     get_apac_regional_report,
@@ -25,12 +29,30 @@ from src.reporting.state_access import (
     get_consultant_review,
     get_effective_red_flags,
     get_fundamentals_report,
+    get_raw_fundamentals_data,
 )
+from src.validators.financial_rules import parse_ocf_amount
 
 logger = structlog.get_logger(__name__)
 
 
 SourceRow = tuple[str, str, str]
+_NUMBER_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+
+
+@dataclass(frozen=True)
+class MetricDisplaySource:
+    """Provenance for a rendered DATA_BLOCK metric.
+
+    ``selected_key`` is the raw metric key chosen for display; ``derivation_label``
+    says how that key was derived; ``provider_source`` says which provider won
+    the merge. These are separate axes and should not be collapsed.
+    """
+
+    display_field: str
+    selected_key: str
+    derivation_label: str | None
+    provider_source: str | None
 
 
 def _run_summary(state: dict) -> dict:
@@ -59,6 +81,152 @@ def _has_effective_flag(state: dict, flag_type: str) -> bool:
         isinstance(flag, dict) and str(flag.get("type", "")).upper() == target
         for flag in get_effective_red_flags(state)
     )
+
+
+def _safe_float(value: object) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _relative_match(left: float, right: float) -> bool:
+    if left == right:
+        return True
+    baseline = max(abs(left), abs(right), 1.0)
+    return abs(left - right) / baseline <= 0.02
+
+
+def _select_amount_key(
+    raw: dict,
+    display_value: str | None,
+    candidates: tuple[str, ...],
+) -> str | None:
+    parsed = parse_ocf_amount(display_value)
+    if parsed is not None:
+        for key in candidates:
+            candidate = _safe_float(raw.get(key))
+            if candidate is not None and _relative_match(parsed, candidate):
+                return key
+    for key in candidates:
+        if raw.get(key) is not None:
+            return key
+    return None
+
+
+def _select_pe_key(raw: dict, display_value: str | None) -> str | None:
+    match = _NUMBER_RE.search(display_value or "")
+    displayed = _safe_float(match.group(0).replace(",", "")) if match else None
+    trailing_pe = _safe_float(raw.get("trailingPE"))
+    if trailing_pe is not None and (
+        displayed is None or _relative_match(displayed, trailing_pe)
+    ):
+        return "trailingPE"
+
+    market_cap = _safe_float(raw.get("marketCap"))
+    net_income = _safe_float(raw.get("netIncomeToCommon"))
+    if market_cap is not None and net_income not in (None, 0):
+        calculated = market_cap / net_income
+        if displayed is None or _relative_match(displayed, calculated):
+            return "marketCap/netIncomeToCommon"
+    return None
+
+
+def _metric_source(
+    raw: dict,
+    display_field: str,
+    selected_key: str | None,
+) -> MetricDisplaySource | None:
+    if not selected_key:
+        return None
+    field_sources = raw.get("_field_sources")
+    field_sources = field_sources if isinstance(field_sources, dict) else {}
+    if "/" in selected_key:
+        parts = selected_key.split("/")
+        providers = sorted(
+            {str(field_sources.get(part)) for part in parts if field_sources.get(part)}
+        )
+        return MetricDisplaySource(
+            display_field=display_field,
+            selected_key=selected_key,
+            derivation_label="calculated_from_market_cap_net_income",
+            provider_source="+".join(providers) if providers else None,
+        )
+    return MetricDisplaySource(
+        display_field=display_field,
+        selected_key=selected_key,
+        derivation_label=raw.get(f"_{selected_key}_source"),
+        provider_source=field_sources.get(selected_key),
+    )
+
+
+def _metric_display_sources(
+    state: dict, fundamentals: str
+) -> list[MetricDisplaySource]:
+    raw = extract_raw_metrics_payload(get_raw_fundamentals_data(state))
+    if not raw:
+        return []
+    rows: list[MetricDisplaySource] = []
+    selections = (
+        (
+            "OPERATING_CASH_FLOW",
+            _select_amount_key(
+                raw,
+                extract_data_block_field(fundamentals, "OPERATING_CASH_FLOW"),
+                ("operatingCashflow_TTM", "operatingCashflow"),
+            ),
+        ),
+        (
+            "FREE_CASH_FLOW",
+            _select_amount_key(
+                raw,
+                extract_data_block_field(fundamentals, "FREE_CASH_FLOW"),
+                ("freeCashflow_TTM", "freeCashflow"),
+            ),
+        ),
+        (
+            "PE_RATIO_TTM",
+            _select_pe_key(raw, extract_data_block_field(fundamentals, "PE_RATIO_TTM")),
+        ),
+    )
+    for display_field, selected_key in selections:
+        source = _metric_source(raw, display_field, selected_key)
+        if source is not None:
+            rows.append(source)
+    return rows
+
+
+def _format_metric_source(source: MetricDisplaySource) -> str:
+    details = [f"selected {source.selected_key}"]
+    if source.derivation_label:
+        details.append(f"derivation {source.derivation_label}")
+    else:
+        details.append("derivation unavailable")
+    if source.provider_source:
+        details.append(f"provider {source.provider_source}")
+    else:
+        details.append("provider unavailable")
+    return "; ".join(details)
+
+
+def _quarterly_diagnostics(raw: dict) -> str | None:
+    diagnostics = raw.get("_quarterly_diagnostics")
+    if not isinstance(diagnostics, list):
+        return None
+    parts: list[str] = []
+    for item in diagnostics:
+        if not isinstance(item, dict):
+            continue
+        field = item.get("field")
+        reason = item.get("reason")
+        if field and reason:
+            parts.append(f"{field}: {reason}")
+        if len(parts) >= 4:
+            break
+    if not parts:
+        return None
+    suffix = "…" if len(diagnostics) > len(parts) else ""
+    return "; ".join(parts) + suffix
 
 
 def build_source_confidence_rows(state: dict) -> list[SourceRow]:
@@ -107,6 +275,20 @@ def build_source_confidence_rows(state: dict) -> list[SourceRow]:
     else:
         rows.append(("Core financials", "Not available", "LOW"))
 
+    for source in _metric_display_sources(state, fundamentals):
+        rows.append(
+            (
+                f"Metric provenance: {source.display_field}",
+                _format_metric_source(source),
+                "MEDIUM",
+            )
+        )
+
+    raw_payload = extract_raw_metrics_payload(get_raw_fundamentals_data(state))
+    quarterly_note = _quarterly_diagnostics(raw_payload)
+    if quarterly_note:
+        rows.append(("Quarterly/TTM diagnostics", quarterly_note, "MEDIUM"))
+
     summary = _run_summary(state)
     auditor_ran = bool(summary.get("auditor_completed")) or bool(
         get_auditor_report(state)
@@ -140,6 +322,8 @@ def build_source_confidence_rows(state: dict) -> list[SourceRow]:
         rows.append(
             ("Cross-model review", "Consultant review failed validation", "LOW")
         )
+    elif verdict == "SKIPPED":
+        rows.append(("Cross-model review", "Consultant bypassed (quick screen)", "—"))
     elif verdict == "UNPARSED":
         rows.append(("Cross-model review", "Consultant review unparsed", "LOW"))
     elif consultant_ran:

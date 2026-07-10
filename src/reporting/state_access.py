@@ -81,6 +81,16 @@ def get_fundamentals_report(source: Any) -> str:
     )
 
 
+def get_raw_fundamentals_data(source: Any) -> str:
+    """Return Junior Fundamentals raw metrics text from either shape."""
+    s = _safe(source)
+    return (
+        s.get("raw_fundamentals_data")
+        or (s.get("source_artifacts") or {}).get("raw_fundamentals_data")
+        or ""
+    )
+
+
 def get_valuation_params(source: Any) -> str:
     """Return the Valuation Calculator's structured-block output from either shape."""
     s = _safe(source)

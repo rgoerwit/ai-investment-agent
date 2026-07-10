@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from src.reporting.source_confidence import (
@@ -135,6 +137,95 @@ def test_build_rows_aggregator_ocf_medium_confidence() -> None:
     _, source, conf = _claim(rows, "Core financials")
     assert conf == "MEDIUM"
     assert "Aggregator" in source
+
+
+def test_build_rows_metric_provenance_uses_selected_ttm_cash_flow_key() -> None:
+    fundamentals = (
+        "### --- START DATA_BLOCK ---\n"
+        "OPERATING_CASH_FLOW: 774.37M TWD\n"
+        "FREE_CASH_FLOW: 463.42M TWD\n"
+        "PE_RATIO_TTM: 5.18\n"
+        "OPERATING_CASH_FLOW_SOURCE: JUNIOR\n"
+        "### --- END DATA_BLOCK ---\n"
+    )
+    raw = {
+        "operatingCashflow": 792_112_000,
+        "_operatingCashflow_source": "extracted_from_statements",
+        "operatingCashflow_TTM": 774_369_000,
+        "_operatingCashflow_TTM_source": "calculated_from_quarterly",
+        "freeCashflow": 361_403_616,
+        "_freeCashflow_source": "calculated_from_statements",
+        "freeCashflow_TTM": 463_420_000,
+        "_freeCashflow_TTM_source": "calculated_from_quarterly",
+        "trailingPE": 5.18,
+        "_field_sources": {
+            "operatingCashflow_TTM": "yfinance",
+            "freeCashflow_TTM": "yfinance",
+            "trailingPE": "eodhd",
+        },
+    }
+    rows = build_source_confidence_rows(
+        {
+            "fundamentals_report": fundamentals,
+            "raw_fundamentals_data": json.dumps(raw),
+        }
+    )
+    _, ocf_source, _ = _claim(rows, "Metric provenance: OPERATING_CASH_FLOW")
+    assert "selected operatingCashflow_TTM" in ocf_source
+    assert "derivation calculated_from_quarterly" in ocf_source
+    assert "provider yfinance" in ocf_source
+
+    _, fcf_source, _ = _claim(rows, "Metric provenance: FREE_CASH_FLOW")
+    assert "selected freeCashflow_TTM" in fcf_source
+
+
+def test_build_rows_metric_provenance_reports_calculated_pe_fallback() -> None:
+    fundamentals = (
+        "### --- START DATA_BLOCK ---\n"
+        "PE_RATIO_TTM: 5.18\n"
+        "OPERATING_CASH_FLOW_SOURCE: JUNIOR\n"
+        "### --- END DATA_BLOCK ---\n"
+    )
+    raw = {
+        "marketCap": 85_058_281_472,
+        "netIncomeToCommon": 16_418_440_192,
+        "_field_sources": {
+            "marketCap": "yfinance",
+            "netIncomeToCommon": "yfinance",
+        },
+    }
+    rows = build_source_confidence_rows(
+        {
+            "fundamentals_report": fundamentals,
+            "source_artifacts": {"raw_fundamentals_data": json.dumps(raw)},
+        }
+    )
+    _, pe_source, _ = _claim(rows, "Metric provenance: PE_RATIO_TTM")
+    assert "selected marketCap/netIncomeToCommon" in pe_source
+    assert "calculated_from_market_cap_net_income" in pe_source
+    assert "provider yfinance" in pe_source
+
+
+def test_build_rows_surfaces_quarterly_diagnostics() -> None:
+    raw = {
+        "_quarterly_diagnostics": [
+            {
+                "field": "revenueGrowth_TTM",
+                "status": "unavailable",
+                "reason": "insufficient_quarterly_history",
+            },
+            {
+                "field": "freeCashflow_TTM",
+                "status": "unavailable",
+                "reason": "missing_cashflow_or_capex_row",
+            },
+        ]
+    }
+    rows = build_source_confidence_rows({"raw_fundamentals_data": json.dumps(raw)})
+    _, source, conf = _claim(rows, "Quarterly/TTM diagnostics")
+    assert conf == "MEDIUM"
+    assert "revenueGrowth_TTM: insufficient_quarterly_history" in source
+    assert "freeCashflow_TTM: missing_cashflow_or_capex_row" in source
 
 
 def test_build_rows_no_fundamentals_low_confidence() -> None:
