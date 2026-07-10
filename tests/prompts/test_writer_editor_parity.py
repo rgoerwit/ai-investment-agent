@@ -69,6 +69,8 @@ SHARED_INVARIANTS = [
     "_SCORE_CONSISTENCY: SUSPECT",
     "GROWTH_DATA_STALE",
     "OCF_FILING_VALUE_UNCORROBORATED",
+    # capital-markets corporate-action carry-through (writer must include, editor audits omission)
+    "(new/cross-listing, ADR debut, major raise, spin-off, delisting)",
     "ANALYST_COVERAGE_TOTAL_EST",
     "low English-language aggregator visibility",
     # revision meta-block protocol
