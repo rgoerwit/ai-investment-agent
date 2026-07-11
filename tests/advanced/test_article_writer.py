@@ -153,8 +153,23 @@ class TestVoiceSampleProfilePriority:
     """Hermetic tests locking profile priority, marker fix, and distinct headers."""
 
     def test_marker_matches_prompt_literal(self, tmp_path):
-        """Exact marker '=== DISTILLED STYLE PROFILE ===' appears as its own line."""
+        """The marker the prompt quotes appears verbatim as its own line.
+
+        Drift guard: the marker is EXTRACTED from prompts/writer.json, not
+        hardcoded — if the prompt renames/drops the quoted marker or the
+        loader stops emitting it, this fails.
+        """
+        import json
+
         from src.article_writer import ArticleWriter
+
+        prompt = json.loads(Path("prompts/writer.json").read_text(encoding="utf-8"))
+        match = re.search(
+            r'block marked "(=== DISTILLED STYLE PROFILE ===)"',
+            prompt["system_message"],
+        )
+        assert match, "writer.json no longer quotes the profile marker"
+        marker = match.group(1)
 
         # Create profile and one raw sample
         profile_file = tmp_path / "style_profile.md"
@@ -168,13 +183,8 @@ class TestVoiceSampleProfilePriority:
 
         samples = writer._load_voice_samples()
 
-        # The exact marker must appear as a standalone line (per the prompt)
-        assert "=== DISTILLED STYLE PROFILE ===" in samples
-        # Verify marker is on its own line (may start the string, but must have newline after)
-        lines = samples.split("\n")
-        marker_lines = [
-            line for line in lines if line.strip() == "=== DISTILLED STYLE PROFILE ==="
-        ]
+        # The prompt's exact marker must appear as a standalone line
+        marker_lines = [line for line in samples.split("\n") if line.strip() == marker]
         assert (
             len(marker_lines) == 1
         ), "Marker should appear exactly once on its own line"
@@ -258,7 +268,7 @@ class TestVoiceSampleProfilePriority:
         assert "=== DISTILLED STYLE PROFILE ===" in samples
         assert "--- Writing Sample:" in samples
         # They should not use each other's format
-        assert not samples.count("--- DISTILLED") > 0
+        assert "--- DISTILLED" not in samples
 
 
 class TestImageManifest:

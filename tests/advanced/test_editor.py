@@ -708,6 +708,55 @@ class TestEditorialLoopIntegration:
         assert feedback["verdict"] == "APPROVED"
 
     @pytest.mark.asyncio
+    async def test_edit_keeps_previous_draft_when_revision_fails(self):
+        """A failed revision (e.g. truncated output) must not lose the draft.
+
+        The revise call raises; edit() keeps the last complete draft, runs
+        the final review, and returns instead of propagating.
+        """
+        from src.article_writer import ArticleWriter
+
+        writer = ArticleWriter()
+        editor = _create_article_editor()
+
+        review_count = 0
+
+        async def mock_review(*args, **kwargs):
+            nonlocal review_count
+            review_count += 1
+            return {
+                "verdict": "REVISE",
+                "factual_errors": [
+                    {"location": "X", "claim": "Y", "ground_truth": "Z"}
+                ],
+                "cuts": [],
+                "style_issues": [],
+                "confidence": 0.5,
+            }
+
+        editor.review = mock_review
+        editor.llm = MagicMock()
+
+        writer.revise = MagicMock(
+            side_effect=RuntimeError(
+                "Writer LLM hit the output token limit before finishing"
+            )
+        )
+
+        draft = "# Complete Draft\n\nViable content."
+        result, feedback = await editor.edit(
+            writer=writer,
+            article_draft=draft,
+            ticker="TEST",
+            company_name="Test Corp",
+        )
+
+        assert result == draft, "previous complete draft must be preserved"
+        assert writer.revise.call_count == 1
+        # Loop review + post-loop final review both ran
+        assert review_count == 2
+
+    @pytest.mark.asyncio
     async def test_edit_respects_max_revisions(self):
         """edit() should stop after MAX_REVISIONS iterations."""
         from src.article_writer import ArticleWriter

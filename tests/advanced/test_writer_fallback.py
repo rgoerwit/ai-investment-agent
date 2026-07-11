@@ -16,6 +16,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 import src.llms as llms
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -202,9 +204,10 @@ class TestHonestFallbackEventNames:
 class TestTruncationGuard:
     @patch("src.article_writer.get_model_name", return_value="gemini-3.5-flash")
     @patch("src.article_writer.create_writer_llm")
-    def test_max_tokens_finish_reason_emits_warning(
+    def test_max_tokens_finish_reason_raises(
         self, mock_create_writer, _mock_model_name, monkeypatch
     ):
+        """Truncated output is a hard error — never return a clipped draft."""
         import src.article_writer as aw
 
         response = MagicMock()
@@ -214,7 +217,8 @@ class TestTruncationGuard:
 
         recorder = _RecordingLogger()
         monkeypatch.setattr(aw, "logger", recorder)
-        writer._invoke_writer([MagicMock()])
+        with pytest.raises(RuntimeError, match="output token limit"):
+            writer._invoke_writer([MagicMock()])
 
         truncations = [
             kwargs

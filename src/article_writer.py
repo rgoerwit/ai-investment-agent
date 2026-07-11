@@ -1980,13 +1980,26 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
                     max_revisions=self.MAX_REVISIONS,
                 )
 
-                current_draft = writer.revise(
-                    original_draft=current_draft,
-                    editor_feedback=feedback,
-                    ticker=ticker,
-                    company_name=company_name,
-                    governance_context=governance_context,
-                )
+                try:
+                    current_draft = writer.revise(
+                        original_draft=current_draft,
+                        editor_feedback=feedback,
+                        ticker=ticker,
+                        company_name=company_name,
+                        governance_context=governance_context,
+                    )
+                except Exception as e:
+                    # A failed revision (e.g. truncated output, all fallback
+                    # tiers down) must not destroy the complete draft we
+                    # already hold — keep it and let the final review below
+                    # apply its caveats.
+                    logger.error(
+                        "article_revision_failed_keeping_previous_draft",
+                        ticker=ticker,
+                        revision=revision_count,
+                        **summarize_exception(e, operation="editor:revise_loop"),
+                    )
+                    break
 
             # Max revisions reached, do final review
             final_feedback = self._flag_failed_references(
