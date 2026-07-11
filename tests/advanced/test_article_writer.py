@@ -80,9 +80,14 @@ class TestVoiceSamplesLoading:
 
         samples = writer._load_voice_samples()
 
-        # Should contain content from at least one sample
+        # Should contain content from at least one sample. The real
+        # writing_samples/ dir carries a distilled style_profile.md, which
+        # gets a distinct header from raw prose samples (see
+        # _load_voice_samples) — accept either.
         assert len(samples) > 0
-        assert "--- Sample:" in samples
+        assert (
+            "--- Writing Sample:" in samples or "=== DISTILLED STYLE PROFILE" in samples
+        )
 
     def test_respects_max_chars_limit(self):
         """Test that samples are truncated to max_chars."""
@@ -102,9 +107,12 @@ class TestVoiceSamplesLoading:
         samples = writer._load_voice_samples()
 
         # Should be truncated - per-file cap of 50 chars each
-        # Note: last file is included even if it puts us over max_sample_chars
-        # So with 50 char/file + ~50 header each, 2 files = ~200 chars
-        assert len(samples) <= 250  # Allow for 2 files with headers
+        # Note: last file is included even if it puts us over max_sample_chars.
+        # When a style_profile.md is present it's always the first file loaded
+        # (see _load_voice_samples), so with 50 char/file + the longer
+        # descriptive headers used to distinguish profile vs. raw samples,
+        # 2 files land around 300 chars.
+        assert len(samples) <= 350  # Allow for 2 files with headers
 
     def test_returns_empty_when_no_samples(self):
         """Test returns empty string when no samples found."""
@@ -139,6 +147,118 @@ class TestVoiceSamplesLoading:
             # At least one filename should appear
             found_filename = any(f.name in samples for f in sample_files)
             assert found_filename, "Sample filenames should be included"
+
+
+class TestVoiceSampleProfilePriority:
+    """Hermetic tests locking profile priority, marker fix, and distinct headers."""
+
+    def test_marker_matches_prompt_literal(self, tmp_path):
+        """Exact marker '=== DISTILLED STYLE PROFILE ===' appears as its own line."""
+        from src.article_writer import ArticleWriter
+
+        # Create profile and one raw sample
+        profile_file = tmp_path / "style_profile.md"
+        profile_file.write_text("Profile content here", encoding="utf-8")
+        raw_file = tmp_path / "sample1.txt"
+        raw_file.write_text("Raw sample", encoding="utf-8")
+
+        writer = ArticleWriter.__new__(ArticleWriter)
+        writer.samples_dir = tmp_path
+        writer.prompt_config = {"metadata": {"max_sample_chars": 50000}}
+
+        samples = writer._load_voice_samples()
+
+        # The exact marker must appear as a standalone line (per the prompt)
+        assert "=== DISTILLED STYLE PROFILE ===" in samples
+        # Verify marker is on its own line (may start the string, but must have newline after)
+        lines = samples.split("\n")
+        marker_lines = [
+            line for line in lines if line.strip() == "=== DISTILLED STYLE PROFILE ==="
+        ]
+        assert (
+            len(marker_lines) == 1
+        ), "Marker should appear exactly once on its own line"
+
+    def test_profile_appears_first(self, tmp_path):
+        """Profile block appears before raw writing samples."""
+        from src.article_writer import ArticleWriter
+
+        profile_file = tmp_path / "style_profile.md"
+        profile_file.write_text("Profile", encoding="utf-8")
+        raw_file = tmp_path / "sample1.txt"
+        raw_file.write_text("Raw", encoding="utf-8")
+
+        writer = ArticleWriter.__new__(ArticleWriter)
+        writer.samples_dir = tmp_path
+        writer.prompt_config = {"metadata": {"max_sample_chars": 50000}}
+
+        samples = writer._load_voice_samples()
+
+        profile_pos = samples.find("=== DISTILLED STYLE PROFILE")
+        raw_pos = samples.find("--- Writing Sample:")
+        assert profile_pos != -1, "Profile should be present"
+        assert raw_pos != -1, "Raw sample should be present"
+        assert profile_pos < raw_pos, "Profile must appear before raw samples"
+
+    def test_raw_pool_capped_at_constant(self, tmp_path):
+        """Raw writing samples limited to RAW_SAMPLES_WHEN_PROFILE_PRESENT."""
+        from src.article_writer import RAW_SAMPLES_WHEN_PROFILE_PRESENT, ArticleWriter
+
+        profile_file = tmp_path / "style_profile.md"
+        profile_file.write_text("Profile", encoding="utf-8")
+
+        # Create 6 raw files (more than the constant)
+        for i in range(6):
+            (tmp_path / f"sample{i}.txt").write_text(f"Sample {i}", encoding="utf-8")
+
+        writer = ArticleWriter.__new__(ArticleWriter)
+        writer.samples_dir = tmp_path
+        writer.prompt_config = {"metadata": {"max_sample_chars": 50000}}
+
+        samples = writer._load_voice_samples()
+
+        # Count raw sample blocks (should be capped)
+        raw_count = samples.count("--- Writing Sample:")
+        assert raw_count == RAW_SAMPLES_WHEN_PROFILE_PRESENT
+
+    def test_profile_not_in_raw_pool(self, tmp_path):
+        """Profile appears exactly once, never in the raw sample count."""
+        from src.article_writer import ArticleWriter
+
+        profile_file = tmp_path / "style_profile.md"
+        profile_file.write_text("Profile", encoding="utf-8")
+        (tmp_path / "sample1.txt").write_text("Sample", encoding="utf-8")
+
+        writer = ArticleWriter.__new__(ArticleWriter)
+        writer.samples_dir = tmp_path
+        writer.prompt_config = {"metadata": {"max_sample_chars": 50000}}
+
+        samples = writer._load_voice_samples()
+
+        # Profile marker should appear exactly once
+        profile_count = samples.count("=== DISTILLED STYLE PROFILE ===")
+        assert profile_count == 1
+
+    def test_distinct_headers_profile_vs_raw(self, tmp_path):
+        """Profile and raw samples use distinct headers."""
+        from src.article_writer import ArticleWriter
+
+        profile_file = tmp_path / "style_profile.md"
+        profile_file.write_text("Profile", encoding="utf-8")
+        raw_file = tmp_path / "sample1.txt"
+        raw_file.write_text("Raw", encoding="utf-8")
+
+        writer = ArticleWriter.__new__(ArticleWriter)
+        writer.samples_dir = tmp_path
+        writer.prompt_config = {"metadata": {"max_sample_chars": 50000}}
+
+        samples = writer._load_voice_samples()
+
+        # Profile uses "=== ... ===" style, raw uses "--- ... ---" style
+        assert "=== DISTILLED STYLE PROFILE ===" in samples
+        assert "--- Writing Sample:" in samples
+        # They should not use each other's format
+        assert not samples.count("--- DISTILLED") > 0
 
 
 class TestImageManifest:
@@ -1058,6 +1178,26 @@ class TestWriterFallbackChainRuntime:
 
         assert writer.writer_fell_back is False
         mock_chain.assert_not_called()
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_truncated_output_raises_error(self, mock_create_writer):
+        """MAX_TOKENS/LENGTH finish_reason raises RuntimeError, not silent skip."""
+        primary = _mock_llm("claude-opus-4-8", "# Article\n\n[truncated]")
+        primary.invoke.return_value.response_metadata = {"finish_reason": "MAX_TOKENS"}
+        writer = self._writer(mock_create_writer, primary)
+
+        with pytest.raises(RuntimeError, match="output token limit"):
+            writer._invoke_writer([MagicMock()])
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_normal_finish_reason_does_not_raise(self, mock_create_writer):
+        """STOP/END_TURN finish_reason succeeds normally."""
+        primary = _mock_llm("claude-opus-4-8", "# Article\n\nComplete.")
+        primary.invoke.return_value.response_metadata = {"finish_reason": "STOP"}
+        writer = self._writer(mock_create_writer, primary)
+
+        article = writer._invoke_writer([MagicMock()])
+        assert "Article" in article
 
 
 class TestWriterFellBackInitStamp:

@@ -36,6 +36,12 @@ from src.tooling.runtime import ToolInvocation
 # Maximum characters for fact-check context (controls token usage)
 MAX_FACT_CHECK_CHARS = 1500
 
+# When a distilled style profile is present, it replaces the full
+# char-budgeted raw-sample set with itself + a small number of raw
+# samples for texture (see ArticleWriter._load_voice_samples).
+STYLE_PROFILE_FILENAME = "style_profile.md"
+RAW_SAMPLES_WHEN_PROFILE_PRESENT = 3
+
 logger = structlog.get_logger(__name__)
 
 # Default fallback prompt config if prompts/writer.json is missing
@@ -400,6 +406,14 @@ class ArticleWriter:
         """
         Load writing samples to establish author voice.
 
+        If ``writing_samples/style_profile.md`` exists (a distilled voice
+        reference), it is always included first and the raw-sample pool is
+        capped at RAW_SAMPLES_WHEN_PROFILE_PRESENT files instead of being
+        loaded up to the full char budget — the profile already carries the
+        distilled signal, so more raw text is diminishing texture, not more
+        voice fidelity. Falls back to the full char-budgeted set when no
+        profile is present.
+
         Args:
             max_chars: Maximum total characters to include (default from config)
 
@@ -417,20 +431,33 @@ class ArticleWriter:
             )
             return ""
 
-        samples = []
-        total_chars = 0
-
         # Load .txt and .md files, randomized for variety across runs
-        sample_files = list(self.samples_dir.glob("*.txt")) + list(
+        all_files = list(self.samples_dir.glob("*.txt")) + list(
             self.samples_dir.glob("*.md")
         )
-        random.shuffle(sample_files)
 
-        if not sample_files:
+        if not all_files:
             logger.warning("no_writing_samples_found", path=str(self.samples_dir))
             return ""
 
-        for sample_file in sample_files:
+        profile_path = self.samples_dir / STYLE_PROFILE_FILENAME
+        style_profile_used = profile_path in all_files
+        raw_files = [f for f in all_files if f != profile_path]
+        random.shuffle(raw_files)
+
+        if style_profile_used:
+            ordered_files = [
+                profile_path,
+                *raw_files[:RAW_SAMPLES_WHEN_PROFILE_PRESENT],
+            ]
+        else:
+            ordered_files = raw_files
+
+        samples = []
+        total_chars = 0
+        loaded_files: list[str] = []
+
+        for sample_file in ordered_files:
             try:
                 content = sample_file.read_text(encoding="utf-8")
 
@@ -438,7 +465,15 @@ class ArticleWriter:
                 if len(content) > max_per_file:
                     content = content[:max_per_file] + "\n[...truncated]"
 
-                samples.append(f"--- Sample: {sample_file.name} ---\n{content}")
+                if sample_file == profile_path:
+                    header = (
+                        "=== DISTILLED STYLE PROFILE ===\n"
+                        "(guidance about the voice — not prose to imitate verbatim)"
+                    )
+                else:
+                    header = f"--- Writing Sample: {sample_file.name} (imitate this prose) ---"
+                samples.append(f"{header}\n{content}")
+                loaded_files.append(sample_file.name)
                 total_chars += len(content)
 
                 # Check limit AFTER adding - ensures last file is included
@@ -456,7 +491,8 @@ class ArticleWriter:
             "loaded_writing_samples",
             count=len(samples),
             total_chars=total_chars,
-            files=[f.name for f in sample_files[: len(samples)]],
+            files=loaded_files,
+            style_profile_used=style_profile_used,
         )
 
         return "\n\n".join(samples)
@@ -818,16 +854,21 @@ class ArticleWriter:
 
         # 0. Truncation guard: a MAX_TOKENS/LENGTH finish means the model ran out
         # of output budget mid-generation (e.g. Gemini hidden reasoning eating the
-        # shared completion pool). Surface it loudly instead of silently saving a
-        # mid-sentence article. (June 2026 1928.T fallback failure.)
+        # shared completion pool). Raise instead of silently saving a mid-sentence
+        # article. (June 2026 1928.T fallback failure.)
         finish_reason = str(
             (getattr(response, "response_metadata", {}) or {}).get("finish_reason", "")
         ).upper()
         if finish_reason in ("MAX_TOKENS", "LENGTH"):
-            logger.warning(
+            logger.error(
                 "writer_output_truncated",
                 finish_reason=finish_reason,
                 model=get_model_name(self.llm),
+            )
+            raise RuntimeError(
+                f"Writer LLM hit the output token limit before finishing the "
+                f"article (finish_reason={finish_reason}). Refusing to return a "
+                f"truncated draft."
             )
 
         # 1. Extract text, filtering out thinking blocks
