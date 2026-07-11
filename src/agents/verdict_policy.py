@@ -26,6 +26,7 @@ import re
 import structlog
 
 from src.agents.pm_verdict_metadata import pm_verdict_metadata_from_text
+from src.charts.extractors.valuation import is_weak_buy_asymmetry
 from src.validators.metric_extractor import extract_metrics
 
 logger = structlog.get_logger(__name__)
@@ -157,6 +158,45 @@ def maybe_qualify_buy_in_quick_mode(
         "full mode before acting.\n"
     )
     logger.info("buy_qualified_quick_mode", ticker=ticker)
+    return content_str.rstrip() + note, True
+
+
+def maybe_qualify_weak_asymmetry_buy(
+    content_str: str,
+    *,
+    weighted_upside: float | None,
+    downside_probability: float | None,
+    ticker: str = "UNKNOWN",
+) -> tuple[str, bool]:
+    """Append a 'weak valuation asymmetry' caveat to a BUY with thin upside.
+
+    A BUY that trips ``is_weak_buy_asymmetry`` (thin probability-weighted
+    intrinsic-value upside, or high downside probability — thresholds in
+    ``src/thesis_constants.py``, shared with the memo valuation line) is not a
+    clean buy. Mirrors ``maybe_qualify_buy_in_quick_mode``: appends a caveat
+    note but leaves the ``VERDICT: BUY`` token intact so no downstream parser
+    (charts, article, IBKR, run-summary) changes — the note rides the persisted
+    PM text, and the run-summary flag is derived from marker presence, not this
+    return value.
+
+    Conservative and idempotent: fires only on a BUY that trips the shared
+    predicate, and never a second time. Returns ``(content_str, qualified)``.
+    """
+    if weighted_upside is None:
+        return content_str, False
+    if pm_verdict_metadata_from_text(content_str).verdict != "BUY":
+        return content_str, False
+    if not is_weak_buy_asymmetry(weighted_upside, downside_probability or 0.0):
+        return content_str, False
+    if "WEAK VALUATION ASYMMETRY" in content_str:
+        return content_str, True
+    note = (
+        "\n\n> **WEAK VALUATION ASYMMETRY — STARTER/VERIFY, NOT A CLEAN BUY**\n"
+        f"> Weighted-IV upside is only {weighted_upside * 100:.1f}% with "
+        f"{(downside_probability or 0.0):.0f}% downside probability. Size as a "
+        "starter and confirm the entry before adding.\n"
+    )
+    logger.info("buy_qualified_weak_asymmetry", ticker=ticker)
     return content_str.rstrip() + note, True
 
 

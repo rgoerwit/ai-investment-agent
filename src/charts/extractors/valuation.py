@@ -22,6 +22,10 @@ from src.data_block_utils import (
 from src.data_block_utils import (
     extract_last_fenced_block,
 )
+from src.thesis_constants import (
+    WEAK_BUY_DOWNSIDE_PROBABILITY,
+    WEAK_BUY_MIN_WEIGHTED_UPSIDE,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -626,6 +630,61 @@ def scenario_valuation_caveat(scenarios: object | None) -> str | None:
             "but no lower normalized EPS baseline was available."
         )
     return None
+
+
+def parse_numeric_field(raw: str | None) -> float | None:
+    """First numeric token of a DATA_BLOCK-style field ('4045.00 JPY' → 4045.0).
+
+    Single shared parser — previously duplicated as ``_parse_numeric_value``
+    (reporting/memo.py) and ``_parse_price_value`` (agents/decision_nodes.py).
+    """
+    if not raw:
+        return None
+    match = re.search(r"[-+]?\d[\d,]*(?:\.\d+)?", str(raw))
+    if not match:
+        return None
+    try:
+        return float(match.group(0).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def scenario_upside_metrics(
+    scenarios: "ValuationScenarios | None", current_price: float | None
+) -> tuple[float, float] | None:
+    """(weighted-IV upside fraction, downside probability percent), or None.
+
+    Single seam for the weak-asymmetry inputs — the memo valuation line and the
+    PM node previously computed these independently (verbatim duplication).
+    Returns None when scenarios are absent, the price is missing/non-positive,
+    or ``weighted_iv`` is falsy.
+    """
+    if scenarios is None or not current_price or current_price <= 0:
+        return None
+    if not scenarios.weighted_iv:
+        return None
+    weighted_upside = (scenarios.weighted_iv / current_price) - 1.0
+    downside_probability = sum(
+        scenario.probability
+        for scenario, intrinsic_value in (
+            (scenarios.bear, scenarios.bear_iv),
+            (scenarios.base, scenarios.base_iv),
+            (scenarios.bull, scenarios.bull_iv),
+        )
+        if intrinsic_value < current_price
+    )
+    return weighted_upside, downside_probability
+
+
+def is_weak_buy_asymmetry(weighted_upside: float, downside_probability: float) -> bool:
+    """Shared weak-BUY predicate — memo warning ≡ PM verdict qualifier.
+
+    ``weighted_upside`` is a fraction; ``downside_probability`` is percent
+    (0-100). Thresholds live in ``src/thesis_constants.py``.
+    """
+    return (weighted_upside < WEAK_BUY_MIN_WEIGHTED_UPSIDE) or (
+        downside_probability >= WEAK_BUY_DOWNSIDE_PROBABILITY
+    )
 
 
 def format_iv(value: float) -> str:

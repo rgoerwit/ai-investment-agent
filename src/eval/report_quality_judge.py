@@ -126,10 +126,17 @@ def _has_scenario_valuation(markdown: str, saved: dict | None) -> bool:
 
 
 _RESOLUTION_TOKENS = ("CONSULTANT_RESOLUTION", "APAC_RESOLUTION", "AUDITOR_RESOLUTION")
+# Rendered prose form of the unresolved-auditor stub: the report layer rewrites
+# the NOT_PROVIDED/UNVERIFIABLE machine stub into "> **Auditor note:** …"
+# (report_generator._reformat_unresolved_auditor_block), so the raw token no
+# longer appears in that case. Matched unbolded to stay decoupled from styling.
+_RESOLUTION_PROSE_MARKERS = ("Auditor note:",)
 
 
 def _has_specialist_resolution(markdown: str) -> bool:
-    return any(token in markdown for token in _RESOLUTION_TOKENS)
+    return any(
+        token in markdown for token in (*_RESOLUTION_TOKENS, *_RESOLUTION_PROSE_MARKERS)
+    )
 
 
 def _has_source_confidence(markdown: str) -> bool:

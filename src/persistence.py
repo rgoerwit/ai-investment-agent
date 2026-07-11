@@ -320,6 +320,10 @@ def build_run_summary(
         # that would lie if the hook no-ops on PM-block parse drift.
         "verdict_qualified_by_quick_mode": "QUICK-MODE QUALIFICATION"
         in (result.get("final_trade_decision") or ""),
+        # Honest flag: marker presence of the weak-asymmetry BUY caveat, same
+        # rationale as verdict_qualified_by_quick_mode above.
+        "verdict_weak_valuation_asymmetry": "WEAK VALUATION ASYMMETRY"
+        in (result.get("final_trade_decision") or ""),
         "consultant_completed": consultant_finished,
         "auditor_completed": auditor_finished,
         "consultant_finished": consultant_finished,

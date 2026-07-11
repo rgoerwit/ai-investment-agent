@@ -71,6 +71,7 @@ class ThesisMetrics:
 
     # Valuation (lower = better)
     pe_ratio: float | None = None
+    pe_pass: bool | None = None
     peg_ratio: float | None = None
 
     # Hard fail checks
@@ -142,13 +143,32 @@ class ThesisVisualizer:
             metrics.growth_score = float(growth_match.group(1))
 
         # P/E Ratio: 11.80 (PEG: 0.16) - PASS
-        pe_match = re.search(
-            r"\*?\*?P/?E\s*(?:Ratio)?\*?\*?[:\s]*(\d+(?:\.\d+)?)",
+        # Primary: anchor to the gate line and capture BOTH the number and the
+        # PM's verdict token. Require the literal word "Ratio" (excludes
+        # "Forward P/E 19.2" and "SECTOR_MEDIAN_PE 25.00" concern-bullet numbers,
+        # neither of which carries "Ratio") and a word-bounded verdict token
+        # (excludes prose "passes"/"fails"). pe_pass reflects the PM's actual
+        # gate decision rather than a re-derived pe_ratio <= PE_MAX (P/E <= 18 is
+        # a soft thesis target, not a hard fail).
+        pe_gate = re.search(
+            r"\*?\*?P/?E\s+Ratio\*?\*?[:\s]*(\d+(?:\.\d+)?)"
+            r"[^\n]*?\b(PASS|FAIL|MARGINAL)\b",
             self.text,
             re.IGNORECASE,
         )
-        if pe_match:
-            metrics.pe_ratio = float(pe_match.group(1))
+        if pe_gate:
+            metrics.pe_ratio = float(pe_gate.group(1))
+            metrics.pe_pass = pe_gate.group(2).upper() in ("PASS", "MARGINAL")
+        else:
+            # Fallback: label-anchored number only (legacy/minimal PM text with
+            # no verdict token). Still requires "Ratio" to avoid the greedy match.
+            pe_num = re.search(
+                r"\*?\*?P/?E\s+Ratio\*?\*?[:\s]*(\d+(?:\.\d+)?)",
+                self.text,
+                re.IGNORECASE,
+            )
+            if pe_num:
+                metrics.pe_ratio = float(pe_num.group(1))
 
         peg_match = re.search(r"PEG[:\s()]*(\d+(?:\.\d+)?)", self.text, re.IGNORECASE)
         if peg_match:
@@ -347,10 +367,21 @@ class ThesisVisualizer:
                 bar = self._bar(
                     m.pe_ratio, self.PE_MAX * 1.5
                 )  # Scale to 27 for visibility
-                check = self._check(m.pe_ratio <= self.PE_MAX, c)
+                # Prefer the PM's parsed gate verdict; fall back to the soft
+                # threshold only when the verdict token wasn't captured.
+                pe_ok = (
+                    m.pe_pass if m.pe_pass is not None else (m.pe_ratio <= self.PE_MAX)
+                )
+                check = self._check(pe_ok, c)
+                # When the PM's verdict disagrees with the raw threshold (e.g.
+                # a soft-target PASS at 19.0 > 18), "(max 18)" would contradict
+                # the checkmark — label the row as PM-gated instead.
+                threshold_ok = m.pe_ratio <= self.PE_MAX
+                suffix = (
+                    f"(max {self.PE_MAX:.0f})" if pe_ok == threshold_ok else "(PM gate)"
+                )
                 lines.append(
-                    f"P/E Ratio         {bar} {m.pe_ratio:5.1f}  {check} "
-                    f"(max {self.PE_MAX:.0f})"
+                    f"P/E Ratio         {bar} {m.pe_ratio:5.1f}  {check} {suffix}"
                 )
 
             if m.peg_ratio is not None:

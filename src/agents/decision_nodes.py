@@ -24,6 +24,7 @@ from src.agents.verdict_policy import (
     maybe_demote_buy_on_blocking_flags,
     maybe_floor_verdict_to_hold,
     maybe_qualify_buy_in_quick_mode,
+    maybe_qualify_weak_asymmetry_buy,
 )
 from src.data_block_utils import (
     extract_data_block_field,
@@ -144,18 +145,6 @@ def _value_trap_capital_context(
         )
         or "",
     }
-
-
-def _parse_price_value(raw: str | None) -> float | None:
-    if not raw:
-        return None
-    match = re.search(r"[-+]?\d[\d,]*(?:\.\d+)?", str(raw))
-    if not match:
-        return None
-    try:
-        return float(match.group(0).replace(",", ""))
-    except ValueError:
-        return None
 
 
 _STRICT_PM_ADDENDUM = """
@@ -1017,10 +1006,16 @@ NEUTRAL ANALYST (Balanced):
         from src.charts.extractors.valuation import (
             extract_valuation_scenarios_for_fundamentals,
             format_iv,
+            parse_numeric_field,
+            scenario_upside_metrics,
         )
 
         valuation_params = get_valid_artifact_content(state, "valuation_params")
         scenarios = None
+        # Hoisted to function scope so the post-PM weak-asymmetry qualifier can
+        # reuse them (they are otherwise bound only inside the price branch).
+        weighted_upside: float | None = None
+        downside_probability: float | None = None
         if valuation_params and fundamentals:
             try:
                 scenarios = extract_valuation_scenarios_for_fundamentals(
@@ -1034,22 +1029,14 @@ NEUTRAL ANALYST (Balanced):
                 )
                 scenarios = None
         if scenarios is not None:
-            current_price = _parse_price_value(
+            current_price = parse_numeric_field(
                 extract_data_block_field(fundamentals, "CURRENT_PRICE")
             )
             weighted_upside_text = ""
             downside_probability_text = ""
-            if current_price and current_price > 0 and scenarios.weighted_iv:
-                weighted_upside = (scenarios.weighted_iv / current_price) - 1.0
-                downside_probability = sum(
-                    scenario.probability
-                    for scenario, intrinsic_value in (
-                        (scenarios.bear, scenarios.bear_iv),
-                        (scenarios.base, scenarios.base_iv),
-                        (scenarios.bull, scenarios.bull_iv),
-                    )
-                    if intrinsic_value < current_price
-                )
+            upside_metrics = scenario_upside_metrics(scenarios, current_price)
+            if upside_metrics is not None:
+                weighted_upside, downside_probability = upside_metrics
                 weighted_upside_text = (
                     f", implied upside {weighted_upside * 100:.1f}% vs current price "
                     f"{format_iv(current_price)}"
@@ -1300,6 +1287,12 @@ RISK TEAM DEBATE:
                 quick_mode=quick_mode,
                 ticker=ticker,
             )
+            content_str, weak_asymmetry_qualified = maybe_qualify_weak_asymmetry_buy(
+                content_str,
+                weighted_upside=weighted_upside,
+                downside_probability=downside_probability,
+                ticker=ticker,
+            )
             content_str, pm_claim_caveats = audit_pm_claims(
                 content_str,
                 fundamentals=fundamentals,
@@ -1328,6 +1321,7 @@ RISK TEAM DEBATE:
                 verdict_floored_to_hold=verdict_floored,
                 buy_demoted_on_blocking_flags=buy_demoted,
                 quick_buy_qualified=quick_buy_qualified,
+                weak_asymmetry_qualified=weak_asymmetry_qualified,
                 pm_claim_caveats=len(pm_claim_caveats),
                 pm_verdict_metadata=pm_metadata.model_dump(exclude_none=True),
                 pre_screening_result=state.get("pre_screening_result"),

@@ -28,6 +28,9 @@ from src.agents.support import extract_kill_criteria, get_bear_history
 from src.charts.extractors.valuation import (
     extract_valuation_scenarios_for_fundamentals,
     format_iv,
+    is_weak_buy_asymmetry,
+    parse_numeric_field,
+    scenario_upside_metrics,
     scenario_valuation_caveat,
 )
 from src.data_block_utils import extract_data_block_field, extract_last_fenced_block
@@ -57,11 +60,6 @@ _RATIONALE_HEADER = re.compile(
     r"#+\s*DECISION RATIONALE\s*\n+(.+?)(?:\n#+\s|\n---|\Z)",
     re.DOTALL | re.IGNORECASE,
 )
-_NUMBER_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
-_WEAK_BUY_MIN_WEIGHTED_UPSIDE = 0.10
-_WEAK_BUY_DOWNSIDE_PROBABILITY = 50.0
-
-
 _VARIANT_PLACEHOLDER = "Not explicitly stated."
 
 
@@ -231,18 +229,6 @@ def _detect_currency(fundamentals: str) -> str:
     return ""
 
 
-def _parse_numeric_value(raw: str | None) -> float | None:
-    if not raw:
-        return None
-    match = _NUMBER_RE.search(raw)
-    if not match:
-        return None
-    try:
-        return float(match.group(0).replace(",", ""))
-    except ValueError:
-        return None
-
-
 def format_scenario_summary(state: dict) -> str | None:
     """Return a one-line scenario summary if a valid VALUATION_SCENARIOS block exists.
 
@@ -277,29 +263,13 @@ def format_scenario_summary(state: dict) -> str | None:
         if caveat
         else ""
     )
-    current_price = _parse_numeric_value(
+    current_price = parse_numeric_field(
         extract_data_block_field(fundamentals, "CURRENT_PRICE")
     )
-    if (
-        extract_pm_verdict(get_pm_output(state)) == "BUY"
-        and current_price is not None
-        and current_price > 0
-        and scenarios.weighted_iv
-    ):
-        weighted_upside = (scenarios.weighted_iv / current_price) - 1.0
-        downside_probability = sum(
-            scenario.probability
-            for scenario, intrinsic_value in (
-                (scenarios.bear, scenarios.bear_iv),
-                (scenarios.base, scenarios.base_iv),
-                (scenarios.bull, scenarios.bull_iv),
-            )
-            if intrinsic_value < current_price
-        )
-        if (
-            weighted_upside < _WEAK_BUY_MIN_WEIGHTED_UPSIDE
-            or downside_probability >= _WEAK_BUY_DOWNSIDE_PROBABILITY
-        ):
+    upside_metrics = scenario_upside_metrics(scenarios, current_price)
+    if extract_pm_verdict(get_pm_output(state)) == "BUY" and upside_metrics:
+        weighted_upside, downside_probability = upside_metrics
+        if is_weak_buy_asymmetry(weighted_upside, downside_probability):
             warning += (
                 " Warning: BUY verdict has weak valuation asymmetry; review "
                 f"weighted IV upside ({weighted_upside * 100:.1f}%) and "

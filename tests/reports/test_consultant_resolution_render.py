@@ -73,6 +73,63 @@ class TestConsultantResolutionRender:
         assert "CONCERN: x" in cleaned
 
 
+_AUDITOR_STUB = (
+    "AUDITOR_RESOLUTION:\n"
+    "- FINDING: Forensic Auditor flagged anomalies not explicitly addressed by PM rationale.\n"
+    "- DATA_CHECK: NOT_PROVIDED\n"
+    "- VERDICT: UNVERIFIABLE\n"
+)
+
+
+class TestUnresolvedAuditorStub:
+    def test_stub_reformatted_to_prose_caveat(self):
+        cleaned = _reporter()._clean_text(f"Rationale text.\n\n{_AUDITOR_STUB}")
+        assert "> **Auditor note:**" in cleaned
+        assert "NOT_PROVIDED" not in cleaned
+        assert "UNVERIFIABLE" not in cleaned
+
+    def test_populated_auditor_block_untouched(self):
+        populated = (
+            "AUDITOR_RESOLUTION:\n"
+            "- FINDING: DSO ballooning flagged.\n"
+            "- DATA_CHECK: DATA_BLOCK DSO 92 days vs auditor 118 days.\n"
+            "- VERDICT: CONFIRMED_RISK (+0.5)\n"
+        )
+        cleaned = _reporter()._clean_text(populated)
+        assert "CONFIRMED_RISK" in cleaned
+        assert "> **Auditor note:**" not in cleaned
+
+    def test_auditor_resolution_none_untouched(self):
+        cleaned = _reporter()._clean_text(_PM_WITH_RESOLUTION)
+        assert "AUDITOR_RESOLUTION: NONE" in cleaned
+        assert "> **Auditor note:**" not in cleaned
+
+    def test_no_auditor_block_unchanged(self):
+        text = "Just a rationale with no auditor block.\n"
+        assert "> **Auditor note:**" not in _reporter()._clean_text(text)
+
+    def test_fenced_stub_reformatted_without_orphan_fences(self):
+        """A PM-authored fenced stub must not leave the blockquote trapped
+        inside orphan ``` lines (the fence is consumed whole)."""
+        fenced = f"Rationale.\n\n{_FENCE}\n{_AUDITOR_STUB}{_FENCE}\n\nMore text.\n"
+        cleaned = _reporter()._clean_text(fenced)
+        assert "> **Auditor note:**" in cleaned
+        assert "NOT_PROVIDED" not in cleaned
+        assert _FENCE not in cleaned  # no orphan fences remain
+        assert "More text." in cleaned
+
+    def test_fenced_populated_block_untouched(self):
+        populated = (
+            f"{_FENCE}\nAUDITOR_RESOLUTION:\n"
+            "- FINDING: DSO ballooning flagged.\n"
+            "- DATA_CHECK: DATA_BLOCK DSO 92 days vs auditor 118 days.\n"
+            f"- VERDICT: CONFIRMED_RISK (+0.5)\n{_FENCE}\n"
+        )
+        cleaned = _reporter()._clean_text(populated)
+        assert "CONFIRMED_RISK" in cleaned
+        assert "> **Auditor note:**" not in cleaned
+
+
 class TestSoftenUndiscovered:
     _SENTIMENT = (
         "Status: UNDISCOVERED (Strong positive).\n"
@@ -91,14 +148,30 @@ class TestSoftenUndiscovered:
         out = QuietModeReporter._soften_undiscovered_language(
             self._SENTIMENT, self._fund("MODERATE")
         )
-        assert "undiscovered" not in out.lower()
-        assert "low English-language aggregator visibility" in out
+        # Banner prepended; raw prose left intact (no fragile in-place rewrite).
+        assert "Coverage caveat:" in out
+        assert out.endswith(self._SENTIMENT)
 
     def test_softened_when_data_quality_note_present(self):
         # has_note is a plain substring check; no DATA_BLOCK markers required.
         fund = "ANALYST_COVERAGE_DATA_QUALITY_NOTE: avoid unqualified hidden framing\n"
         out = QuietModeReporter._soften_undiscovered_language(self._SENTIMENT, fund)
-        assert "undiscovered" not in out.lower()
+        assert "Coverage caveat:" in out
+
+    def test_no_ungrammatical_noun_phrase_splice(self):
+        """The removed in-place regex spliced a noun phrase into header/label/
+        predicate slots. The body must stay verbatim; only the banner is added."""
+        sentiment = (
+            "#### UNDISCOVERED STATUS ASSESSMENT\n"
+            "**Status**: UNDISCOVERED\n"
+            "The stock is genuinely undiscovered by retail crowds.\n"
+        )
+        out = QuietModeReporter._soften_undiscovered_language(
+            sentiment, self._fund("MODERATE")
+        )
+        assert out.endswith(sentiment)  # body verbatim
+        assert "#### low English-language aggregator visibility" not in out
+        assert "is low English-language aggregator visibility by" not in out
 
     def test_unchanged_when_coverage_confirmed_low(self):
         out = QuietModeReporter._soften_undiscovered_language(
@@ -119,28 +192,6 @@ class TestSoftenUndiscovered:
             QuietModeReporter._soften_undiscovered_language(self._SENTIMENT, "")
             == self._SENTIMENT
         )
-
-    def test_preceding_space_preserved_without_modifier(self):
-        """Regression (145020.KQ): the old regex consumed the space before a
-        bare "undiscovered", yielding "forlow English-language…"."""
-        out = QuietModeReporter._soften_undiscovered_language(
-            "Positive for undiscovered thesis.\n", self._fund("MODERATE")
-        )
-        assert "for low English-language aggregator visibility thesis" in out
-        assert "forlow" not in out
-
-    def test_preceding_newline_preserved_without_modifier(self):
-        out = QuietModeReporter._soften_undiscovered_language(
-            "Positive for\nundiscovered thesis.\n", self._fund("MODERATE")
-        )
-        assert "for\nlow English-language aggregator visibility thesis" in out
-
-    def test_modifier_still_consumed_with_its_whitespace(self):
-        out = QuietModeReporter._soften_undiscovered_language(
-            "Status: PASS (Strongly Undiscovered).\n", self._fund("MODERATE")
-        )
-        assert "(low English-language aggregator visibility)" in out
-        assert "Strongly low" not in out
 
     def test_caveat_banner_neutralizes_synonyms(self):
         # Synonym overclaims with no literal "undiscovered" still get the caveat.

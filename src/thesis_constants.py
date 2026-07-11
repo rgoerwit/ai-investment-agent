@@ -95,6 +95,14 @@ US_REVENUE_MAX_PCT = 35.0
 RISK_ZONE_HIGH = 2.0  # >=: default SELL
 RISK_ZONE_MODERATE = 1.0  # >=: default HOLD; below: default BUY
 
+# Weak-asymmetry BUY guard: a BUY whose probability-weighted intrinsic-value
+# upside is below the floor, or whose downside probability is at/above the cap,
+# is qualified (caveat note, verdict token unchanged). Shared by the memo
+# valuation line (reporting/memo.py) and the verdict qualifier
+# (agents/verdict_policy.py) so the two can never diverge.
+WEAK_BUY_MIN_WEIGHTED_UPSIDE = 0.10  # fraction (0.10 = 10% upside); below: weak
+WEAK_BUY_DOWNSIDE_PROBABILITY = 50.0  # percent, 0-100 scale; at/above: weak
+
 # Large-drawdown triggers (shared by context_flags classification and the
 # pre-graph news-analyst drawdown-investigation injection)
 DRAWDOWN_52WK_RATIO = 0.60  # current/52wk-high at/below: large drawdown

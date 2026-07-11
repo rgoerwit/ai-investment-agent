@@ -95,6 +95,20 @@ def test_verdict_qualified_flag_reflects_marker(monkeypatch):
     assert plain["verdict_qualified_by_quick_mode"] is False
 
 
+def test_weak_asymmetry_flag_reflects_marker(monkeypatch):
+    qualified = _min_summary(
+        monkeypatch,
+        {
+            "final_trade_decision": (
+                "### VERDICT: BUY\n> **WEAK VALUATION ASYMMETRY — STARTER/VERIFY** ..."
+            )
+        },
+    )
+    assert qualified["verdict_weak_valuation_asymmetry"] is True
+    plain = _min_summary(monkeypatch, {"final_trade_decision": "### VERDICT: BUY"})
+    assert plain["verdict_weak_valuation_asymmetry"] is False
+
+
 @pytest.mark.parametrize(
     "report, expected_successful, expected_status",
     [

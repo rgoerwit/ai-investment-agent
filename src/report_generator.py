@@ -1371,6 +1371,11 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         # that still contain content such as APAC_RESOLUTION/AUDITOR_RESOLUTION.
         text = re.sub(r"```[^\S\n]*\n[ \t]*```[ \t]*\n?", "", text)
 
+        # Turn the unresolved-auditor machine stub (NOT_PROVIDED/UNVERIFIABLE,
+        # auto-injected when the auditor named a concern the PM didn't reconcile)
+        # into a readable caveat. Real AUDITOR_RESOLUTION blocks are untouched.
+        text = self._reformat_unresolved_auditor_block(text)
+
         # Strip "Analyzing TICKER - Company" openers (redundant with report title).
         # Matches ticker by requiring a dot-delimited exchange suffix (e.g. .HK, .T, .DE).
         # Also handles bold variant: Analyzing **0148.HK (Company Name)**
@@ -1428,9 +1433,10 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         """Qualify unconditional "undiscovered" claims when coverage isn't confirmed low.
 
         Fires when the DATA_BLOCK reports MODERATE/HIGH/UNKNOWN total analyst
-        coverage, or an ANALYST_COVERAGE_DATA_QUALITY_NOTE is present. Rewrites
-        "(strongly/exceptionally/...) undiscovered" to a qualified phrase. The
-        replacement contains no "undiscovered" token, so re-running is a no-op.
+        coverage, or an ANALYST_COVERAGE_DATA_QUALITY_NOTE is present. Prepends a
+        one-time "Coverage caveat" banner disclosing that the discovery/visibility
+        framing is relative, not absolute; the raw sentiment prose is left intact
+        (no fragile in-place rewriting). Idempotent via the banner-presence guard.
         Genuinely-low, confidently-measured coverage is left untouched.
         """
         if not sentiment_text:
@@ -1441,25 +1447,59 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         has_note = "ANALYST_COVERAGE_DATA_QUALITY_NOTE" in (fund_report or "")
         if not (has_note or total_est in {"MODERATE", "HIGH", "UNKNOWN"}):
             return sentiment_text
-        # Whitespace is consumed only when a modifier is present — a bare
-        # "for undiscovered" must keep its preceding space ("forlow…" bug).
-        softened = re.sub(
-            r"\b(?:(?:strongly|exceptionally|truly|genuinely|completely)\s+)?undiscovered\b",
-            "low English-language aggregator visibility",
-            sentiment_text,
-            flags=re.IGNORECASE,
-        )
         # A caveat banner neutralizes the whole family of overclaim synonyms
-        # ("effectively invisible", "entirely absent", "international ignorance")
-        # without fragile in-place phrase rewriting that risks mangling grammar.
+        # ("undiscovered", "effectively invisible", "entirely absent",
+        # "international ignorance") without fragile in-place phrase rewriting.
+        # In-place token substitution was removed: it spliced a noun phrase into
+        # adjective / header / label slots ("#### low English-language aggregator
+        # visibility STATUS ASSESSMENT", "the stock is … by retail crowds"),
+        # producing ungrammatical prose. The banner discloses the qualification
+        # cleanly; the raw prose is left grammatical.
         caveat = (
             "> **Coverage caveat:** discovery/visibility framing below reflects only "
             "low *Western English-language retail* visibility — analyst coverage is not "
             "confirmed low, so treat it as relative, not an absolute claim.\n\n"
         )
-        if "Coverage caveat:" not in softened:
-            softened = caveat + softened
-        return softened
+        if "Coverage caveat:" in sentiment_text:
+            return sentiment_text
+        return caveat + sentiment_text
+
+    # Shared between the fenced and unfenced rewrite forms below so the two
+    # regexes cannot drift (mirrors the CONSULTANT_RESOLUTION two-form handling).
+    _AUDITOR_STUB_BODY = (
+        r"[#*\s]*AUDITOR_RESOLUTION:?[ \t]*\n"
+        r"(?:[#*\s]*-\s*FINDING:[^\n]*\n)?"
+        r"[#*\s]*-\s*DATA_CHECK:\s*NOT_PROVIDED[ \t]*\n"
+        r"[#*\s]*-\s*VERDICT:\s*UNVERIFIABLE[ \t]*\n?"
+    )
+    _AUDITOR_NOTE = (
+        "> **Auditor note:** The forensic auditor flagged anomalies the PM did "
+        "not explicitly reconcile; treat earnings-quality / cash-flow "
+        "conclusions as unverified.\n"
+    )
+
+    @classmethod
+    def _reformat_unresolved_auditor_block(cls, text: str) -> str:
+        """Turn the NOT_PROVIDED/UNVERIFIABLE auditor stub into a prose caveat.
+
+        Only the machine stub injected by ``_ensure_auditor_resolution_block``
+        (DATA_CHECK: NOT_PROVIDED + VERDICT: UNVERIFIABLE) is rewritten; a
+        populated AUDITOR_RESOLUTION (real DATA_CHECK / verdict) and
+        ``AUDITOR_RESOLUTION: NONE`` are left untouched. Handles both the
+        code-injected unfenced form and a PM-authored fenced form — the fenced
+        sub runs first and consumes the whole fence, so no orphan ``` lines
+        can trap the blockquote inside a code block.
+        """
+        text = re.sub(
+            rf"(?ms)^```[^\S\n]*\n{cls._AUDITOR_STUB_BODY}\s*```[ \t]*\n?",
+            cls._AUDITOR_NOTE,
+            text,
+        )
+        return re.sub(
+            rf"(?ms)^{cls._AUDITOR_STUB_BODY}",
+            cls._AUDITOR_NOTE,
+            text,
+        )
 
     @staticmethod
     def _reformat_macro_detection(text: str) -> str:

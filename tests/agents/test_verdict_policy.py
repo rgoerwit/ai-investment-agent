@@ -6,6 +6,7 @@ from src.agents.verdict_policy import (
     maybe_demote_buy_on_blocking_flags,
     maybe_floor_verdict_to_hold,
     maybe_qualify_buy_in_quick_mode,
+    maybe_qualify_weak_asymmetry_buy,
 )
 from src.charts.extractors.pm_block import extract_pm_block
 
@@ -366,3 +367,62 @@ class TestQuickModeBuyQualification:
         assert qualified2 is True
         assert out2 == out1
         assert out2.count("QUICK-MODE QUALIFICATION") == 1
+
+
+class TestWeakAsymmetryBuyQualification:
+    """A BUY with thin weighted-IV upside / high downside prob is qualified."""
+
+    def _buy(self) -> str:
+        return _pm_output("BUY", "BUY")
+
+    def test_weak_upside_gets_caveat_token_unchanged(self):
+        out, qualified = maybe_qualify_weak_asymmetry_buy(
+            self._buy(), weighted_upside=0.043, downside_probability=20.0, ticker="X"
+        )
+        assert qualified is True
+        assert "WEAK VALUATION ASYMMETRY" in out
+        assert "4.3%" in out
+        # Verdict token deliberately unchanged so no downstream parser breaks.
+        assert "VERDICT: BUY" in out
+
+    def test_high_downside_probability_triggers(self):
+        out, qualified = maybe_qualify_weak_asymmetry_buy(
+            self._buy(), weighted_upside=0.30, downside_probability=55.0
+        )
+        assert qualified is True
+        assert "WEAK VALUATION ASYMMETRY" in out
+
+    def test_strong_asymmetry_untouched(self):
+        pm = self._buy()
+        out, qualified = maybe_qualify_weak_asymmetry_buy(
+            pm, weighted_upside=0.30, downside_probability=20.0
+        )
+        assert qualified is False
+        assert out == pm
+
+    def test_non_buy_untouched(self):
+        pm = _pm_output("HOLD", "HOLD")
+        out, qualified = maybe_qualify_weak_asymmetry_buy(
+            pm, weighted_upside=0.01, downside_probability=80.0
+        )
+        assert qualified is False
+        assert out == pm
+
+    def test_none_upside_no_crash(self):
+        pm = self._buy()
+        out, qualified = maybe_qualify_weak_asymmetry_buy(
+            pm, weighted_upside=None, downside_probability=None
+        )
+        assert qualified is False
+        assert out == pm
+
+    def test_idempotent(self):
+        out1, _ = maybe_qualify_weak_asymmetry_buy(
+            self._buy(), weighted_upside=0.043, downside_probability=20.0
+        )
+        out2, qualified2 = maybe_qualify_weak_asymmetry_buy(
+            out1, weighted_upside=0.043, downside_probability=20.0
+        )
+        assert qualified2 is True
+        assert out2 == out1
+        assert out2.count("WEAK VALUATION ASYMMETRY") == 1
