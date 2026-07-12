@@ -671,13 +671,20 @@ def parse_consultant_conditions(consultant_review: str) -> dict[str, Any]:
         except Exception:
             return result
 
+    # The verdict is authoritative only in the FINAL CONSULTANT VERDICT section
+    # ("Overall Assessment: <verdict>"). Body prose can mention "major concern"
+    # discursively and must not override a section-level CONDITIONAL APPROVAL
+    # (3771.T 2026-07-12: a stray body "major concern" beat the section verdict).
+    # Scope the verdict scan to the same section as the breach markers; fall back
+    # to the whole review when no section exists.
+    section_match = _CONSULTANT_FINAL_VERDICT_SECTION_PATTERN.search(consultant_review)
+    scan_text = section_match.group(0) if section_match else consultant_review
+
     for pattern, verdict in _CONSULTANT_VERDICT_PATTERNS:
-        if pattern.search(consultant_review):
+        if pattern.search(scan_text):
             result["verdict"] = verdict
             break
 
-    section_match = _CONSULTANT_FINAL_VERDICT_SECTION_PATTERN.search(consultant_review)
-    scan_text = section_match.group(0) if section_match else consultant_review
     result["has_mandate_breach"] = _breach_marker_present(
         _CONSULTANT_MANDATE_BREACH_TOKEN_PATTERN,
         _CONSULTANT_MANDATE_BREACH_PATTERN,

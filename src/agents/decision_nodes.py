@@ -307,11 +307,16 @@ def _insert_block_before_pm_block(pm_output: str, block_text: str) -> str:
 
 
 def _normalize_pm_block_contract(pm_output: str) -> str:
-    """Rewrite final PM_BLOCK text when its sizing violates verdict semantics.
+    """Reconcile PM sizing surfaces with the (final) PM_BLOCK verdict.
 
-    PM_BLOCK extraction also clamps no-initiation position size for all readers,
-    including older artifacts. This boundary rewrite keeps newly persisted PM
-    output internally coherent with that same contract.
+    For a no-initiation verdict (HOLD / DO_NOT_INITIATE / SELL) this clamps BOTH the
+    machine ``POSITION_SIZE`` token AND the human-facing ``Recommended Position Size: X%``
+    prose line (PM prompt v9.19) to zero, so the persisted PM text is internally
+    coherent. Called at the PM-node tail *after* the deterministic verdict modifiers
+    (floor/demote), so a BUY→HOLD demotion cannot leave a stale nonzero size behind
+    (3773.T 2026-07-12: ``Recommended Position Size: 2.5%`` under VERDICT: HOLD; and the
+    demotion path, where ``_rewrite_pm_decision_surfaces`` rewrites only the decision
+    line, not the sizing fields).
     """
     blocks = list(fenced_block_pattern("PM_BLOCK").finditer(pm_output))
     if not blocks:
@@ -320,31 +325,48 @@ def _normalize_pm_block_contract(pm_output: str) -> str:
     last = blocks[-1]
     body = last.group(1)
     verdict_match = re.search(r"(?im)^VERDICT:\s*([^\n]+)", body)
-    size_match = re.search(r"(?im)^(POSITION_SIZE:\s*)([\d.]+)", body)
-    if not verdict_match or not size_match:
+    if not verdict_match:
         return pm_output
 
     verdict = canonicalize_pm_verdict(verdict_match.group(1))
-    try:
-        emitted_size = float(size_match.group(2))
-    except ValueError:
+    if verdict not in {"HOLD", "DO_NOT_INITIATE", "SELL"}:
         return pm_output
 
-    if verdict not in {"HOLD", "DO_NOT_INITIATE", "SELL"} or emitted_size == 0.0:
-        return pm_output
+    # 1) PM_BLOCK POSITION_SIZE token (skip if absent or already zero).
+    token_rewritten = False
+    size_match = re.search(r"(?im)^(POSITION_SIZE:\s*)([\d.]+)", body)
+    if size_match:
+        try:
+            emitted_size = float(size_match.group(2))
+        except ValueError:
+            emitted_size = 0.0
+        if emitted_size != 0.0:
+            rewritten_body = re.sub(
+                r"(?im)^(POSITION_SIZE:\s*)[\d.]+",
+                r"\g<1>0.0",
+                body,
+                count=1,
+            )
+            pm_output = (
+                pm_output[: last.start(1)] + rewritten_body + pm_output[last.end(1) :]
+            )
+            token_rewritten = True
 
-    logger.warning(
-        "pm_block_position_size_rewritten",
-        verdict=verdict,
-        emitted_position_size=emitted_size,
+    # 2) Human-facing prose line, outside the block (prompt v9.19).
+    pm_output, prose_lines_rewritten = re.subn(
+        r"(?im)^(\**Recommended Position Size\**:\s*)[\d.]+%?",
+        r"\g<1>0.0% (monitor only — no initiation)",
+        pm_output,
     )
-    rewritten_body = re.sub(
-        r"(?im)^(POSITION_SIZE:\s*)[\d.]+",
-        r"\g<1>0.0",
-        body,
-        count=1,
-    )
-    return pm_output[: last.start(1)] + rewritten_body + pm_output[last.end(1) :]
+
+    if token_rewritten or prose_lines_rewritten:
+        logger.warning(
+            "pm_block_position_size_rewritten",
+            verdict=verdict,
+            token_rewritten=token_rewritten,
+            prose_lines_rewritten=prose_lines_rewritten,
+        )
+    return pm_output
 
 
 def _ensure_apac_resolution_block(pm_output: str, apac_report: str | None) -> str:
@@ -1266,7 +1288,6 @@ RISK TEAM DEBATE:
                     fallback_content=content_str,
                 )
 
-            content_str = _normalize_pm_block_contract(content_str)
             content_str, verdict_floored = maybe_floor_verdict_to_hold(
                 content_str,
                 fundamentals_report=fundamentals,
@@ -1299,6 +1320,10 @@ RISK TEAM DEBATE:
                 valuation_params=get_valid_artifact_content(state, "valuation_params"),
                 ticker=ticker,
             )
+            # Reconcile sizing (token + prose) against the FINAL verdict, i.e. after
+            # any floor/demote rewrite above — so a BUY→HOLD demotion cannot leave a
+            # stale nonzero POSITION_SIZE or "Recommended Position Size" prose.
+            content_str = _normalize_pm_block_contract(content_str)
             _log_risk_tally_reconciliation(content_str, code_risk_subtotal, ticker)
             _log_pm_discipline_checks(
                 content_str, red_flags, valuation_reliability, ticker

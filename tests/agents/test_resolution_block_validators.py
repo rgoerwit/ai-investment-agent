@@ -213,3 +213,68 @@ def test_normalize_pm_block_contract_rewrites_only_final_block() -> None:
     assert "POSITION_SIZE: 2.0" in out
     assert "POSITION_SIZE: 0.0" in out
     assert "POSITION_SIZE: 5.0" not in out
+
+
+def test_normalize_pm_block_contract_reconciles_prose_sizing() -> None:
+    # The 3773.T shape: HOLD with both a nonzero block token and a nonzero prose line.
+    pm = (
+        "**Recommended Position Size**: 2.5%\n\n"
+        "### --- START PM_BLOCK ---\n"
+        "VERDICT: HOLD\n"
+        "POSITION_SIZE: 2.5\n"
+        "### --- END PM_BLOCK ---\n"
+    )
+    out = _normalize_pm_block_contract(pm)
+    assert "POSITION_SIZE: 0.0" in out
+    assert "2.5" not in out
+    assert "Recommended Position Size**: 0.0% (monitor only — no initiation)" in out
+
+
+def test_normalize_pm_block_contract_reconciles_prose_when_token_already_zero() -> None:
+    # Block token already correct; prose still contradicts — must still be reconciled
+    # (the case an emitted_size==0 early return would have skipped).
+    pm = (
+        "**Recommended Position Size**: 2.5%\n\n"
+        "### --- START PM_BLOCK ---\n"
+        "VERDICT: HOLD\n"
+        "POSITION_SIZE: 0.0\n"
+        "### --- END PM_BLOCK ---\n"
+    )
+    out = _normalize_pm_block_contract(pm)
+    assert "Recommended Position Size**: 0.0% (monitor only — no initiation)" in out
+
+
+def test_normalize_pm_block_contract_preserves_buy_prose() -> None:
+    pm = (
+        "**Recommended Position Size**: 3.0%\n\n"
+        "### --- START PM_BLOCK ---\n"
+        "VERDICT: BUY\n"
+        "POSITION_SIZE: 3.0\n"
+        "### --- END PM_BLOCK ---\n"
+    )
+    assert _normalize_pm_block_contract(pm) == pm
+
+
+def test_demotion_then_normalize_zeroes_both_surfaces() -> None:
+    # Proves the late placement composes: a BUY demoted to HOLD by
+    # maybe_demote_buy_on_blocking_flags leaves stale sizing that
+    # _normalize_pm_block_contract (run after) must clean.
+    from src.agents.verdict_policy import maybe_demote_buy_on_blocking_flags
+
+    pm = (
+        "#### PORTFOLIO MANAGER VERDICT: BUY\n\n"
+        "**Recommended Position Size**: 3.0%\n\n"
+        "### --- START PM_BLOCK ---\n"
+        "VERDICT: BUY\n"
+        "POSITION_SIZE: 3.0\n"
+        "### --- END PM_BLOCK ---\n"
+    )
+    red_flags = [{"type": "HEALTH_SCORE_UNRELIABLE", "blocks_buy": True}]
+    demoted, was_demoted = maybe_demote_buy_on_blocking_flags(
+        pm, red_flags=red_flags, ticker="TEST"
+    )
+    assert was_demoted is True
+    out = _normalize_pm_block_contract(demoted)
+    assert "POSITION_SIZE: 0.0" in out
+    assert "POSITION_SIZE: 3.0" not in out
+    assert "Recommended Position Size**: 0.0% (monitor only — no initiation)" in out

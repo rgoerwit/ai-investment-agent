@@ -289,6 +289,43 @@ class TestConsultantBreachNegationAwareParsing:
         assert conditions["verdict"] == "UNKNOWN"
 
 
+class TestConsultantVerdictSectionScoping:
+    """The verdict is read from the FINAL CONSULTANT VERDICT section, not body prose.
+
+    A stray 'major concern' phrase in the discussion body must not override a
+    section-level CONDITIONAL APPROVAL (3771.T 2026-07-12: the whole-review
+    first-match scan raised a false CONSULTANT_MAJOR_CONCERNS).
+    """
+
+    def test_body_major_concern_does_not_override_section_conditional(self):
+        review = (
+            "### CONSULTANT REVIEW: CONDITIONAL APPROVAL\n\n"
+            "The normalized-earnings bridge is a major concern that the PM must "
+            "resolve before sizing.\n\n"
+            "### FINAL CONSULTANT VERDICT\n\n"
+            "**Overall Assessment**: CONDITIONAL APPROVAL\n"
+            "**MANDATE_BREACH**: NONE\n"
+            "**HARD_STOP**: NONE\n"
+        )
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["verdict"] == "CONDITIONAL_APPROVAL"
+
+    def test_major_concerns_inside_section_still_detected(self):
+        review = (
+            "Body prose without a verdict phrase.\n\n"
+            "### FINAL CONSULTANT VERDICT\n\n"
+            "**Overall Assessment**: MAJOR CONCERNS\n"
+        )
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["verdict"] == "MAJOR_CONCERNS"
+
+    def test_no_section_falls_back_to_whole_review(self):
+        # No FINAL CONSULTANT VERDICT section → whole-review scan (unchanged behavior).
+        review = "Overall this warrants MAJOR CONCERNS given the leverage."
+        conditions = RedFlagDetector.parse_consultant_conditions(review)
+        assert conditions["verdict"] == "MAJOR_CONCERNS"
+
+
 def _rqf_block(**fields: str) -> str:
     body = "\n".join(f"{k}: {v}" for k, v in fields.items())
     return f"### --- START DATA_BLOCK ---\n{body}\n### --- END DATA_BLOCK ---"
