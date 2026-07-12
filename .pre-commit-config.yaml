@@ -42,23 +42,37 @@ repos:
   #       additional_dependencies: [types-requests]
   #       args: [--ignore-missing-imports]
 
-  # Snyk advisory security scan.
-  # Silently skips when snyk is not installed or not authenticated, and treats a
-  # depleted plan/test-limit ("licensing") failure as a skip — never blocks a
-  # commit. HIGH/CRITICAL findings are printed as remediation notes.
+  # Snyk security scans (MEDIUM+). Both hooks skip cleanly when snyk is missing,
+  # unauthenticated, quota-limited, or errors operationally — the "only activate
+  # when Snyk is available" contract. See scripts/snyk_check.sh.
   # Install: brew install snyk  or  npm install -g snyk   Authenticate: snyk auth
   #
-  # Scoped to dependency-manifest changes: Snyk scans poetry.lock/pyproject.toml,
-  # which is all that affects the result, so running on every commit would only
-  # burn the monthly test allowance. CI (pip-audit in security.yml) still scans
-  # dependencies on every push regardless.
+  #  • snyk-deps           BLOCKS the commit (exit 1) on a MEDIUM+ dependency
+  #                        finding, so pre-commit reports "Failed" instead of a
+  #                        misleading "Passed". Override with SNYK_ADVISORY=1.
+  #                        Scoped to dependency manifests (all that affects SCA).
+  #                        CI (pip-audit in security.yml) also scans deps per push.
+  #  • snyk-container-base Advisory REVIEW REQUIRED (never blocks) for the base
+  #                        image. Scans the base TAG only (fast, no build/daemon);
+  #                        the BUILT image is scanned in CI (security.yml), which
+  #                        is where `apt-get upgrade -y` remediation is verifiable.
   - repo: local
     hooks:
-      - id: snyk
-        name: Snyk (advisory HIGH/CRITICAL scan)
+      - id: snyk-deps
+        name: Snyk dependency scan (medium+, blocking)
         language: script
         entry: scripts/snyk_check.sh
+        args: ['deps']
         pass_filenames: false
         files: '^(poetry\.lock|pyproject\.toml)$'
+        verbose: true
+        stages: [pre-commit]
+      - id: snyk-container-base
+        name: Snyk base-image scan (medium+, review-required)
+        language: script
+        entry: scripts/snyk_check.sh
+        args: ['container-base']
+        pass_filenames: false
+        files: '^Dockerfile$'
         verbose: true
         stages: [pre-commit]

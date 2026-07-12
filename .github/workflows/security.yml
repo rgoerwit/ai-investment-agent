@@ -506,12 +506,87 @@ jobs:
           retention-days: 30
 
   # ══════════════════════════════════════════════════════════════════════════
+  # Snyk container scan - base image + built image (restores Docker coverage that
+  # the disabled Trivy jobs used to provide). Uses the Snyk CLI in a plain `run:`
+  # step (pinned + version-printed) — NOT a third-party Action — so it carries no
+  # supply-chain exposure from the action itself (same rationale as pip-audit and
+  # the whole reason the Trivy Action jobs were pulled). Token-gated and NON-gating
+  # (base-image OS findings like acl/attr have no Debian fix yet; gating would red
+  # every build). Value: the daily cron surfaces newly-disclosed base CVEs, and the
+  # BUILT-image scan verifies that the Dockerfile's `apt-get upgrade -y` actually
+  # clears the fixable OS CVEs (which a base-TAG scan can't show).
+  # ══════════════════════════════════════════════════════════════════════════
+  snyk-container:
+    name: Snyk Container Scan (base tag + built image)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Detect SNYK_TOKEN
+        id: tok
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          if [ -n "$SNYK_TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::SNYK_TOKEN secret absent — skipping Snyk container scan."
+          fi
+
+      - name: Install Snyk CLI (pinned)
+        if: steps.tok.outputs.present == 'true'
+        run: |
+          npm install -g snyk@1.1306.0
+          snyk --version   # printed for auditability of behavior changes
+
+      - name: Scan base image tag (advisory)
+        if: steps.tok.outputs.present == 'true'
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          mkdir -p snyk-sarif
+          # Remote ref: Snyk pulls it; --file gives base-image-upgrade advice.
+          # `|| true` — non-gating (unfixable base CVEs must not fail the build).
+          snyk container test python:3.12-slim --file=Dockerfile \
+            --severity-threshold=medium \
+            --sarif-file-output=snyk-sarif/base.sarif || true
+
+      - name: Build & scan the real shipped image (authoritative)
+        if: steps.tok.outputs.present == 'true'
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          docker build -t investment-agent:${{ github.sha }} .
+          # Scanning the BUILT image is what proves `apt-get upgrade -y` remediated
+          # the fixable OS CVEs (e.g. xz-utils) that a base-tag scan still reports.
+          snyk container test investment-agent:${{ github.sha }} --file=Dockerfile \
+            --severity-threshold=medium \
+            --sarif-file-output=snyk-sarif/image.sarif || true
+
+      - name: Upload Snyk SARIF to GitHub Security
+        if: steps.tok.outputs.present == 'true' && hashFiles('snyk-sarif/*.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk-sarif
+          category: snyk-container
+
+      - name: Upload Snyk SARIF as artifact
+        if: steps.tok.outputs.present == 'true' && hashFiles('snyk-sarif/*.sarif') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-container-sarif
+          path: snyk-sarif/*.sarif
+          retention-days: 30
+
+  # ══════════════════════════════════════════════════════════════════════════
   # Summary job - Aggregate results and provide recommendations
   # ══════════════════════════════════════════════════════════════════════════
   security-summary:
     name: Security Scan Summary
     runs-on: ubuntu-latest
-    needs: [codeql-analysis, gitleaks, pip-audit]
+    needs: [codeql-analysis, gitleaks, pip-audit, snyk-container]
     if: always()  # Run even if some scans fail
     steps:
       - name: Check scan results
@@ -521,8 +596,11 @@ jobs:
           echo "✅ CodeQL SAST: ${{ needs.codeql-analysis.result }}"
           echo "✅ GitLeaks: ${{ needs.gitleaks.result }}"
           echo "✅ pip-audit (Python CVEs): ${{ needs.pip-audit.result }}"
+          echo "✅ Snyk container (base + built image, advisory): ${{ needs.snyk-container.result }}"
           echo ""
-          echo "ℹ️  Trivy jobs are disabled (supply-chain incident, March 2026 week 4)"
+          echo "ℹ️  Trivy Action jobs remain disabled (supply-chain incident, March 2026 week 4);"
+          echo "    container coverage is now provided by the token-gated snyk-container job"
+          echo "    (Snyk CLI in a run: step, non-gating)."
           echo ""
 
           # Check if any scans failed

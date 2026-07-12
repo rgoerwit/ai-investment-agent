@@ -67,7 +67,9 @@ class ThesisMetrics:
 
     # Core scores (higher = better, min 50%)
     health_score: float | None = None
+    health_pass: bool | None = None
     growth_score: float | None = None
+    growth_pass: bool | None = None
 
     # Valuation (lower = better)
     pe_ratio: float | None = None
@@ -124,23 +126,47 @@ class ThesisVisualizer:
         # Note: Patterns use \*?\*? to handle optional markdown bold markers
 
         # Financial Health: 71% (Adjusted) - PASS
-        # Also matches: **Financial Health**: 71%
-        health_match = re.search(
-            r"\*?\*?Financial Health\*?\*?[:\s]*(\d+(?:\.\d+)?)\s*%",
+        # Primary: gate line with the PM's verdict token, mirroring pe_gate —
+        # health/growth gates can PASS below the raw 50% threshold via the
+        # Data-Vacuum Exception, so the ✓/✗ must follow the PM's token, not a
+        # re-derived score comparison. Fallback: number-only (legacy/minimal
+        # PM text). Also matches: **Financial Health**: 71%
+        health_gate = re.search(
+            r"\*?\*?Financial Health\*?\*?[:\s]*(\d+(?:\.\d+)?)\s*%"
+            r"[^\n]*?\b(PASS|FAIL|MARGINAL)\b",
             self.text,
             re.IGNORECASE,
         )
-        if health_match:
-            metrics.health_score = float(health_match.group(1))
+        if health_gate:
+            metrics.health_score = float(health_gate.group(1))
+            metrics.health_pass = health_gate.group(2).upper() in ("PASS", "MARGINAL")
+        else:
+            health_match = re.search(
+                r"\*?\*?Financial Health\*?\*?[:\s]*(\d+(?:\.\d+)?)\s*%",
+                self.text,
+                re.IGNORECASE,
+            )
+            if health_match:
+                metrics.health_score = float(health_match.group(1))
 
         # Growth Transition: 100% (Adjusted) - PASS
-        growth_match = re.search(
-            r"\*?\*?Growth\s*(?:Transition)?\*?\*?[:\s]*(\d+(?:\.\d+)?)\s*%",
+        growth_gate = re.search(
+            r"\*?\*?Growth\s*(?:Transition)?\*?\*?[:\s]*(\d+(?:\.\d+)?)\s*%"
+            r"[^\n]*?\b(PASS|FAIL|MARGINAL)\b",
             self.text,
             re.IGNORECASE,
         )
-        if growth_match:
-            metrics.growth_score = float(growth_match.group(1))
+        if growth_gate:
+            metrics.growth_score = float(growth_gate.group(1))
+            metrics.growth_pass = growth_gate.group(2).upper() in ("PASS", "MARGINAL")
+        else:
+            growth_match = re.search(
+                r"\*?\*?Growth\s*(?:Transition)?\*?\*?[:\s]*(\d+(?:\.\d+)?)\s*%",
+                self.text,
+                re.IGNORECASE,
+            )
+            if growth_match:
+                metrics.growth_score = float(growth_match.group(1))
 
         # P/E Ratio: 11.80 (PEG: 0.16) - PASS
         # Primary: anchor to the gate line and capture BOTH the number and the
@@ -338,20 +364,35 @@ class ThesisVisualizer:
             lines.append("CORE SCORES (Higher = Better)")
             lines.append("─" * 56)
 
+            # Prefer the PM's parsed gate verdict (Data-Vacuum Exception can
+            # PASS below the raw threshold); "(PM gate)" flags disagreement,
+            # mirroring the P/E row below.
             if m.health_score is not None:
                 bar = self._bar(m.health_score, 100.0)
-                check = self._check(m.health_score >= self.HEALTH_MIN, c)
-                lines.append(
-                    f"Financial Health  {bar} {m.health_score:5.1f}% {check} "
+                threshold_ok = m.health_score >= self.HEALTH_MIN
+                health_ok = m.health_pass if m.health_pass is not None else threshold_ok
+                check = self._check(health_ok, c)
+                suffix = (
                     f"(min {self.HEALTH_MIN:.0f}%)"
+                    if health_ok == threshold_ok
+                    else "(PM gate)"
+                )
+                lines.append(
+                    f"Financial Health  {bar} {m.health_score:5.1f}% {check} {suffix}"
                 )
 
             if m.growth_score is not None:
                 bar = self._bar(m.growth_score, 100.0)
-                check = self._check(m.growth_score >= self.GROWTH_MIN, c)
-                lines.append(
-                    f"Growth Transition {bar} {m.growth_score:5.1f}% {check} "
+                threshold_ok = m.growth_score >= self.GROWTH_MIN
+                growth_ok = m.growth_pass if m.growth_pass is not None else threshold_ok
+                check = self._check(growth_ok, c)
+                suffix = (
                     f"(min {self.GROWTH_MIN:.0f}%)"
+                    if growth_ok == threshold_ok
+                    else "(PM gate)"
+                )
+                lines.append(
+                    f"Growth Transition {bar} {m.growth_score:5.1f}% {check} {suffix}"
                 )
 
             lines.append("")

@@ -503,10 +503,45 @@ def test_render_memo_markdown_dni_omits_optional_sections() -> None:
     assert "**Top risks.**" not in md
 
 
+def test_render_memo_markdown_hold_carries_monitor_only_clarifier() -> None:
+    memo = InvestmentMemo(
+        decision="HOLD",
+        one_line_thesis="Passes screens; catalysts absent.",
+        variant_view="Not explicitly stated.",
+        key_numbers=["P/E: 9.65"],
+        valuation="Weighted 479.58.",
+        top_risks=["No catalyst detected"],
+        kill_criteria=[],
+        confidence="Anchored on consultant.",
+    )
+    md = render_memo_markdown(memo)
+    assert "## Investment Memo — HOLD" in md
+    assert "monitor only" in md
+    assert "does not initiate a position" in md
+    # Clarifier sits directly under the title, before the thesis.
+    assert md.index("monitor only") < md.index("**Thesis.**")
+
+
+def test_render_memo_markdown_non_hold_has_no_monitor_clarifier() -> None:
+    for decision in ("BUY", "DO_NOT_INITIATE", "SELL"):
+        memo = InvestmentMemo(
+            decision=decision,
+            one_line_thesis="A thesis.",
+            variant_view="Not explicitly stated.",
+            key_numbers=[],
+            valuation="Valuation summary unavailable.",
+            top_risks=[],
+            kill_criteria=[],
+            confidence="Optional cross-checks did not run.",
+        )
+        assert "monitor only" not in render_memo_markdown(memo)
+
+
 def test_render_memo_for_state_empty_input_returns_unavailable_stub() -> None:
     md = render_memo_for_state({})
     assert "Investment Memo — UNAVAILABLE" in md
     assert md.endswith("\n")
+    assert "monitor only" not in md
 
 
 def test_render_memo_for_state_saved_json_shape_finds_bear_history() -> None:

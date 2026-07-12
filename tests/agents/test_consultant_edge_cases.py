@@ -24,6 +24,63 @@ from src.report_generator import QuietModeReporter
 class TestDataFormatEdgeCases:
     """Test consultant handling of unusual data formats."""
 
+    @pytest.mark.asyncio
+    async def test_final_turn_tool_call_triggers_fallback_synthesis(self):
+        """3679.T 2026-07-11: when the final allowed iteration still returns a
+        tool call, its serialized function_call block must not become the
+        review — content extracts empty and the forced-synthesis fallback
+        produces real prose instead."""
+        from types import SimpleNamespace
+
+        from src.agents.consultant_tool_loop import (
+            ConsultantToolLoopPolicy,
+            run_bounded_consultant_loop,
+        )
+
+        fc_block = {
+            "arguments": '{"ticker":"3679.T","metric":"netIncomeToCommon"}',
+            "call_id": "call_x",
+            "name": "spot_check_metric_mcp_fmp",
+            "type": "function_call",
+            "id": "fc_1",
+            "status": "completed",
+        }
+        tool_response = SimpleNamespace(
+            content=[fc_block],
+            tool_calls=[{"name": "spot_check_metric", "args": {}, "id": "call_x"}],
+        )
+        synthesis = SimpleNamespace(
+            content="FINAL CONSULTANT VERDICT: CONDITIONAL APPROVAL",
+            tool_calls=[],
+        )
+        invoked = []
+
+        async def fake_invoke(llm, messages):
+            invoked.append(llm)
+            return tool_response if llm == "active" else synthesis
+
+        policy = ConsultantToolLoopPolicy(
+            max_tool_iterations=0,
+            max_tool_calls_per_turn=4,
+            deadline=time.monotonic() + 60,
+            total_timeout=60,
+        )
+        result = await run_bounded_consultant_loop(
+            active_llm="active",
+            fallback_llm="fallback",
+            messages=[],
+            tools_by_name={"spot_check_metric": object()},
+            policy=policy,
+            invoke_with_deadline=fake_invoke,
+            agent_name="External Consultant",
+            agent_key="consultant",
+            ticker="3679.T",
+        )
+
+        assert invoked == ["active", "fallback"]
+        assert result.content == "FINAL CONSULTANT VERDICT: CONDITIONAL APPROVAL"
+        assert "function_call" not in result.content
+
     def test_auditor_output_is_canonicalized_to_raw_verdict_field(self):
         content = (
             "FORENSIC_DATA_BLOCK:\n"

@@ -265,6 +265,7 @@ Recent completed control-plane/security work:
 - broader heuristic prompt-injection coverage
 - `src/main.py` -> orchestration plus `src/cli.py`, `src/persistence.py`, and `src/output.py`
 - `src/ibkr/reconciler.py` -> orchestration plus IBKR ownership submodules
+- Snyk pre-commit redesign (July 2026): `scripts/snyk_check.sh` now takes a mode arg — `snyk-deps` BLOCKS commits (exit 1) on MEDIUM+ dependency findings (was always exit 0 / misleading `Passed`; `SNYK_ADVISORY=1` escapes), `snyk-container-base` is advisory REVIEW-REQUIRED for the base image. CI gains a token-gated, non-gating `snyk-container` job (Snyk CLI pinned in a `run:` step, scans base tag + built image) restoring the coverage the disabled Trivy jobs provided. 7-day dependency-release cooldown before remediation bumps.
 
 Next likely large seams:
 

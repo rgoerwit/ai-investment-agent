@@ -424,6 +424,15 @@ def render_memo_markdown(memo: InvestmentMemo) -> str:
         )
 
     parts: list[str] = [f"## Investment Memo — {memo.decision}\n\n"]
+    # The analyzer PM is portfolio-blind (no holdings access), so an analyzer
+    # HOLD is always monitor-only — clarify up front, because the body can
+    # retain the trader's pre-override sizing (e.g. 3626.T: "Initial Position
+    # Size: 2.0%" below a HOLD with 0.0% recommended).
+    if memo.decision == "HOLD":
+        parts.append(
+            "*New-candidate HOLD: monitor only — this analysis does not "
+            "initiate a position.*\n\n"
+        )
     parts.append(f"**Thesis.** {memo.one_line_thesis}\n\n")
     # Tranche 5, Step 8: omit the line entirely when the placeholder fires.
     # Rendering "Not explicitly stated." as a bolded section adds visual noise

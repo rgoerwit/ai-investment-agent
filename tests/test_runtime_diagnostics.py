@@ -85,6 +85,34 @@ class TestRuntimeFailureClassification:
         assert details.provider == "google"
         assert details.retryable is True
 
+    def test_classifies_cloudflare_520_as_retryable_server_error(self):
+        """A Cloudflare 520 body (2726.T/3005.TW 2026-07-10) must retry,
+        not die as unknown_provider_error at attempt 1 of 3."""
+        exc = Exception(
+            "Error code: 520 - {'type': 'https://errors.cloudflare.com/', "
+            "'title': 'Error 520: Web server is returning an unknown error', "
+            "'status': 520}"
+        )
+
+        details = classify_failure(exc, provider="openai", model_name="gpt-5.4")
+
+        assert details.kind == "server_error"
+        assert details.retryable is True
+
+    def test_internal_server_error_class_name_is_server_error(self):
+        """The OpenAI SDK raises InternalServerError for any >=500; the class
+        name (no spaces) must match even when the body names no 50x code."""
+
+        class InternalServerError(Exception):
+            pass
+
+        exc = InternalServerError("upstream origin failure")
+
+        details = classify_failure(exc, provider="openai", model_name="gpt-5.4")
+
+        assert details.kind == "server_error"
+        assert details.retryable is True
+
     def test_classifies_timeout(self):
         exc = Exception("ReadTimeout: request timed out")
 
