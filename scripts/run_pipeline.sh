@@ -273,6 +273,13 @@ apply_run_date() {
     fi
 }
 
+# Print a read-only anomaly digest for the run-date's analyses at stage end
+# (non-publishable / llm failures / consultant ERROR-UNPARSED / same-mode verdict
+# flips). Fail-open: a digest error must never fail the pipeline.
+emit_batch_health() {
+    "${PYTHON_CMD[@]}" scripts/scan_batch_health.py --run-date "$DATE" || true
+}
+
 ticker_to_dash() {
     local ticker="$1"
     printf '%s\n' "$ticker" | tr '._' '-'
@@ -713,6 +720,7 @@ if [[ $START_STAGE -le 1 ]]; then
     done < "$TICKER_LIST"
 
     info "Stage 1 complete: $STAGE1_PROCESSED analyzed, $STAGE1_SKIPPED skipped, $STAGE1_FAILED failed, $STAGE1_NOANALYSIS no-analysis (will retry)"
+    emit_batch_health
 fi
 
 # ============================================================
@@ -908,6 +916,7 @@ if [[ $START_STAGE -le 2 ]]; then
 
     info "Stage 2 complete: $STAGE2_PROCESSED analyzed, $STAGE2_SKIPPED skipped, $STAGE2_FAILED failed, $STAGE2_NOANALYSIS no-analysis (will retry)"
     write_pipeline_marker
+    emit_batch_health
 fi
 
 # ============================================================
